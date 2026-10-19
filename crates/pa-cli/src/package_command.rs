@@ -460,6 +460,7 @@ pub fn handle_package_command(args: &[String]) -> PackageCommandOutcome {
         let exit_code = runtime.block_on(crate::update_flow::update_command::run_coordinator_mode(
             socket_path,
             status_path,
+            options.restart_origin_active_session_id.as_deref(),
         ));
         return match exit_code {
             Ok(code) => PackageCommandOutcome {

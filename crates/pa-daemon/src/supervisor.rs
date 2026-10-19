@@ -24,6 +24,8 @@ use launch_budget::WORKER_AUTH_FLOOR_MS;
 use signals_shutdown::daemon_closing_shutdown_event;
 mod supervision;
 
+#[cfg(all(test, unix))]
+mod dead_child_delete_tests;
 #[cfg(test)]
 mod handshake_tests;
 #[cfg(test)]
@@ -86,10 +88,10 @@ use crate::framing::{write_frame, PrivateFrameReader, DEFAULT_PRIVATE_FRAME_LIMI
 use crate::paths;
 use crate::prompt_admission::input_admission_id;
 use crate::protocol::{
-    command_active_session_id, command_type_name, current_protocol_info,
+    app_version, command_active_session_id, command_type_name, current_protocol_info,
     parse_supervisor_command_line, response_failure, response_line, response_success,
     DaemonResponse, DaemonRuntimeIdentity, EnvelopeParseError, TypedCreateRejection,
-    DAEMON_APP_VERSION, DAEMON_SCHEMA_ID, DAEMON_SCHEMA_REVISION,
+    DAEMON_SCHEMA_ID, DAEMON_SCHEMA_REVISION,
 };
 use crate::registry::{
     ResidentWorker, SessionRegistry, WorkerRegistration, WorkerReply, WorkerRequest,
@@ -220,15 +222,15 @@ pub struct Supervisor {
     /// when the worker could not answer; feeds the replacement-worker create replay,
     /// cleared by a landed `compaction_end`.
     pub(crate) compaction_journal:
-        std::sync::Mutex<crate::compaction_supervision::TerminalCompactionJournal>,
+        std::sync::Mutex<Option<crate::compaction_supervision::TerminalCompactionJournal>>,
 }
 
 impl Supervisor {
-    /// Build the supervisor: descriptor dir, persisted config, event channel, log, journal.
+    /// Build the supervisor: descriptor dir, persisted config, event channel, and log.
     ///
     /// # Errors
     ///
-    /// Returns an error when the descriptor dir, sessions dir, config, or journal cannot be opened.
+    /// Returns an error when the descriptor dir, sessions dir, or config cannot be opened.
     pub fn new(options: SupervisorOptions) -> Result<Self> {
         let descriptor_dir =
             crate::descriptor::descriptor_dir(&options.agent_dir, &options.socket_path);
@@ -250,9 +252,6 @@ impl Supervisor {
             &options.socket_path,
             &options.agent_dir,
         ));
-        let compaction_journal = crate::compaction_supervision::TerminalCompactionJournal::open(
-            &descriptor_dir.join("compaction-supervision.jsonl"),
-        )?;
         Ok(Supervisor {
             options,
             descriptor_dir,
@@ -286,7 +285,7 @@ impl Supervisor {
             passive_scan_gate: tokio::sync::Mutex::new(()),
             passive_scan_pending: std::sync::atomic::AtomicBool::new(false),
             passive_catalog_epoch: std::sync::atomic::AtomicU64::new(0),
-            compaction_journal: std::sync::Mutex::new(compaction_journal),
+            compaction_journal: std::sync::Mutex::new(None),
         })
     }
 
@@ -295,7 +294,8 @@ impl Supervisor {
     /// # Errors
     ///
     /// Returns an error when the socket path cannot be prepared (already in use), the
-    /// socket cannot be bound, or the accept loop exhausts its give-up budget.
+    /// socket cannot be bound, the recovery journal cannot be opened, or the accept loop
+    /// exhausts its give-up budget.
     ///
     /// # Panics
     ///
@@ -363,6 +363,22 @@ impl Supervisor {
         *self.bound_socket_identity.lock().unwrap() =
             socket::socket_identity(&self.options.socket_path);
         socket::restrict_socket_path(&self.options.socket_path);
+        match crate::compaction_supervision::TerminalCompactionJournal::open(
+            &self.descriptor_dir.join("compaction-supervision.jsonl"),
+        ) {
+            Ok(journal) => {
+                *self
+                    .compaction_journal
+                    .lock()
+                    .expect("compaction journal lock") = Some(journal);
+            }
+            Err(error) => {
+                drop(listener);
+                let identity = self.bound_socket_identity.lock().unwrap().clone();
+                socket::cleanup_socket_path_after_close(&self.options.socket_path, identity);
+                return Err(error);
+            }
+        }
         self.log
             .append(&format!("supervisor started pid {}", std::process::id()));
         match open_file_limit {
@@ -458,6 +474,27 @@ impl Supervisor {
             let supervisor = Arc::clone(&self);
             tokio::spawn(async move {
                 crate::session_archive::archive_sweep_loop(&supervisor).await;
+            });
+        }
+
+        // Journals without verifiable ownership and flat TS update status
+        // records stay intact: a missing descriptor or a dead coordinator
+        // does not prove that no worker or waiting caller still needs them.
+        {
+            let supervisor = Arc::clone(&self);
+            tokio::task::spawn_blocking(move || {
+                let leases = crate::lease::reclaim_dead_owner_leases(&supervisor.options.agent_dir);
+                let logs = crate::worker_stderr::prune_socket_logs(
+                    &supervisor.options.agent_dir,
+                    &supervisor.options.socket_path,
+                );
+                let leftovers =
+                    crate::ts_era::sweep_ts_era_leftovers(&supervisor.options.agent_dir);
+                if leases + logs + leftovers > 0 {
+                    supervisor.log_line(&format!(
+                        "boot cleanup: removed {leases} dead-owner lease dir(s), {logs} old socket log(s), {leftovers} TS-era leftover(s)"
+                    ));
+                }
             });
         }
 

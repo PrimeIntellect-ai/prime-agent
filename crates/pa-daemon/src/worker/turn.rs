@@ -374,6 +374,7 @@ impl TurnRunner {
         // Own engine clone, fenced on the session identity it serviced:
         // a branch move or replacement swaps the store mid-review.
         let review_engine = std::sync::Arc::clone(&engine);
+        let settle_engine = std::sync::Arc::clone(&engine);
         let review_session_id = {
             let core = self.core.lock().unwrap();
             core.store
@@ -468,7 +469,8 @@ impl TurnRunner {
                 );
                 let abort_settle = matches!(
                     &event,
-                    EngineEvent::ToolExecutionEnd { .. }
+                    EngineEvent::ModelChange(_)
+                        | EngineEvent::ToolExecutionEnd { .. }
                         | EngineEvent::ToolResultMessage(_)
                         | EngineEvent::TurnEnd { .. }
                         | EngineEvent::AgentEnd { .. }
@@ -476,7 +478,22 @@ impl TurnRunner {
                         | EngineEvent::DoneAborted
                 );
                 let mut core = core.lock().unwrap();
-                if core.abort_requested {
+                // The run's TRUE end — an `agent_end` with no queued work
+                // taking the next turn — keys both the note clear here and
+                // the pane's idle debounce below. An internal boundary that
+                // hands the next turn to queued work (the async bash
+                // completion that cut this run) keeps the note for the work
+                // continuing in the next delivery. Clear before the frame:
+                // its roster flush must not publish the stale note.
+                let agent_end = matches!(event, EngineEvent::AgentEnd { .. });
+                let more_queued =
+                    agent_end && (!core.steering.is_empty() || !core.follow_up.is_empty());
+                if agent_end && !more_queued {
+                    engine.clear_progress_note();
+                }
+                // Durable model cleanup is independent of visual abort-row
+                // suppression and emits no client-facing frame.
+                if core.abort_requested && !matches!(&event, EngineEvent::ModelChange(_)) {
                     // The sighting arms the fallback's silence only when
                     // load-bearing: a sighting on a run that completed on its own
                     // cancels nothing.
@@ -509,7 +526,6 @@ impl TurnRunner {
                         herdr_run_end_seen.store(false, std::sync::atomic::Ordering::SeqCst);
                     }
                     EngineEvent::AgentEnd { messages } => {
-                        let more_queued = !core.steering.is_empty() || !core.follow_up.is_empty();
                         herdr
                             .lock()
                             .unwrap()
@@ -565,6 +581,19 @@ impl TurnRunner {
                     }
                 }
                 match &event {
+                    EngineEvent::ModelChange(change) => {
+                        if let Some(Err(error)) = core.store.as_mut().map(|store| {
+                            store.persist_entry(
+                                "model_change",
+                                json!({
+                                    "provider": change.provider, "modelId": change.model_id,
+                                }),
+                            )
+                        }) {
+                            eprintln!("pa-daemon: model-change persistence failed: {error:#}");
+                            return false;
+                        }
+                    }
                     // A `message` entry per row (TS's appendMessage path).
                     EngineEvent::UserMessage(message)
                     | EngineEvent::AssistantMessage(message)
@@ -575,9 +604,12 @@ impl TurnRunner {
                     }
                     // The in-flight tool-call set, updated under the same core lock
                     // the frames sequence under: the roster feed never reads a
-                    // half-applied transition.
+                    // half-applied transition. The session's tool counter bumps
+                    // with the same set, so the summary a roster push composes
+                    // from this event already carries it.
                     EngineEvent::ToolExecutionStart { tool_call_id, .. } => {
                         core.running_tool_calls.insert(tool_call_id.clone());
+                        core.tool_use_count += 1;
                     }
                     EngineEvent::ToolExecutionEnd { tool_call_id, .. } => {
                         core.running_tool_calls.remove(tool_call_id);
@@ -841,7 +873,9 @@ impl TurnRunner {
                         "type": "turn_end",
                         "error": ABORTED_TURN_SETTLE_ERROR,
                     })],
-                    EngineEvent::Done(Ok(()) | Err(_)) | EngineEvent::DoneAborted => Vec::new(),
+                    EngineEvent::ModelChange(_)
+                    | EngineEvent::Done(Ok(()) | Err(_))
+                    | EngineEvent::DoneAborted => Vec::new(),
                     EngineEvent::AutoRetryStart {
                         attempt,
                         max_attempts,
@@ -993,6 +1027,23 @@ impl TurnRunner {
                 }
             }
             emitting_prefix_rows.set(false);
+            // Sample the worker-owned leaf in memory before accepted rows
+            // persist. The engine stays lazy and the accepted event stays first.
+            let (file_backed, prompt_context_leaf) = {
+                let core = core.lock().unwrap();
+                core.store.as_ref().map_or((false, None), |store| {
+                    (
+                        !store.path.as_os_str().is_empty(),
+                        store.leaf_id().map(str::to_string),
+                    )
+                })
+            };
+            // noSession's in-memory prefix IDs do not identify any durable
+            // context the engine can restore. Only file-backed stores supply
+            // this boundary; their missing-ID validation remains strict.
+            if file_backed {
+                engine.set_prompt_context_boundary(prompt_context_leaf);
+            }
             engine.run_prompt(prompt_index, request, &aborted_probe, &mut emit);
         });
         let _ = turn.await;
@@ -1001,12 +1052,24 @@ impl TurnRunner {
         coalescer.close();
         flusher.abort();
 
-        {
+        let engine_reported_run_end = engine_agent_end.load(std::sync::atomic::Ordering::SeqCst);
+        let more_queued = {
             let mut core = self.core.lock().unwrap();
+            let more_queued = !core.steering.is_empty() || !core.follow_up.is_empty();
+            // Publish the note clear and idle transition atomically to
+            // roster readers, which capture core then the engine note.
+            // An abort-gated run may emit no later event to repair a
+            // roster push that observes idle with its old note.
+            // AgentEnd may have retained the note for work withdrawn before
+            // this settle. Recheck the lanes even when that frame was observed.
+            if !more_queued {
+                settle_engine.clear_progress_note();
+            }
             core.busy = false;
             core.active_action = None;
             core.running_admission_ids.clear();
-        }
+            more_queued
+        };
         self.push_roster_delta();
         // The fallback `agent_end` for runs that ended without a model
         // turn (session commands, pre-model failures): the engine's own
@@ -1026,7 +1089,6 @@ impl TurnRunner {
         // (the flag stays armed until the next pickup — a settle-time
         // re-read would race `handle_abort` and silence a completed
         // session-command or pre-model-failure run).
-        let engine_reported_run_end = engine_agent_end.load(std::sync::atomic::Ordering::SeqCst);
         if !engine_reported_run_end && !abort_gate_armed.load(std::sync::atomic::Ordering::SeqCst) {
             self.emit_turn_event(json!({ "type": "agent_end" }));
         }
@@ -1046,13 +1108,7 @@ impl TurnRunner {
             // `core.busy` flipped to false above; queued lanes still
             // holding items keep the settle debounced so the next pickup
             // cancels the idle flip.
-            let (error_hold, more_queued) = {
-                let core = self.core.lock().unwrap();
-                (
-                    herdr_settle_error.lock().unwrap().take(),
-                    !core.steering.is_empty() || !core.follow_up.is_empty(),
-                )
-            };
+            let error_hold = herdr_settle_error.lock().unwrap().take();
             if !herdr_run_end.load(std::sync::atomic::Ordering::SeqCst) {
                 self.herdr
                     .lock()

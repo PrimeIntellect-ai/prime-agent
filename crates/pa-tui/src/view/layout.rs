@@ -7,6 +7,9 @@ use crate::chat::{render_loader, ChatEntry};
 use crate::chrome::render_splash;
 use crate::Line;
 
+/// Inputs shared by local entry caches and cross-view handoffs.
+pub(super) type LayoutOptions = (crate::theme::Theme, String, bool, bool, Option<url::Url>);
+
 #[cfg(test)]
 thread_local! {
     pub(super) static ENTRY_VISITS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
@@ -318,6 +321,7 @@ impl AgentView {
             self.code_block_indent.clone(),
             self.show_images,
             crate::image_component::fullscreen_image_fallback_active(),
+            url::Url::from_directory_path(&self.chrome.cwd).ok(),
         );
         if self.layout_width != width || self.layout_options.as_ref() != Some(&options) {
             self.entry_heights.clear();

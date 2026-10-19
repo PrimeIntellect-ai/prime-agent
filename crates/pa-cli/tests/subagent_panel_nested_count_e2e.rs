@@ -203,6 +203,7 @@ fn children_host(
             agent_dir.to_path_buf(),
             /*telemetry_disabled*/ true,
         )),
+        String::new(),
     );
     sessions.set_identity(ParentIdentity {
         rlm_depth: depth,
@@ -224,7 +225,6 @@ fn spawn_request(name: &str, prompt: &str) -> RlmSpawnRequest {
         name: Some(name.to_string()),
         model: None,
         thinking: None,
-        cell_source_code: None,
         spawned_by_request_id: None,
     }
 }

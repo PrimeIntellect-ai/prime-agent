@@ -21,7 +21,10 @@ Every contributor (human or agent) must read this before working on this repo.
   `gh pr create --repo PrimeIntellect-ai/prime-agent --base main`.
 - CI runs on the org's billing: `.github/workflows/continuous.yml` on `main` pushes and
   `release.yml` on version tags.
-- Parity ground truth is unchanged: the TS checkout at ~/prime-agent (read-only).
+- Parity ground truth is unchanged: a read-only checkout of the TS implementation (this
+  repo at tag `v0.9.8`, the last TS release before the Rust port merged to `main`). Clone
+  it to `~/prime-agent`, the conventional location the parity scripts and code fall back
+  to; tooling that honors an override reads `PA_TS_REFERENCE`.
 
 ## Style and structure
 
@@ -171,9 +174,9 @@ EXPLICIT EXCEPTION: wire-protocol identifiers that must stay byte-compatible wit
 
 ## Surface contract (must not change)
 
-- Tools exposed to the model: `bash`, `edit`, `ipython` (internal helpers: `rename`, `stdout`).
+- Tools exposed to the model: `bash`, `edit`, `python_repl` (internal helpers: `rename`, `stdout`).
 - RLM kernel API in the persistent Python REPL: `rlm.spawn/find_models/collect/list_subagents/delete_subagent/create_session/progress_note`, `rlm.harness` CRUD, `agent_message.send`, `agent_observe`, `compact`, `goal`, `refine`, `attach_image`, skills (markdown + Python) per the skill contract in the base system prompt.
-- System prompt structure: layered — cache-stable static layer files (core harness description with the full API surface, mandatory usage rules, opinionated guidelines, per-model map) followed by one dynamic tail (packages, project context, skills inventory, MCP servers, environment, session role); the harness digest stays a separate `[harness-digest]` user message. `prime-agent prompt` dumps the assembled prompt with its layer breakdown.
+- System prompt structure: layered — cache-stable static layer files (core harness description with the full API surface, mandatory usage rules, opinionated guidelines, per-model additions from the model-prompts TOML rule map) followed by one dynamic tail (packages, project context, skills inventory, MCP servers, environment, session role); the harness digest stays a separate `[harness-digest]` user message. `prime-agent prompt` dumps the assembled prompt with its layer breakdown.
 - CLI shape: `prime-agent` with the same commands/flags as the TS product; headless modes (RPC/daemon/session-worker) with identical behavior.
 
 ## Crates
@@ -193,6 +196,7 @@ The table summarizes each crate's current direct workspace dependencies:
 | `pa-daemon` | Supervisor, workers, wire protocol | `pa-types`, `pa-core`, `pa-agent`, `pa-ai`, `pa-telemetry`, `pa-models` |
 | `pa-tui` | Terminal UI, daemon-wire client | `pa-types` |
 | `pa-cli` | `prime-agent` binary, composition root | `pa-types`, `pa-core`, `pa-ai`, `pa-agent`, `pa-daemon`, `pa-tui`, `pa-telemetry` |
+| `pa-perf` | Performance corpora + pty bench harness (dev/CI tooling, never shipped) | `pa-types`, `pa-core`, `pa-daemon` |
 
 Layering rules:
 

@@ -113,6 +113,7 @@ pub(crate) mod supervisor_lost;
 pub(crate) mod supervisor_parent_death;
 pub(crate) mod supervisor_roster;
 pub(crate) mod supervisor_roster_seed;
+pub(crate) mod ts_era;
 pub mod types;
 pub(crate) mod update_prepare;
 pub(crate) mod update_restore;
@@ -125,3 +126,5 @@ pub(crate) mod worker_stderr;
 
 #[cfg(test)]
 pub(crate) mod test_support;
+#[cfg(test)]
+pub(crate) mod trace_test_env;

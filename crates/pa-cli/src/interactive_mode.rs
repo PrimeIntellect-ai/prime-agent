@@ -416,10 +416,32 @@ fn build_tui_options(
     let script_path = std::env::var_os("PRIME_AGENT_FAUX_SCRIPT").map(PathBuf::from);
     // Flag order (fork -> resume -> create): the daemon opens the fork —
     // never the source — through the create `sessionPath`.
-    let session = match &options.session.fork {
+    let mut session = match &options.session.fork {
         Some(selector) => fork_startup_selection(selector, &config.cwd, session_dir.as_deref())?,
         None => session_selection(&options.session, session_dir.as_deref()),
     };
+    // A plain resume follows the saved project. Resolve its file before
+    // changing cwd, and use the same project for client settings and the
+    // daemon create config. Explicit --cwd and --fork retain their directory.
+    let mut resolved_options = options.clone();
+    if !options.session.cwd_from_flag && options.session.fork.is_none() {
+        if let SessionSelection::Resume(path) = &mut session {
+            *path = std::path::absolute(&*path)?;
+            if let Some(header) = pa_core::session::manager::read_session_header(path)
+                .filter(|header| !header.cwd.is_empty())
+            {
+                if !Path::new(&header.cwd).is_dir() {
+                    return Err(anyhow!(
+                        "Saved session directory is unavailable: {}. Supply --cwd to reopen elsewhere.",
+                        header.cwd
+                    ));
+                }
+                resolved_options.config.cwd = PathBuf::from(header.cwd);
+            }
+        }
+    }
+    let options = &resolved_options;
+    let config = &options.config;
     let settings = pa_core::settings::SettingsManager::create(&config.cwd, &config.agent_dir);
     let code_block_indent = settings.get_code_block_indent();
     let show_images = settings.get_show_images();

@@ -67,6 +67,7 @@ pub struct ContextUsage {
 /// shared between the host bridge and the turn loop; build it in `Arc` form.
 #[derive(Default)]
 pub struct TurnBoundaryRequests {
+    pub(super) refinement_settings: std::sync::OnceLock<crate::settings::SettingsManager>,
     /// The late-bound runtime; `bind` is first-wins, and `rebind_model_facts`
     /// swaps the model facts after a live model switch.
     runtime: std::sync::RwLock<Option<Arc<TurnBoundaryRuntime>>>,
@@ -347,6 +348,12 @@ impl TurnBoundaryRequests {
                         return Ok(no_active_turn(
                             "no active turn; refine can only be requested while a turn is running",
                         ));
+                    }
+                    let gate_requests = Arc::clone(&requests);
+                    if !tokio::task::spawn_blocking(move || {
+                        super::refinement_gate::enabled(gate_requests.refinement_settings.get())
+                    }).await? {
+                        return Ok(no_active_turn("Harness refinements are disabled in /settings"));
                     }
                     let mut slot = requests.refine.lock().await;
                     let merged = match slot.as_ref() {

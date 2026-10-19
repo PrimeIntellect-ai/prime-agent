@@ -20,9 +20,21 @@ pub(crate) enum AutoCompactionRun {
     /// The check fired and a compaction ran (success, skip, or failure —
     /// the `compaction_start`/`compaction_end` pair went out either way).
     Ran,
+    /// A summary committed and the retained context replaced the old context.
+    Compacted,
     /// The emit callback cancelled the run (an aborted turn): the caller
     /// stops the turn loop like any other cancelled emit.
     Cancelled,
+}
+
+impl AutoCompactionRun {
+    /// Whether in-run threshold checks stay armed after this boundary
+    /// outcome: a summary attempt that failed to commit suppresses the
+    /// rest of the run's checks; a committed summary and a plain
+    /// not-due recheck keep them armed.
+    pub(crate) fn continues_threshold_checks(self) -> bool {
+        !matches!(self, Self::Ran)
+    }
 }
 
 impl AgentSessionEngine {
@@ -206,6 +218,10 @@ impl AgentSessionEngine {
                 }
             }
         }
-        AutoCompactionRun::Ran
+        if matches!(outcome, Ok(Ok(CompactOutcome::Ran(_)))) {
+            AutoCompactionRun::Compacted
+        } else {
+            AutoCompactionRun::Ran
+        }
     }
 }

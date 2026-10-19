@@ -1,9 +1,9 @@
 //! The terminal input grammar: key dispatch, mouse reports, paste,
 //! selection/auto-scroll, and the input-state seams.
 use super::{
-    key_event_to_id, AgentView, ChatEntry, DaemonCommand, DockFocusSource, Duration,
-    EffortPickerAction, Instant, KeyEvent, Map, QueueBrowseDirection, QueueLane, Result, SessionUi,
-    StatusKind, SubmitBehavior,
+    key_event_to_id, AgentView, ChatEntry, ChoicePickerAction, ChoicePurpose, DaemonCommand,
+    DockFocusSource, Duration, Instant, KeyEvent, Map, QueueBrowseDirection, QueueLane, Result,
+    SessionUi, StatusKind, SubmitBehavior,
 };
 
 /// How long the Ctrl+C exit hint arms the second-press exit.
@@ -85,7 +85,7 @@ impl SessionUi {
             return;
         }
         let overlay_focused = view.model_picker.is_some()
-            || view.effort_picker.is_some()
+            || view.choice_picker.is_some()
             || view.heartbeats_picker.is_some()
             || view.goal_panel.is_some()
             || view.bash_view.is_some()
@@ -291,7 +291,9 @@ impl SessionUi {
         let _ = view.editor.handle_paste(text);
     }
 
-    async fn handle_effort_picker_key(
+    /// One key press while the `/effort` picker is open: Esc/Ctrl+C close it
+    /// without applying; Enter applies the picked row.
+    async fn handle_choice_picker_key(
         &mut self,
         key: KeyEvent,
         view: &mut AgentView,
@@ -305,18 +307,21 @@ impl SessionUi {
             self.exit_guard.note_ctrl_c_handled();
         }
         let action = view
-            .effort_picker
+            .choice_picker
             .as_mut()
             .map(|picker| picker.handle_key(&id, view.editor.keybindings()));
         match action {
-            Some(EffortPickerAction::None) | None => {}
-            Some(EffortPickerAction::Cancel) => {
-                view.effort_picker = None;
+            Some(ChoicePickerAction::None) | None => {}
+            Some(ChoicePickerAction::Cancel) => {
+                view.choice_picker = None;
                 self.dirty = true;
             }
-            Some(EffortPickerAction::Apply { level }) => {
-                view.effort_picker = None;
-                self.apply_thinking_level(&level, view).await;
+            Some(ChoicePickerAction::Apply { purpose, key }) => {
+                view.choice_picker = None;
+                self.dirty = true;
+                match purpose {
+                    ChoicePurpose::Effort => self.apply_thinking_level(&key, view).await,
+                }
             }
         }
         Ok(())
@@ -338,8 +343,9 @@ impl SessionUi {
         if view.model_picker.is_some() {
             return self.handle_model_picker_key(key, view).await;
         }
-        if view.effort_picker.is_some() {
-            return self.handle_effort_picker_key(key, view).await;
+        // The `/effort` picker owns the frame the same way.
+        if view.choice_picker.is_some() {
+            return self.handle_choice_picker_key(key, view).await;
         }
         if view.mcp_view.is_some() {
             return self.handle_mcp_view_key(key, view);
@@ -416,56 +422,58 @@ impl SessionUi {
         }
         if to_top {
             view.scroll_to_top();
+            self.window.request_head();
             self.track_scroll("top", view.is_following());
             self.dirty = true;
             return Ok(());
         }
         if follow {
+            self.collapse_transcript_window(view);
             view.scroll_to_bottom();
             self.track_scroll("follow", view.is_following());
             self.dirty = true;
             return Ok(());
         }
-        // The activity dock owns focus while focused; every other key falls
-        // through after releasing the focus.
+        // The focused (expanded) dock owns these keys; every other key falls through after
+        // releasing the focus. Configured bindings match first, so a rebound arrow keeps its
+        // configured action; the literal Left/Right fallbacks apply only after none matched.
         if self.subagents_focused {
             let kb = view.editor.keybindings();
-            if kb.matches(&id, "tui.select.confirm") || kb.matches(&id, "app.subagents.focus") {
+            let open =
+                kb.matches(&id, "tui.select.confirm") || kb.matches(&id, "app.subagents.focus");
+            let down = kb.matches(&id, "tui.select.down");
+            let up = kb.matches(&id, "tui.select.up");
+            let back = kb.matches(&id, "tui.select.cancel") || kb.matches(&id, "app.agents.back");
+            let expand = kb.matches(&id, "app.tools.expand");
+            if open {
                 self.open_dock_group_view(view);
                 return Ok(());
             }
-            if id == "left" && self.activity_group == crate::chrome::ActivityGroup::Subagents {
-                // Left from the subagents selection opens the agents view (the operator's
-                // 2026-09-28 muscle-memory ask; left reads as `agents back` everywhere else).
-                self.open_dock_group_view(view);
-                return Ok(());
-            }
-            if id == "left" || id == "right" {
-                // One press, one group: the step wraps at the row's ends, so an empty group is
-                // still visited (the operator's 2026-09-26 directive).
-                let direction = if id == "left" {
-                    crate::chrome::ActivityDirection::Prev
-                } else {
+            let dock = self.activity_dock_state();
+            // Up from the top row leaves the dock; Down from the bottom row wraps to the top.
+            if down || (up && dock.groups()[0] != self.activity_group) {
+                let direction = if down {
                     crate::chrome::ActivityDirection::Next
+                } else {
+                    crate::chrome::ActivityDirection::Prev
                 };
-                self.activity_group = self
-                    .activity_dock_state()
-                    .step(self.activity_group, direction);
+                self.activity_group = dock.step(self.activity_group, direction);
                 self.update_subagent_summary(view);
                 self.dirty = true;
                 return Ok(());
             }
-            if kb.matches(&id, "tui.select.up")
-                || kb.matches(&id, "tui.select.cancel")
-                || kb.matches(&id, "app.agents.back")
-            {
+            if expand {
+                self.cycle_detail(view);
+                return Ok(());
+            }
+            if up || back || id == "left" {
                 self.subagents_focused = false;
                 self.update_subagent_summary(view);
                 self.dirty = true;
                 return Ok(());
             }
-            if kb.matches(&id, "app.tools.expand") {
-                self.cycle_detail(view);
+            if id == "right" {
+                self.open_dock_group_view(view);
                 return Ok(());
             }
             self.subagents_focused = false;

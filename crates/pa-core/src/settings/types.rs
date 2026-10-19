@@ -81,6 +81,15 @@ pub enum TransportSetting {
     WebSocketCached,
 }
 
+fn deserialize_threshold_percent<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<f64>, D::Error> {
+    let value = serde_json::Value::deserialize(deserializer)?;
+    Ok(value
+        .as_f64()
+        .filter(|percent| pa_types::compaction::is_valid_threshold_percent(*percent)))
+}
+
 /// `number | "unlimited"` autonomous limit.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(untagged)]
@@ -93,6 +102,9 @@ pub enum AutonomousLimitSetting {
 #[serde(rename_all = "camelCase")]
 pub struct CompactionSettings {
     pub enabled: Option<bool>,
+    /// Percentage ceiling for automatic compaction; invalid values behave as unset.
+    #[serde(default, deserialize_with = "deserialize_threshold_percent")]
+    pub threshold_percent: Option<f64>,
     pub reserve_tokens: Option<u64>,
     pub keep_recent_tokens: Option<u64>,
     pub agent_callable: Option<bool>,
@@ -316,6 +328,8 @@ pub struct Settings {
     pub theme: Option<String>,
     pub compaction: Option<CompactionSettings>,
     pub auto_refine: Option<AutoRefineSettings>,
+    /// Master switch for harness creation and context loading; unset preserves enabled behavior.
+    pub harness_refinements: Option<bool>,
     pub agent_traces: Option<AgentTracesSettings>,
     pub factory: Option<FactorySettings>,
     pub telemetry: Option<TelemetrySettings>,
@@ -327,6 +341,13 @@ pub struct Settings {
     /// fail with a configuration hint instead of silently dropping the images.
     pub image_model: Option<String>,
     pub autonomous: Option<AutonomousSettings>,
+    /// Custom shell that runs every kernel `bash()` and user-bash command as
+    /// `<shell> -c <command>`: an absolute path to an existing executable,
+    /// validated once at session start (a bad value fails session creation
+    /// naming this setting). Project `.prime/agent/settings.json` overrides
+    /// the global value (TS parity), so opening an untrusted repo lets it
+    /// choose the binary that wraps every agent shell command - review
+    /// project settings before running the agent there.
     pub shell_path: Option<String>,
     pub quiet_startup: Option<bool>,
     pub shell_command_prefix: Option<String>,

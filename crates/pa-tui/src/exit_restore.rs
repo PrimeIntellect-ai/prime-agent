@@ -91,6 +91,8 @@ pub(crate) fn restore_terminal() {
     let _ = crossterm::terminal::disable_raw_mode();
     let _ = report_cooked_repair();
     let _ = out.flush();
+    // Restore Windows VT after the final ANSI cleanup writes.
+    pa_types::platform::console_restore();
 }
 
 /// The shared exit tail: synchronized output off, SGR reset, cursor

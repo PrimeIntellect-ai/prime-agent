@@ -1,9 +1,18 @@
 # The Windows runtime triage loop (operator directive 2026-09-28): the
-# windows-latest runner is a full Windows Server VM, so this on-demand
-# workflow runs the real crate batteries on ANY ref - the iteration
-# surface for the runtime reds. The mandatory windows-latest CI job on
-# PR heads stays the merge-bar authority; this dispatchable run is the
-# fast loop (fix -> push -> dispatch -> triage -> repeat).
+# windows runner is a full Windows Server VM, so this workflow runs the
+# real crate batteries on ANY ref - the iteration surface for the runtime
+# reds.
+#
+# The Windows test surface (operator directive 2026-10-08: "we need to
+# give you an easy way to test things"): the PR wave gates every
+# Windows-touched PR with the scripted TUI battery, the nightly wave
+# re-runs it (plus the deep crate batteries) on main, and the dispatch
+# input stays the fast loop for triage (fix -> push -> dispatch ->
+# repeat). The battery boots the freshly-built binary as a real daemon and
+# drives the three reported breakages headlessly - session reopen renders
+# the old history, a subagent's session stays a distinct store entry, and
+# non-ASCII agent-message text survives rendering - uploading the pane
+# dumps as run artifacts the fleet can download and inspect.
 name: windows-runtime-triage
 
 on:
@@ -13,6 +22,25 @@ on:
         description: "The ref to battery on Windows (branch, tag, or SHA; empty = this branch's head)"
         required: false
         default: ""
+  # The PR wave: every Windows-touched PR (crate source, the Windows
+  # installers, the workflow itself, the build manifests) runs the tui
+  # battery before review - the repeatable Windows verifier every future
+  # lane gets for free, without a persistent VM.
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+    branches: [main]
+    paths:
+      - "crates/**"
+      - ".github/workflows/windows-runtime-triage.yml"
+      - "install.ps1"
+      - "install-rust.sh"
+      - "scripts/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+  # The nightly wave: main gets the battery every night even when no PR
+  # touched it (the schedule trigger runs on the default branch only).
+  schedule:
+    - cron: "0 4 * * *"
 
 permissions:
   contents: read
@@ -28,8 +56,91 @@ env:
   CARGO_INCREMENTAL: 0
 
 jobs:
+  # The contributor-trust gate (the ci.yml trust job's own class): PR
+  # authors must be a bot, a collaborator, or a vouched contributor before
+  # they bill a windows runner minute.
+  trust:
+    name: contributor trust
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    outputs:
+      allowed: ${{ github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || steps.vouch.outputs.vouched == 'true' }}
+    steps:
+      - name: Check pull request author
+        id: vouch
+        if: github.event_name == 'pull_request'
+        uses: mitchellh/vouch/action/check-user@d66fa29a64600490892131ad87597c30c91fcac4 # v1
+        with:
+          user: ${{ github.event.pull_request.user.login }}
+          allow-fail: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # THE WINDOWS TEST SURFACE (the operator's 2026-10-08 ask): the freshly
+  # built binary booted as a real daemon, driven through the three
+  # scripted TUI scenarios of crates/pa-cli/tests/windows_runtime_triage_e2e.rs
+  # (the reopen battery, the subagent-distinct battery, the glyph-panes
+  # battery), with captured headless panes uploaded for renderer inspection.
+  # The runner is pinned to windows-2022 (never the mutable windows-latest):
+  # the same reviewed-baseline rule the release build-windows job carries.
+  windows-runtime-tui-battery:
+    name: windows tui battery (reopen, subagent distinct, unicode panes)
+    needs: trust
+    if: needs.trust.result == 'success' && needs.trust.outputs.allowed == 'true' && (github.event_name != 'pull_request' || !github.event.pull_request.draft)
+    runs-on: windows-2022
+    permissions:
+      contents: read
+    timeout-minutes: 90
+    env:
+      # Captured headless panes supplement native terminal validation.
+      WINDOWS_RUNTIME_TRIAGE_DUMP_DIR: '${{ github.workspace }}\win-tui-dumps'
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+          ref: ${{ inputs.ref || github.ref }}
+      # The pinned SHA is the toolchain pin: this action version has no
+      # `toolchain` input, and its parse step hard-codes 1.98.1. Change
+      # the compiler by changing the SHA; a `toolchain:` input is ignored.
+      - uses: dtolnay/rust-toolchain@ce678459e9fc7500d337468f904b95f1b5c10b5e # 1.98.1 action pin; the SHA selects the toolchain
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          key: windows-tui-battery
+      # The binary the battery boots is `CARGO_BIN_EXE_prime-agent` - the
+      # same commit's fresh build. The explicit step names the freshly
+      # built binary and warms the test run's build.
+      - name: Build the binary the battery boots (locked)
+        run: cargo build --locked -p pa-cli --bin prime-agent
+      # Console VT setup/restore; redirected CI stdout can take the no-op branch.
+      - name: The Windows console mode regression
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test --locked -p pa-types --lib console -- --nocapture
+      - name: Run the triage battery (the three scripted TUI scenarios)
+        shell: bash
+        run: |
+          set -euo pipefail
+          # The panes must land in the artifact dir: a green battery with
+          # an unset dump dir would upload no renderer evidence.
+          test -n "${WINDOWS_RUNTIME_TRIAGE_DUMP_DIR}" \
+            || { echo "::error::WINDOWS_RUNTIME_TRIAGE_DUMP_DIR is unset"; exit 1; }
+          cargo test --locked -p pa-cli --test windows_runtime_triage_e2e -- --test-threads=1 --nocapture
+      # Renderer evidence only: these frames do not validate console glyphs.
+      - name: Upload the pane dumps
+        if: always()
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: windows-tui-dumps-${{ github.run_id }}
+          path: win-tui-dumps
+          if-no-files-found: warn
+
+  # The deep battery (the multi-hour debug loop; the full pa-cli e2e set
+  # alone runs past three hours on this runner - measured twice): the
+  # on-demand/nightly arm stays, but it must not bill on every PR.
   windows-battery:
     name: windows battery (on-demand)
+    if: github.event_name != 'pull_request'
     runs-on: windows-latest
     # GitHub-hosted jobs stop at six hours whatever this says, so 360 is
     # the real maximum. The full pa-cli e2e set alone runs past it on this
@@ -100,11 +211,9 @@ jobs:
         run: |
           pwsh -NoProfile -File scripts/release/test_windows_install.ps1 2>&1 | Tee-Object -FilePath win-install-e2e.log
           exit $LASTEXITCODE
-      # The Windows channel-fallback regression (the local-channel unit test
-      # for the stable->beta fallback the plain one-liner rides): a stable
-      # channel without a win32-x64 row falls back to beta with the notice,
-      # and an explicitly requested channel refuses with the beta route.
-      - name: windows channel-fallback unit (install.ps1 stable->beta)
+      # Production defaults stay on stable, including when its artifact is
+      # missing. Explicit beta installs remain supported independently.
+      - name: windows installer channel selection (stable default, explicit beta)
         id: channel_fallback
         continue-on-error: true
         shell: pwsh
@@ -112,11 +221,11 @@ jobs:
           pwsh -NoProfile -File scripts/release/test_windows_channel_fallback.ps1 2>&1 | Tee-Object -FilePath win-channel-fallback.log
           exit $LASTEXITCODE
       # THE RAW ONE-LINER on the real channel, end to end: install.ps1
-      # itself from raw.githubusercontent (the ref under test - on main it
-      # is the README's shipped command), then the pointer, the manifest,
+      # itself from raw.githubusercontent (the ref under test, before its
+      # publication to the README's production endpoint), then the manifest,
       # the win32-x64 tarball, and its sums from the real bucket, the real
-      # default prefix ($HOME\.local), the real stable->beta Windows
-      # fallback, and the launcher answering --version. The transcript
+      # default prefix ($HOME\.local), the stable channel, and the launcher
+      # answering --version. The transcript
       # (win-raw-one-liner.log) is the evidence: the install transcript,
       # the --version output, and the exit codes.
       - name: the raw one-liner on the real channel (irm | iex)

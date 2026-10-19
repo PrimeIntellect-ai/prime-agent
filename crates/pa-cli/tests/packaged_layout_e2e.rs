@@ -213,7 +213,7 @@ fn kernel_boot_script(receipt: &Path) -> serde_json::Value {
     );
     serde_json::json!({
         "responses": [
-            { "content": [ { "type": "toolCall", "name": "ipython", "arguments": {
+            { "content": [ { "type": "toolCall", "name": "python_repl", "arguments": {
                 "code": cell,
             } } ] },
             // The next assistant message echoes the request's system

@@ -1,11 +1,9 @@
 //! The agent-session engine's model concern: the startup/restore
 //! model-resolution cluster (the TS `createAgentSession` chain), the
-//! session's live-model and thinking-level surfaces, the request API-key
-//! seam, and the persisted max-depth read.
+//! session's live-model and thinking-level surfaces, and the request
+//! API-key seam.
 
-use super::{
-    AgentSessionEngine, EngineModelSelection, Model, RestoredSessionModel, SessionEngine, Value,
-};
+use super::{AgentSessionEngine, EngineModelSelection, Model, RestoredSessionModel, SessionEngine};
 
 impl AgentSessionEngine {
     /// The startup chain: the saved settings default, then the featured
@@ -374,17 +372,52 @@ impl AgentSessionEngine {
         Option<String>,
         Option<std::collections::BTreeMap<String, String>>,
     ) {
+        let (api_key, headers, _store_healthy) =
+            self.resolve_request_key_and_headers_and_store_health(model);
+        (api_key, headers)
+    }
+
+    /// [`Self::resolve_request_key_and_headers`] plus whether the
+    /// resolution serves a live credential for the model's provider on a
+    /// healthy read — stored, or the ambient environment/runtime override
+    /// (a logout that empties the store leaves the session on the env
+    /// key, exactly like a fresh resolution). `false` means the resolved
+    /// key is the configured `models.json` fallback — served when the
+    /// store is unreadable OR resolves no credential from any live
+    /// source — which is not a credential and must never replace a
+    /// serving pair (the create-config override is source-independent;
+    /// callers apply it themselves).
+    pub(crate) fn resolve_request_key_and_headers_and_store_health(
+        &self,
+        model: &Model,
+    ) -> (
+        Option<String>,
+        Option<std::collections::BTreeMap<String, String>>,
+        bool,
+    ) {
         let auth = pa_core::auth::AuthStorage::create(&self.config.agent_dir);
+        let store_healthy = auth.load_error().is_none();
         let mut registry =
             pa_core::models::ModelRegistry::create(auth, self.config.agent_dir.join("models.json"));
         let resolved = registry.get_api_key_and_headers(model, model.headers.as_ref());
+        // The credential check runs AFTER the resolution: the registry's
+        // lookup may OAuth-refresh and store a fresh token, so a check
+        // before it would read the stale one and discard the fresh pair.
+        let stored_credential = registry
+            .auth
+            .get_api_key_with_source_token(&model.provider, false)
+            .api_key
+            .is_some();
+        let store_auth = store_healthy && stored_credential;
         if let Some(api_key) = &self.current_selection().api_key {
             // The create-config key override pins the key, never the headers:
             // the registry's merged headers still ship, exactly like the TS
-            // `getApiKeyAndHeaders` override path.
-            return (Some(api_key.clone()), resolved.headers);
+            // `getApiKeyAndHeaders` override path. The flag stays the
+            // store's: a caller pairing the override key with headers
+            // keeps its last-good headers when the store cannot serve.
+            return (Some(api_key.clone()), resolved.headers, store_auth);
         }
-        (resolved.api_key, resolved.headers)
+        (resolved.api_key, resolved.headers, store_auth)
     }
 
     pub(crate) fn resolve_request_api_key(&self, model: &Model) -> Option<String> {
@@ -398,47 +431,45 @@ impl AgentSessionEngine {
             .get_api_key_and_headers(model, model.headers.as_ref())
             .api_key
     }
-}
 
-/// The last persisted `rlm_max_depth_state` custom entry in a session
-/// file (TS `_loadPersistedRlmMaxDepthState`): the chat override a resumed
-/// session re-seeds its depth bound from. `None` when absent or unreadable.
-/// Same contract as the reference oracle (`agent_engine/tests.rs`): whole
-/// file valid UTF-8, newest-first, malformed lines skip.
-pub(crate) fn persisted_rlm_max_depth(path: Option<&str>) -> Option<u64> {
-    let path = std::path::Path::new(path?);
-    let mut bytes = Vec::new();
-    std::io::Read::read_to_end(
-        &mut std::io::BufReader::new(std::fs::File::open(path).ok()?),
-        &mut bytes,
-    )
-    .ok()?;
-    let content = std::str::from_utf8(&bytes).ok()?;
-    content
-        .lines()
-        .rev()
-        // The exact union gate: a matching row's raw text carries either the
-        // `customType` literal or a `\u`-escape (serde never letter-escapes),
-        // so the union admits every line the reference could match;
-        // `rlm_max_depth_row` judges the candidates by the decoded fields.
-        .filter(|line| line.contains("rlm_max_depth_state") || line.contains("\\u"))
-        .find_map(rlm_max_depth_row)
-}
-
-/// One candidate line's depth bound: `Some(depth)` for a matching custom
-/// row with a parseable `data.maxDepth`, `None` otherwise.
-fn rlm_max_depth_row(line: &str) -> Option<u64> {
-    let value: Value = serde_json::from_str(line.trim()).ok()?;
-    if value.get("type").and_then(Value::as_str) != Some("custom") {
-        return None;
+    /// The primary target a failover episode restores: the captured model
+    /// with the request auth RE-RESOLVED from the store. The captured
+    /// pair only backs the restore when the store cannot serve a live
+    /// credential; the create-config key override stands in memory
+    /// regardless, keeping the captured headers off a failed read.
+    pub(crate) fn restored_primary_target(
+        &self,
+        primary: &Model,
+        captured_api_key: Option<String>,
+        captured_headers: Option<std::collections::BTreeMap<String, String>>,
+    ) -> pa_core::session_engine::provider_adapter::ProviderTarget {
+        let override_key = self.current_selection().api_key;
+        let (api_key, headers, store_auth) =
+            self.resolve_request_key_and_headers_and_store_health(primary);
+        // The capture backs the restore whenever the store cannot serve a
+        // live credential (a failed read, or a healthy store with nothing
+        // stored — both resolve the configured `models.json` fallback key,
+        // which is not a credential); a live stored credential REPLACES
+        // the pair, headers included.
+        let (api_key, headers) = if let Some(override_key) = override_key {
+            if store_auth {
+                (Some(override_key), headers)
+            } else {
+                (Some(override_key), captured_headers.or(headers))
+            }
+        } else {
+            match api_key {
+                Some(api_key) if store_auth => (Some(api_key), headers),
+                _ => (captured_api_key, captured_headers),
+            }
+        };
+        pa_core::session_engine::provider_adapter::ProviderTarget {
+            service_tier: *self.service_tier.read().expect("service tier lock"),
+            api_key,
+            model: primary.clone(),
+            headers,
+        }
     }
-    if value.get("customType").and_then(Value::as_str) != Some("rlm_max_depth_state") {
-        return None;
-    }
-    value
-        .get("data")
-        .and_then(|data| data.get("maxDepth"))
-        .and_then(Value::as_u64)
 }
 
 /// The saved model context of a session file: the pinned `(provider,

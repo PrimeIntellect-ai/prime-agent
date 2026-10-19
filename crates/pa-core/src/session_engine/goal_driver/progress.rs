@@ -16,6 +16,10 @@ pub(crate) const CONTINUATION_NO_PROGRESS_CAP: u32 = 3;
 /// each retry of a no-progress continuation waits twice as long.
 pub(crate) const CONTINUATION_NO_PROGRESS_BACKOFF_BASE_MS: u64 = 10_000;
 
+/// The goal's terminal reason when the no-progress streak reaches the cap.
+pub const CONTINUATION_NO_PROGRESS_CAP_REASON: &str =
+    "Goal continuation cap reached: consecutive turns made no progress";
+
 /// The durable one-shot wake's cron label: the daemon's boundary sites arm a
 /// one-shot cron at [`GoalDriver::backoff_wake_at`], so the backoff retry actually runs.
 pub const GOAL_BACKOFF_WAKE_CRON_LABEL: &str = "goal-backoff-wake";
@@ -126,9 +130,7 @@ impl GoalDriver {
                     },
                 )?;
                 if self.no_progress_streak >= CONTINUATION_NO_PROGRESS_CAP {
-                    let reason =
-                        "Goal continuation cap reached: consecutive turns made no progress"
-                            .to_string();
+                    let reason = CONTINUATION_NO_PROGRESS_CAP_REASON.to_string();
                     self.set_state(
                         session,
                         GoalState {

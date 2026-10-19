@@ -486,6 +486,41 @@ impl Drop for LockDir {
     }
 }
 
+/// Advisory exclusive lock on an open file, released on drop or process
+/// death — the platform-walled form of `std::fs::File::lock`. OS file locks
+/// (crash-released, no stale-lock reclaim) live here so platform-specific
+/// behavior stays auditable in one place, like the directory locks above.
+///
+/// # Errors
+///
+/// `WouldBlock` (blocking form: after interruption) never applies; other I/O
+/// errors as the platform reports them.
+pub fn lock_exclusive(file: &std::fs::File) -> io::Result<()> {
+    file.lock()
+}
+
+/// Nonblocking [`lock_exclusive`]: any held lock (fresh contention or I/O
+/// failure) surfaces as an error carrying the platform's try-lock error.
+///
+/// # Errors
+///
+/// The platform's [`std::fs::TryLockError`] (contention included) wrapped in
+/// an I/O error; nothing is returned on success.
+pub fn try_lock_exclusive(file: &std::fs::File) -> io::Result<()> {
+    file.try_lock().map_err(io::Error::other)
+}
+
+/// Release an OS file lock without waiting for duplicated or inherited handles
+/// to close. The platform wall owns the Unix and Windows unlock semantics.
+///
+/// # Errors
+///
+/// Returns the underlying OS error when unlocking fails. Unlocking a handle
+/// without a held lock may succeed or return an error, depending on the platform.
+pub fn unlock_file(file: &std::fs::File) -> io::Result<()> {
+    file.unlock()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

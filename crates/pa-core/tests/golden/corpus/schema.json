@@ -74,10 +74,10 @@
     },
     {
       "tool": "ipython",
-      "name": "ipython",
-      "label": "ipython",
+      "name": "python_repl",
+      "label": "python_repl",
       "description": "Execute Python code in a persistent Python REPL. Top-level `await` is supported. Variables, imports, and loaded data persist across calls, and are revived on a best-effort basis when a session is resumed (objects that cannot be serialized are dropped and reported). Run shell commands with `bash('cmd')` / `await bash('cmd')`. Project imports, tests, scripts, CLIs, and dependency checks should run through the target project's own environment.",
-      "promptSnippet": "ipython - persistent Python REPL for code, state, and bash() orchestration",
+      "promptSnippet": "python_repl - persistent Python REPL for code, state, and bash() orchestration",
       "executionMode": "sequential",
       "parameters": {
         "type": "object",

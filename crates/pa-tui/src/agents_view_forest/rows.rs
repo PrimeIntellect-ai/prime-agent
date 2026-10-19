@@ -8,7 +8,8 @@ use super::{
     SUMMARY_ROW_PREFIX,
 };
 use crate::agents_view_state::{
-    now_ms, relative_age, section_rank, summary_for_record, Section, UnifiedRecord,
+    is_unnamed_empty, now_ms, relative_age, section_rank, summary_for_record, Section,
+    UnifiedRecord,
 };
 use crate::subagents::{is_subagent_summary, summary_identity_keys, summary_parent_keys};
 
@@ -410,7 +411,7 @@ fn spawn_code_rows(
     rows
 }
 
-/// Section rank, then empty sessions sink, then recency, then title, then session id.
+/// Section rank, then unnamed empty sessions sink, then recency, then title, then session id.
 fn compare_base(a: &BaseRow, b: &BaseRow, anchor: Option<&str>) -> std::cmp::Ordering {
     use std::cmp::Ordering;
     fn get_str<'a>(summary: &'a Value, field: &str) -> Option<&'a str> {
@@ -450,14 +451,9 @@ fn compare_base(a: &BaseRow, b: &BaseRow, anchor: Option<&str>) -> std::cmp::Ord
     if section != Ordering::Equal {
         return section;
     }
-    // Message-less rows sink to the bottom of their section (anchor exempt).
+    // Unnamed message-less rows sink to the bottom of their section (anchor exempt).
     let empty = |row: &BaseRow| {
-        row.summary
-            .get("messageCount")
-            .and_then(Value::as_u64)
-            .unwrap_or(0)
-            == 0
-            && get_str(&row.summary, "sessionId") != anchor
+        is_unnamed_empty(&row.summary) && get_str(&row.summary, "sessionId") != anchor
     };
     let empty_rank = empty(a).cmp(&empty(b));
     if empty_rank != Ordering::Equal {

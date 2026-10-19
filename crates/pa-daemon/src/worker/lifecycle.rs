@@ -48,6 +48,17 @@ impl Worker {
         response_success(None, "update_snapshot", Some(core_data))
     }
 
+    pub(crate) fn release_session_lease(&self) {
+        let lease = self
+            .core
+            .lock()
+            .unwrap()
+            .store
+            .as_mut()
+            .and_then(|store| store.lease.take());
+        drop(lease);
+    }
+
     /// Graceful stop: the connection loop exits the process after
     /// replying. The session's telemetry finalizes first.
     pub(crate) async fn handle_shutdown(&self) -> DaemonResponse {
@@ -65,14 +76,17 @@ impl Worker {
         {
             let mut core = self.core.lock().unwrap();
             // The shutdown gate closes FIRST: a racing execute_bash must see the
-            // stop before the abort runs, or the fresh claim clears the abort and
-            // spawns a child the exit leaves running.
+            // stop before the abort runs — a claim that slipped in after the
+            // abort would register a controller nothing later cancels, and the
+            // exit leaves its child running.
             core.shutdown_requested = true;
             core.abort_requested = true;
         }
         // The running user bash goes with the stop: the passivation stop must
-        // never leave the user's process running after the worker exits.
-        self.user_bash.abort().await;
+        // never leave the user's process running after the worker exits. Each
+        // run kills its tree in its own task, so the stop waits (bounded) for
+        // the runs to settle (TS `abortBashForClose`).
+        self.user_bash.abort_and_settle().await;
         // TS `shutdown` closes through `session.abort()` -> `requestAbort()`:
         // the in-flight turn's fetch cancels now, not at its next event.
         self.engine.abort_in_flight_turn();
@@ -96,14 +110,7 @@ impl Worker {
             agent_engine.dispose_kernel().await;
         }
         self.engine.end_telemetry().await;
-        let lease = self
-            .core
-            .lock()
-            .unwrap()
-            .store
-            .as_mut()
-            .and_then(|store| store.lease.take());
-        drop(lease);
+        self.release_session_lease();
         // The worker's quit (TS `session_shutdown` reason `quit`): the
         // pane reporter releases its pane as the last write on the wire
         // — awaited here so the release lands before this reply unlocks

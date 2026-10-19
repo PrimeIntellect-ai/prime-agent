@@ -199,7 +199,12 @@ async fn spawn_connection_worker(
         return Err(CodexStreamError::Aborted);
     }
 
-    let connect = tokio_tungstenite::connect_async(request);
+    let connect = tokio_tungstenite::connect_async_tls_with_config(
+        request,
+        None,
+        false,
+        Some(crate::utils_inner::tls::websocket_connector()),
+    );
     let (stream, _response) = match signal.as_ref() {
         Some(signal) => {
             tokio::select! {

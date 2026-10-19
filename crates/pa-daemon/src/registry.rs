@@ -108,6 +108,10 @@ pub(crate) struct ResidentWorker {
     /// Unix-millis spawn time of the current child (0 for an adopted pid): only a lifetime past the
     /// stable window earns a counter reset (spawn-dies-fast churn accumulates).
     pub(crate) spawned_at_ms: AtomicU64,
+    /// The resident's monitor generation: the latest `spawn_monitor` claim.
+    /// A watch whose generation was superseded returns at the exit check
+    /// instead of running crash bookkeeping over the new owner's process.
+    pub(crate) monitor_epoch: AtomicU64,
     /// The worker advertised `direct_peer_transport` in its `worker_auth` response.
     pub(crate) peer_transport_capable: AtomicBool,
     /// The last-good heartbeats catalog answer, tagged with its generation: served when the worker
@@ -136,6 +140,14 @@ pub(crate) struct ResidentWorker {
     pub(crate) compaction: crate::compaction_supervision::CompactionSupervision,
     /// The pending owner-disconnect stop (TS `ownerCleanupTimer`).
     pub(crate) owner_cleanup: std::sync::Mutex<Option<tokio::task::AbortHandle>>,
+    /// The client-forwarded launch env (TS `ResidentWorker.launchEnv`):
+    /// in memory ONLY — never the descriptor, never the durable create
+    /// command, never the update roster. The spawn merges it under the
+    /// internal identity overrides. A resident worker loses it once its
+    /// create completes (a crash relaunch runs on the daemon's env); an
+    /// owned worker keeps it for the owner-driven recovery relaunch
+    /// until ownership clears (promotion).
+    pub(crate) launch_env: std::sync::Mutex<Option<std::collections::BTreeMap<String, String>>>,
 }
 
 /// The last-good heartbeats rows, tagged with the catalog generation they
@@ -173,6 +185,7 @@ impl ResidentWorker {
             intentional_stop: AtomicBool::new(false),
             consecutive_failures: AtomicU32::new(0),
             spawned_at_ms: AtomicU64::new(0),
+            monitor_epoch: AtomicU64::new(0),
             peer_transport_capable: AtomicBool::new(false),
             heartbeat_snapshot: Mutex::new(None),
             cron_snapshot: Mutex::new(None),
@@ -183,7 +196,22 @@ impl ResidentWorker {
             connection_epoch: AtomicU64::new(0),
             compaction: crate::compaction_supervision::CompactionSupervision::default(),
             owner_cleanup: std::sync::Mutex::new(None),
+            launch_env: std::sync::Mutex::new(None),
         })
+    }
+
+    /// Set the client-forwarded launch env (the in-memory lifetime is
+    /// documented on the field).
+    pub(crate) fn set_launch_env(&self, env: Option<std::collections::BTreeMap<String, String>>) {
+        *self
+            .launch_env
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = env;
+    }
+
+    /// Drop the stored launch env (the ready-time and promotion clears).
+    pub(crate) fn clear_launch_env(&self) {
+        self.set_launch_env(None);
     }
 
     pub(crate) fn route_state(&self) -> WorkerRouteState {
@@ -354,7 +382,8 @@ pub(crate) struct WorkerRegistration {
 }
 
 /// Accepted registration state per worker: the identity plus the
-/// registration count (epoch 1 = boot, epoch > 1 = re-registration after a supervisor restart).
+/// registration count (epoch 1 = boot; every later epoch is an in-place
+/// re-registration, e.g. `notify_session_created` after a create).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct RegistrationRecord {
     pub(crate) registration: WorkerRegistration,

@@ -242,7 +242,7 @@ fn child_responses(receipts_dir: &Path) -> Value {
     let cell = child_cell(receipts_dir);
     let reply = json!([
         { "content": [
-            { "type": "toolCall", "name": "ipython", "arguments": { "code": cell } },
+            { "type": "toolCall", "name": "python_repl", "arguments": { "code": cell } },
         ] },
         { "text": "kid turn done" },
     ]);
@@ -331,7 +331,6 @@ async fn send_agent_message(
             "receiver_role": "child",
             "receiver_name": receiver_name,
         }),
-        cell_source_code: None,
     })
     .await
 }
@@ -405,6 +404,7 @@ async fn parent_child_agent_message_round_trip_end_to_end() {
             agent_dir.clone(),
             /*telemetry_disabled*/ true,
         )),
+        String::new(),
     );
     children.set_identity(ParentIdentity {
         rlm_depth: 0,
@@ -422,7 +422,6 @@ async fn parent_child_agent_message_round_trip_end_to_end() {
             name: Some("kid".to_string()),
             model: None,
             thinking: None,
-            cell_source_code: None,
             spawned_by_request_id: None,
         })
         .await
@@ -598,7 +597,7 @@ fn record_cell(request: &str, name: &str, receipts_dir: &Path) -> String {
 fn cell_turn(code: &str) -> Value {
     json!([
         { "content": [
-            { "type": "toolCall", "name": "ipython", "arguments": { "code": code } },
+            { "type": "toolCall", "name": "python_repl", "arguments": { "code": code } },
         ] },
         { "text": "cell turn done" },
     ])
@@ -632,7 +631,7 @@ async fn family_edges_never_cross_families_end_to_end() {
         "parent-a",
         &json!([
             { "content": [
-                { "type": "toolCall", "name": "ipython", "arguments": { "code": parent_a_cell } },
+                { "type": "toolCall", "name": "python_repl", "arguments": { "code": parent_a_cell } },
             ] },
             { "text": "parent-a turn done" },
             { "text": "parent-a turn done" },
@@ -734,6 +733,7 @@ async fn family_edges_never_cross_families_end_to_end() {
                 agent_dir.clone(),
                 /*telemetry_disabled*/ true,
             )),
+            String::new(),
         );
         children.set_identity(ParentIdentity {
             rlm_depth: 0,
@@ -751,7 +751,6 @@ async fn family_edges_never_cross_families_end_to_end() {
                 name: Some(kid_name.to_string()),
                 model: None,
                 thinking: None,
-                cell_source_code: None,
                 spawned_by_request_id: None,
             })
             .await
@@ -874,6 +873,7 @@ async fn family_edges_never_cross_families_end_to_end() {
             agent_dir.clone(),
             /*telemetry_disabled*/ true,
         )),
+        String::new(),
     );
     kid_children.set_identity(ParentIdentity {
         rlm_depth: 1,
@@ -891,7 +891,6 @@ async fn family_edges_never_cross_families_end_to_end() {
             name: Some("grandkid".to_string()),
             model: None,
             thinking: None,
-            cell_source_code: None,
             spawned_by_request_id: None,
         })
         .await
@@ -976,22 +975,28 @@ async fn family_edges_never_cross_families_end_to_end() {
     if let Ok(error) = std::fs::read_to_string(receipts_dir.join("kid-observe.error")) {
         panic!("kid kernel cell failed: {error}");
     }
-    let kid_roster = read_recorded(&receipts_dir, "kid-observe.json");
-    let kid_roster = kid_roster
+    let kid_payload = read_recorded(&receipts_dir, "kid-observe.json");
+    let kid_current = kid_payload
+        .get("current")
+        .expect("kid-a's own row rides current");
+    assert_eq!(kid_current["activeSessionId"], kid_a_active.as_str());
+    assert!(kid_current["isCurrent"] == true, "{kid_current:?}");
+    assert_eq!(kid_current["relationship"], Value::Null, "{kid_current:?}");
+    let kid_roster = kid_payload
         .get("agents")
         .and_then(Value::as_array)
         .expect("the observe roster is a list of summaries");
     assert_eq!(
         kid_roster.len(),
-        3,
-        "kid-a's observe roster is its nuclear family: {kid_roster:?}"
+        2,
+        "kid-a's family roster excludes itself: {kid_roster:?}"
     );
-    let kid_self = kid_roster
-        .iter()
-        .find(|summary| summary["activeSessionId"] == kid_a_active.as_str())
-        .expect("kid-a's own row");
-    assert!(kid_self["isCurrent"] == true, "{kid_self:?}");
-    assert_eq!(kid_self["relationship"], Value::Null, "{kid_self:?}");
+    assert!(
+        !kid_roster
+            .iter()
+            .any(|summary| summary["activeSessionId"] == kid_a_active.as_str()),
+        "kid-a's own row never rides the family roster: {kid_roster:?}"
+    );
     let kid_parent_row = kid_roster
         .iter()
         .find(|summary| summary["sessionId"] == parent_a_session.as_str())
@@ -1020,14 +1025,20 @@ async fn family_edges_never_cross_families_end_to_end() {
         panic!("parent kernel cell failed: {error}");
     }
     let roster = read_recorded(&receipts_dir, "parent-observe.json");
+    let current = roster
+        .get("current")
+        .expect("the parent's own row rides current");
+    assert_eq!(current["sessionId"], parent_a_session.as_str());
+    assert_eq!(current["isCurrent"], true, "{current:?}");
+    assert_eq!(current["relationship"], Value::Null, "{current:?}");
     let roster = roster
         .get("agents")
         .and_then(Value::as_array)
         .expect("the observe roster is a list of summaries");
     assert_eq!(
         roster.len(),
-        3,
-        "the observe roster is the nuclear family: {roster:?}"
+        2,
+        "the family roster excludes the caller: {roster:?}"
     );
     let by_id = |id: &str| {
         roster
@@ -1039,9 +1050,6 @@ async fn family_edges_never_cross_families_end_to_end() {
             .unwrap_or_else(|| panic!("row {id} missing: {roster:?}"))
             .clone()
     };
-    let self_row = by_id(parent_a_session);
-    assert_eq!(self_row["isCurrent"], true, "{self_row:?}");
-    assert_eq!(self_row["relationship"], Value::Null, "{self_row:?}");
     let sibling_row = by_id(sibling_root_active);
     assert_eq!(sibling_row["relationship"], "sibling", "{sibling_row:?}");
     let child_row = by_id(kid_a_active);
@@ -1183,6 +1191,7 @@ async fn parent_renames_a_child_end_to_end() {
             agent_dir.clone(),
             /*telemetry_disabled*/ true,
         )),
+        String::new(),
     );
     children.set_identity(ParentIdentity {
         rlm_depth: 0,
@@ -1201,7 +1210,6 @@ async fn parent_renames_a_child_end_to_end() {
             model: None,
             thinking: None,
             spawned_by_request_id: None,
-            cell_source_code: None,
         })
         .await
         .expect("spawn the child");
@@ -1242,6 +1250,8 @@ async fn parent_renames_a_child_end_to_end() {
         pa_core::session_engine::runtime_wiring::RlmWiring {
             model_registry: None,
             subagent_host: Some(Arc::clone(&children) as Arc<dyn RlmSubagentHost>),
+            usage_store: None,
+            progress_note_emit: None,
         },
         None,
         None,
@@ -1256,7 +1266,6 @@ async fn parent_renames_a_child_end_to_end() {
             "name": "  bench-runner ",
             "session_id": handle.rlm_child_id,
         }),
-        cell_source_code: None,
     })
     .await
     .expect("the rename dispatch");

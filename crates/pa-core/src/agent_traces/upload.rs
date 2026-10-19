@@ -37,7 +37,7 @@ impl TraceUploadOptions<'_> {
         if self.reload_config {
             let _ = settings.reload();
         }
-        settings.get_agent_traces_enabled()
+        settings.errors().is_empty() && settings.get_agent_traces_enabled()
     }
 }
 
@@ -93,16 +93,33 @@ pub(super) async fn perform_agent_trace_upload(
     if options.require_enabled && !options.enabled() {
         return TraceUploadResult::Disabled;
     }
-    let body = match tokio::fs::read_to_string(session_file).await {
+    // Bound the read itself: an append racing the initial stat must not allocate
+    // an arbitrarily large body or bypass the server's 20 MiB limit.
+    let read_body = async {
+        use tokio::io::AsyncReadExt;
+        let file = tokio::fs::File::open(session_file).await?;
+        let mut body = String::new();
+        file.take(MAX_TRACE_BYTES + 1)
+            .read_to_string(&mut body)
+            .await?;
+        Ok::<_, std::io::Error>(body)
+    };
+    let body = match read_body.await {
         Ok(body) => body,
         Err(error) => {
             return TraceUploadResult::Failed {
                 status_code: None,
                 message: error.to_string(),
                 retry_after_ms: None,
-            }
+            };
         }
     };
+    if body.len() as u64 > MAX_TRACE_BYTES {
+        return TraceUploadResult::TooLarge {
+            size: body.len() as u64,
+            max_bytes: MAX_TRACE_BYTES,
+        };
+    }
     if body.trim().is_empty() {
         return TraceUploadResult::EmptySession;
     }
@@ -151,7 +168,7 @@ pub(super) async fn perform_agent_trace_upload(
                 status_code: None,
                 message: error.message(),
                 retry_after_ms: None,
-            }
+            };
         }
     };
     if !(200..300).contains(&response.status) {
@@ -193,7 +210,7 @@ pub(super) async fn perform_agent_trace_upload(
 
 /// The gate runs before every attempt, the retriable statuses/network
 /// errors back off with jitter, and 503 honors `Retry-After`.
-async fn fetch_with_retry(
+pub(super) async fn fetch_with_retry(
     options: &TraceUploadOptions<'_>,
     url: &str,
     headers: Vec<(String, String)>,
@@ -208,6 +225,9 @@ async fn fetch_with_retry(
                 .await?;
         }
         if options.cancel.is_some_and(TraceUploadCancel::is_cancelled) {
+            return Err(TraceHttpError::Cancelled);
+        }
+        if options.require_enabled && !options.enabled() {
             return Err(TraceHttpError::Cancelled);
         }
         let mut retry_delay_ms: Option<u64> = None;

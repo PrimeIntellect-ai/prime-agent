@@ -194,7 +194,9 @@ pub async fn plan(
             current_platform_alias()
         )
     })?;
-    let archive_url = format!("{base_url}/{}", artifact.file);
+    // Channel manifests carry a basename; immutable assets and checksums
+    // live under releases/v<version>, just as the shipped TS installer reads.
+    let archive_url = format!("{base_url}/releases/v{}/{}", release.version, artifact.file);
     let archive_sha256 = artifact.sha256.clone();
     Ok(UpdatePlan::Update {
         version: release.version,

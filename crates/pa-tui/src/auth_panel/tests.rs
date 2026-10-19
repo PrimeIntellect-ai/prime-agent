@@ -686,3 +686,146 @@ fn the_copy_binding_copies_the_mounted_url_into_the_actions_row() {
         "the plain key typed into the field: {rows:?}"
     );
 }
+
+/// Headless login exposes every URL byte even when the terminal cannot carry OSC 8 links.
+#[test]
+fn long_auth_url_wraps_without_losing_bytes_or_controls() {
+    let url = format!("https://auth.openai.com/oauth/authorize?response_type=code&client_id=fixture&redirect_uri=http%3A%2F%2Flocalhost%3A1455%2Fauth%2Fcallback&state={}&simplified_flow=true", "s".repeat(256));
+    for width in [1, 2, 3, 20, 40, 80, 180] {
+        let mut panel = AuthPanel::onboarding("Login to ChatGPT");
+        panel.show_auth_url(url.clone(), None);
+        panel.mount_paste(
+            "Redirect URL:",
+            PastePromptTone::Text,
+            PasteStyle::Visible,
+            false,
+            oneshot::channel().0,
+        );
+        crate::hyperlinks::set_hyperlinks_override(Some(false));
+        let lines = panel.render(&theme(), width, &kb());
+        crate::hyperlinks::set_hyperlinks_override(None);
+        let rows: Vec<String> = lines.iter().map(visible_auth_row).collect();
+        let shown: String = rows[1..]
+            .iter()
+            .take_while(|row| !row.is_empty())
+            .map(|row| row.trim_start())
+            .collect();
+        assert_eq!(shown, url, "width {width}");
+        assert!(lines
+            .iter()
+            .all(|line| crate::width::line_width(line) <= width));
+        if width >= 40 {
+            assert!(rows.iter().any(|row| row.contains("Redirect URL:")));
+            assert!(rows.iter().any(|row| row.contains("cancel")));
+        }
+        let mut clipboard = sink();
+        panel.handle_key("alt+c", &kb(), &mut clipboard);
+        let crate::clipboard::OscSink::Buffer(bytes) = clipboard else {
+            panic!("capture sink")
+        };
+        assert_eq!(
+            String::from_utf8(bytes).unwrap(),
+            crate::osc52::sequence(&url).unwrap()
+        );
+    }
+}
+
+#[test]
+fn every_wrapped_auth_url_row_links_to_the_complete_target() {
+    let url = format!("https://fixture.example/{}", "x".repeat(220));
+    let mut panel = AuthPanel::onboarding("Login");
+    panel.show_auth_url(url.clone(), None);
+    for width in [1, 2, 3, 20, 80, url.len() + 2] {
+        crate::hyperlinks::set_hyperlinks_override(Some(true));
+        let lines = panel.render(&theme(), width, &kb());
+        crate::hyperlinks::set_hyperlinks_override(None);
+        let url_rows: Vec<_> = lines[1..]
+            .iter()
+            .take_while(|line| !line.is_empty())
+            .collect();
+        let text: String = url_rows
+            .iter()
+            .map(|line| visible_auth_row(line).trim_start().to_string())
+            .collect();
+        assert_eq!(text, url);
+        let targets = crate::hyperlinks::frame_link_ranges(&lines);
+        assert_eq!(targets.len(), url_rows.len());
+        for (line, target) in url_rows.iter().zip(targets) {
+            let raw: String = line.iter().map(|span| span.content.as_str()).collect();
+            assert!(raw.ends_with(crate::hyperlinks::OSC8_CLOSE));
+            assert_eq!(target.url, url);
+            assert!(crate::width::line_width(line) <= width);
+        }
+    }
+}
+
+/// Bugbot (cursor) finding: the URL wrap must preserve every byte on screen. `scrub_controls`
+/// spaces control characters and word wrap drops spaces at the break - the visible rows would
+/// no longer match the copied or hyperlinked target. A URL is one token: char-level wrap.
+#[test]
+fn wrapped_auth_url_keeps_spaces_between_the_rows() {
+    let url = format!(
+        "https://example.test/oauth?state={}a{}b{}c",
+        ' ', '\u{1}', ' '
+    );
+    let expected = scrub_controls(&url).replace('\n', "");
+    let mut panel = AuthPanel::onboarding("Login");
+    panel.show_auth_url(url, None);
+    for width in [2, 3, 5, 8, 20, 40] {
+        crate::hyperlinks::set_hyperlinks_override(Some(false));
+        let lines = panel.render(&theme(), width, &kb());
+        crate::hyperlinks::set_hyperlinks_override(None);
+        let mut shown = String::new();
+        for row in &lines[1..] {
+            let raw = visible_auth_row(row);
+            // The URL block ends at the first truly empty row; a wrapped space renders
+            // as a whitespace-only URL row and must not end it.
+            if raw.is_empty() {
+                break;
+            }
+            let segment = if width > 1 {
+                raw.strip_prefix(' ').unwrap_or(&raw)
+            } else {
+                &raw[..]
+            };
+            shown.push_str(segment);
+        }
+        assert_eq!(shown, expected, "width {width}");
+        assert!(lines
+            .iter()
+            .all(|line| crate::width::line_width(line) <= width));
+    }
+}
+
+fn visible_auth_row(line: &Line) -> String {
+    crate::ansi::strip_ansi(
+        &line
+            .iter()
+            .map(|span| span.content.as_str())
+            .collect::<String>(),
+    )
+}
+
+#[test]
+fn wrapped_session_auth_url_keeps_the_link_and_controls_visible() {
+    let url = format!("https://example.test/oauth?state={}", "a".repeat(450));
+    let mut panel = AuthPanel::new("Login to ChatGPT");
+    panel.show_auth_url(url.clone(), None);
+    panel.mount_paste(
+        "Redirect URL:",
+        PastePromptTone::Text,
+        PasteStyle::Visible,
+        false,
+        oneshot::channel().0,
+    );
+    let mut view = crate::view::AgentView::new(theme());
+    view.auth_panel = Some(panel);
+    let rows = view.render_frame(40, 24);
+    let text = rows.iter().map(visible_auth_row).collect::<Vec<_>>();
+    let joined = text.iter().map(|row| row.trim()).collect::<String>();
+    assert!(joined.contains(&url), "complete URL: {text:?}");
+    assert!(
+        joined.contains("Redirect URL:") && joined.contains("cancel"),
+        "controls: {text:?}"
+    );
+}

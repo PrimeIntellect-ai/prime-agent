@@ -225,11 +225,13 @@ impl SessionUi {
         };
         // A missing settings seam keeps the TS defaults.
         if let Some(settings) = &settings {
+            values.compaction_threshold_percent = settings.compaction_threshold_percent();
             values.show_images = settings.show_images();
             values.auto_resize_images = settings.image_auto_resize();
             values.block_images = settings.block_images();
             values.skill_commands = settings.enable_skill_commands();
             values.builtin_skills = settings.enable_builtin_skills();
+            values.harness_refinements = settings.harness_refinements();
             values.hardware_cursor = settings.show_hardware_cursor();
             values.editor_padding = settings.editor_padding_x();
             values.autocomplete_max_visible = settings.autocomplete_max_visible();
@@ -248,6 +250,7 @@ impl SessionUi {
             values.auto_resize_images = true;
             values.skill_commands = true;
             values.builtin_skills = true;
+            values.harness_refinements = true;
             values.idle_eviction_minutes = "90".to_string();
             values.mermaid = "streaming".to_string();
             values.tree_filter_mode = "user-only".to_string();
@@ -309,6 +312,17 @@ impl SessionUi {
     /// the settings seam for persisted preferences.
     async fn apply_settings_change(&mut self, id: &str, value: &str, view: &mut AgentView) {
         match id {
+            "autocompact-threshold" => {
+                if let Some(settings) = &self.client_settings {
+                    let result = value
+                        .parse::<f64>()
+                        .map_err(anyhow::Error::from)
+                        .and_then(|percent| settings.set_compaction_threshold_percent(percent));
+                    if let Err(error) = result {
+                        self.error_row(&format!("{error:#}"), view);
+                    }
+                }
+            }
             "autocompact" => {
                 self.daemon_switch(
                     DaemonCommand::SetAutoCompaction {
@@ -364,6 +378,13 @@ impl SessionUi {
                 };
                 view.editor.set_autocomplete_skill_commands(skills);
                 self.dirty = true;
+            }
+            "harness-refinements" => {
+                self.persist_bool_setting(
+                    |settings, enabled| settings.set_harness_refinements(enabled),
+                    value,
+                    view,
+                );
             }
             "builtin-skills" => {
                 self.persist_bool_setting(

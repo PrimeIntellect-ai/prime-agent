@@ -128,7 +128,38 @@ impl SessionUi {
                 self.note("Usage: /clear", view);
             }
             "new" => {
+                // The raw suffix after the typed command name (TS parses
+                // `text.slice(4)`): the leading separator and the verbatim
+                // prompt survive, where the trimmed `resolved.args` would
+                // lose them.
+                let options = match crate::new_session_command::parse_new_session_command(
+                    &text[1 + resolved.original_name.len()..],
+                ) {
+                    Ok(options) => options,
+                    Err(message) => {
+                        // The draft the submit drained restores next to the
+                        // error row (TS `editor.setText(text)` + `showError`).
+                        view.editor.set_text(text);
+                        self.error_row(&message, view);
+                        return Ok(());
+                    }
+                };
                 self.start_new_session(view).await?;
+                if let Some(name) = options.name {
+                    if !self.set_session_name(&name, view).await {
+                        // TS parity (`handleClearCommand`'s catch): the
+                        // rename failed after the session exists — the
+                        // prompt restores into the editor and never submits.
+                        if let Some(prompt) = options.prompt.as_deref() {
+                            view.editor.set_text(prompt);
+                        }
+                        return Ok(());
+                    }
+                }
+                if let Some(prompt) = options.prompt {
+                    view.editor.add_to_history(&prompt);
+                    self.send_prompt(&prompt, SubmitBehavior::Steer, view)?;
+                }
             }
             // `/quit` detaches and exits (the session keeps running in the daemon).
             "quit" => {
@@ -193,7 +224,7 @@ impl SessionUi {
                     .map(str::to_string);
                 match effort_picker::effort_command(&levels, current.as_deref(), &resolved.args) {
                     effort_picker::EffortCommandOutcome::Open(picker) => {
-                        view.effort_picker = Some(picker);
+                        view.choice_picker = Some(picker);
                         self.track_feature_outcome("effort", "initiated", None);
                     }
                     effort_picker::EffortCommandOutcome::Unsupported => {
@@ -737,26 +768,7 @@ impl SessionUi {
                     }
                     return Ok(());
                 }
-                match self
-                    .bounded_request(
-                        Duration::from_millis(UI_REQUEST_TIMEOUT_MS),
-                        DaemonCommand::SetSessionName {
-                            id: None,
-                            active_session_id: self.active_session_id.clone(),
-                            name: name.to_string(),
-                            worker_token: None,
-                            rest: Map::default(),
-                        },
-                    )
-                    .await
-                {
-                    Ok(_) => {
-                        self.session_name = Some(name.to_string());
-                        view.chrome.chat_name = self.session_display();
-                        self.plain_row(&format!("Session name set: {name}"), view);
-                    }
-                    Err(error) => self.error_row(&format!("{error:#}"), view),
-                }
+                self.set_session_name(name, view).await;
             }
             "fast" => {
                 if !resolved.args.is_empty() {
@@ -827,6 +839,38 @@ impl SessionUi {
             }
         }
         Ok(())
+    }
+
+    /// Rename the active session through the daemon's `SetSessionName` seam —
+    /// the one path the `/name` and `/new --name` arms share. On success the
+    /// local name, the chrome's chat title, and the `Session name set:` row
+    /// update; on failure the error row reports and the caller learns the
+    /// rename did not land.
+    async fn set_session_name(&mut self, name: &str, view: &mut AgentView) -> bool {
+        match self
+            .bounded_request(
+                Duration::from_millis(UI_REQUEST_TIMEOUT_MS),
+                DaemonCommand::SetSessionName {
+                    id: None,
+                    active_session_id: self.active_session_id.clone(),
+                    name: name.to_string(),
+                    worker_token: None,
+                    rest: Map::default(),
+                },
+            )
+            .await
+        {
+            Ok(_) => {
+                self.session_name = Some(name.to_string());
+                view.chrome.chat_name = self.session_display();
+                self.plain_row(&format!("Session name set: {name}"), view);
+                true
+            }
+            Err(error) => {
+                self.error_row(&format!("{error:#}"), view);
+                false
+            }
+        }
     }
 
     /// Report a menu surface opening (`tui menu opened`), fire-and-forget;

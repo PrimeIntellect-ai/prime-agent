@@ -79,6 +79,9 @@ pub struct Reconstructed {
     /// The session's effective service tier (`state.serviceTier`), the
     /// `/fast` toggle's baseline.
     pub service_tier: Option<String>,
+    /// The tail's oldest row when older history exists (the page cursor).
+    pub history_before_entry_id: Option<String>,
+    pub(crate) backfill_seam: BackfillSeam,
 }
 
 impl Reconstructed {
@@ -184,46 +187,25 @@ struct OrphanResult {
     view: crate::chat::ToolResultView,
 }
 
-/// The wire context is summary-first for the model, but the transcript
-/// presents the compaction summary at its chronological boundary — after
-/// the retained messages (`retainedMessageCount`). A missing count falls
-/// back to the timestamp split (pre-count summaries).
-fn order_messages_for_transcript(messages: &[Value]) -> Vec<&Value> {
-    let Some(summary_index) = messages.iter().position(|message| {
-        message.get("role").and_then(Value::as_str) == Some("compactionSummary")
-    }) else {
-        return messages.iter().collect();
-    };
-    let summary = &messages[summary_index];
-    let mut rest: Vec<&Value> = messages
-        .iter()
-        .enumerate()
-        .filter(|(index, _)| *index != summary_index)
-        .map(|(_, message)| message)
-        .collect();
-    let boundary = if let Some(retained) =
-        summary.get("retainedMessageCount").and_then(Value::as_u64)
-    {
-        (retained as usize).min(rest.len())
-    } else {
-        let summary_timestamp = summary.get("timestamp").and_then(Value::as_f64);
-        let retained = rest
-            .iter()
-            .filter(|message| message.get("timestamp").and_then(Value::as_f64) < summary_timestamp)
-            .count();
-        retained.min(rest.len())
-    };
-    rest.insert(boundary, summary);
-    rest
-}
-
 /// Replay a whole transcript, folding `toolResult` messages onto their
 /// pending cards; one id-to-index map keeps the fold linear.
+#[must_use]
 pub fn transcript_to_entries(messages: &[Value]) -> Vec<ChatEntry> {
-    let ordered = order_messages_for_transcript(messages);
+    transcript_with_backfill_seam(messages).0
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) enum BackfillSeam {
+    #[default]
+    Preserve,
+    RetryOutcome,
+}
+
+pub(crate) fn transcript_with_backfill_seam(messages: &[Value]) -> (Vec<ChatEntry>, BackfillSeam) {
+    let mut seam = BackfillSeam::Preserve;
     let mut chat: Vec<ChatEntry> = Vec::new();
     let mut card_index: HashMap<String, Vec<usize>> = HashMap::new();
-    for message in ordered {
+    for message in messages {
         if let Some(result) = tool_result_message_view(message) {
             let tool_call_id = result.tool_call_id.clone();
             if let Some(result) = settle_last_pending(
@@ -246,8 +228,10 @@ pub fn transcript_to_entries(messages: &[Value]) -> Vec<ChatEntry> {
             && message.get("customType").and_then(Value::as_str)
                 == Some(crate::custom_message::PROVIDER_RETRY_OUTCOME_CUSTOM_TYPE)
         {
-            while chat.last().is_some_and(is_superseded_attempt_row) {
-                chat.pop();
+            pop_superseded_attempts(&mut chat);
+            if chat.is_empty() {
+                // This outcome also supersedes attempts in the omitted prefix.
+                seam = BackfillSeam::RetryOutcome;
             }
         }
         let first_new = chat.len();
@@ -261,7 +245,7 @@ pub fn transcript_to_entries(messages: &[Value]) -> Vec<ChatEntry> {
             }
         }
     }
-    chat
+    (chat, seam)
 }
 
 /// Settle one result onto the LAST pending card among `indices` (the
@@ -314,12 +298,24 @@ fn orphan_card(result: ToolResultReplay) -> ChatEntry {
     }))
 }
 
+fn pop_superseded_attempts(chat: &mut Vec<ChatEntry>) {
+    while chat.last().is_some_and(is_superseded_attempt_row) {
+        chat.pop();
+    }
+}
+
+pub(crate) fn join_backfilled_entries(head: &mut Vec<ChatEntry>, seam: BackfillSeam) {
+    if matches!(seam, BackfillSeam::RetryOutcome) {
+        pop_superseded_attempts(head);
+    }
+}
+
 pub fn reconstruct(attach: &AttachData) -> Reconstructed {
     let snapshot = &attach.snapshot;
-    let messages = snapshot
+    let (messages, backfill_seam) = snapshot
         .get("messages")
         .and_then(Value::as_array)
-        .map(|messages| transcript_to_entries(messages))
+        .map(|messages| transcript_with_backfill_seam(messages))
         .unwrap_or_default();
     let state = snapshot.get("state");
     let (model_id, model_provider) = state
@@ -386,20 +382,25 @@ pub fn reconstruct(attach: &AttachData) -> Reconstructed {
         .and_then(|state| state.get("serviceTier"))
         .and_then(Value::as_str)
         .map(str::to_string);
-    let last_user_prompt_ms =
-        snapshot
-            .get("messages")
-            .and_then(Value::as_array)
-            .and_then(|messages| {
-                messages
-                    .iter()
-                    .rev()
-                    .find(|message| {
-                        message.get("role").and_then(Value::as_str) == Some("user")
-                            && message_timestamp_ms(message).is_some()
-                    })
-                    .and_then(message_timestamp_ms)
-            });
+    let history_before_entry_id = snapshot
+        .get("historyBeforeEntryId")
+        .and_then(Value::as_str)
+        .map(str::to_owned);
+    let last_user_prompt_ms = snapshot
+        .get("messages")
+        .and_then(Value::as_array)
+        .and_then(|messages| {
+            messages.iter().rev().find_map(|message| {
+                (message.get("role").and_then(Value::as_str) == Some("user"))
+                    .then(|| message_timestamp_ms(message))
+                    .flatten()
+            })
+        })
+        .or_else(|| {
+            history_before_entry_id
+                .as_ref()
+                .and_then(|_| snapshot.get("lastUserPromptMs").and_then(Value::as_u64))
+        });
     Reconstructed {
         chat: messages,
         model_id,
@@ -415,6 +416,8 @@ pub fn reconstruct(attach: &AttachData) -> Reconstructed {
         queued,
         service_tier,
         last_user_prompt_ms,
+        history_before_entry_id,
+        backfill_seam,
     }
 }
 
@@ -429,10 +432,9 @@ fn message_timestamp_ms(message: &Value) -> Option<u64> {
                 .filter(|value| value.is_finite())
                 .map(|value| value.max(0.0) as u64)
         }),
-        Some(Value::String(iso)) => {
-            let ms = crate::agents_view_state::timestamp_ms(Some(iso));
-            (ms > 0).then_some(ms as u64)
-        }
+        Some(Value::String(iso)) => pa_types::incident::timestamp_to_ms(iso)
+            .filter(|ms| *ms > 0)
+            .map(|ms| ms as u64),
         _ => None,
     }
 }

@@ -58,7 +58,7 @@ use ratatui::Terminal;
 use tokio::sync::mpsc;
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
 
 /// Which session the interactive run opens.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -486,6 +486,7 @@ enum UiInput {
         timeout_ms: u64,
     },
     ScrollTop,
+    Timestamp(std::sync::mpsc::Sender<(Instant, usize)>),
     Resize,
     HeadlessDone,
 }

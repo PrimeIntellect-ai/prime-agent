@@ -29,6 +29,12 @@ fn is_definitive_rejection(message: &str) -> bool {
     message.contains(UNKNOWN_SESSION_WORKER_PREFIX)
 }
 
+pub(crate) fn tombstoned_registration_refusal(active_session_id: &str) -> String {
+    format!(
+        "{UNKNOWN_SESSION_WORKER_PREFIX}: {active_session_id} is stopping: the stop was forwarded; registration refused"
+    )
+}
+
 /// Backoff between failed registration attempts, mirroring the worker-restart backoff.
 const BASE_BACKOFF_MS: u64 = 250;
 const MAX_BACKOFF_MS: u64 = 30_000;
@@ -514,6 +520,69 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(750)).await;
         let late = tokio::time::timeout(Duration::from_millis(750), listener.accept()).await;
         assert!(late.is_err(), "a retired registration never retries");
+    }
+
+    #[tokio::test]
+    async fn a_tombstoned_registration_refusal_retires_the_worker() {
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let supervisor_socket = dir.path().join("supervisor.sock");
+        let config = test_config(dir.path(), &supervisor_socket);
+        let listener = bind_transport(&supervisor_socket).await.expect("bind");
+        let handle = start(&config).expect("registration starts");
+
+        let refusal = tombstoned_registration_refusal("abc123def456");
+        let started = std::time::Instant::now();
+        let attempts = Arc::new(std::sync::Mutex::new(Vec::<u128>::new()));
+        let refuser = {
+            let attempts = Arc::clone(&attempts);
+            tokio::spawn(async move {
+                loop {
+                    let Ok(stream) = listener.accept().await else {
+                        return;
+                    };
+                    let (read_half, mut write_half) = stream.split();
+                    let mut reader = BufReader::new(read_half);
+                    write_half
+                        .write_all(
+                            b"{\"type\":\"daemon_hello\",\"protocol\":{\"name\":\"prime-agent.daemon\",\"version\":7}}\n",
+                        )
+                        .await
+                        .expect("hello");
+                    let mut line = String::new();
+                    reader.read_line(&mut line).await.expect("register");
+                    let envelope: Value = serde_json::from_str(line.trim()).expect("envelope");
+                    let request_id = envelope["id"].as_str().unwrap_or_default().to_string();
+                    let response = json!({
+                        "id": request_id,
+                        "type": "response",
+                        "command": "worker_register",
+                        "success": false,
+                        "error": refusal,
+                    });
+                    attempts.lock().unwrap().push(started.elapsed().as_millis());
+                    write_half
+                        .write_all(format!("{response}\n").as_bytes())
+                        .await
+                        .expect("refuse");
+                    write_half.flush().await.expect("flush");
+                }
+            })
+        };
+
+        tokio::time::timeout(Duration::from_secs(6), handle.retired())
+            .await
+            .unwrap_or_else(|_| {
+                let attempts = attempts.lock().unwrap();
+                panic!(
+                    "the tombstoned refusal never retired the worker: {} re-registrations within 6s: {:?}",
+                    attempts.len(),
+                    *attempts
+                );
+            });
+
+        let attempts = attempts.lock().unwrap();
+        assert_eq!(attempts.len(), 1, "a retired registration never retries");
+        refuser.abort();
     }
 
     #[tokio::test]

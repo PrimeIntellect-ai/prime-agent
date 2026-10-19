@@ -38,6 +38,34 @@ impl pa_tui::update_command::UpdateCommands for ClientUpdate {
                 }
                 return Err(homebrew::upgrade_instruction(kind));
             }
+            let executable = std::env::current_exe().map_err(|error| error.to_string())?;
+            if let Some(root) = pa_core::update::install::install_root_of(&executable) {
+                // Reuse the CLI's managed activation/restart transaction.
+                // Capturing the child keeps its progress off the live frame.
+                let output = tokio::process::Command::new(executable)
+                    .arg("update")
+                    .env(
+                        crate::public_command::SELF_UPDATE_INTERACTIVE_CHILD_ENV,
+                        "1",
+                    )
+                    .stdin(std::process::Stdio::null())
+                    .output()
+                    .await
+                    .map_err(|error| format!("could not start the update: {error}"))?;
+                if !output.status.success() && output.status.code() != Some(75) {
+                    return Err(format!(
+                        "{}{}",
+                        String::from_utf8_lossy(&output.stdout),
+                        String::from_utf8_lossy(&output.stderr)
+                    ));
+                }
+                return pa_core::update::install::read_installation(
+                    &root,
+                    pa_core::update::install::CURRENT_LAUNCHER,
+                )
+                .map(|installed| installed.version().to_string())
+                .map_err(|error| error.to_string());
+            }
             match installer::run_installer(
                 Some(crate::installer_update::requested_installer_channel(None)),
                 InstallerOutput::Capture,

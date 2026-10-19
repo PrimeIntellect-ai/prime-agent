@@ -8,6 +8,7 @@ pub mod identity;
 pub mod process;
 pub mod terminal;
 pub mod transport;
+pub mod windows_console;
 #[cfg(windows)]
 pub(crate) mod windows_pipe;
 
@@ -21,3 +22,4 @@ pub use transport::{
     bind_transport, connect_blocking, connect_transport, BlockingTransportStream,
     TransportListener, TransportStream,
 };
+pub use windows_console::{init as console_init, restore as console_restore};

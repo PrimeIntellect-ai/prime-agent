@@ -38,7 +38,7 @@ const TOOL_RESULT_TAIL_CHARS: usize = 500;
 pub fn extract_file_ops_from_message(message: &AgentMessage, file_ops: &mut FileOperations) {
     match message {
         AgentMessage::ToolResult(result) => {
-            if result.tool_name != "ipython" {
+            if !pa_types::ai::is_python_tool_name(&result.tool_name) {
                 return;
             }
             let Some(details) = result.details.as_ref().and_then(|d| d.as_object()) else {
@@ -367,7 +367,7 @@ mod tests {
         ops.read.insert("/tmp/other.rs".to_string());
         let result = AgentMessage::ToolResult(pa_types::ai::ToolResultMessage {
             tool_call_id: "c".to_string(),
-            tool_name: "ipython".to_string(),
+            tool_name: "python_repl".to_string(),
             content: vec![],
             details: Some(serde_json::json!({
                 "diffs": [{ "path": "/pkg/lib.rs", "oldStr": "a", "newStr": "b" }]

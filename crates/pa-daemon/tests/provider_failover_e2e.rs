@@ -29,27 +29,43 @@ impl Drop for Supervisor {
 
 /// A mock OpenAI-completions provider: the first `failures` requests get a
 /// 500 with an OpenAI-style error body; the rest get one fixed SSE answer.
+/// `Probe` answers the first served request with a `python_repl` tool call
+/// (the cell arguments string), the follow-ups with text.
+#[derive(Clone)]
+enum ReplyMode {
+    Text(&'static str),
+    Threshold,
+    Probe(String),
+}
+
 struct FailingMock {
     requests: Arc<Mutex<usize>>,
     port: u16,
+    reply: ReplyMode,
 }
 
 impl FailingMock {
-    fn start(failures: usize, answer: &'static str) -> FailingMock {
+    fn start(failures: usize, reply: ReplyMode) -> FailingMock {
         let requests = Arc::new(Mutex::new(0usize));
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind mock");
         let port = listener.local_addr().expect("mock addr").port();
         let requests_for_thread = Arc::clone(&requests);
+        let reply_for_thread = reply.clone();
         std::thread::spawn(move || {
             for stream in listener.incoming() {
                 let Ok(stream) = stream else { continue };
                 let requests = Arc::clone(&requests_for_thread);
+                let reply = reply_for_thread.clone();
                 std::thread::spawn(move || {
-                    let _ = serve(stream, failures, answer, &requests);
+                    let _ = serve(stream, failures, &reply, &requests);
                 });
             }
         });
-        FailingMock { requests, port }
+        FailingMock {
+            requests,
+            port,
+            reply,
+        }
     }
 
     fn url(&self) -> String {
@@ -75,7 +91,7 @@ fn chunk(delta: &Value, finish_reason: Option<&str>) -> String {
 fn serve(
     mut stream: TcpStream,
     failures: usize,
-    answer: &str,
+    reply: &ReplyMode,
     requests: &Arc<Mutex<usize>>,
 ) -> std::io::Result<()> {
     let mut reader = BufReader::new(stream.try_clone()?);
@@ -120,12 +136,48 @@ fn serve(
             .as_bytes(),
         );
     }
+    let (delta, reason) = match reply {
+        ReplyMode::Text(answer) => (json!({"role":"assistant","content":answer}), "stop"),
+        ReplyMode::Probe(cell_arguments) => {
+            if index == failures + 1 {
+                (
+                    json!({"role":"assistant","content":"","tool_calls":[{"index":0,"id":"cell-call","type":"function","function":{"name":"python_repl","arguments":cell_arguments}}]}),
+                    "tool_calls",
+                )
+            } else {
+                (json!({"role":"assistant","content":"probed"}), "stop")
+            }
+        }
+        ReplyMode::Threshold => {
+            let request: Value = serde_json::from_slice(&body_bytes).expect("request JSON");
+            let summary = request["messages"]
+                .to_string()
+                .contains("context summarization assistant");
+            if summary {
+                (
+                    json!({"role":"assistant","content":"compact summary"}),
+                    "stop",
+                )
+            } else if index == 1 {
+                (
+                    json!({"role":"assistant","content":"x".repeat(80_000),"tool_calls":[{"index":0,"id":"synthetic-call","type":"function","function":{"name":"synthetic_missing_tool","arguments":"{}"}}]}),
+                    "tool_calls",
+                )
+            } else {
+                (
+                    json!({"role":"assistant","content":"finished after compaction"}),
+                    "stop",
+                )
+            }
+        }
+    };
     let mut payload = String::new();
-    for data in [
-        chunk(&json!({"role": "assistant", "content": answer}), None),
-        chunk(&json!({}), Some("stop")),
-    ] {
+    for data in [chunk(&delta, None), chunk(&json!({}), Some(reason))] {
         write!(payload, "data: {data}\n\n").expect("write to String");
+    }
+    if matches!(reply, ReplyMode::Threshold) {
+        let usage = json!({"id":"chatcmpl-test","object":"chat.completion.chunk","created":1_750_000_000,"model":"mock-1","choices":[],"usage":{"prompt_tokens":if index == 1 { 50_000 } else { 100 },"completion_tokens":10,"total_tokens":if index == 1 { 50_010 } else { 110 }}});
+        write!(payload, "data: {usage}\n\n").expect("usage SSE");
     }
     payload.push_str("data: [DONE]\n\n");
     stream.write_all(
@@ -136,8 +188,34 @@ fn serve(
     )
 }
 
+/// The kernel Python with prime-agent-runtime installed; set
+/// `PA_E2E_KERNEL_PYTHON` to point at an explicit interpreter instead.
+fn kernel_python() -> Option<PathBuf> {
+    if let Some(explicit) = std::env::var_os("PA_E2E_KERNEL_PYTHON") {
+        let explicit = PathBuf::from(explicit);
+        assert!(
+            explicit.exists(),
+            "PA_E2E_KERNEL_PYTHON {} not found",
+            explicit.display()
+        );
+        return Some(explicit);
+    }
+    let candidate = PathBuf::from(std::env::var("HOME").map_or_else(
+        |_| "/home/ubuntu/.prime/agent/kernel-venv/bin/python".to_string(),
+        |home| format!("{home}/.prime/agent/kernel-venv/bin/python"),
+    ));
+    if candidate.exists() {
+        return Some(candidate);
+    }
+    eprintln!(
+        "kernel python {} not found; skipping live model-facts e2e",
+        candidate.display()
+    );
+    None
+}
+
 #[allow(clippy::zombie_processes)]
-fn spawn_supervisor(socket: &Path, agent_dir: &Path) -> Supervisor {
+fn spawn_supervisor(socket: &Path, agent_dir: &Path, kernel_python: Option<&Path>) -> Supervisor {
     std::fs::create_dir_all(agent_dir).expect("agent dir");
     let child = Command::new(env!("CARGO_BIN_EXE_pa-daemon"))
         .arg("supervisor")
@@ -154,6 +232,13 @@ fn spawn_supervisor(socket: &Path, agent_dir: &Path) -> Supervisor {
         })
         .env_remove("PRIME_API_KEY")
         .env_remove("PRIME_AGENT_CODING_AGENT_DIR")
+        // The probe-cell test boots a live kernel on its worker.
+        .envs(kernel_python.map(|python| {
+            (
+                "PRIME_AGENT_KERNEL_PYTHON".to_string(),
+                python.display().to_string(),
+            )
+        }))
         .spawn()
         .expect("spawn pa-daemon supervisor");
     let deadline = Instant::now() + Duration::from_secs(10);
@@ -312,7 +397,7 @@ fn setup(
                             "id": "mock-1",
                             "name": "Mock 1 (backup)",
                             "api": "openai-completions",
-                            "contextWindow": 128_000,
+                            "contextWindow": if matches!(backup.reply, ReplyMode::Threshold) { 64_000 } else { 128_000 },
                             "maxTokens": 4096
                         }
                     ]
@@ -327,6 +412,7 @@ fn setup(
     std::fs::write(
         agent_dir.join("settings.json"),
         json!({
+            "compaction": {"enabled":true,"keepRecentTokens":10},
             "retry": {
                 "enabled": true,
                 "maxRetries": 1,
@@ -338,7 +424,7 @@ fn setup(
     )
     .expect("write settings.json");
     let socket = dir.path().join(format!("{name}.sock"));
-    let supervisor = spawn_supervisor(&socket, &agent_dir);
+    let supervisor = spawn_supervisor(&socket, &agent_dir, /*kernel_python*/ None);
     let mut client = Client::connect(&socket);
     client.send_command(
         "c1",
@@ -385,8 +471,8 @@ fn retry_end(events: &[Value]) -> &Value {
 
 #[test]
 fn provider_failure_fails_over_to_the_next_provider_and_recovers() {
-    let primary = FailingMock::start(usize::MAX, "never reached");
-    let backup = FailingMock::start(0, "recovered on the backup provider");
+    let primary = FailingMock::start(usize::MAX, ReplyMode::Text("never reached"));
+    let backup = FailingMock::start(0, ReplyMode::Text("recovered on the backup provider"));
     let (_dir, _supervisor, mut client, session_id) = setup("failover", &primary, &backup);
     client.send_command(
         "p1",
@@ -473,8 +559,8 @@ fn provider_failure_fails_over_to_the_next_provider_and_recovers() {
 
 #[test]
 fn every_provider_failing_surfaces_the_final_error() {
-    let primary = FailingMock::start(usize::MAX, "never reached");
-    let backup = FailingMock::start(usize::MAX, "never reached");
+    let primary = FailingMock::start(usize::MAX, ReplyMode::Text("never reached"));
+    let backup = FailingMock::start(usize::MAX, ReplyMode::Text("never reached"));
     let (_dir, _supervisor, mut client, session_id) = setup("exhausted", &primary, &backup);
     client.send_command(
         "p1",
@@ -533,4 +619,266 @@ fn every_provider_failing_surfaces_the_final_error() {
         .expect("turn error")
         .contains("mock provider overloaded"));
     assert_eq!(turn_end.get("error"), None, "turn_end: {turn_end}");
+}
+
+#[test]
+fn threshold_yield_keeps_the_backup_until_the_tool_run_finishes() {
+    let primary = FailingMock::start(usize::MAX, ReplyMode::Text("never"));
+    let backup = FailingMock::start(0, ReplyMode::Threshold);
+    let (_dir, _supervisor, mut client, session_id) =
+        setup("threshold-failover", &primary, &backup);
+    client.send_command("p1", &json!({"type":"prompt_and_wait","activeSessionId":session_id,"message":"u".repeat(120_000)}));
+    let done = client.request("p1");
+    assert_eq!(done["success"], true, "{done}");
+    // Read until the authoritative run settles, with a bound even if unrelated
+    // events keep arriving and every individual read succeeds.
+    let settle_deadline = Instant::now() + Duration::from_secs(30);
+    while !client
+        .events
+        .iter()
+        .any(|event| event["type"] == "auto_retry_end")
+    {
+        assert!(
+            Instant::now() < settle_deadline,
+            "retry episode did not settle"
+        );
+        let line = client.read_line();
+        client.collect_event(&line);
+    }
+    assert_eq!(
+        primary.count(),
+        2,
+        "threshold yield must not retry the failed primary"
+    );
+    assert!(
+        backup.count() >= 3,
+        "tool turn, summary and continuation use the backup"
+    );
+    let compact = client
+        .events
+        .iter()
+        .position(|event| event["type"] == "compaction_end")
+        .expect("backup threshold compacted");
+    assert_eq!(client.events[compact]["aborted"], false);
+    assert!(
+        client.events[compact]["result"].is_object(),
+        "{:?}",
+        client.events[compact]
+    );
+    assert!(client.events[compact]["errorMessage"].is_null());
+    let final_reply = client
+        .events
+        .iter()
+        .position(|event| {
+            event["type"] == "message_end"
+                && event["message"]["content"]
+                    .to_string()
+                    .contains("finished after compaction")
+        })
+        .expect("continued after summary");
+    let restore = client
+        .events
+        .iter()
+        .position(|event| event["type"] == "auto_retry_end")
+        .unwrap();
+    assert!(
+        compact < final_reply && final_reply < restore,
+        "primary restores only after real completion"
+    );
+    assert_eq!(
+        client
+            .events
+            .iter()
+            .filter(|event| event["type"] == "auto_retry_end")
+            .count(),
+        1
+    );
+}
+
+/// The probe cell as the tool-call `arguments` string: the kernel-side
+/// `model.info` and `compact.status` answered inside the turn, written to a
+/// receipt for the verifier.
+fn probe_cell(receipt: &Path) -> String {
+    let code = format!(
+        "import json\nfrom rlm import host_request\npayload = {{}}\npayload[\"model_info\"] = await host_request(\"model.info\", {{}})\npayload[\"compact_status\"] = await host_request(\"compact.status\", {{}})\nopen({receipt:?}, \"w\").write(json.dumps(payload))\nprint(\"FACTS_PROBED\")",
+        receipt = receipt.display().to_string(),
+    );
+    serde_json::to_string(&json!({ "code": code })).expect("serialize the cell arguments")
+}
+
+/// Read a probe cell's receipt: the cell runs inside a settled turn, so
+/// the file is on disk once `prompt_and_wait` returns. A missing receipt
+/// means the tool call failed — the turn's tool result names why.
+fn read_receipt(client: &mut Client, session_id: &str, receipt: &Path, read_id: &str) -> Value {
+    let raw = std::fs::read_to_string(receipt).unwrap_or_else(|error| {
+        client.send_command(
+            read_id,
+            &json!({ "type": "get_messages", "activeSessionId": session_id }),
+        );
+        let messages = client.request(read_id);
+        let tool_result = messages["data"]["messages"]
+            .as_array()
+            .and_then(|rows| rows.iter().rev().find(|row| row["role"] == "toolResult"))
+            .cloned()
+            .unwrap_or(Value::Null);
+        panic!(
+            "probe cell receipt {} unreadable ({error}); the turn's tool result: {tool_result}",
+            receipt.display()
+        );
+    });
+    serde_json::from_str(&raw).unwrap_or_else(|error| panic!("receipt {raw:?}: {error}"))
+}
+
+/// The first successful backup response restores the session model before
+/// its tool executes, matching the actual TS binary: both probe cells report
+/// primary facts while the in-episode provider requests stay on the backup.
+// Long by design: one failover flow asserted end to end.
+#[allow(clippy::too_many_lines)]
+#[test]
+fn failover_switch_and_restore_rebind_the_kernel_model_facts() {
+    let Some(kernel_python) = kernel_python() else {
+        return;
+    };
+    // Two request-failures on the primary drive the failover (initial +
+    // one quick retry); the backup serves the in-episode probe, the
+    // recovered primary the restore probe. Distinct backup input/window
+    // facts catch leaving backup session facts after its first successful response.
+    let dir = tempfile::TempDir::new().expect("temp dir");
+    let agent_dir = dir.path().join("agent");
+    let session_dir = agent_dir.join("sessions");
+    std::fs::create_dir_all(&session_dir).expect("session dir");
+    let episode_receipt = dir.path().join("facts-episode.json");
+    let restored_receipt = dir.path().join("facts-restored.json");
+    let primary = FailingMock::start(2, ReplyMode::Probe(probe_cell(&restored_receipt)));
+    let backup = FailingMock::start(0, ReplyMode::Probe(probe_cell(&episode_receipt)));
+    std::fs::write(
+        agent_dir.join("models.json"),
+        json!({
+            "providers": {
+                "prime-inference": {
+                    "api": "openai-completions",
+                    "baseUrl": primary.url(),
+                    "apiKey": "sk-primary",
+                    "models": [
+                        {
+                            "id": "mock-1",
+                            "name": "Mock 1",
+                            "api": "openai-completions",
+                            "input": ["text"],
+                            "contextWindow": 128_000,
+                            "maxTokens": 4096
+                        }
+                    ]
+                },
+                "prime-backup": {
+                    "api": "openai-completions",
+                    "baseUrl": backup.url(),
+                    "apiKey": "sk-backup",
+                    "models": [
+                        {
+                            "id": "mock-1",
+                            "name": "Mock 1 (backup)",
+                            "api": "openai-completions",
+                            "input": ["text", "image"],
+                            "contextWindow": 64_000,
+                            "maxTokens": 4096
+                        }
+                    ]
+                }
+            }
+        })
+        .to_string(),
+    )
+    .expect("write models.json");
+    // Fast quick-retry (one on the primary) and failover (one per provider)
+    // so the test asserts the rebind, not the delays.
+    std::fs::write(
+        agent_dir.join("settings.json"),
+        json!({
+            "retry": {
+                "enabled": true,
+                "maxRetries": 1,
+                "baseDelayMs": 50,
+                "failover": { "enabled": true, "maxRetries": 1, "baseDelayMs": 50 }
+            }
+        })
+        .to_string(),
+    )
+    .expect("write settings.json");
+    let socket = dir.path().join("facts-failover.sock");
+    let _supervisor = spawn_supervisor(&socket, &agent_dir, Some(&kernel_python));
+    let mut client = Client::connect(&socket);
+    client.send_command(
+        "c1",
+        &json!({
+            "type": "create",
+            "config": {
+                "cwd": dir.path().to_string_lossy(),
+                "sessionDir": session_dir.to_string_lossy(),
+                "provider": "prime-inference",
+                "model": "mock-1",
+            },
+        }),
+    );
+    let created = client.request("c1");
+    assert_eq!(created["success"], true, "create failed: {created}");
+    let session_id = created["data"]["id"]
+        .as_str()
+        .or_else(|| created["data"]["sessionId"].as_str())
+        .expect("session id")
+        .to_string();
+    client.send_command(
+        "a1",
+        &json!({ "type": "attach", "activeSessionId": session_id }),
+    );
+    let attached = client.request("a1");
+    assert_eq!(attached["success"], true, "attach failed: {attached}");
+
+    // The primary fails its two attempts. The backup response restores
+    // primary session state before this probe, while its run keeps backup traffic.
+    client.send_command(
+        "p1",
+        &json!({ "type": "prompt_and_wait", "activeSessionId": session_id, "message": "probe the episode" }),
+    );
+    let done = client.request("p1");
+    assert_eq!(done["success"], true, "the failover turn settled: {done}");
+    let episode = read_receipt(&mut client, &session_id, &episode_receipt, "gm-e");
+    assert_eq!(
+        episode["model_info"],
+        json!({ "id": "mock-1", "provider": "prime-inference", "input": ["text"] }),
+        "model.info must report the restored primary session before backup tools execute: {episode}"
+    );
+    assert_eq!(
+        episode["compact_status"]["context_window"], 128_000,
+        "the primary session's context window returns before the backup probe: {episode}"
+    );
+
+    assert_eq!(
+        (primary.count(), backup.count()),
+        (2, 2),
+        "the failed primary requests and both successful backup requests remain separate"
+    );
+
+    // Settlement restores the provider target; the next turn runs on the primary.
+    client.send_command(
+        "p2",
+        &json!({ "type": "prompt_and_wait", "activeSessionId": session_id, "message": "probe the restore" }),
+    );
+    let done = client.request("p2");
+    assert_eq!(done["success"], true, "the restore turn settled: {done}");
+    let restored = read_receipt(&mut client, &session_id, &restored_receipt, "gm-r");
+    assert_eq!(
+        restored["model_info"],
+        json!({ "id": "mock-1", "provider": "prime-inference", "input": ["text"] }),
+        "model.info must rebind the primary on restore: {restored}"
+    );
+    assert_eq!(
+        restored["compact_status"]["context_window"], 128_000,
+        "the primary's context window returns on restore: {restored}"
+    );
+    assert_eq!(
+        (primary.count(), backup.count()),
+        (4, 2),
+        "the next probe uses the primary without another backup request"
+    );
 }

@@ -1,0 +1,1 @@
+- Daemon housekeeping now reclaims dead-owner session leases and obsolete cache files, retains recent socket logs, and removes retired worker recovery journals only after their writer is proven gone. Journals with unverifiable ownership and flat TypeScript update status records are preserved. Premature explicit lease releases on RPC disposal and orphan teardown have been removed.

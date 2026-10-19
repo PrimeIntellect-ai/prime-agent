@@ -5,12 +5,17 @@
 use pa_types::session::{AgentMessage, FileEntry};
 use std::fmt::Write as _;
 
+#[cfg(test)]
+#[path = "compaction_threshold_tests.rs"]
+mod threshold_tests;
+
 pub const DEFAULT_RESERVE_TOKENS: u64 = 16_384;
 pub const DEFAULT_KEEP_RECENT_TOKENS: u64 = 20_000;
 
 /// The percentage of the context window past which a threshold compaction
 /// always fires (guards estimate drift on large windows).
 pub const COMPACT_THRESHOLD_RATIO: f64 = 0.95;
+pub const DEFAULT_THRESHOLD_PERCENT: f64 = COMPACT_THRESHOLD_RATIO * 100.0;
 
 /// The smallest headroom kept under the combined input+output ceiling (the
 /// chars/4 estimate error); `reserve_tokens` raises it when larger.
@@ -19,6 +24,8 @@ pub const COMBINED_LIMIT_HEADROOM_FLOOR: u64 = 4_096;
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct CompactionSettings {
     pub enabled: bool,
+    /// Requested percentage ceiling; output and reserve headroom can trigger earlier.
+    pub threshold_percent: f64,
     /// Headroom under the combined input+output ceiling (a floor of
     /// [`COMBINED_LIMIT_HEADROOM_FLOOR`]): combined-limit providers reject
     /// `input + requested output > contextWindow`.
@@ -30,6 +37,7 @@ impl Default for CompactionSettings {
     fn default() -> Self {
         Self {
             enabled: true,
+            threshold_percent: DEFAULT_THRESHOLD_PERCENT,
             reserve_tokens: DEFAULT_RESERVE_TOKENS,
             keep_recent_tokens: DEFAULT_KEEP_RECENT_TOKENS,
         }
@@ -141,8 +149,8 @@ fn div4(chars: u64) -> u64 {
     chars.div_ceil(4)
 }
 
-/// The effective compaction threshold: the earlier of two ceilings.
-/// PERCENTAGE: `context_window * COMPACT_THRESHOLD_RATIO` (estimate drift on
+/// The effective compaction threshold: a retention-floored percentage capped by model safety.
+/// PERCENTAGE: `context_window * threshold_percent / 100` (estimate drift on
 /// large windows). COMBINED-LIMIT: `context_window - max_output_tokens -
 /// max(reserve_tokens, COMBINED_LIMIT_HEADROOM_FLOOR)`: the output budget
 /// must still fit. TS checks only `contextWindow - reserveTokens`; reserving
@@ -154,7 +162,20 @@ pub fn compaction_threshold(
     max_output_tokens: u64,
     settings: &CompactionSettings,
 ) -> u64 {
-    let percentage = (context_window as f64 * COMPACT_THRESHOLD_RATIO) as u64;
+    let percent = if pa_types::compaction::is_valid_threshold_percent(settings.threshold_percent) {
+        settings.threshold_percent
+    } else {
+        DEFAULT_THRESHOLD_PERCENT
+    };
+    let requested = (context_window as f64 * (percent / 100.0)) as u64;
+    // Retained history and both summary passes must fit below the trigger,
+    // otherwise a low percentage re-summarizes the same retained context on
+    // every tool turn. Two reserves cover both summary completion budgets.
+    let retention_floor = settings
+        .keep_recent_tokens
+        .saturating_add(settings.reserve_tokens.saturating_mul(2))
+        .saturating_add(1);
+    let percentage = requested.max(retention_floor);
     let headroom = settings.reserve_tokens.max(COMBINED_LIMIT_HEADROOM_FLOOR);
     let combined = context_window
         .saturating_sub(max_output_tokens)
@@ -441,6 +462,15 @@ pub const TURN_PREFIX_SUMMARIZATION_PROMPT: &str = "This is the PREFIX of a turn
 
 const UPDATE_SUMMARIZATION_PROMPT: &str = "The messages above are NEW conversation messages to incorporate into the existing summary provided in <previous-summary> tags.\n\nUpdate the existing structured summary with new information. RULES:\n- PRESERVE all existing information from the previous summary\n- ADD new progress, decisions, and context from the new messages\n- UPDATE the Progress section: move items from \"In Progress\" to \"Done\" when completed\n- UPDATE \"Next Steps\" based on what was accomplished\n- PRESERVE exact file paths, function names, and error messages\n- If something is no longer relevant, you may remove it\n\nUse this EXACT format:\n\n## Goal\n[Preserve existing goals, add new ones if the task expanded]\n\n## Constraints & Preferences\n- [Preserve existing, add new ones discovered]\n\n## Progress\n### Done\n- [x] [Include previously done items AND newly completed items]\n\n### In Progress\n- [ ] [Current work - update based on progress]\n\n### Blocked\n- [Current blockers - remove if resolved]\n\n## Key Decisions\n- **[Decision]**: [Brief rationale] (preserve all previous, add new)\n\n## Next Steps\n1. [Update based on current state]\n\n## Critical Context\n- [Preserve important context, add new if needed]\n\nKeep each section concise. Preserve exact file paths, function names, and error messages.";
 
+/// The retry instruction for a summary the output cap cut off: the retry
+/// wire call appends it as one more text block on the summarization request.
+pub(crate) const SHORTER_SUMMARY_INSTRUCTION: &str = "Your previous summary was cut off at the output limit. Write a shorter summary that fits: keep every required section and compress the detail.";
+
+/// The line a twice-capped summary commits behind: the retry's text still
+/// replaces the transcript, so it rides in front of this disclosure.
+pub(crate) const SUMMARY_TRUNCATED_MARKER: &str =
+    "[summary truncated: earlier detail may be missing]";
+
 /// The instruction part of the summarization prompt (initial or update
 /// template, user instructions, kernel persistence note).
 #[must_use]
@@ -598,6 +628,7 @@ mod tests {
         // 126_010 tokens on a 128k window with a 127_500 reserve leaves
         // a 500-token combined ceiling — the crossing fires.
         let settings = CompactionSettings {
+            threshold_percent: 95.0,
             enabled: true,
             reserve_tokens: 127_500,
             keep_recent_tokens: 10,
@@ -615,6 +646,7 @@ mod tests {
         ];
         assert!(!threshold_compaction_due(&messages, 128_000, 0, &settings));
         let disabled = CompactionSettings {
+            threshold_percent: 95.0,
             enabled: false,
             reserve_tokens: 127_500,
             keep_recent_tokens: 10,
@@ -682,6 +714,7 @@ mod tests {
         // A tiny reserve still keeps the 4_096 estimate-error floor:
         // 131_072 - 32_768 - 4_096 = 94_208 < the 95% ceiling.
         let settings = CompactionSettings {
+            threshold_percent: 95.0,
             enabled: true,
             reserve_tokens: 1,
             keep_recent_tokens: 10,
@@ -704,6 +737,7 @@ mod tests {
     #[test]
     fn stale_pre_compaction_usage_never_retriggers() {
         let settings = CompactionSettings {
+            threshold_percent: 95.0,
             enabled: true,
             reserve_tokens: 127_500,
             keep_recent_tokens: 10,

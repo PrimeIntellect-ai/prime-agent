@@ -723,6 +723,34 @@ fn a_parked_refusal_clears_an_earlier_strikes_window() {
     assert_eq!(driver.no_progress_streak(), 1, "the strike stays durable");
 }
 
+/// The print surface's wake take owns an armed window even after its
+/// deadline passed during the settled run: the take still yields the
+/// overdue deadline once — the sleep saturates to zero — and consuming
+/// it admits exactly one wake per strike.
+#[test]
+fn the_print_wake_take_yields_an_overdue_window_once() {
+    let mut session = persisted_session();
+    let mut driver = GoalDriver::new();
+    driver.start(&mut session, "work", None).unwrap();
+    let created_at = driver.state().created_at.unwrap();
+
+    // Strike one: the backoff window arms.
+    let empty = test_empty_turn(created_at as i64 + 1);
+    assert!(driver
+        .next_continuation_message(&mut session, Some(&empty))
+        .unwrap()
+        .is_none());
+
+    // The settled boundary outlasted the window: the armed deadline sits
+    // in the past, still non-zero.
+    let overdue = now_millis().saturating_sub(1);
+    driver.no_progress_backoff_until_ms = overdue;
+
+    // The take yields the overdue deadline once, and consumes it.
+    assert_eq!(driver.take_backoff_wake_at(), Some(overdue));
+    assert_eq!(driver.take_backoff_wake_at(), None);
+}
+
 #[test]
 fn the_rate_limit_refusal_sticks_across_reconsults() {
     let mut session = persisted_session();

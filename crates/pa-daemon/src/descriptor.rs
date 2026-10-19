@@ -100,6 +100,12 @@ pub fn worker_launch_env(
     if let Some(script) = script {
         env.insert(crate::worker::WORKER_SCRIPT_ENV.to_string(), script);
     }
+    if let Some(orphan_journal_path) = &descriptor.orphan_process_journal_path {
+        env.insert(
+            pa_core::kernel::orphan_journal::ORPHAN_PROCESS_JOURNAL_ENV.to_string(),
+            orphan_journal_path.clone(),
+        );
+    }
     if let Some(dir) = &descriptor.session_dir {
         env.insert(crate::paths::SESSION_DIR_ENV.to_string(), dir.clone());
     }
@@ -409,15 +415,29 @@ pub fn load_descriptors(
         let Ok(content) = std::fs::read_to_string(&path) else {
             continue;
         };
-        let Ok(descriptor) = serde_json::from_str::<WorkerDescriptor>(&content) else {
+        let Ok(mut descriptor) = serde_json::from_str::<WorkerDescriptor>(&content) else {
             continue;
         };
         if validate_descriptor(&descriptor, supervisor_socket_path).is_err() {
             continue;
         }
+        backfill_orphan_journal_path(dir, &mut descriptor);
         loaded.push((path, descriptor));
     }
     loaded
+}
+
+/// Wire the orphan-process journal path on a pre-upgrade descriptor (TS
+/// `??=` at boot load): the path is derived, never chosen, so a missing
+/// field heals itself on the first load that uses the descriptor.
+pub fn backfill_orphan_journal_path(dir: &Path, descriptor: &mut WorkerDescriptor) {
+    if descriptor.orphan_process_journal_path.is_none() {
+        descriptor.orphan_process_journal_path = Some(
+            crate::journal::orphan_journal_path(dir, &descriptor.worker_id)
+                .to_string_lossy()
+                .to_string(),
+        );
+    }
 }
 
 /// Read persisted supervisor config when it belongs to this socket.

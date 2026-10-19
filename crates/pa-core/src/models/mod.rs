@@ -41,9 +41,6 @@ pub use prime_inference::{
     is_private_prime_inference_model, is_private_prime_inference_model_id,
     private_prime_inference_models, PRIME_INFERENCE_BASE_URL,
 };
-pub use prime_inference_catalog::{
-    build_prime_inference_models, parse_prime_inference_model_catalog, PrimeInferenceCatalogEntry,
-};
 pub use resolver::{
     build_fallback_model, failover_candidates, find_exact_model_reference_match,
     find_initial_model, find_preferred_default_model, resolve_cli_model,

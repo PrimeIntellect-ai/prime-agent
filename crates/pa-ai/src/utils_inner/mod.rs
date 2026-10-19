@@ -12,5 +12,6 @@ pub mod overflow;
 pub mod sanitize_unicode;
 pub mod sse;
 pub mod stream_failure;
+pub mod tls;
 
 pub use stream_failure::ProviderError;

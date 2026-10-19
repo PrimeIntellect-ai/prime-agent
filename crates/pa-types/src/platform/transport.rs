@@ -53,9 +53,13 @@ impl TransportListener for tokio::net::UnixListener {
     }
 }
 
-/// `AF_UNIX` `sun_path` capacity: 108 bytes including the terminating NUL.
+/// Native `AF_UNIX` path capacity, excluding the terminating NUL.
 #[cfg(unix)]
-const MAX_SUN_PATH: usize = 107;
+const MAX_SUN_PATH: usize = {
+    // SAFETY: sockaddr_un contains only integer fields and arrays of integers.
+    let address: libc::sockaddr_un = unsafe { std::mem::zeroed() };
+    address.sun_path.len() - 1
+};
 
 /// A kernel-valid `AF_UNIX` address for `bind`/`connect`. Paths within the limit pass through; a
 /// longer path is re-anchored through an `O_PATH` descriptor on its parent
@@ -178,7 +182,7 @@ pub fn unix_listener_definitely_closed(path: &Path) -> bool {
     #[cfg(not(target_os = "linux"))]
     {
         let _ = path;
-        return false;
+        false
     }
     #[cfg(target_os = "linux")]
     {
@@ -364,6 +368,7 @@ pub fn connect_blocking(path: &Path) -> std::io::Result<Box<dyn BlockingTranspor
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
+    #[cfg(target_os = "linux")]
     use std::os::unix::fs::FileTypeExt;
 
     /// A directory whose full path length is exactly `target` bytes; falls
@@ -391,6 +396,7 @@ mod tests {
         dir
     }
 
+    #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn over_limit_paths_bind_connect_and_land_in_place() {
         use tokio::io::AsyncReadExt;
@@ -442,6 +448,22 @@ mod tests {
             .await
             .expect("bind at exactly the limit");
         let _ = std::fs::remove_file(&socket);
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    #[test]
+    fn paths_one_byte_over_the_native_limit_are_rejected_with_context() {
+        let path = std::path::PathBuf::from(format!("/{}", "x".repeat(MAX_SUN_PATH)));
+        let error = UnixSocketAddress::new(&path)
+            .err()
+            .expect("over native limit");
+        assert_eq!(
+            error.to_string(),
+            format!(
+                "AF_UNIX socket path exceeds the {MAX_SUN_PATH}-byte limit: {}",
+                path.display()
+            )
+        );
     }
 
     #[tokio::test]

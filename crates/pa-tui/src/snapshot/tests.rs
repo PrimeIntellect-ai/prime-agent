@@ -104,39 +104,6 @@ fn empty_user_message_renders_no_entry() {
 }
 
 #[test]
-fn transcript_presents_the_summary_after_the_retained_tail() {
-    let messages = vec![
-        json!({
-            "role": "compactionSummary", "summary": "the story",
-            "retainedMessageCount": 2, "tokensBefore": 12, "timestamp": 30u64
-        }),
-        json!({"role": "user", "content": "second turn", "timestamp": 20u64}),
-        json!({"role": "assistant", "content": "kept intact", "timestamp": 25u64}),
-        json!({
-            "role": "custom", "customType": "session_slash_command",
-            "content": "/compact focus on the goal", "display": true, "timestamp": 40u64,
-            "details": { "command": {
-                "name": "compact",
-                "args": "focus on the goal",
-                "text": "/compact focus on the goal"
-            } }
-        }),
-    ];
-    let entries = transcript_to_entries(&messages);
-    let order: Vec<String> = entries
-        .iter()
-        .filter_map(|entry| match entry {
-            ChatEntry::User { .. } => Some("user".to_string()),
-            ChatEntry::Assistant { .. } => Some("assistant".to_string()),
-            ChatEntry::CompactionSummary { .. } => Some("summary".to_string()),
-            ChatEntry::SlashCommand { .. } => Some("slash".to_string()),
-            _ => None,
-        })
-        .collect();
-    assert_eq!(order, ["user", "assistant", "summary", "slash"]);
-}
-
-#[test]
 fn unnamed_streamed_tool_call_renders_code_once_named() {
     let mut view = test_view();
     apply_streamed_tool_card(&mut view, "call-1", "", &json!({ "code": "fibonacci(23)" }));
@@ -147,17 +114,17 @@ fn unnamed_streamed_tool_call_renders_code_once_named() {
     apply_streamed_tool_card(
         &mut view,
         "call-1",
-        "ipython",
+        "python_repl",
         &json!({ "code": "fibonacci(23)" }),
     );
     let card = card_of(&view).expect("the named frame creates the card");
-    assert_eq!(card.name, "ipython");
+    assert_eq!(card.name, "python_repl");
     assert!(card.args.get("code").is_some(), "args stream into the card");
     let rows = rendered_card_text(&view);
     assert!(
         rows.iter()
             .any(|row| row.contains("python") && row.contains("fibonacci(23)")),
-        "the ipython card renders the code preview: {rows:?}"
+        "the python_repl card renders the code preview: {rows:?}"
     );
     assert!(
         rows.iter()
@@ -1208,6 +1175,24 @@ fn retry_outcome_row_collapses_the_superseded_attempts() {
 }
 
 #[test]
+fn model_prompt_error_row_is_a_warning_status_line() {
+    let message = json!({
+        "role": "custom",
+        "customType": "model_prompt_error",
+        "content": "[model-prompt-error]\n\nPer-model system prompt additions were not applied:\n- /x/model-prompts.toml: bad TOML",
+        "display": true,
+    });
+    let entries = transcript_to_entries(&[message]);
+    assert!(
+        matches!(
+            entries.as_slice(),
+            [ChatEntry::Status { text, kind: StatusKind::Warning }] if text.contains("[model-prompt-error]")
+        ),
+        "entries: {entries:?}"
+    );
+}
+
+#[test]
 fn a_lone_failed_attempt_without_an_outcome_row_stays() {
     let user = json!({"role": "user", "content": "hi"});
     let failed = json!({
@@ -2142,3 +2127,178 @@ fn elided_image_tool_results_render_their_marker_metadata() {
 }
 
 mod thinking_pins;
+
+#[test]
+fn a_windowed_snapshot_reconstructs_the_full_history_scalars() {
+    let mut full = slim_attach();
+    full["snapshot"]["messages"] = json!([
+        { "role": "user", "content": "head prompt", "timestamp": 100u64 },
+        { "role": "assistant", "content": [{ "type": "text", "text": "old answer" }], "timestamp": 110u64 },
+        { "role": "assistant", "content": [{ "type": "text", "text": "settled answer" }], "timestamp": 120u64 },
+    ]);
+    let mut windowed = full.clone();
+    windowed["snapshot"]["messages"] = json!([
+        { "role": "assistant", "content": [{ "type": "text", "text": "old answer" }], "timestamp": 110u64 },
+        { "role": "assistant", "content": [{ "type": "text", "text": "settled answer" }], "timestamp": 120u64 },
+    ]);
+    windowed["snapshot"]["historyBeforeEntryId"] = json!("e1");
+    windowed["snapshot"]["lastUserPromptMs"] = json!(100u64);
+
+    let full_prompt_ms = reconstruct(&attach_data_from_response(full).unwrap()).last_user_prompt_ms;
+    let windowed_prompt_ms =
+        reconstruct(&attach_data_from_response(windowed).unwrap()).last_user_prompt_ms;
+    assert_eq!(full_prompt_ms, Some(100));
+    assert_eq!(windowed_prompt_ms, full_prompt_ms);
+}
+
+fn comparable(entries: &[ChatEntry]) -> Vec<ChatEntry> {
+    entries
+        .iter()
+        .cloned()
+        .map(|mut entry| {
+            if let ChatEntry::Tool(card) = &mut entry {
+                card.started_at = None;
+                card.ended_at = None;
+            }
+            entry
+        })
+        .collect()
+}
+
+fn joined_matches_full(full: &[Value], cut: usize) {
+    let expected = comparable(&transcript_to_entries(full));
+    let (tail_entries, seam) = transcript_with_backfill_seam(&full[cut..]);
+    let mut joined = transcript_to_entries(&full[..cut]);
+    join_backfilled_entries(&mut joined, seam);
+    joined.extend(tail_entries);
+    assert_eq!(comparable(&joined), expected, "cut {cut}: {joined:?}");
+}
+
+#[test]
+fn backfilled_entries_match_the_full_decode_across_the_seam() {
+    let user = |text: &str| json!({ "role": "user", "content": text, "timestamp": 1u64 });
+    let answer = |text: &str| json!({ "role": "assistant", "content": [{ "type": "text", "text": text }], "timestamp": 2u64 });
+    let tool_call = json!({
+        "role": "assistant",
+        "content": [{ "type": "toolCall", "id": "call-1", "name": "bash", "arguments": { "command": "ls" } }],
+        "timestamp": 4u64,
+    });
+    let tool_result = json!({
+        "role": "toolResult", "toolCallId": "call-1", "toolName": "bash",
+        "content": [{ "type": "text", "text": "output" }], "isError": false, "timestamp": 5u64,
+    });
+    let summary = json!({
+        "role": "compactionSummary", "summary": "the story",
+        "retainedMessageCount": 2, "tokensBefore": 12, "timestamp": 3u64,
+    });
+    joined_matches_full(&[user("one"), answer("a"), user("two"), answer("b")], 2);
+    joined_matches_full(&[user("one"), tool_call, tool_result, answer("done")], 1);
+    joined_matches_full(
+        &[user("kept one"), user("kept two"), summary, answer("after")],
+        3,
+    );
+}
+
+#[test]
+fn backfilled_entries_collapse_a_seam_split_retry_episode() {
+    let attempt = |n: u64| {
+        json!({
+            "role": "assistant", "content": [], "stopReason": "error",
+            "errorMessage": format!("attempt {n} failed"), "timestamp": n,
+        })
+    };
+    let outcome = || {
+        json!({
+            "role": "custom", "customType": "provider_retry_outcome",
+            "content": "Recovered after retries", "display": true,
+            "details": { "success": true }, "timestamp": 9u64,
+        })
+    };
+    let user = |text: &str| json!({ "role": "user", "content": text, "timestamp": 1u64 });
+    let answer = |text: &str| json!({ "role": "assistant", "content": [{ "type": "text", "text": text }], "timestamp": 20u64 });
+    joined_matches_full(
+        &[
+            user("run"),
+            attempt(2),
+            attempt(3),
+            outcome(),
+            answer("done"),
+        ],
+        3,
+    );
+    joined_matches_full(
+        &[
+            user("run"),
+            attempt(2),
+            attempt(3),
+            attempt(4),
+            outcome(),
+            answer("done"),
+        ],
+        2,
+    );
+    joined_matches_full(
+        &[
+            user("run"),
+            attempt(2),
+            attempt(3),
+            user("next turn"),
+            answer("later"),
+        ],
+        3,
+    );
+}
+
+#[test]
+fn backfill_preserves_errors_before_an_unrelated_status() {
+    let attempt = |n: u64| {
+        json!({
+            "role": "assistant", "content": [], "stopReason": "error",
+            "errorMessage": format!("attempt {n} failed"), "timestamp": n,
+        })
+    };
+    let outcome = json!({
+        "role": "custom", "customType": "compaction_outcome", "display": true,
+        "content": "Compaction cancelled", "details": { "cancelled": true },
+        "timestamp": 9u64,
+    });
+    joined_matches_full(&[attempt(1), outcome.clone()], 1);
+    joined_matches_full(&[attempt(1), attempt(2), outcome.clone()], 1);
+    // An empty assistant is a legal worker cut but renders no row, exposing
+    // the unrelated custom status as the first entry of the tail.
+    let empty = json!({ "role": "assistant", "content": [], "stopReason": "stop" });
+    joined_matches_full(&[attempt(1), empty, outcome], 1);
+}
+
+#[test]
+fn windowed_prompt_time_prefers_the_readable_tail_over_an_older_scalar() {
+    for timestamp in [
+        json!(2000.75),
+        json!("1970-01-01T00:00:02.000Z"),
+        json!("1970-01-01T01:00:02.000+01:00"),
+    ] {
+        let mut data = slim_attach();
+        data["snapshot"]["historyBeforeEntryId"] = json!("e1");
+        data["snapshot"]["lastUserPromptMs"] = json!(1000);
+        data["snapshot"]["messages"] = json!([
+            { "role": "user", "content": "latest", "timestamp": timestamp }
+        ]);
+        let mut full = data.clone();
+        full["snapshot"]
+            .as_object_mut()
+            .unwrap()
+            .remove("historyBeforeEntryId");
+        full["snapshot"]
+            .as_object_mut()
+            .unwrap()
+            .remove("lastUserPromptMs");
+        assert_eq!(
+            reconstruct(&attach_data_from_response(full).unwrap()).last_user_prompt_ms,
+            Some(2000)
+        );
+        assert_eq!(
+            reconstruct(&attach_data_from_response(data).unwrap()).last_user_prompt_ms,
+            Some(2000)
+        );
+    }
+}

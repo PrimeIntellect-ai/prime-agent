@@ -1,0 +1,1 @@
+- `mcp.config` host requests now resolve integrations live: an MCP server connected or configured mid-session (e.g. through `/mcp`) is dispatchable from the kernel without restarting the session.

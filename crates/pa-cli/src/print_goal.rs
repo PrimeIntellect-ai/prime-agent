@@ -52,6 +52,10 @@ pub(crate) enum NaturalContinuation {
     /// A threshold compaction is due: the loop stops (any owed mint is held for the post-compaction
     /// admission), the boundary compacts.
     ThresholdDue,
+    /// Unsettled inline-subagent work holds the mint (TS quiescence): the
+    /// deferral is armed on the goal driver, and the quiescence drive
+    /// delivers it after the descendants settle.
+    HeldForRlmWork,
     /// The goal minted its next continuation row.
     GoalRow(Box<pa_agent::types::AgentMessage>),
     /// No goal work owns the boundary: the autonomous arm may consult.
@@ -453,14 +457,17 @@ impl PrintGoalSurface {
             .await
     }
 
-    /// The goal arm of the natural-turn-end consult: queued input (the armed
-    /// steer) and a compaction due gate the mint — the threshold arm mints
-    /// ahead of the compaction and holds it — and an active goal mints its
-    /// next continuation turn inside the same agent run.
+    /// The goal arm of the natural-turn-end consult: queued input (the
+    /// armed steer) and a compaction due gate the mint; an owning goal
+    /// defers behind unsettled descendant work, an ownerless boundary
+    /// drops its deferral; the threshold arm mints ahead of the
+    /// compaction and holds it; an active goal mints its next
+    /// continuation turn inside the same agent run.
     pub(crate) async fn natural_continuation(
         &self,
         engine: &Arc<SessionEngine>,
         model: &pa_types::ai::Model,
+        unsettled_rlm_work: bool,
     ) -> NaturalContinuation {
         // Queued session input owns the boundary before any goal work — the armed budget steer ends
         // the run so the queue drains it.
@@ -470,6 +477,18 @@ impl PrintGoalSurface {
         if engine.turn_boundary.compaction_scheduled().await {
             return NaturalContinuation::RequestedCompaction;
         }
+        // The daemon's consult order: a goal that does not own the
+        // wake-up drops any armed RLM deferral (the deferral dies with
+        // the goal's loop); only an owning goal gates behind unsettled
+        // descendant work — an ownerless boundary never starves the
+        // autonomous arm.
+        let owns_wakeup = engine.goal_owns_continuation_wakeup().await;
+        if !owns_wakeup {
+            engine.drop_owed_goal_continuation().await;
+        } else if unsettled_rlm_work {
+            engine.mark_goal_continuation_owed().await;
+            return NaturalContinuation::HeldForRlmWork;
+        }
         // The threshold arm: the crossing turn mints BEFORE the loop stops; the
         // boundary compacts, and the driver runs the held turn post-compaction.
         if engine.session.auto_compaction_due(model).await {
@@ -478,6 +497,9 @@ impl PrintGoalSurface {
                 self.hold_threshold_continuation(message).await;
             }
             return NaturalContinuation::ThresholdDue;
+        }
+        if !owns_wakeup {
+            return NaturalContinuation::FallThrough;
         }
         // The natural continuation mint: the goal's context turn runs as the next
         // turn of the same run; a row that cannot convert drops the mint.
@@ -494,8 +516,9 @@ impl PrintGoalSurface {
 
     /// The settled boundary's goal drain: the held continuation and the armed
     /// budget steer run as this invocation's follow-up turns; a turn that
-    /// still ends in a terminal error fails an active goal. Returns whether
-    /// an active goal still owns the boundary.
+    /// still ends in a terminal error fails an active goal. Returns
+    /// whether any turn ran (the drive loop re-enters quiescence for
+    /// whatever the turns left behind).
     #[allow(clippy::too_many_arguments)]
     pub(crate) async fn drive_boundary(
         &self,
@@ -505,6 +528,7 @@ impl PrintGoalSurface {
         api_key: Option<String>,
         global_harness_dir: std::path::PathBuf,
     ) -> Result<bool, String> {
+        let mut ran = false;
         loop {
             if let Some(message) = self.take_threshold_continuation().await {
                 // A goal that went inactive mid-turn drops its queued continuation.
@@ -518,6 +542,7 @@ impl PrintGoalSurface {
                         &message,
                     )
                     .await?;
+                    ran = true;
                     continue;
                 }
             }
@@ -531,6 +556,7 @@ impl PrintGoalSurface {
                     &steer,
                 )
                 .await?;
+                ran = true;
                 continue;
             }
             if let Some(message) = crate::headless_autonomous::latest_assistant_error(engine).await
@@ -541,7 +567,24 @@ impl PrintGoalSurface {
                     .map_err(|error| format!("{error:#}"))?;
                 self.publish_goal_update(engine).await;
             }
-            return Ok(engine.goal_state().await.status == pa_types::goal::GoalStatus::Active);
+            if let Some(wake_at) = engine.take_goal_backoff_wake_at().await {
+                tokio::time::sleep(std::time::Duration::from_millis(
+                    wake_at.saturating_sub(pa_core::autonomous::now_millis()),
+                ))
+                .await;
+                boundary
+                    .admit_continuation(
+                        engine,
+                        model,
+                        api_key.clone(),
+                        pa_core::session_engine::goal_driver::GOAL_BACKOFF_WAKE_MARKER_TEXT,
+                        global_harness_dir.clone(),
+                    )
+                    .await?;
+                ran = true;
+                continue;
+            }
+            return Ok(ran);
         }
     }
 
@@ -690,6 +733,27 @@ mod tests {
             .collect()
     }
 
+    /// The wake-marker user rows the goal arm's backoff wake admitted, in any turn.
+    async fn wake_marker_rows(engine: &SessionEngine) -> usize {
+        engine
+            .session
+            .entries()
+            .await
+            .into_iter()
+            .filter(|entry| {
+                let pa_types::session::FileEntry::Message {
+                    message: pa_types::session::AgentMessage::User(user),
+                    ..
+                } = entry
+                else {
+                    return false;
+                };
+                user.content.text()
+                    == pa_core::session_engine::goal_driver::GOAL_BACKOFF_WAKE_MARKER_TEXT
+            })
+            .count()
+    }
+
     /// The transcript's assistant turn texts in order.
     async fn assistant_texts(engine: &SessionEngine) -> Vec<String> {
         engine
@@ -789,12 +853,16 @@ mod tests {
                     additional_prompt_paths: Vec::new(),
                     extra_builtin_skill_overrides: Vec::new(),
                     rlm_subagent_host: None,
+                    rlm_usage_store: None,
+                    progress_note_emit: None,
+                    daemonless: true,
                     rlm_depth: None,
                     model_info: Some(model.clone()),
                     prewarm_ipython_kernel: None,
                     on_background_work_settled: None,
                     queued_goal_context_purge: None,
                     queued_steering_probe: None,
+                    should_stop_after_turn: None,
                     image_model_router: None,
                     steering_mode: None,
                     follow_up_mode: None,
@@ -824,6 +892,7 @@ mod tests {
             &model,
             &surface,
             &autonomous_run,
+            /*root_node*/ None,
         );
         let harness_dir = dir.path().join("harness");
         GoalBed {
@@ -879,7 +948,8 @@ mod tests {
                     self.harness_dir.clone(),
                 )
                 .await
-                .unwrap()
+                .unwrap();
+            self.engine.goal_owns_continuation_wakeup().await
         }
     }
 
@@ -1051,6 +1121,90 @@ mod tests {
                 "goal_update:active",
                 "goal_update:error",
             ]
+        );
+    }
+
+    /// An empty goal turn arms the backoff window: the wake marker runs as the next turn at
+    /// the deadline, the recovered reply lands, and the in-loop continuation resumes inside
+    /// the wake run.
+    #[tokio::test(start_paused = true)]
+    async fn backoff_wake_runs_the_marker_turn_and_recovers_the_reply() {
+        let _guard = FAUX_TEST_LOCK.lock().await;
+        let bed = goal_bed(
+            script(&json!([{}, "recovered reply"]), 128_000),
+            no_compaction(),
+            Some(("finish the work", None)),
+        )
+        .await;
+        let (counter, subscription) = agent_run_counter(&bed.engine).await;
+        let owns = bed.prompt("work").await;
+        subscription.unsubscribe().await;
+        assert_eq!(
+            counter.load(Ordering::SeqCst),
+            2,
+            "the initial run plus the wake turn's run"
+        );
+        assert!(!owns, "the exhausted faux queue fails the resumed goal");
+        assert_eq!(
+            wake_marker_rows(&bed.engine).await,
+            1,
+            "exactly one wake marker turn ran"
+        );
+        assert_eq!(
+            assistant_texts(&bed.engine).await,
+            [String::new(), "recovered reply".to_string()],
+            "the empty turn, then the wake turn's recovered reply"
+        );
+        assert_eq!(
+            bed.engine.goal_state().await.status,
+            pa_types::goal::GoalStatus::Error
+        );
+    }
+
+    /// Three consecutive empty turns end the goal at the cap after exactly three model
+    /// calls — the third wake never runs.
+    #[tokio::test(start_paused = true)]
+    async fn three_empty_turns_hit_the_cap_with_exactly_three_model_calls() {
+        let _guard = FAUX_TEST_LOCK.lock().await;
+        let bed = goal_bed(
+            script(&json!([{}, {}, {}]), 128_000),
+            no_compaction(),
+            Some(("finish the work", None)),
+        )
+        .await;
+        let (counter, subscription) = agent_run_counter(&bed.engine).await;
+        let owns = bed.prompt("work").await;
+        subscription.unsubscribe().await;
+        assert_eq!(
+            counter.load(Ordering::SeqCst),
+            3,
+            "the prompt turn plus the two wake turns"
+        );
+        assert!(!owns, "the capped goal no longer owns the boundary");
+        assert_eq!(wake_marker_rows(&bed.engine).await, 2);
+        let goal = bed.engine.goal_state().await;
+        assert_eq!(goal.status, pa_types::goal::GoalStatus::Error);
+        assert_eq!(
+            goal.last_error.as_deref(),
+            Some(pa_core::session_engine::goal_driver::CONTINUATION_NO_PROGRESS_CAP_REASON)
+        );
+        assert_eq!(goal.no_progress_streak, Some(3));
+    }
+
+    /// A non-goal empty turn never wakes: no marker turn, the boundary returns at once.
+    #[tokio::test(start_paused = true)]
+    async fn non_goal_empty_turn_returns_without_a_wake() {
+        let _guard = FAUX_TEST_LOCK.lock().await;
+        let bed = goal_bed(script(&json!([{}]), 128_000), no_compaction(), None).await;
+        let (counter, subscription) = agent_run_counter(&bed.engine).await;
+        let owns = bed.prompt("work").await;
+        subscription.unsubscribe().await;
+        assert!(!owns, "no goal owns the boundary");
+        assert_eq!(counter.load(Ordering::SeqCst), 1, "no wake turn ran");
+        assert_eq!(wake_marker_rows(&bed.engine).await, 0);
+        assert_eq!(
+            bed.engine.goal_state().await.status,
+            pa_types::goal::GoalStatus::Idle
         );
     }
 
@@ -1316,12 +1470,16 @@ mod tests {
                     additional_prompt_paths: Vec::new(),
                     extra_builtin_skill_overrides: Vec::new(),
                     rlm_subagent_host: None,
+                    rlm_usage_store: None,
+                    progress_note_emit: None,
+                    daemonless: true,
                     rlm_depth: None,
                     model_info: Some(model.clone()),
                     prewarm_ipython_kernel: None,
                     on_background_work_settled: None,
                     queued_goal_context_purge: None,
                     queued_steering_probe: None,
+                    should_stop_after_turn: None,
                     image_model_router: None,
                     steering_mode: None,
                     follow_up_mode: None,
@@ -1350,6 +1508,7 @@ mod tests {
             &model,
             &surface,
             &autonomous_run,
+            /*root_node*/ None,
         );
         GoalBed {
             engine,

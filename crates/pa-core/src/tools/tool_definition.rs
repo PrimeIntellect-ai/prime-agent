@@ -108,7 +108,7 @@ impl ToolDefinition {
     #[must_use]
     pub fn replay_built_in_tool_name(&self) -> Option<&str> {
         match self.name.as_str() {
-            "bash" | "edit" | "ipython" => Some(self.name.as_str()),
+            "bash" | "edit" | pa_types::ai::PYTHON_TOOL_NAME => Some(self.name.as_str()),
             _ => None,
         }
     }

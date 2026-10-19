@@ -48,7 +48,7 @@ fn find_parent_index(
     if let Some(saved) = &records[index].saved {
         if let Some(parent_path) = saved.get("parentSessionPath").and_then(Value::as_str) {
             if !parent_path.is_empty() {
-                keys.push(format!("file:{parent_path}"));
+                keys.push(crate::agents_view_state::file_identity(parent_path));
             }
         }
     }

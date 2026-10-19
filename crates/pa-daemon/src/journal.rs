@@ -1,17 +1,25 @@
-//! Append-only recovery journals: the command journal makes supervisor
-//! mutations exactly-once (a received record is durable before dispatch; a
-//! missing result after a crash is uncertain, never replayed); the worker
-//! journal records the latest busy/operation state and queue snapshots.
+//! Append-only recovery journals: the worker journal records the latest
+//! busy/operation state and queue snapshots.
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::fs::{self, File, OpenOptions};
-use std::io::{BufWriter, Write};
+use std::io::{BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::Path;
 
-const COMPACT_AFTER_RECORDS: usize = 4096;
+pub(crate) const RECOVERY_JOURNAL_SUFFIX: &str = ".recovery.jsonl";
+
+/// The worker's orphan-process journal file suffix (TS
+/// `${workerId}.orphans.jsonl`, beside the recovery journal).
+pub(crate) const ORPHAN_JOURNAL_SUFFIX: &str = ".orphans.jsonl";
+
+/// The worker's orphan-process journal path under its descriptor dir.
+#[must_use]
+pub(crate) fn orphan_journal_path(descriptor_dir: &Path, worker_id: &str) -> std::path::PathBuf {
+    descriptor_dir.join(format!("{worker_id}{ORPHAN_JOURNAL_SUFFIX}"))
+}
 
 pub(crate) fn append_record(path: &Path, record: &Value) -> Result<()> {
     if let Some(parent) = path.parent() {
@@ -55,13 +63,9 @@ pub(crate) fn append_records(path: &Path, records: &[Value]) -> Result<()> {
     Ok(())
 }
 
-/// How the temp journal lands on its path, and whether its data rides a
-/// full sync before the swap.
+/// Whether the temp journal's data rides a full sync before the swap.
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum Finalize {
-    /// Rename through `rename_onto` (the bounded win32 destination-busy
-    /// retry), temp synced before the swap.
-    RetryBusy,
     /// Bare rename, temp synced before the swap: every failure surfaces
     /// immediately.
     Synced,
@@ -85,222 +89,90 @@ pub(crate) fn rewrite_records(path: &Path, records: &[Value], finalize: Finalize
             writer.get_ref().sync_all()?;
         }
     }
-    let rename = match finalize {
-        Finalize::RetryBusy => pa_core::platform::rename_onto(&temp, path),
-        Finalize::Synced | Finalize::Bare => fs::rename(&temp, path),
-    };
+    let rename = fs::rename(&temp, path);
     rename.with_context(|| format!("persist {}", path.display()))?;
     Ok(())
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CommandJournalEntry {
-    pub status: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub response: Option<Value>,
+// Complete records must decode exactly before recovery can replace their history.
+// Only an unterminated final JSON fragment may end with incomplete UTF-8.
+pub(crate) fn decode_journal_lines<'a>(bytes: &'a [u8], path: &Path) -> Result<Vec<&'a str>> {
+    let mut lines = Vec::new();
+    let mut records = bytes.split(|byte| *byte == b'\n').peekable();
+    while let Some(raw) = records.next() {
+        match std::str::from_utf8(raw) {
+            Ok(line) => lines.push(line),
+            Err(error) => {
+                let incomplete_final = records.peek().is_none()
+                    && !bytes.ends_with(b"\n")
+                    && serde_json::from_slice::<Value>(raw).is_err_and(|error| error.is_eof());
+                if !incomplete_final {
+                    return Err(error)
+                        .with_context(|| format!("invalid UTF-8 in journal {}", path.display()));
+                }
+            }
+        }
+    }
+    Ok(lines)
 }
 
-pub struct CommandRecoveryJournal {
-    path: std::path::PathBuf,
-    entries: HashMap<String, CommandJournalEntry>,
-    record_count: usize,
+pub(crate) struct JournalWriteOwner {
+    file: File,
 }
 
-impl CommandRecoveryJournal {
-    /// Open the journal at `path`, creating the parent directory as needed.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the parent directory cannot be created; a
-    /// missing journal loads as empty, and the record load never errors.
-    pub fn open(path: &Path) -> Result<Self> {
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)?;
+impl Drop for JournalWriteOwner {
+    fn drop(&mut self) {
+        // Closing one descriptor can leave the lock held by an inherited copy.
+        if let Err(error) = pa_core::platform::unlock_file(&self.file) {
+            // Drop has no error channel; report without panicking if stderr is unavailable.
+            let _ = writeln!(
+                std::io::stderr(),
+                "Prime Agent: failed to release journal ownership: {error}"
+            );
         }
-        let mut journal = CommandRecoveryJournal {
-            path: path.to_path_buf(),
-            entries: HashMap::new(),
-            record_count: 0,
-        };
-        journal.load()?;
-        Ok(journal)
     }
+}
 
-    fn key(client_id: &str, command_id: &str) -> String {
-        serde_json::json!([client_id, command_id]).to_string()
-    }
+// Keep the sidecar inode stable: unlinking can admit a second ownership inode.
+// Empty sidecars remain after retirement; directory entries/inodes can accumulate.
+// Explicit unlock is attempted on guard drop; a failure leaves close as fallback.
+pub(crate) fn journal_write_owner(path: &Path) -> Result<JournalWriteOwner> {
+    let mut ownership_path = path.as_os_str().to_os_string();
+    ownership_path.push(".writer-lock");
+    let file = OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(false)
+        .open(std::path::PathBuf::from(ownership_path))
+        .with_context(|| format!("open journal ownership {}", path.display()))?;
+    pa_core::platform::try_lock_exclusive(&file)
+        .with_context(|| format!("acquire journal ownership {}", path.display()))?;
+    Ok(JournalWriteOwner { file })
+}
 
-    #[must_use]
-    pub fn lookup(&self, client_id: &str, command_id: &str) -> Option<CommandJournalEntry> {
-        self.entries.get(&Self::key(client_id, command_id)).cloned()
+pub(crate) fn tail_is_torn(path: &Path) -> Result<bool> {
+    let mut file = match File::open(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => {
+            return Err(error).with_context(|| format!("open journal tail {}", path.display()));
+        }
+    };
+    if file
+        .metadata()
+        .with_context(|| format!("stat journal tail {}", path.display()))?
+        .len()
+        == 0
+    {
+        return Ok(false);
     }
-
-    /// Record durable receipt before dispatch. Returns the prior state when the
-    /// command was already journaled.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the receipt record cannot be appended.
-    pub fn begin(
-        &mut self,
-        client_id: &str,
-        command_id: &str,
-        command_type: &str,
-    ) -> Result<Option<CommandJournalEntry>> {
-        if let Some(existing) = self.lookup(client_id, command_id) {
-            return Ok(Some(existing));
-        }
-        let record = serde_json::json!({
-            "version": 1,
-            "type": "received",
-            "key": Self::key(client_id, command_id),
-            "clientId": client_id,
-            "commandId": command_id,
-            "commandType": command_type,
-            "recordedAt": crate::util::now_iso(),
-        });
-        append_record(&self.path, &record)?;
-        self.record_count += 1;
-        self.entries.insert(
-            Self::key(client_id, command_id),
-            CommandJournalEntry {
-                status: "pending".to_string(),
-                response: None,
-            },
-        );
-        Ok(None)
-    }
-
-    /// Record the settled command result; a later replay of the command
-    /// answers from it.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when no receipt was journaled, the result record
-    /// cannot be appended, or the post-append compaction fails.
-    pub fn record_result(
-        &mut self,
-        client_id: &str,
-        command_id: &str,
-        response: &Value,
-    ) -> Result<()> {
-        let key = Self::key(client_id, command_id);
-        if !self.entries.contains_key(&key) {
-            return Err(anyhow::anyhow!(
-                "Cannot record a result before command receipt: {key}"
-            ));
-        }
-        let record = serde_json::json!({
-            "version": 1,
-            "type": "result",
-            "key": key,
-            "response": response,
-            "recordedAt": crate::util::now_iso(),
-        });
-        append_record(&self.path, &record)?;
-        self.record_count += 1;
-        self.entries.insert(
-            key,
-            CommandJournalEntry {
-                status: "complete".to_string(),
-                response: Some(response.clone()),
-            },
-        );
-        if self.record_count >= COMPACT_AFTER_RECORDS {
-            self.compact()?;
-        }
-        Ok(())
-    }
-
-    /// Acknowledge the command: the durable receipt is no longer needed.
-    /// Acknowledging an unknown command is a no-op.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the acknowledgment record cannot be appended
-    /// or the post-acknowledge compaction fails.
-    pub fn acknowledge(&mut self, client_id: &str, command_id: &str) -> Result<()> {
-        let key = Self::key(client_id, command_id);
-        if !self.entries.contains_key(&key) {
-            return Ok(());
-        }
-        let record = serde_json::json!({
-            "version": 1,
-            "type": "acknowledged",
-            "key": key,
-            "recordedAt": crate::util::now_iso(),
-        });
-        append_record(&self.path, &record)?;
-        self.entries.remove(&key);
-        if self.entries.is_empty() || self.record_count >= COMPACT_AFTER_RECORDS {
-            self.compact()?;
-        }
-        Ok(())
-    }
-
-    fn compact(&mut self) -> Result<()> {
-        let mut records = Vec::new();
-        for (key, entry) in &self.entries {
-            let mut received = serde_json::json!({
-                "version": 1,
-                "type": "received",
-                "key": key,
-            });
-            if let Some(response) = &entry.response {
-                received["response"] = response.clone();
-            }
-            records.push(received);
-        }
-        rewrite_records(&self.path, &records, Finalize::RetryBusy)?;
-        self.record_count = records.len();
-        Ok(())
-    }
-
-    fn load(&mut self) -> Result<()> {
-        let Ok(content) = fs::read_to_string(&self.path) else {
-            return Ok(());
-        };
-        for line in content.lines() {
-            if line.is_empty() {
-                continue;
-            }
-            let Ok(record) = serde_json::from_str::<Value>(line) else {
-                // A crash may leave only the final append truncated.
-                continue;
-            };
-            if record.get("version").and_then(Value::as_u64) != Some(1) {
-                continue;
-            }
-            self.record_count += 1;
-            let key = record
-                .get("key")
-                .and_then(Value::as_str)
-                .unwrap_or_default()
-                .to_string();
-            match record.get("type").and_then(Value::as_str) {
-                Some("received") => {
-                    self.entries.insert(
-                        key,
-                        CommandJournalEntry {
-                            status: "pending".to_string(),
-                            response: None,
-                        },
-                    );
-                }
-                Some("acknowledged") => {
-                    self.entries.remove(&key);
-                }
-                Some("result") => {
-                    if let Some(entry) = self.entries.get_mut(&key) {
-                        entry.status = "complete".to_string();
-                        entry.response = record.get("response").cloned();
-                    }
-                }
-                _ => {}
-            }
-        }
-        Ok(())
-    }
+    file.seek(SeekFrom::End(-1))
+        .with_context(|| format!("seek journal tail {}", path.display()))?;
+    let mut tail = [0u8];
+    file.read_exact(&mut tail)
+        .with_context(|| format!("read journal tail {}", path.display()))?;
+    Ok(tail[0] != b'\n')
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -317,10 +189,14 @@ pub struct WorkerRecoveryRecord {
 
 fn parse_worker_records(path: &Path) -> Result<HashMap<String, WorkerRecoveryRecord>> {
     let mut latest = HashMap::new();
-    let Ok(content) = fs::read_to_string(path) else {
-        return Ok(latest);
+    let bytes = match fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(latest),
+        Err(error) => {
+            return Err(error).with_context(|| format!("read journal {}", path.display()));
+        }
     };
-    for line in content.lines() {
+    for line in decode_journal_lines(&bytes, path)? {
         if line.is_empty() {
             continue;
         }
@@ -391,6 +267,7 @@ pub struct WorkerQueueSnapshotRecord {
 /// Latest busy/operation per active session, plus the latest queue
 /// snapshot per session.
 pub struct WorkerRecoveryJournal {
+    _write_owner: JournalWriteOwner,
     path: std::path::PathBuf,
     latest: HashMap<String, WorkerRecoveryRecord>,
     queue_snapshots: HashMap<String, WorkerQueueSnapshotRecord>,
@@ -401,18 +278,28 @@ impl WorkerRecoveryJournal {
     ///
     /// # Errors
     ///
-    /// Returns an error when the parent directory cannot be created, or
-    /// the queue-snapshot pass cannot read an existing journal.
+    /// Returns an error when write ownership cannot be acquired, the parent directory cannot
+    /// be created, either
+    /// record pass cannot read an existing journal, or the
+    /// torn-tail heal cannot rewrite it.
     pub fn open(path: &Path) -> Result<Self> {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
         }
+        let write_owner = journal_write_owner(path)?;
         let queue_snapshots = parse_queue_snapshot_records(path)?;
-        Ok(WorkerRecoveryJournal {
+        let journal = WorkerRecoveryJournal {
+            _write_owner: write_owner,
             path: path.to_path_buf(),
             latest: parse_worker_records(path)?,
             queue_snapshots,
-        })
+        };
+        if tail_is_torn(path)? {
+            // Recovery can still contain busy verdicts and queued prompts.
+            // Sync the replacement before it takes over their durable history.
+            journal.compact(Finalize::Synced)?;
+        }
+        Ok(journal)
     }
 
     /// Read the latest worker record per active session straight from a
@@ -420,8 +307,8 @@ impl WorkerRecoveryJournal {
     ///
     /// # Errors
     ///
-    /// Never errors: a missing or unreadable journal reads as an empty
-    /// set (the `Result` wrapper keeps the reading seam uniform).
+    /// Returns an error when an existing journal cannot be read; a missing
+    /// journal reads as an empty set.
     pub fn read_latest(path: &Path) -> Result<Vec<WorkerRecoveryRecord>> {
         Ok(parse_worker_records(path)?.into_values().collect())
     }
@@ -509,7 +396,7 @@ impl WorkerRecoveryJournal {
         // after `set`); checking before it, a single-session journal never
         // compacted.
         if self.latest.values().all(|entry| !entry.busy) {
-            self.compact()?;
+            self.compact(Finalize::Bare)?;
         }
         Ok(())
     }
@@ -601,7 +488,7 @@ impl WorkerRecoveryJournal {
             // TS parity (same post-insert check as `record`): the
             // compaction fires on the all-idle map including the verdict.
             if self.latest.values().all(|entry| !entry.busy) {
-                self.compact()?;
+                self.compact(Finalize::Bare)?;
             }
         }
         Ok(())
@@ -634,7 +521,7 @@ impl WorkerRecoveryJournal {
             .map(|record| (record.steering, record.follow_up)))
     }
 
-    fn compact(&self) -> Result<()> {
+    fn compact(&self, finalize: Finalize) -> Result<()> {
         let mut records: Vec<Value> = self
             .latest
             .values()
@@ -646,7 +533,7 @@ impl WorkerRecoveryJournal {
             .map(serde_json::to_value)
             .collect::<std::result::Result<_, _>>()?;
         records.extend(snapshots);
-        rewrite_records(&self.path, &records, Finalize::Bare)
+        rewrite_records(&self.path, &records, finalize)
     }
 }
 
@@ -657,14 +544,14 @@ const QUEUE_SNAPSHOT_VERSION: u32 = 2;
 
 fn parse_queue_snapshot_records(path: &Path) -> Result<HashMap<String, WorkerQueueSnapshotRecord>> {
     let mut latest: HashMap<String, WorkerQueueSnapshotRecord> = HashMap::new();
-    let contents = match fs::read_to_string(path) {
-        Ok(contents) => contents,
+    let bytes = match fs::read(path) {
+        Ok(bytes) => bytes,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(latest),
         Err(error) => {
             return Err(error).with_context(|| format!("read journal {}", path.display()))
         }
     };
-    for line in contents.split('\n').filter(|line| !line.is_empty()) {
+    for line in decode_journal_lines(&bytes, path)? {
         let Ok(record) = serde_json::from_str::<Value>(line) else {
             continue;
         };
@@ -733,24 +620,17 @@ mod tests {
     }
 
     #[test]
-    fn command_journal_survives_restart_with_uncertainty() {
-        let path = temp_path("command-journal.jsonl");
-        let mut journal = CommandRecoveryJournal::open(&path).unwrap();
-        assert!(journal.begin("client", "c1", "create").unwrap().is_none());
-        let response =
-            serde_json::json!({"type": "response", "command": "create", "success": true});
-        journal.record_result("client", "c1", &response).unwrap();
+    fn worker_journal_read_failures_are_not_empty_recovery_state() {
+        let path = temp_path("unreadable.jsonl");
+        fs::create_dir_all(&path).unwrap();
+        let sentinel = path.join("preserve");
+        fs::write(&sentinel, b"original data").unwrap();
 
-        let mut reloaded = CommandRecoveryJournal::open(&path).unwrap();
-        let entry = reloaded.lookup("client", "c1").unwrap();
-        assert_eq!(entry.status, "complete");
-        assert_eq!(entry.response, Some(response));
-
-        // Pending (received, no result) is reported but not replayed.
-        reloaded.begin("client", "c2", "kill").unwrap();
-        let reloaded2 = CommandRecoveryJournal::open(&path).unwrap();
-        assert_eq!(reloaded2.lookup("client", "c2").unwrap().status, "pending");
-        let _ = fs::remove_dir_all(path.parent().unwrap());
+        assert!(tail_is_torn(&path).is_err());
+        assert!(parse_worker_records(&path).is_err());
+        assert!(WorkerRecoveryJournal::open(&path).is_err());
+        assert_eq!(fs::read(&sentinel).unwrap(), b"original data");
+        fs::remove_dir_all(path.parent().unwrap()).unwrap();
     }
 
     #[test]
@@ -919,6 +799,7 @@ mod tests {
         let record: Value = serde_json::from_str(lines[0]).unwrap();
         assert_eq!(record["busy"], false);
         assert_eq!(record["operation"], "turn_end");
+        drop(journal);
         let reopened = WorkerRecoveryJournal::open(&path).unwrap();
         let latest = reopened.get_latest();
         assert_eq!(latest.len(), 1);
@@ -986,6 +867,7 @@ mod tests {
         // the compact keeps the LATEST snapshot per session: the
         // settle's (empty) lanes, not the admission's parked row.
         assert_eq!(snapshot["steering"].as_array().map(Vec::len), Some(0));
+        drop(journal);
         let reopened = WorkerRecoveryJournal::open(&path).unwrap();
         assert!(!WorkerRecoveryJournal::read_interrupted(&path));
         let restored = reopened.latest_queue_snapshot("s1").unwrap();
@@ -1021,5 +903,258 @@ mod tests {
         std::fs::write(&path, "not json").unwrap();
         assert!(!WorkerRecoveryJournal::read_interrupted(&path));
         let _ = fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn worker_journal_open_skips_torn_utf8_tail() {
+        let path = temp_path("torn-utf8-tail.recovery.jsonl");
+        let item = WorkerQueueItemRecord {
+            message: "steer ünïcode".to_string(),
+            priority: Some(crate::worker::QueuePriority::Human),
+            preview: Some("preview".to_string()),
+            custom_message: None,
+            queue_key: None,
+            queue_visible: true,
+            policy: queue_policy_default(),
+        };
+        let mut journal = WorkerRecoveryJournal::open(&path).unwrap();
+        journal
+            .record_queue_checkpoint(
+                "s1",
+                "sess1",
+                Some("/a.jsonl"),
+                true,
+                "prompt_accepted",
+                std::slice::from_ref(&item),
+                &[],
+            )
+            .unwrap();
+        let whole = serde_json::to_string(&WorkerRecoveryRecord {
+            active_session_id: "s2".to_string(),
+            session_id: "sess2".to_string(),
+            session_file: None,
+            busy: false,
+            operation: "shütdown".to_string(),
+            recorded_at: "2026-10-07T00:00:00Z".to_string(),
+        })
+        .unwrap();
+        let torn = &whole.as_bytes()[..=whole.find('ü').unwrap()];
+        assert!(std::str::from_utf8(torn).is_err());
+        let mut file = OpenOptions::new().append(true).open(&path).unwrap();
+        file.write_all(torn).unwrap();
+        drop(file);
+
+        drop(journal);
+        let mut healed = WorkerRecoveryJournal::open(&path).unwrap();
+        // Reload after a fresh append so the assertions exercise the healed
+        // file, rather than only the state loaded before the rewrite.
+        healed
+            .record("s1", "sess1", Some("/a.jsonl"), true, "resumed")
+            .unwrap();
+        drop(healed);
+        let reopened = WorkerRecoveryJournal::open(&path).unwrap();
+        assert!(WorkerRecoveryJournal::read_interrupted(&path));
+        let latest = reopened.get_latest();
+        assert_eq!(latest.len(), 1);
+        assert_eq!(latest[0].active_session_id, "s1");
+        assert!(latest[0].busy);
+        let restored = reopened.latest_queue_snapshot("s1").unwrap();
+        assert_eq!(restored.0, vec![item]);
+        assert!(restored.1.is_empty());
+        let _ = fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn worker_journal_open_heals_torn_ascii_tail() {
+        let path = temp_path("torn-ascii-tail.recovery.jsonl");
+        let mut journal = WorkerRecoveryJournal::open(&path).unwrap();
+        journal
+            .record("s1", "sess1", Some("/a.jsonl"), true, "prompt_accepted")
+            .unwrap();
+        let mut file = OpenOptions::new().append(true).open(&path).unwrap();
+        file.write_all(br#"{"activeSessionId":"s3","sessionId":"ses"#)
+            .unwrap();
+        drop(file);
+
+        drop(journal);
+        let mut journal = WorkerRecoveryJournal::open(&path).unwrap();
+        journal.record("s2", "sess2", None, false, "ready").unwrap();
+        drop(journal);
+        let reopened = WorkerRecoveryJournal::open(&path).unwrap();
+        assert!(WorkerRecoveryJournal::read_interrupted(&path));
+        assert_eq!(
+            reopened
+                .get_latest()
+                .iter()
+                .filter(|record| record.active_session_id == "s2")
+                .count(),
+            1,
+            "the record appended after the reopened journal must survive a reload"
+        );
+        let _ = fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn corrupt_complete_queue_bytes_are_preserved_before_recovery_fails() {
+        for newline_terminated in [true, false] {
+            let path = temp_path("corrupt-complete-queue.recovery.jsonl");
+            let mut journal = WorkerRecoveryJournal::open(&path).unwrap();
+            let item = WorkerQueueItemRecord {
+                message: "safeXinstruction".to_string(),
+                priority: None,
+                preview: None,
+                custom_message: None,
+                queue_key: None,
+                queue_visible: true,
+                policy: queue_policy_default(),
+            };
+            journal.record_queue_snapshot("s1", &[item], &[]).unwrap();
+            drop(journal);
+            let mut bytes = fs::read(&path).unwrap();
+            let marker = b"safeXinstruction";
+            let offset = bytes
+                .windows(marker.len())
+                .position(|part| part == marker)
+                .unwrap();
+            bytes[offset + 4] = 0xff;
+            if newline_terminated {
+                bytes.extend_from_slice(br#"{"activeSessionId":"torn"#);
+            } else {
+                assert_eq!(bytes.pop(), Some(b'\n'));
+            }
+            fs::write(&path, &bytes).unwrap();
+            let result = WorkerRecoveryJournal::open(&path);
+            assert_eq!(fs::read(&path).unwrap(), bytes);
+            assert!(
+                result.is_err(),
+                "complete corrupt queued prompts must block recovery"
+            );
+            fs::remove_dir_all(path.parent().unwrap()).unwrap();
+        }
+    }
+
+    #[test]
+    fn corrupt_complete_worker_identifiers_are_preserved_before_recovery_fails() {
+        for newline_terminated in [true, false] {
+            let path = temp_path("corrupt-complete-verdict.recovery.jsonl");
+            let mut journal = WorkerRecoveryJournal::open(&path).unwrap();
+            journal
+                .record("badXsession", "sess1", None, true, "prompt_accepted")
+                .unwrap();
+            drop(journal);
+            let mut bytes = fs::read(&path).unwrap();
+            let marker = b"badXsession";
+            let offset = bytes
+                .windows(marker.len())
+                .position(|part| part == marker)
+                .unwrap();
+            bytes[offset + 3] = 0xff;
+            if newline_terminated {
+                bytes.extend_from_slice(br#"{"activeSessionId":"torn"#);
+            } else {
+                assert_eq!(bytes.pop(), Some(b'\n'));
+            }
+            fs::write(&path, &bytes).unwrap();
+            assert!(WorkerRecoveryJournal::read_latest(&path).is_err());
+            assert!(WorkerRecoveryJournal::open(&path).is_err());
+            assert_eq!(fs::read(&path).unwrap(), bytes);
+            fs::remove_dir_all(path.parent().unwrap()).unwrap();
+        }
+    }
+
+    #[test]
+    fn a_complete_worker_record_without_newline_survives_healing() {
+        let path = temp_path("complete-eof.recovery.jsonl");
+        let mut journal = WorkerRecoveryJournal::open(&path).unwrap();
+        journal
+            .record("s1", "sess1", None, true, "prompt_accepted")
+            .unwrap();
+        let expected = journal.get_latest();
+        drop(journal);
+        let mut bytes = fs::read(&path).unwrap();
+        assert_eq!(bytes.pop(), Some(b'\n'));
+        fs::write(&path, bytes).unwrap();
+        let reopened = WorkerRecoveryJournal::open(&path).unwrap();
+        assert_eq!(reopened.get_latest(), expected);
+        assert_eq!(fs::read(&path).unwrap().last(), Some(&b'\n'));
+        drop(reopened);
+        fs::remove_dir_all(path.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn competing_worker_writers_cannot_replace_an_active_append() {
+        for contender in ["open", "settle"] {
+            let path = temp_path("active-append.recovery.jsonl");
+            let mut owner = WorkerRecoveryJournal::open(&path).unwrap();
+            owner
+                .record("s1", "sess1", None, true, "prompt_accepted")
+                .unwrap();
+            let first = owner.get_latest().pop().unwrap();
+            let record = WorkerRecoveryRecord {
+                active_session_id: "s2".to_string(),
+                session_id: "sess2".to_string(),
+                session_file: None,
+                busy: true,
+                operation: "prompt_accepted".to_string(),
+                recorded_at: "2026-10-11T00:00:01Z".to_string(),
+            };
+            let mut bytes = serde_json::to_vec(&record).unwrap();
+            bytes.push(b'\n');
+            let split = bytes.len() / 2;
+            let mut active_append = OpenOptions::new().append(true).open(&path).unwrap();
+            active_append.write_all(&bytes[..split]).unwrap();
+            let expected = fs::read(&path).unwrap();
+            let result = match contender {
+                "open" => WorkerRecoveryJournal::open(&path).map(drop),
+                "settle" => WorkerRecoveryJournal::settle_busy_records(&path, "worker_gave_up"),
+                _ => unreachable!("known contender"),
+            };
+            assert_eq!(fs::read(&path).unwrap(), expected);
+            assert!(
+                result.is_err(),
+                "a rival writer must not acquire the active journal"
+            );
+            active_append.write_all(&bytes[split..]).unwrap();
+            active_append.sync_all().unwrap();
+            drop(active_append);
+            drop(owner);
+            let reopened = WorkerRecoveryJournal::open(&path).unwrap();
+            let mut latest = reopened.get_latest();
+            latest.sort_by(|left, right| left.active_session_id.cmp(&right.active_session_id));
+            assert_eq!(latest, vec![first, record]);
+            drop(reopened);
+            fs::remove_dir_all(path.parent().unwrap()).unwrap();
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[allow(clippy::used_underscore_binding)] // Intentionally duplicate the private lifetime guard to model an inherited descriptor.
+    fn dropping_a_journal_releases_ownership_while_a_duplicate_handle_survives() {
+        let path = temp_path("duplicate-owner.recovery.jsonl");
+        let mut owner = WorkerRecoveryJournal::open(&path).unwrap();
+        owner
+            .record("s1", "sess1", None, true, "prompt_accepted")
+            .unwrap();
+        let expected = owner.get_latest();
+        let inherited = owner._write_owner.file.try_clone().unwrap();
+        assert!(WorkerRecoveryJournal::open(&path).is_err());
+
+        drop(owner);
+        let successor = WorkerRecoveryJournal::open(&path)
+            .expect("logical owner drop releases its lock even while a duplicate handle survives");
+        assert_eq!(successor.get_latest(), expected);
+        assert!(WorkerRecoveryJournal::open(&path).is_err());
+
+        drop(inherited);
+        assert!(
+            WorkerRecoveryJournal::open(&path).is_err(),
+            "closing the old handle must not release the successor's ownership",
+        );
+        drop(successor);
+        let reopened = WorkerRecoveryJournal::open(&path).unwrap();
+        assert_eq!(reopened.get_latest(), expected);
+        drop(reopened);
+        fs::remove_dir_all(path.parent().unwrap()).unwrap();
     }
 }

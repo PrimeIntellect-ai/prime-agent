@@ -1,0 +1,1 @@
+- Daemon recovery journals now preserve intact records and safely remove an incomplete trailing record after a crash, including a cut in Unicode text, so subsequent records survive reopening. Healing syncs worker recovery data before replacement and stops on journal read failures instead of rewriting unreadable data.

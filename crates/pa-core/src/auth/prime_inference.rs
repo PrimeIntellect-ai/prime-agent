@@ -115,7 +115,7 @@ impl PrimeHttp for ReqwestPrimeHttp {
         let url = url.to_string();
         let api_key = api_key.to_string();
         Box::pin(async move {
-            let client = reqwest::Client::builder()
+            let client = pa_ai::utils::tls::http_client_builder()
                 .timeout(Duration::from_millis(timeout_ms))
                 .build()
                 .map_err(|error| error.to_string())?;
@@ -146,7 +146,7 @@ impl PrimeHttp for ReqwestPrimeHttp {
         timeout_ms: u64,
     ) -> Pin<Box<dyn Future<Output = Result<PrimeHttpResponse, String>> + Send + 'a>> {
         Box::pin(async move {
-            let client = reqwest::Client::builder()
+            let client = pa_ai::utils::tls::http_client_builder()
                 .timeout(Duration::from_millis(timeout_ms))
                 .build()
                 .map_err(|error| error.to_string())?;

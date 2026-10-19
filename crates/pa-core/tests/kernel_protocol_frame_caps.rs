@@ -16,7 +16,6 @@
 #![cfg(unix)]
 
 use std::collections::HashMap;
-use std::os::unix::fs::PermissionsExt;
 use std::time::{Duration, Instant};
 
 use pa_core::kernel::manager::{KernelStartOptions, ReplKernelManager};
@@ -27,37 +26,10 @@ use pa_core::kernel::shared::{
 /// Speaks protocol v3: ready, then per request the oversized unterminated
 /// line (the corruption under test), a multi-MiB blank line followed by a
 /// plain stdout frame (the linear-scan test), or a plain done frame.
-const FAKE_RUNTIME: &str = r#"#!/usr/bin/env python3
-import json
-import sys
-import time
-
-print(json.dumps({"event": "ready", "protocol": 3, "python": "3.13.0"}), flush=True)
-for line in sys.stdin:
-    try:
-        req = json.loads(line)
-    except Exception:
-        continue
-    if req.get("code") == "corrupt-huge-line":
-        sys.stdout.write("x" * (33 * 1024 * 1024))
-        sys.stdout.flush()
-        time.sleep(30)
-        break
-    if req.get("code") == "big-frame":
-        sys.stdout.write(" " * (31 * 1024 * 1024) + "\n")
-        sys.stdout.write(json.dumps({"event": "stdout", "id": req.get("id"), "text": "big"}) + "\n")
-    sys.stdout.write(json.dumps({"event": "done", "id": req.get("id"), "status": "ok"}) + "\n")
-    sys.stdout.flush()
-"#;
-
 fn fake_runtime_path() -> std::path::PathBuf {
-    let dir = tempfile::TempDir::new().expect("temp dir");
-    let path = dir.path().join("fake-kernel");
-    std::fs::write(&path, FAKE_RUNTIME).expect("write fake runtime");
-    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).expect("chmod");
-    // Leak the temp dir: the script must exist until the spawned child exits.
-    std::mem::forget(dir);
-    path
+    // An immutable program avoids writable executable descriptors during concurrent spawns.
+    std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/protocol_caps_kernel.py")
 }
 
 fn manager(python: std::path::PathBuf) -> ReplKernelManager {
@@ -119,6 +91,16 @@ async fn normal_protocol_lines_still_stream_through_the_bounded_reader() {
             .expect("execute must not fail");
         assert_eq!(result.status, ExecuteStatus::Ok);
     }
+    // The ASCII fast path must retain Unicode blank-line handling and continue
+    // dispatching the following nonblank stdout/done frames.
+    let unicode = manager
+        .execute("unicode-blank-frame", ExecuteOptions::default())
+        .await
+        .expect("Unicode blank line must not poison the reader");
+    assert_eq!(
+        (unicode.status, unicode.stdout.as_str()),
+        (ExecuteStatus::Ok, "big")
+    );
     // Give the teardown its full grace window (the fake lives until EOF).
     let _ = tokio::time::timeout(
         Duration::from_secs(10),

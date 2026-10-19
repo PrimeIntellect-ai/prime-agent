@@ -247,6 +247,13 @@ impl RecordingSettings {
 }
 
 impl pa_tui::client_settings::ClientSettings for RecordingSettings {
+    fn compaction_threshold_percent(&self) -> f64 {
+        95.0
+    }
+    fn set_compaction_threshold_percent(&self, percent: f64) -> Result<()> {
+        self.record(&format!("threshold={percent}"))
+    }
+
     fn theme(&self) -> Option<String> {
         None
     }
@@ -730,4 +737,23 @@ fn a_no_match_query_backspaces_away_and_space_still_cycles() {
         row.contains("false"),
         "Space still cycles the selected row: {row}"
     );
+}
+
+#[test]
+fn threshold_percentage_cycles_through_the_persistence_seam() {
+    let mut steps = open_settings();
+    for character in "threshold".chars() {
+        steps.push(HeadlessStep::Key(key(KeyCode::Char(character))));
+    }
+    steps.push(HeadlessStep::Key(key(KeyCode::Right)));
+    steps.push(HeadlessStep::WaitRender {
+        needle: "› Auto-compact threshold (%)".into(),
+        timeout_ms: 5000,
+    });
+    let (frames, settings) = run_plan(steps);
+    assert_eq!(settings.log(), vec!["threshold=100"]);
+    let rows = frame_with(&frames, "› Auto-compact threshold (%)");
+    assert!(rows
+        .iter()
+        .any(|row| row.contains("Auto-compact threshold (%)") && row.contains("100")));
 }

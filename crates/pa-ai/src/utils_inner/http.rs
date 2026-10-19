@@ -19,7 +19,7 @@ static H2_ALPN_CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
 /// reqwest `http2` feature (bedrock) cannot change the transport of any other provider.
 fn client() -> &'static reqwest::Client {
     CLIENT.get_or_init(|| {
-        reqwest::Client::builder()
+        crate::utils_inner::tls::http_client_builder()
             .http1_only()
             .pool_idle_timeout(std::time::Duration::from_secs(90))
             .build()
@@ -31,7 +31,7 @@ fn client() -> &'static reqwest::Client {
 /// default transport; cleartext bedrock endpoints go through `providers/bedrock/h2.rs` instead.
 fn h2_alpn_client() -> &'static reqwest::Client {
     H2_ALPN_CLIENT.get_or_init(|| {
-        reqwest::Client::builder()
+        crate::utils_inner::tls::http_client_builder()
             .pool_idle_timeout(std::time::Duration::from_secs(90))
             .build()
             .expect("reqwest h2 client")

@@ -67,7 +67,7 @@ jobs:
           REPORT_DAY: ${{ steps.day.outputs.date }}
         run: |
           marker="prime-agent-stats-$REPORT_DAY"
-          ids=$(gh api --paginate "repos/$GITHUB_REPOSITORY/actions/artifacts?per_page=100" \
+          ids=$(gh api --paginate "repos/$GITHUB_REPOSITORY/actions/artifacts?name=$marker&per_page=100" \
             --jq ".artifacts[] | select(.name == \"$marker\" and .expired == false) | .id")
           if [[ -n "$ids" ]]; then
             echo 'attempted=true' >> "$GITHUB_OUTPUT"

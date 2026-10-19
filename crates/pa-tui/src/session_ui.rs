@@ -20,6 +20,8 @@ mod sessions_fork;
 mod settings;
 mod share;
 mod stream;
+mod window;
+pub(crate) use window::TranscriptPageNote;
 
 pub(crate) use apply::CompactionAbortNote;
 use auth::{McpAuthIntent, PendingModelSignIn, SetModelOutcome};
@@ -64,10 +66,11 @@ use crate::chat::{
     ChatEntry, CompactionReason, CompactionState, MessageBlock, RetryState, StatusKind,
     ToolResultView, WorkingState,
 };
+use crate::choice_picker::{ChoicePickerAction, ChoicePurpose};
 use crate::click_dispatch::PressedClick;
 use crate::daemon_client::{DaemonClient, DaemonClientEvent};
 use crate::daemon_reconnect::RecoveryKind;
-use crate::effort_picker::{self, EffortPickerAction};
+use crate::effort_picker;
 use crate::export_share::{self, GhAuthStatus, GistOutcome};
 use crate::goal_surface::{format_goal_status, tray_goal_label, GoalPanel, GoalView};
 use crate::heartbeats_picker::{
@@ -119,6 +122,28 @@ const ANTHROPIC_SUBSCRIPTION_AUTH_WARNING: &str = "Anthropic subscription auth i
 pub(crate) struct CommandCatalogUpdate {
     pub epoch: u64,
     pub skill_commands: Vec<crate::autocomplete::SlashCommandEntry>,
+}
+
+pub(crate) fn attach_capabilities() -> Vec<pa_types::daemon::DaemonClientCapability> {
+    vec![
+        "attach_snapshot".to_string(),
+        "event_sequence".to_string(),
+        "slim_attach".to_string(),
+        "elide_snapshot_images".to_string(),
+        "windowed_snapshot".to_string(),
+    ]
+}
+
+pub(crate) fn last_assistant_text_of(chat: &[ChatEntry]) -> Option<String> {
+    chat.iter().rev().find_map(|entry| match entry {
+        ChatEntry::Assistant(message) => {
+            message.blocks.iter().rev().find_map(|block| match block {
+                MessageBlock::Text(text) => Some(text.clone()),
+                MessageBlock::Thinking(_) => None,
+            })
+        }
+        _ => None,
+    })
 }
 
 pub(crate) struct SessionUi {
@@ -292,7 +317,7 @@ pub(crate) struct SessionUi {
     factory_updates: mpsc::UnboundedSender<FactoryUpdate>,
     /// The open view's selected run id: the refresh's watch target.
     factory_selected_run: Option<String>,
-    /// The subagent summary line holds keyboard focus.
+    /// The activity dock holds keyboard focus (and renders expanded).
     subagents_focused: bool,
     activity_group: crate::chrome::ActivityGroup,
     subagent_counts: crate::subagents::SubagentCounts,
@@ -324,7 +349,10 @@ pub(crate) struct SessionUi {
     /// Armed prompt round trips (one per spawned request): the headless
     /// idle and exit gates treat an in-flight submit as busy.
     prompt_in_flight: usize,
-    pub(crate) transcript_stale: bool,
+    /// A compaction settled: the tray's context usage refreshes.
+    pub(crate) compaction_settled: bool,
+    pub(crate) window: window::TranscriptWindow,
+    page_notes: mpsc::UnboundedSender<window::TranscriptPageNote>,
     /// Adoption telemetry (counted into `tui exit`); `None` drops events.
     pub(crate) telemetry: Option<std::sync::Arc<dyn crate::interactive::InteractionTelemetry>>,
     scroll_adoption_emitted: bool,
@@ -445,7 +473,7 @@ impl SessionUi {
         std::mem::take(&mut self.trim_after_frame)
     }
 
-    /// Hand the keyboard focus to the compact dock on its selected group (operator ruling
+    /// Hand the keyboard focus to the dock on its selected group (operator ruling
     /// 2026-09-26: leaving a panel lands on the panel's own dock item, never the prompt bar).
     fn focus_activity_dock(&mut self, view: &mut AgentView) {
         self.subagents_focused = true;

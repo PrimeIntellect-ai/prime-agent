@@ -49,6 +49,50 @@ macro_rules! str_setting {
 }
 
 impl ClientSettings for CliClientSettings {
+    fn harness_refinements(&self) -> bool {
+        self.manager().get_harness_refinements()
+    }
+
+    fn set_harness_refinements(&self, enabled: bool) -> Result<()> {
+        let mut manager = self.manager();
+        manager.set_harness_refinements(enabled)?;
+        // Adoption bookkeeping stays off the UI input/paint path.
+        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+            let agent_dir = self.agent_dir.clone();
+            runtime.spawn_blocking(move || {
+                let client = pa_core::session_engine::telemetry::build_client(&manager, &agent_dir);
+                let mut properties = pa_telemetry::Properties::new();
+                properties.set("enabled", serde_json::json!(enabled));
+                client.track("harness refinements changed", properties);
+            });
+        }
+        Ok(())
+    }
+
+    fn compaction_threshold_percent(&self) -> f64 {
+        self.manager().get_compaction_threshold_percent()
+    }
+
+    fn set_compaction_threshold_percent(&self, percent: f64) -> Result<()> {
+        self.manager().set_compaction_threshold_percent(percent)?;
+        let settings = self.clone();
+        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+            runtime.spawn(async move {
+                let manager = settings.manager();
+                if crate::mode::telemetry_disabled(&manager) {
+                    return;
+                }
+                let client =
+                    pa_core::session_engine::telemetry::build_client(&manager, &settings.agent_dir);
+                let mut properties = pa_telemetry::base_properties("interactive");
+                properties.set("threshold_percent", serde_json::json!(percent));
+                client.track("autocompact threshold changed", properties);
+                let _ = client.shutdown().await;
+            });
+        }
+        Ok(())
+    }
+
     fn theme(&self) -> Option<String> {
         self.manager().get_theme().map(str::to_string)
     }

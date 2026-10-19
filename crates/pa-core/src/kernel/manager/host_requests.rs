@@ -6,21 +6,6 @@ use super::{
     MAX_HANDLED_HOST_REQUEST_IDS,
 };
 
-/// The cell source attached to a host request is capped at this many characters (TS #2475:
-/// `MAX_CELL_SOURCE_CHARS`): the spawning cell's source rides on every host request it triggers.
-const MAX_CELL_SOURCE_CHARS: usize = 2 * 1024;
-
-/// Cap a cell source for host-request attachment: a longer one keeps the first
-/// `MAX_CELL_SOURCE_CHARS` characters and carries the truncation marker.
-fn cap_cell_source(code: &str) -> String {
-    if code.chars().count() <= MAX_CELL_SOURCE_CHARS {
-        code.to_string()
-    } else {
-        let head: String = code.chars().take(MAX_CELL_SOURCE_CHARS).collect();
-        format!("{head}\n[... cell source truncated at {MAX_CELL_SOURCE_CHARS} chars ...]")
-    }
-}
-
 impl Inner {
     /// Dispatch one typed request from kernel code to the registered handler
     /// and reply over the protocol. Unhandled requests answer with an error.
@@ -84,24 +69,7 @@ impl Inner {
                 anyhow!("host request type \"{request_type}\" is not available in this session")
             })?
             .clone();
-        // Tag the request with the cell that triggered it. Detached spawns fire after the
-        // scheduling cell goes idle, so fall back to that last cell's source.
-        let cell_source_code = {
-            let g = lock(&self.guarded);
-            g.active_execution
-                .as_ref()
-                .map(|e| cap_cell_source(&e.code))
-                .or_else(|| g.last_cell_code.as_deref().map(cap_cell_source))
-        };
-        let mut payload = obj.clone();
-        if let Some(code) = cell_source_code {
-            payload.insert("cellSourceCode".to_string(), Value::String(code));
-        }
-        handler(HostRequestPayload {
-            data: Value::Object(payload),
-            cell_source_code: None,
-        })
-        .await
+        handler(HostRequestPayload { data: data.clone() }).await
     }
 
     /// Wait (bounded) for the in-flight host request tasks to settle.
@@ -142,42 +110,5 @@ impl Inner {
                 return;
             }
         }
-    }
-}
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn marker() -> String {
-        format!("\n[... cell source truncated at {MAX_CELL_SOURCE_CHARS} chars ...]")
-    }
-
-    #[test]
-    fn a_source_within_the_cap_attaches_verbatim() {
-        let code = "x".repeat(MAX_CELL_SOURCE_CHARS);
-        assert_eq!(cap_cell_source(&code), code);
-    }
-
-    #[test]
-    fn an_oversized_source_keeps_the_prefix_and_carries_the_marker() {
-        let code = "x".repeat(MAX_CELL_SOURCE_CHARS + 1);
-        let capped = cap_cell_source(&code);
-        let expected = format!("{}{}", "x".repeat(MAX_CELL_SOURCE_CHARS), marker());
-        assert_eq!(capped, expected);
-    }
-
-    #[test]
-    fn a_short_source_is_untouched() {
-        let code = "print(1)";
-        assert_eq!(cap_cell_source(code), code);
-    }
-
-    #[test]
-    fn the_cap_lands_on_a_character_boundary() {
-        // A multi-byte tail: the cap must slice by characters, never split one.
-        let code = format!("{}{}", "é".repeat(MAX_CELL_SOURCE_CHARS), "é");
-        let capped = cap_cell_source(&code);
-        assert!(capped.starts_with(&"é".repeat(MAX_CELL_SOURCE_CHARS)));
-        assert!(capped.ends_with(&marker()));
     }
 }

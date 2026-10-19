@@ -103,6 +103,9 @@ pub fn install_prefix() -> PathBuf {
             return PathBuf::from(prefix);
         }
     }
+    if let Some(prefix) = running_installer_prefix() {
+        return prefix;
+    }
     pa_types::platform::home_dir()
         .unwrap_or_default()
         .join(".local")
@@ -507,7 +510,9 @@ pub fn installed_channel(prefix: &Path) -> Option<&'static str> {
 /// Returns an error when the request fails, answers a non-success status,
 /// or the body cannot be read or written.
 async fn fetch_script(url: &str) -> Result<(PathBuf, std::fs::File)> {
-    let response = reqwest::Client::new()
+    let response = pa_ai::utils::tls::http_client_builder()
+        .build()
+        .expect("installer client")
         .get(url)
         .header("User-Agent", update_user_agent(env!("CARGO_PKG_VERSION")))
         .timeout(SCRIPT_FETCH_TIMEOUT)
@@ -578,7 +583,7 @@ fn trusted_shell() -> PathBuf {
     PathBuf::from("/bin/sh")
 }
 
-/// On Windows the kernel shell resolver's TRUSTED Git Bash roots -
+/// On Windows the kernel shell default's TRUSTED Git Bash roots -
 /// hardcoded install-dir literals, never PATH and never `where bash.exe`
 /// (the `get_shell_config` fallback that serves the kernel shell would
 /// let a repo-controlled `PATH` place the interpreter that receives the
@@ -588,7 +593,7 @@ fn trusted_shell() -> PathBuf {
 /// Returns the failure when no trusted Git Bash root exists.
 #[cfg(windows)]
 fn trusted_shell() -> std::result::Result<std::path::PathBuf, UpdateFailure> {
-    crate::platform::shell::resolve_kernel_bash_shell(None)
+    crate::platform::shell::default_kernel_bash_shell()
         .map(std::path::PathBuf::from)
         .ok_or_else(|| UpdateFailure {
             // No shellPath guidance here: the funnel, like its unix side

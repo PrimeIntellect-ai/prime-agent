@@ -25,6 +25,9 @@ pub use upload_all::{
     TraceUploadAllOptions,
 };
 
+mod continuous;
+pub use continuous::{ContinuousTraceUpload, TraceConsentSnapshot};
+
 mod upload;
 use upload::perform_agent_trace_upload;
 pub use upload::{upload_trace_file, TraceUploadOptions};
@@ -287,20 +290,35 @@ impl TraceUploadSignature {
 // Session header + context
 
 fn read_trace_session_header(path: &Path) -> Option<pa_types::session::SessionHeader> {
+    read_trace_session_header_checked(path).ok().flatten()
+}
+
+fn read_trace_session_header_checked(
+    path: &Path,
+) -> std::io::Result<Option<pa_types::session::SessionHeader>> {
     use std::io::BufRead;
-    let file = std::fs::File::open(path).ok()?;
+    let file = std::fs::File::open(path)?;
     let mut first_line = String::new();
-    std::io::BufReader::new(file)
+    // Corrupt headers must not allocate an entire unbounded transcript line.
+    if let Err(error) = std::io::Read::take(std::io::BufReader::new(file), 256 * 1024 + 1)
         .read_line(&mut first_line)
-        .ok()?;
-    if first_line.trim().is_empty() {
-        return None;
+    {
+        return if error.kind() == std::io::ErrorKind::InvalidData {
+            Ok(None)
+        } else {
+            Err(error)
+        };
     }
-    let value: Value = serde_json::from_str(first_line.trim()).ok()?;
+    if first_line.len() > 256 * 1024 || first_line.trim().is_empty() {
+        return Ok(None);
+    }
+    let Ok(value) = serde_json::from_str::<Value>(first_line.trim()) else {
+        return Ok(None);
+    };
     if !is_trace_session_header(&value) {
-        return None;
+        return Ok(None);
     }
-    serde_json::from_value(value).ok()
+    Ok(serde_json::from_value(value).ok())
 }
 
 fn is_trace_session_header(value: &Value) -> bool {
@@ -510,8 +528,17 @@ fn read_agent_trace_outbox_entry(
     agent_dir: &Path,
     session_file: &Path,
 ) -> Option<TraceUploadSignature> {
+    use std::io::Read;
     let entry_path = agent_trace_outbox_entry_path(agent_dir, session_file);
-    let raw = std::fs::read_to_string(entry_path).ok()?;
+    let mut raw = String::new();
+    std::fs::File::open(entry_path)
+        .ok()?
+        .take(64 * 1024 + 1)
+        .read_to_string(&mut raw)
+        .ok()?;
+    if raw.len() > 64 * 1024 {
+        return None;
+    }
     let (recorded_file, uploaded) = parse_outbox_entry(&raw)?;
     if recorded_file != session_file.to_string_lossy() {
         return None;
@@ -523,6 +550,25 @@ fn signature_equals(recorded: Option<TraceUploadSignature>, current: TraceUpload
     recorded.is_some_and(|recorded| recorded == current)
 }
 
+// Separate short mutation leases from delivery leases (which cover network
+// waits). Persist callers only try-lock; cursor/prune work stays in background.
+fn outbox_mutation_lock(entry: &Path) -> std::io::Result<std::fs::File> {
+    let lock = entry.with_extension("mutation-lock");
+    let mut options = std::fs::OpenOptions::new();
+    options.create(true).read(true).write(true).truncate(false);
+    crate::platform::perms::set_private_mode(&mut options);
+    match options.open(&lock) {
+        Ok(file) => Ok(file),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            if let Some(parent) = lock.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            options.open(lock)
+        }
+        Err(error) => Err(error),
+    }
+}
+
 fn record_agent_trace_outbox_upload(
     agent_dir: &Path,
     session_file: &Path,
@@ -530,6 +576,8 @@ fn record_agent_trace_outbox_upload(
 ) -> std::io::Result<()> {
     std::fs::create_dir_all(agent_trace_outbox_dir(agent_dir))?;
     let entry_path = agent_trace_outbox_entry_path(agent_dir, session_file);
+    let mutation = outbox_mutation_lock(&entry_path)?;
+    crate::platform::lock_exclusive(&mutation)?;
     let temp = entry_path.with_extension(format!(
         "{}.{}.tmp",
         std::process::id(),

@@ -1,0 +1,24 @@
+name: Dependency audit
+description: Run the pinned cargo-deny release without a Docker Hub dependency.
+runs:
+  using: composite
+  steps:
+    - uses: dtolnay/rust-toolchain@ce678459e9fc7500d337468f904b95f1b5c10b5e # 1.98.1, matching workspace CI
+    - name: Download and verify cargo-deny
+      shell: bash
+      run: |
+        set -euo pipefail
+        # Same upstream release as cargo-deny-action v2.1.1. Both callers use x86_64 Linux runners.
+        test "$(uname -s)" = Linux
+        test "$(uname -m)" = x86_64
+        install_dir="$(mktemp -d "${RUNNER_TEMP}/cargo-deny.XXXXXX")"
+        archive="${install_dir}/cargo-deny.tar.gz"
+        curl --fail --show-error --silent --location --retry 3 \
+          https://github.com/EmbarkStudios/cargo-deny/releases/download/0.20.2/cargo-deny-0.20.2-x86_64-unknown-linux-musl.tar.gz \
+          --output "$archive"
+        echo "9f12ed4c49936e09b48bf862b595cde2fe64fcbd9d74dfacac6131ca824c8d5f  $archive" | sha256sum --check --strict
+        tar -xzf "$archive" --directory "$install_dir" --strip-components=1
+        echo "$install_dir" >> "$GITHUB_PATH"
+    - name: Check advisories and licenses
+      shell: bash
+      run: cargo-deny --log-level warn --manifest-path ./Cargo.toml --all-features --workspace check advisories licenses

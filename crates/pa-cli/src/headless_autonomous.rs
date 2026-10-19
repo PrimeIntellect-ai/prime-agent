@@ -48,6 +48,10 @@ pub struct HeadlessAutonomous {
     /// The continuation the threshold arm minted ahead of its compaction,
     /// held for the settled boundary's queued `followUp` admission.
     held: tokio::sync::Mutex<Option<String>>,
+    /// A continuation is held behind unsettled inline-subagent work (TS
+    /// `_holdAutonomousContinuationForRlmWork`): the flag only — the
+    /// decision and its count happen at the post-settle delivery.
+    awaits_rlm_work: std::sync::atomic::AtomicBool,
 }
 
 impl HeadlessAutonomous {
@@ -70,6 +74,7 @@ impl HeadlessAutonomous {
             state: Arc::new(tokio::sync::Mutex::new(state)),
             driver: ShellAutonomousDriver::new(cwd),
             held: tokio::sync::Mutex::new(None),
+            awaits_rlm_work: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
@@ -135,8 +140,59 @@ impl HeadlessAutonomous {
         *self.held.lock().await = Some(text);
     }
 
+    /// Hold the continuation while inline-subagent work settles (TS
+    /// `_holdAutonomousContinuationForRlmWork`): nothing is spent on the
+    /// pre-settle turn — a disabled mode or a spent run holds nothing, so
+    /// the normal mint applies their stop. Returns whether the hold owns
+    /// the boundary (the hook mints no row).
+    pub(crate) async fn hold_rlm_continuation(&self) -> bool {
+        let state = self.state.lock().await;
+        if !state.enabled || autonomous_limit_reason(&state, now_millis()).is_some() {
+            return false;
+        }
+        self.awaits_rlm_work
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        true
+    }
+
+    /// The RLM settle site (the daemon's `autonomous_children_settled`):
+    /// deliver the held continuation once the descendants settled —
+    /// decided fresh from the latest settled turn and counted at the
+    /// delivery, dropped behind a goal that owns the wake-up. Returns
+    /// whether a held flag was consumed.
+    pub(crate) async fn deliver_rlm_continuation(
+        &self,
+        engine: &SessionEngine,
+        boundary: &mut crate::print_boundary::TurnBoundary,
+        model: &Model,
+        api_key: Option<String>,
+        global_harness_dir: PathBuf,
+    ) -> Result<bool, String> {
+        if !self
+            .awaits_rlm_work
+            .swap(false, std::sync::atomic::Ordering::SeqCst)
+        {
+            return Ok(false);
+        }
+        // An active goal's own continuation loop owns the wake-up: the
+        // held turn is dropped behind it.
+        if engine.goal_owns_continuation_wakeup().await {
+            return Ok(true);
+        }
+        let Some(message) = engine.latest_settled_assistant().await else {
+            return Ok(true);
+        };
+        if let Some(text) = self.follow_up_text(&message).await {
+            boundary
+                .admit_continuation(engine, model, api_key, &text, global_harness_dir)
+                .await?;
+        }
+        Ok(true)
+    }
+
     /// The settled boundary's autonomous drain: each held continuation runs as
-    /// this invocation's follow-up turn; a re-crossing threshold holds the next.
+    /// this invocation's follow-up turn; a re-crossing threshold holds the
+    /// next. Returns whether any turn ran.
     #[allow(clippy::too_many_arguments)]
     pub(crate) async fn drive_boundary(
         &self,
@@ -145,7 +201,8 @@ impl HeadlessAutonomous {
         model: &Model,
         api_key: Option<String>,
         global_harness_dir: PathBuf,
-    ) -> Result<(), String> {
+    ) -> Result<bool, String> {
+        let mut ran = false;
         while let Some(text) = self.held.lock().await.take() {
             boundary
                 .admit_continuation(
@@ -156,8 +213,9 @@ impl HeadlessAutonomous {
                     global_harness_dir.clone(),
                 )
                 .await?;
+            ran = true;
         }
-        Ok(())
+        Ok(ran)
     }
 
     /// The print-mode exit contract: stderr text when the run must exit

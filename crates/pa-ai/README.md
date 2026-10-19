@@ -9,7 +9,7 @@ Provider trait + per-provider streaming clients (anthropic, openai-completions/r
 No agent loop, no tool execution, no session state, no UI. Receives/returns `pa-types` messages.
 
 ## Public API
-`Provider` trait, `ProviderRegistry`, model lookup/resolution, faux provider. Per-provider internals are `pub(crate)`.
+`Provider` trait, `ProviderRegistry`, model lookup/resolution, faux provider. `utils::tls::http_client_builder` lets caller-owned HTTP transports apply the shared extra-CA trust configuration. Per-provider internals are `pub(crate)`.
 
 ## Depends on
 pa-types (one-way).

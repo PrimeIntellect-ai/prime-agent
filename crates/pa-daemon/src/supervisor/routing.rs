@@ -548,6 +548,24 @@ impl Supervisor {
                         false,
                     );
                 }
+                // A dead worker can never answer the kill: a routed kill would fail (not
+                // connected) after the stop already ran. The tombstone stands, so the stop
+                // completes without a handshake and the delete succeeds.
+                let (pid, start_id) = {
+                    let descriptor = resident.descriptor.lock().await;
+                    (descriptor.pid, descriptor.process_start_id.clone())
+                };
+                if super::worker_lifecycle::worker_process_gone(pid, start_id).await {
+                    self.finish_plain_kill_stop(&resident, rest).await;
+                    return (
+                        vec![response_line(&response_success(
+                            Some(&command_id),
+                            &type_name,
+                            None,
+                        ))],
+                        false,
+                    );
+                }
             }
         }
         if let DaemonCommand::Attach {
@@ -1033,46 +1051,53 @@ impl Supervisor {
         let edges = ledger
             .live_edges()
             .with_context(|| "read the spawn ledger edges".to_string())?;
-        // `rlmChildId` is the durable key; the selector is the child's LIVE id, NOT
-        // the file stem. Order: (1a) edge matching BOTH the stem and the id; (1b)
-        // the LAST live edge carrying the id; (2) the stem-matching edge.
-        let mut resolved: Option<(String, String)> = None;
-        if let Some(id) = child_id {
-            for edge in &edges {
-                let stem = std::path::Path::new(&edge.child)
-                    .file_stem()
-                    .map(|name| name.to_string_lossy().to_string())
-                    .unwrap_or_default();
-                if stem == selector && edge.child_id == id {
-                    resolved = Some((edge.child_id.clone(), edge.child.clone()));
-                    break;
-                }
-            }
-            if resolved.is_none() {
-                for edge in &edges {
-                    if edge.child_id == id {
-                        resolved = Some((edge.child_id.clone(), edge.child.clone()));
-                    }
-                }
-            }
+        let (child_id, session_file) = if let Some(resolved) =
+            resolve_ledger_child(&edges, selector, child_id)
+        {
+            ledger
+                .append_delete(&resolved.0, &resolved.1, reason)
+                .with_context(|| format!("tombstone RLM subagent {}", resolved.0))?;
+            resolved
         } else {
-            for edge in &edges {
-                let stem = std::path::Path::new(&edge.child)
-                    .file_stem()
-                    .map(|name| name.to_string_lossy().to_string())
-                    .unwrap_or_default();
-                if stem == selector {
-                    resolved = Some((edge.child_id.clone(), edge.child.clone()));
-                    break;
+            // A retry after the boundary already stands: an earlier attempt tombstoned the
+            // edge and ran its finalize, so only a still-running worker blocks the delete.
+            let tombstoned: Vec<_> = ledger
+                .edges(true)
+                .with_context(|| "read the spawn ledger edges".to_string())?
+                .into_iter()
+                .filter(|edge| edge.deleted.is_some())
+                .collect();
+            let Some((deleted_child_id, session_file)) =
+                resolve_ledger_child(&tombstoned, selector, child_id)
+            else {
+                anyhow::bail!("stopped RLM subagent \"{selector}\" is not in the spawn ledger");
+            };
+            let canonical =
+                crate::lease::canonical_session_path(std::path::Path::new(&session_file));
+            for (_, descriptor) in
+                crate::descriptor::load_descriptors(&self.descriptor_dir, &self.options.socket_path)
+            {
+                let same_session = descriptor.session_file.as_deref().is_some_and(|file| {
+                    crate::lease::canonical_session_path(std::path::Path::new(file)) == canonical
+                });
+                if same_session
+                    && !super::worker_lifecycle::worker_process_gone(
+                        descriptor.pid,
+                        descriptor.process_start_id.clone(),
+                    )
+                    .await
+                {
+                    anyhow::bail!(
+                        "deleted RLM subagent \"{selector}\": worker {} (pid {}) is still running; delete refused until it exits",
+                        descriptor.worker_id,
+                        descriptor.pid
+                    );
                 }
             }
-        }
-        let Some((child_id, session_file)) = resolved else {
-            anyhow::bail!("stopped RLM subagent \"{selector}\" is not in the spawn ledger");
+            // The first attempt may have stopped after appending its tombstone.
+            // Reuse the same finalization without writing a second boundary.
+            (deleted_child_id, session_file)
         };
-        ledger
-            .append_delete(&child_id, &session_file, reason)
-            .with_context(|| format!("tombstone RLM subagent {child_id}"))?;
         // The stopped child's teardown mirrors the resident delete's end state: the usage
         // capture, archived state, and artifact sweep land as a live child's kill leaves them.
         let sessions_dir = crate::paths::sessions_dir(&self.options.agent_dir)
@@ -1123,6 +1148,29 @@ impl Supervisor {
         self.push_roster_update(changed, removed);
         Ok(())
     }
+}
+
+/// The ledger edge a delete addresses, as `(child_id, child_file)`. `rlmChildId` is the durable
+/// key; the selector is the child's LIVE id, NOT the file stem. Order: (1a) edge matching BOTH
+/// the stem and the id; (1b) the LAST edge carrying the id; (2) the stem-matching edge.
+fn resolve_ledger_child(
+    edges: &[crate::rlm_ledger::RlmLedgerEdge],
+    selector: &str,
+    child_id: Option<&str>,
+) -> Option<(String, String)> {
+    let stem_matches = |edge: &crate::rlm_ledger::RlmLedgerEdge| {
+        std::path::Path::new(&edge.child)
+            .file_stem()
+            .is_some_and(|name| name.to_string_lossy() == selector)
+    };
+    let found = match child_id {
+        Some(id) => edges
+            .iter()
+            .find(|edge| stem_matches(edge) && edge.child_id == id)
+            .or_else(|| edges.iter().rev().find(|edge| edge.child_id == id)),
+        None => edges.iter().find(|edge| stem_matches(edge)),
+    };
+    found.map(|edge| (edge.child_id.clone(), edge.child.clone()))
 }
 
 /// The client response line for one relayed worker payload: the worker's

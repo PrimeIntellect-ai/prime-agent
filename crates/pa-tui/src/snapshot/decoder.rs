@@ -426,7 +426,7 @@ pub fn working_message_from_update(partial: &Value) -> Option<String> {
         .filter(|text| !text.is_empty())
 }
 
-/// Decode one `custom`-role message into its transcript update: the
+/// Decode one `custom`-role wire message into its transcript update: the
 /// session-command echo/result rows render; an invalid payload renders
 /// the malformed notice; everything else renders nothing.
 fn custom_row_update(message: &Value) -> Option<TurnUpdate> {

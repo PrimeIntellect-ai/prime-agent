@@ -1606,6 +1606,12 @@ ts_stop_rust_stopped=""
 windows_stop_summary=""
 ts_socket="${TMPDIR:-/tmp}/prime-agent-$(id -u)/daemon.sock"
 rust_socket="${TMPDIR:-/tmp}/prime-agent-rust-$(id -u)/daemon.sock"
+# The launcher pins /tmp when the TMPDIR path exceeds the non-Linux
+# 103-byte sun_path limit (pa-daemon socket_dir() owns the rule); the
+# stop probe must look where the launcher actually pinned.
+if [ "$OS" != "Linux" ] && [ "$(printf '%s' "$rust_socket" | wc -c)" -gt 103 ]; then
+  rust_socket="/tmp/prime-agent-rust-$(id -u)/daemon.sock"
+fi
 env_socket="${PRIME_AGENT_DAEMON_SOCKET:-}"
 # THE TILDE EXPANSION (the CLI's own spelling: the products' clients
 # expand a leading ~/ in PRIME_AGENT_DAEMON_SOCKET before connecting, so
@@ -2293,15 +2299,14 @@ if [ ! -x "${stage}/${BINARY_NAME}" ]; then
   rm -rf "$stage"
   die "the tarball did not contain an executable ${BINARY_NAME} payload"
 fi
-# --ARCHIVE ONLY: the archive's name is the version contract (the marker
+# The archive's name is the version contract (the marker
 # records it and the rollback later reports it), so the payload's own
 # --version must agree — a mis-named archive would publish a marker that
-# lies about its payload. The CHANNEL install is out of scope by design:
-# its tarball already passed the manifest's sha256 gate (the row's exact
-# checksum for this exact version), so the channel's integrity needs no
-# second opinion — and a probe there would add a new failure mode (a
-# cold-start binary slower than the bound) the pre-existing flow never
-# had. The probe is BOUNDED by a portable watchdog — NOT the `timeout`
+# lies about its payload. npm bridge channel installs also need this probe:
+# a checksum-valid binary may be incompatible with the host. Reject it
+# before replacing the public npm command so the bridge can retain its
+# working TypeScript recovery path. Other channel installs retain their
+# existing checksum-only behavior. The probe is BOUNDED by a portable watchdog — NOT the `timeout`
 # command: on Windows `timeout` on PATH is timeout.exe, which waits
 # instead of running a command and would refuse every probe, and macOS
 # ships no GNU timeout at all. A payload whose --version blocks is
@@ -2311,9 +2316,8 @@ fi
 # payload-writable stage: an extracted archive could forge a done marker
 # where the loop looks and hang past the bound (the trailing wait would
 # block on the hanging payload forever).
-if [ "$MODE" != "archive" ]; then
-  # The channel install publishes without the name probe (see the block
-  # comment above); the stage continues to the marker write.
+if [ "$MODE" != "archive" ] && [ "${PRIME_AGENT_PRESERVE_NPM_BRIDGE:-0}" != 1 ]; then
+  # A non-bridge channel install continues to the marker write.
   :
 else
 probe_out="$dl/.version-probe.out"
@@ -2533,6 +2537,7 @@ if [ "$WINDOWS" = "yes" ] \
   fi
 fi
 launcher_tmp=""
+npm_launcher_backup=""
 cmd_tmp=""
 preserved_cmd_file=""
 windows_installed=""
@@ -2563,6 +2568,12 @@ on_exit() {
   # to publish into share_dir while this one still restores state — the
   # restore would delete that fresh payload (cross-installer data loss).
   publish_window_restore
+  # npm may have unlinked the public command before an interrupted uninstall.
+  # Restore the saved native launcher before releasing the publication lock.
+  if [ -n "${npm_launcher_backup:-}" ]; then
+    mv -f "$npm_launcher_backup" "$launcher" 2>/dev/null \
+      || echo "warning: restore the native launcher from ${npm_launcher_backup} to ${launcher}" >&2
+  fi
   [ -n "$launcher_tmp" ] && rm -f "$launcher_tmp" 2>/dev/null || true
   [ -n "${cmd_tmp:-}" ] && rm -f "$cmd_tmp" 2>/dev/null || true
   # The extraction stage is disposable on every failed path: a successful
@@ -2781,7 +2792,17 @@ fi
 # is the Rust port's now (the TS tree itself was preserved above). An
 # UNOWNED regular file at the path is not silently destroyed: it is moved
 # aside first, so nothing this script did not write is ever lost.
-if [ -e "$launcher" ] || [ -L "$launcher" ]; then
+# Old npm TUIs may have captured `node <prefix>/bin/prime-agent` before
+# updating. Keep that npm-owned JS symlink executable by Node when npm and
+# Rust share a prefix. The bridge delegates directly to the native payload.
+preserve_npm_launcher=no
+if [ "${PRIME_AGENT_PRESERVE_NPM_BRIDGE:-0}" = 1 ] \
+   && [ -n "${PRIME_AGENT_NPM_BRIDGE_ENTRYPOINT:-}" ] \
+   && [ -L "$launcher" ] \
+   && [ "$launcher" -ef "$PRIME_AGENT_NPM_BRIDGE_ENTRYPOINT" ]; then
+  preserve_npm_launcher=yes
+fi
+if [ "$preserve_npm_launcher" != yes ] && { [ -e "$launcher" ] || [ -L "$launcher" ]; }; then
   if [ -L "$launcher" ]; then
     say "replacing the prime-agent command symlink (was: $(readlink "$launcher" 2>/dev/null || true));"
     say "  the keyword is the Rust port's now"
@@ -2827,13 +2848,39 @@ export PRIME_AGENT_CODING_AGENT_DIR="${PRIME_AGENT_CODING_AGENT_DIR:-$HOME/.prim
 # (the uid suffix) and rust-only: it never collides with the TypeScript
 # daemon's own ${TMPDIR}/prime-agent-$(id -u) socket, so after the
 # installer's clean TS-daemon stop the two daemons cannot fight again.
-export PRIME_AGENT_DAEMON_SOCKET="${PRIME_AGENT_DAEMON_SOCKET:-${TMPDIR:-/tmp}/prime-agent-rust-$(id -u)/daemon.sock}"
+# An npm migration restores the running TS daemon into its existing namespace.
+# The durable marker survives payload replacement and later curl updates.
+if [ -f "$(dirname "$0")/../share/.prime-agent-npm-bridge/legacy-daemon-socket" ]; then
+  export PRIME_AGENT_DAEMON_SOCKET="${PRIME_AGENT_DAEMON_SOCKET:-${TMPDIR:-${TMP:-${TEMP:-/tmp}}}/prime-agent-$(id -u)/daemon.sock}"
+else
+  if [ -z "${PRIME_AGENT_DAEMON_SOCKET:-}" ]; then
+    # Same rule as pa-daemon socket_dir(): non-Linux sun_path caps a unix
+    # socket at 103 bytes, so a too-deep TMPDIR pins /tmp/prime-agent-rust-<uid>.
+    PRIME_AGENT_DAEMON_SOCKET="${TMPDIR:-/tmp}/prime-agent-rust-$(id -u)/daemon.sock"
+    if [ "$(printf '%s' "$PRIME_AGENT_DAEMON_SOCKET" | wc -c)" -gt 103 ] && [ "$(uname -s)" != "Linux" ]; then
+      PRIME_AGENT_DAEMON_SOCKET="/tmp/prime-agent-rust-$(id -u)/daemon.sock"
+    fi
+    export PRIME_AGENT_DAEMON_SOCKET
+  fi
+fi
 exec "$(dirname "$0")/../share/prime-agent/prime-agent" "$@"
 EOF
 fi
 chmod 0755 "$launcher_tmp"
-mv -f "$launcher_tmp" "$launcher"
-launcher_tmp=""
+if [ "$preserve_npm_launcher" = yes ]; then
+  # Probing the public bridge while it holds its migration lock would
+  # recurse into this install. Use the generated sibling wrapper for these
+  # checks; its relative payload path is identical, and EXIT removes it.
+  install_probe_launcher="$launcher_tmp"
+else
+  mv -f "$launcher_tmp" "$launcher"
+  launcher_tmp=""
+  install_probe_launcher="$launcher"
+fi
+if [ "${PRIME_AGENT_USE_LEGACY_DAEMON_SOCKET:-0}" = 1 ]; then
+  mkdir -p "${PREFIX}/share/.prime-agent-npm-bridge"
+  printf 'legacy\n' > "${PREFIX}/share/.prime-agent-npm-bridge/legacy-daemon-socket"
+fi
 # The cmd/PowerShell launcher twin (Windows only): the same
 # ../share/prime-agent payload, resolved from the .cmd's own location, so
 # `prime-agent` answers from cmd.exe and PowerShell too (the sh launcher
@@ -2907,7 +2954,10 @@ last_stop_was_rust=""
 # build) and this product's daemon runs a named pipe - the unix-socket
 # ladder below never applies. The Windows daemon stop already ran, before
 # the publish (the file-lock ruling).
-if [ "$WINDOWS" != "yes" ]; then
+# The historical npm updater launches its restart coordinator through the
+# migration bridge. That coordinator must capture the TS restart manifest
+# before stopping the old daemon; the bridge explicitly transfers that duty.
+if [ "$WINDOWS" != "yes" ] && [ "${PRIME_AGENT_DEFER_DAEMON_STOP:-0}" != 1 ]; then
   stop_daemon_candidate "$ts_socket" ts
   ts_stop_stopped_ts="$last_stop_recorded"
   ts_stop_was_rust_ts="$last_stop_was_rust"
@@ -2960,18 +3010,27 @@ fi
 # keyword), with the restore command printed. Exact package `prime-agent`
 # only; best-effort — an npm failure warns and moves on. Windows never had
 # a TS npm install (the TS product shipped darwin/linux only), so the whole
-# step is darwin/linux.
-if [ "$WINDOWS" != "yes" ] && command -v npm >/dev/null 2>&1; then
+# step is darwin/linux. The npm migration bridge remains the package manager's
+# command entry point: removing it during its child installer would delete the
+# running launcher's files and break later package-manager updates.
+if [ "$WINDOWS" != "yes" ] && [ "${PRIME_AGENT_PRESERVE_NPM_BRIDGE:-0}" != 1 ] && command -v npm >/dev/null 2>&1; then
   npm_root="$(npm root -g 2>/dev/null || true)"
   if [ -n "$npm_root" ] && [ -f "${npm_root}/prime-agent/package.json" ]; then
     ts_version="$("$UVPY" -c 'import json, sys
 try:
     package = json.load(open(sys.argv[1]))
-    if package.get("name") == "prime-agent":
+    if package.get("name") == "prime-agent" and package.get("primeAgentRustBridge") is not True:
         print(package.get("version", ""))
 except Exception:
     print("")' "${npm_root}/prime-agent/package.json")"
     if [ -n "$ts_version" ]; then
+      # npm unlinks its old bin entry even when our regular launcher has
+      # replaced that symlink. Keep a sibling copy and publish it again after
+      # uninstall (including a partial failure), without guessing npm's prefix.
+      launcher_tmp="$(mktemp "${bin_dir}/.prime-agent.XXXXXX")"
+      cp -p "$launcher" "$launcher_tmp"
+      npm_launcher_backup="$launcher_tmp"
+      launcher_tmp=""
       step_start "Removing the TypeScript npm package"
       if npm uninstall -g prime-agent >/dev/null 2>&1; then
         step_ok "Removed the TypeScript npm package" "restore: npm install -g prime-agent@${ts_version}"
@@ -2980,6 +3039,8 @@ except Exception:
         note "! The TypeScript npm command can shadow ${launcher} on PATH. Remove it:"
         todo "npm uninstall -g prime-agent"
       fi
+      mv -f "$npm_launcher_backup" "$launcher"
+      npm_launcher_backup=""
     fi
   fi
 fi
@@ -3065,7 +3126,7 @@ if uv_on_path \
    || { [ -n "$uv_bin_dir" ] && [ -x "${uv_bin_dir}/${uv_name}" ]; } \
    || { [ "$uv_under_store" = "no" ] && [ -x "${HOME}/.local/bin/${uv_name}" ]; }; then
   step_start "Preparing the Python kernel"
-  if bootstrap_out="$("$launcher" --prime-agent-bootstrap 2>&1)"; then
+  if bootstrap_out="$("$install_probe_launcher" --prime-agent-bootstrap 2>&1)"; then
     step_ok "Kernel ready"
     say "kernel pre-warmed: the first session's Python kernel is ready"
     say "$bootstrap_out"
@@ -3081,15 +3142,15 @@ else
 fi
 
 # --- verify: the launcher must answer --version -----------------------------------
-# Tried once. The common failure on a fresh install is the first-run kernel
-# venv bootstrap (the sidecar provisions itself on first launch), so the
-# failure prints the output plus a re-run hint instead of failing the
-# install over it.
-version_ok="yes"
-if version_out="$("$launcher" --version 2>&1)"; then
+# Tried once. The probe prints the compiled-in version and does not run the
+# first-run kernel venv bootstrap (the pre-warm above stays best-effort; the
+# first session retries it), so a failure here is a broken payload and must
+# fail installation: a published payload alone does not certify a working
+# command.
+if version_out="$("$install_probe_launcher" --version 2>&1)"; then
   say "installed: ${version_out}"
 else
-  version_ok="no"
+  die "The installed prime-agent --version check failed: ${version_out}"
 fi
 
 # --- the summary ---------------------------------------------------------------------
@@ -3139,15 +3200,7 @@ if [ "$ts_stop_rust_stopped" = "yes" ] && [ "$rust_leftover" != "yes" ]; then
 fi
 
 printf '\n' >&2
-if [ "$version_ok" = yes ]; then
-  printf ' %sDone.%s Run %sprime-agent%s to start.\n' "$C_BOLD" "$C_RESET" "$C_BOLD" "$C_RESET" >&2
-else
-  note "! Installed, but the first prime-agent --version run failed (it sets up"
-  note "  the kernel on first launch). Its output:"
-  printf '%s\n' "$version_out" >&2
-  note "  Run it again:"
-  todo "${launcher} --version"
-fi
+printf ' %sDone.%s Run %sprime-agent%s to start.\n' "$C_BOLD" "$C_RESET" "$C_BOLD" "$C_RESET" >&2
 dim "installed to $(tilde "$share_dir") · launcher $(tilde "$launcher")"
 if [ -n "$ts_takeover_from" ]; then
   dim "moved the TypeScript install to $(tilde "$ts_takeover_from") · undo:"

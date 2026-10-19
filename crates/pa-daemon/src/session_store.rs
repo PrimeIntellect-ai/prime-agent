@@ -28,6 +28,10 @@ mod stream_tests;
 mod window_tests;
 
 // The index concern lives in session_store::index; the facade re-imports keep the callers in scope.
+mod child_usage;
+#[cfg(test)]
+#[path = "session_store/child_usage_tests.rs"]
+mod child_usage_tests;
 mod index;
 
 use index::fold_child_usage_attributions;
@@ -66,16 +70,12 @@ mod info;
 mod info_sidecar;
 
 pub(crate) use info::read_session_info_from;
+pub use info::{find_most_recent_session_for_cwd, read_session_info, SessionInfo};
 #[cfg(test)]
 use info::{
-    append_capped_search_text, fold_scan_entry, message_content_text, raw_string, raw_u64,
-    session_info_cache, SessionInfoEntry, SessionInfoGeneration, SessionInfoScanCache,
-    SessionScanAccumulator, SessionScanState, SESSION_SCAN_MAX_CACHED_STATES,
+    message_content_text, raw_string, raw_u64, session_info_cache, SessionInfoEntry,
+    SessionInfoGeneration, SessionInfoScanCache, SessionScanState, SESSION_SCAN_MAX_CACHED_STATES,
     SESSION_SCAN_RESUME_TAIL_BYTES,
-};
-pub use info::{
-    find_most_recent_session_for_cwd, read_session_info, SessionInfo,
-    SESSION_LIST_SEARCH_TEXT_MAX_CHARS,
 };
 pub(crate) use info_sidecar::persist_info_sidecar;
 
@@ -103,6 +103,19 @@ pub struct SessionEntry {
     pub fields: Value,
 }
 
+/// One display-transcript page ([`SessionFile::transcript_page`]).
+#[derive(Debug, Clone)]
+pub struct TranscriptPageRows {
+    pub messages: Vec<Value>,
+    pub first_entry_id: Option<String>,
+    pub last_entry_id: Option<String>,
+    /// Rows exist past the page's far side: older ones for an end page, newer
+    /// ones before `until` for a start page.
+    pub more: bool,
+    /// The newest user prompt's time anywhere on the branch.
+    pub last_user_prompt_ms: Option<u64>,
+}
+
 /// The windowed sequence's summary scalars (newest timestamp, message count),
 /// from [`SessionFile::scan_message_scalars`] without materializing the fold.
 #[derive(Debug, Default, Clone, Copy, PartialEq)]
@@ -122,7 +135,14 @@ pub struct SessionFile {
     pub(crate) by_id: HashMap<String, usize>,
     pub(crate) leaf_id: Option<String>,
     pub(crate) window: Option<SessionWindow>,
+    pub(crate) trace_upload: Option<std::sync::Arc<pa_core::agent_traces::ContinuousTraceUpload>>,
     pub(crate) lease: Option<std::sync::Arc<crate::lease::SessionLease>>,
+    child_usage_recovery: child_usage::ChildUsageRecovery,
+    /// Rows the full reader skipped as unparsable (the TS loader's
+    /// lenient skip): zero on a healthy file. A reopen that found damage
+    /// logs this count (silent skips are how a torn session degraded
+    /// unnoticed — the operator's 2026-10-08 report).
+    pub(crate) skipped_lines: usize,
     /// Whether this session has already drawn the Anthropic subscription
     /// ban-risk warning (the once-per-session-lifecycle gate, operator
     /// directive 2026-09-29): hydrated from the persisted

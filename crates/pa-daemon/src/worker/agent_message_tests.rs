@@ -221,6 +221,56 @@ async fn deliver_message_while_busy_queues() {
     );
 }
 
+/// Agent-message deliveries admit as background work: later user input jumps
+/// them, FIFO behind earlier user input, on both lanes.
+#[tokio::test]
+async fn user_input_jumps_parked_agent_message_deliveries() {
+    for (command, delivery_mode, lane) in [
+        ("steer", "steer", "steering"),
+        ("follow_up", "follow_up", "followUp"),
+    ] {
+        let worker = created_worker().await;
+        worker.core.lock().unwrap().busy = true;
+        for (text, user) in [
+            ("first agent", false),
+            ("second agent", false),
+            ("first user", true),
+            ("second user", true),
+        ] {
+            let response = if user {
+                worker.dispatch(command, &json!({ "message": text })).await
+            } else {
+                worker
+                    .dispatch(
+                        "worker_deliver_message",
+                        &json!({
+                            "targetActiveSessionId": "target-session",
+                            "message": text,
+                            "sender": { "activeSessionId": "source-session" },
+                            "deliveryMode": delivery_mode,
+                        }),
+                    )
+                    .await
+            };
+            assert!(response.success, "{text}: {response:?}");
+            if !user {
+                assert_eq!(response.data.expect("receipt")["deliveryStatus"], "queued");
+            }
+        }
+        let queue = worker.dispatch("get_queue", &json!({})).await;
+        assert_eq!(
+            queue.data.expect("queue data")[lane],
+            json!([
+                "first user",
+                "second user",
+                "Agent message received: first agent",
+                "Agent message received: second agent"
+            ]),
+            "{lane}"
+        );
+    }
+}
+
 /// The pending-capacity guard fails with the TS error string.
 #[tokio::test]
 async fn deliver_message_respects_the_pending_capacity() {
@@ -379,4 +429,140 @@ async fn attach_response_wire_bytes_keep_the_ts_key_order() {
             );
         }
     }
+}
+
+/// `clear_queue` bounces each dropped agent-message row to its sender over
+/// the supervisor `send_message` route; the cleared user prompt sends
+/// nothing (unix: the link endpoint is an `AF_UNIX` socket).
+#[cfg(unix)]
+#[tokio::test]
+async fn clear_queue_bounces_dropped_agent_messages_to_their_senders() {
+    assert_clear_queue_bounces(/*restore_queue*/ false).await;
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn clear_queue_bounces_recovered_agent_messages_to_their_senders() {
+    assert_clear_queue_bounces(/*restore_queue*/ true).await;
+}
+
+#[cfg(unix)]
+async fn assert_clear_queue_bounces(restore_queue: bool) {
+    let dir = std::env::temp_dir().join(format!("pa-worker-am-bounce-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let socket = dir.join("supervisor.sock");
+    let (sends, _server) = crate::worker::tests::fake_supervisor(&socket);
+    let config = WorkerConfig {
+        socket_path: dir.join("worker.sock"),
+        supervisor_socket_path: socket,
+        token: "token".to_string(),
+        worker_instance_id: String::new(),
+        active_session_id: "target-session".to_string(),
+        agent_dir: dir.join("agent"),
+        recovery_journal_path: dir.join("recovery.jsonl"),
+        telemetry_disabled: None,
+        script: Some(json!({ "responses": ["ack"] })),
+    };
+    let worker = Arc::new(Worker::new(config, None));
+    // Production opens the recovery sink in serve(); direct-dispatch fixtures
+    // must install it before admission so checkpoints persist synchronously.
+    *worker.recovery.lock().unwrap() =
+        Some(WorkerRecoveryJournal::open(&worker.config.recovery_journal_path).unwrap());
+    let created = worker
+        .dispatch(
+            "create",
+            &json!({ "noSession": true, "cwd": "/tmp", "name": "target" }),
+        )
+        .await;
+    assert!(created.success, "create failed: {created:?}");
+    // Busy parks both rows in their lanes.
+    worker.core.lock().unwrap().busy = true;
+    let delivered = worker
+        .dispatch(
+            "worker_deliver_message",
+            &json!({
+                "targetActiveSessionId": "target-session",
+                "message": "please review the plan",
+                "sender": {
+                    "activeSessionId": "source-session",
+                    "sessionName": "source-agent",
+                },
+            }),
+        )
+        .await;
+    assert!(delivered.success, "deliver failed: {delivered:?}");
+    let queued = worker
+        .dispatch("follow_up", &json!({ "message": "plain queued prompt" }))
+        .await;
+    assert!(queued.success, "follow_up failed: {queued:?}");
+    if restore_queue {
+        // Reopen the persisted journal as a respawn would: the marker must
+        // survive alongside the custom row for clear/pause/status handling.
+        // A respawn acquires ownership after the old worker releases it.
+        // Dropping the sink releases the journal lock; the durable admissions
+        // above have already completed their synchronous checkpoint writes.
+        drop(worker.recovery.lock().unwrap().take());
+        let journal = WorkerRecoveryJournal::open(&worker.config.recovery_journal_path).unwrap();
+        let (steering, follow_up) = restore_queue_snapshot(&journal, "target-session");
+        assert_eq!(steering.len(), 1, "agent row checkpoint must be durable");
+        assert_eq!(follow_up.len(), 1, "prompt checkpoint must be durable");
+        // The replacement worker owns the reopened sink for clear's checkpoint.
+        *worker.recovery.lock().unwrap() = Some(journal);
+        let mut core = worker.core.lock().unwrap();
+        core.steering = steering;
+        core.follow_up = follow_up;
+        assert_eq!(
+            core.steering[0].agent_message.as_deref(),
+            Some("please review the plan")
+        );
+    }
+    let cleared = worker.dispatch("clear_queue", &json!({})).await;
+    assert!(cleared.success, "clear_queue failed: {cleared:?}");
+    let data = cleared.data.expect("the clear data");
+    assert_eq!(
+        data["steering"],
+        json!(["[agent-message from source-agent]\n\nplease review the plan"]),
+        "the response shape is unchanged: {data}"
+    );
+    assert_eq!(
+        data["followUp"],
+        json!(["plain queued prompt"]),
+        "the response shape is unchanged: {data}"
+    );
+    // Exactly one bounce leaves for the agent row's sender; the cleared
+    // user prompt sends nothing.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let sends = loop {
+        let recorded: Vec<Value> = sends
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|command| command["type"] == "send_message")
+            .cloned()
+            .collect();
+        if !recorded.is_empty() {
+            break recorded;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the bounce never reached the supervisor link"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    };
+    assert_eq!(
+        sends.len(),
+        1,
+        "one bounce per agent row, none for the prompt: {sends:?}"
+    );
+    let command = &sends[0];
+    assert_eq!(command["type"], "send_message");
+    assert_eq!(command["targetActiveSessionId"], "source-session");
+    assert_eq!(command["fromActiveSessionId"], "target-session");
+    assert_eq!(command["agentOrigin"], true);
+    assert_eq!(
+        command["message"],
+        "Your agent message was cleared from target's queue before delivery: please review the plan",
+        "the bounce names the receiver and quotes the dropped body: {command}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
 }

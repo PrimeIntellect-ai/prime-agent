@@ -163,6 +163,11 @@ async fn drive(
             .await
             .set_state(UpdateState::Prepared)
             .map_err(PhaseFailure::after_stop)?;
+        writer
+            .lock()
+            .await
+            .set_state(UpdateState::Stopping)
+            .map_err(PhaseFailure::after_stop)?;
     }
     // `Stopped`: fence-free predecessor exit wait (spec §9).
     if let Some(identity) = &predecessor {

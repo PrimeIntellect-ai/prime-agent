@@ -1098,3 +1098,213 @@ fn compact_session_command_emits_the_result_on_success() {
     assert_eq!(rows.len(), 1, "the /compact echo only: {rows:?}");
     assert_eq!(rows[0]["customType"], "session_slash_command");
 }
+
+#[test]
+fn threshold_crossing_inside_one_run_compacts_before_the_next_model_turn() {
+    let _faux = FAUX_TEST_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let (engine, _dir) = faux_engine_with_settings(
+        &json!({
+            "responses": [
+                {"text":"seed reply"},
+                {"content":[{"type":"text","text":"x".repeat(80_000)}, {"type":"toolCall","id":"synthetic-call","name":"synthetic_missing_tool","arguments":{}}]},
+                {"text":"history summary"},
+                {"text":"prefix summary"},
+                {"text":"task finished"}
+            ]
+        }),
+        128_000 - FAUX_REQUEST_BUDGET - 20_000,
+    );
+    let mut events = Vec::new();
+    admit(&engine, "seed".into(), &mut events);
+    events.clear();
+    admit(&engine, "continue task".into(), &mut events);
+    let compaction = events
+        .iter()
+        .position(|event| matches!(event, EngineEvent::CompactionStart { .. }))
+        .expect("threshold crossed inside run");
+    let assistants: Vec<_> = events
+        .iter()
+        .enumerate()
+        .filter_map(|(index, event)| {
+            matches!(event, EngineEvent::AssistantMessage(_)).then_some(index)
+        })
+        .collect();
+    assert_eq!(assistants.len(), 2, "one tool turn and one final turn");
+    assert!(
+        assistants[0] < compaction && compaction < assistants[1],
+        "compaction must precede the next ordinary model call"
+    );
+    assert_eq!(
+        assistant_texts(&events).last().map(String::as_str),
+        Some("task finished")
+    );
+}
+
+#[test]
+fn failed_mid_run_compaction_resumes_without_retrying_each_tool_round() {
+    let _faux = FAUX_TEST_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let tool_turn = json!({"content":[{"type":"text","text":"x".repeat(80_000)}, {"type":"toolCall","id":"synthetic-call","name":"synthetic_missing_tool","arguments":{}}]});
+    let (engine, _dir) = faux_engine_with_settings(
+        &json!({
+            "responses": [
+                {"text":"seed reply"}, tool_turn,
+                {"text":"", "stopReason":"error", "errorMessage":"synthetic summary failure"},
+                {"text":"prefix summary"}, tool_turn,
+                {"text":"task finished"}
+            ]
+        }),
+        128_000 - FAUX_REQUEST_BUDGET - 20_000,
+    );
+    let mut events = Vec::new();
+    admit(&engine, "seed".into(), &mut events);
+    events.clear();
+    admit(&engine, "continue task".into(), &mut events);
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(event, EngineEvent::CompactionStart { .. }))
+            .count(),
+        1
+    );
+    assert_eq!(
+        assistant_texts(&events).last().map(String::as_str),
+        Some("task finished")
+    );
+    assert!(events
+        .iter()
+        .any(|event| matches!(event, EngineEvent::Done(Ok(())))));
+    let core = engine.session.blocking_lock().clone().unwrap();
+    let entries = engine
+        .runtime
+        .block_on(async { core.session.shared_persistence().lock().await.get_entries() });
+    let user_prompts: Vec<_> = entries
+        .iter()
+        .filter_map(|entry| match entry {
+            pa_types::session::FileEntry::Message {
+                message: pa_types::session::AgentMessage::User(user),
+                ..
+            } => Some(user.content.text()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(user_prompts, ["seed", "continue task"]);
+}
+
+/// A not-due recheck after a threshold yield keeps the in-run threshold
+/// machinery armed: the suppression is reserved for a summary attempt
+/// that failed to commit (cursor: "Recheck mismatch disables further
+/// compaction").
+#[test]
+fn a_not_due_recheck_keeps_threshold_checks_armed() {
+    use crate::auto_compaction::AutoCompactionRun;
+    assert!(
+        AutoCompactionRun::NotDue.continues_threshold_checks(),
+        "a not-due recheck is not a failed summary"
+    );
+    assert!(
+        AutoCompactionRun::Compacted.continues_threshold_checks(),
+        "a committed summary keeps checking"
+    );
+    assert!(
+        !AutoCompactionRun::Ran.continues_threshold_checks(),
+        "a failed or skipped summary suppresses the rest of the run"
+    );
+}
+
+#[test]
+fn low_custom_percentage_compacts_real_history_once_and_then_makes_progress() {
+    let _faux = FAUX_TEST_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let (engine, dir) = faux_engine_with_settings(
+        &serde_json::json!({
+            "responses": vec![serde_json::json!({"text": "short response"}); 80],
+        }),
+        16_384,
+    );
+    std::fs::write(
+        dir.path().join("agent/settings.json"),
+        serde_json::json!({"compaction": {
+            "enabled": true, "thresholdPercent": 5,
+            "reserveTokens": 16_384, "keepRecentTokens": 20_000
+        }})
+        .to_string(),
+    )
+    .unwrap();
+    let engine = std::sync::Arc::new(engine);
+    engine.register_arc();
+    let mut events = Vec::new();
+    let mut compacted = false;
+    for turn in 0..30 {
+        admit(
+            &engine,
+            format!("turn {turn} {}", "x".repeat(12_000)),
+            &mut events,
+        );
+        if let Some(EngineEvent::Compaction { event, entry }) = events
+            .iter()
+            .find(|event| matches!(event, EngineEvent::Compaction { .. }))
+        {
+            assert!(event["result"]["summary"]
+                .as_str()
+                .unwrap()
+                .contains("short response"));
+            assert!(entry["firstKeptEntryId"].is_string());
+            compacted = true;
+            break;
+        }
+    }
+    assert!(compacted, "the 5% setting ran an actual compaction");
+    let usage = events
+        .iter()
+        .filter_map(|event| match event {
+            EngineEvent::AssistantMessage(message) => message["usage"]["totalTokens"].as_u64(),
+            _ => None,
+        })
+        .next_back()
+        .unwrap();
+    assert!(
+        usage < 95_232,
+        "compaction occurred before the unchanged default trigger"
+    );
+    for turn in 0..4 {
+        admit(&engine, format!("short continuation {turn}"), &mut events);
+    }
+    let starts = events
+        .iter()
+        .filter(|event| matches!(event, EngineEvent::CompactionStart { .. }))
+        .count();
+    let ends = events
+        .iter()
+        .filter(|event| matches!(event, EngineEvent::Compaction { .. }))
+        .count();
+    assert_eq!(
+        (starts, ends),
+        (1, 1),
+        "short turns do not recompact retained history"
+    );
+    assert_eq!(
+        assistant_texts(&events).last().map(String::as_str),
+        Some("short response")
+    );
+
+    // The autonomous mirror shares the same live getter rather than a copied refresh.
+    let mut settings =
+        pa_core::settings::SettingsManager::create(dir.path(), dir.path().join("agent"));
+    settings.set_compaction_threshold_percent(75.0).unwrap();
+    let mirror = engine.autonomous_boundary.lock().unwrap().clone().unwrap();
+    let session = mirror.session.upgrade().unwrap();
+    assert_eq!(
+        session.session.compaction_settings(),
+        pa_core::session_engine::compaction::CompactionSettings {
+            threshold_percent: 75.0,
+            reserve_tokens: 16_384,
+            keep_recent_tokens: 20_000,
+            ..Default::default()
+        }
+    );
+}

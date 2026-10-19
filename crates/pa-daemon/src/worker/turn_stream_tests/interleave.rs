@@ -77,12 +77,11 @@
 //! coverage. The departure release (a closed connection's release
 //! re-arming the window) is the park family's window battery too. The
 //! gate-before-abort ORDER inside `handle_shutdown` (one critical section
-//! sets `shutdown_requested` before `user_bash.abort()` runs) has no seam
-//! a test can hold between the two steps, so no test here pins it - the
-//! tests pin each step's effect. The base's `UserBash` open corners (the single-slot overlap,
-//! the forked-grandchild survival) are TS-anchored follow-ups on the
-//! base's bash surface — out of this lane's scope (the round-9 rebuttal
-//! carries them).
+//! sets `shutdown_requested` before `user_bash.abort_and_settle()` runs) has
+//! no seam a test can hold between the two steps, so no test here pins it -
+//! the tests pin each step's effect. The forked-child kill and the stop's
+//! settle wait are pinned in `user_bash`'s own tests; the single-slot overlap
+//! stays a TS-anchored follow-up on the base's bash surface.
 // Unix-only: the probe harness stands in for the supervisor side of
 // the passivation ask over a real unix domain socket
 // (tokio::net::UnixListener), which has no counterpart on the windows

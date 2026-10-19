@@ -31,15 +31,157 @@ fn add_cost(total: pa_types::JsNumber, usage: pa_types::JsNumber) -> pa_types::J
 
 /// Child work affects session-level billable totals, not the parent's
 /// model-facing context size, so the context tokens are restored after the fold.
-pub(crate) fn attribute_child_usage(parent_usage: &mut Usage, child_usage: &Usage) {
+pub fn attribute_child_usage(parent_usage: &mut Usage, child_usage: &Usage) {
     let parent_context_tokens = super::compaction::calculate_context_tokens(parent_usage);
     add_assistant_usage(parent_usage, child_usage);
     parent_usage.total_tokens = parent_context_tokens;
 }
 
+/// Compare the immutable attribution identity using the transcript's JSON number decoding.
+/// The aggregate is deliberately excluded: later children can advance it.
+///
+/// # Errors
+///
+/// Returns a serialization error if the supplied usage cannot use the wire representation.
+pub fn child_usage_identity_matches(
+    payload: &pa_types::session::ChildUsageAttributionEntry,
+    target_id: &str,
+    child_usage: Usage,
+    origin: Option<ChildUsageOrigin>,
+) -> std::io::Result<bool> {
+    let wire_usage: Usage = serde_json::from_str(&serde_json::to_string(&child_usage)?)?;
+    Ok(payload.target_id == target_id
+        && (payload.child_usage == child_usage || payload.child_usage == wire_usage)
+        && payload.origin == origin)
+}
+
+pub type RlmChildUsageFuture<'a, T> =
+    std::pin::Pin<std::boxed::Box<dyn std::future::Future<Output = T> + Send + 'a>>;
+
+/// A confirmed store result, carrying the current authoritative aggregate.
+#[derive(Debug, Clone, Copy)]
+pub enum ChildUsageAppendResult {
+    /// First confirmed durable result for this owned attribution intent.
+    Created(Usage),
+    /// This ID was already confirmed; later children may have advanced the aggregate.
+    Existing(Usage),
+}
+
+/// The attribution producer's durable transcript boundary. Implementations
+/// serialize mutation under the session owner, compute the aggregate from
+/// their own authoritative state, and return [`ChildUsageAppendResult::Existing`]
+/// for a row id already in the store (the identity must match), appending one
+/// row that carries the caller's id otherwise. Callers must preserve row ID,
+/// target, child usage and origin across retries.
+pub trait RlmChildUsageStore: Send + Sync {
+    fn last_assistant(&self) -> RlmChildUsageFuture<'_, Option<(String, Usage)>>;
+
+    fn append_attribution(
+        &self,
+        row_id: &str,
+        target_id: &str,
+        child_usage: Usage,
+        origin: Option<ChildUsageOrigin>,
+    ) -> RlmChildUsageFuture<'_, std::io::Result<ChildUsageAppendResult>>;
+}
+
+pub(crate) struct SessionUsageStore(pub(crate) std::sync::Arc<tokio::sync::Mutex<SessionManager>>);
+
+impl RlmChildUsageStore for SessionUsageStore {
+    fn last_assistant(&self) -> RlmChildUsageFuture<'_, Option<(String, Usage)>> {
+        let session = std::sync::Arc::clone(&self.0);
+        Box::pin(async move {
+            let session = session.lock().await;
+            session
+                .retained_entries()
+                .iter()
+                .rev()
+                .find_map(last_assistant_row)
+        })
+    }
+
+    fn append_attribution(
+        &self,
+        row_id: &str,
+        target_id: &str,
+        child_usage: Usage,
+        origin: Option<ChildUsageOrigin>,
+    ) -> RlmChildUsageFuture<'_, std::io::Result<ChildUsageAppendResult>> {
+        let session = std::sync::Arc::clone(&self.0);
+        let target_id = target_id.to_string();
+        let row_id = row_id.to_string();
+        Box::pin(async move {
+            let mut session = session.lock().await;
+            // The thin idempotency check: a row this id already wrote is
+            // confirmed, whatever the caller's last attempt returned. The
+            // retained scan is the same view `last_assistant` reads, so a
+            // windowed manager answers instead of asserting full history.
+            let existing = session
+                .retained_entries()
+                .iter()
+                .rev()
+                .find(|entry| entry.id() == Some(row_id.as_str()));
+            if let Some(entry) = existing {
+                let pa_types::session::FileEntry::ChildUsageAttributed { payload, .. } = entry
+                else {
+                    return Err(attribution_id_collision());
+                };
+                if !child_usage_identity_matches(payload, &target_id, child_usage, origin)? {
+                    return Err(attribution_id_collision());
+                }
+                return Ok(ChildUsageAppendResult::Existing(target_assistant_usage(
+                    &session, &target_id,
+                )?));
+            }
+            let mut aggregate = target_assistant_usage(&session, &target_id)?;
+            attribute_child_usage(&mut aggregate, &child_usage);
+            session.append_child_usage_attribution(
+                &row_id,
+                &target_id,
+                child_usage,
+                aggregate,
+                origin,
+            )?;
+            Ok(ChildUsageAppendResult::Created(aggregate))
+        })
+    }
+}
+
+/// The duplicate retry of an id that landed under another identity is a
+/// transcript bug, not a retry: refuse it instead of folding twice.
+fn attribution_id_collision() -> std::io::Error {
+    std::io::Error::new(std::io::ErrorKind::InvalidData, "attribution ID collision")
+}
+
+/// The target assistant row's current usage: the running aggregate, since
+/// every attribution append folds its aggregate back into the row. The
+/// retained scan answers on a windowed manager too, where the by-id
+/// lookup's full-history assertion would panic.
+fn target_assistant_usage(session: &SessionManager, target_id: &str) -> std::io::Result<Usage> {
+    session
+        .retained_entries()
+        .iter()
+        .rev()
+        .find_map(|entry| match entry {
+            pa_types::session::FileEntry::Message {
+                message: pa_types::session::AgentMessage::Assistant(assistant),
+                ..
+            } if entry.id() == Some(target_id) => Some(assistant.usage),
+            _ => None,
+        })
+        .ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("Assistant message entry {target_id} not found"),
+            )
+        })
+}
+
 /// Per-origin batches in first-seen order.
 #[derive(Debug, Clone)]
 pub struct RlmChildUsageReport {
+    /// Frozen observation identity; clones and retries must preserve this ID.
+    pub report_id: String,
     pub rlm_child_id: String,
     pub batches: Vec<(ChildUsageOrigin, Usage)>,
 }
@@ -47,9 +189,9 @@ pub struct RlmChildUsageReport {
 /// The producer the daemon's child observation feeds: spawn registration
 /// plus the durable flush. One instance per session engine.
 pub struct RlmChildUsageAttributions {
-    session: std::sync::Arc<tokio::sync::Mutex<SessionManager>>,
-    /// The aggregate base per parent assistant row, shared by all its children;
-    /// held across the durable append so batches serialize in observation order.
+    store: std::sync::Arc<dyn RlmChildUsageStore>,
+    /// Last confirmed aggregate per parent row; held to serialize report handoffs.
+    /// The store owns the authoritative aggregate calculation, including retries.
     bases: tokio::sync::Mutex<HashMap<String, Usage>>,
     /// The parent assistant row each child attributes to, captured at spawn;
     /// dropped in [`Self::forget_child`].
@@ -66,9 +208,9 @@ pub struct RlmChildUsageAttributions {
 }
 
 impl RlmChildUsageAttributions {
-    pub fn new(session: std::sync::Arc<tokio::sync::Mutex<SessionManager>>) -> Self {
+    pub fn new(store: std::sync::Arc<dyn RlmChildUsageStore>) -> Self {
         Self {
-            session,
+            store,
             bases: tokio::sync::Mutex::new(HashMap::new()),
             children: std::sync::Mutex::new(HashMap::new()),
             telemetry: std::sync::Mutex::new(None),
@@ -102,14 +244,7 @@ impl RlmChildUsageAttributions {
             Box::pin(async move { forward.register_spawn(rlm_child_id).await }).await;
             return;
         }
-        let target = {
-            let session = self.session.lock().await;
-            session
-                .retained_entries()
-                .iter()
-                .rev()
-                .find_map(last_assistant_row)
-        };
+        let target = self.store.last_assistant().await;
         if let Some((target_id, usage)) = target {
             // Seed the base BEFORE the registration publishes: a report finding the entry
             // must not compute from the default (or_insert preserves a broken first aggregate).
@@ -124,17 +259,18 @@ impl RlmChildUsageAttributions {
     }
 
     /// Flush one observed report: batches fold into the target row's cumulative aggregate,
-    /// one durable `child_usage_attributed` row per batch; a failed append is logged and
-    /// dropped, so attribution bookkeeping never breaks the observing path.
+    /// one durable `child_usage_attributed` row per batch. Returns whether every batch
+    /// persisted (nothing owed — an unregistered or forgotten child has no durable target,
+    /// and retrying cannot help — counts as persisted); a failed append is logged and stops
+    /// the flush, leaving the rest for the next observation's retry.
     ///
     /// # Panics
     ///
     /// Panics if the forward, children, or telemetry state mutexes are poisoned.
-    pub async fn record_child_usage(&self, report: RlmChildUsageReport) {
+    pub async fn record_child_usage(&self, report: RlmChildUsageReport) -> bool {
         let forward = self.forward.lock().expect("rlm usage forward lock").clone();
         if let Some(forward) = forward {
-            Box::pin(async move { forward.record_child_usage(report).await }).await;
-            return;
+            return Box::pin(async move { forward.record_child_usage(report).await }).await;
         }
         // The guard drops at its own statement: a scrutinee temp held
         // across the fallback await is not Send.
@@ -151,46 +287,41 @@ impl RlmChildUsageAttributions {
                 None => {
                     // Never registered here (raced a rebuild, or the
                     // child outlived its engine): no durable target.
-                    return;
+                    return true;
                 }
             },
         };
-        // A report racing the handoff can find the registration copied before the bases:
-        // read the retired side's base BEFORE our bases lock.
-        let fallback_base = self.fallback_base(&target_id).await;
         let mut bases = self.bases.lock().await;
         // The forward re-check runs WITH the bases lock held: a handoff that armed
         // mid-report blocks its bases copy on this lock, so the adoption carries it.
         let forward = self.forward.lock().expect("rlm usage forward lock").clone();
         if let Some(forward) = forward {
-            // Release the bases BEFORE forwarding: the successor's fallback_base re-locks
-            // THIS producer's bases (a tokio Mutex is not reentrant); holding it across
-            // the await would deadlock the handoff path and the adoption.
+            // Release the bases BEFORE forwarding: the successor's fallback
+            // consult re-locks THIS producer's bases (a tokio Mutex is not
+            // reentrant); holding it across the await would deadlock the
+            // handoff path and the adoption.
             drop(bases);
-            Box::pin(async move { forward.record_child_usage(report).await }).await;
-            return;
+            return Box::pin(async move { forward.record_child_usage(report).await }).await;
         }
-        for (origin, usage) in report.batches {
-            let base = bases
-                .get(&target_id)
-                .copied()
-                .or(fallback_base)
-                .unwrap_or_default();
-            let mut aggregate = base;
-            attribute_child_usage(&mut aggregate, &usage);
-            match self.session.lock().await.append_child_usage_attribution(
-                &target_id,
-                usage,
-                aggregate,
-                Some(origin),
-            ) {
-                Ok(_) => {
+        for (batch_index, (origin, usage)) in report.batches.into_iter().enumerate() {
+            let row_id = format!("{}-{batch_index}", report.report_id);
+            match self
+                .store
+                .append_attribution(&row_id, &target_id, usage, Some(origin))
+                .await
+            {
+                Ok(result) => {
+                    let (aggregate, created) = match result {
+                        ChildUsageAppendResult::Created(aggregate) => (aggregate, true),
+                        ChildUsageAppendResult::Existing(aggregate) => (aggregate, false),
+                    };
                     bases.insert(target_id.clone(), aggregate);
                     if let Some(telemetry) = self
                         .telemetry
                         .lock()
                         .expect("rlm usage telemetry lock")
                         .as_ref()
+                        .filter(|_| created)
                     {
                         telemetry.note_child_usage_attributed(
                             usage.input,
@@ -203,9 +334,11 @@ impl RlmChildUsageAttributions {
                 }
                 Err(error) => {
                     eprintln!("pa-core: RLM child usage attribution not persisted: {error}");
+                    return false;
                 }
             }
         }
+        true
     }
 
     /// A rebuild keeps the session's live children: adopt the retired
@@ -289,18 +422,6 @@ impl RlmChildUsageAttributions {
         Some(target_id)
     }
 
-    /// The retired side's frozen cumulative base: read BEFORE our own
-    /// bases lock (lock order: the fallback's bases first, ours second).
-    async fn fallback_base(&self, target_id: &str) -> Option<Usage> {
-        for producer in self.fallback_chain() {
-            let retired_bases = producer.bases.lock().await;
-            if let Some(base) = retired_bases.get(target_id) {
-                return Some(*base);
-            }
-        }
-        None
-    }
-
     /// Drop one child's registration once its final observation lands; the
     /// aggregate base stays. The retired side's copy is pruned too, so a
     /// straggler cannot resurrect it through the fallback.
@@ -349,7 +470,7 @@ pub trait RlmChildUsageSink: Send + Sync {
     fn record(
         &self,
         report: RlmChildUsageReport,
-    ) -> std::pin::Pin<std::boxed::Box<dyn std::future::Future<Output = ()> + Send + '_>>;
+    ) -> std::pin::Pin<std::boxed::Box<dyn std::future::Future<Output = bool> + Send + '_>>;
 
     /// Drop the registration so sequential children do not accumulate.
     fn forget(
@@ -441,6 +562,12 @@ mod tests {
             .unwrap_or_else(|| row[key]["cost"]["total"].as_i64().expect("cost number") as f64)
     }
 
+    fn producer(
+        manager: std::sync::Arc<tokio::sync::Mutex<SessionManager>>,
+    ) -> RlmChildUsageAttributions {
+        RlmChildUsageAttributions::new(std::sync::Arc::new(SessionUsageStore(manager)))
+    }
+
     /// Captured TS fixture (assistant row 4f61089a, archive 01a0a7d4-cdd9):
     /// the folded aggregate carries input 52,898, parts summing to 77,321,
     /// and totalTokens FROZEN at the parent's 23,032; the raw parent's
@@ -450,10 +577,11 @@ mod tests {
         let raw_parent = usage_block(2_690, 1_577, 19_917, 0, 23_032, 0.0);
         let child = usage_block(50_208, 2_929, 0, 0, 53_137, 0.008_995_7);
         let (_tmp, manager) = manager_with_assistant(raw_parent);
-        let producer = RlmChildUsageAttributions::new(manager.clone());
+        let producer = producer(manager.clone());
         producer.register_spawn("sub-abc12345").await;
         producer
             .record_child_usage(RlmChildUsageReport {
+                report_id: uuid::Uuid::new_v4().to_string(),
                 rlm_child_id: "sub-abc12345".to_string(),
                 batches: vec![(ChildUsageOrigin::SpawnTask, child)],
             })
@@ -500,11 +628,12 @@ mod tests {
     async fn rebuild_adoption_continues_the_aggregate_chain() {
         let raw_parent = usage_block(1_000, 0, 0, 0, 4_096, 0.0);
         let (_tmp, manager) = manager_with_assistant(raw_parent);
-        let retired = std::sync::Arc::new(RlmChildUsageAttributions::new(manager.clone()));
-        let fresh = std::sync::Arc::new(RlmChildUsageAttributions::new(manager.clone()));
+        let retired = std::sync::Arc::new(producer(manager.clone()));
+        let fresh = std::sync::Arc::new(producer(manager.clone()));
         retired.register_spawn("sub-rebuild1").await;
         retired
             .record_child_usage(RlmChildUsageReport {
+                report_id: uuid::Uuid::new_v4().to_string(),
                 rlm_child_id: "sub-rebuild1".to_string(),
                 batches: vec![(
                     ChildUsageOrigin::SpawnTask,
@@ -515,6 +644,7 @@ mod tests {
         fresh.adopt_registrations(&retired).await;
         fresh
             .record_child_usage(RlmChildUsageReport {
+                report_id: uuid::Uuid::new_v4().to_string(),
                 rlm_child_id: "sub-rebuild1".to_string(),
                 batches: vec![(
                     ChildUsageOrigin::AgentMessage,
@@ -534,6 +664,7 @@ mod tests {
         // The retired producer now FORWARDS: a late emission still lands on the adopted chain.
         retired
             .record_child_usage(RlmChildUsageReport {
+                report_id: uuid::Uuid::new_v4().to_string(),
                 rlm_child_id: "sub-rebuild1".to_string(),
                 batches: vec![(
                     ChildUsageOrigin::DirectUser,
@@ -551,6 +682,7 @@ mod tests {
         fresh.forget_child("sub-rebuild1").await;
         fresh
             .record_child_usage(RlmChildUsageReport {
+                report_id: uuid::Uuid::new_v4().to_string(),
                 rlm_child_id: "sub-rebuild1".to_string(),
                 batches: vec![(
                     ChildUsageOrigin::DirectUser,
@@ -579,12 +711,13 @@ mod tests {
         );
         fresh
             .record_child_usage(RlmChildUsageReport {
+                report_id: uuid::Uuid::new_v4().to_string(),
                 rlm_child_id: "sub-rebuild2".to_string(),
                 batches: vec![(ChildUsageOrigin::SpawnTask, usage_block(2, 2, 0, 0, 4, 0.0))],
             })
             .await;
-        // A report racing the adoption's bases copy (base dropped to simulate):
-        // the fold starts from the retired side's frozen handoff base.
+        // A report racing the adoption's bases copy (base dropped to simulate)
+        // must use the store's current aggregate, preserving every earlier report.
         let target_of_second_for_base = fresh
             .children
             .lock()
@@ -595,6 +728,7 @@ mod tests {
         fresh.bases.lock().await.remove(&target_of_second_for_base);
         fresh
             .record_child_usage(RlmChildUsageReport {
+                report_id: uuid::Uuid::new_v4().to_string(),
                 rlm_child_id: "sub-rebuild2".to_string(),
                 batches: vec![(
                     ChildUsageOrigin::AgentMessage,
@@ -609,8 +743,8 @@ mod tests {
             .collect();
         assert_eq!(
             base_race.last().unwrap()["aggregateUsage"]["input"],
-            1_015,
-            "the raced report folds onto the frozen retired base, not the default"
+            1_025,
+            "the raced report preserves all usage already confirmed by the store"
         );
         // A registration the adoption copy raced (inserted on the
         // retired side directly): the fallback consult adopts it.
@@ -627,6 +761,7 @@ mod tests {
         }
         fresh
             .record_child_usage(RlmChildUsageReport {
+                report_id: uuid::Uuid::new_v4().to_string(),
                 rlm_child_id: "sub-raced".to_string(),
                 batches: vec![(ChildUsageOrigin::SpawnTask, usage_block(3, 3, 0, 0, 6, 0.0))],
             })
@@ -641,19 +776,26 @@ mod tests {
             6,
             "the forwarded spawn, the base race, and the raced registration all attribute"
         );
-        // Continues the same cumulative chain: the raced 1,015 + 3 input.
-        assert_eq!(raced[5]["aggregateUsage"]["input"], 1_018);
+        assert_eq!(
+            raced
+                .iter()
+                .map(|row| row["aggregateUsage"]["input"].as_u64().unwrap())
+                .collect::<Vec<_>>(),
+            vec![1_010, 1_017, 1_018, 1_020, 1_025, 1_028],
+            "handoff and stale producer caches cannot discard confirmed usage"
+        );
     }
 
     #[tokio::test]
     async fn multiple_children_and_origins_share_the_cumulative_base() {
         let raw_parent = usage_block(1_000, 100, 0, 0, 1_100, 0.01);
         let (_tmp, manager) = manager_with_assistant(raw_parent);
-        let producer = RlmChildUsageAttributions::new(manager.clone());
+        let producer = producer(manager.clone());
         producer.register_spawn("sub-one").await;
         producer.register_spawn("sub-two").await;
         producer
             .record_child_usage(RlmChildUsageReport {
+                report_id: uuid::Uuid::new_v4().to_string(),
                 rlm_child_id: "sub-one".to_string(),
                 batches: vec![(
                     ChildUsageOrigin::SpawnTask,
@@ -663,6 +805,7 @@ mod tests {
             .await;
         producer
             .record_child_usage(RlmChildUsageReport {
+                report_id: uuid::Uuid::new_v4().to_string(),
                 rlm_child_id: "sub-two".to_string(),
                 batches: vec![
                     (
@@ -698,9 +841,10 @@ mod tests {
     #[tokio::test]
     async fn unregistered_child_report_attributes_nothing() {
         let (_tmp, manager) = manager_with_assistant(usage_block(1, 1, 0, 0, 2, 0.0));
-        let producer = RlmChildUsageAttributions::new(manager.clone());
+        let producer = producer(manager.clone());
         producer
             .record_child_usage(RlmChildUsageReport {
+                report_id: uuid::Uuid::new_v4().to_string(),
                 rlm_child_id: "sub-unknown".to_string(),
                 batches: vec![(
                     ChildUsageOrigin::SpawnTask,
@@ -712,5 +856,202 @@ mod tests {
         assert!(rows
             .iter()
             .all(|row| row["type"] != "child_usage_attributed"));
+    }
+
+    /// A store whose appends fail while the toggle is set, so a report's
+    /// first delivery fails and its retry persists.
+    struct FailingAppendStore {
+        store: SessionUsageStore,
+        fail: std::sync::atomic::AtomicBool,
+    }
+
+    impl RlmChildUsageStore for FailingAppendStore {
+        fn last_assistant(&self) -> RlmChildUsageFuture<'_, Option<(String, Usage)>> {
+            self.store.last_assistant()
+        }
+
+        fn append_attribution(
+            &self,
+            row_id: &str,
+            target_id: &str,
+            child_usage: Usage,
+            origin: Option<ChildUsageOrigin>,
+        ) -> RlmChildUsageFuture<'_, std::io::Result<ChildUsageAppendResult>> {
+            if self.fail.load(std::sync::atomic::Ordering::Relaxed) {
+                return Box::pin(std::future::ready(Err(std::io::Error::other(
+                    "append disabled",
+                ))));
+            }
+            self.store
+                .append_attribution(row_id, target_id, child_usage, origin)
+        }
+    }
+
+    /// A failed append returns false and writes no row; the retry persists
+    /// the batch once, folding from the unchanged base (no double fold).
+    #[tokio::test]
+    async fn a_failed_append_leaves_the_base_for_the_retry() {
+        let raw_parent = usage_block(1_000, 0, 0, 0, 4_096, 0.0);
+        let (_tmp, manager) = manager_with_assistant(raw_parent);
+        let store = std::sync::Arc::new(FailingAppendStore {
+            store: SessionUsageStore(manager.clone()),
+            fail: std::sync::atomic::AtomicBool::new(true),
+        });
+        let producer = RlmChildUsageAttributions::new(store.clone());
+        producer.register_spawn("sub-flaky").await;
+        let report = || RlmChildUsageReport {
+            report_id: uuid::Uuid::new_v4().to_string(),
+            rlm_child_id: "sub-flaky".to_string(),
+            batches: vec![(
+                ChildUsageOrigin::SpawnTask,
+                usage_block(10, 5, 0, 0, 15, 0.01),
+            )],
+        };
+        assert!(!producer.record_child_usage(report()).await);
+        let rows = file_rows(&manager).await;
+        assert!(rows
+            .iter()
+            .all(|row| row["type"] != "child_usage_attributed"));
+
+        store
+            .fail
+            .store(false, std::sync::atomic::Ordering::Relaxed);
+        assert!(producer.record_child_usage(report()).await);
+        let rows = file_rows(&manager).await;
+        let attributed: Vec<&serde_json::Value> = rows
+            .iter()
+            .filter(|row| row["type"] == "child_usage_attributed")
+            .collect();
+        assert_eq!(attributed.len(), 1, "the retry persisted the batch once");
+        assert_eq!(attributed[0]["aggregateUsage"]["input"], 1_010);
+    }
+
+    enum FailurePoint {
+        BeforeSecondAppend,
+        AfterFirstAppend,
+    }
+
+    /// Fail one chosen store acknowledgment while retaining real transcript writes.
+    struct InterruptedAppendStore {
+        store: SessionUsageStore,
+        calls: std::sync::atomic::AtomicUsize,
+        point: FailurePoint,
+    }
+
+    impl RlmChildUsageStore for InterruptedAppendStore {
+        fn last_assistant(&self) -> RlmChildUsageFuture<'_, Option<(String, Usage)>> {
+            self.store.last_assistant()
+        }
+
+        fn append_attribution(
+            &self,
+            row_id: &str,
+            target_id: &str,
+            child_usage: Usage,
+            origin: Option<ChildUsageOrigin>,
+        ) -> RlmChildUsageFuture<'_, std::io::Result<ChildUsageAppendResult>> {
+            let target_id = target_id.to_string();
+            let row_id = row_id.to_string();
+            Box::pin(async move {
+                let call = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                if matches!(self.point, FailurePoint::BeforeSecondAppend) && call == 1 {
+                    return Err(std::io::Error::other("injected second append failure"));
+                }
+                let result = self
+                    .store
+                    .append_attribution(&row_id, &target_id, child_usage, origin)
+                    .await?;
+                if matches!(self.point, FailurePoint::AfterFirstAppend) && call == 0 {
+                    return Err(std::io::Error::other("injected lost append acknowledgment"));
+                }
+                Ok(result)
+            })
+        }
+    }
+
+    /// Acknowledged origins must not be folded again when a later origin fails.
+    #[tokio::test]
+    async fn a_partially_persisted_report_is_counted_once_on_retry() {
+        let (_tmp, manager) = manager_with_assistant(usage_block(1_000, 0, 0, 0, 4_096, 0.0));
+        let producer =
+            RlmChildUsageAttributions::new(std::sync::Arc::new(InterruptedAppendStore {
+                store: SessionUsageStore(manager.clone()),
+                calls: std::sync::atomic::AtomicUsize::new(0),
+                point: FailurePoint::BeforeSecondAppend,
+            }));
+        producer.register_spawn("sub-partial").await;
+        let report = RlmChildUsageReport {
+            report_id: uuid::Uuid::new_v4().to_string(),
+            rlm_child_id: "sub-partial".to_string(),
+            batches: vec![
+                (
+                    ChildUsageOrigin::SpawnTask,
+                    usage_block(10, 0, 0, 0, 10, 0.01),
+                ),
+                (
+                    ChildUsageOrigin::AgentMessage,
+                    usage_block(20, 0, 0, 0, 20, 0.02),
+                ),
+            ],
+        };
+        assert!(!producer.record_child_usage(report.clone()).await);
+        assert!(producer.record_child_usage(report).await);
+        let rows = file_rows(&manager).await;
+        let attributions: Vec<_> = rows
+            .iter()
+            .filter(|row| row["type"] == "child_usage_attributed")
+            .map(|row| {
+                serde_json::json!({
+                    "origin": row["origin"],
+                    "childInput": row["childUsage"]["input"],
+                    "aggregateInput": row["aggregateUsage"]["input"],
+                })
+            })
+            .collect();
+        assert_eq!(
+            attributions,
+            vec![
+                serde_json::json!({"origin": "spawn_task", "childInput": 10, "aggregateInput": 1010}),
+                serde_json::json!({"origin": "agent_message", "childInput": 20, "aggregateInput": 1030}),
+            ]
+        );
+    }
+
+    /// An error after a complete real append cannot safely mean nothing persisted.
+    #[tokio::test]
+    async fn a_persisted_report_with_lost_acknowledgment_is_not_appended_twice() {
+        let (_tmp, manager) = manager_with_assistant(usage_block(1_000, 0, 0, 0, 4_096, 0.0));
+        let producer =
+            RlmChildUsageAttributions::new(std::sync::Arc::new(InterruptedAppendStore {
+                store: SessionUsageStore(manager.clone()),
+                calls: std::sync::atomic::AtomicUsize::new(0),
+                point: FailurePoint::AfterFirstAppend,
+            }));
+        producer.register_spawn("sub-uncertain").await;
+        let report = RlmChildUsageReport {
+            report_id: uuid::Uuid::new_v4().to_string(),
+            rlm_child_id: "sub-uncertain".to_string(),
+            batches: vec![(
+                ChildUsageOrigin::SpawnTask,
+                usage_block(10, 0, 0, 0, 10, 0.01),
+            )],
+        };
+        assert!(!producer.record_child_usage(report.clone()).await);
+        let rows = file_rows(&manager).await;
+        assert_eq!(
+            rows.iter()
+                .filter(|row| row["type"] == "child_usage_attributed")
+                .count(),
+            1
+        );
+        assert!(producer.record_child_usage(report).await);
+        let rows = file_rows(&manager).await;
+        assert_eq!(
+            rows.iter()
+                .filter(|row| row["type"] == "child_usage_attributed")
+                .count(),
+            1,
+            "the complete disk row survives the failed acknowledgment and must be reused"
+        );
     }
 }

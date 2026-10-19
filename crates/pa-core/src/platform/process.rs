@@ -5,6 +5,13 @@
 
 use std::process::Command;
 
+/// The real Unix user id, matching Node `process.getuid()` for daemon namespaces.
+#[cfg(unix)]
+#[must_use]
+pub fn current_user_id() -> u32 {
+    nix::unistd::Uid::current().as_raw()
+}
+
 /// Termination signal for [`kill_pid`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Signal {
@@ -232,9 +239,7 @@ pub fn pid_exists(pid: u32) -> bool {
 
 /// The kernel-held process handle (`pidfd_open`): pins the exact process
 /// behind the pid, so a signal through it ([`pidfd_signal`]) reaches that
-/// process even if the numeric pid is recycled afterwards. The caller
-/// treats an unobtainable handle as never-signal: a missed stop is
-/// recoverable, a wrong one is not.
+/// process even if the numeric pid is recycled afterwards.
 ///
 /// # Errors
 ///

@@ -216,7 +216,7 @@ pub fn format_skills_for_prompt(skills: &[Skill]) -> String {
     }
     let mut lines = vec![
         "\n\nThe following skills provide specialized instructions for specific tasks.".to_string(),
-        "Use ipython to inspect a skill's file when the task matches its description.".to_string(),
+        "Use python_repl to inspect a skill's file when the task matches its description.".to_string(),
         "Skills with a python_import are prepared in the persistent Python kernel when available and can be called directly by that import name.".to_string(),
         "When a skill file references a relative path, resolve it against the skill directory (parent of SKILL.md / dirname of the path) and use that absolute path in tool commands.".to_string(),
         String::new(),

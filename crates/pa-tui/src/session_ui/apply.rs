@@ -2,9 +2,8 @@
 //! rows, compaction aborts, and the telemetry seams.
 use super::{
     assistant_message_parts, event_to_update, pop_superseded_attempt_row, AgentView, ChatEntry,
-    CompactionReason, CompactionState, DaemonClientEvent, DaemonCommand, Duration, Map,
-    MessageBlock, Result, RetryState, SessionUi, StatusKind, ToolResultView, TurnUpdate, Value,
-    UI_REQUEST_TIMEOUT_MS,
+    CompactionReason, CompactionState, DaemonClientEvent, DaemonCommand, Map, MessageBlock, Result,
+    RetryState, SessionUi, StatusKind, ToolResultView, TurnUpdate, Value,
 };
 
 /// One backgrounded compaction-abort outcome: a failed abort surfaces as
@@ -105,37 +104,6 @@ impl SessionUi {
 
     pub(crate) fn apply_background_note(&mut self, text: &str, view: &mut AgentView) {
         self.note(text, view);
-    }
-
-    /// A compaction succeeded and the durable transcript was rebuilt: re-fetch it. Best effort — a
-    /// failed fetch keeps the pushed outcome row instead of an empty transcript.
-    pub(crate) async fn rebuild_transcript(&mut self, view: &mut AgentView) {
-        self.transcript_stale = false;
-        self.last_status_index = None;
-        self.pressed_click = None;
-        let Ok(data) = self
-            .bounded_request(
-                Duration::from_millis(UI_REQUEST_TIMEOUT_MS),
-                DaemonCommand::GetMessages {
-                    id: None,
-                    active_session_id: self.active_session_id.clone(),
-                    rest: Map::default(),
-                },
-            )
-            .await
-        else {
-            return;
-        };
-        let Some(messages) = data.get("messages").and_then(Value::as_array) else {
-            return;
-        };
-        let entries = crate::snapshot::transcript_to_entries(messages);
-        view.clear_chat();
-        for entry in entries {
-            view.push_entry(entry);
-        }
-        view.follow();
-        self.dirty = true;
     }
 
     /// Report the first scroll action of the run (`tui_scroll_count`),
@@ -557,8 +525,8 @@ impl SessionUi {
             } => {
                 view.compaction = None;
                 if let Some(result) = result {
-                    // A succeeded compaction rebuilt the durable transcript: show the outcome
-                    // row immediately, then re-fetch so the compacted-away rows drop.
+                    // The display transcript keeps every row: the summary appends at the
+                    // compaction's own position.
                     view.push_entry(ChatEntry::CompactionSummary {
                         summary: result
                             .get("summary")
@@ -571,7 +539,7 @@ impl SessionUi {
                             .unwrap_or_default(),
                         custom_instructions,
                     });
-                    self.transcript_stale = true;
+                    self.compaction_settled = true;
                 } else if reason == "manual" {
                     // Aborts and error messages surface only for user-issued compactions.
                     if aborted {
@@ -920,7 +888,7 @@ impl SessionUi {
     /// `tui ipython bash rendered`: the settled ipython card that renders
     /// as bash reports its bash share, primitives only.
     fn track_ipython_bash_rendered(&self, card: &crate::tool_card::ToolCallCard) {
-        if card.name != "ipython" {
+        if !pa_types::ai::is_python_tool_name(&card.name) {
             return;
         }
         let Some(stats) = crate::tool_card::ipython::bash_dominated_stats(card) else {

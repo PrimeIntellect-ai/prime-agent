@@ -209,7 +209,7 @@ async fn goal_turn_end_loop_runs_to_completion() {
                 "first pursuit turn",
                 "second pursuit turn",
                 { "content": [
-                    { "type": "toolCall", "name": "ipython",
+                    { "type": "toolCall", "name": "python_repl",
                       "arguments": { "code": "import goal; await goal.complete()" } },
                 ] },
                 "wrap-up after the completion",

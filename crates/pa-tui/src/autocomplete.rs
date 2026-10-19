@@ -10,6 +10,7 @@ use crate::width::str_width;
 use crate::{Line, Span};
 use pa_types::slash_commands::SlashCommandRegistry;
 
+mod file_index;
 mod fuzzy_file_search;
 pub use fuzzy_file_search::FileSearch;
 
@@ -248,7 +249,7 @@ fn home_dir() -> std::path::PathBuf {
 
 /// The `@`-attachment token at the cursor: the token feeds the fuzzy
 /// file search below the session cwd (or the typed scope).
-fn extract_at_prefix(text: &[char]) -> Option<String> {
+pub(crate) fn extract_at_prefix(text: &[char]) -> Option<String> {
     if let Some(quoted) = extract_quoted_prefix(text) {
         if quoted.starts_with("@\"") {
             return Some(quoted);
@@ -738,6 +739,8 @@ pub struct CombinedAutocompleteProvider {
     /// command's argument position (e.g. the `/tier` tier choices).
     arguments: std::collections::HashMap<&'static str, Vec<CompletionItem>>,
     paths: PathCompletionProvider,
+    /// The `@` file search's in-memory file index (one per session view).
+    file_index: file_index::FileIndex,
 }
 
 impl CombinedAutocompleteProvider {
@@ -772,6 +775,7 @@ impl CombinedAutocompleteProvider {
             hidden: HashSet::default(),
             arguments: HashMap::default(),
             paths: PathCompletionProvider { base },
+            file_index: file_index::FileIndex::new(),
         }
     }
 
@@ -896,6 +900,7 @@ impl AutocompleteProvider for CombinedAutocompleteProvider {
         if let Some(at_prefix) = extract_at_prefix(&before) {
             return Some(SuggestionLookup::Searching(fuzzy_file_search::spawn(
                 &self.paths.base,
+                self.file_index.clone(),
                 at_prefix,
             )));
         }

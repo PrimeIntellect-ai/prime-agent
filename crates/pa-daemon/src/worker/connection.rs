@@ -1,12 +1,12 @@
 //! Client connections: accept, authenticate, and the frame/event plumbing
 //! between the worker and its supervisor.
 use super::{
-    active_session_id_of, anyhow, bind_transport, broadcast, create_daemon_replay_info,
-    current_protocol_info, default_client_capabilities, json, normalize_client_capabilities,
-    peer_command_allowed, response_failure, response_success, worker_peer_command_allowed,
-    worker_server_capabilities, write_frame, write_frame_segments, Arc, AtomicU64, ConnectionRole,
-    Context, DaemonOutbound, DaemonResponse, DaemonResumeCursor, Map, Ordering, Result,
-    TransportStream, Value, Worker, WorkerRecoveryJournal, DAEMON_APP_VERSION, DAEMON_SCHEMA_ID,
+    active_session_id_of, anyhow, app_version, bind_transport, broadcast,
+    create_daemon_replay_info, current_protocol_info, default_client_capabilities, json,
+    normalize_client_capabilities, peer_command_allowed, response_failure, response_success,
+    worker_peer_command_allowed, worker_server_capabilities, write_frame, write_frame_segments,
+    Arc, AtomicU64, ConnectionRole, Context, DaemonOutbound, DaemonResponse, DaemonResumeCursor,
+    Map, Ordering, Result, TransportStream, Value, Worker, WorkerRecoveryJournal, DAEMON_SCHEMA_ID,
     DAEMON_SCHEMA_REVISION, DEFAULT_PRIVATE_FRAME_LIMITS, PEER_COMMAND_NOT_ALLOWED,
 };
 
@@ -210,14 +210,6 @@ impl Worker {
     ///
     /// Panics when the recovery mutex is poisoned.
     pub async fn serve(self: Arc<Self>) -> Result<()> {
-        *self.recovery.lock().unwrap() = Some(WorkerRecoveryJournal::open(
-            &self.config.recovery_journal_path,
-        )?);
-        // A worker spawned under a supervisor arms the orphan-exit monitor:
-        // nobody else reaps it if the supervisor dies without a graceful stop.
-        if !self.config.supervisor_socket_path.as_os_str().is_empty() {
-            crate::supervisor_lost::start(self.clone());
-        }
         if let Err(error) = crate::socket::prepare_socket_path(&self.config.socket_path).await {
             // The no-listener confirmation of the close handshake: an
             // exit path already parked on the confirmation proceeds (its
@@ -257,6 +249,21 @@ impl Worker {
         *self.bound_socket_identity.lock().unwrap() =
             crate::socket::socket_identity(&self.config.socket_path);
         crate::socket::restrict_socket_path(&self.config.socket_path);
+        match WorkerRecoveryJournal::open(&self.config.recovery_journal_path) {
+            Ok(journal) => *self.recovery.lock().unwrap() = Some(journal),
+            Err(error) => {
+                drop(listener);
+                let identity = self.bound_socket_identity.lock().unwrap().clone();
+                crate::socket::cleanup_socket_path_after_close(&self.config.socket_path, identity);
+                self.listener_closed.notify_one();
+                return Err(error);
+            }
+        }
+        // No journal snapshot is loaded before endpoint and write ownership.
+        if !self.config.supervisor_socket_path.as_os_str().is_empty() {
+            crate::supervisor_lost::start(self.clone());
+        }
+
         // This loop owns the bound listener and hands its close to the
         // exit paths (TS daemon-mode.ts:8011-8018 awaits `server.close()`
         // FIRST and cleans the socket path after): an exiting path
@@ -325,7 +332,7 @@ impl Worker {
             protocol: current_protocol_info(),
             schema_id: Some(DAEMON_SCHEMA_ID.to_string()),
             schema_revision: Some(DAEMON_SCHEMA_REVISION),
-            app_version: Some(DAEMON_APP_VERSION.to_string()),
+            app_version: Some(app_version().to_string()),
             runtime: None,
             supervisor_generation: None,
             supervisor_pid: Some(u64::from(std::process::id())),
@@ -758,6 +765,8 @@ impl Worker {
     }
 }
 
+const ATTACH_TAIL_MESSAGE_BUDGET: usize = 512;
+
 impl Worker {
     pub(crate) fn handle_attach(&self, payload: &Value) -> DaemonResponse {
         if let Err(response) = self.require_created("attach") {
@@ -825,18 +834,31 @@ impl Worker {
             core.attached_client_ids.push(client_id.clone());
         }
         let summary = self.summary_locked(&core, summary_inputs);
-        let mut messages: Vec<Value> = core
-            .store
-            .as_ref()
-            .map(crate::session_store::SessionFile::messages)
-            .unwrap_or_default();
+        let client_capabilities = echoed_client_capabilities
+            .clone()
+            .unwrap_or_else(|| capabilities.clone());
+        let windowed = crate::snapshot_stream::wants_windowed(&client_capabilities);
+        let (mut messages, history_before_entry_id, last_user_prompt_ms) = match core.store.as_ref()
+        {
+            Some(store) if windowed => store
+                .transcript_page(&pa_types::daemon::TranscriptPage::End {
+                    before: None,
+                    limit: ATTACH_TAIL_MESSAGE_BUDGET,
+                })
+                .map_or((Vec::new(), None, None), |page| {
+                    (
+                        page.messages,
+                        page.first_entry_id.filter(|_| page.more),
+                        page.last_user_prompt_ms,
+                    )
+                }),
+            Some(store) => (store.messages(), None, None),
+            None => (Vec::new(), None, None),
+        };
         // The image-payload elision: `elide_snapshot_images` clients read the
         // transcript without base64 payloads; the client's set is
         // `capabilities` unless the routed attach carried
         // `clientCapabilities`.
-        let client_capabilities = echoed_client_capabilities
-            .clone()
-            .unwrap_or_else(|| capabilities.clone());
         if crate::snapshot_stream::wants_image_elision(&client_capabilities) {
             crate::snapshot_stream::elide_snapshot_image_payloads(&mut messages);
         }
@@ -863,6 +885,12 @@ impl Worker {
             "children": [],
         });
         snapshot["messages"] = Value::Array(messages);
+        if let Some(entry_id) = history_before_entry_id {
+            snapshot["historyBeforeEntryId"] = json!(entry_id);
+            if let Some(last_user_prompt_ms) = last_user_prompt_ms {
+                snapshot["lastUserPromptMs"] = json!(last_user_prompt_ms);
+            }
+        }
         // Slim clients read summary/messages from the snapshot; duplicating
         // them at the top level would serialize the history twice per attach.
         let slim = capabilities.iter().any(|cap| cap == "slim_attach");

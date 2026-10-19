@@ -1,5 +1,6 @@
 //! The unauthenticated catalog fetch layer.
 
+use std::sync::OnceLock;
 use std::time::Duration;
 
 use thiserror::Error;
@@ -49,10 +50,12 @@ pub enum FetchOutcome {
 }
 
 /// The shared catalog HTTP client. One instance serves both catalog URLs;
-/// each request is bounded by the timeout and the byte cap.
+/// each request is bounded by the timeout and the byte cap. The `reqwest`
+/// client is built on the first request, so a process that never fetches
+/// never loads the native trust store.
 #[derive(Debug)]
 pub struct CatalogFetcher {
-    client: reqwest::Client,
+    client: OnceLock<reqwest::Client>,
     timeout: Duration,
     max_bytes: usize,
 }
@@ -69,26 +72,31 @@ impl CatalogFetcher {
         Self::with_limits(FETCH_TIMEOUT, MAX_RESPONSE_BYTES)
     }
 
-    /// A client with explicit bounds (tests; the Prime Inference 2 MiB cap).
-    ///
-    /// # Panics
-    ///
-    /// Panics if the reqwest client fails to build.
+    /// A fetcher with explicit bounds (tests; the Prime Inference 2 MiB cap).
     #[must_use]
     pub fn with_limits(timeout: Duration, max_bytes: usize) -> Self {
-        let client = reqwest::Client::builder()
-            // A moved catalog must be a client change, never a silent hop.
-            .redirect(reqwest::redirect::Policy::none())
-            .build()
-            .expect("catalog reqwest client");
         Self {
-            client,
+            client: OnceLock::new(),
             timeout,
             max_bytes,
         }
     }
 
+    fn client(&self) -> &reqwest::Client {
+        self.client.get_or_init(|| {
+            pa_ai::utils::tls::http_client_builder()
+                // A moved catalog must be a client change, never a silent hop.
+                .redirect(reqwest::redirect::Policy::none())
+                .build()
+                .expect("catalog reqwest client")
+        })
+    }
+
     /// GET `url` with catalog headers and the optional cached `ETag`.
+    ///
+    /// # Panics
+    ///
+    /// Panics on the first request if the reqwest client fails to build.
     ///
     /// # Errors
     ///
@@ -102,6 +110,10 @@ impl CatalogFetcher {
     /// [`CatalogFetcher::fetch`] plus extra request headers (credentials for
     /// the credentialed Prime Inference fetch).
     ///
+    /// # Panics
+    ///
+    /// Panics on the first request if the reqwest client fails to build.
+    ///
     /// # Errors
     ///
     /// Returns `FetchError::Transport` on request failure, refused redirects
@@ -114,7 +126,7 @@ impl CatalogFetcher {
         extra_headers: &[(String, String)],
     ) -> Result<FetchOutcome, FetchError> {
         let mut request = self
-            .client
+            .client()
             .get(url)
             .timeout(self.timeout)
             .header("accept", "application/json")

@@ -159,7 +159,8 @@ class SyntheticRepo:
         runtime = root / "runtime"
         runtime.mkdir()
         (runtime / "pyproject.toml").write_text("[project]\nname='rlm'\n")
-        (runtime / "src").mkdir()
+        (runtime / "src" / "rlm").mkdir(parents=True)
+        (runtime / "src" / "rlm" / "repl.py").write_text("# fixture REPL\n")
         # The exe-adjacent kernel runtime tree package_release.py stages.
         kernel = root / "prime-agent-runtime"
         (kernel / "src" / "rlm").mkdir(parents=True)

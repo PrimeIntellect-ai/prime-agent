@@ -166,33 +166,14 @@ impl Inner {
                 self.register_late_sent_agent_message_handler(&execution.request_id, callback);
             }
 
-            let mut stdout = std::mem::take(&mut buffers.stdout);
-            buffers.stdout_chars = 0;
-            let mut stderr = std::mem::take(&mut buffers.stderr);
-            buffers.stderr_chars = 0;
+            let stdout = std::mem::take(&mut buffers.stdout).finish(execution.max_chars);
+            let stderr = std::mem::take(&mut buffers.stderr).finish(execution.max_chars);
             let mut result = buffers.result.take();
             let mut status = buffers.status;
-            if buffers.stdout_truncated {
-                let _ = write!(
-                    stdout,
-                    "\n[... output truncated at {} chars ...]",
-                    execution.max_chars
-                );
-            }
-            if buffers.stderr_truncated {
-                let _ = write!(
-                    stderr,
-                    "\n[... output truncated at {} chars ...]",
-                    execution.max_chars
-                );
-            }
             if let Some(text) = &result {
-                if text.len() > execution.max_chars {
-                    let mut clipped = text[..execution.max_chars.clamp(0, text.len())].to_string();
-                    // Trim at a char boundary when max_chars split a multi-byte char.
-                    while !clipped.is_char_boundary(clipped.len()) {
-                        clipped.pop();
-                    }
+                if let Some((end, _)) = text.char_indices().nth(execution.max_chars) {
+                    // Match the Unicode-scalar limit used for stdout and stderr.
+                    let mut clipped = text[..end].to_string();
                     let _ = write!(
                         clipped,
                         "\n[... output truncated at {} chars ...]",

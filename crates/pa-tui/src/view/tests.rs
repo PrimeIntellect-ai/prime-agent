@@ -12,6 +12,42 @@ fn view() -> AgentView {
     AgentView::new(Theme::builtin("prime", ColorMode::TrueColor))
 }
 
+#[test]
+fn markdown_link_targets_use_the_owning_view_cwd() {
+    let first_path = std::env::temp_dir().join("markdown-first");
+    let second_path = std::env::temp_dir().join("markdown-second");
+    let first_url = url::Url::from_directory_path(&first_path)
+        .unwrap()
+        .join("url")
+        .unwrap()
+        .to_string();
+    let second_url = url::Url::from_directory_path(&second_path)
+        .unwrap()
+        .join("url")
+        .unwrap()
+        .to_string();
+    let mut first = view();
+    first.chrome.cwd = first_path.to_string_lossy().into_owned();
+    first.push_entry(ChatEntry::User {
+        text: "[link](url)".to_string(),
+    });
+    let mut second = view();
+    second.chrome.cwd = second_path.to_string_lossy().into_owned();
+    second.push_entry(ChatEntry::User {
+        text: "[link](url)".to_string(),
+    });
+    let targets =
+        |v: &mut AgentView| crate::hyperlinks::frame_link_ranges(&v.render_transcript(80));
+    let first_targets = targets(&mut first);
+    let second_targets = targets(&mut second);
+    assert!(first_targets.iter().any(|link| link.url == first_url));
+    assert!(second_targets.iter().any(|link| link.url == second_url));
+    assert_eq!(targets(&mut first), first_targets);
+    first.chrome.cwd = second_path.to_string_lossy().into_owned();
+    assert_eq!(targets(&mut first), second_targets);
+    assert!(targets(&mut first).iter().all(|link| link.url != first_url));
+}
+
 /// The hardware caret never sits over the factory page: the page is an
 /// input-less replacement view, so `frame_cursor` suppresses the stale
 /// editor dock position while it is open (the settings menu's guard
@@ -44,7 +80,7 @@ fn a_paste_never_reaches_the_editor_behind_an_overlay() {
     let editor_text = |view: &AgentView| view.editor.get_lines().join("\n");
     // The /effort picker takes it into its search.
     let mut v = view();
-    v.effort_picker = Some(crate::effort_picker::EffortPicker::new(
+    v.choice_picker = Some(crate::choice_picker::ChoicePicker::effort(
         &["high".to_string()],
         None,
     ));
@@ -217,8 +253,8 @@ fn hint_rows_carry_the_platform_alt_label() {
     v.queue_selected = Some(crate::queued::QueueSelectionItem {
         lane: crate::queued::QueueLane::Steering,
         index: 0,
+        position: 0,
         text: "turn right".to_string(),
-        internal: false,
     });
     let frame = v.render_frame(80, 24);
     let joined = frame.iter().map(text_of).collect::<Vec<_>>().join("\n");
@@ -249,23 +285,6 @@ fn frame_is_exactly_height_rows() {
     assert!(joined.contains("prime agent v0.0.0"));
     assert!(joined.contains("Collapsed mode (Ctrl+O to expand)"));
     assert!(joined.contains('>'));
-}
-
-#[test]
-fn osc_emissions_reemit_only_changed_rows() {
-    let mut v = view();
-    v.chrome.version = "0.0.0".to_string();
-    v.chrome.cwd = "/w".to_string();
-    v.chrome.chat_name = "w".to_string();
-    v.push(TranscriptItem::UserMessage {
-        text: "hello".to_string(),
-    });
-    let frame = v.render_frame(80, 24);
-    let first = v.take_osc_emissions(&frame);
-    let marked: Vec<usize> = first.iter().map(|(row, _)| *row).collect();
-    assert!(!marked.is_empty());
-    let again = v.take_osc_emissions(&frame);
-    assert!(again.is_empty());
 }
 
 /// Fill the transcript past one window so there is scrollable history.
@@ -1409,8 +1428,8 @@ fn browse_header_pair_sits_below_the_editor_top_row() {
     v.queue_selected = Some(crate::queued::QueueSelectionItem {
         lane: crate::queued::QueueLane::Steering,
         index: 0,
+        position: 0,
         text: "turn right".to_string(),
-        internal: false,
     });
     let frame = v.render_frame(80, 24);
     let joined: Vec<String> = frame.iter().map(text_of).collect();

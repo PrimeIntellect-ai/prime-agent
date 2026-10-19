@@ -34,11 +34,12 @@ getrandom = "0.3"
 url = "2"
 hmac = "0.12"
 globset = "0.4"
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "stream"] }
+toml.workspace = true
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-native-roots", "rustls-tls-webpki-roots", "json", "stream"] }
 tar = "0.4"
 flate2 = "1"
 unicode-normalization = "0.1"
-serde_yaml = "0.9"
+serde_yaml = { package = "yaml_serde", version = "0.10.7" }
 ignore = "0.4"
 
 [dev-dependencies]
@@ -47,10 +48,6 @@ proptest = { workspace = true }
 # The traces rate-gate test runs on paused tokio time (the 12s platform
 # interval auto-advances).
 tokio = { workspace = true, features = ["test-util"] }
-
-[[test]]
-name = "golden_system_prompt"
-path = "tests/golden/system_prompt.rs"
 
 [lints.clippy]
 # pa-core keeps its OWN lints table (not `workspace = true`): the

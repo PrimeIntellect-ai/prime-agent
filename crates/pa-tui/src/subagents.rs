@@ -41,7 +41,7 @@ impl SessionIdentity {
             keys.push(format!("session:{id}"));
         }
         if let Some(path) = self.session_file.as_deref() {
-            keys.push(format!("file:{path}"));
+            keys.push(crate::agents_view_state::file_identity(path));
         }
         keys
     }
@@ -78,7 +78,7 @@ pub(crate) fn summary_parent_keys(summary: &Value) -> Vec<String> {
         keys.push(format!("session:{id}"));
     }
     if let Some(path) = get_str(summary, "parentSessionPath") {
-        keys.push(format!("file:{path}"));
+        keys.push(crate::agents_view_state::file_identity(path));
     }
     keys
 }
@@ -93,7 +93,7 @@ pub(crate) fn summary_identity_keys(summary: &Value) -> Vec<String> {
         keys.push(format!("session:{id}"));
     }
     if let Some(path) = get_str(summary, "sessionFile") {
-        keys.push(format!("file:{path}"));
+        keys.push(crate::agents_view_state::file_identity(path));
     }
     keys
 }
@@ -147,7 +147,13 @@ pub(crate) fn depth_consistent_binding(
     else {
         return false;
     };
-    parent_file == Some(parent_path) && parent_depth == Some(depth - 1)
+    // The binding compares the SAME file's two Windows string forms (the
+    // raw summary form against the ledger's verbatim form), so it folds
+    // through the shared normalizer - an exact compare detaches the
+    // ledger's children exactly where the forest's keys do.
+    let parent_file = parent_file.map(crate::agents_view_state::normalize_session_file_path);
+    let normalized_path = crate::agents_view_state::normalize_session_file_path(parent_path);
+    parent_file.as_deref() == Some(normalized_path.as_str()) && parent_depth == Some(depth - 1)
 }
 
 /// Every row whose summary descends from `parent`, breadth-first over the
@@ -223,25 +229,6 @@ pub fn descendant_positions_with_depth(
     positions
 }
 
-/// The descendant positions of `parent`, depth-free (the flat
-/// consumers).
-#[must_use]
-pub fn descendant_positions(summaries: &[&Value], parent: &SessionIdentity) -> Vec<usize> {
-    descendant_positions_with_depth(summaries, parent)
-        .into_iter()
-        .map(|(position, _)| position)
-        .collect()
-}
-
-/// The summaries that descend from `parent`.
-#[must_use]
-pub fn descendant_rows<'a>(summaries: &[&'a Value], parent: &SessionIdentity) -> Vec<&'a Value> {
-    descendant_positions(summaries, parent)
-        .into_iter()
-        .map(|position| summaries[position])
-        .collect()
-}
-
 /// The roster entries that descend from `parent`, with each entry's
 /// depth below it (1 = a direct child).
 ///
@@ -264,15 +251,6 @@ pub fn descendant_entries_with_depth<'a>(
     descendant_positions_with_depth(&summaries, parent)
         .into_iter()
         .map(|(position, depth)| (with_summaries[position], depth))
-        .collect()
-}
-
-/// The roster entries that descend from `parent`.
-#[must_use]
-pub fn descendant_entries<'a>(roster: &'a [Value], parent: &SessionIdentity) -> Vec<&'a Value> {
-    descendant_entries_with_depth(roster, parent)
-        .into_iter()
-        .map(|(entry, _)| entry)
         .collect()
 }
 
@@ -328,7 +306,7 @@ pub fn count_descendants(roster: &[Value], parent: &SessionIdentity) -> Subagent
 /// agents view bills the session's row. `None` when the roster holds no
 /// record for the session.
 pub(crate) fn family_cost(roster: &[Value], session: &SessionIdentity) -> Option<f64> {
-    let records = crate::agents_view_state::reconcile_unified_sessions(roster, &[]);
+    let records = crate::agents_view_state::reconcile_unified_sessions(roster, &[], None);
     let rollups = crate::agents_view_forest::compute_rollups(&records);
     let keys = session.keys();
     records
@@ -469,7 +447,7 @@ mod tests {
         assert_eq!(family_cost(&roster, &identity), Some(2.30));
         // Pinned against the agents-view row itself, not a second copy
         // of the formula.
-        let records = crate::agents_view_state::reconcile_unified_sessions(&roster, &[]);
+        let records = crate::agents_view_state::reconcile_unified_sessions(&roster, &[], None);
         let rollups = crate::agents_view_forest::compute_rollups(&records);
         let rows = crate::agents_view_forest::build_rows(
             &records,

@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::Map;
 
@@ -181,6 +181,7 @@ pub(crate) struct TerminalCompactionRecord {
 /// worker descriptors, latest record per session. Declared records feed
 /// the replacement-worker create replay until they are consumed.
 pub(crate) struct TerminalCompactionJournal {
+    _write_owner: crate::journal::JournalWriteOwner,
     path: PathBuf,
     latest: HashMap<String, TerminalCompactionRecord>,
     /// Failed durable writes stay retryable in memory (the replay retries them).
@@ -194,19 +195,35 @@ impl TerminalCompactionJournal {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
+        let write_owner = crate::journal::journal_write_owner(path)?;
+        let latest = Self::load(path)?;
+        if crate::journal::tail_is_torn(path)? {
+            let records = latest
+                .values()
+                .map(serde_json::to_value)
+                .collect::<std::result::Result<Vec<_>, _>>()?;
+            crate::journal::rewrite_records(path, &records, crate::journal::Finalize::Synced)?;
+        }
         Ok(TerminalCompactionJournal {
-            latest: Self::load(path),
+            _write_owner: write_owner,
+            latest,
             retryable: HashMap::new(),
             path: path.to_path_buf(),
         })
     }
 
-    fn load(path: &Path) -> HashMap<String, TerminalCompactionRecord> {
-        let Ok(content) = std::fs::read_to_string(path) else {
-            return HashMap::new();
+    fn load(path: &Path) -> Result<HashMap<String, TerminalCompactionRecord>> {
+        let bytes = match std::fs::read(path) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(HashMap::new());
+            }
+            Err(error) => {
+                return Err(error).with_context(|| format!("read journal {}", path.display()));
+            }
         };
         let mut latest = HashMap::new();
-        for line in content.lines() {
+        for line in crate::journal::decode_journal_lines(&bytes, path)? {
             if line.trim().is_empty() {
                 continue;
             }
@@ -215,7 +232,7 @@ impl TerminalCompactionJournal {
             };
             latest.insert(record.active_session_id.clone(), record);
         }
-        latest
+        Ok(latest)
     }
 
     /// Record the terminal declaration (durable before the synthetic end goes out, so a
@@ -291,6 +308,20 @@ pub(crate) fn abort_grace() -> Duration {
 }
 
 impl crate::supervisor::Supervisor {
+    pub(crate) fn with_compaction_journal<T>(
+        &self,
+        action: impl FnOnce(&mut TerminalCompactionJournal) -> Result<T>,
+    ) -> Result<T> {
+        let mut journal = self
+            .compaction_journal
+            .lock()
+            .expect("compaction journal lock");
+        let journal = journal
+            .as_mut()
+            .context("terminal compaction journal is not initialized")?;
+        action(journal)
+    }
+
     /// The `abort_compaction` supervisor arm: acknowledge immediately (TS `abortCompaction`
     /// is always instant), forward best-effort, declare terminal a run past the grace.
     pub(crate) async fn handle_abort_compaction(
@@ -447,13 +478,9 @@ impl crate::supervisor::Supervisor {
     ) {
         let session_file = resident.descriptor.lock().await.session_file.clone();
         let declared = crate::util::now_iso();
-        let terminal = {
-            let mut journal = self
-                .compaction_journal
-                .lock()
-                .expect("compaction journal lock");
+        let terminal = self.with_compaction_journal(|journal| {
             let Some(terminal) = take() else {
-                return;
+                return Ok(None);
             };
             let record = TerminalCompactionRecord {
                 version: 1,
@@ -469,7 +496,17 @@ impl crate::supervisor::Supervisor {
                     terminal.active_session_id
                 ));
             }
-            terminal
+            Ok(Some(terminal))
+        });
+        let terminal = match terminal {
+            Ok(Some(terminal)) => terminal,
+            Ok(None) => return,
+            Err(error) => {
+                self.log_line(&format!(
+                    "terminal compaction journal unavailable: {error:#}"
+                ));
+                return;
+            }
         };
         self.note_compaction_abort_declared();
         // The synthetic `compaction_end`: an abort carries `aborted: true` with no error
@@ -710,6 +747,7 @@ mod tests {
                 })
                 .unwrap();
             journal.clear("session-b").unwrap();
+            drop(journal);
             let mut reopened = TerminalCompactionJournal::open(&path).unwrap();
             assert_eq!(reopened.pending("session-b").unwrap(), None);
         }
@@ -796,6 +834,7 @@ mod tests {
         std::fs::remove_dir(&path).unwrap();
         let pending = failing.pending("session-a").unwrap().expect("retried");
         assert_eq!(pending.reason, "threshold");
+        drop(failing);
         let reloaded = TerminalCompactionJournal::open(&path).unwrap();
         assert!(reloaded.latest.contains_key("session-a"));
 
@@ -811,5 +850,195 @@ mod tests {
             "the cleared record never reappears"
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn terminal_journal_read_failure_stops_recovery() {
+        let dir = std::env::temp_dir().join(format!("pa-comp-sup-{}", uuid::Uuid::new_v4()));
+        let path = dir.join("unreadable.jsonl");
+        std::fs::create_dir_all(&path).unwrap();
+        let sentinel = path.join("preserve");
+        std::fs::write(&sentinel, b"original data").unwrap();
+
+        assert!(TerminalCompactionJournal::open(&path).is_err());
+        assert_eq!(std::fs::read(&sentinel).unwrap(), b"original data");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn terminal_journal_open_heals_torn_utf8_tail() {
+        let dir = std::env::temp_dir().join(format!("pa-comp-sup-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("compaction-supervision.jsonl");
+        let mut torn: Vec<u8> = br#"{"version":1,"type":"terminal_compaction","activeSessionId":"session-a","sessionFile":"/sessions/a.jsonl","reason":"threshold","declaredAt":"2026-09-23T00:00:00Z"}"#.to_vec();
+        torn.push(b'\n');
+        let whole = r#"{"activeSessionId":"session-b","reason":"shütdown"}"#;
+        torn.extend_from_slice(&whole.as_bytes()[..=whole.find('ü').unwrap()]);
+        assert!(std::str::from_utf8(&torn).is_err());
+        std::fs::write(&path, torn).unwrap();
+
+        {
+            let mut journal = TerminalCompactionJournal::open(&path).unwrap();
+            assert!(journal.pending("session-a").unwrap().is_some());
+            journal
+                .declare(TerminalCompactionRecord {
+                    version: 1,
+                    r#type: TERMINAL_COMPACTION_RECORD_TYPE.to_string(),
+                    active_session_id: "session-b".to_string(),
+                    session_file: None,
+                    reason: "threshold".to_string(),
+                    declared_at: "2026-09-23T00:00:01Z".to_string(),
+                })
+                .unwrap();
+        }
+        let mut reopened = TerminalCompactionJournal::open(&path).unwrap();
+        assert!(
+            reopened.pending("session-b").unwrap().is_some(),
+            "the record appended after the reopened journal must survive a reload"
+        );
+        assert!(reopened.pending("session-a").unwrap().is_some());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn corrupt_complete_terminal_identifiers_are_preserved_before_recovery_fails() {
+        for newline_terminated in [true, false] {
+            let dir = std::env::temp_dir().join(format!("pa-comp-sup-{}", uuid::Uuid::new_v4()));
+            std::fs::create_dir_all(&dir).unwrap();
+            let path = dir.join("compaction-supervision.jsonl");
+            let mut journal = TerminalCompactionJournal::open(&path).unwrap();
+            journal
+                .declare(TerminalCompactionRecord {
+                    version: 1,
+                    r#type: TERMINAL_COMPACTION_RECORD_TYPE.to_string(),
+                    active_session_id: "badXsession".to_string(),
+                    session_file: None,
+                    reason: "threshold".to_string(),
+                    declared_at: "2026-10-11T00:00:00Z".to_string(),
+                })
+                .unwrap();
+            drop(journal);
+            let mut bytes = std::fs::read(&path).unwrap();
+            let marker = b"badXsession";
+            let offset = bytes
+                .windows(marker.len())
+                .position(|part| part == marker)
+                .unwrap();
+            bytes[offset + 3] = 0xff;
+            if newline_terminated {
+                bytes.extend_from_slice(br#"{"activeSessionId":"torn"#);
+            } else {
+                assert_eq!(bytes.pop(), Some(b'\n'));
+            }
+            std::fs::write(&path, &bytes).unwrap();
+            assert!(TerminalCompactionJournal::open(&path).is_err());
+            assert_eq!(std::fs::read(&path).unwrap(), bytes);
+            std::fs::remove_dir_all(dir).unwrap();
+        }
+    }
+
+    #[test]
+    fn a_competing_terminal_writer_cannot_replace_an_active_append() {
+        use std::io::Write;
+        let dir = std::env::temp_dir().join(format!("pa-comp-sup-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("compaction-supervision.jsonl");
+        let first = TerminalCompactionRecord {
+            version: 1,
+            r#type: TERMINAL_COMPACTION_RECORD_TYPE.to_string(),
+            active_session_id: "session-a".to_string(),
+            session_file: None,
+            reason: "threshold".to_string(),
+            declared_at: "2026-10-11T00:00:00Z".to_string(),
+        };
+        let second = TerminalCompactionRecord {
+            active_session_id: "session-b".to_string(),
+            declared_at: "2026-10-11T00:00:01Z".to_string(),
+            ..first.clone()
+        };
+        let mut owner = TerminalCompactionJournal::open(&path).unwrap();
+        owner.declare(first.clone()).unwrap();
+        let mut bytes = serde_json::to_vec(&second).unwrap();
+        bytes.push(b'\n');
+        let split = bytes.len() / 2;
+        let mut active_append = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap();
+        active_append.write_all(&bytes[..split]).unwrap();
+        let expected = std::fs::read(&path).unwrap();
+        let competing = TerminalCompactionJournal::open(&path);
+        assert_eq!(std::fs::read(&path).unwrap(), expected);
+        assert!(
+            competing.is_err(),
+            "a rival writer must not acquire the active journal"
+        );
+        active_append.write_all(&bytes[split..]).unwrap();
+        active_append.sync_all().unwrap();
+        drop(active_append);
+        drop(owner);
+        let mut reopened = TerminalCompactionJournal::open(&path).unwrap();
+        assert_eq!(reopened.pending("session-a").unwrap(), Some(&first));
+        assert_eq!(reopened.pending("session-b").unwrap(), Some(&second));
+        drop(reopened);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_competing_supervisor_does_not_heal_before_socket_admission() {
+        use std::io::Write;
+        let dir = std::path::PathBuf::from("/tmp").join(format!("pa-c-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let options = crate::supervisor::SupervisorOptions {
+            socket_path: dir.join("supervisor.sock"),
+            agent_dir: dir.join("agent"),
+        };
+        let descriptor_dir =
+            crate::descriptor::descriptor_dir(&options.agent_dir, &options.socket_path);
+        std::fs::create_dir_all(&descriptor_dir).unwrap();
+        let path = descriptor_dir.join("compaction-supervision.jsonl");
+        let first = TerminalCompactionRecord {
+            version: 1,
+            r#type: TERMINAL_COMPACTION_RECORD_TYPE.to_string(),
+            active_session_id: "session-a".to_string(),
+            session_file: None,
+            reason: "threshold".to_string(),
+            declared_at: "2026-10-11T00:00:00Z".to_string(),
+        };
+        let second = TerminalCompactionRecord {
+            active_session_id: "session-b".to_string(),
+            declared_at: "2026-10-11T00:00:01Z".to_string(),
+            ..first.clone()
+        };
+        let mut original = serde_json::to_vec(&first).unwrap();
+        original.push(b'\n');
+        std::fs::write(&path, original).unwrap();
+        let listener = pa_types::platform::transport::bind_transport(&options.socket_path)
+            .await
+            .unwrap();
+        // A legacy writer does not take the proposed journal sidecar lock.
+        let mut active_append = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap();
+        let mut bytes = serde_json::to_vec(&second).unwrap();
+        bytes.push(b'\n');
+        let split = bytes.len() / 2;
+        active_append.write_all(&bytes[..split]).unwrap();
+        let expected = std::fs::read(&path).unwrap();
+        let contender = crate::supervisor::Supervisor::new(options).unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), expected);
+        assert!(std::sync::Arc::new(contender).run().await.is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), expected);
+        active_append.write_all(&bytes[split..]).unwrap();
+        active_append.sync_all().unwrap();
+        drop(active_append);
+        let mut reopened = TerminalCompactionJournal::open(&path).unwrap();
+        assert_eq!(reopened.pending("session-a").unwrap(), Some(&first));
+        assert_eq!(reopened.pending("session-b").unwrap(), Some(&second));
+        drop(reopened);
+        drop(listener);
+        std::fs::remove_dir_all(dir).unwrap();
     }
 }

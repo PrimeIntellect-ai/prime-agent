@@ -76,10 +76,12 @@ async fn monitor(worker: Arc<Worker>) {
         if since.elapsed() < window {
             continue;
         }
-        let ongoing = worker.core.lock().unwrap().has_ongoing_work();
+        let ongoing =
+            worker.core.lock().unwrap().has_ongoing_work() || worker.user_bash.is_running();
         if ongoing {
-            // TS `hasOngoingSessionWork`: an active run owns the worker a little
-            // longer; its turn end lets the next check reconsider.
+            // TS `hasOngoingSessionWork` (`isSessionActive`, which counts
+            // `isBashRunning`): an active run or a running user bash owns the
+            // worker a little longer; its end lets the next check reconsider.
             continue;
         }
         exit_orphaned(&worker, since).await;
@@ -104,6 +106,23 @@ async fn exit_orphaned(worker: &Worker, absent_since: tokio::time::Instant) {
         agent_engine.dispose_kernel().await;
     }
     let _ = worker.record_recovery(false, "shutdown");
+    // The lease is retained through exit, but the sidecars still get the
+    // holder's current state before the process dies; a drain writer
+    // racing the fold leaves a valid warm tail (the load re-checks the
+    // generation and prefix).
+    let lease = worker
+        .core
+        .lock()
+        .unwrap()
+        .store
+        .as_ref()
+        .and_then(|store| store.lease.clone());
+    if let Some(lease) = lease {
+        lease.write_sidecars();
+    }
+    // Retain the lease through process exit: kernel disposal has a bounded
+    // host-request drain, so writers may survive until the process dies.
+    // The dead-owner sweep or the next acquire reclaims its directory.
     // The listener closes FIRST and the cleanup probes the path with the
     // owner's bind provably released (the TS graceful-shutdown sequence,
     // shared with `exit_after_close`), so both a REPLACED file and a

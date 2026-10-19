@@ -273,6 +273,7 @@ impl OnboardingScreen {
         kb: &crate::keybindings::KeybindingsManager,
     ) -> Vec<Line> {
         let width = width.max(1);
+        let auth_panel_open = matches!(self.panel.as_ref(), Some(OnboardingPanel::Auth { .. }));
         let mut lines: Vec<Line> = vec![Vec::new()];
         lines.extend(self.mark_rows(theme, width));
         lines.push(Vec::new());
@@ -287,6 +288,15 @@ impl OnboardingScreen {
             // A started flow with no mounted panel keeps one blank row in the gap.
             None => lines.push(Vec::new()),
             Some(panel) => lines.extend(panel.render(theme, width, kb)),
+        }
+        // A long sign-in link can wrap through the splash's fixed logo rows. Yield the logo
+        // first so the full auth block fits whenever the pane can hold it. On a shorter terminal,
+        // keep the block's final input and action rows visible like the session dock does.
+        if auth_panel_open && lines.len() > height {
+            lines.drain(..(LOGO_LINES.len() + 2));
+            if lines.len() > height {
+                lines.drain(..lines.len() - height);
+            }
         }
         while lines.len() < height {
             lines.push(Vec::new());
@@ -719,6 +729,60 @@ mod tests {
         assert!(
             waiting > url,
             "the waiting line rides below the URL block: {text:?}"
+        );
+    }
+
+    /// When the link wraps, the decorative mark yields its rows to the complete link and the
+    /// action row. A 24-row terminal has room for both once the mark is omitted.
+    #[test]
+    fn wrapped_onboarding_auth_url_keeps_the_link_and_actions_visible() {
+        let mut screen = OnboardingScreen::welcome();
+        screen.mount_panel(crate::onboarding_flow::OnboardingPanel::Auth {
+            panel: std::boxed::Box::new(crate::auth_panel::AuthPanel::onboarding(
+                "Login to Prime Inference",
+            )),
+            heading: Some(crate::onboarding_flow::PRIME_LOGIN_HEADING.to_string()),
+        });
+        let url = format!("https://example.test/oauth?state={}", "a".repeat(450));
+        screen.apply_auth_request(crate::auth_panel::AuthPanelRequest::AuthUrl {
+            url: url.clone(),
+            instructions: None,
+        });
+        screen.apply_auth_request(crate::auth_panel::AuthPanelRequest::PastePrompt {
+            prompt: "Redirect URL:".to_string(),
+            tone: crate::auth_panel::PastePromptTone::Text,
+            style: crate::auth_panel::PasteStyle::Visible,
+            allow_empty: false,
+            reply: tokio::sync::oneshot::channel().0,
+        });
+        let theme = Theme::builtin("prime", ColorMode::TrueColor);
+        let rows = screen.render(&theme, 40, 24, &kb());
+        let text: Vec<String> = rows
+            .iter()
+            .map(|row| {
+                let raw = row
+                    .iter()
+                    .map(|span| span.content.as_str())
+                    .collect::<String>();
+                crate::hyperlinks::strip_osc8_content(&raw)
+            })
+            .collect();
+        let joined = text.iter().map(|row| row.trim()).collect::<String>();
+        assert!(
+            joined.contains(&url),
+            "the complete URL remains visible: {text:?}"
+        );
+        assert!(
+            joined.contains("Redirect URL:"),
+            "the paste prompt remains visible: {text:?}"
+        );
+        assert!(
+            joined.contains("Paste value"),
+            "the paste field remains visible: {text:?}"
+        );
+        assert!(
+            joined.contains("copy") && joined.contains("cancel"),
+            "the URL actions remain visible: {text:?}"
         );
     }
 

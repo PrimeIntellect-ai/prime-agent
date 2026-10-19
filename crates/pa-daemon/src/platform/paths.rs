@@ -9,9 +9,26 @@ use crate::paths::hash_key;
 /// Default directory holding daemon socket files (Unix).
 #[cfg(unix)]
 pub fn socket_dir() -> PathBuf {
-    let uid = current_uid().unwrap_or_else(|| "user".to_string());
+    let uid = pa_core::platform::process::current_user_id();
     let tmp = std::env::var_os("TMPDIR").map_or_else(|| PathBuf::from("/tmp"), PathBuf::from);
-    tmp.join(format!("prime-agent-{uid}"))
+    socket_dir_for(&tmp, uid)
+}
+
+/// Reserve the longest generated endpoint before selecting a directory. Linux
+/// can re-anchor deep paths through /proc; other Unix platforms need a short path.
+#[cfg(unix)]
+fn socket_dir_for(tmp: &Path, uid: u32) -> PathBuf {
+    let name = format!("prime-agent-{uid}");
+    let dir = tmp.join(&name);
+    #[cfg(not(target_os = "linux"))]
+    if std::os::unix::net::SocketAddr::from_pathname(
+        dir.join("worker-000000000000-000000000000.sock"),
+    )
+    .is_err()
+    {
+        return Path::new("/tmp").join(name);
+    }
+    dir
 }
 
 /// The socket-dir half of a discovery state root on Windows: TS computes
@@ -20,22 +37,6 @@ pub fn socket_dir() -> PathBuf {
 #[must_use]
 pub fn socket_dir() -> PathBuf {
     std::env::temp_dir().join("prime-agent-user")
-}
-
-/// Read the effective uid without libc: `/proc/self/status` on Linux,
-/// HOME-derived uniqueness elsewhere (best-effort, same as today).
-#[cfg(unix)]
-fn current_uid() -> Option<String> {
-    if let Ok(status) = std::fs::read_to_string("/proc/self/status") {
-        for line in status.lines() {
-            if let Some(rest) = line.strip_prefix("Uid:") {
-                if let Some(first) = rest.split_whitespace().next() {
-                    return Some(first.to_string());
-                }
-            }
-        }
-    }
-    None
 }
 
 /// Default supervisor endpoint: `daemon.sock` in the socket dir (Unix) or
@@ -83,6 +84,49 @@ pub use pa_types::platform::socket_identity;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn default_socket_uses_the_same_real_uid_as_the_typescript_daemon() {
+        let output = std::process::Command::new("id")
+            .arg("-ru")
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        let uid = String::from_utf8(output.stdout).unwrap();
+        let tmp = std::env::var_os("TMPDIR").map_or_else(|| PathBuf::from("/tmp"), PathBuf::from);
+        assert_eq!(
+            socket_dir(),
+            socket_dir_for(&tmp, uid.trim().parse().unwrap())
+        );
+    }
+
+    #[cfg(all(unix, not(target_os = "linux")))]
+    #[test]
+    fn generated_endpoints_fit_even_when_tmpdir_is_deep() {
+        use std::os::unix::net::SocketAddr;
+
+        for length in [20, 65, 120] {
+            let tmp = PathBuf::from(format!("/{}", "d".repeat(length - 1)));
+            let dir = socket_dir_for(&tmp, 501);
+            let worker = dir.join("worker-000000000000-000000000000.sock");
+            assert!(SocketAddr::from_pathname(&worker).is_ok());
+            if length >= 65 {
+                assert_eq!(dir, Path::new("/tmp/prime-agent-501"));
+            } else {
+                assert_eq!(dir, tmp.join("prime-agent-501"));
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn short_tmpdir_keeps_the_original_socket_directory() {
+        assert_eq!(
+            socket_dir_for(Path::new("/tmp"), 501),
+            Path::new("/tmp/prime-agent-501")
+        );
+    }
 
     #[test]
     fn worker_socket_names_are_deterministic() {

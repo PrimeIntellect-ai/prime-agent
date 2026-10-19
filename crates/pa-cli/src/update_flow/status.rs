@@ -80,11 +80,17 @@ impl StatusWriter {
     /// # Errors
     /// Returns an error when the adopted status record cannot be persisted.
     pub fn adopt(path: &Path, update_id: &UpdateId, socket_path: &str) -> Result<Self> {
-        let mut writer = Self::fresh(path, update_id, socket_path);
-        if let Some(existing) = read_status(path) {
-            writer.status.epoch = existing.epoch + 1;
-            writer.status.started_at = existing.started_at;
-        }
+        let status = read_status(path).context("read the staged coordinator status")?;
+        anyhow::ensure!(
+            status.update_id == *update_id && status.socket_path == socket_path,
+            "the staged coordinator status belongs to another update"
+        );
+        let mut writer = Self {
+            path: path.to_path_buf(),
+            status,
+        };
+        writer.status.coordinator = Some(coordinator_identity());
+        writer.touch();
         writer
             .persist()
             .context("write the adopted coordinator status")?;
@@ -291,25 +297,32 @@ mod tests {
     async fn adoption_continues_the_epoch_above_the_predecessor() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("status.json");
-        let predecessor_epoch = {
+        let predecessor = {
             // The predecessor drives the spec's legal path to `Staged`: the coordinator's
             // `set_state` asserts the transition table.
             let mut writer = StatusWriter::new(&path, &update_id(), "/tmp/s.sock").unwrap();
             writer.set_state(UpdateState::Planning).unwrap();
             writer.set_state(UpdateState::Downloading).unwrap();
             writer.set_state(UpdateState::Staged).unwrap();
-            writer.current().epoch
+            writer
+                .set_message(Some("candidate verified".to_string()))
+                .unwrap();
+            writer.current().clone()
         };
-        let successor = StatusWriter::adopt(&path, &update_id(), "/tmp/s.sock").unwrap();
-        assert!(successor.current().epoch > predecessor_epoch);
+        let mut successor = StatusWriter::adopt(&path, &update_id(), "/tmp/s.sock").unwrap();
         assert_eq!(
-            successor.current().started_at,
-            read_status(&path).unwrap().started_at
+            read_status(&path).unwrap(),
+            UpdateStatus {
+                epoch: predecessor.epoch + 1,
+                coordinator: Some(coordinator_identity()),
+                updated_at: successor.current().updated_at.clone(),
+                heartbeat_at: successor.current().heartbeat_at.clone(),
+                ..predecessor
+            }
         );
-        // The adopted status file still parses with the TS schema.
-        let read = read_status(&path).unwrap();
-        assert_eq!(read.state, UpdateState::Acquire);
-        assert!(read.epoch > predecessor_epoch);
+        // The next real coordinator transition must remain legal after handoff.
+        successor.set_state(UpdateState::Preparing).unwrap();
+        assert_eq!(read_status(&path).unwrap(), *successor.current());
     }
 
     #[tokio::test]

@@ -156,7 +156,10 @@ impl SessionFile {
             leaf_id: None,
             window: None,
             lease: None,
+            child_usage_recovery: super::child_usage::ChildUsageRecovery::default(),
+            trace_upload: None,
             anthropic_warning_shown: false,
+            skipped_lines: 0,
         };
         for line in lines {
             let line = line.with_context(read_context)?;
@@ -164,9 +167,13 @@ impl SessionFile {
             if trimmed.is_empty() {
                 continue;
             }
-            // Malformed lines are skipped, matching the TS loader.
-            if let Ok(entry) = serde_json::from_str::<SessionEntry>(trimmed) {
-                file.push_index(entry);
+            // Malformed lines are skipped, matching the TS loader. The
+            // count rides the store so the reopen that found damage can
+            // log it (the rows now STAY on disk: an append-only reopen
+            // never deletes what it skipped).
+            match serde_json::from_str::<SessionEntry>(trimmed) {
+                Ok(entry) => file.push_index(entry),
+                Err(_) => file.skipped_lines += 1,
             }
         }
         fold_child_usage_attributions(&mut file.entries);
@@ -209,7 +216,10 @@ impl SessionFile {
             leaf_id: None,
             window: None,
             lease: None,
+            child_usage_recovery: super::child_usage::ChildUsageRecovery::default(),
+            trace_upload: None,
             anthropic_warning_shown,
+            skipped_lines: 0,
         };
         // The raw rows are consumed in place: each line String drops as soon as its
         // parsed entry joins the store.
@@ -228,7 +238,7 @@ impl SessionFile {
         // retained rows, so the fold runs once every row is in.
         fold_child_usage_attributions(&mut file.entries);
         file.leaf_id = Some(window.leaf_id().to_owned());
-        let context = window.context();
+        let settings = window.settings();
         file.window = Some(SessionWindow {
             message_count: window.message_count(),
             first_message: window
@@ -239,10 +249,10 @@ impl SessionFile {
             compaction_count: window.compaction_count(),
             has_thinking_level: window.has_thinking_level(),
             has_service_tier: window.has_service_tier(),
-            model: context.model,
+            model: settings.model.clone(),
             boundary_model: window.boundary_model().cloned(),
-            thinking_level: context.thinking_level,
-            service_tier: context.service_tier,
+            thinking_level: settings.thinking_level.clone(),
+            service_tier: settings.service_tier,
             // The retained rows joined the store verbatim above, so their ids are
             // exactly the trailing `raw_count` store ids — no third parse pass.
             retained_ids: file.entries[file.entries.len() - raw_count..]
@@ -275,6 +285,9 @@ impl SessionFile {
         }
         full.leaf_id.clone_from(&self.leaf_id);
         full.lease.clone_from(&self.lease);
+        full.trace_upload.clone_from(&self.trace_upload);
+        full.child_usage_recovery
+            .clone_from(&self.child_usage_recovery);
         // The merged store's leaf is the window's leaf: re-derive the gate
         // from the merged ACTIVE branch — the full open's own-leaf answer
         // can disagree, a post-snapshot marker must hydrate, and an
@@ -303,7 +316,10 @@ impl SessionFile {
             leaf_id: None,
             window: None,
             lease: None,
+            child_usage_recovery: super::child_usage::ChildUsageRecovery::default(),
+            trace_upload: None,
             anthropic_warning_shown: false,
+            skipped_lines: 0,
         }
     }
 }

@@ -423,23 +423,24 @@ fn differential_live_export_matches_ts_binary() {
     assert_prefix(&ts_data, "ts");
     assert_prefix(&rs_data, "rust");
 
-    // The tools section: the session's registered tool contract, equal in
-    // both products (TS `state.tools` vs the Rust engine registry).
-    assert_eq!(ts_data["tools"], rs_data["tools"], "tools section");
-    let ipython_registered = ts_data["tools"]
-        .as_array()
-        .expect("tools array")
-        .iter()
-        .any(|tool| {
-            tool["name"] == "ipython"
-                && tool["description"].is_string()
-                && tool["parameters"].is_object()
-        });
-    assert!(
-        ipython_registered,
-        "ipython contract in tools: {}",
-        ts_data["tools"]
-    );
+    // The Rust tool was intentionally renamed; the TS reference still
+    // advertises ipython. Assert each surface before normalizing only that
+    // name so description/schema differences still fail the comparison.
+    let ts_tools = ts_data["tools"].as_array().expect("TS tools array");
+    let rs_tools = rs_data["tools"].as_array().expect("Rust tools array");
+    assert!(ts_tools.iter().any(|tool| tool["name"] == "ipython"));
+    assert!(rs_tools.iter().any(|tool| {
+        tool["name"] == "python_repl"
+            && tool["description"].is_string()
+            && tool["parameters"].is_object()
+    }));
+    let mut normalized_ts_tools = ts_tools.clone();
+    for tool in &mut normalized_ts_tools {
+        if tool["name"] == "ipython" {
+            tool["name"] = json!("python_repl");
+        }
+    }
+    assert_eq!(&normalized_ts_tools, rs_tools, "tools section");
 
     // The custom-tool call has no renderer in either product: the section
     // is omitted (not null), so the template's generic fallback applies

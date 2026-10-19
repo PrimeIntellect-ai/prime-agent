@@ -1,0 +1,1 @@
+- Print and JSON runs now release their session lease after the runtime stops, including error exits and panic unwinding, so detached session writers finish or are cancelled before another run can reopen the session.
