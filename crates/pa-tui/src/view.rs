@@ -135,9 +135,6 @@ pub struct AgentView {
     /// The hovered screen cell, while its row is a clickable card row
     /// (operator directive 2026-09-26); revalidated every frame.
     pub(crate) hover_pos: Option<(usize, usize)>,
-    /// Plain text of the last frame's rows: OSC zone-marker emission only
-    /// re-emits rows whose content changed.
-    osc_last_rows: std::collections::HashMap<usize, String>,
     /// Rendered rows per chat entry and detail mode: a frame re-renders only entries invalidated
     /// since the last frame, so a transcript-scale frame pays full layout once per entry/detail.
     entry_layout: Vec<[Option<EntryLayout>; 3]>,
@@ -164,7 +161,7 @@ pub struct AgentView {
     /// The width the cached rows were laid out for.
     pub(crate) layout_width: usize,
     /// Rendering options that affect cached entry rows.
-    layout_options: Option<(Theme, String, bool, bool)>,
+    layout_options: Option<layout::LayoutOptions>,
     /// Row texts of the inline frame at the last main-screen flush: the
     /// next flush diffs against this, so exits never duplicate scrollback.
     flushed_frame: Vec<String>,
@@ -326,7 +323,6 @@ impl AgentView {
             window_shows_tail: false,
             detail_transition: false,
             hover_pos: None,
-            osc_last_rows: std::collections::HashMap::new(),
             toasts: crate::toast::Toasts::default(),
             entry_layout: Vec::new(),
             entry_heights: Vec::new(),
@@ -347,35 +343,6 @@ impl AgentView {
             handoff_seeds: 0,
             click: click::ClickSurface::default(),
         }
-    }
-
-    /// Zone-marker emission plan for a freshly composed frame: every
-    /// marked row whose content changed since the last frame.
-    pub fn take_osc_emissions(
-        &mut self,
-        frame: &[Line],
-    ) -> Vec<(usize, crate::osc133::RowMarkers)> {
-        // Only candidate rows build their text: joining the whole frame
-        // costs O(transcript) per render.
-        let mut plan = Vec::new();
-        let mut last_rows = std::collections::HashMap::new();
-        for (row, line) in frame.iter().enumerate() {
-            let markers = crate::osc133::row_markers(line);
-            if !markers.start && !markers.end {
-                continue;
-            }
-            let text: String = line.iter().map(|s| s.content.as_str()).collect();
-            let changed = self
-                .osc_last_rows
-                .get(&row)
-                .is_none_or(|prev| prev != &text);
-            if changed {
-                plan.push((row, markers));
-            }
-            last_rows.insert(row, text);
-        }
-        self.osc_last_rows = last_rows;
-        plan
     }
 
     pub fn terminal_rows(&self) -> u16 {
@@ -504,6 +471,117 @@ impl AgentView {
                 matches!(self.chat.last(), Some(ChatEntry::AgentMessage(_)));
         }
         self.push_entry(entry);
+    }
+
+    pub fn prepend_entries(&mut self, entries: Vec<ChatEntry>) {
+        let count = entries.len();
+        if count == 0 {
+            return;
+        }
+        self.pending_handoff = None;
+        let seam_before = if self.layout_width > 0 && !self.chat.is_empty() {
+            self.count_entry_rows(0, self.layout_width)
+        } else {
+            0
+        };
+        self.reanchor_paused_window_for_prepend();
+        let cursor_spacing_before = self.prepend_cursor_spacing(0);
+        self.splice_chat(0..0, entries);
+        self.note_prepended_entries(count, seam_before, cursor_spacing_before);
+    }
+
+    /// Replace `range`, which lies below the viewport, with `entries`: a paused
+    /// viewport keeps its rows.
+    pub fn replace_entries(&mut self, range: std::ops::Range<usize>, entries: Vec<ChatEntry>) {
+        self.pending_handoff = None;
+        let width = self.layout_width;
+        // The entry after the range re-measures too: its spacing follows its neighbor.
+        let follower = usize::from(range.end < self.chat.len());
+        let rows = |view: &Self, from: usize, to: usize| -> usize {
+            (from..to)
+                .map(|index| view.count_entry_rows(index, width))
+                .sum()
+        };
+        let before = if width > 0 {
+            rows(self, range.start, range.end + follower)
+        } else {
+            0
+        };
+        let start = range.start;
+        let inserted = entries.len();
+        self.splice_chat(range, entries);
+        if width > 0 {
+            let after = rows(self, start, start + inserted + follower);
+            self.sparse_tail_delta(after as isize - before as isize, start);
+        }
+    }
+
+    /// Drop the first `count` entries, which lie above the viewport: the window
+    /// re-anchors to the tail, which they do not touch.
+    pub fn drop_leading_entries(&mut self, count: usize) {
+        if count == 0 {
+            return;
+        }
+        self.pending_handoff = None;
+        self.reanchor_paused_window_for_prepend();
+        self.splice_chat(0..count, Vec::new());
+        self.note_dropped_entries(count);
+    }
+
+    /// Splice the chat and every per-entry cache keyed by its index.
+    fn splice_chat(&mut self, range: std::ops::Range<usize>, entries: Vec<ChatEntry>) {
+        let inserted = entries.len();
+        let removed = range.len();
+        let shift = |index: usize| -> Option<usize> {
+            if index < range.start {
+                Some(index)
+            } else if index < range.end {
+                None
+            } else {
+                Some(index - removed + inserted)
+            }
+        };
+        if let Some((index, rows)) = self.sparse_mutation {
+            self.sparse_mutation = shift(index).map(|index| (index, rows));
+        }
+        {
+            let mut caches = self.md_caches.borrow_mut();
+            let shifted: std::collections::HashMap<usize, crate::markdown::MarkdownBlockCache> =
+                caches
+                    .drain()
+                    .filter_map(|(index, cache)| Some((shift(index)?, cache)))
+                    .collect();
+            *caches = shifted;
+        }
+        self.sparse_entries = self
+            .sparse_entries
+            .iter()
+            .filter_map(|i| shift(*i))
+            .collect();
+        self.toggled_cards = self
+            .toggled_cards
+            .iter()
+            .filter_map(|i| shift(*i))
+            .collect();
+        self.entry_layout.splice(
+            range.clone(),
+            std::iter::repeat_n([None, None, None], inserted),
+        );
+        self.entry_heights.splice(
+            range.clone(),
+            std::iter::repeat_n([None, None, None], inserted),
+        );
+        self.chat.splice(range, entries);
+    }
+
+    /// The first and last chat entries the last frame showed.
+    pub(crate) fn visible_entries(&self) -> Option<(usize, usize)> {
+        let entries = self
+            .click
+            .window_sections
+            .iter()
+            .map(|section| section.entry);
+        Some((entries.clone().min()?, entries.max()?))
     }
 
     /// Drop the whole transcript and its cached layout (a fresh snapshot
@@ -732,6 +810,8 @@ fn item_to_entry(item: TranscriptItem) -> ChatEntry {
     }
 }
 
+#[cfg(test)]
+mod prepend_tests;
 #[cfg(test)]
 mod tests;
 #[cfg(test)]

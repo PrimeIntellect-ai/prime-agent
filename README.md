@@ -66,11 +66,27 @@ Prime Agent combines a persistent Python control environment with durable harnes
 - **Agents communicate directly:** running agents can exchange messages and orchestrate one another without routing everything through the user.
 - **Long tasks keep moving:** automatic compaction, persistent goals, heartbeats, schedules, autonomous mode, and retained subagents preserve progress across turns and terminal sessions.
 
+## Slack
+
+Connect Slack from `/mcp` or run `/mcp login slack` inside Prime Agent to search
+your workspace and use Slack tools. See the [Slack connector guide](docs/slack-mcp.md)
+for OAuth setup and troubleshooting.
+
 ## Clipboard over SSH and tmux
 
 Prime Agent uses the local clipboard tool (such as `pbcopy`) when available. In tmux it asks the attached tmux client to forward a clipboard buffer if that client advertises the `Ms` capability. This works with tmux's default `set-clipboard external`, unlike application-origin OSC 52. Without tmux, remote copies request delivery using OSC 52. Terminal requests cannot confirm that your local clipboard changed, so Prime Agent reports them as unconfirmed.
 
 Nested tmux servers and terminals may still block delivery. An outer tmux with `set-clipboard external` can reject the inner server's OSC 52. In that case, run `tmux set -s set-clipboard on` on the outer server, or use native terminal selection (Shift-drag in most terminals; Option-drag in iTerm2) followed by Cmd-C. macOS Terminal.app does not support OSC 52; iTerm2 requires its “Applications in terminal may access clipboard” setting.
+
+## Custom certificate authorities
+
+HTTPS requests trust your operating system's trust store together with the bundled Mozilla roots. For servers behind a custom CA, point `NODE_EXTRA_CA_CERTS` at a PEM bundle of your CA certificates — the same variable the Node/TypeScript build honors:
+
+```bash
+export NODE_EXTRA_CA_CERTS=/path/to/your-ca.pem
+```
+
+Each transport reads the variable once when its first client is initialized. The background daemon keeps the environment it started with, so run `prime-agent shutdown` after changing it.
 
 ## Getting Started
 
@@ -97,11 +113,6 @@ prime-agent doctor [--fix]           # Inspect or repair background services
 prime-agent update [--force]         # Update Prime Agent
 prime-agent shutdown [--force]       # Stop every agent, worker, and background service
 ```
-
-The experimental Decision API (the `decisionApi.systemOneModel` setting)
-drives a decision model for real-time control tasks. See
-[Decision API setup and smoke checks](docs/decision-api.md) for the setting
-and verification in the persistent Python REPL.
 
 ## Built for Long-Running Work
 Prime Agent is built for long-running work, especially for evaluations in research. These features are available in the TUI, and when run autonomously.
@@ -135,3 +146,30 @@ If you use this codebase in your research, please cite Prime Agent:
 ```
 
 Available at [https://arxiv.org/abs/2608.23552](https://arxiv.org/abs/2608.23552).
+
+### Automatic compaction settings
+
+`/settings` exposes the global automatic compaction percentage in five-point steps,
+with a 95% default. A saved off-grid percentage stays selectable. The effective
+trigger also reserves room for retained history and summaries; the model's input
+and requested-output ceiling always takes priority. Manual compaction budgets are
+unchanged. The underlying `compaction.thresholdPercent` setting accepts 1–100,
+including fractional values; project settings can override the global setting.
+
+For per-model early compaction, use the existing provider-scoped
+`modelOverrides.<id>.contextWindow` option in `models.json`, for example:
+
+```json
+{
+  "providers": {
+    "prime-inference": {
+      "modelOverrides": {
+        "your-model-id": { "contextWindow": 524288 }
+      }
+    }
+  }
+}
+```
+
+Use the actual model ID for your provider. This sets that model's effective context
+window; it does not change every model's global compaction percentage.

@@ -59,6 +59,7 @@ pub(crate) mod piped_stdin;
 pub(crate) mod print_autonomous;
 pub(crate) mod print_boundary;
 pub(crate) mod print_goal;
+pub(crate) mod print_rlm;
 pub mod print_runtime;
 pub(crate) mod print_session_command;
 pub mod update_flow;
@@ -171,13 +172,13 @@ fn main_impl(args: &[String], runtime: &dyn mode::Runtime) -> Result<i32, String
     }
 
     // Daemon worker processes start with the worker role env var set: route
-    // straight into the worker runtime.
+    // straight into the worker runtime. The binary entry keeps the worker
+    // handshake env only for the supervisor-spawned `worker` subcommand (it
+    // strips an inherited one from every other invocation), so the routing
+    // reads that subcommand alone.
     let is_worker_process =
         std::env::var(pa_daemon::worker::WORKER_ROLE_ENV).unwrap_or_default() == "1";
-    if is_worker_process
-        && (args.first().map(String::as_str) == Some("worker")
-            || args.windows(2).any(|pair| pair == ["--mode", "daemon"]))
-    {
+    if is_worker_process && args.first().map(String::as_str) == Some("worker") {
         return run_worker_mode();
     }
 

@@ -430,11 +430,12 @@ pub(crate) async fn register_client(
     registration_endpoint: &str,
     label: &str,
     scope: Option<&str>,
+    callback_port: Option<u16>,
 ) -> Result<String> {
     validated_https_url(registration_endpoint, "Registration endpoint")?;
     let mut body = serde_json::json!({
         "client_name": format!("Prime Agent ({label})"),
-        "redirect_uris": super::oauth_callback::all_redirect_uris(),
+        "redirect_uris": super::oauth_callback::redirect_uris(callback_port)?,
         "grant_types": ["authorization_code", "refresh_token"],
         "response_types": ["code"],
         "token_endpoint_auth_method": "none",

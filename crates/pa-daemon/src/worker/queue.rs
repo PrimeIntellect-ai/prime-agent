@@ -2,7 +2,8 @@
 //! and queue recovery.
 use super::{
     emit_worker_event_with, json, oneshot, Arc, Duration, EventPump, Mutex, Notify, Result,
-    SessionCore, Value, VecDeque, WorkerRecoveryJournal, AUTONOMOUS_QUEUE_KEY,
+    SessionCore, Value, VecDeque, WorkerRecoveryJournal, AGENT_MESSAGE_SOURCE,
+    AUTONOMOUS_QUEUE_KEY,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -231,6 +232,17 @@ pub(crate) enum QueueCheckpoint {
     Settle { operation: &'static str },
 }
 
+/// Clear a withdrawn run's note before publishing an idle, empty queue.
+/// Call while holding the core lock; summary readers take core then note too.
+pub(crate) fn clear_withdrawn_progress_note(
+    core: &SessionCore,
+    engine: &dyn crate::engine::SessionEngine,
+) {
+    if !core.busy && core.steering.is_empty() && core.follow_up.is_empty() {
+        engine.clear_progress_note();
+    }
+}
+
 /// Write one queue-lane recovery checkpoint: under the recovery lock (then
 /// the core lock) the lanes and the busy verdict record from the same read.
 pub(crate) fn checkpoint_queue_recovery(
@@ -361,6 +373,18 @@ pub(crate) fn restore_queue_snapshot(
             .into_iter()
             .map(|record| {
                 let policy = record.policy();
+                // The journal retains the custom row, including the original
+                // body. Reconstruct the marker used by clear/pause/status.
+                let agent_message = record.custom_message.as_ref().and_then(|row| {
+                    (row.get("customType").and_then(Value::as_str) == Some(AGENT_MESSAGE_SOURCE))
+                        .then(|| {
+                            row.get("details")?
+                                .get("message")?
+                                .as_str()
+                                .map(str::to_string)
+                        })
+                        .flatten()
+                });
                 QueuedItem {
                     preview: record.preview,
                     message: record.message,
@@ -372,7 +396,7 @@ pub(crate) fn restore_queue_snapshot(
                         }
                     }),
                     custom_message: record.custom_message,
-                    agent_message: None,
+                    agent_message,
                     queue_key: record.queue_key,
                     admission_id: None,
                     images: Vec::new(),
@@ -571,6 +595,7 @@ pub(crate) fn withdraw_bash_completion_notice(
     recovery: &std::sync::Mutex<Option<WorkerRecoveryJournal>>,
     core: &Arc<Mutex<SessionCore>>,
     notice: &crate::engine::BashConsumedNotice,
+    engine: Option<&dyn crate::engine::SessionEngine>,
 ) {
     let removed = {
         let mut core_guard = core.lock().unwrap();
@@ -588,6 +613,9 @@ pub(crate) fn withdraw_bash_completion_notice(
         };
         core_guard.steering.retain(&mut withdraw_one);
         core_guard.follow_up.retain(withdraw_one);
+        if let Some(engine) = engine {
+            clear_withdrawn_progress_note(&core_guard, engine);
+        }
         before != core_guard.steering.len() + core_guard.follow_up.len()
     };
     if removed {

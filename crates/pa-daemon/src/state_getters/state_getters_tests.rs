@@ -20,7 +20,6 @@ async fn created_worker_at(root: &std::path::Path, session_file: &std::path::Pat
         recovery_journal_path: root.join("recovery.jsonl"),
         telemetry_disabled: None,
         script: Some(json!({ "responses": ["ack"] })),
-        decision_child: false,
     };
     let worker = Arc::new(Worker::new(config, None));
     let created = worker
@@ -50,7 +49,6 @@ async fn created_worker() -> Arc<Worker> {
         recovery_journal_path: dir.join("recovery.jsonl"),
         telemetry_disabled: None,
         script: Some(json!({ "responses": ["ack"] })),
-        decision_child: false,
     };
     let worker = Arc::new(Worker::new(config, None));
     let created = worker
@@ -718,7 +716,6 @@ async fn model_catalog_and_available_models_match_the_ts_shapes() {
         recovery_journal_path: dir.path().join("recovery.jsonl"),
         telemetry_disabled: None,
         script: Some(json!({ "responses": ["ack"] })),
-        decision_child: false,
     };
     let worker = Arc::new(Worker::new(config, None));
     let created = worker

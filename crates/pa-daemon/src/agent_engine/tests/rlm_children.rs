@@ -1,9 +1,10 @@
 //! The rlm-children tests (the persisted max-depth scan, the settled-child release probe).
 use super::*;
+use pa_core::session_engine::rlm_host::persisted_rlm_max_depth;
 
 /// The reference reader the depth scan replaced, verbatim: the whole-file
 /// read plus a full `parse_session_entries` walk. The scan
-/// (`model::persisted_rlm_max_depth`) must match it on every class.
+/// (`rlm_host::persisted_rlm_max_depth`) must match it on every class.
 fn persisted_rlm_max_depth_reference(path: Option<&str>) -> Option<u64> {
     let path = std::path::Path::new(path?);
     let content = std::fs::read_to_string(path).ok()?;
@@ -199,7 +200,7 @@ fn persisted_rlm_max_depth_scan_matches_reference_across_classes() {
         std::fs::write(&path, bytes).unwrap();
         let path_str = path.display().to_string();
         assert_eq!(
-            model::persisted_rlm_max_depth(Some(&path_str)),
+            persisted_rlm_max_depth(Some(&path_str)),
             persisted_rlm_max_depth_reference(Some(&path_str)),
             "depth class {name}"
         );
@@ -220,24 +221,24 @@ fn persisted_rlm_max_depth_scan_matches_reference_across_classes() {
         std::fs::write(&path, bytes).unwrap();
         let path_str = path.display().to_string();
         assert_eq!(
-            model::persisted_rlm_max_depth(Some(&path_str)),
+            persisted_rlm_max_depth(Some(&path_str)),
             persisted_rlm_max_depth_reference(Some(&path_str)),
             "depth class invalid_utf8"
         );
         assert!(
-            model::persisted_rlm_max_depth(Some(&path_str)).is_none(),
+            persisted_rlm_max_depth(Some(&path_str)).is_none(),
             "invalid utf8 voids the override"
         );
     }
     // Missing file and absent path: both readers keep the create-carried bound.
-    assert_eq!(model::persisted_rlm_max_depth(None), None);
+    assert_eq!(persisted_rlm_max_depth(None), None);
     assert_eq!(
-        model::persisted_rlm_max_depth(None),
+        persisted_rlm_max_depth(None),
         persisted_rlm_max_depth_reference(None)
     );
     let missing = "/nonexistent-cold-open-residual/session.jsonl";
     assert_eq!(
-        model::persisted_rlm_max_depth(Some(missing)),
+        persisted_rlm_max_depth(Some(missing)),
         persisted_rlm_max_depth_reference(Some(missing))
     );
 }

@@ -208,6 +208,7 @@ async fn run_interactive_surface(
     // autocomplete provider.
     let (commands_tx, mut commands_rx) =
         mpsc::unbounded_channel::<crate::session_ui::CommandCatalogUpdate>();
+    let (page_tx, mut page_rx) = mpsc::unbounded_channel::<crate::session_ui::TranscriptPageNote>();
     // The double-Ctrl+C force-quit guard: the terminal reader observes the pair while this loop is
     // wedged in a daemon request; a std-thread watchdog enforces the exit deadline without the
     // runtime.
@@ -308,6 +309,7 @@ async fn run_interactive_surface(
         let bash_tx = bash_tx.clone();
         let factory_tx = factory_tx.clone();
         let commands_tx = commands_tx.clone();
+        let page_tx = page_tx.clone();
         let waits_through_update_restart = route == SessionOpenRoute::AgentsView;
         tokio::spawn(async move {
             crate::update_restart_wait::wait_through_update_restart(
@@ -335,6 +337,7 @@ async fn run_interactive_surface(
                     let bash_tx = bash_tx.clone();
                     let factory_tx = factory_tx.clone();
                     let commands_tx = commands_tx.clone();
+                    let page_tx = page_tx.clone();
                     async move {
                         let (client, events) = match first {
                             Some(first) => first,
@@ -362,6 +365,7 @@ async fn run_interactive_surface(
                                 factory: factory_tx,
                                 commands: commands_tx,
                             },
+                            page_tx,
                         )
                         .await?;
                         Ok((events, session))
@@ -823,6 +827,9 @@ async fn run_interactive_surface(
     let mut session_reconnect: Option<SessionReconnect> = None;
 
     'run: while running {
+        if !session.dirty {
+            session.spawn_transcript_page(&view);
+        }
         if enhanced_keys_pending {
             if let Some((kitty, modify_other_keys)) = crate::enhanced_keys::settle_state() {
                 if let Some(telemetry) = &session.telemetry {
@@ -972,6 +979,14 @@ async fn run_interactive_surface(
                     }
                 }
             } else if let Some(input) = pending.pop_front() {
+                // Timing markers observe the previous frame without dirtying the view or
+                // adding a select/render iteration to the measured input sequence. The render
+                // count rides along: the frame capture dedupes on plain text, so restyle-only
+                // renders need a separate witness.
+                if let UiInput::Timestamp(sender) = input {
+                    sender.send((Instant::now(), renderer.headless_renders()))?;
+                    continue;
+                }
                 session.dirty = true;
                 match input {
                     UiInput::Key(key) => {
@@ -1122,6 +1137,7 @@ async fn run_interactive_surface(
                             session.run_traces_login(&mut view);
                         }
                     }
+                    UiInput::Timestamp(_) => unreachable!("timing marker handled above"),
                     UiInput::HeadlessDone => headless_done = true,
                     UiInput::WaitRender { .. } | UiInput::WaitGone { .. } => {
                         unreachable!("render barrier handled above")
@@ -1129,6 +1145,7 @@ async fn run_interactive_surface(
                     UiInput::ScrollTop => {
                         session.stop_selection_auto_scroll();
                         view.scroll_to_top();
+                        session.window.request_head();
                     }
                     UiInput::Resize => {
                         session.stop_selection_auto_scroll();
@@ -1233,7 +1250,7 @@ async fn run_interactive_surface(
         // paint; a keystroke's toast or hint) must not park behind a select that has no other wake.
         // The headless barriers' deadlines and the hint/toast expiry arm HERE, not after the frame
         // gate.
-        if session.dirty && render_deadline.is_none() {
+        if (session.dirty || session.wants_transcript_page(&view)) && render_deadline.is_none() {
             render_deadline = Some(Instant::now());
         }
         for deadline in [
@@ -1311,15 +1328,9 @@ async fn run_interactive_surface(
                     while let Ok(event) = events.try_recv() {
                         session.apply_client_event(event, &mut view);
                     }
-                    // A succeeded compaction rebuilt the durable transcript: replace the view's
-                    // chat with it, and refresh the tray usage the same way a settled turn does.
-                    if session.transcript_stale {
-                        session.rebuild_transcript(&mut view).await;
-                        session.refresh_stats().await;
-                        session.rebuild_tray(&mut view);
-                    }
-                    // A settled turn refreshes the tray's context usage.
-                    if was_active && !session.turn_active {
+                    // A settled turn or compaction refreshes the tray's context usage.
+                    let compaction_settled = std::mem::take(&mut session.compaction_settled);
+                    if compaction_settled || (was_active && !session.turn_active) {
                         session.refresh_stats().await;
                         session.rebuild_tray(&mut view);
                     }
@@ -1514,6 +1525,11 @@ async fn run_interactive_surface(
             maybe_note = notes_rx.recv() => {
                 if let Some(note) = maybe_note {
                     session.apply_background_note(&note, &mut view);
+                }
+            }
+            maybe_page = page_rx.recv() => {
+                if let Some(note) = maybe_page {
+                    session.apply_transcript_page(note, &mut view);
                 }
             }
             maybe_compaction_abort = compaction_abort_rx.recv() => {
@@ -1876,6 +1892,7 @@ async fn run_interactive_surface(
             } => {
                 last_bash_refresh = Instant::now();
                 session.spawn_bash_activity_refresh();
+                session.refresh_expanded_dock(&mut view);
             }
             () = async {
                 // The factory lane's 2s poll: the bash poll's cadence
@@ -1907,8 +1924,6 @@ async fn run_interactive_surface(
                 // accumulated state now.
             }
         }
-
-        session.sync_goal_tray(&mut view);
 
         // Spinner animation: the wall clock drives the phase, not the render rate — the frame gate
         // below caps renders, and only a phase change dirties the frame.
@@ -2009,6 +2024,17 @@ async fn run_interactive_surface(
     // switch into a mid-teardown process kill ("shutdown stalled; forced exit.", the live report),
     // so the deadline covers only the leaves that end this process.
     let handing_off = session.open_agents_view || session.pending_selection.is_some();
+    if renderer.is_terminal() && !session.open_agents_view {
+        // Leaving the run flushes only the history already loaded and contiguous with
+        // the tail: an unfinished page is abandoned (dropping the task aborts its
+        // request), a page that already arrived applies, and a resident run cut off
+        // from the tail drops before the flush.
+        session.window.retire_fetch();
+        while let Ok(note) = page_rx.try_recv() {
+            session.apply_transcript_page(note, &mut view);
+        }
+        session.collapse_transcript_window(&mut view);
+    }
     if renderer.is_terminal() && !handing_off {
         exit_guard.arm_for_exit();
     }

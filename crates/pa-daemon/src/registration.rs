@@ -349,7 +349,6 @@ mod tests {
             recovery_journal_path: dir.join("recovery.jsonl"),
             telemetry_disabled: None,
             script: None,
-            decision_child: false,
         }
     }
 

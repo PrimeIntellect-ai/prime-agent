@@ -205,6 +205,18 @@ jobs:
           components: rustfmt
       - run: cargo fmt --all --check
 
+  discussion-notifier:
+    name: discussion notification contract
+    needs: trust
+    runs-on: ubuntu-24.04
+    timeout-minutes: 3
+    if: needs.trust.result == 'success' && needs.trust.outputs.allowed == 'true' && (github.event_name != 'pull_request' || !github.event.pull_request.draft)
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - run: python3 .github/scripts/discussion-notifier/test_notify.py
+
   migration-packaging:
     name: historical upgrade packaging
     needs: trust
@@ -219,7 +231,9 @@ jobs:
         run: |
           python3 scripts/release/test_native_compat.py
           python3 scripts/release/test_npm_bridge.py
+          python3 scripts/release/test_release_publication.py
           python3 scripts/release/test_restamp.py
+          python3 scripts/release/test_channel_version.py
 
   clippy-test:
     name: check + clippy (workspace)
@@ -334,11 +348,18 @@ jobs:
       # and only synthetic loopback providers/state. One leg avoids 8 downloads.
       - name: Compare the lifecycle binaries (pinned TS reference)
         id: lifecycle_parity
-        if: matrix.shard == 1 && steps.selection.outputs.units != '0' && (hashFiles('scripts/review_graceful_shutdown_parity.py') != '' || hashFiles('scripts/review_goal_backoff_parity.py') != '' || hashFiles('scripts/review_draft_disconnect_parity.py') != '')
+        if: matrix.shard == 1 && steps.selection.outputs.units != '0' && hashFiles('scripts/review_*_parity.py') != ''
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
+          mkdir -p "${RUNNER_TEMP}/lifecycle-parity-receipts"
+          comparison_status=0
+          if [ -f scripts/review_new_goal_parity.py ]; then
+            PA_COMPACTION_TRACE=stderr RUST_BACKTRACE=1 cargo test --locked -p pa-daemon --lib \
+              lazy_build_restores_only_the_pre_admission_prompt_context -- --nocapture \
+              2>&1 | tee "${RUNNER_TEMP}/lifecycle-parity-receipts/new-goal-regression.log" || comparison_status=1
+          fi
           reference="${RUNNER_TEMP}/lifecycle-ts-reference"
           mkdir -p "${reference}"
           gh release download v0.9.8 --repo "${GITHUB_REPOSITORY}" \
@@ -355,21 +376,39 @@ jobs:
           export PA_E2E_KERNEL_PYTHON="${PRIME_AGENT_KERNEL_PYTHON}"
           export PYTHONPATH="${reference}/package/skills/goal/src"
           test -x "${PRIME_AGENT_KERNEL_PYTHON}"
-          mkdir -p "${RUNNER_TEMP}/lifecycle-parity-receipts"
-          comparison_status=0
-          for scenario in graceful_shutdown goal_backoff draft_disconnect; do
-            verifier="scripts/review_${scenario}_parity.py"
-            if [ -f "${verifier}" ]; then
-              python3 "${verifier}" --receipt "${RUNNER_TEMP}/lifecycle-parity-receipts/${scenario}.json" || comparison_status=1
+          # The pinned TS @ provider needs the real fd executable. Stage
+          # the distro binary only for the completion fixture; enumeration
+          # stays in the actual product rather than a mocked tool.
+          if [ -f scripts/review_at_completion_parity.py ]; then
+            if ! command -v fd >/dev/null && ! command -v fdfind >/dev/null; then
+              sudo apt-get update -qq
+              sudo apt-get install -y --no-install-recommends fd-find
             fi
+            if ! command -v fd >/dev/null; then
+              mkdir -p "${RUNNER_TEMP}/at-completion-tools"
+              ln -s "$(command -v fdfind)" "${RUNNER_TEMP}/at-completion-tools/fd"
+              export PATH="${RUNNER_TEMP}/at-completion-tools:${PATH}"
+            fi
+          fi
+          # Discover independently added verifiers so feature PRs do not
+          # overwrite or conflict with each other's comparison selection.
+          for verifier in scripts/review_*_parity.py; do
+            [ -f "${verifier}" ] || continue
+            scenario="${verifier#scripts/review_}"
+            scenario="${scenario%_parity.py}"
+            verifier_test="scripts/test_review_${scenario}_parity.py"
+            if [ -f "${verifier_test}" ]; then
+              python3 "${verifier_test}" || comparison_status=1
+            fi
+            python3 "${verifier}" --receipt "${RUNNER_TEMP}/lifecycle-parity-receipts/${scenario}.json" || comparison_status=1
           done
           exit "${comparison_status}"
       - name: Upload the binary comparison receipts
-        if: always() && matrix.shard == 1 && steps.selection.outputs.units != '0' && (hashFiles('scripts/review_graceful_shutdown_parity.py') != '' || hashFiles('scripts/review_goal_backoff_parity.py') != '' || hashFiles('scripts/review_draft_disconnect_parity.py') != '')
+        if: always() && matrix.shard == 1 && steps.selection.outputs.units != '0' && hashFiles('scripts/review_*_parity.py') != ''
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: lifecycle-parity-receipts-attempt-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/lifecycle-parity-receipts/*.json
+          path: ${{ runner.temp }}/lifecycle-parity-receipts/
           if-no-files-found: error
       - name: Run this shard's test subset
         if: ${{ !cancelled() && (success() || steps.lifecycle_parity.outcome == 'failure') }}
@@ -407,6 +446,29 @@ jobs:
           python3 scripts/test_ci_pr_crates.py
           python3 scripts/test_ci_test_shard_summary.py
           python3 scripts/ci_test_shard_summary.py --total ${{ env.SHARD_COUNT }} --dir manifests
+
+  # The vendored runtime suite (prime-agent-runtime): the kernel-side Python
+  # (`bash()`, the repl protocol, the bounded-await contract) has no Rust test,
+  # so this is its only CI gate — CPython 3.11, the minimum the runtime
+  # supports and the version the kernel venv pins.
+  runtime:
+    name: runtime suite (python 3.11)
+    needs: trust
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    if: needs.trust.result == 'success' && needs.trust.outputs.allowed == 'true' && (github.event_name != 'pull_request' || !github.event.pull_request.draft)
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Install uv
+        run: |
+          python3 -m pip install --user uv
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+      - name: Run the runtime suite (CPython 3.11)
+        run: |
+          cd prime-agent-runtime
+          uv run --python 3.11 python -m unittest discover -s test
 
   # The Windows job set + the supply-chain deny gate:
   #
@@ -478,7 +540,18 @@ jobs:
   # enforces.
   trust-audit:
     name: trust gate audit
-    needs: [trust, changes, fmt, clippy-test, test-shard, test-summary, windows-cross, deny]
+    needs:
+      [
+        trust,
+        changes,
+        fmt,
+        clippy-test,
+        test-shard,
+        test-summary,
+        runtime,
+        windows-cross,
+        deny,
+      ]
     if: always()
     runs-on: ubuntu-24.04
     timeout-minutes: 10

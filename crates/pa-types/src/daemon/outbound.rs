@@ -109,7 +109,6 @@ pub struct DaemonSavedSessionInfo {
     pub modified: String,
     pub message_count: u64,
     pub first_message: String,
-    pub all_messages_text: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub usage: Option<Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

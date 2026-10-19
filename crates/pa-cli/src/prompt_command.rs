@@ -99,21 +99,11 @@ fn assemble_breakdown(
         .collect::<std::collections::HashMap<String, pa_core::mcp::McpServerConfig>>();
     let (skill_overrides, generic_servers, _manager) =
         pa_core::mcp::McpManager::prompt_gating(user_servers, &agent_dir);
-    // The decision-api skill rides the prompt only while the Decision API is
-    // configured (decisionApi.systemOneModel is set).
-    let decision_api_configured = pa_core::session_engine::decision_api::decision_api_configured(
-        pa_core::settings::SettingsManager::create(cwd, &agent_dir).settings(),
-    );
-    let mut resources = load_resources(ResourceLoaderOptions {
+    let resources = load_resources(ResourceLoaderOptions {
         extra_builtin_skill_overrides: skill_overrides,
         system_prompt: None,
         ..ResourceLoaderOptions::new(cwd.to_path_buf(), agent_dir)
     })?;
-    if !decision_api_configured {
-        resources.skills.retain(|skill| {
-            skill.name != pa_core::session_engine::decision_api::DECISION_API_SKILL_NAME
-        });
-    }
     let breakdown = pa_core::prompts::system_prompt::system_prompt_breakdown(
         &pa_core::prompts::BuildSystemPromptOptions {
             cwd: cwd.display().to_string(),
@@ -126,9 +116,9 @@ fn assemble_breakdown(
                 .map(|file| (file.path.display().to_string(), file.content.clone()))
                 .collect(),
             skills: resources.skills.clone(),
-            // The shipped model-tool surface: `ipython` only; bash/edit are kernel-resident
+            // The shipped model-tool surface: `python_repl` only; bash/edit are kernel-resident
             // programmatic tools.
-            selected_tools: Some(vec!["ipython"]),
+            selected_tools: Some(vec![pa_types::ai::PYTHON_TOOL_NAME]),
             allow_recursion: Some(true),
             generic_mcp_servers: generic_servers,
             rlm_depth: Some(0),

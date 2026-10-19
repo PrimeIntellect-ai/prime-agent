@@ -4,8 +4,10 @@
 //! instead of rescanning the whole file. pa-daemon owns the sidecar:
 //! the scan state is this crate's type, and it certifies differently from
 //! pa-core's window snapshot (an exact generation there, a grown-file
-//! resume with a prefix check here). Only the lease holder writes (the
-//! worker at release); every reader loads.
+//! resume with a prefix check here). Two writers: the lease holder at
+//! release, and the catalog scan for a file it had to fold. Both persist
+//! only certified states and every load re-validates the generation or
+//! prefix, so a lost race leaves an older valid prefix, never a wrong row.
 
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
@@ -16,11 +18,14 @@ use super::info::{session_info_cache, SessionScanState};
 
 /// The sidecar format version: a sidecar serves only at exactly this
 /// version; any other version (an older or a newer build's) is a cold
-/// scan, the behavior without a sidecar. Bump on any change to
-/// [`SessionScanAccumulator`](super::info::SessionScanAccumulator) or
-/// [`UsageScan`](crate::session_usage::UsageScan) - the persisted fold's
-/// fields or semantics.
-const INFO_SIDECAR_VERSION: u32 = 1;
+/// scan, the behavior without a sidecar. Bump when an OLD sidecar's state
+/// would be wrong for this build - a new field or changed fold semantics
+/// in [`SessionScanAccumulator`](super::info::SessionScanAccumulator) or
+/// [`UsageScan`](crate::session_usage::UsageScan). Removing a field needs
+/// no bump: the plain `Deserialize` (no `deny_unknown_fields`) ignores the
+/// stale key, and the remaining state is exactly what this build's fold
+/// would have written, so the store stays warm.
+const INFO_SIDECAR_VERSION: u32 = 2;
 
 /// The on-disk envelope: the version gate plus the scan state.
 #[derive(Serialize, Deserialize)]
@@ -43,8 +48,8 @@ pub(super) fn load(path: &Path) -> Option<SessionScanState> {
     (sidecar.version == INFO_SIDECAR_VERSION).then_some(sidecar.state)
 }
 
-/// The lease-release write: persist the cached scan state for `path` (the
-/// path form the lease holder opened and read the file by - the scan
+/// The sidecar write (lease release, catalog backfill): persist the cached
+/// scan state for `path` (the path form the writer read the file by - the scan
 /// cache's key, and the form the load derives the sidecar path from) so
 /// the next process that opens the file folds only what was appended
 /// since. A fresh temp file, then the rename - a torn write never
@@ -68,10 +73,9 @@ pub(crate) fn persist_info_sidecar(path: &Path) {
         // serialized fragment into its own write syscall.
         let mut options = std::fs::OpenOptions::new();
         options.write(true).create_new(true);
-        // The sidecar carries message text (the search corpus, the first
-        // message): the temp is owner-only like the session files
-        // (`persist.rs`'s writer), and the rename carries the mode onto
-        // the sidecar.
+        // The sidecar carries message text (the first message): the temp is
+        // owner-only like the session files (`persist.rs`'s writer), and the
+        // rename carries the mode onto the sidecar.
         pa_core::platform::perms::set_private_mode(&mut options);
         let mut file = io::BufWriter::new(options.open(&temp)?);
         serde_json::to_writer(

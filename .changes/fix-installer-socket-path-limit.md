@@ -1,0 +1,1 @@
+- On macOS, a long `TMPDIR` no longer breaks the daemon socket for installer and npm installs: when the default socket path would exceed the 103-byte limit, it moves to `/tmp/prime-agent-rust-<uid>`.

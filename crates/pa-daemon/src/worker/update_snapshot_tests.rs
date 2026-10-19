@@ -14,7 +14,6 @@ async fn snapshot_after_create() -> (Arc<Worker>, DaemonResponse) {
         recovery_journal_path: dir.join("recovery.jsonl"),
         telemetry_disabled: None,
         script: Some(json!({ "responses": ["ack"] })),
-        decision_child: false,
     };
     let worker = Arc::new(Worker::new(config, None));
     // The journal is opened in `serve()`; tests open it directly so the
@@ -576,8 +575,19 @@ async fn restored_lane_rows_keep_the_child_status_provenance() {
             follow_up: Vec::new(),
         },
     );
-    let journal = WorkerRecoveryJournal::open(&worker.config.recovery_journal_path).unwrap();
-    let (steering, follow_up) = restore_queue_snapshot(&journal, "target-session");
+    let (steering, follow_up) = {
+        let recovery = worker.recovery.lock().unwrap();
+        let journal = recovery.as_ref().unwrap();
+        assert_eq!(
+            WorkerRecoveryJournal::read_queue_snapshot(
+                &worker.config.recovery_journal_path,
+                "target-session",
+            )
+            .unwrap(),
+            journal.latest_queue_snapshot("target-session"),
+        );
+        restore_queue_snapshot(journal, "target-session")
+    };
     assert_eq!(steering.len(), 1);
     assert!(follow_up.is_empty());
     assert!(

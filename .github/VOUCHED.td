@@ -2,4 +2,5 @@
 # Maintainers, bots, and collaborators with write access are allowed automatically.
 Arian-Urdu
 DariusMatin
+froody
 sirouk

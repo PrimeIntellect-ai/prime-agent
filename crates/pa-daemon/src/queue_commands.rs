@@ -91,9 +91,9 @@ impl Worker {
                 ),
             };
             if status == "applied" {
-                // A replace onto another lane moves the item to the back
-                // of the target lane. The non-overlapping direction pairs
-                // only - `target != lane` holds for every reached arm.
+                // A replace onto another lane is an arrival there: the item
+                // keeps its priority and enqueues by it. The non-overlapping
+                // direction pairs only - `target != lane` holds for every reached arm.
                 if mutation_type == "replace" {
                     if let Some(target) =
                         wire_lane(mutation.get("lane")).filter(|target| *target != lane)
@@ -104,13 +104,15 @@ impl Worker {
                             _ => None,
                         };
                         if let Some(item) = item {
-                            match target {
-                                Lane::Steering => core.steering.push_back(item),
-                                Lane::FollowUp => core.follow_up.push_back(item),
-                            }
+                            let target_lane = match target {
+                                Lane::Steering => &mut core.steering,
+                                Lane::FollowUp => &mut core.follow_up,
+                            };
+                            crate::worker::enqueue_priority(target_lane, item);
                         }
                     }
                 }
+                crate::worker::clear_withdrawn_progress_note(&core, self.engine.as_ref());
                 (status, true)
             } else {
                 (status, false)
@@ -248,7 +250,6 @@ mod tests {
             recovery_journal_path: dir.join("recovery.jsonl"),
             telemetry_disabled: None,
             script: Some(json!({ "responses": ["ack"] })),
-            decision_child: false,
         };
         let worker = Arc::new(Worker::new(config, None));
         let created = worker
@@ -675,5 +676,58 @@ mod tests {
             .front()
             .map(|item| item.message.clone());
         assert_eq!(remaining.as_deref(), Some("plain prompt"));
+    }
+
+    /// A cross-lane replace is an arrival in the target lane: the edited user
+    /// item lands after earlier user items and before parked agent messages.
+    #[tokio::test]
+    async fn cross_lane_replace_lands_before_parked_agent_messages() {
+        for (source, target, source_command, target_command, delivery_mode) in [
+            ("followUp", "steering", "follow_up", "steer", "steer"),
+            ("steering", "followUp", "steer", "follow_up", "follow_up"),
+        ] {
+            let worker = created_worker().await;
+            worker.core.lock().unwrap().busy = true;
+            for (command, payload) in [
+                (target_command, json!({ "message": "earlier" })),
+                (
+                    "worker_deliver_message",
+                    json!({
+                        "targetActiveSessionId": "queue-session",
+                        "message": "the research is done",
+                        "sender": { "activeSessionId": "source-session" },
+                        "deliveryMode": delivery_mode,
+                    }),
+                ),
+                (source_command, json!({ "message": "draft" })),
+            ] {
+                let admitted = worker.dispatch(command, &payload).await;
+                assert!(admitted.success, "{command}: {admitted:?}");
+            }
+            let replaced = worker
+                .dispatch(
+                    "mutate_queued_message",
+                    &json!({
+                        "lane": source,
+                        "index": 0,
+                        "expectedText": "draft",
+                        "mutation": { "type": "replace", "text": "edited", "lane": target },
+                    }),
+                )
+                .await;
+            assert_eq!(replaced.data, Some(json!({ "status": "applied" })));
+            let queue = worker.dispatch("get_queue", &json!({})).await;
+            let data = queue.data.expect("queue data");
+            assert_eq!(data[source], json!([]), "{source} -> {target}");
+            assert_eq!(
+                data[target],
+                json!([
+                    "earlier",
+                    "edited",
+                    "Agent message received: the research is done"
+                ]),
+                "{source} -> {target}"
+            );
+        }
     }
 }

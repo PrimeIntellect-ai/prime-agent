@@ -44,9 +44,9 @@
 #      load-bearing: a GITHUB_TOKEN-created tag fires NO downstream push
 #      event, so release.yml would never run. The App's ref creation is the
 #      push event that triggers release.yml's -beta* channel: build ->
-#      promote (beta.json, a PRERELEASE - never takes GitHub's Latest
-#      pointer; beta tags publish automatically from the release-beta
-#      environment, no approval) -> nightly-refresh rolls the rolling
+#      promote (beta.json and versioned R2 artifacts; beta tags publish
+#      automatically from the release-beta environment, no approval) ->
+#      nightly-refresh rolls the rolling
 #      `nightly` release.
 #
 # Idempotency/counter safety: if the computed tag already exists, the cut
@@ -445,4 +445,4 @@ jobs:
           tag="$(jq -r .tag "${out}/meta.json")"
           gh api -X POST "${repo}/git/refs" --input "${out}/ref.json"
           echo "annotated tag ${tag} cut at the tag-only commit ${commit_sha} (parent $(jq -r .parent "${out}/meta.json"))"
-          echo "release.yml (tag-triggered, -beta* channel) takes over: build -> promote (beta.json + prerelease; publishes automatically, no approval) -> nightly-refresh rolls the nightly release"
+          echo "release.yml (tag-triggered, -beta* channel) takes over: build -> promote (beta.json + versioned R2 artifacts; publishes automatically, no approval) -> nightly-refresh rolls the nightly release"

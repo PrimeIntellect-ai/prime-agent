@@ -6,9 +6,9 @@
 pub mod thinking_levels;
 
 pub use thinking_levels::{
-    clamp_thinking_level, get_supported_thinking_levels, models_are_equal, supports_thinking,
-    thinking_level_from_str, thinking_level_index, thinking_level_map, EXTENDED_THINKING_LEVELS,
-    SUPPORTED_THINKING_LEVELS,
+    clamp_thinking_level, get_supported_thinking_levels, minimum_reasoning, models_are_equal,
+    supports_thinking, thinking_level_from_str, thinking_level_index, thinking_level_map,
+    EXTENDED_THINKING_LEVELS, SUPPORTED_THINKING_LEVELS,
 };
 
 use serde::{Deserialize, Serialize};
@@ -248,6 +248,13 @@ pub struct ImageContent {
     pub mime_type: String,
     #[serde(flatten)]
     pub rest: JsonMap,
+}
+
+pub const PYTHON_TOOL_NAME: &str = "python_repl";
+
+#[must_use]
+pub fn is_python_tool_name(name: &str) -> bool {
+    matches!(name, PYTHON_TOOL_NAME | "python" | "ipython")
 }
 
 /// Tool call content block (`type: "toolCall"`).

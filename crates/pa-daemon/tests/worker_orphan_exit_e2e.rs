@@ -25,16 +25,18 @@ impl Drop for WorkerGuard {
 /// with the lost-exit window at zero (exit at the first availability check
 /// that cannot connect).
 fn spawn_worker(dir: &Path, supervisor_socket: &Path) -> WorkerGuard {
-    spawn_worker_with_window(dir, supervisor_socket, "0")
+    spawn_worker_with_window(dir, supervisor_socket, "0", None)
 }
 
 fn spawn_worker_with_window(
     dir: &Path,
     supervisor_socket: &Path,
     lost_exit_ms: &str,
+    script: Option<&Path>,
 ) -> WorkerGuard {
     std::fs::create_dir_all(dir.join("agent")).expect("agent dir");
-    let child = Command::new(env!("CARGO_BIN_EXE_pa-daemon"))
+    let mut command = Command::new(env!("CARGO_BIN_EXE_pa-daemon"));
+    command
         .arg("worker")
         .env(pa_daemon::worker::WORKER_ROLE_ENV, "1")
         .env(
@@ -61,7 +63,11 @@ fn spawn_worker_with_window(
         .env(
             pa_daemon::worker::WORKER_SUPERVISOR_LOST_EXIT_MS_ENV,
             lost_exit_ms,
-        )
+        );
+    if let Some(script) = script {
+        command.env(pa_daemon::worker::WORKER_SCRIPT_ENV, script);
+    }
+    let child = command
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -229,7 +235,7 @@ fn the_orphan_exit_preserves_the_session_and_allows_dead_owner_lease_reclaim() {
     let dir = tempfile::tempdir().expect("temp dir");
     let canonical_dir = std::fs::canonicalize(dir.path()).expect("canonical dir");
     let supervisor_socket = dir.path().join("never-bound-supervisor.sock");
-    let mut worker = spawn_worker_with_window(dir.path(), &supervisor_socket, "4000");
+    let mut worker = spawn_worker_with_window(dir.path(), &supervisor_socket, "4000", None);
     let worker_socket = dir.path().join("worker.sock");
     wait_worker_socket(&worker_socket);
     let session_file = canonical_dir.join("orphan-lease-session.jsonl");
@@ -272,5 +278,118 @@ fn the_orphan_exit_preserves_the_session_and_allows_dead_owner_lease_reclaim() {
     assert!(
         session_file.exists(),
         "the session file survives the lease release"
+    );
+}
+
+/// TS `isSessionActive` counts `isBashRunning`: an orphaned worker waits for a
+/// running user bash instead of exiting under it, so the command finishes and
+/// its row lands in the session file. The command is the work being waited on,
+/// not a readiness signal: an idle orphan exits at the second availability
+/// check after the client's close (checks every 5s, a 4s window), so a worker
+/// that ignored the run would exit while the 20s command still runs.
+#[test]
+fn an_orphaned_worker_waits_for_a_running_user_bash() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let canonical_dir = std::fs::canonicalize(dir.path()).expect("canonical dir");
+    let supervisor_socket = dir.path().join("never-bound-supervisor.sock");
+    let mut worker = spawn_worker_with_window(dir.path(), &supervisor_socket, "4000", None);
+    let worker_socket = dir.path().join("worker.sock");
+    wait_worker_socket(&worker_socket);
+    let session_file = canonical_dir.join("orphan-bash-session.jsonl");
+    let mut client = WorkerClient::connect(&worker_socket, "orphan-e2e-bootstrap-token");
+    let created = client.request(
+        "create",
+        &serde_json::json!({"sessionPath": session_file.to_string_lossy()}),
+    );
+    assert_eq!(created["success"], true, "create failed: {created}");
+    let command = "sleep 20; echo finished";
+    let started = client.request("execute_bash", &serde_json::json!({ "command": command }));
+    assert_eq!(started["success"], true, "execute_bash failed: {started}");
+    drop(client);
+
+    assert!(
+        wait_exit(&mut worker.child, Duration::from_secs(40)),
+        "the orphaned worker exited once the command settled"
+    );
+    let rows: Vec<serde_json::Value> = std::fs::read_to_string(&session_file)
+        .expect("session file")
+        .lines()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .map(|entry| entry["message"].clone())
+        .filter(|message| message["role"] == "bashExecution")
+        .map(|row| {
+            serde_json::json!({
+                "command": row["command"],
+                "output": row["output"],
+                "exitCode": row["exitCode"],
+                "cancelled": row["cancelled"],
+            })
+        })
+        .collect();
+    assert_eq!(
+        rows,
+        vec![serde_json::json!({
+            "command": command,
+            "output": "finished\n",
+            "exitCode": 0,
+            "cancelled": false,
+        })]
+    );
+}
+
+/// The orphan exit retains its lease through process death, but it still
+/// writes the sidecars while it holds them: a session whose turn settled
+/// leaves a current info sidecar (`generation.len == offset == file len`),
+/// so the next daemon boot folds zero bytes instead of the transcript.
+#[test]
+fn the_orphan_exit_writes_a_current_info_sidecar() {
+    let dir = tempfile::TempDir::new().expect("temp dir");
+    let canonical_dir = std::fs::canonicalize(dir.path()).expect("canonical dir");
+    let script = dir.path().join("faux-script.json");
+    std::fs::write(
+        &script,
+        r#"{"engine":"faux","responses":["orphan sidecar reply"]}"#,
+    )
+    .expect("script file");
+    let supervisor_socket = dir.path().join("never-bound-supervisor.sock");
+    let mut worker =
+        spawn_worker_with_window(dir.path(), &supervisor_socket, "4000", Some(&script));
+    let worker_socket = dir.path().join("worker.sock");
+    wait_worker_socket(&worker_socket);
+    let session_file = canonical_dir.join("orphan-sidecar-session.jsonl");
+    let mut client = WorkerClient::connect(&worker_socket, "orphan-e2e-bootstrap-token");
+    let created = client.request(
+        "create",
+        &serde_json::json!({ "sessionPath": session_file.to_string_lossy() }),
+    );
+    assert_eq!(created["success"], true, "create failed: {created}");
+    let prompted = client.request(
+        "prompt_and_wait",
+        &serde_json::json!({
+            "activeSessionId": "orphan-e2e-session",
+            "message": "orphan sidecar question",
+        }),
+    );
+    assert_eq!(prompted["success"], true, "prompt failed: {prompted}");
+    drop(client);
+
+    assert!(
+        wait_exit(&mut worker.child, Duration::from_secs(40)),
+        "the orphaned worker exited on the supervisor-lost window"
+    );
+    let file_len = std::fs::metadata(&session_file)
+        .expect("session file")
+        .len();
+    let sidecar = std::fs::read(session_file.with_extension("info-cache.json"))
+        .expect("the orphan exit wrote its info sidecar");
+    let value: serde_json::Value = serde_json::from_slice(&sidecar).expect("sidecar json");
+    let len = value["state"]["generation"]["len"]
+        .as_u64()
+        .expect("gen len");
+    let offset = value["state"]["offset"].as_u64().expect("offset");
+    assert_eq!(
+        (len, offset),
+        (file_len, file_len),
+        "the orphan exit's sidecar must be current"
     );
 }

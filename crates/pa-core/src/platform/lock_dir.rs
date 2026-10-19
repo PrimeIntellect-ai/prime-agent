@@ -510,6 +510,17 @@ pub fn try_lock_exclusive(file: &std::fs::File) -> io::Result<()> {
     file.try_lock().map_err(io::Error::other)
 }
 
+/// Release an OS file lock without waiting for duplicated or inherited handles
+/// to close. The platform wall owns the Unix and Windows unlock semantics.
+///
+/// # Errors
+///
+/// Returns the underlying OS error when unlocking fails. Unlocking a handle
+/// without a held lock may succeed or return an error, depending on the platform.
+pub fn unlock_file(file: &std::fs::File) -> io::Result<()> {
+    file.unlock()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -13,6 +13,13 @@ const MODEL_ERROR_SUGGESTION_LIMIT: usize = 3;
 pub const ANSWER_PREVIEW_MAX_CHARS: usize = 160;
 /// Cap on the one-line task label shown in kernel rosters.
 pub const LABEL_MAX_CHARS: usize = 200;
+/// Cap on the FULL final-answer text the collect envelope carries (the
+/// settle-binding data plane): the roster preview stays
+/// [`ANSWER_PREVIEW_MAX_CHARS`], while a consumer that binds outputs from
+/// the answer (the factory's output ports) needs the whole fenced JSON,
+/// so the lane is bounded instead of unbounded, never ballooning the
+/// collect reply for a runaway answer.
+pub const ANSWER_TEXT_MAX_CHARS: usize = 65_536;
 const ELLIPSIS: &str = "...";
 
 /// The model catalog the RLM surface resolves against: the same
@@ -55,7 +62,12 @@ pub fn resolve_child_model(
 
 /// The resolution before the allowlist gate: `None` inherits the parent model; a reference resolves
 /// parent equality first, then an exact catalog selector, then a unique short-form match.
-fn resolve_child_model_unchecked(
+/// Public for the daemonless print host: print sessions do not enforce
+/// `allowedModels`, so its children do not either.
+///
+/// # Errors
+/// Returns an error when the reference cannot be resolved against the catalog.
+pub fn resolve_child_model_unchecked(
     agent_dir: &Path,
     reference: Option<&str>,
     parent_model: Option<&str>,
@@ -191,7 +203,8 @@ pub fn rlm_child_label(prompt: &str) -> String {
 }
 
 /// Whitespace-collapsed text capped at `max` chars with an ellipsis.
-fn cap_text(text: &str, max: usize) -> String {
+#[must_use]
+pub fn cap_text(text: &str, max: usize) -> String {
     if text.chars().count() <= max {
         return text.to_string();
     }
@@ -434,15 +447,22 @@ mod tests {
             &dir.path().join("models.json"),
             &pa_core::models::PrivatePrimeAuthorizationCache {
                 fingerprint,
-                models: vec![serde_json::from_value(json!({
-                    "id": "internal/glm-5.3-fast", "name": "GLM 5.3 Fast",
-                    "api": "openai-completions", "provider": "prime-inference",
-                    "baseUrl": "https://api.pinference.ai/api/v1",
-                    "reasoning": true, "input": ["text"],
-                    "cost": { "input": 0.42, "output": 2.1, "cacheRead": 0, "cacheWrite": 0 },
-                    "contextWindow": 400_000, "maxTokens": 131_072
-                }))
-                .unwrap()],
+                // The durable wire items (an `/models` payload shape): the
+                // read path parses and builds the model from them.
+                items: vec![json!({
+                    "id": "internal/glm-5.3-fast",
+                    "display_name": "GLM 5.3 Fast",
+                    "pricing": {
+                        "input_usd_per_mtok": 0.42, "output_usd_per_mtok": 2.1,
+                        "cache_read_usd_per_mtok": 0.0, "cache_write_usd_per_mtok": 0.0,
+                    },
+                    "specs": {
+                        "context_window": 400_000, "max_output_tokens": 131_072,
+                        "supports_reasoning": true,
+                        "modalities": { "input": ["text"], "output": ["text"] },
+                    },
+                })],
+                models: Vec::new(),
                 refreshed_at: 1,
             },
         );
@@ -588,5 +608,24 @@ mod tests {
         let preview = compact_rlm_text(&long_answer);
         assert_eq!(preview.chars().count(), ANSWER_PREVIEW_MAX_CHARS);
         assert!(preview.ends_with("..."));
+    }
+
+    #[test]
+    fn the_binding_lane_keeps_far_more_than_the_preview_cap() {
+        // The collect envelope's full-answer lane: a fenced JSON output
+        // longer than the 160-character roster preview binds whole from
+        // it, so the bound stays far above the preview cap and only a
+        // genuinely oversized payload (over ANSWER_TEXT_MAX_CHARS) sees
+        // the ellipsis.
+        let long = "y".repeat(ANSWER_TEXT_MAX_CHARS + 50);
+        let capped = cap_text(&long, ANSWER_TEXT_MAX_CHARS);
+        assert_eq!(capped.chars().count(), ANSWER_TEXT_MAX_CHARS);
+        assert!(capped.ends_with("..."));
+        let wide_json = format!(
+            "{{\"blob\": \"{}\"}}",
+            "z".repeat(ANSWER_PREVIEW_MAX_CHARS * 4)
+        );
+        let lane = cap_text(&wide_json, ANSWER_TEXT_MAX_CHARS);
+        assert_eq!(lane, wide_json, "a wide-but-bounded JSON keeps its tail");
     }
 }

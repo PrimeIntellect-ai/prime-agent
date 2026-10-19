@@ -29,6 +29,10 @@ impl AgentSessionEngine {
         // runs text-only (attachments are never re-sent).
         let prompt = first;
         let mut overflow_retry = false;
+        self.threshold_yielded
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+        self.threshold_checks_enabled
+            .store(true, std::sync::atomic::Ordering::SeqCst);
         // Whether a loop-boundary frame already passed in this item: the
         // worker's run-opening frames are the first run's, so the engine
         // forwards the later runs' opening frames.
@@ -44,7 +48,11 @@ impl AgentSessionEngine {
             if !self.run_pre_turn_overflow_compaction(emit) {
                 return;
             }
-            if self.run_auto_compaction(emit) == AutoCompactionRun::Cancelled {
+            if self
+                .threshold_checks_enabled
+                .load(std::sync::atomic::Ordering::SeqCst)
+                && self.run_auto_compaction(emit) == AutoCompactionRun::Cancelled
+            {
                 return;
             }
             // The overflow retry re-issues the loop without a new user
@@ -157,7 +165,11 @@ impl AgentSessionEngine {
             }
             // The settled turn's usage crossing the headroom auto-compacts; the
             // autonomous continuation decision below still runs after it.
-            if self.run_auto_compaction(emit) == AutoCompactionRun::Cancelled {
+            if self
+                .threshold_checks_enabled
+                .load(std::sync::atomic::Ordering::SeqCst)
+                && self.run_auto_compaction(emit) == AutoCompactionRun::Cancelled
+            {
                 return;
             }
             // The compact-trigger round is NOT consumed here: the review runs

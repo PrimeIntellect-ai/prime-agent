@@ -112,11 +112,9 @@ impl pa_core::session_engine::rlm_usage::RlmChildUsageSink for ProducerUsageSink
     fn record(
         &self,
         report: pa_core::session_engine::rlm_usage::RlmChildUsageReport,
-    ) -> std::pin::Pin<std::boxed::Box<dyn std::future::Future<Output = ()> + Send + '_>> {
+    ) -> std::pin::Pin<std::boxed::Box<dyn std::future::Future<Output = bool> + Send + '_>> {
         let producer = std::sync::Arc::clone(&self.0);
-        Box::pin(async move {
-            producer.record_child_usage(report).await;
-        })
+        Box::pin(async move { producer.record_child_usage(report).await })
     }
 
     fn forget(

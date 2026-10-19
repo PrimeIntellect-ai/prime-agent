@@ -8,6 +8,9 @@ pub(crate) mod merge;
 pub(crate) mod storage;
 pub(crate) mod types;
 
+#[cfg(test)]
+mod persistence_tests;
+
 pub use manager::{
     IdleEviction, SessionArchivePolicy, SettingsError, SettingsManager,
     DEFAULT_IDLE_EVICTION_MINUTES, DEFAULT_SESSION_ARCHIVE_MAX_AGE_DAYS,

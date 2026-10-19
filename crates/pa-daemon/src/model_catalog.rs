@@ -348,6 +348,35 @@ mod tests {
         serde_json::to_string(&json!({"data": data})).unwrap()
     }
 
+    /// A private entitlement payload whose route declares the live reasoning
+    /// parameters (`supported_parameters` with `reasoning`/`reasoning_effort`
+    /// plus the supported efforts) — the shape the internal `DeepSeek` routes
+    /// serve: reasoning arrives only when a request addresses it.
+    fn reasoning_private_payload(id: &str) -> String {
+        serde_json::to_string(&json!({
+            "data": [{
+                "id": id,
+                "display_name": id,
+                "pricing": {"input_usd_per_mtok": 1.0, "output_usd_per_mtok": 2.0},
+                "specs": {
+                    "context_window": 200_000,
+                    "max_output_tokens": 32_768,
+                    "supports_reasoning": true,
+                    "modalities": {"input": ["text"], "output": ["text"]},
+                },
+                "supported_parameters": [
+                    "max_tokens", "temperature", "tools", "tool_choice",
+                    "reasoning", "reasoning_effort",
+                ],
+                "reasoning": {
+                    "supported_efforts": ["none", "low", "high", "max"],
+                    "default_effort": "high",
+                },
+            }]
+        }))
+        .unwrap()
+    }
+
     fn write_auth_json(agent_dir: &Path, api_key: &str, team_id: &str) {
         std::fs::write(
             agent_dir.join("auth.json"),
@@ -431,7 +460,6 @@ mod tests {
             recovery_journal_path: dir.join("recovery.jsonl"),
             telemetry_disabled: None,
             script: Some(json!({ "responses": ["ack"] })),
-            decision_child: false,
         };
         let worker = Arc::new(Worker::new(config, None));
         let events = worker.events.subscribe();
@@ -732,6 +760,116 @@ mod tests {
         assert!(
             !catalog_changed_within(&mut fixture.events, Duration::from_millis(250)).await,
             "a gated refresh must not broadcast model_catalog_changed"
+        );
+    }
+
+    /// The private-route reasoning regression: a route that declares its
+    /// reasoning parameters (the live `internal/deepseek-v4.1-flash` shape)
+    /// must serve a model whose compat addresses them — the served catalog
+    /// reads the authorization cache back, so this pins the fetch build AND
+    /// the cache round-trip. Without the declared controls rebuilt into the
+    /// model, a thinking session sends no `reasoning_effort`, and a route
+    /// that only thinks when asked emits no thinking at all.
+    #[tokio::test]
+    async fn a_private_route_with_declared_reasoning_serves_addressable_levels() {
+        let answers = vec![
+            Answer::Raw(ok_json(&catalog_aggregate(&["probe-v1"]))),
+            Answer::Raw(ok_json(&pi_snapshot_payload("live/team-a-marker"))),
+            Answer::Raw(ok_json(&reasoning_private_payload(
+                "internal/team-a-private",
+            ))),
+        ];
+        let fixture = fixture(answers).await;
+
+        let served = get_model_catalog(&fixture.worker, "catalog-session").await;
+        assert_canonical_models_order(&served);
+        let model = served["models"]
+            .as_array()
+            .expect("models array")
+            .iter()
+            .find(|model| model["id"] == "internal/team-a-private")
+            .expect("the authorized private route");
+        assert_eq!(
+            model["compat"]["supportsReasoningEffort"], true,
+            "the declared reasoning_effort parameter must be addressable"
+        );
+        assert_eq!(model["thinkingLevelMap"]["high"], "high");
+        assert_eq!(model["thinkingLevelMap"]["low"], "low");
+        assert_eq!(model["thinkingLevelMap"]["max"], "max");
+        assert_eq!(model["thinkingLevelMap"]["off"], "none");
+    }
+
+    /// The malformed-entitlement regression: a 200 body without a `data`
+    /// array is a fetch failure, not an empty authorization — an empty
+    /// success would wipe the authorized private models and rewrite the
+    /// fingerprint cache with an empty set and a fresh TTL.
+    #[tokio::test]
+    async fn a_malformed_entitlement_payload_keeps_the_authorized_private_models() {
+        let fixture = fixture(create_phase_answers()).await;
+        // Age the on-disk authorization past its TTL so the next refresh
+        // refetches the entitlements in the background.
+        let cache_path = fixture
+            .agent_dir
+            .join("prime-inference-private-models.json");
+        let document: Value =
+            serde_json::from_str(&std::fs::read_to_string(&cache_path).expect("cache")).unwrap();
+        std::fs::write(
+            &cache_path,
+            serde_json::to_string(&json!({
+                "fingerprint": document["fingerprint"],
+                "data": document["data"],
+                "refreshedAt": 1u64,
+            }))
+            .unwrap(),
+        )
+        .expect("age the cache");
+        // The catalog chain stays hourly-gated from the create path; only the
+        // private entitlement fetch runs. Its answer is a held gate: the
+        // malformed body is released only after this test starts watching
+        // the cache, so the background refresh's write decision cannot slip
+        // in before the watch begins.
+        let (release, held) = gate();
+        fixture.server.push(held);
+        let requests_before = fixture.server.request_count();
+
+        let served = get_model_catalog(&fixture.worker, "catalog-session").await;
+        assert!(
+            has_model(&served, "internal/team-a-private"),
+            "the cached authorization serves instantly"
+        );
+        // The background entitlement fetch is recorded and parked on the
+        // gate; the deadline is on the request log, not a fixed wait.
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while fixture.server.request_count() < requests_before + 1 {
+            assert!(
+                Instant::now() < deadline,
+                "the stale-cache background refresh never fetched: {:?}",
+                fixture.server.recorded_requests()
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let aged_cache = std::fs::read_to_string(&cache_path).expect("cache");
+        // Release the malformed body. The empty-success bug applies the
+        // wipe and rewrites the cache the moment the refresh processes it;
+        // the bounded negative wait is the only way to prove the fixed
+        // path leaves the cache untouched.
+        let _ = release.send(ok_json(r#"{"data": {"not": "an array"}}"#));
+        let settle = Instant::now() + Duration::from_secs(2);
+        loop {
+            let cache = std::fs::read_to_string(&cache_path).expect("cache");
+            assert_eq!(
+                cache, aged_cache,
+                "a malformed entitlement payload must not rewrite the authorization cache"
+            );
+            if Instant::now() >= settle {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        let after = get_model_catalog(&fixture.worker, "catalog-session").await;
+        assert!(
+            has_model(&after, "internal/team-a-private"),
+            "a malformed entitlement payload must not wipe the authorized private models"
         );
     }
 

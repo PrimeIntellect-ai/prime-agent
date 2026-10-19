@@ -96,24 +96,37 @@ impl AuthPanel {
             // execute terminal control operations; a URL is single-line. The link renders wrapped
             // in OSC 8 (the URL is the display text) when the terminal implements hyperlinks.
             let safe = scrub_controls(url).replace('\n', "");
-            // The OSC 8 wrap survives truncation intact: the display text truncates BEFORE the
-            // wrap (a long URL cut mid-sequence would leave the link region open); the URI
-            // carries the full URL.
-            let budget = width.saturating_sub(2);
-            let display = if crate::width::str_width(&safe) > budget {
-                crate::width::truncate_line(&vec![Span::raw(safe.clone())], budget, "")
-                    .iter()
-                    .map(|span| span.content.clone())
-                    .collect::<String>()
-            } else {
-                safe.clone()
+            // Wrap the visible URL before adding OSC 8: every row must retain a complete
+            // target and a closing sequence. Wrapping the escape-bearing string can split it.
+            // The wrap is character-level, not word-level: a URL is one token, and word wrap
+            // drops the spaces `scrub_controls` emits for control characters at the breaks -
+            // the visible rows would no longer match the copied or linked target.
+            let budget = width.saturating_sub(2).max(1);
+            let push_url_row = |lines: &mut Vec<Line>, display: &str| {
+                let linked = if crate::hyperlinks::hyperlinks_enabled() {
+                    format!("{}{display}{OSC8_CLOSE}", osc8_open(&safe))
+                } else {
+                    display.to_string()
+                };
+                // At one column there is no room for the usual indent as well as the URL.
+                lines.push(vec![
+                    Span::raw(if width > 1 { " " } else { "" }),
+                    theme.fg_span(ThemeColor::Text, linked),
+                ]);
             };
-            let linked = if crate::hyperlinks::hyperlinks_enabled() {
-                format!("{}{display}{OSC8_CLOSE}", osc8_open(&safe))
-            } else {
-                display
-            };
-            lines.push(content_row(theme, width, ThemeColor::Text, &linked));
+            let mut display = String::new();
+            let mut display_width = 0usize;
+            for c in safe.chars() {
+                let char_width = crate::width::char_width(c);
+                if display_width + char_width > budget && !display.is_empty() {
+                    push_url_row(&mut lines, &display);
+                    display.clear();
+                    display_width = 0;
+                }
+                display.push(c);
+                display_width += char_width;
+            }
+            push_url_row(&mut lines, &display);
             // The browser-step text reads apart from the URL.
             lines.push(Vec::new());
             let instructions = self.auth_instructions.clone().map_or_else(
@@ -227,13 +240,14 @@ impl AuthPanel {
         // The URL block's actions row rides last — the copy-key hint with the copy status,
         // the submit hint while the paste field is mounted, and the cancel hint.
         if self.auth_url.is_some() {
-            lines.push(auth_actions_row(
+            let actions = auth_actions_row(
                 theme,
-                width,
+                usize::MAX,
                 kb,
                 matches!(self.input, PanelInput::Paste { .. }),
                 self.copy_status,
-            ));
+            );
+            lines.extend(crate::width::wrap_line(&actions, width));
         }
         lines
     }

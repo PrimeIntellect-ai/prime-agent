@@ -47,7 +47,7 @@ fn faux_script(dir: &Path) -> PathBuf {
             "responses": [
                 {"content": [
                     {"type": "text", "text": "Running the wedge cell."},
-                    {"type": "toolCall", "name": "ipython", "id": "toolu_wedge01",
+                    {"type": "toolCall", "name": "python_repl", "id": "toolu_wedge01",
                      "arguments": {"code":
                         "import time\nopen('wedge-started', 'w').write('1')\ntime.sleep(300)\nopen('wedge-finished', 'w').write('1')\nprint('cell completed')"}}
                 ]},

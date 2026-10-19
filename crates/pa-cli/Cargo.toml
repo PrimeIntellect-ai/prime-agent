@@ -29,7 +29,7 @@ base64 = "0.22"
 # The release-workflow test parses the CI workflow YAML and builds fixture
 # tarballs/manifests for the promote-job layout gates (the same versions the
 # workspace already resolves for pa-core's update/release seam).
-serde_yaml = "0.9"
+serde_yaml = { package = "yaml_serde", version = "0.10.7" }
 tar = "0.4"
 flate2 = "1"
 # The traces login tests encrypt the challenge result with the flow's own

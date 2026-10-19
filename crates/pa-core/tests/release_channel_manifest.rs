@@ -250,17 +250,21 @@ fn the_workflow_wires_the_channel_manifest_producer() {
         files.contains("release-out/*.json"),
         "the attach list must carry the channel manifest via a json glob"
     );
-    // A -beta* tag attaches as a GitHub PRE-RELEASE so the nightly can never take the Latest
-    // pointer; the stable channel's download base (.../releases/latest/download/) keeps serving the
-    // last stable release's latest.json (Bugbot: beta tags steal GitHub Latest).
+    // Only stable tags attach individual GitHub releases. Beta assets use the
+    // rolling nightly release and versioned R2 archive instead.
+    assert_eq!(
+        attach_step.r#if.as_deref(),
+        Some("${{ !contains(github.ref_name, '-') }}"),
+        "individual GitHub releases are stable-only"
+    );
     let prerelease = attach_step
         .with
         .as_ref()
         .and_then(|with| with.prerelease.as_deref())
         .expect("the attach step must decide prerelease-ness");
     assert_eq!(
-        prerelease, "${{ contains(github.ref_name, '-') }}",
-        "the attach step must mark prerelease-tag releases as prereleases"
+        prerelease, "false",
+        "the stable attachment remains a non-prerelease"
     );
     // Every tag promotes under its own group: a queued promotion is never
     // canceled by another tag's push, so every published tag gets its
@@ -334,16 +338,16 @@ fn the_rolling_nightly_refresh_is_a_serialized_job() {
         .as_deref()
         .expect("the refresh step runs a script");
     assert!(run.contains("gh release upload nightly"), "{run}");
-    assert!(run.contains("release-out/beta.json"), "{run}");
+    assert!(run.contains("release-out/*.json"), "{run}");
     assert!(run.contains("--clobber"), "{run}");
     assert!(run.contains("--prerelease"), "{run}");
     assert!(run.contains("release-out/prime-agent-*.tar.gz"), "{run}");
     // The newest-wins guard: re-runs of an older tag must never clobber a newer rolling beta.json;
     // gh release download's destination flag is --dir (Bugbot: --output-dir was discarded and never
     // wrote the guard file). The guard FAILS CLOSED: a release carrying an unreadable beta.json is
-    // never clobbered (Bugbot: a discarded download failure fell through to --clobber), while a
-    // release with NO beta.json asset (a partial earlier refresh) has nothing to protect - the
-    // clobber heals it.
+    // never clobbered (Bugbot: a discarded download failure fell through to --clobber), and a
+    // witnessless release clobbers only when its own tarball asset names carry no newer version -
+    // an empty release (no versioned assets at all) heals unconditionally.
     assert!(run.contains("sort -V"), "{run}");
     assert!(run.contains("skipping the refresh"), "{run}");
     assert!(run.contains(r#"--dir "$guard""#), "{run}");

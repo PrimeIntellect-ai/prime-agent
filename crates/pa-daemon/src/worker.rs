@@ -25,11 +25,12 @@ pub use queue::Lane;
 pub use queue::QueuePriority;
 pub(crate) use queue::{
     admit_autonomous_follow_up, admit_bash_completion_notice, admit_goal_follow_up,
-    checkpoint_queue_recovery, enqueue_priority, gather_delivery_batch, parse_custom_message,
-    parse_prompt_images, queue_lanes, restore_queue_snapshot, restored_turn_policy,
-    withdraw_bash_completion_notice, QueueCheckpoint, QueueLanes, QueuedItem, TurnPolicy,
-    TurnSettle, ABORTED_TURN_SETTLE_ERROR, PROMPT_ABORTED_BEFORE_DELIVERY, QUEUED_INPUT_SUSPENDED,
-    QUEUED_PROMPT_DELETED, SIDE_QUESTION_SETTLE_TIMEOUT,
+    checkpoint_queue_recovery, clear_withdrawn_progress_note, enqueue_priority,
+    gather_delivery_batch, parse_custom_message, parse_prompt_images, queue_lanes,
+    restore_queue_snapshot, restored_turn_policy, withdraw_bash_completion_notice, QueueCheckpoint,
+    QueueLanes, QueuedItem, TurnPolicy, TurnSettle, ABORTED_TURN_SETTLE_ERROR,
+    PROMPT_ABORTED_BEFORE_DELIVERY, QUEUED_INPUT_SUSPENDED, QUEUED_PROMPT_DELETED,
+    SIDE_QUESTION_SETTLE_TIMEOUT,
 };
 
 mod create;
@@ -47,7 +48,7 @@ use turn::TurnRunner;
 mod commands;
 
 pub use env::{
-    WORKER_ACTIVE_SESSION_ID_ENV, WORKER_CWD_ENV, WORKER_DECISION_CHILD_ENV,
+    strip_inherited_worker_env, WORKER_ACTIVE_SESSION_ID_ENV, WORKER_CWD_ENV,
     WORKER_INSTANCE_ID_ENV, WORKER_RECOVERY_JOURNAL_ENV, WORKER_ROLE_ENV, WORKER_SCRIPT_ENV,
     WORKER_SOCKET_ENV, WORKER_SUPERVISOR_LOST_EXIT_MS_ENV, WORKER_SUPERVISOR_SOCKET_ENV,
     WORKER_TELEMETRY_DISABLED_ENV, WORKER_TOKEN_ENV,
@@ -127,6 +128,8 @@ pub struct Worker {
     /// The concrete agent engine behind `engine` for the create command's
     /// eager session build (the kernel prewarm).
     pub(crate) agent_engine: Option<std::sync::Arc<crate::agent_engine::AgentSessionEngine>>,
+    /// The worker's supervisor link (roster pushes, passivation asks, bounces).
+    pub(crate) roster_link: std::sync::Arc<crate::supervisor_link::SupervisorLink>,
     /// The monotonic roster-delta counter the roster pushes stamp and the
     /// authoritative pulls embed: a push can race a fresher pull, so the
     /// supervisor's gate drops the stale snapshot.
@@ -276,6 +279,7 @@ impl Worker {
     /// # Panics
     ///
     /// The wired closures panic on a poisoned session-core mutex.
+    #[must_use]
     pub fn new(config: WorkerConfig, registration: Option<RegistrationHandle>) -> Self {
         let events = Arc::new(EventPump::new());
         let supervisor_claims = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -317,7 +321,7 @@ impl Worker {
             active_action: None,
             running_tool_calls: std::collections::HashSet::new(),
             running_admission_ids: std::collections::HashSet::new(),
-            decision_child: false,
+            tool_use_count: 0,
         };
         let active_session_id = config.active_session_id.clone();
         let script = config.script.clone();
@@ -341,11 +345,10 @@ impl Worker {
         let idle_notify = Arc::new(Notify::new());
         // The supervisor link and worker token for roster pushes: one
         // construction shared by the turn runner and the command arms
-        // (identical dial path).
+        // (identical dial path). The config field is the one supervisor-
+        // socket source.
         let roster_link = std::sync::Arc::new(crate::supervisor_link::SupervisorLink::new(
-            std::env::var_os(WORKER_SUPERVISOR_SOCKET_ENV)
-                .map(std::path::PathBuf::from)
-                .unwrap_or_default(),
+            config.supervisor_socket_path.clone(),
         ));
         let worker_token = std::env::var(WORKER_TOKEN_ENV).unwrap_or_default();
         let roster_delta_sequence = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
@@ -372,200 +375,115 @@ impl Worker {
             Arc::clone(&events),
             Arc::clone(&recovery),
         ));
-        // The turn runner's passivation context: shared by both engine
-        // branches below (each moves the worker token into its engine).
-        let passivation = crate::worker::turn::PassivationContext {
-            agent_dir: config.agent_dir.clone(),
-            link: Arc::clone(&roster_link),
-            worker_token: worker_token.clone(),
-        };
         let (engine, agent_engine, roster_pushes): (
             std::sync::Arc<dyn SessionEngine>,
             Option<std::sync::Arc<crate::agent_engine::AgentSessionEngine>>,
             crate::roster_activity::RosterPushQueue,
         ) = {
-            // The Decision API child runs the decision engine; every other
-            // session (scripted or not) runs the agent engine family.
-            if config.decision_child {
-                let engine: std::sync::Arc<dyn SessionEngine> =
-                    std::sync::Arc::new(crate::decision_engine::DecisionEngine::new(
-                        std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")),
-                        config.agent_dir.clone(),
-                        std::sync::Arc::clone(&roster_link),
-                        config.active_session_id.clone(),
-                        worker_token,
-                    ));
-                (
-                    engine,
-                    None,
-                    crate::roster_activity::RosterPushQueue::disabled(),
-                )
-            } else {
-                // Scripted sessions serve the integration harness; sessions
-                // without a script run the real agent engine.
-                let mut agent_engine: Option<
-                    std::sync::Arc<crate::agent_engine::AgentSessionEngine>,
-                > = None;
-                let engine: std::sync::Arc<dyn SessionEngine> = match &script {
-                    // A `{"engine": "faux", ...}` script drives the real agent
-                    // engine over the scripted faux provider (verification only).
-                    Some(script) if script.get("engine") == Some(&serde_json::json!("faux")) => {
-                        let cwd = std::env::current_dir()
-                            .unwrap_or_else(|_| std::path::PathBuf::from("."));
-                        match AgentSessionEngine::new(AgentEngineConfig {
-                            cwd,
-                            agent_dir: config.agent_dir.clone(),
-                            provider: None,
-                            model: None,
-                            api_key: None,
-                            thinking: None,
-                            session_dir: None,
-                            session_file: None,
-                            faux_script: Some(script.to_string()),
-                            supervisor_link: Some(supervisor_link_config(&config)),
-                            telemetry_disabled: config.telemetry_disabled,
-                            cron_store: Some(kernel_cron_wiring(&scheduled)),
-                            queued_steering_probe: queued_steering_probe.clone(),
-                        }) {
-                            Ok(engine) => {
-                                let concrete = std::sync::Arc::new(engine);
-                                agent_engine = Some(std::sync::Arc::clone(&concrete));
-                                concrete
-                            }
-                            // Runtime construction failed: degrade to the echo engine.
-                            Err(_) => std::sync::Arc::new(ScriptedEngine::default()),
+            // Scripted sessions serve the integration harness; sessions
+            // without a script run the real agent engine.
+            let mut agent_engine: Option<std::sync::Arc<crate::agent_engine::AgentSessionEngine>> =
+                None;
+            let engine: std::sync::Arc<dyn SessionEngine> = match &script {
+                // A `{"engine": "faux", ...}` script drives the real agent
+                // engine over the scripted faux provider (verification only).
+                Some(script) if script.get("engine") == Some(&serde_json::json!("faux")) => {
+                    let cwd =
+                        std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+                    match AgentSessionEngine::new(AgentEngineConfig {
+                        cwd,
+                        agent_dir: config.agent_dir.clone(),
+                        provider: None,
+                        model: None,
+                        api_key: None,
+                        thinking: None,
+                        session_dir: None,
+                        session_file: None,
+                        faux_script: Some(script.to_string()),
+                        supervisor_link: Some(supervisor_link_config(&config)),
+                        telemetry_disabled: config.telemetry_disabled,
+                        cron_store: Some(kernel_cron_wiring(&scheduled)),
+                        queued_steering_probe: queued_steering_probe.clone(),
+                    }) {
+                        Ok(engine) => {
+                            let concrete = std::sync::Arc::new(engine);
+                            agent_engine = Some(std::sync::Arc::clone(&concrete));
+                            concrete
                         }
+                        // Runtime construction failed: degrade to the echo engine.
+                        Err(_) => std::sync::Arc::new(ScriptedEngine::default()),
                     }
-                    Some(script) => {
-                        std::sync::Arc::new(ScriptedEngine::from_value(script).unwrap_or_default())
-                    }
-                    None => {
-                        let cwd = std::env::current_dir()
-                            .unwrap_or_else(|_| std::path::PathBuf::from("."));
-                        match AgentSessionEngine::new(AgentEngineConfig {
-                            cwd,
-                            agent_dir: config.agent_dir.clone(),
-                            provider: std::env::var("PRIME_AGENT_MODEL_PROVIDER").ok(),
-                            model: std::env::var("PRIME_AGENT_MODEL").ok(),
-                            api_key: None,
-                            thinking: None,
-                            session_dir: None,
-                            session_file: None,
-                            faux_script: None,
-                            supervisor_link: Some(supervisor_link_config(&config)),
-                            telemetry_disabled: config.telemetry_disabled,
-                            cron_store: Some(kernel_cron_wiring(&scheduled)),
-                            queued_steering_probe: queued_steering_probe.clone(),
-                        }) {
-                            Ok(engine) => {
-                                let concrete = std::sync::Arc::new(engine);
-                                agent_engine = Some(std::sync::Arc::clone(&concrete));
-                                concrete
-                            }
-                            // Runtime construction failed: degrade to the echo engine.
-                            Err(_) => std::sync::Arc::new(ScriptedEngine::default()),
+                }
+                Some(script) => {
+                    std::sync::Arc::new(ScriptedEngine::from_value(script).unwrap_or_default())
+                }
+                None => {
+                    let cwd =
+                        std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+                    match AgentSessionEngine::new(AgentEngineConfig {
+                        cwd,
+                        agent_dir: config.agent_dir.clone(),
+                        provider: std::env::var("PRIME_AGENT_MODEL_PROVIDER").ok(),
+                        model: std::env::var("PRIME_AGENT_MODEL").ok(),
+                        api_key: None,
+                        thinking: None,
+                        session_dir: None,
+                        session_file: None,
+                        faux_script: None,
+                        supervisor_link: Some(supervisor_link_config(&config)),
+                        telemetry_disabled: config.telemetry_disabled,
+                        cron_store: Some(kernel_cron_wiring(&scheduled)),
+                        queued_steering_probe: queued_steering_probe.clone(),
+                    }) {
+                        Ok(engine) => {
+                            let concrete = std::sync::Arc::new(engine);
+                            agent_engine = Some(std::sync::Arc::clone(&concrete));
+                            concrete
                         }
+                        // Runtime construction failed: degrade to the echo engine.
+                        Err(_) => std::sync::Arc::new(ScriptedEngine::default()),
                     }
-                };
-                // The goal continuation seam (TS `getContinuationMessages`):
-                // the worker owns the queue and gates, the engine owns the mint.
-                if let Some(concrete) = agent_engine.as_ref() {
-                    // The in-run autonomous continuation seam: the hook holds
-                    // itself weakly through the registered arc.
-                    concrete.register_arc();
-                    let sink_core = Arc::clone(&core);
-                    let sink_notify = Arc::clone(&work_notify);
-                    let autonomous_sink: crate::agent_engine::AutonomousAdmission = {
-                        let sink_core = Arc::clone(&sink_core);
-                        let sink_notify = Arc::clone(&sink_notify);
-                        let sink_recovery = Arc::clone(&recovery);
-                        std::sync::Arc::new(move |text| {
-                            admit_autonomous_follow_up(
-                                &sink_recovery,
-                                &sink_core,
-                                &sink_notify,
-                                text,
-                            );
-                        })
-                    };
-                    concrete.set_autonomous_admission(autonomous_sink);
-                    let purge_core = Arc::clone(&core);
-                    let purge_recovery = Arc::clone(&recovery);
-                    let autonomous_purge: std::sync::Arc<dyn Fn() + Send + Sync> =
-                        std::sync::Arc::new(move || {
-                            {
-                                let mut core = purge_core.lock().unwrap();
-                                core.follow_up.retain(|item| {
-                                    item.queue_key.as_deref() != Some(AUTONOMOUS_QUEUE_KEY)
-                                });
-                                core.steering.retain(|item| {
-                                    item.queue_key.as_deref() != Some(AUTONOMOUS_QUEUE_KEY)
-                                });
-                            }
-                            // The withdraw settles the rows: dropping the last
-                            // queued row must not leave busy=true promising a
-                            // revive (mid-turn stays busy until its own `turn_end`).
-                            checkpoint_queue_recovery(
-                                &purge_recovery,
-                                &purge_core,
-                                QueueCheckpoint::Settle {
-                                    operation: "queue_purged",
-                                },
-                            );
-                        });
-                    concrete.set_autonomous_queue_purge(autonomous_purge);
-                    let probe_core = Arc::clone(&core);
-                    let probe: crate::engine::SessionInputProbe = Arc::new(move || {
-                        let core = probe_core.lock().unwrap();
-                        core.queued_input_suspended
-                            || !core.steering.is_empty()
-                            || !core.follow_up.is_empty()
-                    });
-                    let sink_core = Arc::clone(&core);
-                    let sink_events = events.clone();
-                    let sink_notify = Arc::clone(&work_notify);
+                }
+            };
+            // The goal continuation seam (TS `getContinuationMessages`):
+            // the worker owns the queue and gates, the engine owns the mint.
+            if let Some(concrete) = agent_engine.as_ref() {
+                // The in-run autonomous continuation seam: the hook holds
+                // itself weakly through the registered arc.
+                concrete.register_arc();
+                concrete
+                    .set_rlm_usage_store(std::sync::Arc::new(CoreUsageStore(Arc::clone(&core))));
+                let sink_core = Arc::clone(&core);
+                let sink_notify = Arc::clone(&work_notify);
+                let autonomous_sink: crate::agent_engine::AutonomousAdmission = {
+                    let sink_core = Arc::clone(&sink_core);
+                    let sink_notify = Arc::clone(&sink_notify);
                     let sink_recovery = Arc::clone(&recovery);
-                    // Weak engine reference: the engine holds this sink, so a
-                    // strong one would pin it forever.
-                    let sink_engine = std::sync::Arc::downgrade(concrete);
-                    let sink: crate::engine::GoalAdmissionSink = Arc::new(move |work| {
-                        // The item's OWN pending handle, cloned before the
-                        // admission: the release touches exactly this mint's
-                        // guard, never the mutable mirror a rebuilt core re-swaps.
-                        let pending_handle = match &work {
-                            crate::engine::GoalTurnEndWork::Continuation(item)
-                            | crate::engine::GoalTurnEndWork::BudgetLimitSteer(item) => {
-                                item.pending_handle.clone()
-                            }
-                        };
-                        admit_goal_follow_up(
-                            &sink_recovery,
-                            &sink_core,
-                            &sink_events,
-                            &sink_notify,
-                            work,
-                        );
-                        if sink_engine.upgrade().is_none() {
-                            return;
-                        }
-                        // The queue admitted the minted continuation: the guard
-                        // releases now, so the next boundary may mint again.
-                        AgentSessionEngine::release_goal_continuation_handle(
-                            pending_handle.as_ref(),
-                        );
-                    });
-                    // TS `_clearQueuedGoalContexts`: withdraw queued minted
-                    // goal-context turns.
-                    let purge_core = Arc::clone(&core);
-                    let purge_recovery = Arc::clone(&recovery);
-                    let queue_purge: std::sync::Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
+                    std::sync::Arc::new(move |text| {
+                        admit_autonomous_follow_up(&sink_recovery, &sink_core, &sink_notify, text);
+                    })
+                };
+                concrete.set_autonomous_admission(autonomous_sink);
+                let purge_core = Arc::clone(&core);
+                let purge_recovery = Arc::clone(&recovery);
+                let purge_engine = Arc::downgrade(concrete);
+                let autonomous_purge: std::sync::Arc<dyn Fn() + Send + Sync> =
+                    std::sync::Arc::new(move || {
                         {
                             let mut core = purge_core.lock().unwrap();
-                            core.steering.retain(|item| !is_goal_context_item(item));
-                            core.follow_up.retain(|item| !is_goal_context_item(item));
+                            core.follow_up.retain(|item| {
+                                item.queue_key.as_deref() != Some(AUTONOMOUS_QUEUE_KEY)
+                            });
+                            core.steering.retain(|item| {
+                                item.queue_key.as_deref() != Some(AUTONOMOUS_QUEUE_KEY)
+                            });
+                            if let Some(engine) = purge_engine.upgrade() {
+                                clear_withdrawn_progress_note(&core, engine.as_ref());
+                            }
                         }
-                        // Same settle as the autonomous withdraw: a pause/clear
-                        // cannot leave busy=true.
+                        // The withdraw settles the rows: dropping the last
+                        // queued row must not leave busy=true promising a
+                        // revive (mid-turn stays busy until its own `turn_end`).
                         checkpoint_queue_recovery(
                             &purge_recovery,
                             &purge_core,
@@ -574,144 +492,224 @@ impl Worker {
                             },
                         );
                     });
-                    concrete.set_goal_admission(probe, sink, queue_purge);
-                    let late_core = Arc::clone(&core);
-                    let late_events = Arc::clone(&events);
-                    concrete.set_late_agent_message_sink(std::sync::Arc::new(
-                        move |tool_call_id, message| {
-                            let wire = pa_core::sent_agent_message_json(&message);
-                            crate::user_bash::emit_session_event_frame(
-                                &late_core,
-                                &late_events,
-                                serde_json::json!({
-                                    "type": "ipython_sent_agent_message",
-                                    "toolCallId": tool_call_id,
-                                    "message": wire,
-                                }),
-                            );
-                        },
-                    ));
-                    // The settled-child kernel release's registered-jobs gate
-                    // (TS #2483's `canPassivateSettledSession`
-                    // `hasRegisteredCronJob`): the release defers while this
-                    // session still owns an active or paused scheduled job
-                    // (a cron or heartbeat run must not lose its kernel).
-                    let jobs_core = Arc::clone(&core);
-                    let jobs_store = std::sync::Arc::clone(scheduled.store());
-                    concrete.set_registered_jobs_probe(std::sync::Arc::new(move || {
-                        let active_session_id = {
-                            jobs_core
-                                .lock()
-                                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                                .active_session_id
-                                .clone()
-                        };
-                        jobs_store.list().into_iter().any(|job| {
-                            job.active_session_id == active_session_id
-                                && matches!(
-                                    job.status,
-                                    pa_core::cron::JobStatus::Active
-                                        | pa_core::cron::JobStatus::Paused
-                                )
-                        })
-                    }));
-                    // The live compaction summary-delta sink: every summarizer
-                    // text delta reaches clients as one ephemeral frame (never
-                    // persisted, never a roster trigger).
-                    let summary_core = Arc::clone(&core);
-                    let summary_events = events.clone();
-                    let summary_sink: pa_core::session_engine::compaction_exec::SummaryDeltaSink =
-                        Arc::new(move |delta| {
-                            emit_worker_event_with(
-                                &summary_core,
-                                &summary_events,
-                                crate::compaction::compaction_summary_delta_event(delta),
-                            );
-                        });
-                    concrete.set_compaction_summary_sink(summary_sink);
-                    // The bash-completion wake seam (TS `_promptInjectedMessage`
-                    // for `bash.completed`): the handler validates, the sink
-                    // admits/withdraws through the queue lanes.
-                    let notice_engine = std::sync::Arc::downgrade(concrete);
-                    let notice_core = Arc::clone(&core);
-                    let notice_notify = Arc::clone(&work_notify);
-                    let notice_recovery = Arc::clone(&recovery);
-                    let completion: crate::engine::BashCompletionSink = Arc::new(move |notice| {
-                        let Some(engine) = notice_engine.upgrade() else {
-                            return;
-                        };
-                        if engine.session_is_closed() {
-                            return;
+                concrete.set_autonomous_queue_purge(autonomous_purge);
+                let probe_core = Arc::clone(&core);
+                let probe: crate::engine::SessionInputProbe = Arc::new(move || {
+                    let core = probe_core.lock().unwrap();
+                    core.queued_input_suspended
+                        || !core.steering.is_empty()
+                        || !core.follow_up.is_empty()
+                });
+                let sink_core = Arc::clone(&core);
+                let sink_events = events.clone();
+                let sink_notify = Arc::clone(&work_notify);
+                let sink_recovery = Arc::clone(&recovery);
+                // Weak engine reference: the engine holds this sink, so a
+                // strong one would pin it forever.
+                let sink_engine = std::sync::Arc::downgrade(concrete);
+                let sink: crate::engine::GoalAdmissionSink = Arc::new(move |work| {
+                    // The item's OWN pending handle, cloned before the
+                    // admission: the release touches exactly this mint's
+                    // guard, never the mutable mirror a rebuilt core re-swaps.
+                    let pending_handle = match &work {
+                        crate::engine::GoalTurnEndWork::Continuation(item)
+                        | crate::engine::GoalTurnEndWork::BudgetLimitSteer(item) => {
+                            item.pending_handle.clone()
                         }
-                        admit_bash_completion_notice(
-                            &notice_recovery,
-                            &notice_core,
-                            &notice_notify,
-                            &notice,
-                            // Revalidated inside the admission's lock section: the
-                            // close paths mark the session BEFORE clearing the lanes.
-                            || engine.session_is_closed(),
-                        );
-                    });
-                    let withdraw_core = Arc::clone(&core);
-                    let withdraw_recovery = Arc::clone(&recovery);
-                    let consumed: crate::engine::BashConsumedSink = Arc::new(move |notice| {
-                        withdraw_bash_completion_notice(
-                            &withdraw_recovery,
-                            &withdraw_core,
-                            &notice,
-                        );
-                    });
-                    concrete.set_bash_notice_sinks(completion, consumed);
-                }
-                // The live roster activity feed (TS `observeRosterEvent`): busy
-                // flips and trigger events coalesce into `worker_roster_delta`
-                // pushes.
-                let roster_pushes = crate::roster_activity::RosterPushQueue::spawn(
-                    crate::worker::RosterPushContext {
-                        core: Arc::clone(&core),
-                        engine: std::sync::Arc::clone(&engine),
-                        user_bash: std::sync::Arc::clone(&user_bash),
-                        roster_link: Arc::clone(&roster_link),
-                        worker_token,
-                        worker_instance_id: config.worker_instance_id.clone(),
-                        roster_delta_sequence: std::sync::Arc::clone(&roster_delta_sequence),
-                    },
-                );
-                crate::roster_activity::spawn_roster_activity_watch(&events, roster_pushes.clone());
-                if let Some(children) = agent_engine
-                    .as_ref()
-                    .and_then(|engine| engine.children.as_ref())
-                {
-                    crate::roster_activity::spawn_running_children_watch(
-                        children,
-                        roster_pushes.clone(),
+                    };
+                    admit_goal_follow_up(
+                        &sink_recovery,
+                        &sink_core,
+                        &sink_events,
+                        &sink_notify,
+                        work,
                     );
-                }
-                (engine, agent_engine, roster_pushes)
+                    if sink_engine.upgrade().is_none() {
+                        return;
+                    }
+                    // The queue admitted the minted continuation: the guard
+                    // releases now, so the next boundary may mint again.
+                    AgentSessionEngine::release_goal_continuation_handle(pending_handle.as_ref());
+                });
+                // TS `_clearQueuedGoalContexts`: withdraw queued minted
+                // goal-context turns.
+                let purge_core = Arc::clone(&core);
+                let purge_recovery = Arc::clone(&recovery);
+                let purge_engine = Arc::downgrade(concrete);
+                let queue_purge: std::sync::Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
+                    {
+                        let mut core = purge_core.lock().unwrap();
+                        core.steering.retain(|item| !is_goal_context_item(item));
+                        core.follow_up.retain(|item| !is_goal_context_item(item));
+                        if let Some(engine) = purge_engine.upgrade() {
+                            clear_withdrawn_progress_note(&core, engine.as_ref());
+                        }
+                    }
+                    // Same settle as the autonomous withdraw: a pause/clear
+                    // cannot leave busy=true.
+                    checkpoint_queue_recovery(
+                        &purge_recovery,
+                        &purge_core,
+                        QueueCheckpoint::Settle {
+                            operation: "queue_purged",
+                        },
+                    );
+                });
+                concrete.set_goal_admission(probe, sink, queue_purge);
+                let late_core = Arc::clone(&core);
+                let late_events = Arc::clone(&events);
+                concrete.set_late_agent_message_sink(std::sync::Arc::new(
+                    move |tool_call_id, message| {
+                        let wire = pa_core::sent_agent_message_json(&message);
+                        crate::user_bash::emit_session_event_frame(
+                            &late_core,
+                            &late_events,
+                            serde_json::json!({
+                                "type": "ipython_sent_agent_message",
+                                "toolCallId": tool_call_id,
+                                "message": wire,
+                            }),
+                        );
+                    },
+                ));
+                // The settled-child kernel release's registered-jobs gate
+                // (TS #2483's `canPassivateSettledSession`
+                // `hasRegisteredCronJob`): the release defers while this
+                // session still owns an active or paused scheduled job
+                // (a cron or heartbeat run must not lose its kernel).
+                let jobs_core = Arc::clone(&core);
+                let jobs_store = std::sync::Arc::clone(scheduled.store());
+                concrete.set_registered_jobs_probe(std::sync::Arc::new(move || {
+                    let active_session_id = {
+                        jobs_core
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                            .active_session_id
+                            .clone()
+                    };
+                    jobs_store.list().into_iter().any(|job| {
+                        job.active_session_id == active_session_id
+                            && matches!(
+                                job.status,
+                                pa_core::cron::JobStatus::Active | pa_core::cron::JobStatus::Paused
+                            )
+                    })
+                }));
+                // The live compaction summary-delta sink: every summarizer
+                // text delta reaches clients as one ephemeral frame (never
+                // persisted, never a roster trigger).
+                let summary_core = Arc::clone(&core);
+                let summary_events = events.clone();
+                let summary_sink: pa_core::session_engine::compaction_exec::SummaryDeltaSink =
+                    Arc::new(move |delta| {
+                        emit_worker_event_with(
+                            &summary_core,
+                            &summary_events,
+                            crate::compaction::compaction_summary_delta_event(delta),
+                        );
+                    });
+                concrete.set_compaction_summary_sink(summary_sink);
+                // The bash-completion wake seam (TS `_promptInjectedMessage`
+                // for `bash.completed`): the handler validates, the sink
+                // admits/withdraws through the queue lanes.
+                let notice_engine = std::sync::Arc::downgrade(concrete);
+                let notice_core = Arc::clone(&core);
+                let notice_notify = Arc::clone(&work_notify);
+                let notice_recovery = Arc::clone(&recovery);
+                let completion: crate::engine::BashCompletionSink = Arc::new(move |notice| {
+                    let Some(engine) = notice_engine.upgrade() else {
+                        return;
+                    };
+                    if engine.session_is_closed() {
+                        return;
+                    }
+                    admit_bash_completion_notice(
+                        &notice_recovery,
+                        &notice_core,
+                        &notice_notify,
+                        &notice,
+                        // Revalidated inside the admission's lock section: the
+                        // close paths mark the session BEFORE clearing the lanes.
+                        || engine.session_is_closed(),
+                    );
+                });
+                let withdraw_core = Arc::clone(&core);
+                let withdraw_recovery = Arc::clone(&recovery);
+                let withdraw_engine = Arc::downgrade(concrete);
+                let consumed: crate::engine::BashConsumedSink = Arc::new(move |notice| {
+                    let engine = withdraw_engine.upgrade();
+                    withdraw_bash_completion_notice(
+                        &withdraw_recovery,
+                        &withdraw_core,
+                        &notice,
+                        engine.as_deref().map(|engine| engine as &dyn SessionEngine),
+                    );
+                });
+                concrete.set_bash_notice_sinks(completion, consumed);
+                // The accepted note frames as a session event on the pump.
+                let note_core = Arc::clone(&core);
+                let note_events = events.clone();
+                let note_emit: pa_core::session_engine::rlm_host::RlmProgressNoteEmit =
+                    Arc::new(move |message, timestamp| {
+                        emit_worker_event_with(
+                            &note_core,
+                            &note_events,
+                            json!({
+                                "type": "rlm_progress_note",
+                                "message": message,
+                                "timestamp": timestamp,
+                            }),
+                        );
+                    });
+                concrete.set_progress_note_emit(note_emit);
             }
+            // The live roster activity feed (TS `observeRosterEvent`): busy
+            // flips and trigger events coalesce into `worker_roster_delta`
+            // pushes.
+            let roster_pushes =
+                crate::roster_activity::RosterPushQueue::spawn(crate::worker::RosterPushContext {
+                    core: Arc::clone(&core),
+                    engine: std::sync::Arc::clone(&engine),
+                    user_bash: std::sync::Arc::clone(&user_bash),
+                    roster_link: Arc::clone(&roster_link),
+                    worker_token: worker_token.clone(),
+                    worker_instance_id: config.worker_instance_id.clone(),
+                    roster_delta_sequence: std::sync::Arc::clone(&roster_delta_sequence),
+                });
+            crate::roster_activity::spawn_roster_activity_watch(&events, roster_pushes.clone());
+            if let Some(children) = agent_engine
+                .as_ref()
+                .and_then(|engine| engine.children.as_ref())
+            {
+                crate::roster_activity::spawn_running_children_watch(
+                    children,
+                    roster_pushes.clone(),
+                );
+            }
+            let runner = TurnRunner {
+                recovery: Arc::clone(&recovery),
+                core: Arc::clone(&core),
+                input_pauses: input_pauses.clone(),
+                prompt_admissions: prompt_admissions.clone(),
+                work_notify: Arc::clone(&work_notify),
+                idle_notify: Arc::clone(&idle_notify),
+                events: events.clone(),
+                engine: std::sync::Arc::clone(&engine),
+                active_session_id,
+                roster_pushes: roster_pushes.clone(),
+                user_bash: std::sync::Arc::clone(&user_bash),
+                passivation: crate::worker::turn::PassivationContext {
+                    agent_dir: config.agent_dir.clone(),
+                    link: Arc::clone(&roster_link),
+                    worker_token,
+                },
+                herdr: std::sync::Arc::clone(&herdr_slot),
+            };
+            tokio::spawn(async move {
+                runner.run().await;
+            });
+            (engine, agent_engine, roster_pushes)
         };
-        // The turn runner drives the engine's queued prompts; every engine
-        // needs it — a decision child without a runner never dequeues its
-        // first prompt.
-        let runner = TurnRunner {
-            recovery: Arc::clone(&recovery),
-            core: Arc::clone(&core),
-            input_pauses: input_pauses.clone(),
-            prompt_admissions: prompt_admissions.clone(),
-            work_notify: Arc::clone(&work_notify),
-            idle_notify: Arc::clone(&idle_notify),
-            events: events.clone(),
-            engine: std::sync::Arc::clone(&engine),
-            active_session_id,
-            roster_pushes: roster_pushes.clone(),
-            user_bash: std::sync::Arc::clone(&user_bash),
-            passivation,
-            herdr: std::sync::Arc::clone(&herdr_slot),
-        };
-        tokio::spawn(async move {
-            runner.run().await;
-        });
         let side_questions = crate::side_question::SideQuestionManager::new(
             std::sync::Arc::clone(&engine),
             events.clone(),
@@ -760,6 +758,7 @@ impl Worker {
             core,
             engine,
             agent_engine,
+            roster_link: Arc::clone(&roster_link),
             roster_delta_sequence,
             work_notify,
             idle_notify,
@@ -955,6 +954,73 @@ fn emit_refinement_row(
         json!({ "type": "message_end", "message": message }),
     );
     true
+}
+
+struct CoreUsageStore(Arc<Mutex<SessionCore>>);
+
+fn missing_usage_target(target_id: &str) -> std::io::Error {
+    std::io::Error::new(
+        std::io::ErrorKind::InvalidInput,
+        format!("Assistant message entry {target_id} not found"),
+    )
+}
+
+fn assistant_message(entry: &crate::session_store::SessionEntry) -> Option<&Value> {
+    if entry.type_ != "message" {
+        return None;
+    }
+    let message = entry.fields.get("message")?;
+    (crate::types::message_role(message) == Some("assistant")).then_some(message)
+}
+
+impl pa_core::session_engine::rlm_usage::RlmChildUsageStore for CoreUsageStore {
+    fn last_assistant(
+        &self,
+    ) -> pa_core::session_engine::rlm_usage::RlmChildUsageFuture<
+        '_,
+        Option<(String, pa_types::ai::Usage)>,
+    > {
+        let core = Arc::clone(&self.0);
+        Box::pin(async move {
+            let core = core.lock().unwrap();
+            let store = core.store.as_ref()?;
+            store.entries().iter().rev().find_map(|entry| {
+                let message = assistant_message(entry)?;
+                Some((
+                    entry.id.clone(),
+                    message
+                        .get("usage")
+                        .cloned()
+                        .and_then(|usage| serde_json::from_value(usage).ok())
+                        .unwrap_or_default(),
+                ))
+            })
+        })
+    }
+
+    fn append_attribution(
+        &self,
+        row_id: &str,
+        target_id: &str,
+        child_usage: pa_types::ai::Usage,
+        origin: Option<pa_types::session::ChildUsageOrigin>,
+    ) -> pa_core::session_engine::rlm_usage::RlmChildUsageFuture<
+        '_,
+        std::io::Result<pa_core::session_engine::rlm_usage::ChildUsageAppendResult>,
+    > {
+        let core = Arc::clone(&self.0);
+        let row_id = row_id.to_owned();
+        let target_id = target_id.to_owned();
+        Box::pin(async move {
+            let mut core = core.lock().unwrap();
+            let Some(store) = core.store.as_mut() else {
+                return Err(missing_usage_target(&target_id));
+            };
+            store
+                .append_child_usage_once(&row_id, &target_id, child_usage, origin)
+                .map_err(|error| std::io::Error::other(format!("{error:#}")))
+        })
+    }
 }
 
 /// Whether one queued item is a minted goal-context turn (TS's

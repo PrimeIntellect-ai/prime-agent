@@ -20,6 +20,9 @@ import tempfile
 import threading
 import time
 
+from review_agent_bounce_parity import Client
+from review_goal_fixture_lifecycle import OwnedProcesses, TAG, finish
+
 
 TS_ARCHIVE_SHA256 = "83fb09129bf78e3e60268212cd70932166591b15188caa70c1b0efbcc76235e2"
 TIMEOUT_SECONDS = 35
@@ -75,8 +78,6 @@ class MockHandler(http.server.BaseHTTPRequestHandler):
             })
             if number >= MAX_REQUESTS:
                 server.limit_hit = True
-                if server.process is not None:
-                    os.killpg(server.process.pid, signal.SIGTERM)
             server.changed.notify_all()
 
         if server.scenario == "recover" and number == 2:
@@ -115,7 +116,7 @@ class MockHandler(http.server.BaseHTTPRequestHandler):
             pass
 
 
-def run_case(binary, label, scenario, base_dir):
+def run_case(binary, label, scenario, base_dir, observation):
     home = base_dir / (label + "-" + scenario)
     home.mkdir()
     agent = home / "agent"
@@ -147,6 +148,7 @@ def run_case(binary, label, scenario, base_dir):
                 "PI_CODING_AGENT_DIR": str(agent), "PI_SESSION_DIR": str(sessions),
                 "PRIME_AGENT_CODING_AGENT_DIR": str(agent),
                 "PRIME_AGENT_SESSION_DIR": str(sessions)})
+    env[TAG] = str(home.resolve())
     (home / "tmp").mkdir()
     goal_module = next((pathlib.Path(part) / "goal" / "__init__.py"
                         for part in env.get("PYTHONPATH", "").split(os.pathsep)
@@ -160,11 +162,20 @@ def run_case(binary, label, scenario, base_dir):
     }
     version = None
     if scenario == "control":
-        probe = subprocess.run([str(binary), "--version"], cwd=cwd, env=env,
-                               text=True, capture_output=True, timeout=10, check=False)
+        try:
+            probe = subprocess.run([str(binary), "--version"], cwd=cwd, env=env,
+                                   text=True, capture_output=True, timeout=10, check=False)
+        except BaseException:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=2)
+            raise
         version = {"exit_code": probe.returncode, "stdout": probe.stdout.strip(),
                    "stderr": probe.stderr.strip()}
         if probe.returncode != 0 or not probe.stdout.strip():
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=2)
             raise RuntimeError("--version failed: " + json.dumps(version))
     command = [str(binary), "--mode", "json", "--provider", "fixture", "--model",
                "goal-fixture", "--no-session"]
@@ -176,12 +187,39 @@ def run_case(binary, label, scenario, base_dir):
     stdout_path = home / "stdout.jsonl"
     stderr_path = home / "stderr.txt"
     started = time.monotonic()
-    with stdout_path.open("wb") as stdout, stderr_path.open("wb") as stderr:
-        process = subprocess.Popen(command, cwd=cwd, env=env, stdout=stdout, stderr=stderr,
-                                   start_new_session=True)
-        server.process = process
-        stopped = None
-        try:
+    socket_path = home / 'd.sock'
+    scope = OwnedProcesses(binary, home.resolve(), socket_path)
+    daemon, client, process = None, None, None
+    daemon_log = (home / 'daemon.log').open('wb')
+    done = threading.Event()
+    tracker_errors = []
+    def discover():
+        while not done.is_set():
+            try:
+                scope.discover()
+            except Exception as error:
+                tracker_errors.append(str(error))
+                return
+            done.wait(0.025)
+    tracker = threading.Thread(target=discover, daemon=True)
+    primary_error = None
+    try:
+        # TS JSON mode otherwise creates a detached daemon that outlives the CLI.
+        # Supply the same daemon route with an explicitly owned supervisor/socket.
+        if label == 'ts':
+            daemon_command = [str(binary), '--mode', 'daemon', '--daemon-socket', str(socket_path)]
+            daemon = subprocess.Popen(daemon_command, cwd=cwd, env=env, stdout=daemon_log,
+                                      stderr=subprocess.STDOUT, start_new_session=True)
+            scope.register(daemon, daemon_command)
+            client = Client(socket_path, daemon)
+            command += ['--daemon-socket', str(socket_path)]
+        with stdout_path.open("wb") as stdout, stderr_path.open("wb") as stderr:
+            process = subprocess.Popen(command, cwd=cwd, env=env, stdout=stdout, stderr=stderr,
+                                       start_new_session=True)
+            scope.register(process, command)
+            server.process = process
+            tracker.start()
+            stopped = None
             while True:
                 try:
                     exit_code = process.wait(timeout=0.15)
@@ -197,17 +235,37 @@ def run_case(binary, label, scenario, base_dir):
                 elif count >= MAX_REQUESTS:
                     stopped = "request_observation_limit"
                 if stopped:
-                    os.killpg(process.pid, signal.SIGTERM)
+                    scope.send(process.pid, signal.SIGTERM)
                     try:
                         exit_code = process.wait(timeout=2)
                     except subprocess.TimeoutExpired:
-                        os.killpg(process.pid, signal.SIGKILL)
+                        scope.send(process.pid, signal.SIGKILL)
                         exit_code = process.wait(timeout=2)
                     break
-        finally:
-            server.shutdown()
-            server.server_close()
-            thread.join(timeout=2)
+    except BaseException as error:
+        primary_error = error
+        observation['primary_error'] = str(error)
+        raise
+    finally:
+        done.set()
+        if tracker.ident is not None:
+            tracker.join(timeout=2)
+        finish(scope, client, daemon, observation)
+        observation['tracker_errors'] = tracker_errors
+        observation['requests'] = server.requests
+        for path, key, limit in ((stdout_path, 'stdout_tail', 3500), (stderr_path, 'stderr_tail', 2500)):
+            if path.exists():
+                observation[key] = path.read_text(errors='replace')[-limit:]
+        daemon_log.close()
+        observation['daemon_log_tail'] = (home / 'daemon.log').read_text(errors='replace')[-6000:]
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+        if tracker_errors or tracker.is_alive():
+            observation['cleanup_verified'] = False
+            observation['cleanup_error'] = 'goal ownership tracker failed: ' + str(tracker_errors)
+        if not observation['cleanup_verified'] and primary_error is None:
+            raise AssertionError('goal fixture cleanup failed: ' + observation.get('cleanup_error', 'unknown'))
 
     raw = stdout_path.read_text(errors="replace")
     errors = stderr_path.read_text(errors="replace")
@@ -245,7 +303,7 @@ def run_case(binary, label, scenario, base_dir):
                 isinstance(block, dict) and block.get("type") == "text"
                 and "Goal completed." in block.get("text", "") for block in content
             )
-    return {
+    observation.update({
         "version_probe": version,
         "kernel_provenance": kernel_provenance if scenario == "control" else None,
         "exit_code": exit_code,
@@ -267,7 +325,8 @@ def run_case(binary, label, scenario, base_dir):
         "cap_reason_seen": "Goal continuation cap reached: consecutive turns made no progress" in combined,
         "stderr_tail": errors[-2500:],
         "stdout_tail": raw[-3500:],
-    }
+    })
+    return observation
 
 
 def main():
@@ -295,13 +354,15 @@ def main():
               "binaries": {key: {"path": str(path), "sha256": sha256(path)}
                            for key, path in paths.items()},
               "scenarios": {}, "differences": {}, "fixture_error": None}
-    with tempfile.TemporaryDirectory(prefix="goal-backoff-parity-") as temp:
-        base_dir = pathlib.Path(temp)
+    temp = tempfile.TemporaryDirectory(prefix="goal-backoff-parity-")
+    try:
+        base_dir = pathlib.Path(temp.name)
         for scenario in ("control", "empty", "recover", "budget"):
             result["scenarios"][scenario] = {}
             for label, binary in paths.items():
                 try:
-                    result["scenarios"][scenario][label] = run_case(binary, label, scenario, base_dir)
+                    observation = result["scenarios"][scenario][label] = {}
+                    run_case(binary, label, scenario, base_dir, observation)
                 except Exception as exc:
                     result["fixture_error"] = "%s/%s: %s" % (scenario, label, exc)
                     break
@@ -321,14 +382,24 @@ def main():
                               "model_completion_text_seen", "exit_code", "stopped")
                 if ts[field] != rust[field]
             }
+    finally:
+        # Receipt persistence must survive cleanup failure; never suppress it or
+        # retry deletion while a writer's lifetime has not been proved complete.
+        try:
+            temp.cleanup()
+        except Exception as error:
+            result['directory_cleanup_error'] = str(error)
+            if result['fixture_error'] is None:
+                result['fixture_error'] = 'directory cleanup: ' + str(error)
     all_runs = [run for versions in result["scenarios"].values() for run in versions.values()]
     result["observed_fields_equal"] = not any(result["differences"].values())
     result["validation_complete"] = (not result["fixture_error"] and len(all_runs) == 8
-                                     and all(run["request_count"] > 0 and run["stopped"] is None
+                                     and all(run.get("request_count", 0) > 0 and run.get("stopped") is None
+                                             and run.get("cleanup_verified") is True
                                              for run in all_runs))
     recovery = result["scenarios"].get("recover", {})
     result["recovery_confirmed"] = (len(recovery) == 2 and
-                                    all(run["confirmed_goal_complete"] for run in recovery.values()))
+                                    all(run.get("confirmed_goal_complete", False) for run in recovery.values()))
     result["parity"] = (result["observed_fields_equal"] and result["validation_complete"]
                         and result["recovery_confirmed"])
     result["requires_behavior_decision"] = not result["parity"]
@@ -336,7 +407,7 @@ def main():
     print("goal parity receipt: %s" % args.receipt)
     for scenario, versions in result["scenarios"].items():
         print(scenario + ": " + ", ".join("%s requests=%s exit=%s stopped=%s" %
-                                           (label, run["request_count"], run["exit_code"], run["stopped"])
+                                           (label, run.get("request_count"), run.get("exit_code"), run.get("stopped"))
                                            for label, run in versions.items()))
     if result["requires_behavior_decision"]:
         print("PARITY NOT CONFIRMED: inspect differences and incomplete observations in receipt")
@@ -345,7 +416,7 @@ def main():
     if result["fixture_error"]:
         print(result["fixture_error"], file=sys.stderr)
         return 1
-    if any(run["request_count"] == 0 for versions in result["scenarios"].values()
+    if any(run.get("request_count", 0) == 0 for versions in result["scenarios"].values()
            for run in versions.values()):
         print("a binary made no mock-provider request; inspect receipt", file=sys.stderr)
         return 1

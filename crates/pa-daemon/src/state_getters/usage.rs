@@ -82,6 +82,20 @@ fn subtract_usage(total: &mut Value, usage: &Value) {
     }
 }
 
+/// The attribution rows own usage counts, each id once: a retried durable
+/// append can land the same id twice (bytes written, fsync errored), and the
+/// second row must not subtract its batch again. First occurrence wins; a row
+/// without an id carries no identity to dedupe by.
+fn unique_attribution_rows(
+    all_entries: &[crate::session_store::SessionEntry],
+) -> impl Iterator<Item = &crate::session_store::SessionEntry> + '_ {
+    let mut seen = std::collections::HashSet::new();
+    all_entries.iter().filter(move |entry| {
+        entry.type_ == "child_usage_attributed"
+            && (entry.id.is_empty() || seen.insert(entry.id.clone()))
+    })
+}
+
 /// The branch's cumulative assistant usage (`totalUsage`) minus the child
 /// usage attributions targeting those assistants (`ownUsage`). Totals stay
 /// cumulative across compactions — compaction shrinks the context, not the spend.
@@ -109,10 +123,7 @@ pub(crate) fn compute_own_and_total_usage(
         }
     }
     let mut own = total.clone();
-    for entry in all_entries {
-        if entry.type_ != "child_usage_attributed" {
-            continue;
-        }
+    for entry in unique_attribution_rows(all_entries) {
         let Some(target_id) = entry.fields.get("targetId").and_then(Value::as_str) else {
             continue;
         };
@@ -233,10 +244,7 @@ pub(crate) fn compute_own_usage_by_model(
     if unresolved {
         return None;
     }
-    for entry in all_entries {
-        if entry.type_ != "child_usage_attributed" {
-            continue;
-        }
+    for entry in unique_attribution_rows(all_entries) {
         let Some(target_id) = entry.fields.get("targetId").and_then(Value::as_str) else {
             continue;
         };
@@ -317,11 +325,10 @@ mod usage_tests {
                 .collect(),
         };
         let assistant_entry = entry(&assistant, "m1");
-        let attribution_entry = entry(&attribution, "a1");
         let entries = vec![
             assistant_entry.clone(),
-            attribution_entry.clone(),
-            attribution_entry.clone(),
+            entry(&attribution, "a1"),
+            entry(&attribution, "a2"),
         ];
         let branch_refs: Vec<&crate::session_store::SessionEntry> = entries.iter().collect();
         let (own, total) = compute_own_and_total_usage(&branch_refs, &entries);
@@ -331,17 +338,67 @@ mod usage_tests {
         // Subtraction clamps at zero instead of going negative (TS attribution-drift guard).
         let entries_more = vec![
             assistant_entry,
-            attribution_entry.clone(),
-            attribution_entry.clone(),
-            attribution_entry.clone(),
-            attribution_entry.clone(),
-            attribution_entry,
+            entry(&attribution, "a1"),
+            entry(&attribution, "a2"),
+            entry(&attribution, "a3"),
+            entry(&attribution, "a4"),
+            entry(&attribution, "a5"),
         ];
         let branch_refs_more: Vec<&crate::session_store::SessionEntry> =
             entries_more.iter().collect();
         let (own, _) = compute_own_and_total_usage(&branch_refs_more, &entries_more);
         assert_eq!(own["input"], json!(0));
         assert_eq!(own["cost"]["total"].as_f64(), Some(0.0));
+    }
+
+    /// A duplicated attribution id — a retried durable append whose bytes
+    /// landed but whose fsync errored — is subtracted once: own usage keeps
+    /// one batch, the total keeps its last-wins aggregate.
+    #[test]
+    fn a_duplicated_attribution_id_is_subtracted_once() {
+        let assistant = json!({
+            "type": "message", "id": "m1",
+            "message": {
+                "role": "assistant", "content": "text",
+                "usage": {
+                    "input": 100, "output": 10, "cacheRead": 0, "cacheWrite": 0,
+                    "totalTokens": 110,
+                    "cost": { "input": 1, "output": 2, "cacheRead": 0, "cacheWrite": 0, "total": 3 },
+                },
+            },
+        });
+        let attribution = json!({
+            "type": "child_usage_attributed", "id": "a1",
+            "targetId": "m1",
+            "childUsage": {
+                "input": 40, "output": 5, "cacheRead": 0, "cacheWrite": 0,
+                "totalTokens": 45,
+                "cost": { "input": 0.5, "output": 1, "cacheRead": 0, "cacheWrite": 0, "total": 1.5 },
+            },
+        });
+        let entry = |value: &Value, id: &str| crate::session_store::SessionEntry {
+            type_: value["type"].as_str().expect("type").to_string(),
+            id: id.to_string(),
+            parent_id: None,
+            timestamp: "2024-01-01T00:00:00.000Z".to_string(),
+            fields: value
+                .as_object()
+                .expect("object")
+                .clone()
+                .into_iter()
+                .collect(),
+        };
+        // The retry's second row carries the same id and the same bytes.
+        let entries = vec![
+            entry(&assistant, "m1"),
+            entry(&attribution, "a1"),
+            entry(&attribution, "a1"),
+        ];
+        let branch: Vec<&crate::session_store::SessionEntry> = entries.iter().collect();
+        let (own, total) = compute_own_and_total_usage(&branch, &entries);
+        assert_eq!(total["input"], json!(100));
+        assert_eq!(own["input"], json!(60), "the duplicated id subtracts once");
+        assert_eq!(own["cost"]["total"].as_f64(), Some(1.5));
     }
 
     /// A `branch_summary` row served by an auxiliary model (TS #2411) bills on

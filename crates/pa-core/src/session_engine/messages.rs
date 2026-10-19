@@ -9,7 +9,7 @@ use pa_types::ai::{
 use pa_types::session::AgentMessage;
 use std::fmt::Write as _;
 
-pub const COMPACTION_SUMMARY_PREFIX: &str = "[compaction-summary]\n\nThe conversation history before this point was compacted into the following summary.\nThe retained messages below are authoritative; this summary may lag behind them.\n\n<summary>\n";
+pub const COMPACTION_SUMMARY_PREFIX: &str = "[compaction-summary]\n\nThe conversation history before this point was compacted into the following summary.\nThe retained messages below are authoritative; this summary may lag behind them.\nBackground work may have progressed during compaction; treat resource statuses as last-observed and refresh them before relying on them.\n\n<summary>\n";
 pub const COMPACTION_SUMMARY_SUFFIX: &str = "\n</summary>";
 pub const BRANCH_SUMMARY_PREFIX: &str = "[branch-summary]\n\nThe following is a summary of a branch that this conversation came back from:\n\n<summary>\n";
 pub const BRANCH_SUMMARY_SUFFIX: &str = "\n</summary>";
@@ -26,6 +26,10 @@ pub const REFINEMENT_NOTICE_CUSTOM_TYPE: &str = "refinement_notice";
 /// DIVERGENCE, operator ruling 2026-09-23): a user-facing disclosure, never
 /// model context — `convert_to_llm` drops it.
 pub const PROVIDER_RETRY_OUTCOME_CUSTOM_TYPE: &str = "provider_retry_outcome";
+/// TS `MCP_CONNECTION_OUTCOME_CUSTOM_TYPE`: the durable row an MCP
+/// connect/disconnect leaves in the transcript (produced by the TS-era
+/// daemon; the row is bookkeeping, never model context).
+pub const MCP_CONNECTION_OUTCOME_CUSTOM_TYPE: &str = "mcp_connection_outcome";
 pub const HEARTBEAT_PROMPT_CUSTOM_TYPE: &str = "heartbeat_prompt";
 /// The durable row a detached kernel bash completion admits as the
 /// woken turn's injected prompt.
@@ -323,6 +327,7 @@ pub fn convert_to_llm(messages: &[AgentMessage]) -> Vec<AgentMessage> {
                     SESSION_SLASH_COMMAND_CUSTOM_TYPE
                         | SESSION_SLASH_COMMAND_RESULT_CUSTOM_TYPE
                         | COMPACTION_OUTCOME_CUSTOM_TYPE
+                        | MCP_CONNECTION_OUTCOME_CUSTOM_TYPE
                         | REFINEMENT_OUTCOME_CUSTOM_TYPE
                         | PROVIDER_RETRY_OUTCOME_CUSTOM_TYPE
                         | crate::prompts::model_prompts::MODEL_PROMPT_ERROR_CUSTOM_TYPE
@@ -474,6 +479,25 @@ mod tests {
             "/x/model-prompts.toml: bad TOML".to_string(),
         ]);
         assert!(convert_to_llm(&[AgentMessage::Custom(message)]).is_empty());
+    }
+
+    /// TS `MCP_CONNECTION_OUTCOME_CUSTOM_TYPE`: the durable MCP
+    /// login/disconnect line is bookkeeping, never model context.
+    #[test]
+    fn mcp_connection_outcome_row_is_never_context() {
+        // The literal is the on-disk value a TS-era session file carries.
+        let message = pa_types::session::CustomMessage {
+            custom_type: "mcp_connection_outcome".to_string(),
+            content: UserContent::Text("Connected acme (12 tools verified).".to_string()),
+            display: true,
+            details: None,
+            timestamp: 0,
+            rest: serde_json::Map::default(),
+        };
+        assert!(
+            convert_to_llm(&[AgentMessage::Custom(message)]).is_empty(),
+            "the MCP connection outcome row must drop out of model context"
+        );
     }
 
     #[test]

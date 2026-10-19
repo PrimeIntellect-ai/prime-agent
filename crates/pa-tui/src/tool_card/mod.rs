@@ -125,7 +125,9 @@ pub fn render_tool_card(
     show_images: bool,
 ) -> Vec<Line> {
     match card.name.as_str() {
-        "ipython" => ipython::render(card, frame, detail, theme, width, show_images),
+        name if pa_types::ai::is_python_tool_name(name) => {
+            ipython::render(card, frame, detail, theme, width, show_images)
+        }
         "bash" => bash::render(card, frame, detail, theme, width, show_images),
         _ => generic::render(card, frame, detail, theme, width, show_images),
     }
@@ -333,7 +335,9 @@ pub(crate) fn count_tool_card(
     show_images: bool,
 ) -> usize {
     match card.name.as_str() {
-        "ipython" => ipython::count(card, frame, detail, theme, width, show_images),
+        name if pa_types::ai::is_python_tool_name(name) => {
+            ipython::count(card, frame, detail, theme, width, show_images)
+        }
         "bash" => bash::count(card, frame, detail, theme, width, show_images),
         _ => generic::count(card, frame, detail, theme, width, show_images),
     }

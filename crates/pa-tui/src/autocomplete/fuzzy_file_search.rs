@@ -1,27 +1,33 @@
 //! The `@` fuzzy file search: fd's own `ignore`-crate walk — files and directories, links
 //! followed, hidden entries included, `.git` pruned, fd's default gitignore rules — run
 //! on one background thread, because a no-match walk of a large tree takes seconds; the
-//! result lands on the receiver.
+//! result lands on the receiver. From the first query on, the session's file index
+//! (see [`file_index`]) answers instead; the walk stays as the fallback for scopes the
+//! index cannot serve.
 
-use std::cmp::Reverse;
+use std::cmp::Ordering;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
 use std::sync::mpsc::{self, Receiver};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::thread;
 
-use ignore::{WalkBuilder, WalkState};
+use ignore::{DirEntry, WalkBuilder, WalkState};
 use regex::RegexBuilder;
 
+use super::file_index::{Answer, FileIndex, IndexScope};
 use super::{
     build_completion_value, expand_home_path, parse_path_prefix, CompletionItem, SuggestionKind,
     Suggestions,
 };
 
+/// The `.git` directory name: pruned from every walk.
+pub(super) const GIT_DIR: &str = ".git";
+
 /// fd's `--max-results`: the walk stops once this many entries match.
-const MAX_WALK_RESULTS: usize = 100;
+pub(super) const MAX_WALK_RESULTS: usize = 100;
 /// The menu's row cap.
-const MAX_SUGGESTIONS: usize = 20;
+pub(super) const MAX_SUGGESTIONS: usize = 20;
 
 /// An in-flight `@` file search: the walk thread sends its result over `results` (`None`
 /// when there is nothing to suggest). Dropping the handle cancels the walk.
@@ -33,28 +39,144 @@ pub struct FileSearch {
 
 impl Drop for FileSearch {
     fn drop(&mut self) {
-        self.cancel.store(true, Ordering::Relaxed);
+        self.cancel.store(true, AtomicOrdering::Relaxed);
     }
 }
 
 /// Start the background search for the typed `@` token against the
 /// session cwd.
-pub(super) fn spawn(base: &Path, at_prefix: String) -> FileSearch {
+pub(super) fn spawn(base: &Path, index: FileIndex, at_prefix: String) -> FileSearch {
     let (tx, results) = mpsc::channel();
     let cancel = Arc::new(AtomicBool::new(false));
     let base = base.to_path_buf();
     let thread_cancel = Arc::clone(&cancel);
     thread::spawn(move || {
-        let _ = tx.send(search(&base, &at_prefix, &thread_cancel));
+        let _ = tx.send(search(&base, &index, &at_prefix, &thread_cancel));
     });
     FileSearch { results, cancel }
 }
 
-/// One walk result in fd's printed form: relative to the walk base,
-/// directories carrying their trailing `/`.
-struct WalkedEntry {
-    path: String,
-    is_directory: bool,
+/// The fd printed form without the directory marker.
+pub(super) fn form_trimmed(form: &str) -> &str {
+    form.strip_suffix('/').unwrap_or(form)
+}
+
+/// The final path segment of a fd printed form.
+pub(super) fn form_name(form: &str) -> &str {
+    form_trimmed(form).rsplit('/').next().unwrap_or_default()
+}
+
+/// The depth below the walk base: the separator count of the trimmed form.
+fn form_depth(form: &str) -> usize {
+    form_trimmed(form).matches('/').count()
+}
+
+/// fd's walk rules — the one configuration every walk in the `@` completion uses:
+/// hidden entries included, links followed, `.git` pruned, fd's default ignore set.
+pub(super) fn walk_builder(root: &Path) -> WalkBuilder {
+    let mut builder = WalkBuilder::new(root);
+    builder.hidden(false);
+    builder.follow_links(true);
+    builder.filter_entry(|entry| entry.file_name() != GIT_DIR);
+    builder
+}
+
+/// The fd printed form of one walk entry: relative to `walk_base` (the walk may sit
+/// deeper inside it), directories carrying their trailing `/`; the walk root itself
+/// and non-file non-dir entries skip.
+pub(super) fn fd_printed_form(entry: &DirEntry, walk_base: &Path) -> Option<String> {
+    if entry.depth() == 0 {
+        return None;
+    }
+    let file_type = entry.file_type()?;
+    if !file_type.is_file() && !file_type.is_dir() {
+        return None;
+    }
+    let relative = entry.path().strip_prefix(walk_base).unwrap_or(entry.path());
+    let form = to_display_path(&relative.to_string_lossy());
+    Some(if file_type.is_dir() {
+        format!("{form}/")
+    } else {
+        form
+    })
+}
+
+/// The walk-base-joined path full-path mode matches, built into a reused buffer.
+/// `base` is the walk base as a string.
+fn push_joined_path(target: &mut String, base: &str, form: &str) {
+    target.clear();
+    target.push_str(base);
+    if !target.ends_with(std::path::MAIN_SEPARATOR) {
+        target.push(std::path::MAIN_SEPARATOR);
+    }
+    target.push_str(form_trimmed(form));
+}
+
+/// One typed `@` token's resolved search: what the ranking needs — the typed query
+/// lowercased once, the typed scope's display base rebuilt into the item paths, and the
+/// token's quoting — and how candidates match and cancel.
+pub(super) struct AtSearch<'a> {
+    pub(super) lower_query: &'a str,
+    pub(super) display_base: Option<&'a str>,
+    pub(super) at_prefix: &'a str,
+    pub(super) is_quoted_prefix: bool,
+    pub(super) walk_base: &'a Path,
+    pub(super) regex: Option<&'a regex::Regex>,
+    pub(super) full_path_mode: bool,
+    pub(super) cancel: &'a AtomicBool,
+}
+
+impl AtSearch<'_> {
+    /// The one fd match of a printed form, shared by the walk and the index scan: the
+    /// regex against the name, or in full-path mode against the walk-base-joined path
+    /// (built into `target`). `base` is the walk base as a string; an empty query
+    /// matches every form.
+    pub(super) fn matches(&self, base: &str, form: &str, target: &mut String) -> bool {
+        let Some(regex) = self.regex else {
+            return true;
+        };
+        if self.full_path_mode {
+            push_joined_path(target, base, form);
+            regex.is_match(target)
+        } else {
+            regex.is_match(form_name(form))
+        }
+    }
+
+    /// The one ranking key of a matched form, shared by the walk and the index scan, all
+    /// case-insensitive against the once-lowercased query: `None` when neither the name
+    /// nor the path contains the query; an empty query is a name prefix of every form.
+    /// The form is relative to the typed scope, so the scope's own dot directory
+    /// (`@.github/`) hides nothing.
+    pub(super) fn score<'form>(&self, form: &'form str) -> Option<RankedForm<'form>> {
+        let name = form_name(form);
+        let class = if eq_ignore_case(name, self.lower_query) {
+            MatchClass::ExactName
+        } else if starts_with_ignore_case(name, self.lower_query) {
+            MatchClass::NamePrefix
+        } else if contains_ignore_case(name, self.lower_query) {
+            MatchClass::NameSubstring
+        } else if contains_ignore_case(form, self.lower_query) {
+            MatchClass::PathSubstring
+        } else {
+            return None;
+        };
+        let dotted_query = self
+            .lower_query
+            .rsplit('/')
+            .next()
+            .is_some_and(|segment| segment.starts_with('.'));
+        let hidden = !dotted_query
+            && form_trimmed(form)
+                .split('/')
+                .any(|segment| segment.starts_with('.'));
+        Some(RankedForm {
+            class,
+            hidden,
+            depth: form_depth(form),
+            form,
+        })
+    }
 }
 
 /// The `@dir/partial` scope: the walk runs inside `base_dir` for `query`, and
@@ -91,66 +213,68 @@ fn resolve_scoped_query(base: &Path, raw_query: &str) -> Option<ScopedQuery> {
 
 /// Walk with fd's semantics: the parallel `ignore` walker, the base itself skipped, the
 /// walk cut at [`MAX_WALK_RESULTS`] or on cancel; results come back in fd's printed form.
-fn walk_directory(
-    walk_base: &Path,
-    regex: Option<&regex::Regex>,
-    full_path_mode: bool,
-    cancel: &AtomicBool,
-) -> Vec<WalkedEntry> {
-    let found: Mutex<Vec<WalkedEntry>> = Mutex::new(Vec::new());
-    WalkBuilder::new(walk_base)
-        .hidden(false)
-        .follow_links(true)
-        .filter_entry(|entry| entry.file_name() != ".git")
-        .build_parallel()
-        .run(|| {
-            Box::new(|entry| {
-                if cancel.load(Ordering::Relaxed) {
-                    return WalkState::Quit;
-                }
-                let Ok(entry) = entry else {
-                    return WalkState::Continue;
-                };
-                // Only files and directories reach the results (broken
-                // links and loops arrive as errors and skip).
-                if entry.depth() == 0 {
-                    return WalkState::Continue;
-                }
-                let file_type = match entry.file_type() {
-                    Some(file_type) if file_type.is_file() || file_type.is_dir() => file_type,
-                    _ => return WalkState::Continue,
-                };
-                let target = if full_path_mode {
-                    entry.path().to_string_lossy()
-                } else {
-                    entry.file_name().to_string_lossy()
-                };
-                if regex.is_some_and(|regex| !regex.is_match(&target)) {
-                    return WalkState::Continue;
-                }
-                let relative = entry.path().strip_prefix(walk_base).unwrap_or(entry.path());
-                let path = to_display_path(&relative.to_string_lossy());
-                let is_directory = file_type.is_dir();
-                let path = if is_directory {
-                    format!("{path}/")
-                } else {
-                    path
-                };
-                let mut found = found.lock().unwrap_or_else(PoisonError::into_inner);
-                if found.len() == MAX_WALK_RESULTS {
-                    return WalkState::Quit;
-                }
-                found.push(WalkedEntry { path, is_directory });
-                WalkState::Continue
-            })
-        });
+fn walk_directory(search: &AtSearch<'_>) -> Vec<String> {
+    let found: Mutex<Vec<String>> = Mutex::new(Vec::new());
+    let base = search.walk_base.to_string_lossy().into_owned();
+    walk_builder(search.walk_base).build_parallel().run(|| {
+        let (found, base) = (&found, base.as_str());
+        let mut target = String::new();
+        Box::new(move |entry| {
+            if search.cancel.load(AtomicOrdering::Relaxed) {
+                return WalkState::Quit;
+            }
+            let Ok(entry) = entry else {
+                return WalkState::Continue;
+            };
+            let Some(form) = fd_printed_form(&entry, search.walk_base) else {
+                return WalkState::Continue;
+            };
+            if !search.matches(base, &form, &mut target) {
+                return WalkState::Continue;
+            }
+            let mut found = found.lock().unwrap_or_else(PoisonError::into_inner);
+            if found.len() == MAX_WALK_RESULTS {
+                return WalkState::Quit;
+            }
+            found.push(form);
+            WalkState::Continue
+        })
+    });
     found.into_inner().unwrap_or_else(PoisonError::into_inner)
 }
 
-/// The walk thread body: resolve the typed scope, walk with fd's semantics, score, and
-/// build the items. `None` means no menu: fd matched nothing, the query was an invalid
-/// regex (fd exits non-zero), or every entry scored zero.
-fn search(base: &Path, at_prefix: &str, cancel: &AtomicBool) -> Option<Suggestions> {
+/// The walk thread body: answer from the file index when it serves the query (walking
+/// once to build it on first use), fall back to the live walk otherwise, and rank.
+/// `None` means no menu: fd matched nothing, the query was an invalid regex (fd exits
+/// non-zero), or every entry scored zero.
+fn search(
+    base: &Path,
+    index: &FileIndex,
+    at_prefix: &str,
+    cancel: &AtomicBool,
+) -> Option<Suggestions> {
+    resolve_search(base, at_prefix, cancel, |search, scope| {
+        match index.query(base, scope, search) {
+            Answer::Served(answered) => answered,
+            Answer::Walk => {
+                let found = walk_directory(search);
+                suggestions(
+                    top_ranked(found.iter().filter_map(|form| search.score(form))),
+                    search,
+                )
+            }
+        }
+    })
+}
+
+/// Resolve the typed `@` token — its scope, the fd pattern, the index scope — and hand
+/// the resolved search to `answer`. An invalid regex answers `None` without it.
+pub(super) fn resolve_search(
+    base: &Path,
+    at_prefix: &str,
+    cancel: &AtomicBool,
+    answer: impl FnOnce(&AtSearch<'_>, &IndexScope) -> Option<Suggestions>,
+) -> Option<Suggestions> {
     let (raw_query, _is_at_prefix, is_quoted_prefix) = parse_path_prefix(at_prefix);
     let scoped_query = resolve_scoped_query(base, &raw_query);
     let (walk_base, query) = match &scoped_query {
@@ -171,39 +295,130 @@ fn search(base: &Path, at_prefix: &str, cancel: &AtomicBool) -> Option<Suggestio
                 .ok()?,
         )
     };
-    let found = walk_directory(&walk_base, regex.as_ref(), full_path_mode, cancel);
-    // The stable sort keeps fd's arrival order within a score.
-    let mut scored_entries: Vec<(i32, WalkedEntry)> = found
+    let lower_query = query.to_lowercase();
+    let search = AtSearch {
+        lower_query: &lower_query,
+        display_base: scoped_query
+            .as_ref()
+            .map(|scoped| scoped.display_base.as_str()),
+        at_prefix,
+        is_quoted_prefix,
+        walk_base: &walk_base,
+        regex: regex.as_ref(),
+        full_path_mode,
+        cancel,
+    };
+    let scope = match &scoped_query {
+        Some(scoped) => index_scope(&scoped.display_base),
+        None => IndexScope::Unscoped,
+    };
+    answer(&search, &scope)
+}
+
+/// The typed scope as an index prefix: relative, no `..` component, a leading `./`
+/// normalized away — `Outside` when the scope can never be served by the index.
+fn index_scope(display_base: &str) -> IndexScope {
+    if display_base.starts_with('/') || display_base.starts_with('~') {
+        return IndexScope::Outside;
+    }
+    let normalized = display_base.strip_prefix("./").unwrap_or(display_base);
+    if normalized.split('/').any(|component| component == "..") {
+        return IndexScope::Outside;
+    }
+    IndexScope::Prefix(normalized.to_string())
+}
+
+/// How a form contains the typed query, best first.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum MatchClass {
+    ExactName,
+    NamePrefix,
+    NameSubstring,
+    PathSubstring,
+}
+
+/// A matched candidate form with its ranking key (see [`RankedForm::cmp`]).
+pub(super) struct RankedForm<'a> {
+    class: MatchClass,
+    hidden: bool,
+    depth: usize,
+    form: &'a str,
+}
+
+impl RankedForm<'_> {
+    /// The `@` ranking, a total order (best first): the match class (exact name, name
+    /// prefix, name substring, path substring); visible before hidden (a segment starts
+    /// with `.`; nothing is hidden for a query whose last segment starts with `.`);
+    /// fewer segments; fewer chars; directories before files; byte order.
+    fn cmp(&self, other: &Self) -> Ordering {
+        let (this, that) = (form_trimmed(self.form), form_trimmed(other.form));
+        self.class
+            .cmp(&other.class)
+            .then(self.hidden.cmp(&other.hidden))
+            .then(self.depth.cmp(&other.depth))
+            .then_with(|| this.chars().count().cmp(&that.chars().count()))
+            .then_with(|| other.form.ends_with('/').cmp(&self.form.ends_with('/')))
+            .then_with(|| this.cmp(that))
+    }
+}
+
+/// The one top-[`MAX_SUGGESTIONS`] selection, in rank order: over the walk's ranks, an
+/// index chunk's, and the merged chunk tops alike. Bounded work — the full ranked set
+/// never collects.
+pub(super) fn top_ranked<'a>(
+    ranked: impl IntoIterator<Item = RankedForm<'a>>,
+) -> Vec<RankedForm<'a>> {
+    let mut best: Vec<RankedForm<'a>> = Vec::with_capacity(MAX_SUGGESTIONS);
+    for ranked in ranked {
+        if best.len() < MAX_SUGGESTIONS {
+            best.push(ranked);
+            if best.len() == MAX_SUGGESTIONS {
+                best.sort_unstable_by(RankedForm::cmp);
+            }
+        } else if let Some(worst) = best.last() {
+            if RankedForm::cmp(&ranked, worst) == Ordering::Less {
+                best.pop();
+                let position =
+                    best.partition_point(|kept| RankedForm::cmp(kept, &ranked) == Ordering::Less);
+                best.insert(position, ranked);
+            }
+        }
+    }
+    // The fill phase above only sorts at capacity; a short candidate list arrives in
+    // its own order.
+    best.sort_unstable_by(RankedForm::cmp);
+    best
+}
+
+/// The menu of the top ranks, in their order. `None` means no menu.
+pub(super) fn suggestions(best: Vec<RankedForm<'_>>, search: &AtSearch<'_>) -> Option<Suggestions> {
+    if best.is_empty() {
+        return None;
+    }
+    let AtSearch {
+        display_base,
+        at_prefix,
+        is_quoted_prefix,
+        ..
+    } = search;
+    let items: Vec<CompletionItem> = best
         .into_iter()
-        .map(|entry| {
-            let score = if query.is_empty() {
-                1
-            } else {
-                score_entry(&entry.path, &query, entry.is_directory)
-            };
-            (score, entry)
-        })
-        .filter(|(score, _)| *score > 0)
-        .collect();
-    scored_entries.sort_by_key(|(score, _)| Reverse(*score));
-    scored_entries.truncate(MAX_SUGGESTIONS);
-    let items: Vec<CompletionItem> = scored_entries
-        .into_iter()
-        .map(|(_, entry)| {
-            let path = entry.path.strip_suffix('/').unwrap_or(&entry.path);
-            let display_path = match &scoped_query {
-                Some(scoped) => scoped_path_for_display(&scoped.display_base, path),
+        .map(|ranked| {
+            let path = form_trimmed(ranked.form);
+            let display_path = match display_base {
+                Some(display_base) => scoped_path_for_display(display_base, path),
                 None => path.to_string(),
             };
             let name = path.rsplit('/').next().unwrap_or_default();
-            let completion_path = if entry.is_directory {
+            let is_directory = ranked.form.ends_with('/');
+            let completion_path = if is_directory {
                 format!("{display_path}/")
             } else {
                 display_path.clone()
             };
             CompletionItem {
-                value: build_completion_value(&completion_path, true, is_quoted_prefix),
-                label: if entry.is_directory {
+                value: build_completion_value(&completion_path, true, *is_quoted_prefix),
+                label: if is_directory {
                     format!("{name}/")
                 } else {
                     name.to_string()
@@ -214,41 +429,46 @@ fn search(base: &Path, at_prefix: &str, cancel: &AtomicBool) -> Option<Suggestio
             }
         })
         .collect();
-    if items.is_empty() {
-        return None;
-    }
     Some(Suggestions {
-        prefix: at_prefix.to_string(),
+        prefix: (*at_prefix).to_string(),
         kind: Some(SuggestionKind::File),
         items,
     })
 }
 
-/// Exact name 100, name prefix 80, name contains 50, path contains 30,
-/// +10 for directories (when positive), all case-insensitive.
-fn score_entry(file_path: &str, query: &str, is_directory: bool) -> i32 {
-    let file_name = file_path
-        .trim_end_matches('/')
-        .rsplit('/')
-        .next()
-        .unwrap_or_default();
-    let lower_name = file_name.to_lowercase();
-    let lower_query = query.to_lowercase();
-    let mut score = if lower_name == lower_query {
-        100
-    } else if lower_name.starts_with(&lower_query) {
-        80
-    } else if lower_name.contains(&lower_query) {
-        50
-    } else if file_path.to_lowercase().contains(&lower_query) {
-        30
+/// Case-insensitive equality against a needle already lowercased: in place for an
+/// ASCII pair (ASCII casing is per-byte), Unicode lowering otherwise.
+fn eq_ignore_case(haystack: &str, lower_needle: &str) -> bool {
+    if haystack.is_ascii() && lower_needle.is_ascii() {
+        haystack.eq_ignore_ascii_case(lower_needle)
     } else {
-        0
-    };
-    if is_directory && score > 0 {
-        score += 10;
+        haystack.to_lowercase() == lower_needle
     }
-    score
+}
+
+/// Case-insensitive prefix test against a needle already lowercased: in place for an
+/// ASCII pair (ASCII casing is per-byte), Unicode lowering otherwise.
+fn starts_with_ignore_case(haystack: &str, lower_needle: &str) -> bool {
+    if haystack.is_ascii() && lower_needle.is_ascii() {
+        haystack.len() >= lower_needle.len()
+            && haystack[..lower_needle.len()].eq_ignore_ascii_case(lower_needle)
+    } else {
+        haystack.to_lowercase().starts_with(lower_needle)
+    }
+}
+
+/// Case-insensitive containment against a needle already lowercased: in place for an
+/// ASCII pair (byte windows, because ASCII casing is per-byte), Unicode lowering
+/// otherwise.
+fn contains_ignore_case(haystack: &str, lower_needle: &str) -> bool {
+    if haystack.is_ascii() && lower_needle.is_ascii() {
+        haystack
+            .as_bytes()
+            .windows(lower_needle.len())
+            .any(|window| window.eq_ignore_ascii_case(lower_needle.as_bytes()))
+    } else {
+        haystack.to_lowercase().contains(lower_needle)
+    }
 }
 
 /// The raw query when it holds no `/`; otherwise the segments
@@ -277,7 +497,7 @@ fn build_fd_path_query(query: &str) -> String {
 }
 
 /// Normalize backslashes to `/` on every platform.
-fn to_display_path(value: &str) -> String {
+pub(super) fn to_display_path(value: &str) -> String {
     value.replace('\\', "/")
 }
 

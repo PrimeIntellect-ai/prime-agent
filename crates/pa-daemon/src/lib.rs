@@ -43,7 +43,6 @@ pub(crate) mod compaction_supervision;
 pub(crate) mod context_tree_cache;
 pub(crate) mod context_tree_children;
 pub(crate) mod create_reuse;
-pub(crate) mod decision_engine;
 pub mod descriptor;
 pub mod engine;
 pub(crate) mod factory_activity;

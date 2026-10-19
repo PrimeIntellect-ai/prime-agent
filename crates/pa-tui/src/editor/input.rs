@@ -180,6 +180,7 @@ impl Editor {
                     self.cursor_line = result.cursor_line;
                     self.set_cursor_col(result.cursor_col);
                     self.cancel_autocomplete();
+                    self.request_autocomplete_in_symbol_token();
                     if !is_typed_exact || !completed_noop {
                         self.emit(EditorEvent::Changed(self.get_text()));
                         return;

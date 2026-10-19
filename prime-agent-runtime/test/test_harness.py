@@ -1502,8 +1502,6 @@ class HarnessStateTest(unittest.TestCase):
                 state.list("tool")
 
 
-if __name__ == "__main__":
-    unittest.main()
 
 
 class HarnessSearchTest(unittest.TestCase):
@@ -1631,3 +1629,79 @@ class HarnessSearchTest(unittest.TestCase):
             state.entries["memory"]["rare"].updated_at = "2026-07-01T00:00:00+00:00"
             self.assertEqual([entry.id for entry in state.search("session quantum")], ["rare", "zz_newer", "aa_older", "solo"])
 
+
+
+class HarnessRefinementsSettingTests(unittest.TestCase):
+    def test_disabled_harness_keeps_kernel_api_introspection_available(self):
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {"PRIME_AGENT_CODING_AGENT_DIR": tmp}):
+            (Path(tmp) / "settings.json").write_text('{"harnessRefinements":false}')
+            # The real kernel bootstrap probes these methods before any cell runs.
+            for method in ("create_memory", "update_memory", "delete_memory", "create_skill", "record_refinement"):
+                self.assertTrue(callable(getattr(package_harness, method)))
+                self.assertTrue(callable(getattr(callable_rlm.harness, method)))
+            with self.assertRaisesRegex(RuntimeError, "disabled in /settings"):
+                package_harness.create_memory("No", "Do not create")
+            with self.assertRaisesRegex(RuntimeError, "disabled in /settings"):
+                package_harness.snapshot()
+
+    def test_project_settings_cannot_override_the_global_master_switch(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            agent_dir = Path(tmp) / "agent"
+            project_dir = Path(tmp) / "project" / ".prime" / "agent"
+            agent_dir.mkdir()
+            project_dir.mkdir(parents=True)
+            (agent_dir / "settings.json").write_text('{"harnessRefinements":false}')
+            project_settings = project_dir / "settings.json"
+            project_settings.write_text('{"harnessRefinements":true}')
+            with patch.dict(os.environ, {"PRIME_AGENT_CODING_AGENT_DIR": str(agent_dir), "PRIME_AGENT_SETTINGS_CWD": str(Path(tmp) / "project")}):
+                with self.assertRaisesRegex(RuntimeError, "disabled in /settings"):
+                    HarnessState(Path(tmp) / "harness_state.json", scope="global")
+                (agent_dir / "settings.json").write_text('{"harnessRefinements":true}')
+                project_settings.write_text('{"harnessRefinements":false}')
+                state = HarnessState(Path(tmp) / "harness_state.json", scope="global")
+                state.create_memory("Note", "Global preference wins", id="note")
+                self.assertEqual(state.get("memory", "note").content, "Global preference wins")
+                (agent_dir / "settings.json").write_text('{"harnessRefinements":false}')
+                project_settings.write_text('{"harnessRefinements":true}')
+                with self.assertRaisesRegex(RuntimeError, "disabled in /settings"):
+                    state.get("memory", "note")
+                (agent_dir / "settings.json").write_text('{"harnessRefinements":"false"}')
+                self.assertEqual(state.get("memory", "note").content, "Global preference wins")
+
+    def test_disable_blocks_cached_reads_and_writes_without_deleting_state(self):
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {"PRIME_AGENT_CODING_AGENT_DIR": tmp}):
+            settings = Path(tmp) / "settings.json"
+            settings.write_text('{"harnessRefinements":true}')
+            state = get_harness_state(tmp, global_=True)
+            state.create_memory("Note", "Saved memory", id="note")
+            before = state.file_path.read_bytes()
+            settings.write_text('{"harnessRefinements":false}')
+            for action in (lambda: get_harness_state(tmp, global_=True), lambda: state.get("memory", "note"), lambda: state.create_memory("New", "New memory"), state.load, state.save):
+                with self.assertRaisesRegex(RuntimeError, "disabled in /settings"):
+                    action()
+            self.assertEqual(state.file_path.read_bytes(), before)
+            settings.write_text('{"harnessRefinements":true}')
+            self.assertEqual(state.get("memory", "note").content, "Saved memory")
+
+    def test_disabled_refinements_refuse_factory_runs_before_launch(self):
+        import asyncio
+        from rlm import factory
+
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {"PRIME_AGENT_CODING_AGENT_DIR": tmp}):
+            settings = Path(tmp) / "settings.json"
+            settings.write_text('{"factory":{"enabled":true},"harnessRefinements":true}')
+            state = HarnessState(Path(tmp) / "harness_state.json")
+            state.create_factory("Saved factory", "Saved spec", id="saved", dag=FACTORY_DAG)
+            before = state.file_path.read_bytes()
+            executor = factory.FactoryExecutor(harness=state)
+            settings.write_text('{"factory":{"enabled":true},"harnessRefinements":false}')
+            with patch.object(factory, "_DEFAULT_EXECUTOR", executor):
+                for name in ("saved", "review-sweep"):
+                    with self.assertRaisesRegex(RuntimeError, "disabled in /settings"):
+                        asyncio.run(factory.run_factory(name))
+            self.assertEqual(executor._runs, {})
+            self.assertEqual(state.file_path.read_bytes(), before)
+
+
+if __name__ == "__main__":
+    unittest.main()

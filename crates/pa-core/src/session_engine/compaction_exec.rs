@@ -78,12 +78,15 @@ pub fn build_summarization_request(
     })]
 }
 
-/// One resolved summarizer wire call: the summary text and what it
-/// billed; the no-history split arm has no wire call (`usage: None`).
+/// One resolved summarizer wire call: the summary text, what it billed, and
+/// whether the reply stopped at the output cap (`Length` — the caller
+/// retries a truncated summary once with a shorter-summary instruction).
+/// The no-history split arm has no wire call (`usage: None`).
 #[derive(Debug, Clone, PartialEq)]
 pub struct SummarySlice {
     pub summary: String,
     pub usage: Option<pa_types::ai::Usage>,
+    pub truncated: bool,
 }
 
 /// The literal history stand-in for a split turn whose kept cut leaves
@@ -125,12 +128,17 @@ pub type SummaryDeltaSink = std::sync::Arc<dyn Fn(&str) + Send + Sync>;
 
 /// Run one summarizer wire call through `pa_ai::complete_simple`: `headers`
 /// are the routed model's merged request headers; `on_delta` is the live sink
-/// ([`SummaryDeltaSink`]); `failure` labels the error-stop bail.
+/// ([`SummaryDeltaSink`]); `failure` labels the unusable-reply bails. Only a
+/// reply with non-empty text is a usable summary — anything less would be
+/// committed as the compaction row and replace the transcript. A reply
+/// stopped at the output cap resolves with `truncated: true`; the caller
+/// decides the retry.
 ///
 /// # Errors
 ///
-/// Returns an error when the summarizer wire call fails, or when its reply
-/// stops with an error (labeled with `failure`).
+/// Returns an error when the summarizer wire call fails, when its reply
+/// stops with an error, a tool call, or an abort, or when its joined text
+/// is empty (all labeled with `failure`).
 pub async fn complete_summary_call(
     model: &pa_types::ai::Model,
     api_key: Option<String>,
@@ -153,13 +161,19 @@ pub async fn complete_summary_call(
         messages,
         tools: None,
     };
-    let stream_options =
+    // Dropping the summary future must also retire its detached provider task.
+    // The daemon races this future against cancellation at the compaction boundary.
+    let cancel = tokio_util::sync::CancellationToken::new();
+    let _cancel_on_drop = cancel.clone().drop_guard();
+    let mut stream_options =
         pa_ai::types::SimpleStreamOptions::from_base(pa_ai::types::StreamOptions {
+            signal: Some(cancel),
             max_tokens: Some(max_tokens),
             api_key,
             headers: headers.map(|headers| headers.into_iter().collect()),
             ..Default::default()
         });
+    stream_options.reasoning = pa_types::ai::minimum_reasoning(model);
     let assistant = match on_delta {
         None => pa_ai::complete_simple(model, &context, Some(stream_options)).await?,
         Some(on_delta) => {
@@ -175,15 +189,24 @@ pub async fn complete_summary_call(
             stream.result().await
         }
     };
-    if assistant.stop_reason == pa_types::ai::StopReason::Error {
-        anyhow::bail!(
+    let stop_reason = assistant.stop_reason;
+    let truncated = match stop_reason {
+        pa_types::ai::StopReason::Stop => false,
+        pa_types::ai::StopReason::Length => true,
+        pa_types::ai::StopReason::Error => anyhow::bail!(
             "{failure}: {}",
             assistant
                 .error_message
                 .as_deref()
                 .unwrap_or("Unknown error")
-        );
-    }
+        ),
+        // A tool-call or aborted reply is not a usable summary: committing it
+        // as the compaction row would irreversibly replace the transcript
+        // with a fragment.
+        pa_types::ai::StopReason::ToolUse | pa_types::ai::StopReason::Aborted => {
+            anyhow::bail!("{failure}: the summary stopped with reason {stop_reason:?}");
+        }
+    };
     let summary = assistant
         .content
         .iter()
@@ -193,9 +216,13 @@ pub async fn complete_summary_call(
         })
         .collect::<Vec<_>>()
         .join("\n");
+    if summary.trim().is_empty() {
+        anyhow::bail!("{failure}: the summary was empty");
+    }
     Ok(SummarySlice {
         summary,
         usage: Some(assistant.usage),
+        truncated,
     })
 }
 
@@ -643,6 +670,7 @@ mod tests {
         let slice = |summary: &str, usage: Option<pa_types::ai::Usage>| SummarySlice {
             summary: summary.to_string(),
             usage,
+            truncated: false,
         };
         let summed = summed_usage(&[
             slice("a", Some(usage(10, 5, first_cost))),

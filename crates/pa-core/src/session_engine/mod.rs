@@ -12,7 +12,6 @@ pub mod compaction;
 pub mod compaction_exec;
 pub mod compaction_trace;
 pub mod compaction_utils;
-pub mod decision_api;
 pub mod engine;
 pub mod error_classify;
 pub mod factory_host;
@@ -29,6 +28,7 @@ pub mod provider_failover;
 pub mod provider_park;
 pub mod provider_retry;
 pub mod refine;
+mod refinement_gate;
 pub mod request_timing;
 pub mod rlm_host;
 pub mod rlm_notices;
@@ -136,6 +136,7 @@ pub struct AgentSession {
     /// Whether this session may auto-refine; defaults off until the
     /// engine wiring resolves it.
     auto_refine_allowed: bool,
+    refinement_settings: Option<crate::settings::SettingsManager>,
     /// The resolved auto-refine gates; the compact trigger reads them.
     auto_refine: refine::AutoRefineGates,
     /// Session-side auto-refine state the transport surfaces arm and
@@ -238,6 +239,7 @@ impl AgentSession {
             compaction: std::sync::RwLock::new(compaction::CompactionSettings::default()),
             auxiliary_model: None,
             auto_refine_allowed: false,
+            refinement_settings: None,
             auto_refine: refine::AutoRefineGates::default(),
             compact_auto_refine: std::sync::Mutex::default(),
             kernel_state: None,
@@ -489,5 +491,3 @@ mod compaction_outcome_tests;
 
 #[cfg(test)]
 mod compaction_unblocked_tests;
-#[cfg(test)]
-mod decision_runtime_tests;

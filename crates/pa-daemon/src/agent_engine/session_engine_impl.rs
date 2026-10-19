@@ -3,43 +3,15 @@
 //! turn state machine, and the export/telemetry reads.
 
 use super::{
-    artifact_reference, json, map_thinking_level, now_millis, persisted_rlm_max_depth,
-    AgentSessionEngine, Arc, BranchSummaryOutcome, BranchSummaryRequest, BranchSummaryRun,
-    CompactionOutcome, CompactionRequest, CompactionRun, EngineEvent, EngineModelSelection,
-    ParentIdentity, PromptRequest, ProviderTarget, SessionEngine, SideQuestionOutcome,
+    artifact_reference, json, map_thinking_level, now_millis, AgentSessionEngine, Arc,
+    BranchSummaryOutcome, BranchSummaryRequest, BranchSummaryRun, CompactionOutcome,
+    CompactionRequest, CompactionRun, EngineEvent, EngineModelSelection, ParentIdentity,
+    PromptContextBoundary, PromptRequest, ProviderTarget, SessionEngine, SideQuestionOutcome,
     SideQuestionRequest, StartupScope, TurnPrompt, Value, DEFAULT_RLM_MAX_DEPTH,
 };
-use pa_core::session_engine::agent_messaging::AgentFamilyRelationship;
 
 impl SessionEngine for AgentSessionEngine {
-    fn route_decision_api_event(
-        &self,
-        relationship: Option<AgentFamilyRelationship>,
-        sender_name: &str,
-        message: &str,
-    ) -> bool {
-        if relationship != Some(AgentFamilyRelationship::Child) {
-            return false;
-        }
-        let Ok(decision) = serde_json::from_str::<Value>(message) else {
-            return false;
-        };
-        if decision["type"] != "decision_api.decision" {
-            return false;
-        }
-        if let Some(slot) = self
-            .decision_replies
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .get_mut(sender_name)
-        {
-            *slot = Some(decision);
-        }
-        true
-    }
-    /// TS `_clearQueuedGoalContexts`: the worker-installed purge withdraws
-    /// the queued minted goal-context turns (pause/clear/start must not
-    /// leave a stale continuation to run after the state change).    /// Withdraw the queued minted goal-context turns so a state change leaves nothing stale to run.
+    /// Withdraw the queued minted goal-context turns so a state change leaves nothing stale to run.
     fn purge_queued_goal_contexts(&self) {
         let purge = self
             .goal_queue_purge
@@ -284,6 +256,28 @@ impl SessionEngine for AgentSessionEngine {
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(path);
     }
 
+    fn set_prompt_context_boundary(&self, leaf_id: Option<String>) {
+        let boundary = match leaf_id {
+            Some(leaf) => PromptContextBoundary::Leaf(leaf),
+            None => PromptContextBoundary::Empty,
+        };
+        if std::env::var_os("PA_COMPACTION_TRACE").is_some() {
+            pa_core::session_engine::compaction_trace::trace(
+                "daemon.prompt_boundary",
+                &json!({
+                    "kind": match &boundary {
+                        PromptContextBoundary::Empty => "empty",
+                        PromptContextBoundary::Leaf(_) => "leaf",
+                    },
+                }),
+            );
+        }
+        *self
+            .prompt_context_boundary
+            .lock()
+            .expect("prompt context boundary lock") = Some(boundary);
+    }
+
     /// Restore through the bounded readiness wait. An explicit create flag
     /// wins; a failed restore is never silent
     /// ([`Self::model_fallback_message`]).
@@ -339,6 +333,29 @@ impl SessionEngine for AgentSessionEngine {
                     .filter(|name| !name.is_empty())
                     .map(str::to_string),
             );
+        }
+    }
+
+    /// The session's newest accepted progress note; `None` before the
+    /// first build and after a run boundary cleared it.
+    fn progress_note(&self) -> Option<String> {
+        self.progress_notes
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+            .and_then(|notes| notes.latest_note())
+            .map(|(note, _)| note)
+    }
+
+    /// Clears the stored note at the run boundary; the throttle clock stays.
+    fn clear_progress_note(&self) {
+        if let Some(notes) = self
+            .progress_notes
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+        {
+            notes.clear();
         }
     }
 
@@ -419,6 +436,14 @@ impl SessionEngine for AgentSessionEngine {
             return false;
         };
         {
+            // The switch's resolve-and-install serializes with `/reload`'s
+            // live-input refresh (the failover callbacks' fence): a reload
+            // landing between this resolution and the slot write must not
+            // be clobbered by the switch's older pair.
+            let _reload_serialized = self
+                .reload_lock
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             let (api_key, headers) = self.resolve_request_key_and_headers(&model);
             let mut target = self.provider_target.write().expect("provider target lock");
             *target = Some(ProviderTarget {
@@ -440,6 +465,10 @@ impl SessionEngine for AgentSessionEngine {
                 core.session
                     .set_model_and_thinking_level(&model, &provider, &model_id, level),
             );
+            // The turn-boundary model facts follow the switch: `model.info`
+            // and the usage estimate's context window report the model now
+            // running. A core that is not built yet rebinds at its build.
+            core.update_model_facts(&model);
         }
         if let Some(children) = &self.children {
             children.set_model(format!("{}/{}", model.provider, model.id));
@@ -837,28 +866,13 @@ impl SessionEngine for AgentSessionEngine {
                 .ok_or_else(|| anyhow::anyhow!("unknown thinking level \"{thinking}\""))?;
         }
         // The depth bound's precedence: chat override > inherited > global
-        // setting > env > default.
-        let (max_depth, source) = persisted_rlm_max_depth(identity.session_file.as_deref())
-            .map(|depth| (depth, "chat"))
-            .or_else(|| {
-                identity
-                    .rlm_max_depth
-                    .map(|depth| (u64::from(depth), "inherited"))
-            })
-            .or_else(|| {
-                let settings =
-                    pa_core::settings::SettingsManager::create(self.cwd(), &self.config.agent_dir);
-                settings.get_rlm_max_depth().map(|depth| (depth, "global"))
-            })
-            .or_else(|| {
-                std::env::var("RLM_MAX_DEPTH")
-                    .ok()
-                    .filter(|value| !value.is_empty())
-                    .and_then(|value| value.parse::<u64>().ok())
-                    .filter(|value| *value >= 1)
-                    .map(|depth| (depth, "env"))
-            })
-            .unwrap_or((u64::from(DEFAULT_RLM_MAX_DEPTH), "default"));
+        // setting > env > default (the shared resolver).
+        let (max_depth, source) = pa_core::session_engine::rlm_host::resolve_rlm_max_depth(
+            identity.session_file.as_deref(),
+            identity.rlm_max_depth,
+            &self.cwd(),
+            &self.config.agent_dir,
+        );
         *self.rlm_max_depth_source.lock().expect("depth source lock") = source;
         // The semantic-edge identity (TS `semanticEdgeLedgerPath` +
         // provenance): a spawned child's ledger lives in its rlm session
@@ -930,6 +944,21 @@ impl SessionEngine for AgentSessionEngine {
 
     /// The worker's turn completed: release child prompt tasks waiting on the boundary.
     fn on_turn_done(&self) {
+        *self
+            .prompt_context_boundary
+            .lock()
+            .expect("prompt context boundary lock") = None;
+        self.runtime.block_on(async {
+            let core = self.session.lock().await.clone();
+            if let Some(core) = core {
+                core.session
+                    .shared_persistence()
+                    .lock()
+                    .await
+                    .replay_admitted_user_rows(Vec::new())
+                    .expect("clearing admitted rows cannot fail");
+            }
+        });
         if let Some(children) = &self.children {
             children.notify_turn_done();
         }
@@ -1306,9 +1335,12 @@ impl SessionEngine for AgentSessionEngine {
         if let Some(command) =
             crate::session_commands::parse_prompt_session_command(&request.message)
         {
-            let Some(execution) =
-                crate::session_commands::run_session_command(self, &command, &mut emit)
-            else {
+            let Some(execution) = crate::session_commands::run_session_command(
+                self,
+                &command,
+                &request.images,
+                &mut emit,
+            ) else {
                 return;
             };
             if let Some(error) = &execution.error {

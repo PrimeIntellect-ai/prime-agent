@@ -8,7 +8,6 @@ use super::{
     bail, json, rlm_child_label, Arc, ChildCloseReason, ChildRecord, Context, DaemonCommand,
     DeletedChild, Map, Mutex, Result, SupervisorChildSessionsInner, KILL_TIMEOUT_MS,
 };
-use crate::lease::canonical_session_path;
 
 /// The already-gone marker inside a close failure: a close walking a
 /// child that died earlier must not fail (a missing child session is a completed no-op).
@@ -32,6 +31,7 @@ impl SupervisorChildSessionsInner {
             session_name: record.session_name.clone(),
             session_dir: record.session_dir.clone(),
             started_at_ms: record.started_at_ms,
+            status: record.roster_status(),
             answer_preview: record.answer_preview.clone(),
             error: record
                 .error
@@ -98,15 +98,32 @@ impl SupervisorChildSessionsInner {
     /// Delete one inactive child by id: refresh the registry row first, refuse one still in flight,
     /// and tear a settled one down with its ledger tombstone (same as `rlm.delete_subagent`).
     pub(super) async fn delete_inactive_subagent(&self, child_id: &str) -> Result<&'static str> {
+        if !self.replay_retired_usage(Some(child_id)).await {
+            bail!("RLM child usage remains owed after retirement; retry deletion");
+        }
         let children = self.children.lock().await.clone();
         for record in &children {
             let matched = record.lock().await.rlm_child_id == child_id;
             if !matched {
                 continue;
             }
+            let rename_lock = record.lock().await.rename_lock.clone();
+            let _guard = rename_lock.lock().await;
+            let already_terminated = self.has_retired_usage(record);
+            if !self
+                .children
+                .lock()
+                .await
+                .iter()
+                .any(|held| Arc::ptr_eq(held, record))
+            {
+                continue;
+            }
             // Freshness pass: a child that just went idle settles here
             // and stays deletable.
-            self.refresh_record(record).await;
+            if !already_terminated {
+                self.refresh_record(record).await;
+            }
             let (running, active_session_id) = {
                 let record = record.lock().await;
                 (
@@ -114,90 +131,100 @@ impl SupervisorChildSessionsInner {
                     record.active_session_id.clone(),
                 )
             };
-            if running {
+            if running && !already_terminated {
                 return Ok("running");
             }
             // Capture before the unlink: a deleted child's already-durable
             // rows are its only remaining spend record on the parent side.
-            self.emit_child_usage(record).await;
-            let command = DaemonCommand::Kill {
-                id: None,
-                active_session_id: active_session_id.clone(),
-                rest: serde_json::Map::from_iter([
-                    ("rlmLedgerDelete".to_string(), json!("user")),
-                    ("rlmChildId".to_string(), json!(child_id)),
-                ]),
-            };
-            self.command(&command, KILL_TIMEOUT_MS)
-                .await
-                .with_context(|| format!("kill RLM child \"{child_id}\""))?;
-            // Rows can land between the pre-kill capture and the kill
-            // (a settle racing the kill): the post-kill walk is the last
-            // observation; the cursor keeps it free of double-billing.
-            self.emit_child_usage(record).await;
-            self.forget_child_usage(record).await;
-            // Any live usage watcher retires with the record: a
-            // follow-up watch must not keep polling the killed worker.
-            record.lock().await.closed_by_parent = true;
-            // The inactive delete leaves the same tombstone as the live
-            // delete, so `collect` answers a just-deleted selector.
-            {
-                let record = record.lock().await;
-                self.remember_deleted_child(&record);
+            if !already_terminated {
+                self.emit_child_usage(record).await;
+                let command = DaemonCommand::Kill {
+                    id: None,
+                    active_session_id: active_session_id.clone(),
+                    rest: serde_json::Map::from_iter([
+                        ("rlmLedgerDelete".to_string(), json!("user")),
+                        ("rlmChildId".to_string(), json!(child_id)),
+                    ]),
+                };
+                self.command(&command, KILL_TIMEOUT_MS)
+                    .await
+                    .with_context(|| format!("kill RLM child \"{child_id}\""))?;
+                // Rows can land between the pre-kill capture and the kill
+                // (a settle racing the kill): the post-kill walk is the last
+                // observation; the cursor keeps it free of double-billing.
+                self.retain_retired_usage(
+                    record,
+                    super::RetirementIntent::Delete { was_running: false },
+                );
+                self.emit_child_usage(record).await;
             }
-            self.emit_child_removal(record).await;
-            self.children
-                .lock()
-                .await
-                .retain(|candidate| !Arc::ptr_eq(candidate, record));
-            // The deleted child is a resume site for the owed goal continuation.
-            self.fire_settle_hook(record).await;
+            let usage_persisted = self.forget_child_usage(record).await;
+            self.finish_retirement(record).await;
+            if usage_persisted {
+                self.remove_retired_usage(record);
+            }
+            if !usage_persisted {
+                bail!("RLM child usage remains owed after retirement; retry deletion");
+            }
             return Ok("deleted");
         }
-        Ok("not_found")
+        if self
+            .deleted_children
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .contains_key(child_id)
+        {
+            Ok("deleted")
+        } else {
+            Ok("not_found")
+        }
     }
 
     /// A child whose session is already gone is a completed no-op; every
     /// other close failure is kept (walk all children, rethrow the first error).
     pub(super) async fn close_children_inner(&self, reason: ChildCloseReason) -> Result<()> {
+        let usage_persisted = self.replay_retired_usage(None).await;
         let children = self.children.lock().await.clone();
-        let mut close_error: Option<anyhow::Error> = None;
+        let mut close_error = (!usage_persisted)
+            .then(|| anyhow::anyhow!("RLM child usage remains owed after retirement; retry close"));
         for record in &children {
-            {
-                let mut record = record.lock().await;
-                record.closed_by_parent = true;
-                record.notice_delivered = true;
-            }
-            // Capture before the close: the teardown settles each run;
-            // nothing observes the child after the kill.
-            self.emit_child_usage(record).await;
-            let active_session_id = record.lock().await.active_session_id.clone();
-            if let Err(error) = self.kill_child(&active_session_id, reason).await {
-                if unknown_session(&error).is_some() {
-                    // Already gone: the missing child is a no-op success.
-                    // The dead worker's file is frozen — the pre-kill walk
-                    // covered its rows; the registration drops with it.
-                    self.forget_child_usage(record).await;
-                    self.children
-                        .lock()
-                        .await
-                        .retain(|candidate| !Arc::ptr_eq(candidate, record));
-                    continue;
-                }
-                // A failed close keeps the child tracked so the
-                // caller can retry.
-                close_error.get_or_insert(error);
-                continue;
-            }
-            // Rows can land between the pre-kill capture and the kill:
-            // the post-kill walk is the last observation; the registration
-            // drops with the child.
-            self.emit_child_usage(record).await;
-            self.forget_child_usage(record).await;
-            self.children
+            let rename_lock = record.lock().await.rename_lock.clone();
+            let _guard = rename_lock.lock().await;
+            if !self
+                .children
                 .lock()
                 .await
-                .retain(|candidate| !Arc::ptr_eq(candidate, record));
+                .iter()
+                .any(|held| Arc::ptr_eq(held, record))
+            {
+                continue;
+            }
+            if !self.has_retired_usage(record) {
+                {
+                    let mut record = record.lock().await;
+                    record.closed_by_parent = true;
+                    record.notice_delivered = true;
+                }
+                self.emit_child_usage(record).await;
+                let active_session_id = record.lock().await.active_session_id.clone();
+                if let Err(error) = self.kill_child(&active_session_id, reason).await {
+                    if unknown_session(&error).is_none() {
+                        close_error.get_or_insert(error);
+                        continue;
+                    }
+                }
+                self.retain_retired_usage(record, super::RetirementIntent::Close);
+                self.emit_child_usage(record).await;
+            }
+            let usage_persisted = self.forget_child_usage(record).await;
+            self.finish_retirement(record).await;
+            if usage_persisted {
+                self.remove_retired_usage(record);
+            } else {
+                close_error.get_or_insert_with(|| {
+                    anyhow::anyhow!("RLM child usage remains owed after retirement; retry close")
+                });
+            }
         }
         // The walk changed the registry: wake a parked barrier (a closed
         // child is settled work, settled here by its removal).
@@ -206,6 +233,122 @@ impl SupervisorChildSessionsInner {
         match close_error {
             Some(error) => Err(error),
             None => Ok(()),
+        }
+    }
+
+    /// Complete a confirmed retirement once, including an interrupted caller's bookkeeping.
+    pub(super) async fn finish_retirement(&self, record: &Arc<Mutex<ChildRecord>>) {
+        if record.lock().await.retirement_finished {
+            return;
+        }
+        let intent = self
+            .retirement_intent(record)
+            .expect("confirmed retirement receipt");
+        let deleted = matches!(intent, super::RetirementIntent::Delete { .. });
+        let cancelled_by_delete = matches!(
+            intent,
+            super::RetirementIntent::Delete { was_running: true }
+        );
+        let child_id = {
+            let mut row = record.lock().await;
+            row.closed_by_parent = true;
+            match intent {
+                super::RetirementIntent::Delete { was_running } => {
+                    if was_running {
+                        row.settled_status = Some("cancelled");
+                        row.error = Some("Deleted by parent orchestrator".into());
+                    }
+                    self.remember_deleted_child(&row);
+                }
+                super::RetirementIntent::Close => {
+                    row.notice_delivered = true;
+                }
+            }
+            row.rlm_child_id.clone()
+        };
+        if deleted {
+            let sink = self
+                .child_update_sink
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone();
+            let row = {
+                let mut row = record.lock().await;
+                if row.retirement_roster_emitted {
+                    None
+                } else {
+                    row.retirement_roster_emitted = true;
+                    Some(if cancelled_by_delete {
+                        row.snapshot_value()
+                    } else {
+                        json!({
+                            "id": row.rlm_child_id, "activeSessionId": row.active_session_id,
+                            "sessionName": row.session_name, "label": row.session_name,
+                            "status": "cancelled", "sessionDir": row.session_dir,
+                            "error": "Deleted by parent orchestrator"
+                        })
+                    })
+                }
+            };
+            if let (Some(sink), Some(row)) = (sink, row) {
+                sink(row);
+            }
+        }
+        self.children
+            .lock()
+            .await
+            .retain(|held| !Arc::ptr_eq(held, record));
+        if deleted {
+            let notify = self
+                .delete_notifier
+                .lock()
+                .expect("delete notifier lock")
+                .clone();
+            let claimed = {
+                let mut row = record.lock().await;
+                let claimed = !row.retirement_notified;
+                row.retirement_notified = true;
+                claimed
+            };
+            if let Some(notify) = notify.filter(|_| claimed) {
+                notify(&child_id);
+            }
+            let notice = {
+                let mut row = record.lock().await;
+                let claimed = cancelled_by_delete && !row.notice_delivered;
+                row.notice_delivered = true;
+                claimed.then(|| super::RlmChildTerminalNotice::Cancelled {
+                    child_id: row.rlm_child_id.clone(),
+                    session_name: row.session_name.clone(),
+                    reason: Some("Deleted by parent orchestrator".into()),
+                })
+            };
+            if let Some(notice) = notice {
+                self.deliver_terminal_notice(super::create_rlm_child_terminal_notice(
+                    &notice,
+                    super::now_ms(),
+                ))
+                .await;
+            }
+        }
+        self.refresh_running().await;
+        let notify_hook = {
+            let mut row = record.lock().await;
+            row.settled = true;
+            row.retirement_finished = true;
+            deleted
+        };
+        // No await follows the completion claim: cancellation cannot strand its notifications.
+        self.settle_notify.notify_waiters();
+        if notify_hook {
+            let hook = self
+                .settle_hook
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone();
+            if let Some(hook) = hook {
+                std::thread::spawn(move || hook());
+            }
         }
     }
 
@@ -310,16 +453,14 @@ fn ledger_child_records(
     };
     let ledger =
         crate::rlm_ledger::RlmSpawnLedger::new(agent_dir, Path::new(&sessions_dir), |_| {});
-    let edges = ledger.live_edges().unwrap_or_else(|error| {
-        eprintln!("pa-daemon: RLM ledger reseed skipped: {error:#}");
-        Vec::new()
-    });
-    let parent_file = canonical_session_path(parent_file);
+    let edges = ledger
+        .live_edges_of_parent(parent_file)
+        .unwrap_or_else(|error| {
+            eprintln!("pa-daemon: RLM ledger reseed skipped: {error:#}");
+            Vec::new()
+        });
     let mut records = Vec::new();
     for edge in edges {
-        if canonical_session_path(Path::new(&edge.parent)) != parent_file {
-            continue;
-        }
         let child = PathBuf::from(&edge.child);
         let session_id = child
             .file_stem()
@@ -376,14 +517,24 @@ fn ledger_child_records(
             ),
             settled: true,
             answer_preview: None,
+            answer_text: None,
             answer_captured: false,
             replied_since_task: false,
+            progress_note: None,
+            tool_use_count: None,
+            live_observation: None,
+            direct_observation: Arc::new(Mutex::new(())),
             notice_delivered: true,
             prompt_admitted: true,
             error: None,
             closed_by_parent: false,
+            retirement_finished: false,
+            retirement_notified: false,
+            retirement_roster_emitted: false,
+            usage_registration_forgotten: false,
             session_file: Some(edge.child),
             attributed_rows: None,
+            pending_usage_report: None,
             usage_watch_live: false,
             usage_rearm: false,
             emit_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),

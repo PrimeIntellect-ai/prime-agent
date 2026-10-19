@@ -32,6 +32,11 @@ pub(crate) struct SessionCore {
     /// The turn's tool calls in flight, keyed by tool-call id: the
     /// roster summary derives `isRunningTools` from its size.
     pub(crate) running_tool_calls: std::collections::HashSet<String>,
+    /// The session's tool executions so far (the summary's `toolUseCount`):
+    /// bumped per `tool_execution_start` under the same core lock the frames
+    /// sequence under, and seeded from the session file when a worker opens
+    /// it, so a revived session never resets the count.
+    pub(crate) tool_use_count: u64,
     /// Admission ids belonging to the current in-flight turn. The queue
     /// handoff and owned cancellation both inspect this under the core lock.
     pub(crate) running_admission_ids: std::collections::HashSet<String>,
@@ -56,9 +61,6 @@ pub(crate) struct SessionCore {
     /// The create command's harness `childScript` (kept across the runtime swap
     /// so a replacement's children stay scripted); `None` for product sessions.
     pub(crate) child_script: Option<String>,
-    /// The Decision API child flag (`rlm.spawn kind="decision"`): the worker
-    /// runs the decision engine instead of the agent engine.
-    pub(crate) decision_child: bool,
     /// The session's service-tier preference (TS `_serviceTierPreference`,
     /// `None` = "auto"): clamps `priority` to `default` without fast mode.
     pub(crate) service_tier: Option<pa_types::ai::ServiceTier>,
@@ -127,6 +129,7 @@ impl SessionCore {
             compacting: false,
             running_tool_calls: std::collections::HashSet::new(),
             running_admission_ids: std::collections::HashSet::new(),
+            tool_use_count: 0,
             auto_compaction_enabled: true,
             last_action_snapshot: Some(SessionActionSnapshot::default()),
             rlm_depth: 0,
@@ -145,7 +148,6 @@ impl SessionCore {
             queued_input_suspended: false,
             pending_next_turn: Vec::new(),
             active_action: None,
-            decision_child: false,
         }
     }
 }

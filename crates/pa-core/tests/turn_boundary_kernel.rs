@@ -153,7 +153,7 @@ async fn turn_boundary_host_requests_round_trip_through_a_real_kernel() {
         Some("running the harness cell"),
         vec![(
             "call-1",
-            "ipython",
+            "python_repl",
             json!({ "code": harness_cell(&receipt_path) }),
         )],
     );
@@ -179,6 +179,7 @@ async fn turn_boundary_host_requests_round_trip_through_a_real_kernel() {
         semantic_edges: None,
         cron_store: None,
         queued_steering_probe: None,
+        should_stop_after_turn: None,
         image_model_router: None,
         steering_mode: None,
         follow_up_mode: None,
@@ -199,7 +200,10 @@ async fn turn_boundary_host_requests_round_trip_through_a_real_kernel() {
         additional_prompt_paths: Vec::new(),
         extra_builtin_skill_overrides: Vec::new(),
         rlm_subagent_host: None,
+        rlm_usage_store: None,
+        progress_note_emit: None,
         rlm_depth: None,
+        daemonless: true,
         telemetry: None,
         model_info: Some(registry_model()),
         mcp_manager: None,

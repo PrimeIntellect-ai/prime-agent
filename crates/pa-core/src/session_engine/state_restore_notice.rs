@@ -17,7 +17,8 @@ fn now_millis() -> u64 {
 }
 
 /// The notice text: the `[python-state-restored]` header, the
-/// revived-or-fresh line, and the failed-names disclosure.
+/// revived-or-fresh line, the failed-names disclosure, and the env/cwd
+/// reset line (a fresh kernel revives neither).
 #[must_use]
 pub fn notice_content(result: &RestoreResult) -> String {
     let mut lines = vec!["[python-state-restored]".to_string(), String::new()];
@@ -42,6 +43,9 @@ pub fn notice_content(result: &RestoreResult) -> String {
                 .join(", ")
         ));
     }
+    lines.push(
+        "The working directory and environment variables were reset to the session defaults; re-apply any os.chdir(...) or os.environ[...] changes you still need.".to_string(),
+    );
     lines.join("\n")
 }
 
@@ -94,7 +98,7 @@ mod tests {
         };
         assert_eq!(
             content,
-            "[python-state-restored]\n\nYour Python kernel state was revived from your previous session. These names are available again: data, helper."
+            "[python-state-restored]\n\nYour Python kernel state was revived from your previous session. These names are available again: data, helper.\nThe working directory and environment variables were reset to the session defaults; re-apply any os.chdir(...) or os.environ[...] changes you still need."
         );
     }
 
@@ -110,7 +114,7 @@ mod tests {
         };
         assert_eq!(
             content,
-            "[python-state-restored]\n\nYour previous Python kernel state could not be revived; the kernel is starting fresh, so re-create any variables, imports, or loaded data you need."
+            "[python-state-restored]\n\nYour previous Python kernel state could not be revived; the kernel is starting fresh, so re-create any variables, imports, or loaded data you need.\nThe working directory and environment variables were reset to the session defaults; re-apply any os.chdir(...) or os.environ[...] changes you still need."
         );
     }
 
@@ -121,7 +125,7 @@ mod tests {
             panic!("text content");
         };
         assert!(
-            content.ends_with("These could not be restored and must be recreated if needed: sock.")
+            content.contains("These could not be restored and must be recreated if needed: sock.")
         );
     }
 }

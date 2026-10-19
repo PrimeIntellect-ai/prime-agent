@@ -64,6 +64,10 @@ pub fn update_user_agent(version: &str) -> String {
 /// # Errors
 ///
 /// Returns an error only when the manifest body cannot be read after a successful fetch.
+///
+/// # Panics
+///
+/// Panics if the HTTP client cannot be built.
 pub async fn latest_release(
     current_version: &str,
     channel: Option<UpdateChannel>,
@@ -76,7 +80,9 @@ pub async fn latest_release(
     let manifest_path =
         super::version::resolve_update_channel(current_version, channel).manifest_path();
     let url = format!("{}/{manifest_path}", base_url.trim_end_matches('/'));
-    let response = reqwest::Client::new()
+    let response = pa_ai::utils::tls::http_client_builder()
+        .build()
+        .expect("release client")
         .get(&url)
         .header("User-Agent", update_user_agent(current_version))
         .header("accept", "application/json")

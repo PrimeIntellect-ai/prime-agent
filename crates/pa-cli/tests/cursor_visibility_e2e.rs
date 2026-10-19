@@ -216,6 +216,51 @@ fn cursor_stays_hidden_and_positioned_across_mount_picker_and_suspend() {
     harness.finish();
 }
 
+#[test]
+fn shell_markers_are_reserved_for_the_exit_transcript() {
+    let _lock = HARNESS_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut harness = CursorHarness::start();
+    harness.wait_from_start("\x1b[?2026l", "the attached transcript frame finished");
+    let mark = harness.mark();
+    harness.write(b"hi");
+    harness.wait_from(
+        mark,
+        "\x1b[?25l\x1b[20;7H",
+        "the editor parked the hidden caret after the typed text",
+    );
+    let mark = harness.mark();
+    harness.write(b"\x7f\x7f");
+    harness.wait_from(
+        mark,
+        "\x1b[?25l\x1b[20;5H",
+        "the editor emptied back to the bare caret",
+    );
+    harness.write(b"\x04");
+    harness.wait_from_start("\x1b[?1049l", "exit restored the main screen");
+    harness.wait_from_start("\x1b]133;C\x07", "exit replayed the marked transcript");
+    harness.wait_from_start("test result: ok", "the interactive child exited cleanly");
+    let output = harness.output();
+    harness.finish();
+
+    let leave = find_subsequence(&output, b"\x1b[?1049l").expect("alternate screen exit");
+    let (fullscreen, transcript) = output.split_at(leave);
+    assert!(find_subsequence(fullscreen, b"row 0").is_some());
+    assert!(
+        find_subsequence(fullscreen, b"\x1b]133;").is_none(),
+        "shell prompt markers must not change the terminal's grid during fullscreen painting"
+    );
+    for marker in [b"\x1b]133;A\x07", b"\x1b]133;B\x07", b"\x1b]133;C\x07"] {
+        assert!(
+            find_subsequence(transcript, marker).is_some(),
+            "exit retains shell integration"
+        );
+    }
+    assert!(find_subsequence(transcript, b"row 0").is_some());
+    assert!(find_subsequence(transcript, b"row 3").is_some());
+}
+
 /// One pty-backed product child plus the mock supervisor it attaches to.
 struct CursorHarness {
     child: Child,

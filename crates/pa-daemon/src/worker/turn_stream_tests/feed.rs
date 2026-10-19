@@ -50,61 +50,6 @@ async fn the_waiting_prompt_resolves_only_after_the_turn_settles() {
     turn.await.expect("the turn task panicked");
 }
 
-/// A fake supervisor link endpoint: every `worker_roster_delta`
-/// command's summary is recorded in arrival order.
-#[cfg(unix)]
-fn fake_supervisor(
-    socket: &std::path::Path,
-) -> (Arc<Mutex<Vec<Value>>>, tokio::task::JoinHandle<()>) {
-    let listener = tokio::net::UnixListener::bind(socket).unwrap();
-    let recorded = Arc::new(Mutex::new(Vec::<Value>::new()));
-    let sink = Arc::clone(&recorded);
-    let server = tokio::spawn(async move {
-        loop {
-            let Ok((stream, _)) = listener.accept().await else {
-                break;
-            };
-            let sink = Arc::clone(&sink);
-            tokio::spawn(async move {
-                use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-                let (reader, mut writer) = stream.into_split();
-                writer
-                    .write_all(b"{\"type\":\"daemon_hello\"}\n")
-                    .await
-                    .unwrap();
-                let mut lines = BufReader::new(reader);
-                loop {
-                    let mut line = String::new();
-                    if lines.read_line(&mut line).await.unwrap_or(0) == 0 {
-                        return;
-                    }
-                    if line.trim().is_empty() {
-                        continue;
-                    }
-                    let Ok(request) = serde_json::from_str::<Value>(line.trim()) else {
-                        continue;
-                    };
-                    sink.lock()
-                        .unwrap()
-                        .push(request["command"]["summary"].clone());
-                    let response =
-                        crate::protocol::response_line(&crate::protocol::response_success(
-                            request["id"].as_str(),
-                            "worker_roster_delta",
-                            None,
-                        ));
-                    writer
-                        .write_all(serde_json::to_string(&response).unwrap().as_bytes())
-                        .await
-                        .unwrap();
-                    writer.write_all(b"\n").await.unwrap();
-                }
-            });
-        }
-    });
-    (recorded, server)
-}
-
 /// A turn runner whose roster pushes ship to a live supervisor link
 /// (the burst runner keeps them disabled). Unix only.
 #[cfg(unix)]
@@ -154,7 +99,7 @@ fn live_feed_runner(engine: Arc<dyn SessionEngine>, socket: std::path::PathBuf) 
 async fn roster_feed_publishes_live_tool_activity() {
     let dir = tempfile::TempDir::new().unwrap();
     let socket = dir.path().join("sup.sock");
-    let (recorded, server) = fake_supervisor(&socket);
+    let (recorded, server) = crate::worker::tests::fake_supervisor(&socket);
     let engine: Arc<dyn SessionEngine> = Arc::new(
         ScriptedEngine::from_value(&json!({
             "responses": [{
@@ -200,13 +145,18 @@ async fn roster_feed_publishes_live_tool_activity() {
             .lock()
             .unwrap()
             .last()
-            .is_some_and(|summary| summary["isStreaming"] == json!(false));
+            .is_some_and(|command| command["summary"]["isStreaming"] == json!(false));
         if settled || std::time::Instant::now() > deadline {
             break;
         }
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
     }
-    let summaries = recorded.lock().unwrap().clone();
+    let summaries: Vec<Value> = recorded
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|command| command["summary"].clone())
+        .collect();
     let statuses = |key: &str| {
         summaries
             .iter()

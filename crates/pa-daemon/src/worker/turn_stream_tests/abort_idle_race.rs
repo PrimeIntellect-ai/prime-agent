@@ -131,7 +131,6 @@ async fn abort_and_send_idle_race_rate_harness() {
                     "follow-up reply"
                 ],
             })),
-            decision_child: false,
         };
         let worker = std::sync::Arc::new(Worker::new(config, None));
         let created = worker

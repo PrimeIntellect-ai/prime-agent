@@ -1,0 +1,4 @@
+- Add an enabled-by-default, global-only **Harness refinements** toggle in `/settings` → **Agents**. Project settings cannot override it. Turning it off prevents refinement generation and loading saved harness rows into future model requests; existing saved state is preserved.
+- Disabled `refine.run()` requests report a refusal without scheduling work. Plans completed while disabled are discarded. Undelivered digests are deferred until a turn admitted with refinements enabled; toggling does not re-arm a consumed digest.
+- Earlier replies and summary prose may already reflect refinements, and sent requests cannot be recalled. Start a new disabled session for a conversation that has never used saved refinements.
+- Factory execution also requires harness access for stored specs and subagent references: `factory.run()` refuses while refinements are off, including library-machine lookup. It does not start children or change saved state.

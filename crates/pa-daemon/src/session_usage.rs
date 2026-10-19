@@ -259,14 +259,15 @@ pub struct UsageScan {
     assistant_usage_by_id: AssistantUsageById,
     #[serde(with = "usage_bits")]
     attributed_child_usage: Usage,
+    attributed_child_ids: std::collections::HashSet<String>,
     #[serde(with = "usage_bits")]
     summarization_usage: Usage,
 }
 
 impl UsageScan {
-    /// The per-assistant-message records the scan state keeps resident.
+    /// The assistant usage records and stable attribution IDs kept resident.
     pub(crate) fn retained_entries(&self) -> usize {
-        self.assistant_usage_by_id.len()
+        self.assistant_usage_by_id.len() + self.attributed_child_ids.len()
     }
 
     /// TS `foldSessionScanLine`: the raw assistant usage keyed by entry id (only an assistant
@@ -281,9 +282,12 @@ impl UsageScan {
     }
 
     /// A `child_usage_attributed` entry folds only when its target is already
-    /// in the map; a malformed attribution contributes nothing.
+    /// in the map; a malformed attribution contributes nothing. Stable nonempty
+    /// row IDs subtract child spend once; legacy rows without an ID each fold.
+    /// Every valid row still replaces the target aggregate in file order.
     pub(crate) fn fold_child_attribution(
         &mut self,
+        row_id: &str,
         target_id: Option<&str>,
         child_usage: Option<Usage>,
         aggregate_usage: Option<Usage>,
@@ -295,7 +299,9 @@ impl UsageScan {
         };
         if self.assistant_usage_by_id.contains(target_id) {
             self.assistant_usage_by_id.set(target_id, aggregate_usage);
-            add_assistant_usage(&mut self.attributed_child_usage, &child_usage);
+            if row_id.is_empty() || self.attributed_child_ids.insert(row_id.to_owned()) {
+                add_assistant_usage(&mut self.attributed_child_usage, &child_usage);
+            }
         }
     }
 
@@ -368,6 +374,7 @@ impl ScanEntry {
                 scan.fold_message(&self.id, role, usage);
             }
             "child_usage_attributed" => scan.fold_child_attribution(
+                &self.id,
                 self.target_id.as_deref(),
                 self.child_usage.map(Usage::from),
                 self.aggregate_usage.map(Usage::from),
@@ -473,6 +480,78 @@ mod tests {
             "type": "child_usage_attributed", "targetId": target,
             "childUsage": child, "aggregateUsage": aggregate
         })
+    }
+
+    #[test]
+    fn duplicate_attribution_ids_subtract_once_and_preserve_latest_aggregate() {
+        let assistant = message(
+            "a",
+            "assistant",
+            &serde_json::to_value(usage(100, 10, 8.0)).unwrap(),
+        );
+        let mut first = attribution("a", usage(20, 2, 2.0), usage(120, 12, 10.0));
+        first["id"] = json!("report-1");
+        let mut second = attribution("a", usage(30, 3, 4.0), usage(150, 15, 14.0));
+        second["id"] = json!("report-2");
+        let mut repeated = first.clone();
+        // Aggregate replacement still follows file order, even for a repeated ID.
+        repeated["aggregateUsage"] = serde_json::to_value(usage(160, 16, 16.0)).unwrap();
+        let mut full = UsageScan::default();
+        for row in [&assistant, &first] {
+            serde_json::from_value::<ScanEntry>(row.clone())
+                .unwrap()
+                .fold_into(&mut full);
+        }
+        let mut resumed: UsageScan =
+            serde_json::from_slice(&serde_json::to_vec(&full).unwrap()).unwrap();
+        for scan in [&mut full, &mut resumed] {
+            for row in [&second, &repeated] {
+                serde_json::from_value::<ScanEntry>(row.clone())
+                    .unwrap()
+                    .fold_into(scan);
+            }
+            assert_eq!(
+                scan.totals(),
+                SessionUsageTotals {
+                    own: usage(110, 11, 10.0),
+                    total: usage(160, 16, 16.0),
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn orphan_ids_are_not_consumed_and_legacy_attributions_remain_distinct() {
+        let mut orphan = attribution("a", usage(20, 2, 2.0), usage(120, 12, 10.0));
+        orphan["id"] = json!("report-1");
+        let assistant = message(
+            "a",
+            "assistant",
+            &serde_json::to_value(usage(100, 10, 8.0)).unwrap(),
+        );
+        let missing_id = attribution("a", usage(30, 3, 4.0), usage(150, 15, 14.0));
+        let mut empty_id = attribution("a", usage(40, 4, 8.0), usage(190, 19, 22.0));
+        empty_id["id"] = json!("");
+        let mut scan = UsageScan::default();
+        for row in [
+            orphan.clone(),
+            assistant,
+            orphan.clone(),
+            orphan,
+            missing_id,
+            empty_id,
+        ] {
+            serde_json::from_value::<ScanEntry>(row)
+                .unwrap()
+                .fold_into(&mut scan);
+        }
+        assert_eq!(
+            scan.totals(),
+            SessionUsageTotals {
+                own: usage(100, 10, 8.0),
+                total: usage(190, 19, 22.0),
+            }
+        );
     }
 
     /// The latest aggregate replaces the raw block, every child block

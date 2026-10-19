@@ -21,9 +21,7 @@ use super::plan::{
     plan_reap, plan_shutdown_all, plan_shutdown_confirmation, ReapActionKind,
     ShutdownConfirmationPlan,
 };
-use super::{
-    discover_daemons, is_daemon_process_listening, probe_daemon, DaemonInfo, DaemonStateRoot,
-};
+use super::{discover_daemons, is_daemon_process_listening, probe_daemon, DaemonStateRoot};
 
 /// `status`: the daemons discovered in the given state root as JSON or
 /// as the table.
@@ -198,10 +196,7 @@ fn run_shutdown_converging(json: bool, force: bool, root: &DaemonStateRoot) -> i
     let mut failed: Vec<(String, String)> = Vec::new();
     let mut handled_pids: std::collections::HashSet<u32> = std::collections::HashSet::new();
 
-    let daemons: Vec<DaemonInfo> = discover_daemons(root)
-        .into_iter()
-        .filter(|daemon| !super::is_worker_socket_path(&daemon.socket_path, &root.socket_dir))
-        .collect();
+    let daemons = discover_daemons(root);
     let action_order = |kind: &ReapActionKind| match kind {
         ReapActionKind::Shutdown => 0,
         ReapActionKind::RemoveFile => 1,

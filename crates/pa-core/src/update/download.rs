@@ -58,7 +58,9 @@ async fn download_once(
     user_agent: &str,
 ) -> Result<()> {
     use futures::StreamExt;
-    let response = reqwest::Client::new()
+    let response = pa_ai::utils::tls::http_client_builder()
+        .build()
+        .expect("download client")
         .get(url)
         .header("User-Agent", user_agent)
         .timeout(timeout)

@@ -60,7 +60,7 @@ impl<'a> WrapOutput<'a> {
 pub(super) fn blank_after(next: Option<&Block>, exclude_lists: bool) -> bool {
     match next {
         Some(next) => {
-            !(next.sep_blank || exclude_lists && matches!(next.kind, BlockKind::List { .. }))
+            !(next.sep_blank || exclude_lists && matches!(next.kind, BlockKind::List(..)))
         }
         None => false,
     }
@@ -91,7 +91,15 @@ pub(crate) fn markdown_row_count_tagged(
         total += usize::from(block.sep_blank);
         // The key build clones the block's lines, so an empty cache skips it.
         let cached = (!cache.0.is_empty())
-            .then(|| block_cache_key(style_tag, &blocks, index, width))
+            .then(|| {
+                block_cache_key(
+                    style_tag,
+                    &blocks,
+                    index,
+                    width,
+                    style.link_base_url.as_ref(),
+                )
+            })
             .flatten()
             .and_then(|key| cache.0.get(&key));
         if let Some(rows) = cached {
@@ -99,9 +107,9 @@ pub(crate) fn markdown_row_count_tagged(
             continue;
         }
         let count = match &block.kind {
-            BlockKind::Heading => {
+            BlockKind::Heading { depth } => {
                 let text = block.lines.first().cloned().unwrap_or_default();
-                wrapped_span_count(&heading_spans(&text, style), width)
+                wrapped_span_count(&heading_spans(&text, *depth, style), width)
                     + usize::from(blank_after(next, false))
             }
             BlockKind::Hr => 1,
@@ -120,20 +128,9 @@ pub(crate) fn markdown_row_count_tagged(
                     .sum::<usize>()
                     + usize::from(blank_after(next, true))
             }
-            BlockKind::List { ordered, start } => {
-                let mut count = 0;
-                for (index, text) in block.lines.iter().enumerate() {
-                    let bullet = if *ordered {
-                        format!("{}. ", start + index)
-                    } else {
-                        "- ".to_owned()
-                    };
-                    let content_width = width
-                        .saturating_sub(crate::width::str_width(&bullet))
-                        .max(1);
-                    count += wrapped_span_count(&render_inline(text, style), content_width);
-                }
-                count + usize::from(blank_after(next, true))
+            BlockKind::List(list) => {
+                crate::markdown::list_row_count(list, 0, 0, width, style)
+                    + usize::from(blank_after(next, true))
             }
             BlockKind::Quote => block
                 .lines

@@ -27,7 +27,6 @@ async fn aborted_turn_row_broadcasts_and_persists_through_the_worker_gate() {
                 { "text": "held reply", "delayMs": 60000 },
             ],
         })),
-        decision_child: false,
     };
     let worker = std::sync::Arc::new(Worker::new(config, None));
     let created = worker
@@ -198,7 +197,6 @@ async fn kill_cancels_the_sessions_scheduled_jobs() {
         recovery_journal_path: dir.join("recovery.jsonl"),
         telemetry_disabled: None,
         script: Some(json!({ "engine": "faux", "responses": [] })),
-        decision_child: false,
     };
     let worker = std::sync::Arc::new(Worker::new(config, None));
     let created = worker
@@ -278,7 +276,6 @@ async fn kill_cancels_a_mid_provider_wait_turn_and_surfaces_the_aborted_row() {
                 { "text": "held reply", "delayMs": 60000 },
             ],
         })),
-        decision_child: false,
     };
     let worker = std::sync::Arc::new(Worker::new(config, None));
     let created = worker
@@ -423,7 +420,6 @@ async fn compact_interrupt_swallows_the_aborted_row() {
             "engine": "faux",
             "responses": [{ "text": "held reply", "delayMs": 60000 }],
         })),
-        decision_child: false,
     };
     let worker = std::sync::Arc::new(Worker::new(config, None));
     let created = worker

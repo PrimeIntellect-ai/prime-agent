@@ -53,7 +53,6 @@ const DYNAMIC_ONLY_MARKERS: &[&str] = &[
     "<available_skills>",
     "Enabled generic MCP servers:",
     "# Project Context",
-    "# Additional Guidance",
     "Pre-installed Python packages:",
     "You are a child agent spawned by",
 ];
@@ -83,7 +82,7 @@ fn cached_prefix_is_stable_across_sessions() {
         messages_path: Some("/first/session.jsonl".to_string()),
         model_prompt_extras: Some("model guidance."),
         skills: sorted_bundled_skills(),
-        selected_tools: Some(vec!["ipython"]),
+        selected_tools: Some(vec!["python_repl"]),
         ..Default::default()
     };
     let first = system_prompt_breakdown(&options);
@@ -94,7 +93,6 @@ fn cached_prefix_is_stable_across_sessions() {
     options.rlm_parent_agent = Some("orchestrator");
     options.generic_mcp_servers = vec!["slack".into(), "github".into()];
     options.context_files = vec![("AGENTS.md".into(), "Never commit main.".into())];
-    options.prompt_guidelines = Some(vec!["prefer tabs".into()]);
     options.append_system_prompt = Some("And one more thing.".into());
     let second = system_prompt_breakdown(&options);
 
@@ -125,7 +123,6 @@ fn cached_prefix_is_stable_across_sessions() {
     assert!(second_tail.contains("Recursive agent depth: 3 (not root)"));
     assert!(second_tail.contains("You are a child agent spawned by orchestrator."));
     assert!(second_tail.contains("# Project Context"));
-    assert!(second_tail.contains("# Additional Guidance"));
     assert!(second_tail.ends_with("And one more thing."));
 
     for segment in &first.segments {
@@ -150,10 +147,9 @@ const INTERNAL_HOST_REQUESTS: &[&str] =
     &["model.info", "mcp.config", "mcp.refresh", "mcp.begin_login"];
 
 /// Map one registered host-request type to the prompt token that documents
-/// it. `None` when the request is host-internal or belongs to a gated skill.
+/// it. `None` when the request is host-internal.
 fn prompt_token_for_host_request(request: &str) -> Option<String> {
-    let module = request.split('.').next().unwrap_or_default();
-    if INTERNAL_HOST_REQUESTS.contains(&request) || gated_bundled_skills().contains(module) {
+    if INTERNAL_HOST_REQUESTS.contains(&request) {
         return None;
     }
     Some(
@@ -288,7 +284,7 @@ fn all_string_literals(text: &str) -> Vec<String> {
 /// Kernel-bound REPL names from the real bootstrap code (`rlm`, `bash`,
 /// `mcp`), derived from `build_rlm_bootstrap_code`.
 fn kernel_bound_names() -> BTreeSet<String> {
-    let code = pa_core::kernel::bootstrap::build_rlm_bootstrap_code(&[]);
+    let code = pa_core::kernel::bootstrap::build_rlm_bootstrap_code(&[], false);
     let mut names = BTreeSet::new();
     for line in code.lines() {
         let line = line.trim_start();
@@ -341,22 +337,20 @@ fn python_skill_functions(package_path: &Path) -> Vec<String> {
     functions
 }
 
-/// Bundled skills that are gated: the auth-gated builtin MCP integrations
-/// (disabled when the user is not logged in) and the Decision API (hidden
-/// while decisionApi.systemOneModel is unset). The prompt documents them only
-/// through the dynamic skills inventory, not as API surface.
-fn gated_bundled_skills() -> BTreeSet<String> {
+/// Bundled skills that are auth-gated builtin MCP integrations: they are disabled in sessions whose
+/// user is not logged into the integration, so the prompt documents them only through the dynamic
+/// skills inventory (and its generic "additional skills may exist" note), not as API surface.
+fn auth_gated_bundled_skills() -> BTreeSet<String> {
     pa_core::mcp::BUILTIN_MCP_CATALOG
         .iter()
         .map(|(server, _, _)| server.to_string())
-        .chain(std::iter::once("decision_api".to_string()))
         .collect()
 }
 
 /// (import name, public functions) for every bundled Python skill that is
-/// always available (gated skills excluded).
+/// always available (auth-gated integrations excluded).
 fn bundled_python_skills() -> Vec<(String, Vec<String>)> {
-    let gated = gated_bundled_skills();
+    let gated = auth_gated_bundled_skills();
     sorted_bundled_skills()
         .into_iter()
         .filter(|skill| {
@@ -501,8 +495,6 @@ const TS_PACKAGED_SKILL_SET: &[&str] = &[
     "agent-observe",
     "attach-image",
     "compact",
-    // Experimental, no TS counterpart yet.
-    "decision-api",
     "edit",
     "goal",
     "mcp",
@@ -543,6 +535,38 @@ fn bundled_skills_match_the_ts_packaged_set() {
     );
 }
 
+/// The bounded-await contract renders only in daemon sessions: the
+/// runtime half (the degrade) exists only where the host registers the
+/// bash completion notice, so a daemonless prompt must carry no trace of it.
+#[test]
+fn bounded_await_contract_render_is_daemon_only() {
+    let mut options = BuildSystemPromptOptions {
+        cwd: "/w".to_string(),
+        messages_path: Some("/log.jsonl".to_string()),
+        skills: sorted_bundled_skills(),
+        selected_tools: Some(vec!["python_repl"]),
+        ..Default::default()
+    };
+    let daemon = system_prompt_breakdown(&options);
+    assert!(
+        daemon.assembled.contains("yield_after")
+            && daemon.assembled.contains("[bash-done]")
+            && daemon.assembled.contains("`r.running` is True")
+            && daemon.assembled.contains("`r.exit_code` is None"),
+        "the daemon session prompt must carry the bounded-await result contract"
+    );
+    options.daemonless = true;
+    let daemonless = system_prompt_breakdown(&options);
+    assert!(
+        !daemonless.assembled.contains("yield_after")
+            && !daemonless.assembled.contains("[bash-done]")
+            && !daemonless.assembled.contains("still-running snapshot")
+            && !daemonless.assembled.contains("about 10 seconds"),
+        "the daemonless session prompt must not leak the bounded-await contract: {0}",
+        daemonless.assembled
+    );
+}
+
 /// The generic mcp skill loads through the normal markdown discovery and renders in the
 /// `<available_skills>` inventory exactly like any other markdown skill: the `[skill name
 /// location]`-style XML the TS `formatSkillsForPrompt` emits, without a `python_import` line.
@@ -552,7 +576,7 @@ fn generic_mcp_skill_renders_in_the_prompt_inventory() {
         cwd: "/w".to_string(),
         messages_path: Some("/log.jsonl".to_string()),
         skills: sorted_bundled_skills(),
-        selected_tools: Some(vec!["ipython"]),
+        selected_tools: Some(vec!["python_repl"]),
         ..Default::default()
     };
     let breakdown = system_prompt_breakdown(&options);
