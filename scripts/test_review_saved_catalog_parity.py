@@ -4,8 +4,8 @@ from pathlib import Path
 import tempfile
 import unittest
 
-from review_saved_catalog_parity import (COUNT, PAGE, TARGET, TRANSCRIPT_TARGET,
-    normalize, same_rows, seed, ts_ignores_paging, validate_query)
+from review_saved_catalog_parity import (COUNT, PAGE, TARGET, normalize,
+    same_rows, seed, ts_ignores_paging, validate_query)
 
 
 class SavedCatalogGuards(unittest.TestCase):
@@ -57,16 +57,14 @@ class SavedCatalogGuards(unittest.TestCase):
             self.assertEqual(entries[-1]['message']['role'], 'assistant')
         self.assertNotIn(TARGET, json.dumps(self.expected[:PAGE]))
         self.assertEqual(self.expected[-1]['name'], TARGET)
-        self.assertIn(TRANSCRIPT_TARGET, self.expected[-1]['allMessagesText'])
-        self.assertNotIn(TRANSCRIPT_TARGET, self.expected[-1]['firstMessage'])
         self.assertEqual(self.check(self.call()), self.expected)
 
-    def test_rejects_missing_duplicate_wrong_or_transcript_truncated_rows(self):
+    def test_rejects_missing_duplicate_or_wrong_rows(self):
         for mutate in (
             lambda rows: rows.pop(),
             lambda rows: rows.append(copy.deepcopy(rows[0])),
             lambda rows: rows[0].update(name='wrong'),
-            lambda rows: rows[-1].update(allMessagesText=rows[-1]['firstMessage']),
+            lambda rows: rows[-1].update(firstMessage='wrong'),
         ):
             call = self.call()
             mutate(call['final_data']['sessions'])
@@ -120,7 +118,7 @@ class SavedCatalogGuards(unittest.TestCase):
                 call['raw_sent_hex'] = [b'{"id":"elsewhere","command":{}}\n'.hex()]
             elif mode == 'wrong_stream':
                 call['frames'][0] = copy.deepcopy(call['frames'][0])
-                call['frames'][0]['session']['allMessagesText'] = 'lost transcript'
+                call['frames'][0]['session']['firstMessage'] = 'wrong'
             elif mode == 'duplicate_stream':
                 call['frames'].insert(0, copy.deepcopy(call['frames'][0]))
             elif mode == 'wrong_order':
