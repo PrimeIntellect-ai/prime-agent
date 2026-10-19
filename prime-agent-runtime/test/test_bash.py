@@ -1506,8 +1506,7 @@ class PersistentBashTest(unittest.IsolatedAsyncioTestCase):
 
         held.kill()
         await held
-        with self.assertRaises(ProcessLookupError):
-            os.killpg(held_pid, 0)
+        await _poll_group_dead(held_pid)
         self.assertEqual(self.files(), [])
 
     async def test_fresh_persistent_shell_reports_through_files(self):
@@ -1526,6 +1525,13 @@ class PersistentBashTest(unittest.IsolatedAsyncioTestCase):
         rows = {row["pid"]: row for row in bash_module.activity_request("list")["activities"]}
         self.assertFalse(rows[plain.pid]["persistent"])
         await plain
+
+    async def test_a_watched_leader_exit_kills_the_members_it_leaves_behind(self):
+        handle = bash("( sleep 30 & ); exit 0", persistent=True)
+        self.pgids.append(handle.pid)
+        self.assertEqual((await handle).exit_code, 0)
+        self.assertEqual(self.files(), [])
+        await _poll_group_dead(handle.pid)
 
     async def test_persistent_requires_a_saved_session(self):
         with mock.patch.dict(os.environ):

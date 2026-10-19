@@ -1018,8 +1018,9 @@ class PersistentBashHandle(BashHandle):
     the agent dir's persistent-shells home instead of an orphan journal entry.
     Awaits never own it: cancelling an await leaves it running. Finished
     output is kept in memory. Files remain recoverable on read errors or when
-    a leaderless group cannot be verified; such a group is never signalled
-    using only its old numeric process-group id.
+    a leaderless group cannot be verified because no watcher saw its leader
+    exit; such a group is never signalled using only its old numeric
+    process-group id.
     """
 
     def __init__(
@@ -1099,7 +1100,9 @@ class PersistentBashHandle(BashHandle):
         # A dead leader's group can still contain the shell's children. A live
         # recycled pid instead names a stranger's group and must not be signalled.
         with self._kill_lock:
-            reaped = _reap_persistent_group(self._pid, self._start_id)
+            reaped = _reap_persistent_group(
+                self._pid, self._start_id, leader_exit_witnessed=self._proc is not None or running
+            )
             self._reaped = True
         try:
             cast("_OutputFile", self._buffer).keep()
@@ -1469,13 +1472,15 @@ def _rehydrate_persistent_shells() -> None:
             _remove_shell_files(home, record["id"])
 
 
-def _reap_persistent_group(pid: int, start_id: str) -> bool:
+def _reap_persistent_group(pid: int, start_id: str, leader_exit_witnessed: bool = False) -> bool:
     """Reap stragglers without ever signalling a live recycled or unverified pid."""
     # Existence is distinct from liveness: a recycled zombie can still own an
     # unrelated group. It must pass the same start-identity check as a live pid.
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
+        if leader_exit_witnessed:
+            return _signal_group(pid, signal.SIGKILL)
         # A durable record can outlive its original group. An extant group
         # without the recorded leader may be a reused PGID: retain it, do not kill.
         try:

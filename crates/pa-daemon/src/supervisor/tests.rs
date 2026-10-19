@@ -955,7 +955,7 @@ fn saved_session_rows_match_the_catalog_row_golden() {
 
     let info = crate::session_store::read_session_info(&path).unwrap();
     assert_eq!(
-        saved_session_row(&info),
+        saved_session_row(&info, &std::collections::HashMap::new()),
         json!({
             "path": path.to_string_lossy(),
             "id": "golden-session",
