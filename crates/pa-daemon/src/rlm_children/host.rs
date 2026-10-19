@@ -508,14 +508,36 @@ impl RlmSubagentHost for SupervisorChildSessions {
                 ]),
             };
             drop(record_guard);
-            let was_running = record.lock().await.settled_status.is_none();
+            let was_running = {
+                // The pre-kill settle (the same coordination the close walk
+                // uses): a watcher parked inside its wait slice must not
+                // refresh the killed run back to `done` and append a clean
+                // `child_returned` beside the cancel line. A failed kill
+                // undoes it below — the child stays live and retryable.
+                let mut row = record.lock().await;
+                let was_running = row.settled_status.is_none();
+                if was_running && !already_terminated {
+                    row.settled_status = Some("cancelled");
+                }
+                was_running
+            };
             // Capture before the kill: a deleted running child's durable
             // rows are its last observable spend on the parent side.
             if !already_terminated {
                 this.emit_child_usage(&record).await;
-                this.command(&command, KILL_TIMEOUT_MS)
+                if let Err(error) = this
+                    .command(&command, KILL_TIMEOUT_MS)
                     .await
-                    .with_context(|| format!("kill RLM child \"{target}\""))?;
+                    .with_context(|| format!("kill RLM child \"{target}\""))
+                {
+                    // The kill never landed: undo the pre-kill settle so
+                    // the still-live child is not reported cancelled and a
+                    // later successful delete can still record the edge.
+                    if was_running {
+                        record.lock().await.settled_status = None;
+                    }
+                    return Err(error);
+                }
                 this.retain_retired_usage(&record, super::RetirementIntent::Delete { was_running });
                 // Observe any rows that landed before the acknowledged kill.
                 this.emit_child_usage(&record).await;

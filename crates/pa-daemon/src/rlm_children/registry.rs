@@ -46,8 +46,12 @@ impl SupervisorChildSessionsInner {
 
     /// Abort one child's live run (see
     /// [`SupervisorChildSessions::cancel_child_run`]): claim the notice,
-    /// settle the row as `cancelled`, then abort the worker's in-flight
-    /// turn (best-effort; the registry is the user-visible state).
+    /// settle the row as `cancelled` (so a parked watcher cannot append a
+    /// clean `child_returned` beside the cancel line), then abort the
+    /// worker's in-flight turn (best-effort; the registry is the
+    /// user-visible state). A refused abort is undone: the child never got
+    /// the command, so the row stays live and a later confirmed cancel can
+    /// still record the edge.
     pub(super) async fn cancel_child_run(&self, child_id: &str) -> bool {
         let children = self.children.lock().await.clone();
         for record in &children {
@@ -102,6 +106,15 @@ impl SupervisorChildSessionsInner {
                     .is_some_and(|error| unknown_session(error).is_some());
             if cancelled_confirmed {
                 self.record_child_cancelled(record).await;
+            } else {
+                // The abort was refused for a real reason: the child never
+                // got the command, so undo the pre-abort settle — a
+                // still-live child is not misreported cancelled, and a
+                // later confirmed cancel (a retry, a close, a delete) can
+                // still record the parent -> child edge.
+                let mut row = record.lock().await;
+                row.settled_status = None;
+                row.error = None;
             }
             // The settled/cancelled child releases an owed goal continuation.
             self.fire_settle_hook(record).await;

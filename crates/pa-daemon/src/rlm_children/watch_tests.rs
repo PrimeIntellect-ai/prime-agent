@@ -14,6 +14,9 @@ use tokio::sync::mpsc;
 /// How the fake supervisor answers a child `kill`.
 enum FakeKill {
     Success,
+    /// The kill succeeds, but only after `ms` (the delete race window: the
+    /// watcher wakes and tries to settle while the kill is in flight).
+    SuccessAfterMs(u64),
     /// The child session is gone (the route failure a supervisor answers for a non-resident child).
     UnknownSession,
     /// The kill fails for a real reason (a stuck worker).
@@ -247,6 +250,11 @@ async fn spawn_fake_supervisor(
                             let _ = kill_tx.send(command.clone());
                             match *kill_behavior {
                                 FakeKill::Success => {
+                                    response_success(Some(&id), command_type, None)
+                                }
+                                FakeKill::SuccessAfterMs(ms) => {
+                                    tokio::time::sleep(std::time::Duration::from_millis(ms))
+                                        .await;
                                     response_success(Some(&id), command_type, None)
                                 }
                                 FakeKill::UnknownSession => response_failure(
@@ -1329,6 +1337,151 @@ async fn a_failed_close_leaves_the_child_running_and_can_still_record_its_cancel
     );
 }
 
+/// A delete-killed live run never records a clean return beside its cancel
+/// line (PR #3680 review finding, the delete twin of the close case): the
+/// delete settles the row `cancelled` before its kill, so a settle watcher
+/// that wakes inside the delete's in-flight window cannot refresh the
+/// killed run back to `done` and append a `child_returned` after the cancel
+/// line.
+#[tokio::test]
+async fn a_deleted_live_child_never_records_a_clean_return() {
+    let (follow_up_tx, _follow_up_rx) = mpsc::unbounded_channel();
+    let child_subagents = Arc::new(FakeChildSubagents::default());
+    // A live grandchild holds the watcher's wait slice open until the test
+    // releases it inside the delete's in-flight window.
+    child_subagents.running.store(true, Ordering::SeqCst);
+    let (sessions, mut kill_rx) = sessions_with_fake_child_subagents(
+        follow_up_tx,
+        100,
+        FakeKill::SuccessAfterMs(2_000),
+        FakeChild::Healthy,
+        Arc::clone(&child_subagents),
+    )
+    .await;
+    let (recorder, ledger_path, _dir) = seeded_parent_recorder();
+    sessions.set_semantic_edges(Some(recorder));
+    let (hook_tx, mut hook_rx) = mpsc::unbounded_channel();
+    sessions.set_settle_hook(Arc::new(move || {
+        let _ = hook_tx.send(());
+    }));
+    let handle = spawn_child(&sessions).await;
+    // The child committed one request before the delete cut it short (its
+    // own ledger carries the line the parent's return recording reads).
+    std::fs::create_dir_all(&handle.session_dir).expect("child session dir");
+    let mut child_ledger = String::new();
+    child_ledger.push_str("{\"type\":\"session_registered\",\"session_id\":\"child-file\"}");
+    child_ledger.push('\n');
+    child_ledger.push_str("{\"type\":\"request_finished\",\"request_id\":\"child-request-1\"}");
+    child_ledger.push('\n');
+    std::fs::write(
+        Path::new(&handle.session_dir).join("semantic-edges.jsonl"),
+        child_ledger,
+    )
+    .expect("write the child ledger");
+    sessions.notify_turn_done();
+    // Wait until the watcher is provably parked inside its held quiescence
+    // wait (the fake counts them), never on one still starting.
+    let parked = Instant::now() + Duration::from_secs(10);
+    while child_subagents.quiescent_waits.load(Ordering::SeqCst) == 0 {
+        assert!(
+            Instant::now() < parked,
+            "the watcher never parked in its wait slice"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    // The delete reads the live row (and settles it `cancelled`) before it
+    // sends the kill; the kill answers only after its delay. Waiting for
+    // the kill therefore proves the pre-kill settle landed, and releasing
+    // the parked watcher now puts its refresh inside the delete's window.
+    let delete_sessions = sessions.clone();
+    let child_id = handle.rlm_child_id.clone();
+    let delete = tokio::spawn(async move { delete_sessions.delete_subagent(child_id).await });
+    let kill = kill_rx.recv().await.expect("the delete reaches the kill");
+    assert_eq!(kill["type"], "kill");
+    child_subagents.running.store(false, Ordering::SeqCst);
+    // The watcher's wait slice answers, its settle tail runs (the delete
+    // fires the settle hook too, so the second fire bounds that tail).
+    let mut hook_fires = 0;
+    while hook_fires < 2 {
+        tokio::time::timeout(Duration::from_secs(15), hook_rx.recv())
+            .await
+            .expect("the watcher runs its settle tail")
+            .expect("hook channel open");
+        hook_fires += 1;
+    }
+    delete
+        .await
+        .expect("the delete task joins")
+        .expect("delete the running child");
+
+    assert_eq!(
+        cancelled_lines(&ledger_path),
+        vec![(
+            "parent-lead".to_string(),
+            "child-file".to_string(),
+            "parent-request-1".to_string()
+        )],
+        "the delete's kill records the cancel line"
+    );
+    assert!(
+        returned_children(&ledger_path).is_empty(),
+        "a deleted live child never records a child_returned line: {:?}",
+        returned_children(&ledger_path)
+    );
+}
+
+/// A failed delete must not poison the cancel record (PR #3680 review
+/// finding): the pre-kill settle is undone on a real kill failure, so the
+/// still-live child stays `running` and a later confirmed cancel still
+/// records the parent -> child edge.
+#[tokio::test]
+async fn a_failed_delete_leaves_the_child_running_and_can_still_record_its_cancel() {
+    let (follow_up_tx, _follow_up_rx) = mpsc::unbounded_channel();
+    let (sessions, _kill_rx) =
+        sessions_with_fake_supervisor(follow_up_tx, 10_000, FakeKill::Failure, FakeChild::Healthy)
+            .await;
+    let (recorder, ledger_path, _dir) = seeded_parent_recorder();
+    sessions.set_semantic_edges(Some(recorder));
+    let handle = spawn_child(&sessions).await;
+
+    let error = sessions
+        .delete_subagent(handle.rlm_child_id.clone())
+        .await
+        .expect_err("a real delete failure must propagate");
+    assert!(
+        format!("{error:#}").contains("kill refused"),
+        "the delete error must surface the kill failure: {error:#}"
+    );
+
+    // The kill never landed, so the pre-kill settle is undone: the
+    // still-live child is not misreported cancelled.
+    let entries = sessions.list_subagents().await.expect("child roster");
+    assert_eq!(entries.len(), 1, "the failed child stays tracked for retry");
+    assert_eq!(
+        entries[0].status, "running",
+        "a failed delete must not mark the still-live child cancelled: {entries:?}"
+    );
+    assert!(
+        cancelled_lines(&ledger_path).is_empty(),
+        "a failed delete records no cancel edge: {:?}",
+        cancelled_lines(&ledger_path)
+    );
+
+    // A later confirmed stop still records the edge: the failed attempt
+    // did not burn the at-most-once claim.
+    assert!(sessions.cancel_child_run(&handle.rlm_child_id).await);
+    assert_eq!(
+        cancelled_lines(&ledger_path),
+        vec![(
+            "parent-lead".to_string(),
+            "child-file".to_string(),
+            "parent-request-1".to_string()
+        )],
+        "the retry records the cancel edge the failed delete could not"
+    );
+}
+
 #[tokio::test]
 async fn a_replied_child_gets_no_terminal_notice() {
     let (follow_up_tx, mut follow_up_rx) = mpsc::unbounded_channel();
@@ -1539,13 +1692,12 @@ fn returned_children(path: &Path) -> Vec<String> {
         .collect()
 }
 
-/// A refused abort records no cancel edge (PR #3680 review finding): the
-/// registry row still settles cancelled (the registry is the
-/// user-visible state), but the ledger mirrors the confirmed effect only
-/// — a child the abort never reached may still be running, and the
-/// unburned dedup keeps a later successful cancel able to record.
+/// A refused abort leaves the child live and records no cancel edge (PR
+/// #3680 review finding): the ledger mirrors the confirmed effect only, and
+/// the row is left live so a later confirmed cancel can still record the
+/// parent -> child edge.
 #[tokio::test]
-async fn a_refused_abort_settles_the_row_but_records_no_cancel_edge() {
+async fn a_refused_abort_leaves_the_child_running_and_a_later_cancel_records_the_edge() {
     let (follow_up_tx, _follow_up_rx) = mpsc::unbounded_channel();
     let child_subagents = Arc::new(FakeChildSubagents::default());
     child_subagents.abort_fails.store(true, Ordering::SeqCst);
@@ -1554,7 +1706,7 @@ async fn a_refused_abort_settles_the_row_but_records_no_cancel_edge() {
         10_000,
         FakeKill::Success,
         FakeChild::Healthy,
-        child_subagents,
+        Arc::clone(&child_subagents),
     )
     .await;
     let (recorder, ledger_path, _dir) = seeded_parent_recorder();
@@ -1566,10 +1718,34 @@ async fn a_refused_abort_settles_the_row_but_records_no_cancel_edge() {
         "the cancel still claims the registry row"
     );
 
+    // The refused abort never reached the child: the row stays live, so a
+    // still-running child is not misreported cancelled.
+    let entries = sessions.list_subagents().await.expect("child roster");
+    assert_eq!(
+        entries[0].status, "running",
+        "a refused abort must leave the live child running: {entries:?}"
+    );
     assert_eq!(
         cancelled_lines(&ledger_path),
         Vec::new(),
         "a refused abort records no cancel line"
+    );
+
+    // A later confirmed cancel records the edge the refused attempt could
+    // not: the settle undo left the row live for the retry.
+    child_subagents.abort_fails.store(false, Ordering::SeqCst);
+    assert!(
+        sessions.cancel_child_run(&handle.rlm_child_id).await,
+        "the retry claims the still-live row"
+    );
+    assert_eq!(
+        cancelled_lines(&ledger_path),
+        vec![(
+            "parent-lead".to_string(),
+            "child-file".to_string(),
+            "parent-request-1".to_string()
+        )],
+        "the confirmed retry records the cancel edge"
     );
 }
 
