@@ -244,6 +244,11 @@ impl BashView {
             if !self.activities.iter().any(|row| row.id == id) {
                 self.mode = Mode::List;
                 self.reset_detail_output();
+                // The dropped detail's fetch error goes with it; a kill error keeps its lifecycle.
+                if self.fetch_error {
+                    self.error = None;
+                    self.fetch_error = false;
+                }
             }
         }
         self.output_tail = self
