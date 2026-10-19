@@ -258,6 +258,22 @@ fn long_session_names_clip_to_the_name_column() {
     assert!(text.ends_with("$0.00   1s"));
 }
 
+/// A nesting deeper than the name column clips its indent there: the row keeps the pane width
+/// and its model cell stays under the legend's Model heading.
+#[test]
+fn deep_rows_clip_their_indent_to_the_name_column() {
+    let (mut mode, index) = mode_with_row("deep", "mock-1");
+    mode.rows[index].depth = 10;
+    mode.selected = index;
+    let layout = build_layout(&mode.rows, 120);
+    assert!(4 * 10 + 2 > layout.name_width);
+    let text = flat(&mode.render_row(&mode.rows[index], &layout, 120, false));
+    assert_eq!(str_width(&text), 120);
+    let model_at = str_width(&text[..text.find("mock-1").expect("model cell")]);
+    let heading_at = str_width(&layout.legend[..layout.legend.find("Model").expect("heading")]);
+    assert_eq!(model_at, heading_at);
+}
+
 #[test]
 fn short_session_names_pad_to_the_name_column() {
     let (mode, index) = mode_with_row("short name", "mock-1");

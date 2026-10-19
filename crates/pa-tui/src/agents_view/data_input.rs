@@ -5,8 +5,8 @@ use super::{
     build_rows, compute_rollups, filter_empty_sessions, filter_unified_sessions,
     parse_search_query, reconcile_unified_sessions, resolve_selection, scope_ancestors, scope_root,
     scope_to_subtree, AgentsViewMode, AgentsViewRow, AgentsViewScope, Composer, OpenedRow, PathBuf,
-    PressedMouseClick, RowKind, ScopeRoot, SelectionEdge, SelectionKey, SessionSelection, Value,
-    ANCHOR_LOADING_HINT,
+    PressedMouseClick, RowKind, SavedMore, ScopeRoot, SelectionEdge, SelectionKey,
+    SessionSelection, Value, ANCHOR_LOADING_HINT, SAVED_CATALOG_PAGE_FILES,
 };
 
 impl AgentsViewMode {
@@ -288,14 +288,25 @@ impl AgentsViewMode {
         self.saved_stream.push(session);
     }
 
-    /// Flush the streamed batch into the catalog: upsert by path first, then durable id, so a
-    /// superseded fetch's late frames never duplicate a row. Returns whether the catalog changed.
+    /// Flush the streamed batch into the catalog. Returns whether the catalog changed.
     pub(super) fn flush_saved_stream(&mut self) -> bool {
         if self.saved_stream.is_empty() {
             return false;
         }
-        for row in std::mem::take(&mut self.saved_stream) {
+        let rows = std::mem::take(&mut self.saved_stream);
+        self.upsert_saved(rows);
+        self.rebuild_rows();
+        true
+    }
+
+    /// Upsert rows into the catalog by path first, then durable id, so a superseded fetch's late
+    /// frames or a page that repeats a row never duplicate it. Paths deleted this run stay out.
+    pub(super) fn upsert_saved(&mut self, rows: Vec<Value>) {
+        for row in rows {
             let path = row.get("path").and_then(Value::as_str);
+            if path.is_some_and(|path| self.deleted_saved_paths.contains(path)) {
+                continue;
+            }
             let durable_id = row.get("id").and_then(Value::as_str);
             let existing = self.saved.iter().position(|saved| {
                 path.is_some_and(|path| saved.get("path").and_then(Value::as_str) == Some(path))
@@ -307,8 +318,45 @@ impl AgentsViewMode {
                 None => self.saved.push(row),
             }
         }
-        self.rebuild_rows();
-        true
+    }
+
+    /// The next fetch of the unfolded store, as its cursor and file limit: a search wants the
+    /// whole rest, a selection within a page step of the list's end wants the next page. A
+    /// failed fetch waits for the query-change retry.
+    pub(super) fn next_saved_fetch(&self) -> Option<(String, Option<u64>)> {
+        let more = self
+            .saved_more
+            .as_ref()
+            .filter(|_| !self.saved_fetch_failed)?;
+        if !self.query.trim().is_empty() {
+            return Some((more.cursor.clone(), None));
+        }
+        if self.anchor_selection_pending {
+            return Some((more.cursor.clone(), Some(SAVED_CATALOG_PAGE_FILES)));
+        }
+        if !self.saved_page_requested {
+            return None;
+        }
+        let last = self
+            .rows
+            .iter()
+            .rposition(AgentsViewRow::selectable)
+            .unwrap_or(0);
+        (self.selected + self.page_step() >= last)
+            .then(|| (more.cursor.clone(), Some(SAVED_CATALOG_PAGE_FILES)))
+    }
+
+    pub(super) fn settle_carried_anchor(&mut self) {
+        if self.saved_more.is_none() {
+            self.end_anchor_wait();
+        }
+    }
+
+    pub(super) fn finish_saved_page(&mut self, more: Option<SavedMore>) {
+        self.saved_more = more;
+        if self.saved_more.is_none() {
+            self.end_anchor_wait();
+        }
     }
 
     /// Drop the unflushed stream batch: the terminal response replaces the catalog wholesale, and
@@ -377,13 +425,15 @@ impl AgentsViewMode {
         self.saved_catalog_loaded = true;
     }
 
-    /// Whether the loop must re-arm the saved-catalog fetch (one retry per terminal failure).
+    /// Whether the loop must re-fetch the first saved-catalog page (one retry per terminal
+    /// failure). A failed continuation's retry resumes its cursor through `next_saved_fetch`
+    /// instead, so the pages already loaded stay.
     pub(super) fn take_saved_fetch_rearm(&mut self) -> bool {
         let rearm = std::mem::take(&mut self.saved_query_rearm);
         if rearm {
             self.saved_fetch_failed = false;
         }
-        rearm
+        rearm && self.saved_more.is_none()
     }
 
     /// The loading hint belongs to the wait alone: ending the wait by either arm drops it, so the
@@ -553,6 +603,7 @@ impl AgentsViewMode {
             return;
         }
         if self.keybindings.matches(key, "tui.select.down") {
+            self.saved_page_requested = true;
             self.move_selection(1);
             return;
         }
@@ -561,6 +612,7 @@ impl AgentsViewMode {
             return;
         }
         if self.keybindings.matches(key, "tui.select.pageDown") {
+            self.saved_page_requested = true;
             self.move_selection(self.page_step() as isize);
             return;
         }
@@ -572,6 +624,7 @@ impl AgentsViewMode {
             return;
         }
         if self.keybindings.matches(key, "tui.select.bottom") {
+            self.saved_page_requested = true;
             self.move_selection_to(SelectionEdge::Last);
             return;
         }

@@ -102,6 +102,28 @@ pub fn parse_bash_activities(data: &Value) -> Vec<BashActivity> {
     activities
 }
 
+/// The command's cell budget inside one activity-dock shell item.
+const DOCK_COMMAND_CELLS: usize = 32;
+
+/// The activity dock's shells row: the running shells only, one item each.
+pub(crate) fn dock_shell_items(activities: &[BashActivity]) -> Vec<String> {
+    activities
+        .iter()
+        .filter(|activity| activity.running())
+        .map(dock_shell_item)
+        .collect()
+}
+
+/// One running shell in the activity dock: `<command, truncated> · <elapsed>`.
+fn dock_shell_item(activity: &BashActivity) -> String {
+    let command = crate::heartbeats_picker::single_line(&activity.command);
+    format!(
+        "{} · {}",
+        crate::width::truncate_to_width(&command, DOCK_COMMAND_CELLS, "\u{2026}"),
+        format_duration(activity.duration_ms)
+    )
+}
+
 /// The running shells in a `list_kernel_bash` reply: finished shells stay in the bash view only.
 #[must_use]
 pub fn running_shell_count(data: &Value) -> usize {
