@@ -153,7 +153,7 @@ pub(crate) fn stream_attach(
     snapshot.insert("messages".to_string(), Value::Array(Vec::new()));
     // The stream's count is the transcript it carries: a windowed attach
     // streams the tail alone, while `summary.messageCount` stays the
-    // session's total (the backfill cursor is `historyBefore`).
+    // session's total (the page cursor is `historyBeforeEntryId`).
     let message_count = match &messages {
         Value::Array(messages) => messages.len() as u64,
         // A missing or malformed transcript fails the transfer below.

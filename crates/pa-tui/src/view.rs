@@ -486,31 +486,102 @@ impl AgentView {
         };
         self.reanchor_paused_window_for_prepend();
         let cursor_spacing_before = self.prepend_cursor_spacing(0);
-        self.chat.splice(0..0, entries);
-        self.entry_layout
-            .splice(0..0, std::iter::repeat_n([None, None, None], count));
-        self.entry_heights
-            .splice(0..0, std::iter::repeat_n([None, None, None], count));
+        self.splice_chat(0..0, entries);
+        self.note_prepended_entries(count, seam_before, cursor_spacing_before);
+    }
+
+    /// Replace `range`, which lies below the viewport, with `entries`: a paused
+    /// viewport keeps its rows.
+    pub fn replace_entries(&mut self, range: std::ops::Range<usize>, entries: Vec<ChatEntry>) {
+        self.pending_handoff = None;
+        let width = self.layout_width;
+        // The entry after the range re-measures too: its spacing follows its neighbor.
+        let follower = usize::from(range.end < self.chat.len());
+        let rows = |view: &Self, from: usize, to: usize| -> usize {
+            (from..to)
+                .map(|index| view.count_entry_rows(index, width))
+                .sum()
+        };
+        let before = if width > 0 {
+            rows(self, range.start, range.end + follower)
+        } else {
+            0
+        };
+        let start = range.start;
+        let inserted = entries.len();
+        self.splice_chat(range, entries);
+        if width > 0 {
+            let after = rows(self, start, start + inserted + follower);
+            self.sparse_tail_delta(after as isize - before as isize, start);
+        }
+    }
+
+    /// Drop the first `count` entries, which lie above the viewport: the window
+    /// re-anchors to the tail, which they do not touch.
+    pub fn drop_leading_entries(&mut self, count: usize) {
+        if count == 0 {
+            return;
+        }
+        self.pending_handoff = None;
+        self.reanchor_paused_window_for_prepend();
+        self.splice_chat(0..count, Vec::new());
+        self.note_dropped_entries(count);
+    }
+
+    /// Splice the chat and every per-entry cache keyed by its index.
+    fn splice_chat(&mut self, range: std::ops::Range<usize>, entries: Vec<ChatEntry>) {
+        let inserted = entries.len();
+        let removed = range.len();
+        let shift = |index: usize| -> Option<usize> {
+            if index < range.start {
+                Some(index)
+            } else if index < range.end {
+                None
+            } else {
+                Some(index - removed + inserted)
+            }
+        };
+        if let Some((index, rows)) = self.sparse_mutation {
+            self.sparse_mutation = shift(index).map(|index| (index, rows));
+        }
         {
             let mut caches = self.md_caches.borrow_mut();
             let shifted: std::collections::HashMap<usize, crate::markdown::MarkdownBlockCache> =
                 caches
                     .drain()
-                    .map(|(index, cache)| (index + count, cache))
+                    .filter_map(|(index, cache)| Some((shift(index)?, cache)))
                     .collect();
             *caches = shifted;
         }
         self.sparse_entries = self
             .sparse_entries
             .iter()
-            .map(|index| index + count)
+            .filter_map(|i| shift(*i))
             .collect();
         self.toggled_cards = self
             .toggled_cards
             .iter()
-            .map(|index| index + count)
+            .filter_map(|i| shift(*i))
             .collect();
-        self.note_prepended_entries(count, seam_before, cursor_spacing_before);
+        self.entry_layout.splice(
+            range.clone(),
+            std::iter::repeat_n([None, None, None], inserted),
+        );
+        self.entry_heights.splice(
+            range.clone(),
+            std::iter::repeat_n([None, None, None], inserted),
+        );
+        self.chat.splice(range, entries);
+    }
+
+    /// The first and last chat entries the last frame showed.
+    pub(crate) fn visible_entries(&self) -> Option<(usize, usize)> {
+        let entries = self
+            .click
+            .window_sections
+            .iter()
+            .map(|section| section.entry);
+        Some((entries.clone().min()?, entries.max()?))
     }
 
     /// Drop the whole transcript and its cached layout (a fresh snapshot

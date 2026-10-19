@@ -8,6 +8,36 @@ use super::{
     DaemonResumeCursor, Deserialize, JsonMap, Serialize, Value,
 };
 
+/// One page of the display transcript (the branch in order, each compaction as its
+/// summary row), bounded by entry-id cursors.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "from", rename_all = "camelCase")]
+pub enum TranscriptPage {
+    /// The newest `limit` rows before the `before` row; the tail without it.
+    End {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        before: Option<String>,
+        limit: usize,
+    },
+    /// The oldest `limit` rows after the `after` row (the head without it),
+    /// stopping before the `until` row.
+    Start {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        after: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        until: Option<String>,
+        limit: usize,
+    },
+}
+
+impl TranscriptPage {
+    /// Whether the page can reach rows older than a windowed store's loaded suffix.
+    #[must_use]
+    pub fn reads_history(&self) -> bool {
+        !matches!(self, Self::End { before: None, .. })
+    }
+}
+
 /// `type: "command"` envelope wrapping a [`DaemonCommand`].
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -117,6 +147,12 @@ pub enum DaemonCommand {
         session_dir: Option<String>,
         #[serde(default)]
         scope: Value,
+        /// The most session files this request folds; `None` walks to the end of the store.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        limit: Option<u64>,
+        /// A previous response's `nextCursor`: the walk resumes after that file.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cursor: Option<String>,
         #[serde(flatten)]
         rest: JsonMap,
     },
@@ -600,7 +636,7 @@ pub enum DaemonCommand {
         id: Option<String>,
         active_session_id: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        before: Option<u64>,
+        page: Option<TranscriptPage>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         capabilities: Option<Vec<DaemonClientCapability>>,
         #[serde(flatten)]

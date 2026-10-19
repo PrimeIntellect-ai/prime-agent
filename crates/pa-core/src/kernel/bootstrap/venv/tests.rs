@@ -1071,3 +1071,145 @@ async fn skill_sync_falls_back_to_per_skill_installs_on_batch_failure() {
         .collect::<Vec<_>>();
     assert_eq!(recorded, vec!["edit"], "only the healthy skill is recorded");
 }
+
+/// Permission semantics need a non-root runner: `chmod` cannot deny root, so these
+/// tests skip as root and the gate harness runs the binary via `runuser` as a
+/// non-root user (a shared install dir readable but not writable, like the verifiers
+/// harness's `agent_user` seats).
+#[cfg(unix)]
+fn skip_when_root() -> bool {
+    if unsafe { libc::geteuid() } == 0 {
+        eprintln!("skipped: run as a non-root user (chmod cannot deny root)");
+        return true;
+    }
+    false
+}
+
+#[cfg(unix)]
+fn set_mode(path: &Path, mode: u32) {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).unwrap();
+}
+
+/// A base-ready venv whose directory cannot host the bootstrap lock (EACCES/EROFS on
+/// the candidate) must degrade like a `PRIME_AGENT_KERNEL_PYTHON` override: the
+/// uncovered skill is disabled with a warning and the venv python is returned, with
+/// nothing installed into the read-only venv. Red on the raw EACCES before the fix.
+#[cfg(unix)]
+#[tokio::test]
+async fn unwritable_venv_disables_uncovered_skills_instead_of_failing() {
+    if skip_when_root() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let venv = dir.path().join("kernel-venv");
+    let rlm = venv.join("lib/python3.11/site-packages/rlm");
+    std::fs::create_dir_all(&rlm).unwrap();
+    std::fs::write(rlm.join("__init__.py"), "x = 1\n").unwrap();
+    // The fake interpreter passes the runtime and dill probes; only the skill import fails.
+    let python = venv.join("bin/python");
+    std::fs::create_dir_all(python.parent().unwrap()).unwrap();
+    std::fs::write(
+        &python,
+        "#!/bin/sh\nif [ \"$2\" = \"import edit\" ]; then exit 1; fi\nexit 0\n",
+    )
+    .unwrap();
+    set_mode(&python, 0o755);
+    let skill_dir = dir.path().join("skills/edit");
+    std::fs::create_dir_all(&skill_dir).unwrap();
+    std::fs::write(
+        skill_dir.join("pyproject.toml"),
+        "[project]\nname = \"edit\"\n",
+    )
+    .unwrap();
+    let runtime_source = require_runtime_source_dir().unwrap();
+    let runtime_identity = hash_runtime_source(&runtime_source).unwrap();
+    write_bootstrap_version(&venv, &runtime_identity, &[]).unwrap();
+
+    let warnings = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let mut options = EnsureKernelPythonOptions::default();
+    let sink = warnings.clone();
+    options.on_progress = Some(std::sync::Arc::new(move |message: &str| {
+        sink.lock().unwrap().push(message.to_string());
+    }));
+    options.python_skills = vec![KernelPythonSkill {
+        name: "edit".to_string(),
+        import_name: "edit".to_string(),
+        package_path: skill_dir.clone(),
+        pyproject_path: skill_dir.join("pyproject.toml"),
+    }];
+
+    set_mode(&venv, 0o555);
+    set_mode(dir.path(), 0o555);
+    let outcome = super::super::ensure_kernel_venv(
+        &options,
+        &normalize_python_skills(&options.python_skills),
+        venv.clone(),
+    )
+    .await;
+    set_mode(dir.path(), 0o755);
+    set_mode(&venv, 0o755);
+
+    let resolved = outcome.expect("a base-ready venv must still yield its python");
+    assert_eq!(resolved, python);
+    let warnings = warnings.lock().unwrap();
+    assert!(
+        warnings.len() == 1
+            && warnings[0].contains("Warning: Python skills unavailable in")
+            && warnings[0].contains(&venv.display().to_string())
+            && warnings[0].contains("edit (edit)"),
+        "one warning naming the venv and the disabled skill: {warnings:?}"
+    );
+    assert!(
+        !dir.path().join("kernel-venv.bootstrap.lock").exists(),
+        "the read-only directory hosts no lock"
+    );
+    let version = read_bootstrap_version(&venv).expect("the version file is still readable");
+    assert!(
+        version.python_skills.as_ref().is_none_or(Vec::is_empty),
+        "nothing was installed into the read-only venv: {version:?}"
+    );
+}
+
+/// A venv that cannot host the lock AND cannot run the kernel is a setup error that
+/// names the venv and both env overrides — not the raw candidate-file EACCES.
+/// Red on the raw EACCES before the fix.
+#[cfg(unix)]
+#[tokio::test]
+async fn unwritable_stale_venv_names_the_venv_and_both_env_overrides() {
+    if skip_when_root() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let venv = dir.path().join("kernel-venv");
+    let python = venv.join("bin/python");
+    std::fs::create_dir_all(python.parent().unwrap()).unwrap();
+    std::fs::write(&python, "#!/bin/sh\nexit 0\n").unwrap();
+    set_mode(&python, 0o755);
+    // A stale runtime identity: the base is not ready, so the venv needs a rebuild.
+    write_bootstrap_version(&venv, "sha256:stale", &[]).unwrap();
+
+    set_mode(&venv, 0o555);
+    set_mode(dir.path(), 0o555);
+    let error =
+        super::super::ensure_kernel_venv(&EnsureKernelPythonOptions::default(), &[], venv.clone())
+            .await
+            .expect_err("an unusable venv in a read-only dir is a setup error");
+    set_mode(dir.path(), 0o755);
+    set_mode(&venv, 0o755);
+
+    let message = error.to_string();
+    assert!(
+        message.contains(&venv.display().to_string()),
+        "names the venv: {message}"
+    );
+    assert!(
+        message.contains("PRIME_AGENT_KERNEL_VENV")
+            && message.contains("PRIME_AGENT_KERNEL_PYTHON"),
+        "names both env overrides: {message}"
+    );
+    assert!(
+        !message.contains("candidate-"),
+        "no raw lock-candidate path: {message}"
+    );
+}

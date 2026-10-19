@@ -422,56 +422,58 @@ impl SessionUi {
         }
         if to_top {
             view.scroll_to_top();
+            self.window.request_head();
             self.track_scroll("top", view.is_following());
             self.dirty = true;
             return Ok(());
         }
         if follow {
+            self.collapse_transcript_window(view);
             view.scroll_to_bottom();
             self.track_scroll("follow", view.is_following());
             self.dirty = true;
             return Ok(());
         }
-        // The activity dock owns focus while focused; every other key falls
-        // through after releasing the focus.
+        // The focused (expanded) dock owns these keys; every other key falls through after
+        // releasing the focus. Configured bindings match first, so a rebound arrow keeps its
+        // configured action; the literal Left/Right fallbacks apply only after none matched.
         if self.subagents_focused {
             let kb = view.editor.keybindings();
-            if kb.matches(&id, "tui.select.confirm") || kb.matches(&id, "app.subagents.focus") {
+            let open =
+                kb.matches(&id, "tui.select.confirm") || kb.matches(&id, "app.subagents.focus");
+            let down = kb.matches(&id, "tui.select.down");
+            let up = kb.matches(&id, "tui.select.up");
+            let back = kb.matches(&id, "tui.select.cancel") || kb.matches(&id, "app.agents.back");
+            let expand = kb.matches(&id, "app.tools.expand");
+            if open {
                 self.open_dock_group_view(view);
                 return Ok(());
             }
-            if id == "left" && self.activity_group == crate::chrome::ActivityGroup::Subagents {
-                // Left from the subagents selection opens the agents view (the operator's
-                // 2026-09-28 muscle-memory ask; left reads as `agents back` everywhere else).
-                self.open_dock_group_view(view);
-                return Ok(());
-            }
-            if id == "left" || id == "right" {
-                // One press, one group: the step wraps at the row's ends, so an empty group is
-                // still visited (the operator's 2026-09-26 directive).
-                let direction = if id == "left" {
-                    crate::chrome::ActivityDirection::Prev
-                } else {
+            let dock = self.activity_dock_state();
+            // Up from the top row leaves the dock; Down from the bottom row wraps to the top.
+            if down || (up && dock.groups()[0] != self.activity_group) {
+                let direction = if down {
                     crate::chrome::ActivityDirection::Next
+                } else {
+                    crate::chrome::ActivityDirection::Prev
                 };
-                self.activity_group = self
-                    .activity_dock_state()
-                    .step(self.activity_group, direction);
+                self.activity_group = dock.step(self.activity_group, direction);
                 self.update_subagent_summary(view);
                 self.dirty = true;
                 return Ok(());
             }
-            if kb.matches(&id, "tui.select.up")
-                || kb.matches(&id, "tui.select.cancel")
-                || kb.matches(&id, "app.agents.back")
-            {
+            if expand {
+                self.cycle_detail(view);
+                return Ok(());
+            }
+            if up || back || id == "left" {
                 self.subagents_focused = false;
                 self.update_subagent_summary(view);
                 self.dirty = true;
                 return Ok(());
             }
-            if kb.matches(&id, "app.tools.expand") {
-                self.cycle_detail(view);
+            if id == "right" {
+                self.open_dock_group_view(view);
                 return Ok(());
             }
             self.subagents_focused = false;
