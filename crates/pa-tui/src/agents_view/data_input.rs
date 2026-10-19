@@ -413,13 +413,15 @@ impl AgentsViewMode {
         self.saved_catalog_loaded = true;
     }
 
-    /// Whether the loop must re-arm the saved-catalog fetch (one retry per terminal failure).
+    /// Whether the loop must re-fetch the first saved-catalog page (one retry per terminal
+    /// failure). A failed continuation's retry resumes its cursor through `next_saved_fetch`
+    /// instead, so the pages already loaded stay.
     pub(super) fn take_saved_fetch_rearm(&mut self) -> bool {
         let rearm = std::mem::take(&mut self.saved_query_rearm);
         if rearm {
             self.saved_fetch_failed = false;
         }
-        rearm
+        rearm && self.saved_more.is_none()
     }
 
     /// The loading hint belongs to the wait alone: ending the wait by either arm drops it, so the

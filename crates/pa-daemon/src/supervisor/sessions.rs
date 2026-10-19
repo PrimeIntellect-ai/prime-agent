@@ -811,9 +811,6 @@ pub(super) fn saved_session_row(info: &crate::session_store::SessionInfo) -> Val
         "modified": info.modified,
         "messageCount": info.message_count,
         "firstMessage": info.first_message,
-        // The scan's capped transcript corpus (TS `allMessagesText`): the
-        // agents-view full-transcript search field.
-        "allMessagesText": info.all_messages_text,
         "state": info.state.as_ref().map(|state| json!({ "status": state })),
     });
     let object = row.as_object_mut().expect("row object");

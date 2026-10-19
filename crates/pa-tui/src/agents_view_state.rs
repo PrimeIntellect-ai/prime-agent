@@ -144,7 +144,7 @@ const SESSION_NAME_COLUMN_MAX_CELLS: usize = 28;
 const SESSION_TITLE_MAX_CELLS: usize = SESSION_NAME_COLUMN_MAX_CELLS - 2;
 
 /// The picker's name target: the SESSION column's own title, clipped at the column's own cap;
-/// the TS transcript corpus (`allMessagesText`) stays excluded.
+/// transcript text stays excluded.
 fn session_search_name(summary: &Value) -> String {
     truncate_text(&session_title(summary), SESSION_TITLE_MAX_CELLS)
 }

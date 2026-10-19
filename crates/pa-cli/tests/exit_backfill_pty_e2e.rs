@@ -45,8 +45,8 @@ const CHILD_SOCKET_ENV: &str = "PA_EXIT_BACKFILL_CHILD_SOCKET";
 /// The exit bound: far below the held page's 30s client timeout, generous
 /// above a clean detach-and-flush exit.
 const EXIT_BOUND: Duration = Duration::from_secs(5);
-/// The windowed attach claims this many older messages exist before the tail.
-const HISTORY_BEFORE: u64 = 40;
+/// The windowed attach's cursor sits this many messages into the history.
+const HISTORY_BEFORE: usize = 2_000;
 /// The tail the snapshot carries: rows 0 and 8 are user rows (contiguous
 /// needles; assistant rows carry SGR spans).
 const TAIL_MESSAGES: usize = 9;
@@ -95,13 +95,108 @@ fn resume_does_not_wait_for_a_pending_backfill_page() {
     leave_with_pending_backfill(b"/resume s2\r");
 }
 
+/// The top key (shift+alt+up) as an escape sequence.
+const TOP_KEY: &[u8] = b"\x1b[1;4A";
+
+/// The top key as the last input: the terminal paints the key inline, so nothing but
+/// the loop's own wake starts the head page, and the session start must render.
+#[test]
+fn the_top_key_loads_the_session_start_as_the_last_input() {
+    let _lock = match HARNESS_LOCK.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    let held = Arc::new(AtomicUsize::new(0));
+    let served = Arc::new(AtomicUsize::new(0));
+    let mut harness = ExitBackfillHarness::start(Arc::clone(&held), Some(Arc::clone(&served)));
+    harness.wait_from_start(KITTY_QUERY, "the kitty capability query");
+    harness.write(KITTY_ANSWER);
+    harness.wait_from_start(LAST_ROW, "the attach tail rendered");
+    harness.settle();
+    let mark = harness.output().len();
+    harness.write(TOP_KEY);
+    harness.master.wait_from(
+        mark,
+        b"SESSION-START-ROW",
+        "the session start after the top key",
+    );
+}
+
+/// Older pages the window keeps resident above the tail; one more evicts the
+/// chunk next to the tail.
+const RESIDENT_CHUNKS: usize = 3;
+const PAGE_UP: &[u8] = b"\x1b[5~";
+
+/// Scrolled far up, the resident rows are cut off from the tail: the exit flush
+/// writes the contiguous tail alone, without the far rows or the gap row, and
+/// requests no page on the way out.
+#[test]
+fn exit_flushes_the_tail_without_a_disjoint_resident_run() {
+    let _lock = match HARNESS_LOCK.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    let held = Arc::new(AtomicUsize::new(0));
+    let served = Arc::new(AtomicUsize::new(0));
+    let mut harness = ExitBackfillHarness::start(Arc::clone(&held), Some(Arc::clone(&served)));
+    harness.wait_from_start(KITTY_QUERY, "the kitty capability query");
+    harness.write(KITTY_ANSWER);
+    harness.wait_from_start(LAST_ROW, "the attach tail rendered");
+    for _ in 0..200 {
+        harness.write(PAGE_UP);
+        harness.master.drain_until_quiet(1);
+        if served.load(Ordering::SeqCst) > RESIDENT_CHUNKS {
+            break;
+        }
+    }
+    harness.settle();
+    let served_at_exit = served.load(Ordering::SeqCst);
+    assert!(
+        served_at_exit > RESIDENT_CHUNKS,
+        "the climb must load more older pages than stay resident (served {served_at_exit})"
+    );
+    let held_at_exit = held.load(Ordering::SeqCst);
+    let mark = harness.output().len();
+    harness.write(b"/exit\r");
+    assert_eq!(
+        harness.wait_child_exit(EXIT_BOUND),
+        Some(0),
+        "the exit completes"
+    );
+    harness.settle();
+    let output = harness.output();
+    let leave_at = mark
+        + find_subsequence(&output[mark..], ALT_SCREEN_LEAVE)
+            .expect("the exit left the alternate screen");
+    let flushed = &output[leave_at..];
+    assert!(
+        find_subsequence(flushed, FIRST_ROW).is_some()
+            && find_subsequence(flushed, LAST_ROW).is_some(),
+        "the flush carries the tail"
+    );
+    assert!(
+        find_subsequence(flushed, b"old row").is_none(),
+        "the flush drops the resident rows cut off from the tail:\n{}",
+        String::from_utf8_lossy(flushed)
+    );
+    assert!(
+        find_subsequence(flushed, b"Loading newer history").is_none(),
+        "the flush drops the gap row"
+    );
+    assert_eq!(
+        (served.load(Ordering::SeqCst), held.load(Ordering::SeqCst)),
+        (served_at_exit, held_at_exit),
+        "the exit requests no page"
+    );
+}
+
 fn leave_with_pending_backfill(gesture: &[u8]) {
     let _lock = match HARNESS_LOCK.lock() {
         Ok(guard) => guard,
         Err(poisoned) => poisoned.into_inner(),
     };
     let held = Arc::new(AtomicUsize::new(0));
-    let mut harness = ExitBackfillHarness::start(Arc::clone(&held));
+    let mut harness = ExitBackfillHarness::start(Arc::clone(&held), None);
 
     harness.wait_from_start(KITTY_QUERY, "the kitty capability query");
     harness.write(KITTY_ANSWER);
@@ -159,8 +254,8 @@ fn leave_with_pending_backfill(gesture: &[u8]) {
 }
 
 /// One attached session behind a mock supervisor socket: the attach is
-/// windowed (`historyBefore` > 0), and the older-history page request is
-/// held forever; everything else answers promptly.
+/// windowed (it carries a page cursor), and the older-history page request
+/// is held forever; everything else answers promptly.
 struct ExitBackfillHarness {
     child: Child,
     _server: std::thread::JoinHandle<()>,
@@ -168,10 +263,10 @@ struct ExitBackfillHarness {
 }
 
 impl ExitBackfillHarness {
-    fn start(held: Arc<AtomicUsize>) -> ExitBackfillHarness {
+    fn start(held: Arc<AtomicUsize>, history: Option<Arc<AtomicUsize>>) -> ExitBackfillHarness {
         let dir = tempfile::TempDir::new().expect("temp dir");
         let socket = dir.path().join("tui.sock");
-        let supervisor = MockSupervisor::bind(&socket, held);
+        let supervisor = MockSupervisor::bind(&socket, held, history);
         let server = std::thread::spawn(move || supervisor.serve());
 
         let pty = openpty(
@@ -397,31 +492,38 @@ fn child_options(socket: PathBuf) -> InteractiveOptions {
 }
 
 /// One attached session behind a mock supervisor socket: the attach carries
-/// a windowed snapshot, and the older-history page request (`get_messages`
-/// with `before`) is held forever; every other request answers promptly.
+/// a windowed snapshot. Without `history`, every page request is held forever;
+/// with it, older pages are served and only newer pages are held. Every other
+/// request answers promptly.
 struct MockSupervisor {
     listener: std::os::unix::net::UnixListener,
     held: Arc<AtomicUsize>,
+    history: Option<Arc<AtomicUsize>>,
 }
 
 impl MockSupervisor {
-    fn bind(socket: &Path, held: Arc<AtomicUsize>) -> Self {
+    fn bind(socket: &Path, held: Arc<AtomicUsize>, history: Option<Arc<AtomicUsize>>) -> Self {
         MockSupervisor {
             listener: std::os::unix::net::UnixListener::bind(socket).expect("bind mock socket"),
             held,
+            history,
         }
     }
 
     fn serve(self) {
         for stream in self.listener.incoming() {
             match stream {
-                Ok(stream) => Self::serve_connection(stream, &self.held),
+                Ok(stream) => Self::serve_connection(stream, &self.held, self.history.as_ref()),
                 Err(_) => return,
             }
         }
     }
 
-    fn serve_connection(stream: std::os::unix::net::UnixStream, held: &Arc<AtomicUsize>) {
+    fn serve_connection(
+        stream: std::os::unix::net::UnixStream,
+        held: &Arc<AtomicUsize>,
+        history: Option<&Arc<AtomicUsize>>,
+    ) {
         let write_stream = stream.try_clone().expect("clone mock socket");
         let mut writer = write_stream;
         let mut reader = std::io::BufReader::new(stream);
@@ -455,10 +557,21 @@ impl MockSupervisor {
                 "attach" => {
                     write_json(&mut writer, &attach_data(id));
                 }
-                // The older-history page: counted and held — the run loop
-                // starts it from the windowed attach's `historyBefore`, and
-                // the exit must not wait for it.
-                "get_messages" if command.get("before").is_some() => {
+                // With history served: an older page or the head page of `old row`s.
+                "get_messages"
+                    if history.is_some()
+                        && (command["page"]["from"] == "end"
+                            || command["page"].get("after").is_none()) =>
+                {
+                    history
+                        .expect("history mode")
+                        .fetch_add(1, Ordering::SeqCst);
+                    write_json(&mut writer, &history_page(id, &command["page"]));
+                }
+                // A page request: counted and held — the run loop starts it
+                // from the windowed attach's cursor, and the exit must not
+                // wait for it.
+                "get_messages" if command.get("page").is_some() => {
                     held.fetch_add(1, Ordering::SeqCst);
                 }
                 _ => {
@@ -485,8 +598,43 @@ fn write_json(writer: &mut std::os::unix::net::UnixStream, value: &Value) {
     writer.flush().expect("flush mock frame");
 }
 
+/// One page over `HISTORY_BEFORE` messages `old row 0..`, ids `e<index>`: an
+/// older page, or the head page.
+fn history_page(id: &str, page: &Value) -> Value {
+    let cursor = |key: &str| {
+        page[key]
+            .as_str()
+            .and_then(|cursor| cursor[1..].parse::<usize>().ok())
+    };
+    let limit = page["limit"].as_u64().expect("page limit") as usize;
+    let (start, end) = if page["from"] == "end" {
+        let end = cursor("before").expect("older page cursor");
+        (end.saturating_sub(limit), end)
+    } else {
+        (0, limit.min(cursor("until").expect("head page bound")))
+    };
+    let messages: Vec<Value> = (start..end)
+        .map(|index| match index {
+            // A row the terminal's cell diff must write whole: it shares no cell with an
+            // `old row` line.
+            0 => json!({ "role": "user", "content": "SESSION-START-ROW" }),
+            _ => json!({ "role": "user", "content": format!("old row {index}") }),
+        })
+        .collect();
+    json!({
+        "type": "response", "id": id, "command": "get_messages", "success": true,
+        "data": {
+            "messages": messages,
+            "firstEntryId": format!("e{start}"),
+            "lastEntryId": format!("e{}", end - 1),
+            "more": if page["from"] == "end" { start > 0 } else { end < HISTORY_BEFORE },
+            "historyLeafId": "attach-leaf",
+        },
+    })
+}
+
 /// The attach snapshot: a small windowed tail over an unfinished older
-/// history (`historyBefore` > 0).
+/// history (its page cursor).
 fn attach_data(id: &str) -> Value {
     let messages: Vec<Value> = (0..TAIL_MESSAGES)
         .map(|index| {
@@ -524,7 +672,7 @@ fn attach_data(id: &str) -> Value {
                     "sessionActions": { "queuedCount": 0, "steering": [], "followUps": [] },
                 },
                 "messages": messages,
-                "historyBefore": HISTORY_BEFORE,
+                "historyBeforeEntryId": format!("e{HISTORY_BEFORE}"),
                 "lastEventSequence": 0,
             },
             "replay": null,

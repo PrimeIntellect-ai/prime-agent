@@ -18,10 +18,13 @@ use super::info::{session_info_cache, SessionScanState};
 
 /// The sidecar format version: a sidecar serves only at exactly this
 /// version; any other version (an older or a newer build's) is a cold
-/// scan, the behavior without a sidecar. Bump on any change to
-/// [`SessionScanAccumulator`](super::info::SessionScanAccumulator) or
-/// [`UsageScan`](crate::session_usage::UsageScan) - the persisted fold's
-/// fields or semantics.
+/// scan, the behavior without a sidecar. Bump when an OLD sidecar's state
+/// would be wrong for this build - a new field or changed fold semantics
+/// in [`SessionScanAccumulator`](super::info::SessionScanAccumulator) or
+/// [`UsageScan`](crate::session_usage::UsageScan). Removing a field needs
+/// no bump: the plain `Deserialize` (no `deny_unknown_fields`) ignores the
+/// stale key, and the remaining state is exactly what this build's fold
+/// would have written, so the store stays warm.
 const INFO_SIDECAR_VERSION: u32 = 2;
 
 /// The on-disk envelope: the version gate plus the scan state.
@@ -70,10 +73,9 @@ pub(crate) fn persist_info_sidecar(path: &Path) {
         // serialized fragment into its own write syscall.
         let mut options = std::fs::OpenOptions::new();
         options.write(true).create_new(true);
-        // The sidecar carries message text (the search corpus, the first
-        // message): the temp is owner-only like the session files
-        // (`persist.rs`'s writer), and the rename carries the mode onto
-        // the sidecar.
+        // The sidecar carries message text (the first message): the temp is
+        // owner-only like the session files (`persist.rs`'s writer), and the
+        // rename carries the mode onto the sidecar.
         pa_core::platform::perms::set_private_mode(&mut options);
         let mut file = io::BufWriter::new(options.open(&temp)?);
         serde_json::to_writer(
