@@ -292,6 +292,9 @@ pub struct AgentsViewLink {
     /// The activity counts the previous run held: a re-entry renders the line the user opened on
     /// its first frame, so the carried selection restores onto it.
     session_activity: std::collections::HashMap<String, SessionActivity>,
+    /// The persistent shells list the previous run held, for the same first-frame restore of a
+    /// shell row.
+    persistent_shells: Value,
     /// An unfinished cycle follows the roster link across session handoffs; re-entry consumes
     /// its result instead of starting another batch while these requests still wait.
     activity_fetch: Option<tokio::sync::oneshot::Receiver<Vec<session_activity::ActivityRead>>>,
@@ -306,6 +309,7 @@ impl AgentsViewLink {
             saved_sessions: Vec::new(),
             saved_catalog_loaded: false,
             session_activity: std::collections::HashMap::new(),
+            persistent_shells: Value::Null,
             activity_fetch: None,
         })
     }
@@ -724,6 +728,10 @@ async fn run_agents_view_surface(
         .as_mut()
         .map(|link| std::mem::take(&mut link.session_activity))
         .unwrap_or_default();
+    let persistent_shells = link
+        .as_mut()
+        .map(|link| std::mem::take(&mut link.persistent_shells))
+        .unwrap_or_default();
     let mut activity_fetch = link.as_mut().and_then(|link| link.activity_fetch.take());
     // This pane may arrive already in TUI state (the chat's teardown preserves it), so a
     // roster-link failure here must hand the terminal back before the error escapes.
@@ -749,6 +757,7 @@ async fn run_agents_view_surface(
     mode.saved = saved_sessions;
     mode.saved_catalog_loaded = saved_catalog_loaded;
     mode.session_activity = session_activity;
+    mode.persistent_shells = persistent_shells;
     mode.rebuild_rows();
     // The notice from the log's bounded tail paints on the FIRST frame, before the interval's
     // first tick.
@@ -1336,6 +1345,7 @@ async fn run_agents_view_surface(
             saved_sessions: mode.saved.clone(),
             saved_catalog_loaded: mode.saved_catalog_loaded,
             session_activity: std::mem::take(&mut mode.session_activity),
+            persistent_shells: std::mem::take(&mut mode.persistent_shells),
             activity_fetch,
         })
     } else {
