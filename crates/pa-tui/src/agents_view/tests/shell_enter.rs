@@ -206,3 +206,33 @@ fn stopping_an_orphan_keeps_its_finished_detail_until_back() {
         "{rows}"
     );
 }
+
+#[test]
+fn the_orphan_overlay_follows_a_terminal_resize() {
+    let mut mode = fresh_mode(Vec::new());
+    mode.apply_saved_loaded(Vec::new());
+    mode.apply_persistent_shells(serde_json::json!({ "activities": [
+        shell("o1", "sleep 600", "gone"),
+    ]}));
+    enter_on_shell(&mut mode, "o1");
+    mode.handle_key("enter");
+    let Some(crate::bash_view::BashViewAction::OpenDetail { id, generation }) =
+        mode.pending_shell_action.take()
+    else {
+        panic!("the detail opens")
+    };
+    let tail = (1..=100)
+        .map(|n| format!("line {n}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    mode.shell_view
+        .as_mut()
+        .expect("the overlay")
+        .set_output(&id, &tail, generation);
+    let (lines, _) = mode.render_frame(100, 12);
+    let text = lines.iter().map(flat).collect::<Vec<_>>().join("\n");
+    assert!(
+        text.contains("line 100") && text.contains("Cancel command"),
+        "the shrunk frame keeps the newest output and the action row:\n{text}"
+    );
+}
