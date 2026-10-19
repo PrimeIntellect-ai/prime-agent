@@ -110,7 +110,7 @@ class DockSupervisor(Supervisor):
 def running_visible(text, kind, count, expanded=False):
     # Rust's collapsed dock reads "N subagents"; its focused (expanded) dock's
     # subagents row reads the "N running · …" breakdown, like TS's box.
-    label = 'running' if kind == 'ts' or expanded else 'subagents'
+    label = 'running' if kind == 'ts' or expanded else 'subagents?'
     return re.search(r'(?<!\d)' + str(count) + r'\s+' + label + r'\b', text) is not None
 
 
