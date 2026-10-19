@@ -258,6 +258,69 @@ fn pathless_summary_usage_folds_the_in_memory_entries() {
     );
 }
 
+/// #4: a resumed session's summary counts the tool calls its file already
+/// holds, so a revived child's `toolUseCount` never resets (TS counts a
+/// run-less child's assistant tool calls).
+#[tokio::test]
+async fn a_resumed_sessions_summary_counts_its_persisted_tool_calls() {
+    let dir = std::env::temp_dir().join(format!("pa-worker-tools-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("tool-count.jsonl");
+    let header = json!({
+        "type": "session", "version": 3, "id": "tool-count",
+        "timestamp": "2026-01-01T00:00:00.000Z", "cwd": "/tmp",
+    });
+    let user = json!({
+        "type": "message", "id": "u1", "parentId": null,
+        "timestamp": "2026-01-01T00:00:00.000Z",
+        "message": { "role": "user", "content": "run it" },
+    });
+    let tools = json!({
+        "type": "message", "id": "a1", "parentId": "u1",
+        "timestamp": "2026-01-01T00:00:01.000Z",
+        "message": {
+            "role": "assistant",
+            "content": [
+                { "type": "toolCall", "toolCallId": "t1", "name": "bash", "arguments": {} },
+                { "type": "toolCall", "toolCallId": "t2", "name": "edit", "arguments": {} },
+            ],
+            "provider": "p", "model": "m", "stopReason": "toolUse",
+        },
+    });
+    std::fs::write(&path, format!("{header}\n{user}\n{tools}\n")).unwrap();
+    let config = WorkerConfig {
+        socket_path: dir.join("worker.sock"),
+        supervisor_socket_path: std::path::PathBuf::new(),
+        token: "token".to_string(),
+        worker_instance_id: String::new(),
+        active_session_id: "tool-count".to_string(),
+        agent_dir: dir.join("agent"),
+        recovery_journal_path: dir.join("recovery.jsonl"),
+        telemetry_disabled: None,
+        script: Some(json!({ "responses": [] })),
+    };
+    let worker = Worker::new(config, None);
+    let resumed = worker
+        .dispatch(
+            "create",
+            &json!({
+                "cwd": "/tmp",
+                "sessionPath": path,
+                "name": "resumed",
+            }),
+        )
+        .await;
+    assert!(resumed.success, "resume failed: {resumed:?}");
+    let state = worker.dispatch("get_state", &json!({})).await;
+    assert!(state.success, "get_state failed: {state:?}");
+    assert_eq!(
+        state.data.unwrap_or(Value::Null)["toolUseCount"],
+        json!(2),
+        "the resumed summary counts the persisted tool calls"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[test]
 fn display_ids_are_twelve_hex() {
     let id = crate::util::new_display_id();

@@ -604,9 +604,12 @@ impl TurnRunner {
                     }
                     // The in-flight tool-call set, updated under the same core lock
                     // the frames sequence under: the roster feed never reads a
-                    // half-applied transition.
+                    // half-applied transition. The session's tool counter bumps
+                    // with the same set, so the summary a roster push composes
+                    // from this event already carries it.
                     EngineEvent::ToolExecutionStart { tool_call_id, .. } => {
                         core.running_tool_calls.insert(tool_call_id.clone());
+                        core.tool_use_count += 1;
                     }
                     EngineEvent::ToolExecutionEnd { tool_call_id, .. } => {
                         core.running_tool_calls.remove(tool_call_id);

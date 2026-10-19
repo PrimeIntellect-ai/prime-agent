@@ -100,6 +100,11 @@ pub struct SessionSummary {
     /// boundaries so an idle row never carries one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub progress_note: Option<String>,
+    /// The session's tool calls so far (TS `toolUseCount`, omitted when
+    /// zero): bumped per `tool_execution_start`, re-seeded from the session
+    /// file when a worker opens it so a revived child never resets it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_use_count: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent_session_path: Option<String>,
     /// The parent's live active-session id (subagent summaries).
