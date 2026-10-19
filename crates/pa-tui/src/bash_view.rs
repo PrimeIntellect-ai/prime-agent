@@ -124,6 +124,18 @@ fn dock_shell_item(activity: &BashActivity) -> String {
     )
 }
 
+/// Whether a registry update moved a row (its id, status or exit code): the running rows'
+/// duration ticks alone never count.
+pub(crate) fn registry_rows_moved(old: &Value, new: &Value) -> bool {
+    let signature = |data: &Value| -> Vec<(String, String, Option<i64>)> {
+        parse_bash_activities(data)
+            .into_iter()
+            .map(|row| (row.id, row.status, row.exit_code))
+            .collect()
+    };
+    signature(old) != signature(new)
+}
+
 /// The running shells in a `list_kernel_bash` reply: finished shells stay in the bash view only.
 #[must_use]
 pub fn running_shell_count(data: &Value) -> usize {

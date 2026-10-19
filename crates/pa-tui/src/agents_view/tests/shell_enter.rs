@@ -208,6 +208,28 @@ fn stopping_an_orphan_keeps_its_finished_detail_until_back() {
 }
 
 #[test]
+fn a_refused_stop_keeps_its_error_across_a_duration_tick() {
+    let mut mode = fresh_mode(Vec::new());
+    mode.apply_saved_loaded(Vec::new());
+    mode.apply_persistent_shells(serde_json::json!({ "activities": [
+        shell("o1", "sleep 600", "gone"),
+    ]}));
+    enter_on_shell(&mut mode, "o1");
+    mode.handle_key("enter");
+    mode.pending_shell_action.take();
+    mode.shell_view.as_mut().expect("the overlay").set_error(
+        "Could not kill bash command: refused".to_string(),
+        false,
+        None,
+    );
+    let mut ticked = shell("o1", "sleep 600", "gone");
+    ticked["durationMs"] = 14_400.into();
+    mode.apply_persistent_shells(serde_json::json!({ "activities": [ticked] }));
+    let text = frame(&mut mode).join("\n");
+    assert!(text.contains("refused"), "{text}");
+}
+
+#[test]
 fn the_orphan_overlay_follows_a_terminal_resize() {
     let mut mode = fresh_mode(Vec::new());
     mode.apply_saved_loaded(Vec::new());

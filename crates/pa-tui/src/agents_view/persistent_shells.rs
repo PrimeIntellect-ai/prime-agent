@@ -227,13 +227,16 @@ impl AgentsViewMode {
         }
     }
 
-    /// A landed list: the rows rebuild and an open bash view follows, only when it changed.
+    /// A landed list: the rows rebuild and an open bash view follows, only when it changed; a kill
+    /// error clears only when a row moved, never on a running row's duration tick.
     pub(super) fn apply_persistent_shells(&mut self, data: Value) {
         if data == self.persistent_shells {
             return;
         }
-        if let Some(view) = self.shell_view.as_mut() {
-            view.clear_error();
+        if crate::bash_view::registry_rows_moved(&self.persistent_shells, &data) {
+            if let Some(view) = self.shell_view.as_mut() {
+                view.clear_error();
+            }
         }
         self.persistent_shells = data;
         self.rebuild_rows();

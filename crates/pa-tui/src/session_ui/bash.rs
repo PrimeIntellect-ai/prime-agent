@@ -247,13 +247,8 @@ impl SessionUi {
                 }
                 // A landed REGISTRY update supersedes a shown error — but only when the registry's
                 // rows actually moved; the running rows' duration ticks never clear anything.
-                let row_signature = |data: &Value| -> Vec<(String, String, Option<i64>)> {
-                    crate::bash_view::parse_bash_activities(data)
-                        .into_iter()
-                        .map(|row| (row.id, row.status, row.exit_code))
-                        .collect()
-                };
-                let rows_settled = row_signature(&self.bash_activities) != row_signature(&data);
+                let rows_settled =
+                    crate::bash_view::registry_rows_moved(&self.bash_activities, &data);
                 self.bash_activities = data;
                 if rows_settled {
                     if let Some(bash_view) = view.bash_view.as_mut() {
