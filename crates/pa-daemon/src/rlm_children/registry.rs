@@ -84,14 +84,25 @@ impl SupervisorChildSessionsInner {
                 active_session_id: active_session_id.clone(),
                 rest: Map::default(),
             };
-            let _ = self
+            let abort_result = self
                 .command(&abort, KILL_TIMEOUT_MS)
                 .await
                 .with_context(|| format!("abort RLM child session {active_session_id}"));
-            // A cancelled run is the parent's action (nano-rlm #202's
-            // `agent.cancel` gap): the child leaves a parent -> child
-            // cancel line on the ledger, not a clean disappearance.
-            self.record_child_cancelled(record).await;
+            // The cancel line records the confirmed effect only (nano-rlm
+            // #202 records after its `terminate`): an abort that reached
+            // the child, or one whose session is already gone (a dead
+            // child is cancelled), leaves the line; a real abort failure
+            // keeps the edge absent, so a later successful cancel of the
+            // still-running child can still record it (the dedup never saw
+            // the failed attempt).
+            let cancelled_confirmed = abort_result.is_ok()
+                || abort_result
+                    .as_ref()
+                    .err()
+                    .is_some_and(|error| unknown_session(error).is_some());
+            if cancelled_confirmed {
+                self.record_child_cancelled(record).await;
+            }
             // The settled/cancelled child releases an owed goal continuation.
             self.fire_settle_hook(record).await;
             return true;
@@ -211,11 +222,18 @@ impl SupervisorChildSessionsInner {
                 }
                 self.emit_child_usage(record).await;
                 let (active_session_id, was_running) = {
-                    let record = record.lock().await;
-                    (
-                        record.active_session_id.clone(),
-                        record.settled_status.is_none(),
-                    )
+                    let mut record = record.lock().await;
+                    let was_running = record.settled_status.is_none();
+                    // A close that kills a live run settles the row
+                    // `cancelled` (the same registry state
+                    // `cancel_child_run` leaves): a watcher parked inside
+                    // its wait slice can then never refresh the killed run
+                    // back to `done` and record a clean `child_returned`
+                    // beside the cancel line.
+                    if was_running {
+                        record.settled_status = Some("cancelled");
+                    }
+                    (record.active_session_id.clone(), was_running)
                 };
                 if let Err(error) = self.kill_child(&active_session_id, reason).await {
                     if unknown_session(&error).is_none() {

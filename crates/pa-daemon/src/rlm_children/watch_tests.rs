@@ -197,6 +197,18 @@ async fn spawn_fake_supervisor(
                                 )
                             }
                         }
+                        "abort" => {
+                            if child_subagents.abort_fails.load(Ordering::SeqCst) {
+                                response_failure(
+                                    Some(&id),
+                                    command_type,
+                                    "abort refused by the fake supervisor",
+                                    None,
+                                )
+                            } else {
+                                response_success(Some(&id), command_type, None)
+                            }
+                        }
                         "kill" => {
                             let _ = kill_tx.send(command.clone());
                             match *kill_behavior {
@@ -264,6 +276,9 @@ struct FakeChildSubagents {
     running: AtomicBool,
     quiescent_waits: std::sync::atomic::AtomicUsize,
     answer_reads: AtomicU32,
+    /// The fake answers `abort` with a real refusal (the cancel path's
+    /// failed-abort lane).
+    abort_fails: AtomicBool,
 }
 
 /// [`sessions_with_fake_supervisor`] whose child reports its own running
@@ -1098,6 +1113,137 @@ async fn a_closed_running_child_records_the_cancel_edge_on_the_parent_ledger() {
             "parent-request-1".to_string()
         )],
         "the close's kill lands as a parent -> child cancel edge"
+    );
+}
+
+/// The `child_returned` lines of one parent ledger: the child session ids.
+fn returned_children(path: &Path) -> Vec<String> {
+    std::fs::read_to_string(path)
+        .unwrap_or_default()
+        .lines()
+        .filter_map(|line| serde_json::from_str::<SemanticEdgeLedgerEvent>(line.trim()).ok())
+        .filter_map(|event| match event {
+            SemanticEdgeLedgerEvent::ChildReturned {
+                child_session_id, ..
+            } => Some(child_session_id),
+            _ => None,
+        })
+        .collect()
+}
+
+/// A refused abort records no cancel edge (PR #3680 review finding): the
+/// registry row still settles cancelled (the registry is the
+/// user-visible state), but the ledger mirrors the confirmed effect only
+/// — a child the abort never reached may still be running, and the
+/// unburned dedup keeps a later successful cancel able to record.
+#[tokio::test]
+async fn a_refused_abort_settles_the_row_but_records_no_cancel_edge() {
+    let (follow_up_tx, _follow_up_rx) = mpsc::unbounded_channel();
+    let child_subagents = Arc::new(FakeChildSubagents::default());
+    child_subagents.abort_fails.store(true, Ordering::SeqCst);
+    let (sessions, _kill_rx) = sessions_with_fake_child_subagents(
+        follow_up_tx,
+        10_000,
+        FakeKill::Success,
+        FakeChild::Healthy,
+        child_subagents,
+    )
+    .await;
+    let (recorder, ledger_path, _dir) = seeded_parent_recorder();
+    sessions.set_semantic_edges(Some(recorder));
+    let handle = spawn_child(&sessions).await;
+
+    assert!(
+        sessions.cancel_child_run(&handle.rlm_child_id).await,
+        "the cancel still claims the registry row"
+    );
+
+    assert_eq!(
+        cancelled_lines(&ledger_path),
+        Vec::new(),
+        "a refused abort records no cancel line"
+    );
+}
+
+/// A close-killed live run never records a clean return beside its cancel
+/// line (PR #3680 review finding): the settle watcher is parked inside
+/// its wait slice when the close kills the child, and its post-kill
+/// refresh used to re-mark the killed run `done` — appending a
+/// `child_returned` line after the cancel line. The close now settles
+/// the row `cancelled`, so the parked watcher's tail records nothing.
+#[tokio::test]
+async fn a_close_killed_child_never_records_a_clean_return() {
+    let (follow_up_tx, _follow_up_rx) = mpsc::unbounded_channel();
+    let child_subagents = Arc::new(FakeChildSubagents::default());
+    // A live grandchild holds the watcher's wait slice open indefinitely,
+    // so the close provably lands on a watcher parked mid-wait.
+    child_subagents.running.store(true, Ordering::SeqCst);
+    let (sessions, _kill_rx) = sessions_with_fake_child_subagents(
+        follow_up_tx,
+        100,
+        FakeKill::Success,
+        FakeChild::Healthy,
+        Arc::clone(&child_subagents),
+    )
+    .await;
+    let (recorder, ledger_path, _dir) = seeded_parent_recorder();
+    sessions.set_semantic_edges(Some(recorder));
+    let (hook_tx, mut hook_rx) = mpsc::unbounded_channel();
+    sessions.set_settle_hook(Arc::new(move || {
+        let _ = hook_tx.send(());
+    }));
+    let handle = spawn_child(&sessions).await;
+    // The child committed one request before the close cut it short (its
+    // own ledger carries the line the parent's return recording reads).
+    std::fs::create_dir_all(&handle.session_dir).expect("child session dir");
+    let mut child_ledger = String::new();
+    child_ledger.push_str("{\"type\":\"session_registered\",\"session_id\":\"child-file\"}");
+    child_ledger.push('\n');
+    child_ledger.push_str("{\"type\":\"request_finished\",\"request_id\":\"child-request-1\"}");
+    child_ledger.push('\n');
+    std::fs::write(
+        Path::new(&handle.session_dir).join("semantic-edges.jsonl"),
+        child_ledger,
+    )
+    .expect("write the child ledger");
+    sessions.notify_turn_done();
+    // Wait until the watcher is provably parked inside its held quiescence
+    // wait (the fake counts them), never on one still starting.
+    let parked = Instant::now() + Duration::from_secs(10);
+    while child_subagents.quiescent_waits.load(Ordering::SeqCst) == 0 {
+        assert!(
+            Instant::now() < parked,
+            "the watcher never parked in its wait slice"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    sessions
+        .close_children(ChildCloseReason::Killed)
+        .await
+        .expect("close the running child");
+    // Release the parked watcher: its wait slice answers, its refresh runs,
+    // and its settle tail fires the hook — the return recording precedes
+    // the hook in that tail, so the hook bounds the assertion.
+    child_subagents.running.store(false, Ordering::SeqCst);
+    tokio::time::timeout(Duration::from_secs(15), hook_rx.recv())
+        .await
+        .expect("the parked watcher runs its settle tail")
+        .expect("hook channel open");
+
+    assert_eq!(
+        cancelled_lines(&ledger_path),
+        vec![(
+            "parent-lead".to_string(),
+            "child-file".to_string(),
+            "parent-request-1".to_string()
+        )],
+        "the close's kill records the cancel line"
+    );
+    assert!(
+        returned_children(&ledger_path).is_empty(),
+        "a close-killed run never records a child_returned line: {:?}",
+        returned_children(&ledger_path)
     );
 }
 
