@@ -7,7 +7,7 @@ use super::{
     CompactionAbortNote, Context, DaemonClient, DaemonCommand, DockFold, Duration, GoalView,
     HashSet, InteractiveOptions, LoaderTokenTracker, Map, ModelCatalogUpdate, PromptOrder,
     PromptSubmitNote, ReattachOutcome, RebuildKind, RecoveryKind, ReloadNote, Result, ResyncBash,
-    SessionSelection, SessionUi, ShareNote, TranscriptBackfillNote, UpdateNote, Value,
+    SessionSelection, SessionUi, ShareNote, TranscriptPageNote, UpdateNote, Value,
     EXIT_DETACH_TIMEOUT_MS, EXIT_STATS_TIMEOUT_MS, UI_REQUEST_TIMEOUT_MS,
 };
 
@@ -27,7 +27,7 @@ impl SessionUi {
         catalog_updates: mpsc::UnboundedSender<ModelCatalogUpdate>,
         auth_panel_notes: mpsc::UnboundedSender<crate::auth_panel::AuthPanelRequest>,
         activity_updates: ActivityUpdates,
-        backfill_notes: mpsc::UnboundedSender<TranscriptBackfillNote>,
+        page_notes: mpsc::UnboundedSender<TranscriptPageNote>,
     ) -> Result<SessionUi> {
         let active_session_id = match &options.session {
             SessionSelection::New => create_session(&client, options, None).await?,
@@ -169,14 +169,9 @@ impl SessionUi {
             prompt_orders: orders_tx,
             input_submission_generation: 0,
             prompt_in_flight: 0,
-            transcript_stale: false,
-            transcript_epoch: 0,
-            backfill_compaction_count: None,
-            backfill_leaf_id: None,
-            transcript_backfill: None,
-            pending_backfill: None,
-            backfill_seam: crate::snapshot::BackfillSeam::Preserve,
-            backfill_notes,
+            compaction_settled: false,
+            window: super::window::TranscriptWindow::default(),
+            page_notes,
             telemetry: options.telemetry.clone(),
             scroll_adoption_emitted: false,
             exit_reason: "daemon_closed",
@@ -518,15 +513,13 @@ impl SessionUi {
         // The rebuild's first frame materializes the visible window; arm the
         // post-frame trim so its wrap/render churn returns too.
         self.trim_after_frame = true;
-        self.transcript_epoch = self.transcript_epoch.wrapping_add(1);
-        self.transcript_backfill = None;
-        self.backfill_seam = reconstructed.backfill_seam;
-        self.backfill_compaction_count = attach.snapshot["state"]["compactionCount"].as_u64();
-        self.backfill_leaf_id = attach.snapshot["state"]["leafId"]
-            .as_str()
-            .map(str::to_owned);
-        self.pending_backfill =
-            Some(reconstructed.history_before).filter(|history_before| *history_before > 0);
+        self.window.reset(
+            attach.snapshot["state"]["leafId"]
+                .as_str()
+                .map(str::to_owned),
+            reconstructed.history_before_entry_id,
+            reconstructed.backfill_seam,
+        );
         Ok(())
     }
 
@@ -790,7 +783,7 @@ mod backfill_tests {
     /// One session attached over a mock daemon that answers `attach` and `get_messages`.
     async fn mock_session(
         socket: &std::path::Path,
-        backfill_tx: mpsc::UnboundedSender<TranscriptBackfillNote>,
+        backfill_tx: mpsc::UnboundedSender<TranscriptPageNote>,
     ) -> (SessionUi, tokio::task::JoinHandle<()>) {
         let listener = tokio::net::UnixListener::bind(socket).unwrap();
         let server = tokio::spawn(async move {
@@ -852,43 +845,6 @@ mod backfill_tests {
         .await
         .unwrap();
         (session, server)
-    }
-
-    #[tokio::test]
-    async fn a_rebuild_rejects_an_already_queued_backfill_note() {
-        tokio::time::timeout(Duration::from_secs(10), async {
-            let dir = tempfile::tempdir().unwrap();
-            let socket = dir.path().join("backfill.sock");
-            let (backfill_tx, mut backfill_rx) = mpsc::unbounded_channel();
-            let (mut session, server) = mock_session(&socket, backfill_tx.clone()).await;
-            let old_epoch = session.transcript_epoch;
-            assert!(backfill_tx
-                .send(TranscriptBackfillNote {
-                    epoch: old_epoch,
-                    entries: Ok(crate::snapshot::transcript_to_entries(&[
-                        json!({"role": "user", "content": "stale history", "timestamp": 0}),
-                    ])),
-                })
-                .is_ok());
-            let mut view = AgentView::new(crate::theme::Theme::builtin(
-                "prime",
-                crate::theme::ColorMode::TrueColor,
-            ));
-            session.rebuild_transcript(&mut view).await;
-            assert_ne!(session.transcript_epoch, old_epoch);
-            assert_eq!(view.chat.len(), 1, "rebuild applied the current transcript");
-            let expected = view.chat.clone();
-            // Deliver the note that was demonstrably queued before the real rebuild.
-            session.apply_transcript_backfill(backfill_rx.try_recv().unwrap(), &mut view);
-            assert_eq!(
-                view.chat, expected,
-                "an obsolete queued page cannot prepend rows after rebuild"
-            );
-            drop(session);
-            server.abort();
-        })
-        .await
-        .expect("mock session open, rebuild and stale-note delivery complete within ten seconds");
     }
 
     /// A rebind that tears down an agents-view panel drops its return: a later dock-opened shells

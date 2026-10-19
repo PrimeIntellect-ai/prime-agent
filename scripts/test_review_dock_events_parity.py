@@ -37,6 +37,10 @@ class CaptureTests(unittest.TestCase):
         self.assertTrue(running_visible('1 running', 'ts', 1))
         self.assertFalse(running_visible('1 running', 'ts', 2))
         self.assertTrue(running_visible('2 subagents', 'rust', 2))
+        expanded = '◆ subagents   2 running · 0 idle · 0 inactive'
+        self.assertTrue(running_visible(expanded, 'rust', 2, expanded=True))
+        self.assertFalse(running_visible(expanded, 'rust', 2))
+        self.assertFalse(running_visible('◆ 2 subagents', 'rust', 2, expanded=True))
 
     def test_count_has_integer_boundaries(self):
         for kind, label in [('ts', 'running'), ('rust', 'subagents')]:

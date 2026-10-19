@@ -364,20 +364,21 @@ fn wait_gone(needle: &str) -> HeadlessStep {
 /// next Enter re-opens the Heartbeats panel, and the run never hands off to the agents view.
 fn heartbeats_exit_plan(exit: KeyCode) -> Vec<HeadlessStep> {
     vec![
-        // The barrier pins the panel's content (its row label); the navigation itself steps the
-        // rendered groups, empty ones included, so it never depends on the feed's landing order.
+        // The barriers pin the panel's own column header (the expanded dock row lists the
+        // heartbeat's label too); the navigation steps the rendered rows, empty ones included,
+        // so it never depends on the feed's landing order.
         wait_render("\u{25f7} 1 heartbeat"),
         alt_a(),
         HeadlessStep::WaitMs(150),
         // The dock's focus starts on the subagents section (the default selection).
-        key(KeyCode::Right),
+        key(KeyCode::Down),
         HeadlessStep::WaitMs(150),
         key(KeyCode::Enter),
-        wait_render("Workspace tidy"),
+        wait_render("Next run"),
         key(exit),
-        wait_gone("Workspace tidy"),
+        wait_gone("Next run"),
         key(KeyCode::Enter),
-        wait_render("Workspace tidy"),
+        wait_render("Next run"),
     ]
 }
 
@@ -387,16 +388,16 @@ fn shells_exit_plan(exit: KeyCode) -> Vec<HeadlessStep> {
         wait_render("\u{25b8} 1 shell"),
         alt_a(),
         HeadlessStep::WaitMs(150),
-        key(KeyCode::Right),
+        key(KeyCode::Down),
         HeadlessStep::WaitMs(150),
-        key(KeyCode::Right),
+        key(KeyCode::Down),
         HeadlessStep::WaitMs(150),
         key(KeyCode::Enter),
-        wait_render("render the frames"),
+        wait_render("Duration"),
         key(exit),
-        wait_gone("render the frames"),
+        wait_gone("Duration"),
         key(KeyCode::Enter),
-        wait_render("render the frames"),
+        wait_render("Duration"),
     ]
 }
 
@@ -407,11 +408,11 @@ fn goal_exit_plan(exit: KeyCode) -> Vec<HeadlessStep> {
         wait_render("Pursuing goal (0s)"),
         alt_a(),
         HeadlessStep::WaitMs(150),
-        key(KeyCode::Right),
+        key(KeyCode::Down),
         HeadlessStep::WaitMs(150),
-        key(KeyCode::Right),
+        key(KeyCode::Down),
         HeadlessStep::WaitMs(150),
-        key(KeyCode::Right),
+        key(KeyCode::Down),
         HeadlessStep::WaitMs(150),
         key(KeyCode::Enter),
         wait_render("land the dock exit focus"),
@@ -429,7 +430,7 @@ fn heartbeats_panel_esc_returns_to_the_dock_item() {
     let outcome = run_plan(heartbeats_exit_plan(KeyCode::Esc));
     let last = outcome.frames.last().expect("frames were captured");
     assert!(
-        last.contains("Workspace tidy"),
+        last.contains("Next run"),
         "the reopened Heartbeats panel owns the final frame:\n{last}"
     );
     assert!(
@@ -448,22 +449,22 @@ fn heartbeats_command_path_esc_returns_to_the_dock_item() {
         wait_render("Pursuing goal (0s)"),
         alt_a(),
         HeadlessStep::WaitMs(150),
-        key(KeyCode::Right),
+        key(KeyCode::Down),
         HeadlessStep::WaitMs(150),
-        key(KeyCode::Right),
+        key(KeyCode::Down),
         HeadlessStep::WaitMs(150),
-        key(KeyCode::Right),
+        key(KeyCode::Down),
         HeadlessStep::WaitMs(150),
         HeadlessStep::Submit("/heartbeats".to_string()),
-        wait_render("Workspace tidy"),
+        wait_render("Next run"),
         key(KeyCode::Esc),
-        wait_gone("Workspace tidy"),
+        wait_gone("Next run"),
         key(KeyCode::Enter),
-        wait_render("Workspace tidy"),
+        wait_render("Next run"),
     ]);
     let last = outcome.frames.last().expect("frames were captured");
     assert!(
-        last.contains("Workspace tidy"),
+        last.contains("Next run"),
         "the reopened Heartbeats panel owns the final frame:\n{last}"
     );
     assert!(
@@ -481,7 +482,7 @@ fn heartbeats_panel_left_returns_to_the_dock_item() {
     let outcome = run_plan(heartbeats_exit_plan(KeyCode::Left));
     let last = outcome.frames.last().expect("frames were captured");
     assert!(
-        last.contains("Workspace tidy"),
+        last.contains("Next run"),
         "the reopened Heartbeats panel owns the final frame:\n{last}"
     );
     assert!(
@@ -495,7 +496,7 @@ fn shells_panel_esc_returns_to_the_dock_item() {
     let outcome = run_plan(shells_exit_plan(KeyCode::Esc));
     let last = outcome.frames.last().expect("frames were captured");
     assert!(
-        last.contains("render the frames"),
+        last.contains("Duration"),
         "the reopened Shells panel owns the final frame:\n{last}"
     );
     assert!(
@@ -509,7 +510,7 @@ fn shells_panel_left_returns_to_the_dock_item() {
     let outcome = run_plan(shells_exit_plan(KeyCode::Left));
     let last = outcome.frames.last().expect("frames were captured");
     assert!(
-        last.contains("render the frames"),
+        last.contains("Duration"),
         "the reopened Shells panel owns the final frame:\n{last}"
     );
     assert!(

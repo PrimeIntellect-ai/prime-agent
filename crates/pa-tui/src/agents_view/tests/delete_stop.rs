@@ -304,6 +304,31 @@ fn a_deleted_path_survives_a_late_catalog_apply() {
 }
 
 #[test]
+fn a_deleted_path_survives_a_late_page_upsert() {
+    let mut mode = mode_with_anchor(None, Vec::new());
+    mode.saved = vec![saved_catalog_row(
+        "/x/gone.jsonl",
+        "gone-1",
+        "a deleted session",
+    )];
+    mode.rebuild_rows();
+    mode.delete_result(
+        "Deleted session a deleted session",
+        StatusTone::Muted,
+        Some("/x/gone.jsonl".to_string()),
+    );
+    mode.upsert_saved(vec![saved_catalog_row(
+        "/x/gone.jsonl",
+        "gone-1",
+        "a deleted session",
+    )]);
+    assert!(
+        mode.saved.is_empty(),
+        "the deleted path stays gone behind a continued page"
+    );
+}
+
+#[test]
 fn a_roster_replacement_retires_the_armed_confirm() {
     let mut mode = mode_with_parent_and_child();
     mode.selected = 0;

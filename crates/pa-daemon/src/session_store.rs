@@ -70,16 +70,12 @@ mod info;
 mod info_sidecar;
 
 pub(crate) use info::read_session_info_from;
+pub use info::{find_most_recent_session_for_cwd, read_session_info, SessionInfo};
 #[cfg(test)]
 use info::{
-    append_capped_search_text, fold_scan_entry, message_content_text, raw_string, raw_u64,
-    session_info_cache, SessionInfoEntry, SessionInfoGeneration, SessionInfoScanCache,
-    SessionScanAccumulator, SessionScanState, SESSION_SCAN_MAX_CACHED_STATES,
+    message_content_text, raw_string, raw_u64, session_info_cache, SessionInfoEntry,
+    SessionInfoGeneration, SessionInfoScanCache, SessionScanState, SESSION_SCAN_MAX_CACHED_STATES,
     SESSION_SCAN_RESUME_TAIL_BYTES,
-};
-pub use info::{
-    find_most_recent_session_for_cwd, read_session_info, SessionInfo,
-    SESSION_LIST_SEARCH_TEXT_MAX_CHARS,
 };
 pub(crate) use info_sidecar::persist_info_sidecar;
 
@@ -107,10 +103,16 @@ pub struct SessionEntry {
     pub fields: Value,
 }
 
+/// One display-transcript page ([`SessionFile::transcript_page`]).
 #[derive(Debug, Clone)]
-pub struct WindowedTranscript {
+pub struct TranscriptPageRows {
     pub messages: Vec<Value>,
-    pub omitted: usize,
+    pub first_entry_id: Option<String>,
+    pub last_entry_id: Option<String>,
+    /// Rows exist past the page's far side: older ones for an end page, newer
+    /// ones before `until` for a start page.
+    pub more: bool,
+    /// The newest user prompt's time anywhere on the branch.
     pub last_user_prompt_ms: Option<u64>,
 }
 

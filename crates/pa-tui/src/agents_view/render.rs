@@ -95,9 +95,27 @@ impl AgentsViewMode {
             .flatten()
             .map(str::to_string);
         let notice_height = notice_panel.as_ref().map_or(0, Vec::len);
-        let list_rows = height.saturating_sub(lines.len() + 1 + notice_height);
+        // The catalog never truncates silently: while store files are still unfolded, the list
+        // ends with their count.
+        let unloaded = self.saved_more.as_ref().map(|more| {
+            let text = if self.query.trim().is_empty() {
+                format!(
+                    "{} older sessions not loaded \u{b7} scroll to load",
+                    more.remaining
+                )
+            } else {
+                format!("Searching {} older sessions\u{2026}", more.remaining)
+            };
+            pad_line(
+                vec![self.theme.fg(ThemeColor::Dim, truncate_text(&text, width))],
+                width,
+            )
+        });
+        let list_rows = height
+            .saturating_sub(lines.len() + 1 + notice_height + usize::from(unloaded.is_some()));
         let list_frame_row = lines.len();
         lines.extend(self.render_list(width, list_rows, list_frame_row));
+        lines.extend(unloaded);
         if let Some(panel) = notice_panel {
             lines.extend(panel);
         }

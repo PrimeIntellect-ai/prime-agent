@@ -132,6 +132,19 @@ async fn full_messages(worker: &Worker) -> Vec<Value> {
         .clone()
 }
 
+/// One display-transcript page, optionally anchored to the attached branch leaf.
+async fn page(worker: &Worker, page: Value, leaf: Option<&str>) -> DaemonResponse {
+    let mut payload = json!({ "page": page, "capabilities": TUI_CAPABILITIES });
+    if let Some(leaf) = leaf {
+        payload["historyLeafId"] = json!(leaf);
+    }
+    worker.dispatch("get_messages", &payload).await
+}
+
+fn row_id(message_index: usize) -> String {
+    format!("m{:07}", message_index + 1)
+}
+
 const TUI_CAPABILITIES: &[&str] = &[
     "attach_snapshot",
     "event_sequence",
@@ -194,9 +207,10 @@ async fn a_windowed_attach_serves_a_tool_result_safe_tail() {
     let data = attach(&worker, TUI_CAPABILITIES).await;
     let snapshot = &data["snapshot"];
     let tail = snapshot["messages"].as_array().expect("tail messages");
-    let omitted = snapshot["historyBefore"].as_u64().expect("historyBefore");
+    let omitted = 198;
     assert_eq!(
-        omitted, 198,
+        snapshot["historyBeforeEntryId"],
+        json!(row_id(omitted)),
         "the cut snaps back off the tool result and custom rows"
     );
     assert_eq!(tail.len(), 802, "the tail keeps the whole tool call run");
@@ -210,43 +224,37 @@ async fn a_windowed_attach_serves_a_tool_result_safe_tail() {
     );
     assert_eq!(
         &tail[..],
-        &full[(omitted as usize)..],
-        "the tail is a suffix of the one walk"
+        &full[omitted..],
+        "the tail is a suffix of the walk"
     );
     assert_eq!(
         snapshot["lastUserPromptMs"], 1000,
         "the newest user timestamp rides the windowed snapshot"
     );
-    let head = worker
-        .dispatch("get_messages", &json!({ "before": omitted }))
-        .await;
+    let head = page(
+        &worker,
+        json!({ "from": "end", "before": row_id(omitted), "limit": 1000 }),
+        None,
+    )
+    .await;
     assert!(head.success, "the head fetch failed: {head:?}");
+    let head = head.data.expect("head data");
+    assert_eq!(head["more"], false, "the page reaches the session start");
+    assert_eq!(head["firstEntryId"], json!(row_id(0)));
+    assert_eq!(head["lastEntryId"], json!(row_id(omitted - 1)));
+    let head_messages = head["messages"].as_array().expect("head messages");
     assert_eq!(
-        head.data.expect("head data")["messages"],
-        serde_json::json!(full[..omitted as usize]),
-        "the before range serves the walk's omitted prefix"
-    );
-    let elided = worker
-        .dispatch(
-            "get_messages",
-            &json!({
-                "before": omitted,
-                "capabilities": TUI_CAPABILITIES,
-            }),
-        )
-        .await;
-    assert!(elided.success, "the elided head fetch failed: {elided:?}");
-    let elided_messages = elided.data.expect("elided head data")["messages"]
-        .as_array()
-        .expect("elided messages")
-        .clone();
-    assert_eq!(
-        elided_messages[197]["content"][1]["data"], "",
-        "the image payload leaves the backfill head"
+        head_messages.len(),
+        omitted,
+        "the page serves the omitted prefix"
     );
     assert_eq!(
-        elided_messages[197]["content"][1]["elidedBytes"], 8,
-        "the elided marker rides the backfill head"
+        head_messages[197]["content"][1]["data"], "",
+        "the image payload leaves the page"
+    );
+    assert_eq!(
+        head_messages[197]["content"][1]["elidedBytes"], 8,
+        "the elided marker rides the page"
     );
 
     let plain = attach(&worker, &["attach_snapshot", "event_sequence"]).await;
@@ -257,14 +265,14 @@ async fn a_windowed_attach_serves_a_tool_result_safe_tail() {
         "a non-windowed attach keeps the full snapshot"
     );
     assert!(
-        plain["snapshot"].get("historyBefore").is_none()
+        plain["snapshot"].get("historyBeforeEntryId").is_none()
             && plain["snapshot"].get("lastUserPromptMs").is_none(),
         "the unwindowed snapshot keeps today's shape"
     );
 }
 
 #[tokio::test]
-async fn a_windowed_attach_never_cuts_inside_the_compaction_retained_segment() {
+async fn pages_continue_into_pre_compaction_history_with_one_summary() {
     let dir = session_dir();
     let path = dir.join("windowed-compacted.jsonl");
     let retained = 400usize;
@@ -277,6 +285,7 @@ async fn a_windowed_attach_never_cuts_inside_the_compaction_retained_segment() {
     for _ in 0..10 {
         fixture.row(|prev, id| message_row(prev, id, &assistant_message("compacted away")));
     }
+    fixture.row(|prev, id| message_row(prev, id, &assistant_message("retained")));
     let first_kept = fixture.prev.clone().expect("retained start");
     for _ in 1..retained {
         fixture.row(|prev, id| message_row(prev, id, &assistant_message("retained")));
@@ -293,23 +302,88 @@ async fn a_windowed_attach_never_cuts_inside_the_compaction_retained_segment() {
     std::fs::write(&path, fixture.content).unwrap();
 
     let worker = worker_over(&dir, &path).await;
-    let full = full_messages(&worker).await;
-    assert_eq!(
-        full[0]["role"], "compactionSummary",
-        "the walk serves the summary first"
-    );
-    assert_eq!(full.len(), 601, "summary plus retained plus post");
-
     let data = attach(&worker, TUI_CAPABILITIES).await;
     let snapshot = &data["snapshot"];
-    let tail = snapshot["messages"].as_array().expect("tail messages");
-    let omitted = snapshot["historyBefore"].as_u64().unwrap_or(0);
-    assert!(
-        omitted == 0 || omitted >= 401,
-        "the cut is complete history or past the retained segment, got {omitted}"
+    let tail = snapshot["messages"]
+        .as_array()
+        .expect("tail messages")
+        .clone();
+    let tail_first = snapshot["historyBeforeEntryId"]
+        .as_str()
+        .expect("older history exists above the tail")
+        .to_string();
+    let older = page(
+        &worker,
+        json!({ "from": "end", "before": tail_first, "limit": 1000 }),
+        None,
+    )
+    .await;
+    assert!(older.success, "the older page failed: {older:?}");
+    let older = older.data.expect("older data");
+    assert_eq!(older["more"], false);
+    let mut display = older["messages"]
+        .as_array()
+        .expect("older messages")
+        .clone();
+    display.extend(tail);
+    let texts: Vec<&str> = display
+        .iter()
+        .map(|message| {
+            message["content"][0]["text"]
+                .as_str()
+                .or_else(|| message["summary"].as_str())
+                .unwrap_or_default()
+        })
+        .collect();
+    let expected: Vec<&str> = std::iter::repeat_n("compacted away", 10)
+        .chain(std::iter::repeat_n("retained", retained))
+        .chain(["the story"])
+        .chain(std::iter::repeat_n("after compaction", post))
+        .collect();
+    assert_eq!(
+        texts, expected,
+        "the display walk is the whole branch in order with the summary once at the compaction"
     );
-    assert_eq!(tail.len(), 601 - omitted as usize);
-    assert_eq!(&tail[..], &full[(omitted as usize)..]);
+
+    // A zero limit is an empty page at either end, never a panic under the core lock.
+    for empty in [
+        json!({ "from": "end", "limit": 0 }),
+        json!({ "from": "start", "until": tail_first, "limit": 0 }),
+    ] {
+        let response = page(&worker, empty, None).await;
+        assert!(response.success, "a zero-limit page failed: {response:?}");
+        assert_eq!(
+            response.data.expect("empty page data")["messages"],
+            json!([])
+        );
+    }
+
+    // The head page and a newer page stop at their bounds.
+    let head = page(
+        &worker,
+        json!({ "from": "start", "until": tail_first, "limit": 5 }),
+        None,
+    )
+    .await;
+    let head = head.data.expect("head data");
+    assert_eq!(head["messages"], json!(display[..5]));
+    assert_eq!(head["more"], true);
+    let rest = page(
+        &worker,
+        json!({ "from": "start", "after": head["lastEntryId"], "until": tail_first, "limit": 1000 }),
+        None,
+    )
+    .await;
+    let rest = rest.data.expect("rest data");
+    assert_eq!(
+        rest["more"], false,
+        "the newer page closes the gap to the tail"
+    );
+    assert_eq!(
+        rest["messages"],
+        json!(older["messages"].as_array().unwrap()[5..]),
+        "the newer page ends right before the tail"
+    );
 }
 
 #[tokio::test]
@@ -341,7 +415,7 @@ async fn a_windowed_attach_preserves_iso_and_fractional_prompt_times() {
             let worker = worker_over(dir.path(), &path).await;
             let data = attach(&worker, TUI_CAPABILITIES).await;
             let snapshot = &data["snapshot"];
-            assert_eq!(snapshot["historyBefore"], 88);
+            assert_eq!(snapshot["historyBeforeEntryId"], json!(row_id(88)));
             assert_eq!(
                 snapshot["lastUserPromptMs"], 2000,
                 "latest timestamp {timestamp} at index {user_index}"
@@ -352,7 +426,7 @@ async fn a_windowed_attach_preserves_iso_and_fractional_prompt_times() {
 
 /// The chunked stream's advertised count is the transcript it carries:
 /// a windowed attach streams the tail alone, and the summary keeps the
-/// session total the backfill cursor (`historyBefore`) completes.
+/// session total.
 #[tokio::test]
 async fn a_chunked_windowed_attach_streams_the_count_it_carries() {
     let dir = session_dir();
@@ -380,11 +454,10 @@ async fn a_chunked_windowed_attach_streams_the_count_it_carries() {
     capabilities.push("chunked_snapshot");
     let data = attach(&worker, &capabilities).await;
     let snapshot = &data["snapshot"];
-    let omitted = snapshot["historyBefore"].as_u64().expect("historyBefore");
     let summary_count = snapshot["summary"]["messageCount"]
         .as_u64()
         .expect("summary count");
-    assert_eq!(omitted, 88);
+    assert_eq!(snapshot["historyBeforeEntryId"], json!(row_id(88)));
     assert_eq!(summary_count, 600);
     assert_eq!(snapshot["messages"].as_array().expect("tail").len(), 512);
 
@@ -417,9 +490,9 @@ async fn a_chunked_windowed_attach_streams_the_count_it_carries() {
         "the advertised count is the messages the stream carries"
     );
     assert_eq!(
-        omitted + carried,
+        88 + carried,
         summary_count,
-        "the tail plus the history-before prefix is the session total"
+        "the tail plus the rows above its cursor is the session total"
     );
 }
 
@@ -479,7 +552,8 @@ async fn a_windowed_attach_keeps_interleaved_tool_pairs_together() {
         let data = attach(&worker, TUI_CAPABILITIES).await;
         let snapshot = &data["snapshot"];
         assert_eq!(
-            snapshot["historyBefore"], 20,
+            snapshot["historyBeforeEntryId"],
+            json!(row_id(20)),
             "both matched pairs belong in the tail; unrelated older history stays omitted"
         );
         assert_eq!(
@@ -487,9 +561,12 @@ async fn a_windowed_attach_keeps_interleaved_tool_pairs_together() {
             json!(full[20..]),
             "moving the boundary preserves the complete ordered suffix"
         );
-        let head = worker
-            .dispatch("get_messages", &json!({"before": 20}))
-            .await;
+        let head = page(
+            &worker,
+            json!({ "from": "end", "before": row_id(20), "limit": 1000 }),
+            None,
+        )
+        .await;
         assert!(head.success);
         assert_eq!(
             head.data.unwrap()["messages"],
@@ -529,7 +606,8 @@ async fn anchored_backfill_rejects_other_client_branch_navigation() {
         let data = attach(&worker, TUI_CAPABILITIES).await;
         let snapshot = &data["snapshot"];
         let leaf = snapshot["state"]["leafId"].as_str().expect("attached leaf");
-        assert_eq!(snapshot["historyBefore"], 88);
+        let tail_first = snapshot["historyBeforeEntryId"].clone();
+        assert_eq!(tail_first, json!(row_id(88)));
         let navigated = worker
             .dispatch(
                 "navigate_tree",
@@ -539,19 +617,12 @@ async fn anchored_backfill_rejects_other_client_branch_navigation() {
         assert!(navigated.success, "navigation failed: {navigated:?}");
         let current = full_messages(&worker).await;
         assert_eq!(current.len(), if target == "sibling" { 1 } else { 300 });
-        let state = worker.dispatch("get_connection_state", &json!({})).await;
-        assert!(state.success, "state failed: {state:?}");
-        assert_eq!(
-            state.data.unwrap()["compactionCount"],
-            snapshot["state"]["compactionCount"],
-            "the existing compaction fence cannot detect this branch change"
-        );
-        let backfill = worker
-            .dispatch(
-                "get_messages",
-                &json!({"before": snapshot["historyBefore"], "historyLeafId": leaf}),
-            )
-            .await;
+        let backfill = page(
+            &worker,
+            json!({ "from": "end", "before": tail_first, "limit": 256 }),
+            Some(leaf),
+        )
+        .await;
         assert!(
             !backfill.success,
             "a prefix from {target} must not join the old attach tail: {backfill:?}"
@@ -591,12 +662,12 @@ async fn anchored_backfill_accepts_descendant_appends_and_restored_branch() {
                 assert!(navigated.success, "navigation failed: {navigated:?}");
             }
         }
-        let backfill = worker
-            .dispatch(
-                "get_messages",
-                &json!({"before": snapshot["historyBefore"], "historyLeafId": leaf}),
-            )
-            .await;
+        let backfill = page(
+            &worker,
+            json!({ "from": "end", "before": snapshot["historyBeforeEntryId"], "limit": 256 }),
+            Some(leaf),
+        )
+        .await;
         assert!(backfill.success, "coherent prefix rejected: {backfill:?}");
         let returned = backfill.data.expect("backfill data");
         assert_eq!(returned["messages"], json!(original[..88]));

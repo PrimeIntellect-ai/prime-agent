@@ -1110,6 +1110,24 @@ fn durations_format_compactly() {
     assert_eq!(format_duration(Some(125_000)), "2m 05s");
 }
 
+/// The dock's shells row lists only the running shells, each `<command, truncated> · <elapsed>`;
+/// done and failed runs stay rows inside the bash view.
+#[test]
+fn the_dock_shell_items_list_running_shells_only() {
+    let mut rows = activities();
+    rows.extend(failed_activities());
+    rows.extend(parse_bash_activities(&json!({"activities": [
+        {"id":"long","command":"python -m pytest tests/integration --maxfail=1 -x","status":"running","durationMs":125_000},
+    ]})));
+    assert_eq!(
+        dock_shell_items(&rows),
+        vec![
+            "cargo build --release · 3.4s",
+            "python -m pytest tests/integrat… · 2m 05s",
+        ]
+    );
+}
+
 #[test]
 fn running_shell_count_skips_finished_shells() {
     let data = json!({"activities": [
