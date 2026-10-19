@@ -196,10 +196,27 @@ impl TerminalMcpAuth {
         // The bundled websearch skill is settings-gated and off by default, so
         // the stored key alone leaves it excluded: flip the gate here, the one
         // place the user supplies the key the skill reads.
-        pa_core::settings::SettingsManager::create(&self.cwd, &self.agent_dir)
+        let mut settings = pa_core::settings::SettingsManager::create(&self.cwd, &self.agent_dir);
+        settings
             .set_bundled_websearch_enabled(true)
             .context("could not enable the bundled websearch skill")?;
-        Ok(format!("Saved API key for {label}. Web search is ready."))
+        // A global settings file that fails to parse records the failure and
+        // saves nothing instead of erroring: surface it rather than answering
+        // with a gate that never moved (project-scope load noise is not ours).
+        if let Some(error) = settings
+            .drain_errors()
+            .into_iter()
+            .rfind(|error| error.scope == pa_core::settings::SettingsScope::Global)
+        {
+            return Err(anyhow!(error.message))
+                .context("could not enable the bundled websearch skill");
+        }
+        // The skill gating resolves at session build (which is also when the
+        // key reaches the kernel), so the message carries the activation state
+        // like the MCP login flow's wording.
+        Ok(format!(
+            "Saved API key for {label}. Its skill activates in new sessions (/new)."
+        ))
     }
 
     fn logout_inner(&self, server: &str) -> Result<String> {
@@ -521,7 +538,7 @@ mod tests {
             .expect("the reply lands");
         assert_eq!(
             flow.await.expect("the flow ran")?,
-            "Saved API key for Serper (web search). Web search is ready."
+            "Saved API key for Serper (web search). Its skill activates in new sessions (/new)."
         );
 
         // The stored credential is the EXACT contract the websearch runtime
@@ -600,6 +617,47 @@ mod tests {
             stored["bundledSkills"]["websearch"],
             serde_json::json!(true),
             "the key flow must enable the settings-gated websearch skill"
+        );
+        Ok(())
+    }
+
+    /// An unparseable global settings file saves nothing: the flow must fail
+    /// rather than answer with a gate that never moved (and must never replace
+    /// the user's document with defaults).
+    #[tokio::test]
+    async fn the_api_key_flow_fails_when_the_settings_file_cannot_be_parsed() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let agent_dir = dir.path().join("agent");
+        std::fs::create_dir_all(&agent_dir)?;
+        std::fs::write(agent_dir.join("settings.json"), "{ not json")?;
+        let hook = TerminalMcpAuth::new(dir.path().to_path_buf(), agent_dir.clone());
+
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let panel = pa_tui::auth_panel::AuthPanelHandle::new(tx);
+        let flow = tokio::spawn({
+            let hook = hook.clone();
+            async move { hook.api_key_inner("serper", panel).await }
+        });
+        let request = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
+            .await
+            .expect("the paste request sends")
+            .expect("the channel stays open");
+        let pa_tui::auth_panel::AuthPanelRequest::PastePrompt { reply, .. } = request else {
+            panic!("expected the paste request")
+        };
+        reply
+            .send(Some("the-serper-key".to_string()))
+            .expect("the reply lands");
+        let error = flow.await.expect("the flow ran").unwrap_err();
+        let rendered = format!("{error:#}");
+        assert!(
+            rendered.contains("could not enable the bundled websearch skill"),
+            "{rendered}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(agent_dir.join("settings.json")).expect("settings.json"),
+            "{ not json",
+            "the unparsed document stays untouched"
         );
         Ok(())
     }
