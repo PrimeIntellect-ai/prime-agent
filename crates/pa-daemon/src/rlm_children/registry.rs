@@ -237,6 +237,13 @@ impl SupervisorChildSessionsInner {
                 };
                 if let Err(error) = self.kill_child(&active_session_id, reason).await {
                     if unknown_session(&error).is_none() {
+                        // The kill never landed: undo the pre-kill settle so
+                        // the still-live child is not reported cancelled, and
+                        // a later successful stop can still record its cancel
+                        // edge (the recorder's dedup never saw this attempt).
+                        if was_running {
+                            record.lock().await.settled_status = None;
+                        }
                         close_error.get_or_insert(error);
                         continue;
                     }
@@ -561,6 +568,10 @@ fn ledger_child_records(
             answer_text: None,
             answer_captured: false,
             replied_since_task: false,
+            progress_note: None,
+            tool_use_count: None,
+            live_observation: None,
+            direct_observation: Arc::new(Mutex::new(())),
             notice_delivered: true,
             prompt_admitted: true,
             error: None,

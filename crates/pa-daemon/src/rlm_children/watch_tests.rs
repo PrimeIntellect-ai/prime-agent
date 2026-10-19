@@ -1275,6 +1275,60 @@ async fn close_children_keeps_a_failed_child_tracked() {
     assert_eq!(entries.len(), 1, "the failed child stays tracked for retry");
 }
 
+/// A failed close must not poison the cancel record (PR #3680 review
+/// finding): a real kill failure undoes the pre-kill settle, so the
+/// still-live child stays `running` on the roster and a later successful
+/// stop still records the parent -> child cancel edge (the failed attempt
+/// never reached the recorder's dedup).
+#[tokio::test]
+async fn a_failed_close_leaves_the_child_running_and_can_still_record_its_cancel() {
+    let (follow_up_tx, _follow_up_rx) = mpsc::unbounded_channel();
+    let (sessions, _kill_rx) =
+        sessions_with_fake_supervisor(follow_up_tx, 10_000, FakeKill::Failure, FakeChild::Healthy)
+            .await;
+    let (recorder, ledger_path, _dir) = seeded_parent_recorder();
+    sessions.set_semantic_edges(Some(recorder));
+    let handle = spawn_child(&sessions).await;
+    sessions.notify_turn_done();
+    one_running_child(&sessions).await;
+
+    let error = sessions
+        .close_children(ChildCloseReason::Killed)
+        .await
+        .expect_err("a real close failure must propagate");
+    assert!(
+        format!("{error:#}").contains("kill refused"),
+        "the close error must surface the kill failure: {error:#}"
+    );
+
+    // The kill never landed, so the pre-kill settle is undone: the
+    // still-live child is not misreported cancelled.
+    let entries = sessions.list_subagents().await.expect("child roster");
+    assert_eq!(entries.len(), 1, "the failed child stays tracked for retry");
+    assert_eq!(
+        entries[0].status, "running",
+        "a failed close must not mark the still-live child cancelled: {entries:?}"
+    );
+    assert!(
+        cancelled_lines(&ledger_path).is_empty(),
+        "a failed close records no cancel edge: {:?}",
+        cancelled_lines(&ledger_path)
+    );
+
+    // A later successful stop still records the edge: the failed attempt
+    // did not burn the at-most-once claim.
+    assert!(sessions.cancel_child_run(&handle.rlm_child_id).await);
+    assert_eq!(
+        cancelled_lines(&ledger_path),
+        vec![(
+            "parent-lead".to_string(),
+            "child-file".to_string(),
+            "parent-request-1".to_string()
+        )],
+        "the retry records the cancel edge the failed close could not"
+    );
+}
+
 #[tokio::test]
 async fn a_replied_child_gets_no_terminal_notice() {
     let (follow_up_tx, mut follow_up_rx) = mpsc::unbounded_channel();
