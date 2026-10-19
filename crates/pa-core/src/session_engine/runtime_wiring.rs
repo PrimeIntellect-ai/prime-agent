@@ -238,15 +238,14 @@ pub fn kernel_provisioner(
         "PRIME_AGENT_CODING_AGENT_DIR".to_string(),
         agent_dir.to_string_lossy().to_string(),
     );
-    if let Some(id) = session_artifact_dir
+    // Always set: an unsaved session blanks an inherited id (a run started inside another
+    // session's kernel), so its persistent shells never join that session.
+    let rlm_session_id = session_artifact_dir
         .as_deref()
         .and_then(std::path::Path::file_name)
-    {
-        env.insert(
-            "RLM_SESSION_ID".to_string(),
-            id.to_string_lossy().to_string(),
-        );
-    }
+        .map(|id| id.to_string_lossy().to_string())
+        .unwrap_or_default();
+    env.insert("RLM_SESSION_ID".to_string(), rlm_session_id);
     for (key, value) in [
         ("RLM_SESSION_DIR", session_artifact_dir.clone()),
         (
