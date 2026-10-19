@@ -363,6 +363,34 @@ impl PromptParams {
     }
 }
 
+/// The `session/steering` request params (the mid-turn steering extension,
+/// nano-rlm #205 ported): text blocks injected into the running turn.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SteeringParams {
+    pub session_id: String,
+    pub prompt: Vec<Value>,
+}
+
+impl SteeringParams {
+    /// Parse `session/steering` params. The blocks stay raw: the handler
+    /// admits only text blocks, so a non-text block is the request's own
+    /// invalid-params error, never dropped input.
+    pub fn parse(params: &Value) -> SteeringParams {
+        SteeringParams {
+            session_id: params
+                .get("sessionId")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string(),
+            prompt: params
+                .get("prompt")
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default(),
+        }
+    }
+}
+
 /// The `session/set_config_option` request params.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SetConfigOptionParams {
@@ -413,7 +441,10 @@ pub fn initialize_result(product_version: &str) -> InitializeResult {
             title: "Prime Agent".to_string(),
             version: product_version.to_string(),
         },
-        meta: super::meta::prime_agent_meta(&super::meta::PrimeAgentSessionMeta::default()),
+        meta: super::meta::prime_agent_meta(&super::meta::PrimeAgentSessionMeta {
+            steering: Some(super::meta::PrimeAgentSteeringMeta { supported: true }),
+            ..Default::default()
+        }),
     }
 }
 
@@ -436,7 +467,9 @@ mod tests {
                     "sessionCapabilities": { "close": {}, "list": {} },
                 },
                 "agentInfo": { "name": "prime-agent", "title": "Prime Agent", "version": "9.9.9" },
-                "_meta": { "ai.primeintellect.prime-agent": {} },
+                "_meta": {
+                    "ai.primeintellect.prime-agent": { "steering": { "supported": true } }
+                },
             })
         );
     }

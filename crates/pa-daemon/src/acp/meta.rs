@@ -90,6 +90,17 @@ pub struct PrimeAgentSessionMeta {
     pub subagents: Option<Vec<PrimeAgentSubagentMeta>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub autonomous: Option<PrimeAgentAutonomousMeta>,
+    /// Advertised in `initialize` only: `session/steering` is served.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub steering: Option<PrimeAgentSteeringMeta>,
+}
+
+/// The `session/steering` capability advertised at `initialize`
+/// (`_meta.steering.supported`, the nano-rlm #205 extension shape).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PrimeAgentSteeringMeta {
+    pub supported: bool,
 }
 
 /// A goal's live state, surfaced after `/goal` commands and driver turns.

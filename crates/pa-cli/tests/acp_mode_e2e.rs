@@ -318,7 +318,7 @@ fn acp_initialize_matches_the_ts_golden() {
     assert_eq!(info["title"], "Prime Agent");
     assert_eq!(
         result["_meta"],
-        json!({ "ai.primeintellect.prime-agent": {} })
+        json!({ "ai.primeintellect.prime-agent": { "steering": { "supported": true } } })
     );
 }
 
@@ -2897,5 +2897,221 @@ fn acp_daemon_attached_close_holds_the_input_pause_until_the_next_session_new() 
     );
 
     let _second = new_session(&mut client);
+    drop(client);
+}
+
+/// The parent script of the steering lane: the first response runs a
+/// kernel cell that sleeps (the tool-call boundary the steer parks
+/// behind), the second names the steered continuation.
+fn steering_parent_script(sleep_cell: &str) -> Value {
+    json!({
+        "engine": "faux",
+        "responses": [
+            { "content": [
+                { "type": "text", "text": "Running the sleep cell." },
+                { "type": "toolCall", "name": "python_repl", "id": "toolu_steer01",
+                  "arguments": { "code": sleep_cell } },
+            ] },
+            { "content": [{ "type": "text", "text": "STEERED-ACK: acknowledged mid-turn" }] },
+        ],
+    })
+}
+
+/// The stored transcript rows of a session file, in order: user and
+/// assistant messages only, as (role, text) pairs.
+fn transcript_rows(session_file: &std::path::Path) -> Vec<(String, String)> {
+    std::fs::read_to_string(session_file)
+        .expect("read session file")
+        .lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .filter(|row| row["type"] == "message")
+        .filter_map(|row| {
+            let message = row.get("message")?;
+            let role = message.get("role")?.as_str()?.to_string();
+            let text = match message.get("content") {
+                Some(Value::String(text)) => text.clone(),
+                Some(Value::Array(blocks)) => blocks
+                    .iter()
+                    .filter_map(|block| block.get("text").and_then(Value::as_str))
+                    .collect::<Vec<_>>()
+                    .join(""),
+                _ => String::new(),
+            };
+            Some((role, text))
+        })
+        .filter(|(role, _)| role == "user" || role == "assistant")
+        .collect()
+}
+
+/// `session/steering` (the nano-rlm #205 extension) lands inside a busy
+/// turn: the request answers `injected` while the prompt turn runs, the
+/// steered text enters the conversation before the turn settles, and the
+/// steered continuation streams within the same prompt's updates.
+#[test]
+fn acp_steering_lands_inside_a_busy_turn() {
+    let Some(kernel_python) = kernel_python() else {
+        return;
+    };
+    let sleep_cell = "import time\ntime.sleep(4)\nprint('slept')";
+    let parent = steering_parent_script(sleep_cell);
+    let child = json!({ "responses": ["unused"] });
+    let mut client =
+        AcpChild::spawn_with_child_script(&["--mode", "acp"], &parent, &child, &kernel_python);
+    let session_id = initialize_and_new_session(&mut client);
+    let socket = client.socket.clone();
+    let prompt = client.request(
+        "session/prompt",
+        &json!({ "sessionId": session_id, "prompt": [{ "type": "text", "text": "run the sleep cell" }] }),
+    );
+    // Readiness is the turn's own tool call: the steer parks strictly
+    // mid-tool, never at an idle boundary.
+    client.wait_frame(TIMEOUT, |frame| {
+        frame["params"]["update"]["sessionUpdate"] == "tool_call"
+    });
+    let steer = client.request(
+        "session/steering",
+        &json!({
+            "sessionId": session_id,
+            "prompt": [{ "type": "text", "text": "steer note: acknowledge this" }],
+        }),
+    );
+    let (steer_response, _) = client.wait_response(steer, TIMEOUT);
+    assert_eq!(
+        steer_response["result"],
+        json!({ "outcome": "injected" }),
+        "the busy turn's steer answers the injected receipt: {steer_response}"
+    );
+    let (prompt_response, updates) = client.wait_response(prompt, TIMEOUT);
+    assert_end_turn(&prompt_response);
+    let steered_chunk = updates
+        .iter()
+        .find(|update| {
+            update["params"]["update"]["sessionUpdate"] == "agent_message_chunk"
+                && update["params"]["update"]["content"]["text"]
+                    .as_str()
+                    .is_some_and(|text| text.contains("STEERED-ACK"))
+        })
+        .expect("the steered continuation streamed inside the busy turn");
+    assert_eq!(
+        steered_chunk["params"]["update"]["content"]["text"],
+        "STEERED-ACK: acknowledged mid-turn"
+    );
+    // The durable transcript carries the steer as a user row that landed
+    // inside the run: after the original prompt, before the steered reply.
+    let session_file = live_sessions(&socket)[0]["sessionFile"]
+        .as_str()
+        .expect("the resident session's file")
+        .to_string();
+    let rows = transcript_rows(std::path::Path::new(&session_file));
+    let position = |needle: &str| {
+        rows.iter()
+            .position(|(_, text)| text.contains(needle))
+            .unwrap_or_else(|| panic!("no transcript row contains {needle}: {rows:?}"))
+    };
+    let prompt_row = position("run the sleep cell");
+    let steer_row = position("steer note: acknowledge this");
+    let reply_row = position("STEERED-ACK");
+    assert_eq!(rows[steer_row].0, "user", "the steer landed as a user row");
+    assert!(
+        prompt_row < steer_row && steer_row < reply_row,
+        "the steer row sits inside the run: {rows:?}"
+    );
+    drop(client);
+}
+
+/// An idle steer is admitted, not injected: the receipt reads `queued` and
+/// the message runs as the session's next turn (the daemon's steer lane
+/// wakes an idle session - the declared divergence from nano-rlm's
+/// `promptRequired`).
+#[test]
+fn acp_steering_with_no_running_turn_queues_the_next_turn() {
+    let mut client = AcpChild::spawn(
+        &["--mode", "acp", "--no-session"],
+        &json!({ "engine": "faux", "responses": ["idle steer reply"] }),
+    );
+    let session_id = initialize_and_new_session(&mut client);
+    let steer = client.request(
+        "session/steering",
+        &json!({
+            "sessionId": session_id,
+            "prompt": [{ "type": "text", "text": "run when ready" }],
+        }),
+    );
+    let (steer_response, _) = client.wait_response(steer, TIMEOUT);
+    assert_eq!(
+        steer_response["result"],
+        json!({ "outcome": "queued" }),
+        "the idle steer answers the queued receipt: {steer_response}"
+    );
+    let chunk = client.wait_frame(TIMEOUT, |frame| {
+        frame["params"]["update"]["sessionUpdate"] == "agent_message_chunk"
+            && frame["params"]["update"]["content"]["text"] == "idle steer reply"
+    });
+    assert_eq!(
+        chunk["params"]["update"]["content"]["text"], "idle steer reply",
+        "the queued steer runs as its own turn: {chunk}"
+    );
+    drop(client);
+}
+
+/// The steering request's own validation: unknown sessions, non-text
+/// blocks, and empty steering text are invalid params, never dropped or
+/// silently admitted input.
+#[test]
+fn acp_steering_rejects_bad_requests() {
+    let mut client = AcpChild::spawn(
+        &["--mode", "acp", "--no-session"],
+        &json!({ "engine": "faux", "responses": ["unused"] }),
+    );
+    let session_id = initialize_and_new_session(&mut client);
+    let unknown = client.request(
+        "session/steering",
+        &json!({
+            "sessionId": "not-a-session",
+            "prompt": [{ "type": "text", "text": "any" }],
+        }),
+    );
+    let (unknown_response, _) = client.wait_response(unknown, TIMEOUT);
+    assert_eq!(
+        unknown_response["error"]["code"], -32602,
+        "{unknown_response}"
+    );
+    assert!(
+        unknown_response["error"]["data"]["reason"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("Unknown ACP session"),
+        "the unknown session names the rule: {unknown_response}"
+    );
+    let bad_block = client.request(
+        "session/steering",
+        &json!({
+            "sessionId": session_id,
+            "prompt": [{ "type": "image", "data": "aGk=", "mimeType": "image/png" }],
+        }),
+    );
+    let (bad_block_response, _) = client.wait_response(bad_block, TIMEOUT);
+    assert_eq!(
+        bad_block_response["error"]["code"], -32602,
+        "{bad_block_response}"
+    );
+    assert_eq!(
+        bad_block_response["error"]["data"]["reason"],
+        "steering requires non-empty text content blocks",
+        "a non-text block is rejected, never dropped: {bad_block_response}"
+    );
+    let blank = client.request(
+        "session/steering",
+        &json!({
+            "sessionId": session_id,
+            "prompt": [{ "type": "text", "text": "   " }],
+        }),
+    );
+    let (blank_response, _) = client.wait_response(blank, TIMEOUT);
+    assert_eq!(
+        blank_response["error"]["data"]["reason"],
+        "steering requires non-empty text content blocks",
+        "blank steering text is rejected: {blank_response}"
+    );
     drop(client);
 }

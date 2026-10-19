@@ -1048,6 +1048,9 @@ async fn handle_incoming(
         "session/set_config_option" => {
             handle_set_config_option(id, params, link, state, tx).await;
         }
+        "session/steering" => {
+            handle_session_steering(id, params, link, state, tx).await;
+        }
         other => {
             let _ = tx.send(jsonrpc::error_response(
                 &id,
@@ -1484,6 +1487,142 @@ async fn handle_session_prompt(
     let reply = prompt_turn(id, params, &admission_id, link, state).await;
     release_turn_slot(state, &admission_id).await;
     let _ = tx.send(reply);
+}
+
+/// `session/steering`: inject a user message into the bound session's
+/// running turn (the nano-rlm #205 extension, ported onto the daemon's
+/// `steer` lane). The text joins the busy turn's conversation at its next
+/// delivery boundary - tools are never interrupted - and with no running
+/// turn it is admitted as the next turn. The receipt maps the two
+/// admissions: `injected` while a prompt turn runs, `queued` otherwise.
+async fn handle_session_steering(
+    id: Value,
+    params: Value,
+    link: &Arc<DaemonLink>,
+    state: &Arc<Mutex<DaemonAcpState>>,
+    tx: producer::FrameSink,
+) {
+    let params = types::SteeringParams::parse(&params);
+    // The turn slot is the ACP layer's own admission state: read under one
+    // lock, then send without holding it (the busy prompt's settle locks
+    // the same state).
+    let resolved = {
+        let guard = state.lock().await;
+        let session_closing = guard.session_close_done.is_some();
+        guard
+            .session
+            .as_ref()
+            .filter(|hosted| hosted.acp_session_id == params.session_id)
+            .map(|hosted| {
+                (
+                    hosted.daemon_active_session_id.clone(),
+                    hosted.turn.is_some(),
+                    hosted.cancelling,
+                    hosted.stop_failure.clone(),
+                    session_closing,
+                )
+            })
+    };
+    let Some((daemon_session_id, turn_running, cancelling, stop_failure, session_closing)) =
+        resolved
+    else {
+        let _ = tx.send(jsonrpc::error_response(
+            &id,
+            jsonrpc::INVALID_PARAMS,
+            "Invalid params",
+            Some(&json!({ "reason": format!("Unknown ACP session: {}", params.session_id) })),
+        ));
+        return;
+    };
+    if session_closing {
+        let _ = tx.send(jsonrpc::error_response(
+            &id,
+            jsonrpc::INVALID_PARAMS,
+            "Invalid params",
+            Some(&json!({ "reason": "ACP session is closed or closing" })),
+        ));
+        return;
+    }
+    if cancelling {
+        let _ = tx.send(jsonrpc::error_response(
+            &id,
+            jsonrpc::INVALID_PARAMS,
+            "Invalid params",
+            Some(&json!({ "reason": format!("ACP session is cancelling: {}", params.session_id) })),
+        ));
+        return;
+    }
+    if let Some(stop_failure) = stop_failure {
+        let _ = tx.send(jsonrpc::error_response(
+            &id,
+            jsonrpc::INVALID_PARAMS,
+            "Invalid params",
+            Some(&json!({ "reason": format!("ACP session stop failed: {stop_failure}") })),
+        ));
+        return;
+    }
+    // Steering admits text blocks only: the daemon's steer lane has no
+    // image surface, and a dropped image block would let a client believe
+    // it was accepted (the prompt-block rule).
+    let blocks_invalid = params.prompt.is_empty()
+        || params.prompt.iter().any(|block| {
+            block.get("type").and_then(Value::as_str) != Some("text")
+                || block.get("text").and_then(Value::as_str).is_none()
+        });
+    let message = params
+        .prompt
+        .iter()
+        .filter_map(|block| block.get("text").and_then(Value::as_str))
+        .collect::<Vec<_>>()
+        .join("\n");
+    if blocks_invalid || message.trim().is_empty() {
+        let _ = tx.send(jsonrpc::error_response(
+            &id,
+            jsonrpc::INVALID_PARAMS,
+            "Invalid params",
+            Some(&json!({ "reason": "steering requires non-empty text content blocks" })),
+        ));
+        return;
+    }
+    let steer = DaemonCommand::Steer {
+        id: None,
+        active_session_id: daemon_session_id,
+        message,
+        input: pa_types::daemon::PromptInput {
+            content: None,
+            images: None,
+            streaming_behavior: None,
+            queue_if_busy: None,
+            expand_prompt_templates: None,
+            source: None,
+            agent_message_id: None,
+            custom_message: None,
+            queue_key: None,
+            prefix_messages: None,
+            admission_id: None,
+            rlm_notice_nonce: None,
+        },
+        rest: Map::default(),
+    };
+    let response = match link.request(steer).await {
+        Ok(response) => response,
+        Err(error) => {
+            let _ = tx.send(super::internal_error(&id, &error.to_string()));
+            return;
+        }
+    };
+    if !response.success {
+        let failure = response
+            .error
+            .unwrap_or_else(|| "unknown error".to_string());
+        let _ = tx.send(super::internal_error(
+            &id,
+            &format!("prime-agent steering failed: {failure}"),
+        ));
+        return;
+    }
+    let outcome = if turn_running { "injected" } else { "queued" };
+    let _ = tx.send(jsonrpc::response(&id, &json!({ "outcome": outcome })));
 }
 
 /// Release this prompt's turn slot, after its stop sequence if it was
