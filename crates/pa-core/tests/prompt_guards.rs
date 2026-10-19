@@ -611,44 +611,50 @@ fn generic_mcp_skill_renders_in_the_prompt_inventory() {
 
 // Async turn discipline
 
-/// The usage layer pins the turn contract: long commands are backgrounded and never
-/// inline-awaited, the turn ends with a short text reply while long work runs or nothing
-/// actionable remains, awaits stay bounded, and notifications are the trusted wake mechanism.
-/// Observed gap (async-discipline eval, hosted baseline xdhf6w72abxj8xjuvb7ldzzs): the D3
-/// turn-held/sleep/poll violation rate sat at 0.85 — agents slept 97-157 s through turns and
-/// held turns 166 s while builds ran inline, against the grader's 60 s inline-span contract.
+/// The async-turn contract is session-scoped: notification sessions are told to end the
+/// turn and collect results on the notice, daemonless sessions are told to await commands
+/// before ending the turn (nothing wakes them). Observed gap (async-discipline eval,
+/// hosted baseline xdhf6w72abxj8xjuvb7ldzzs): the D3 turn-held/sleep/poll violation rate
+/// sat at 0.85 — agents slept 97-157 s through turns and held turns 166 s while builds ran
+/// inline, against the grader's 60 s inline-span contract.
 #[test]
-fn usage_layer_pins_the_async_turn_contract() {
-    let options = BuildSystemPromptOptions {
+fn usage_layer_async_turn_contract_stays_session_scoped() {
+    let mut options = BuildSystemPromptOptions {
         cwd: "/w".to_string(),
         messages_path: Some("/log.jsonl".to_string()),
         skills: sorted_bundled_skills(),
-        selected_tools: Some(vec!["ipython"]),
+        selected_tools: Some(vec!["python_repl"]),
         ..Default::default()
     };
-    let breakdown = system_prompt_breakdown(&options);
+    let daemon = system_prompt_breakdown(&options);
     assert!(
-        breakdown
+        daemon
             .assembled
-            .contains("A command expected to run longer than 60 seconds is never inline-awaited"),
-        "the 60 s inline-span limit (the async-discipline grader's contract) must be pinned"
+            .contains("end the turn and collect the final result on the `[bash-done]` notification"),
+        "the notification-session prompt must tell the agent to end the turn and collect on the notice"
     );
     assert!(
-        breakdown
+        daemon
             .assembled
-            .contains("When long work is running, or nothing actionable remains, end the turn with a short text reply"),
-        "the turn must end with a short text reply instead of being held open"
+            .contains("they end the turn and collect the result on the done notification"),
+        "the usage layer must keep the no-polling, collect-on-notice rule"
+    );
+    options.daemonless = true;
+    let daemonless = system_prompt_breakdown(&options);
+    assert!(
+        daemonless.assembled.contains(
+            "In sessions without completion notifications, await commands before ending the turn."
+        ),
+        "the daemonless await rule must render"
     );
     assert!(
-        breakdown
+        daemonless
             .assembled
-            .contains("`await` is bounded to the short operation needed to start work or inspect a result that is immediately needed"),
-        "awaits must stay bounded to immediately-needed results"
+            .contains("await them before ending your turn"),
+        "the daemonless role line must repeat the await rule"
     );
     assert!(
-        breakdown
-            .assembled
-            .contains("bash completion notifications, subagent replies, and heartbeats are the trusted wake mechanism"),
-        "notifications must be pinned as the trusted wake mechanism"
+        !USAGE_LAYER.contains("end the turn with a short text reply"),
+        "an unscoped static turn-end rule renders in daemonless sessions too, where nothing          wakes the turn, contradicting the await rule: keep the turn-end contract in the          daemon role line"
     );
 }
