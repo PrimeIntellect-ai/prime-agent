@@ -78,3 +78,24 @@ fn a_carried_partial_catalog_keeps_waiting_for_a_missing_anchor() {
         "an exhausted catalog settles a missing anchor"
     );
 }
+
+#[test]
+fn a_failed_continuation_retries_from_its_cursor() {
+    let mut mode = mode_with_anchor(None, Vec::new());
+    mode.apply_saved_loaded(vec![saved_catalog_row("/x/new.jsonl", "new", "newer")]);
+    mode.rebuild_rows();
+    mode.finish_saved_page(more());
+    // The continuation page fails (the loop's `SavedFailed` arm).
+    mode.saved_fetch_failed = true;
+    assert!(mode.next_saved_fetch().is_none());
+    mode.handle_key("o");
+    assert!(
+        !mode.take_saved_fetch_rearm(),
+        "the retry never refetches the first page over the loaded rows"
+    );
+    assert_eq!(
+        mode.next_saved_fetch(),
+        Some(("page-two".to_string(), None)),
+        "the search resumes the failed page's cursor"
+    );
+}
