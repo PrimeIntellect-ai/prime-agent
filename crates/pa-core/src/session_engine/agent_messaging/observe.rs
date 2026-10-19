@@ -62,6 +62,9 @@ pub struct AgentObserveSummary {
     pub session_name: Option<String>,
     pub relationship: Option<AgentFamilyRelationship>,
     pub runtime_kind: Option<String>,
+    /// The session's working directory (TS marks the field absent for
+    /// roster rows that carry none).
+    pub cwd: Option<String>,
     pub status: AgentFamilyStatus,
     /// The live activity of a resident session; `None` for family members
     /// with no live session in this daemon (TS marks the field absent).
@@ -70,8 +73,19 @@ pub struct AgentObserveSummary {
     pub is_streaming: bool,
     pub is_compacting: bool,
     pub attached_clients: usize,
+    /// The session's persisted message count.
+    pub message_count: Option<u64>,
     pub queued_count: usize,
     pub is_session_active: bool,
+    /// The parent's live active session id (subagent summaries).
+    pub parent_active_session_id: Option<String>,
+    /// The parent's persisted session id (subagent summaries).
+    pub parent_session_id: Option<String>,
+    /// This subagent's child id under its parent.
+    pub rlm_child_id: Option<String>,
+    /// The session's first user message, preview-capped (an inactive
+    /// child's identity signal; TS `firstMessage`).
+    pub first_message: Option<String>,
 }
 
 impl AgentObserveSummary {
@@ -93,8 +107,49 @@ impl AgentObserveSummary {
         if let Some(activity) = self.activity {
             row["activity"] = json!(activity.as_str());
         }
+        // The TS summary spreads these facts in only when the row
+        // carries them.
+        if let Some(cwd) = &self.cwd {
+            row["cwd"] = json!(cwd);
+        }
+        if let Some(message_count) = self.message_count {
+            row["messageCount"] = json!(message_count);
+        }
+        if let Some(parent_active_session_id) = &self.parent_active_session_id {
+            row["parentActiveSessionId"] = json!(parent_active_session_id);
+        }
+        if let Some(parent_session_id) = &self.parent_session_id {
+            row["parentSessionId"] = json!(parent_session_id);
+        }
+        if let Some(rlm_child_id) = &self.rlm_child_id {
+            row["rlmChildId"] = json!(rlm_child_id);
+        }
+        if let Some(first_message) = &self.first_message {
+            row["firstMessage"] = json!(first_message);
+        }
         row
     }
+}
+
+/// TS `AgentObserveListResult`: the caller's own summary plus the family
+/// roster, which excludes the caller.
+#[derive(Debug, Clone)]
+pub struct AgentObserveListResult {
+    pub current: AgentObserveSummary,
+    pub agents: Vec<AgentObserveSummary>,
+}
+
+/// TS `AgentObserveRecentMessagesResult`: the target's summary plus the
+/// bounded preview window and the clamped bounds.
+#[derive(Debug, Clone)]
+pub struct AgentObserveRecentMessagesResult {
+    pub agent: AgentObserveSummary,
+    pub messages: Vec<AgentObserveMessagePreview>,
+    pub limit: usize,
+    pub max_chars: usize,
+    /// Whether older messages exist beyond the returned window
+    /// (TS `truncated: startIndex > 0`).
+    pub truncated: bool,
 }
 
 /// One bounded message preview.
@@ -111,7 +166,7 @@ pub struct AgentObserveMessagePreview {
 
 /// The controller the daemon supplies for `agent_observe.*` requests.
 pub trait AgentObserveController: Send + Sync {
-    fn list_agents(&self) -> impl Future<Output = anyhow::Result<Vec<AgentObserveSummary>>> + Send;
+    fn list_agents(&self) -> impl Future<Output = anyhow::Result<AgentObserveListResult>> + Send;
     fn get_agent(
         &self,
         target: &str,
@@ -121,7 +176,7 @@ pub trait AgentObserveController: Send + Sync {
         target: &str,
         limit: usize,
         max_chars: usize,
-    ) -> impl Future<Output = anyhow::Result<Vec<AgentObserveMessagePreview>>> + Send;
+    ) -> impl Future<Output = anyhow::Result<AgentObserveRecentMessagesResult>> + Send;
 }
 
 /// Clamp an observe limit (default 8, range 1..=50).
@@ -295,9 +350,10 @@ pub fn register_agent_observe_host_handlers<C: AgentObserveController + 'static>
             move |_payload| {
                 let controller = controller.clone();
                 Box::pin(async move {
-                    let agents = controller.list_agents().await?;
+                    let list = controller.list_agents().await?;
                     Ok(json!({
-                        "agents": agents.iter().map(AgentObserveSummary::to_value).collect::<Vec<_>>(),
+                        "current": list.current.to_value(),
+                        "agents": list.agents.iter().map(AgentObserveSummary::to_value).collect::<Vec<_>>(),
                     }))
                 })
             }
@@ -340,7 +396,7 @@ pub fn register_agent_observe_host_handlers<C: AgentObserveController + 'static>
                         .or_else(|| payload.data.get("maxChars")),
                     "agent_observe.recent max_chars",
                 )?;
-                let messages = controller
+                let recent = controller
                     .recent_messages(
                         target,
                         normalize_observe_limit(limit)?,
@@ -348,7 +404,11 @@ pub fn register_agent_observe_host_handlers<C: AgentObserveController + 'static>
                     )
                     .await?;
                 Ok(json!({
-                    "messages": messages.iter().map(preview_value).collect::<Vec<_>>(),
+                    "agent": recent.agent.to_value(),
+                    "messages": recent.messages.iter().map(preview_value).collect::<Vec<_>>(),
+                    "limit": recent.limit,
+                    "maxChars": recent.max_chars,
+                    "truncated": recent.truncated,
                 }))
             })
         }),
