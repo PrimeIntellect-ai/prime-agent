@@ -532,7 +532,12 @@ impl AgentsViewMode {
         let icon_style = theme
             .fg_style(icon_color)
             .add_modifier(ratatui::style::Modifier::BOLD);
-        let indent = depth_indent(row.depth);
+        // The indent clips to the name column after the icon prefix, so a deep row keeps the
+        // model and cost/age columns in place.
+        let indent = truncate_text(
+            &depth_indent(row.depth),
+            layout.name_width.saturating_sub(2),
+        );
         let indent_width = str_width(&indent);
         let mut line: Line = Vec::new();
         if indent_width > 0 {
