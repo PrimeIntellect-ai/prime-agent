@@ -117,6 +117,14 @@ pub enum McpServerConfig {
             skip_serializing_if = "Option::is_none"
         )]
         call_timeout_ms: Option<u64>,
+        #[serde(rename = "clientId", default, skip_serializing_if = "Option::is_none")]
+        client_id: Option<String>,
+        #[serde(
+            rename = "callbackPort",
+            default,
+            skip_serializing_if = "Option::is_none"
+        )]
+        callback_port: Option<u16>,
     },
     #[serde(rename_all = "camelCase")]
     Stdio {
@@ -998,15 +1006,6 @@ fn is_generic_server_name(name: &str) -> bool {
     chars.all(|char| char.is_ascii_alphanumeric() || char == '_' || char == '-')
 }
 
-impl ResolvedIntegration {
-    fn config_url(&self) -> Option<&str> {
-        match &self.config {
-            McpServerConfig::Http { url, .. } => Some(url.as_str()),
-            McpServerConfig::Stdio { .. } => None,
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1041,6 +1040,8 @@ mod tests {
             disabled_tools: None,
             startup_timeout_ms: None,
             call_timeout_ms: None,
+            client_id: None,
+            callback_port: None,
         }
     }
 

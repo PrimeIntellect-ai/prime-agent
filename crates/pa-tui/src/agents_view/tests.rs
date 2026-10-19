@@ -10,6 +10,7 @@ mod cost_aggregates;
 mod delete_stop;
 mod drill_down;
 mod edge_jumps;
+mod empty_sessions;
 mod entry_anchor;
 mod heartbeat_badge;
 mod hints_render;
@@ -21,6 +22,7 @@ mod render_pulse;
 mod reply;
 mod running_lines;
 mod saved_catalog;
+mod saved_pages;
 mod search_selection;
 mod selection_churn;
 

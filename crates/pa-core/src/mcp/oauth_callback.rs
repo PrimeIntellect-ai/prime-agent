@@ -6,7 +6,7 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, bail, Result};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 
@@ -25,12 +25,30 @@ fn redirect_uri_for(port: u16) -> String {
     format!("http://localhost:{port}{CALLBACK_PATH}")
 }
 
+pub(super) fn validate_callback_port(callback_port: Option<u16>) -> Result<()> {
+    if callback_port == Some(0) {
+        bail!("OAuth callbackPort must be between 1 and 65535");
+    }
+    Ok(())
+}
+
+fn candidate_ports(callback_port: Option<u16>) -> Result<Vec<u16>> {
+    validate_callback_port(callback_port)?;
+    Ok(match callback_port {
+        Some(port) => vec![port],
+        None => (0..CALLBACK_PORT_COUNT)
+            .map(|offset| CALLBACK_PORT_BASE + offset)
+            .collect(),
+    })
+}
+
 /// Every redirect URI a login registers (dynamic client registration
 /// offers them all).
-pub fn all_redirect_uris() -> Vec<String> {
-    (0..CALLBACK_PORT_COUNT)
-        .map(|offset| redirect_uri_for(CALLBACK_PORT_BASE + offset))
-        .collect()
+pub fn redirect_uris(callback_port: Option<u16>) -> Result<Vec<String>> {
+    Ok(candidate_ports(callback_port)?
+        .into_iter()
+        .map(redirect_uri_for)
+        .collect())
 }
 
 /// The authorization code plus the echoed `state` from the browser
@@ -78,16 +96,9 @@ impl CallbackServer {
     /// Bind a registered port exactly, or the first free DCR candidate. Never substitute
     /// an unregistered redirect port when the registered one is occupied.
     pub async fn start(label: &str, callback_port: Option<u16>) -> Result<Self> {
-        if callback_port == Some(0) {
-            return Err(anyhow!("The OAuth callback port must be nonzero ({label})"));
-        }
         let host = callback_host();
         let mut last_error: Option<String> = None;
-        let ports = callback_port.map_or_else(
-            || (CALLBACK_PORT_BASE..CALLBACK_PORT_BASE + CALLBACK_PORT_COUNT).collect(),
-            |port| vec![port],
-        );
-        for port in ports {
+        for port in candidate_ports(callback_port)? {
             let listener = match TcpListener::bind((host.as_str(), port)).await {
                 Ok(listener) => listener,
                 Err(error) => {
@@ -554,5 +565,28 @@ mod tests {
         );
         assert_eq!(query_param("code=a+b", "code"), Some("a b".to_string()));
         assert_eq!(query_param("code", "state"), None);
+    }
+    #[tokio::test]
+    async fn zero_callback_port_is_rejected_before_binding_or_registration() {
+        assert!(redirect_uris(Some(0))
+            .unwrap_err()
+            .to_string()
+            .contains("callbackPort"));
+        let error = CallbackServer::start("fixture", Some(0)).await.unwrap_err();
+        assert!(error.to_string().contains("callbackPort"));
+    }
+
+    #[tokio::test]
+    async fn pinned_port_rebinds_after_drop() {
+        let probe = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = probe.local_addr().unwrap().port();
+        drop(probe);
+        {
+            let first = CallbackServer::start("Linear", Some(port)).await.unwrap();
+            assert_eq!(first.redirect_uri(), redirect_uri_for(port));
+        }
+        tokio::task::yield_now().await;
+        let second = CallbackServer::start("Linear", Some(port)).await.unwrap();
+        assert_eq!(second.redirect_uri(), redirect_uri_for(port));
     }
 }

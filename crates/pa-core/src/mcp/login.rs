@@ -11,7 +11,7 @@ use crate::auth::{AuthStorage, OAuthIntegration};
 
 use super::oauth::{mcp_login, McpLoginUi, McpOAuthConfig};
 use super::oauth_http::OAuthHttp;
-use super::McpManager;
+use super::{McpManager, McpServerConfig};
 
 /// One server's login execution: the resolved OAuth config plus the auth store. Detached from the
 /// manager on purpose — the flow awaits UI input, so no manager lock may be held across it.
@@ -51,17 +51,25 @@ impl McpManager {
         if !integration.uses_oauth {
             return None;
         }
-        let url = integration.config_url().map(str::to_string)?;
-        // Slack publishes this PKCE desktop client in its agent-harness setup guide:
-        // https://docs.slack.dev/ai/slack-mcp-server/connect-to-harnesses/
-        // Match the endpoint, never the user-controlled connection name.
+        let McpServerConfig::Http {
+            url,
+            client_id,
+            callback_port,
+            ..
+        } = &integration.config
+        else {
+            unreachable!("uses_oauth implies an http config");
+        };
+        // Slack defaults follow the endpoint; explicit user settings take precedence.
         let slack = url == "https://mcp.slack.com/mcp";
         Some(McpOAuthConfig {
             server: integration.server.clone(),
             label: integration.label.clone(),
-            url,
-            client_id: slack.then(|| "1601185624273.8899143856786".to_string()),
-            callback_port: slack.then_some(3118),
+            url: url.clone(),
+            client_id: client_id
+                .clone()
+                .or_else(|| slack.then(|| "1601185624273.8899143856786".to_string())),
+            callback_port: (*callback_port).or(slack.then_some(3118)),
             scopes: None,
         })
     }
@@ -335,6 +343,8 @@ mod tests {
             disabled_tools: None,
             startup_timeout_ms: None,
             call_timeout_ms: None,
+            client_id: None,
+            callback_port: None,
         }
     }
 
@@ -364,6 +374,28 @@ mod tests {
                 r#"{"access_token":"fixture-access","refresh_token":"fixture-refresh","expires_in":3600}"#,
             ),
         ])
+    }
+
+    #[test]
+    fn oauth_config_threads_client_id_and_callback_port() {
+        for endpoint in ["https://fixture.example/mcp", "https://mcp.slack.com/mcp"] {
+            let agent = tempfile::tempdir().unwrap();
+            let user_servers: HashMap<String, McpServerConfig> = serde_json::from_value(json!({
+                "slack": {
+                    "type": "http",
+                    "url": endpoint,
+                    "oauth": true,
+                    "clientId": "custom-client",
+                    "callbackPort": 4567
+                }
+            }))
+            .unwrap();
+            let http = Arc::new(fixture_http());
+            let manager = manager(agent.path(), Some(user_servers), http);
+            let config = manager.lock().unwrap().oauth_config("slack").unwrap();
+            assert_eq!(config.client_id.as_deref(), Some("custom-client"));
+            assert_eq!(config.callback_port, Some(4567));
+        }
     }
 
     /// Slack has no DCR; drive its public desktop client through the real manager and auth store.

@@ -323,11 +323,6 @@ fn escape() -> KeyEvent {
     KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)
 }
 
-/// Right: the dock's group-traversal arrow (the focused row's `left`/`right` arms).
-fn right() -> KeyEvent {
-    KeyEvent::new(KeyCode::Right, KeyModifiers::NONE)
-}
-
 fn wait_render(needle: &str) -> HeadlessStep {
     HeadlessStep::WaitRender {
         needle: needle.to_string(),
@@ -400,18 +395,17 @@ fn the_drafts_down_enters_the_dock_and_up_returns_before_the_recall() {
     );
 }
 
-/// Coexistence: the right arrow walks to the heartbeats group (the 2026-09-26 dock-arrows
-/// directive), and Escape closes the panel onto the dock's own item (the 2026-09-26 panel-exit
-/// ruling): the history recall works right after the round trip.
+/// Coexistence: Down walks the expanded dock to the heartbeats row, and Escape closes the panel
+/// onto the dock's own item (the 2026-09-26 panel-exit ruling): the history recall works right
+/// after the round trip.
 #[test]
 fn alt_a_arrows_and_enter_still_open_the_dock_group_view_and_recall_survives_it() {
     let mut steps = Vec::new();
     steps.push(wait_render("heartbeat"));
     steps.extend(submit("first prompt"));
     steps.push(HeadlessStep::Key(alt_a()));
-    // The dock's row starts the focus on the subagents group; one right arrow steps to heartbeats
-    // (the rendered-group cycle).
-    steps.push(HeadlessStep::Key(right()));
+    // The dock's focus starts on the subagents row; one Down steps to heartbeats.
+    steps.push(HeadlessStep::Key(down()));
     steps.push(HeadlessStep::Key(enter()));
     steps.push(wait_render("Heartbeats"));
     steps.push(HeadlessStep::Key(escape()));

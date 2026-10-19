@@ -1979,3 +1979,26 @@ fn rapid_churn_keeps_the_folded_page_coherent() {
         "every keypress resolved against the folded batch"
     );
 }
+
+/// The dock's factory row lists the live runs (the dock count's own set), paused runs first.
+#[test]
+fn the_dock_factory_items_list_live_runs_paused_first() {
+    let mut response = three_run_response();
+    response["runs"][0]["state"] = json!("done");
+    response["runs"][0]["usage"]["running"] = json!(0);
+    response["runs"][1]["state"] = json!("running");
+    response["runs"][2]["state"] = json!("paused");
+    let mut fourth = scripted_snapshot();
+    fourth["runId"] = json!("run-jkl24680");
+    fourth["name"] = json!("fourth-run");
+    fourth["state"] = json!("paused");
+    response["runs"].as_array_mut().unwrap().push(fourth);
+    assert_eq!(
+        dock_factory_items(&parse_factory_runs(&response)),
+        vec![
+            "fourth-run paused",
+            "third-run paused",
+            "second-run running"
+        ]
+    );
+}
