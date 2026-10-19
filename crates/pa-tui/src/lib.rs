@@ -85,6 +85,7 @@ mod menu_panel;
 pub mod model_picker;
 pub(crate) mod mouse;
 pub(crate) mod mouse_tracking;
+mod new_session_command;
 pub mod onboarding;
 pub mod onboarding_choice;
 pub mod onboarding_flow;

@@ -306,7 +306,7 @@ pub fn count_descendants(roster: &[Value], parent: &SessionIdentity) -> Subagent
 /// agents view bills the session's row. `None` when the roster holds no
 /// record for the session.
 pub(crate) fn family_cost(roster: &[Value], session: &SessionIdentity) -> Option<f64> {
-    let records = crate::agents_view_state::reconcile_unified_sessions(roster, &[]);
+    let records = crate::agents_view_state::reconcile_unified_sessions(roster, &[], None);
     let rollups = crate::agents_view_forest::compute_rollups(&records);
     let keys = session.keys();
     records
@@ -447,7 +447,7 @@ mod tests {
         assert_eq!(family_cost(&roster, &identity), Some(2.30));
         // Pinned against the agents-view row itself, not a second copy
         // of the formula.
-        let records = crate::agents_view_state::reconcile_unified_sessions(&roster, &[]);
+        let records = crate::agents_view_state::reconcile_unified_sessions(&roster, &[], None);
         let rollups = crate::agents_view_forest::compute_rollups(&records);
         let rows = crate::agents_view_forest::build_rows(
             &records,

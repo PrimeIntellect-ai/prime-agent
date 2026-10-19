@@ -5,7 +5,7 @@
 use anyhow::Context as _;
 
 use super::{
-    bail, canonical_session_path, fs, json, Arc, HashMap, Path, PathBuf, Result,
+    bail, canonical_session_path, fs, json, Arc, HashMap, Mutex, OnceLock, Path, PathBuf, Result,
     RlmLedgerDeleteReason, RlmLedgerEdge, Value,
 };
 
@@ -156,6 +156,16 @@ pub(super) fn parse_ledger_line(line: &str, index: usize) -> Result<Option<Ledge
 pub(super) struct ReplayState {
     pub(super) edges: Vec<RlmLedgerEdge>,
     pub(super) index: HashMap<String, usize>,
+    pub(super) artifact_index: OnceLock<Mutex<ArtifactIndex>>,
+    pub(super) deleted_bucket: Mutex<Option<DeletedBucket>>,
+}
+
+/// Ledger rows are immutable within a replay, but restore/archive and transcript
+/// edits can change the inputs of the deleted-spend fold without any append.
+#[derive(Debug)]
+pub(super) struct DeletedBucket {
+    pub(super) inputs: Vec<Option<FileIdentity>>,
+    pub(super) usage: HashMap<String, crate::session_usage::SessionUsageSummary>,
 }
 
 pub(super) fn edge_key(child_id: &str, child: &str) -> String {
@@ -167,69 +177,122 @@ pub(super) fn edge_key(child_id: &str, child: &str) -> String {
 
 /// One `live_edges` liveness pass: a recorded path that stats resolves
 /// as itself; a moved file resolves through its durable session id (the
-/// file-name stem) against the sessions dir and the artifacts tree. The
-/// per-pass cache keeps the artifact walk to one pass per read.
-pub(super) struct LivePathResolver {
+/// file-name stem) against the sessions dir and the artifacts tree.
+pub(super) struct LivePathResolver<'a> {
     agent_dir: PathBuf,
     sessions_dir: PathBuf,
     pub(super) resolved: HashMap<String, Option<PathBuf>>,
-    pub(super) artifact_index: Option<HashMap<String, PathBuf>>,
+    artifact_index: &'a OnceLock<Mutex<ArtifactIndex>>,
+    artifact_checked: bool,
 }
 
-impl LivePathResolver {
-    pub(super) fn new(agent_dir: PathBuf, sessions_dir: PathBuf) -> Self {
+impl<'a> LivePathResolver<'a> {
+    pub(super) fn new(
+        agent_dir: PathBuf,
+        sessions_dir: PathBuf,
+        artifact_index: &'a OnceLock<Mutex<ArtifactIndex>>,
+    ) -> Self {
         LivePathResolver {
             agent_dir,
             sessions_dir,
             resolved: HashMap::new(),
-            artifact_index: None,
+            artifact_index,
+            artifact_checked: false,
         }
     }
 
     /// The live session file for one recorded edge path, `None` when the
     /// session is gone everywhere (the edge endpoint is dead).
-    pub(super) fn resolve(&mut self, recorded: &str) -> Option<PathBuf> {
+    pub(super) fn resolve(&mut self, recorded: &str) -> Result<Option<PathBuf>> {
         if let Some(hit) = self.resolved.get(recorded) {
-            return hit.clone();
+            return Ok(hit.clone());
         }
-        let live = self.resolve_uncached(recorded);
+        let live = self.resolve_uncached(recorded)?;
         self.resolved.insert(recorded.to_string(), live.clone());
-        live
+        Ok(live)
     }
 
-    fn resolve_uncached(&mut self, recorded: &str) -> Option<PathBuf> {
+    fn resolve_uncached(&mut self, recorded: &str) -> Result<Option<PathBuf>> {
         let recorded_path = Path::new(recorded);
         if is_file(recorded_path) {
-            return Some(recorded_path.to_path_buf());
+            return Ok(Some(recorded_path.to_path_buf()));
         }
-        let id = recorded_path.file_stem()?.to_string_lossy().to_string();
+        let Some(stem) = recorded_path.file_stem() else {
+            return Ok(None);
+        };
+        let id = stem.to_string_lossy();
         if id.is_empty() {
-            return None;
+            return Ok(None);
         }
         let sessions_candidate = self.sessions_dir.join(format!("{id}.jsonl"));
         if is_file(&sessions_candidate) {
-            return Some(sessions_candidate);
+            return Ok(Some(sessions_candidate));
         }
-        let index = self
+        if is_file(
+            &crate::session_archive::archive_dir(&self.agent_dir)
+                .join(crate::session_store::session_file_name(&id)),
+        ) {
+            return Ok(None);
+        }
+        let mut index = self
             .artifact_index
-            .get_or_insert_with(|| artifact_session_index(&self.agent_dir));
-        index.get(&id).cloned()
+            .get_or_init(|| Mutex::new(artifact_session_index(&self.agent_dir)))
+            .lock()
+            .map_err(|_| anyhow::anyhow!("artifact index cache lock poisoned"))?;
+        // Directory identities cover additions, deletion and relocation, including
+        // new partitions. Check once per read; unchanged misses retain the shared
+        // negative result instead of enumerating every artifact file again.
+        if !self.artifact_checked {
+            if index
+                .directories
+                .iter()
+                .any(|(path, identity)| path_identity(path) != *identity)
+            {
+                *index = artifact_session_index(&self.agent_dir);
+            }
+            self.artifact_checked = true;
+        }
+        Ok(index
+            .paths
+            .get(id.as_ref())
+            .filter(|path| is_file(path))
+            .cloned())
     }
+}
+
+#[derive(Debug, Default)]
+pub(super) struct ArtifactIndex {
+    paths: HashMap<String, PathBuf>,
+    directories: Vec<(PathBuf, Option<FileIdentity>)>,
+}
+
+#[cfg(test)]
+thread_local! {
+    pub(super) static ARTIFACT_SCANS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 /// The session files under the artifacts tree, keyed by their durable session id (the file-name
 /// stem); non-session `.jsonl` sidecars key by their own stems and never collide.
-fn artifact_session_index(agent_dir: &Path) -> HashMap<String, PathBuf> {
-    let mut index = HashMap::new();
+fn artifact_session_index(agent_dir: &Path) -> ArtifactIndex {
+    #[cfg(test)]
+    ARTIFACT_SCANS.with(|count| count.set(count.get() + 1));
+    let mut index = ArtifactIndex::default();
     let root = agent_dir.join(crate::context_tree_children::RLM_SESSION_ARTIFACTS_DIR);
+    index.directories.push((root.clone(), path_identity(&root)));
     let Ok(parents) = std::fs::read_dir(&root) else {
         return index;
     };
     for parent in parents.flatten() {
+        index
+            .directories
+            .push((parent.path(), path_identity(&parent.path())));
         let Ok(subs) = std::fs::read_dir(parent.path()) else {
             continue;
         };
         for sub in subs.flatten() {
+            index
+                .directories
+                .push((sub.path(), path_identity(&sub.path())));
             let Ok(files) = std::fs::read_dir(sub.path()) else {
                 continue;
             };
@@ -237,7 +300,7 @@ fn artifact_session_index(agent_dir: &Path) -> HashMap<String, PathBuf> {
                 let path = file.path();
                 if path.extension().and_then(|ext| ext.to_str()) == Some("jsonl") {
                     if let Some(stem) = path.file_stem() {
-                        index.insert(stem.to_string_lossy().to_string(), path);
+                        index.paths.insert(stem.to_string_lossy().to_string(), path);
                     }
                 }
             }
@@ -307,10 +370,14 @@ pub(super) fn sole_edge_by_child_id(state: &ReplayState, child_id: &str) -> Opti
 }
 
 pub(super) fn file_identity(path: &Path) -> Result<Option<FileIdentity>> {
+    Ok(path_identity(path))
+}
+
+fn path_identity(path: &Path) -> Option<FileIdentity> {
     let Ok(metadata) = fs::metadata(path) else {
-        return Ok(None);
+        return None;
     };
-    Ok(Some(FileIdentity {
+    Some(FileIdentity {
         size: metadata.len(),
         mtime: metadata.modified().ok(),
         #[cfg(unix)]
@@ -318,7 +385,7 @@ pub(super) fn file_identity(path: &Path) -> Result<Option<FileIdentity>> {
             use std::os::unix::fs::MetadataExt;
             Some(metadata.ino())
         },
-    }))
+    })
 }
 
 pub(super) fn is_file(path: &Path) -> bool {

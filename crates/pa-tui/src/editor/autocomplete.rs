@@ -3,7 +3,7 @@
 
 use std::sync::mpsc::TryRecvError;
 
-use super::text_utils::{char_at, char_prefix, ends_with_symbol_token};
+use super::text_utils::{char_prefix, ends_with_symbol_token};
 use super::{AutocompleteSearch, Editor, EditorEvent, PendingAutocomplete};
 
 impl Editor {
@@ -106,27 +106,33 @@ impl Editor {
         if self.autocomplete.is_none() {
             let slash_ctx = self.current_slash_command_context();
             let c = ch.chars().next().unwrap_or(' ');
-            if c == '/'
-                && matches!(&slash_ctx, Some(ctx) if ctx.kind == crate::autocomplete::SlashKind::Name)
-            {
+            let slash_name_slash = c == '/'
+                && matches!(&slash_ctx, Some(ctx) if ctx.kind == crate::autocomplete::SlashKind::Name);
+            let slash_word_char =
+                slash_ctx.is_some() && (c.is_ascii_alphanumeric() || ".-_".contains(c));
+            if slash_name_slash || slash_word_char {
                 self.request_autocomplete(false, false);
-            } else if c == '@' || c == '#' {
-                let current_line = &self.lines[self.cursor_line];
-                let before = char_prefix(current_line, self.cursor_col);
-                let prev = char_at(&before, before.chars().count().saturating_sub(2));
-                if before.chars().count() <= 1 || prev == Some(' ') || prev == Some('\t') {
-                    self.request_autocomplete(false, false);
-                }
-            } else if c.is_ascii_alphanumeric() || ".-_".contains(c) {
-                let current_line = &self.lines[self.cursor_line];
-                let before = char_prefix(current_line, self.cursor_col);
-                if slash_ctx.is_some() || ends_with_symbol_token(&before) {
-                    self.request_autocomplete(false, false);
-                }
+            } else {
+                self.request_autocomplete_in_symbol_token();
             }
         } else {
             self.refresh_autocomplete_after_edit(false);
         }
+    }
+
+    /// Request suggestions when the cursor ends an `@`/`#` token: any edit
+    /// inside it — a `/` too, and a completion that keeps it open (an
+    /// applied directory, `@src/`) — lists what the token now matches.
+    pub(crate) fn request_autocomplete_in_symbol_token(&mut self) {
+        if self.cursor_ends_symbol_token() {
+            self.request_autocomplete(false, false);
+        }
+    }
+
+    fn cursor_ends_symbol_token(&self) -> bool {
+        let before = char_prefix(&self.lines[self.cursor_line], self.cursor_col);
+        ends_with_symbol_token(&before)
+            || crate::autocomplete::extract_at_prefix(&before.chars().collect::<Vec<_>>()).is_some()
     }
 
     pub(crate) fn request_autocomplete(&mut self, force: bool, explicit_tab: bool) {
@@ -238,6 +244,7 @@ impl Editor {
             self.lines = result.lines;
             self.cursor_line = result.cursor_line;
             self.set_cursor_col(result.cursor_col);
+            self.request_autocomplete_in_symbol_token();
             self.emit(EditorEvent::Changed(self.get_text()));
             return;
         }
@@ -270,10 +277,8 @@ impl Editor {
     }
 
     pub(crate) fn refresh_autocomplete_after_edit(&mut self, retrigger: bool) {
-        let current_line = &self.lines[self.cursor_line];
-        let before = char_prefix(current_line, self.cursor_col);
         let has_ctx =
-            self.current_slash_command_context().is_some() || ends_with_symbol_token(&before);
+            self.current_slash_command_context().is_some() || self.cursor_ends_symbol_token();
 
         // An edit that empties the prompt cancels both the open menu and the
         // parked request (a parked request can exist without an open menu; if it
@@ -299,6 +304,26 @@ impl Editor {
         self.autocomplete_search = None;
         if was {
             self.emit(EditorEvent::AutocompleteToggled(false));
+        }
+    }
+}
+
+#[cfg(test)]
+impl Editor {
+    /// Wait for the actual search response, with a failure deadline rather than idle polling.
+    pub(super) fn settle_autocomplete_search(&mut self) {
+        while self.has_pending_autocomplete() {
+            if self.pending_autocomplete.is_some() {
+                self.materialize_autocomplete();
+            }
+            if let Some(active) = self.autocomplete_search.take() {
+                let result = active
+                    .search
+                    .results
+                    .recv_timeout(std::time::Duration::from_secs(10))
+                    .expect("autocomplete search must send its result");
+                self.apply_suggestions(result, active.request);
+            }
         }
     }
 }

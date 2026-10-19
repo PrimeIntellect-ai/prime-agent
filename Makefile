@@ -165,6 +165,18 @@ package:
 catalog-assets-gates:
 	python3 scripts/release/test_catalog_assets.py
 
+# Local one-command perf run (crates/pa-perf/README.md documents the
+# scenario set): build the release binaries, generate the small corpus,
+# bench every scenario 10x, print the table. Run it on a quiet machine —
+# the numbers are wall-clock latencies of the interactive surfaces.
+perf:
+	cargo build --release --locked -p pa-cli --bin prime-agent -p pa-perf --bin pa-perf
+	./target/release/pa-perf run --binary target/release/prime-agent \
+		--profile small --out target/perf --runs 10
+	./target/release/pa-perf report --baseline crates/pa-perf/baseline.json \
+		--results target/perf/results/*.json
+
+
 # The changelog fold's contract battery (RELEASE-FLOW-PROPOSAL.md §8): the
 # fold is the release-PR's changelog half, and the pathspec security case is
 # first - a fragment NAME is data, never a git pathspec, so no root-level
@@ -187,7 +199,7 @@ shard-gates:
 	python3 scripts/test_ci_test_shard.py
 	python3 scripts/test_ci_pr_crates.py
 
-.PHONY: check deny windows-cross actionlint glibc-gate release-dry-run continuous-dry-run audit-build package catalog-assets catalog-assets-fixture catalog-assets-gates fold-gates restamp-gates shard-gates
+.PHONY: check deny windows-cross actionlint glibc-gate release-dry-run continuous-dry-run audit-build package catalog-assets catalog-assets-fixture catalog-assets-gates fold-gates restamp-gates shard-gates perf
 
 # Offline packaging contract tests for updaters shipped since Prime Agent 0.6.
 legacy-upgrade-gates:

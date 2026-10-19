@@ -14,23 +14,27 @@ impl Worker {
     pub(crate) async fn dispatch(&self, command_type: &str, payload: &Value) -> DaemonResponse {
         // Only operations that inspect or change historical branches need hydration.
         // Cancellation is deliberately excluded: it must reach the live turn immediately.
-        if matches!(
-            command_type,
-            "get_session_tree"
-                | "get_context_tree"
-                | "get_user_messages_for_forking"
-                | "set_session_entry_label"
-                | "navigate_tree"
-                | "fork"
-                | "export_html"
-                | "export_jsonl"
-        ) && self
-            .core
-            .lock()
-            .unwrap()
-            .store
-            .as_ref()
-            .is_some_and(|store| store.window.is_some())
+        let history_page = command_type == "get_messages"
+            && transcript_page(payload).is_some_and(|page| page.reads_history());
+        if (history_page
+            || matches!(
+                command_type,
+                "get_session_tree"
+                    | "get_context_tree"
+                    | "get_user_messages_for_forking"
+                    | "set_session_entry_label"
+                    | "navigate_tree"
+                    | "fork"
+                    | "export_html"
+                    | "export_jsonl"
+            ))
+            && self
+                .core
+                .lock()
+                .unwrap()
+                .store
+                .as_ref()
+                .is_some_and(|store| store.window.is_some())
         {
             let path = self
                 .core
@@ -463,10 +467,7 @@ impl Worker {
         if let Err(response) = self.require_created("get_messages") {
             return response;
         }
-        let before = payload
-            .get("before")
-            .and_then(Value::as_u64)
-            .and_then(|before| usize::try_from(before).ok());
+        let page = transcript_page(payload);
         let capabilities = payload
             .get("capabilities")
             .and_then(Value::as_array)
@@ -479,32 +480,48 @@ impl Worker {
             })
             .unwrap_or_default();
         let core = self.core.lock().unwrap();
-        // Validate ancestry atomically with the positional read. Appends keep the
+        let Some(page) = page else {
+            let mut messages = core
+                .store
+                .as_ref()
+                .map(SessionFile::messages)
+                .unwrap_or_default();
+            if crate::snapshot_stream::wants_image_elision(&capabilities) {
+                crate::snapshot_stream::elide_snapshot_image_payloads(&mut messages);
+            }
+            return response_success(None, "get_messages", Some(json!({ "messages": messages })));
+        };
+        let Some(store) = core.store.as_ref() else {
+            return response_failure(None, "get_messages", "History branch changed", None);
+        };
+        // Validate ancestry atomically with the page read. Appends keep the
         // attached leaf on this branch; navigation to another branch does not.
-        let history_leaf = payload.get("historyLeafId").filter(|_| before.is_some());
-        if let Some(anchor) = history_leaf {
-            let valid = anchor.as_str().is_some_and(|leaf| {
-                core.store
-                    .as_ref()
-                    .is_some_and(|store| store.branch().iter().any(|entry| entry.id == leaf))
-            });
-            if !valid {
+        let history_leaf = match payload.get("historyLeafId").map(Value::as_str) {
+            Some(Some(leaf)) if store.branch().iter().any(|entry| entry.id == leaf) => {
+                leaf.to_string()
+            }
+            Some(_) => {
                 return response_failure(None, "get_messages", "History branch changed", None);
             }
-        }
-        let mut messages: Vec<Value> = match (core.store.as_ref(), before) {
-            (Some(store), Some(before)) => store.messages_before(before),
-            (Some(store), None) => store.messages(),
-            (None, _) => Vec::new(),
+            None => store.leaf_id.clone().unwrap_or_default(),
+        };
+        let Some(mut rows) = store.transcript_page(&page) else {
+            return response_failure(None, "get_messages", "History branch changed", None);
         };
         if crate::snapshot_stream::wants_image_elision(&capabilities) {
-            crate::snapshot_stream::elide_snapshot_image_payloads(&mut messages);
+            crate::snapshot_stream::elide_snapshot_image_payloads(&mut rows.messages);
         }
-        let mut data = json!({ "messages": messages });
-        if let Some(anchor) = history_leaf {
-            data["historyLeafId"] = anchor.clone();
-        }
-        response_success(None, "get_messages", Some(data))
+        response_success(
+            None,
+            "get_messages",
+            Some(json!({
+                "messages": rows.messages,
+                "firstEntryId": rows.first_entry_id,
+                "lastEntryId": rows.last_entry_id,
+                "more": rows.more,
+                "historyLeafId": history_leaf,
+            })),
+        )
     }
 
     fn handle_get_queue(&self) -> DaemonResponse {
@@ -858,6 +875,11 @@ fn cleared_agent_message_bounce_text(receiver: &str, message: &str) -> String {
     let budget = limit.saturating_sub(prefix.chars().count());
     let body: String = message.chars().take(budget).collect();
     format!("{prefix}{body}")
+}
+
+/// The display-transcript page a `get_messages` payload asks for, if any.
+fn transcript_page(payload: &Value) -> Option<pa_types::daemon::TranscriptPage> {
+    serde_json::from_value(payload.get("page")?.clone()).ok()
 }
 
 #[cfg(test)]

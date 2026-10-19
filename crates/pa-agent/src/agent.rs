@@ -316,8 +316,9 @@ struct ActiveRun {
 }
 
 struct AgentInner {
-    /// One lock serializes state reduction and listener awaits: emitted
-    /// events are processed strictly in the order the loop emits them.
+    /// Serializes state reduction and listener delivery without holding the
+    /// state lock across callbacks that may read or restore that state.
+    event_delivery: tokio::sync::Mutex<()>,
     shared: tokio::sync::Mutex<Shared>,
     steering_queue: Mutex<PendingMessageQueue>,
     follow_up_queue: Mutex<PendingMessageQueue>,
@@ -362,6 +363,7 @@ impl AgentInner {
     }
 
     async fn process_events(self: &Arc<Self>, event: AgentEvent) -> anyhow::Result<()> {
+        let _delivery = self.event_delivery.lock().await;
         let message_end_transform = self.message_end_transform.lock().unwrap().clone();
         let mut shared = self.shared.lock().await;
         // The landing transform rewrites a `MessageEnd` row under the same
@@ -416,6 +418,7 @@ impl AgentInner {
             .iter()
             .map(|(_, listener)| Arc::clone(listener))
             .collect();
+        drop(shared);
         for listener in listeners {
             listener(event.clone(), signal.clone()).await?;
         }
@@ -764,6 +767,7 @@ impl Agent {
             ..MutableAgentState::default()
         };
         let inner = Arc::new(AgentInner {
+            event_delivery: tokio::sync::Mutex::new(()),
             shared: tokio::sync::Mutex::new(Shared {
                 state,
                 listeners: Vec::new(),
@@ -1297,6 +1301,53 @@ mod tests {
         let removed = queue.remove_where(&|m| matches!(m, AgentMessage::Standard(crate::types::Message::User(u)) if matches!(&u.content, crate::types::UserContent::Text(t) if t.contains("drop"))));
         assert_eq!(removed.len(), 1);
         assert!(queue.has_items());
+    }
+
+    #[tokio::test]
+    async fn awaited_listeners_can_read_and_restore_state_before_the_next_listener() {
+        let agent = Agent::new(AgentOptions::default());
+        let entered = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let callback_agent = agent.clone();
+        let callback_entered = entered.clone();
+        let first = agent
+            .subscribe(move |_event, _signal| {
+                let agent = callback_agent.clone();
+                let entered = callback_entered.clone();
+                Box::pin(async move {
+                    entered.store(true, std::sync::atomic::Ordering::SeqCst);
+                    let mut model = agent.state().await.model;
+                    model.id = "restored-primary".to_string();
+                    agent.set_model(model).await;
+                    Ok(())
+                })
+            })
+            .await;
+        let callback_agent = agent.clone();
+        let second = agent
+            .subscribe(move |_event, _signal| {
+                let agent = callback_agent.clone();
+                Box::pin(async move {
+                    assert_eq!(agent.state().await.model.id, "restored-primary");
+                    Ok(())
+                })
+            })
+            .await;
+        let inner = agent.inner.clone();
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            agent
+                .inner
+                .run_with_lifecycle(move |_signal, _override| async move {
+                    inner.process_events(AgentEvent::AgentStart).await
+                }),
+        )
+        .await;
+        assert!(entered.load(std::sync::atomic::Ordering::SeqCst));
+        result
+            .expect("awaited listener deadlocked on agent state")
+            .unwrap();
+        first.unsubscribe().await;
+        second.unsubscribe().await;
     }
 
     #[tokio::test]

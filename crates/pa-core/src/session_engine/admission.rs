@@ -46,9 +46,10 @@ impl AgentSession {
         prompt_messages.extend(self.take_next_turn_rows().await);
         let custom_row = session_message_to_loop(&SessionAgentMessage::Custom(message.clone()))
             .ok_or_else(|| anyhow::anyhow!("injected custom message conversion failed"))?;
-        // The dispatch-time routing fires for every dispatched turn; an
-        // injected row never carries images, so it clears a route left by
-        // the previous turn.
+        // The dispatch-time routing fires for every dispatched turn; injected
+        // rows do not re-run the route decision (a goal objective start's
+        // images ride the row's content and the row runs on the session's
+        // model), so a route left by the previous turn clears here.
         self.apply_image_model_routing(&[], &[]).await?;
         prompt_messages.push(custom_row);
         self.agent

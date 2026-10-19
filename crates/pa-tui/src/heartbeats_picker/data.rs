@@ -198,6 +198,52 @@ pub fn default_heartbeat_name(entry: &HeartbeatEntry) -> &'static str {
     }
 }
 
+/// A heartbeat's primary text (TS `primary`): the label, else the prompt, else
+/// the default name.
+#[must_use]
+pub fn row_primary(entry: &HeartbeatEntry) -> String {
+    entry
+        .job
+        .label
+        .as_deref()
+        .map(str::trim)
+        .filter(|label| !label.is_empty())
+        .map(str::to_string)
+        .or_else(|| {
+            let prompt = single_line(&entry.job.prompt);
+            (!prompt.is_empty()).then_some(prompt)
+        })
+        .unwrap_or_else(|| default_heartbeat_name(entry).to_string())
+}
+
+/// The activity dock's heartbeats row: the active heartbeats only (paused
+/// ones never list), soonest next fire first, each `<countdown> <label>`.
+#[must_use]
+pub fn dock_heartbeat_items(entries: &[HeartbeatEntry], now_ms: u64) -> Vec<String> {
+    let mut active: Vec<&HeartbeatEntry> = entries
+        .iter()
+        .filter(|entry| entry.job.is_active())
+        .collect();
+    active.sort_by_key(|entry| {
+        entry
+            .job
+            .next_run_at
+            .as_deref()
+            .and_then(crate::agents_view_state::iso_to_unix_ms)
+            .unwrap_or(i64::MAX)
+    });
+    active
+        .iter()
+        .map(|entry| {
+            format!(
+                "{} {}",
+                next_run_label(entry.job.next_run_at.as_deref(), now_ms),
+                row_primary(entry)
+            )
+        })
+        .collect()
+}
+
 /// Collapse all whitespace runs to single spaces.
 #[must_use]
 pub fn single_line(value: &str) -> String {
@@ -218,11 +264,11 @@ pub fn format_timestamp(value: &str) -> String {
     }
 }
 
-/// The next-run label in natural language ("in 45s", "in 5m", "in 10h"):
+/// The next-run label as a bare countdown ("45s", "5m", "10h"):
 /// rounded seconds under a minute, then rounded minutes, hours, and days,
-/// with a one-second floor. The `in ` prefix is the operator's wording
-/// (2026-09-26 directive) — TS renders the bare countdown, superseded
-/// here. A missing next run keeps the `—` placeholder; an unparseable
+/// with a one-second floor. Bare countdown, no `in ` prefix (operator
+/// directive 2026-10-17, reversing the 2026-09-26 wording; matches TS).
+/// A missing next run keeps the `—` placeholder; an unparseable
 /// value renders raw.
 #[must_use]
 pub fn next_run_label(next_run_at: Option<&str>, now_ms: u64) -> String {
@@ -235,16 +281,16 @@ pub fn next_run_label(next_run_at: Option<&str>, now_ms: u64) -> String {
     let delta = ((at - now_ms as i64).max(0) as f64) / 1000.0;
     let seconds = (delta.round() as i64).max(1);
     if seconds < 60 {
-        return format!("in {seconds}s");
+        return format!("{seconds}s");
     }
     let minutes = ((seconds as f64) / 60.0).round() as i64;
     if minutes < 60 {
-        return format!("in {minutes}m");
+        return format!("{minutes}m");
     }
     let hours = ((minutes as f64) / 60.0).round() as i64;
     if hours < 24 {
-        return format!("in {hours}h");
+        return format!("{hours}h");
     }
     let days = ((hours as f64) / 24.0).round() as i64;
-    format!("in {days}d")
+    format!("{days}d")
 }

@@ -94,6 +94,78 @@ fn recovery_rebuild_rehydrates_the_goal_from_the_session_file() {
     );
 }
 
+/// The `/goal` objective start keeps the prompt's attached images on the
+/// injected context row (TS `createGoalContextMessage`: text first, images
+/// after) — the row is the turn's only image carrier, session commands
+/// never admit a user row.
+#[test]
+fn goal_start_keeps_the_prompt_images_on_the_context_row() {
+    let _faux = FAUX_TEST_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let dir = tempfile::TempDir::new().unwrap();
+    let engine = std::sync::Arc::new(
+        AgentSessionEngine::new(AgentEngineConfig {
+            cwd: dir.path().to_path_buf(),
+            agent_dir: dir.path().join("agent"),
+            provider: None,
+            model: None,
+            api_key: None,
+            thinking: None,
+            session_dir: None,
+            session_file: None,
+            faux_script: Some(r#"{"responses": [{"text": "goal reply"}]}"#.to_string()),
+            supervisor_link: None,
+            telemetry_disabled: None,
+            cron_store: None,
+            queued_steering_probe: None,
+        })
+        .unwrap(),
+    );
+    let mut events: Vec<EngineEvent> = Vec::new();
+    engine.run_prompt(
+        0,
+        PromptRequest {
+            batch: Vec::new(),
+            images: vec![pa_agent::types::ImageContent {
+                data: "aGVsbG8gZ29hbA==".to_string(),
+                mime_type: "image/png".to_string(),
+            }],
+            message: "/goal describe the attachment".to_string(),
+            source: "user".to_string(),
+            agent_message_id: None,
+            custom_message: None,
+        },
+        &|| false,
+        &mut |event| {
+            events.push(event);
+            true
+        },
+    );
+    let context = events
+        .iter()
+        .find_map(|event| match event {
+            EngineEvent::CustomMessage(value) if value["customType"] == "goal_context" => {
+                Some(value.clone())
+            }
+            _ => None,
+        })
+        .expect("the goal start emitted its context row");
+    let blocks = context["content"]
+        .as_array()
+        .expect("the context row carries the attached image as content blocks");
+    assert_eq!(blocks[0]["type"], "text");
+    let text = blocks[0]["text"].as_str().expect("text block content");
+    assert!(
+        text.contains("[goal: continuation]") && text.contains("describe the attachment"),
+        "the continuation prompt names the objective: {text}"
+    );
+    assert_eq!(
+        blocks[1],
+        json!({ "type": "image", "data": "aGVsbG8gZ29hbA==", "mimeType": "image/png" })
+    );
+}
+
 /// A durable message row in the worker's persisted wire shape.
 fn wire_user_message(text: String) -> Value {
     serde_json::to_value(pa_types::session::AgentMessage::User(

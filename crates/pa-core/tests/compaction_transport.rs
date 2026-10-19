@@ -1,7 +1,12 @@
-//! Synthetic-provider regressions for summary request controls and cancellation.
+//! Synthetic-provider regressions for summary and refinement request controls and cancellation.
 use std::time::Duration;
 
+use pa_core::session_engine::branch_summarization::{
+    generate_branch_summary, GenerateBranchSummaryOptions, DEFAULT_BRANCH_RESERVE_TOKENS,
+};
 use pa_core::session_engine::compaction_exec::complete_summary_call;
+use pa_core::session_engine::refine::default_refiner_call;
+use pa_types::session::{AgentMessage, EntryBase, FileEntry};
 use serde_json::{json, Value};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
@@ -174,4 +179,57 @@ async fn summary_preserves_unspecified_reasoning_when_off_is_supported() {
         assert!(request.await.unwrap().get("reasoning_effort").is_none());
         assert!(server.await.unwrap());
     }
+}
+
+#[tokio::test]
+async fn branch_summary_respects_mandatory_thinking() {
+    let (model, request, server) = mock_summary(Reply::Complete).await;
+    let entries = [FileEntry::Message {
+        message: AgentMessage::User(pa_types::ai::UserMessage {
+            content: pa_types::ai::UserContent::Text("explored a side branch".to_string()),
+            timestamp: 0,
+            rest: serde_json::Map::default(),
+        }),
+        base: EntryBase {
+            id: Some("u1".to_string()),
+            parent_id: None,
+            timestamp: Some("2024-01-01T00:00:00.000Z".to_string()),
+            rest: serde_json::Map::default(),
+        },
+    }];
+    let result = generate_branch_summary(
+        &entries,
+        GenerateBranchSummaryOptions {
+            model: &model,
+            api_key: Some("synthetic-key".into()),
+            custom_instructions: None,
+            replace_instructions: false,
+            reserve_tokens: DEFAULT_BRANCH_RESERVE_TOKENS,
+            auxiliary: None,
+        },
+    )
+    .await;
+    assert_eq!(result.error, None, "branch summary failed: {result:?}");
+    assert!(result
+        .summary
+        .as_deref()
+        .unwrap_or_default()
+        .contains("summary"));
+    assert_eq!(request.await.unwrap()["enable_thinking"], json!(true));
+    assert!(server.await.unwrap());
+}
+
+#[tokio::test]
+async fn refiner_call_respects_mandatory_thinking() {
+    let (model, request, server) = mock_summary(Reply::Complete).await;
+    let reply =
+        default_refiner_call(Some("synthetic-key".into()))(model, "system", "prompt".into())
+            .await
+            .unwrap();
+    assert!(matches!(
+        reply.content.as_slice(),
+        [pa_types::ai::AssistantContentBlock::Text(text)] if text.text == "summary"
+    ));
+    assert_eq!(request.await.unwrap()["enable_thinking"], json!(true));
+    assert!(server.await.unwrap());
 }

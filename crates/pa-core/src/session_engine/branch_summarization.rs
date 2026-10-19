@@ -452,13 +452,14 @@ pub async fn generate_branch_summary(
             .collect(),
         tools: None,
     };
-    let stream_options =
+    let mut stream_options =
         pa_ai::types::SimpleStreamOptions::from_base(pa_ai::types::StreamOptions {
             max_tokens: Some(BRANCH_SUMMARY_MAX_TOKENS),
             api_key,
             headers: summary_headers.map(|headers| headers.into_iter().collect()),
             ..Default::default()
         });
+    stream_options.reasoning = pa_types::ai::minimum_reasoning(model);
     let response = match pa_ai::complete_simple(model, &context, Some(stream_options)).await {
         Ok(response) => response,
         Err(error) => {

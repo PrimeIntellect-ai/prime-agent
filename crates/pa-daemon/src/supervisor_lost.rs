@@ -106,6 +106,20 @@ async fn exit_orphaned(worker: &Worker, absent_since: tokio::time::Instant) {
         agent_engine.dispose_kernel().await;
     }
     let _ = worker.record_recovery(false, "shutdown");
+    // The lease is retained through exit, but the sidecars still get the
+    // holder's current state before the process dies; a drain writer
+    // racing the fold leaves a valid warm tail (the load re-checks the
+    // generation and prefix).
+    let lease = worker
+        .core
+        .lock()
+        .unwrap()
+        .store
+        .as_ref()
+        .and_then(|store| store.lease.clone());
+    if let Some(lease) = lease {
+        lease.write_sidecars();
+    }
     // Retain the lease through process exit: kernel disposal has a bounded
     // host-request drain, so writers may survive until the process dies.
     // The dead-owner sweep or the next acquire reclaims its directory.

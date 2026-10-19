@@ -221,6 +221,56 @@ async fn deliver_message_while_busy_queues() {
     );
 }
 
+/// Agent-message deliveries admit as background work: later user input jumps
+/// them, FIFO behind earlier user input, on both lanes.
+#[tokio::test]
+async fn user_input_jumps_parked_agent_message_deliveries() {
+    for (command, delivery_mode, lane) in [
+        ("steer", "steer", "steering"),
+        ("follow_up", "follow_up", "followUp"),
+    ] {
+        let worker = created_worker().await;
+        worker.core.lock().unwrap().busy = true;
+        for (text, user) in [
+            ("first agent", false),
+            ("second agent", false),
+            ("first user", true),
+            ("second user", true),
+        ] {
+            let response = if user {
+                worker.dispatch(command, &json!({ "message": text })).await
+            } else {
+                worker
+                    .dispatch(
+                        "worker_deliver_message",
+                        &json!({
+                            "targetActiveSessionId": "target-session",
+                            "message": text,
+                            "sender": { "activeSessionId": "source-session" },
+                            "deliveryMode": delivery_mode,
+                        }),
+                    )
+                    .await
+            };
+            assert!(response.success, "{text}: {response:?}");
+            if !user {
+                assert_eq!(response.data.expect("receipt")["deliveryStatus"], "queued");
+            }
+        }
+        let queue = worker.dispatch("get_queue", &json!({})).await;
+        assert_eq!(
+            queue.data.expect("queue data")[lane],
+            json!([
+                "first user",
+                "second user",
+                "Agent message received: first agent",
+                "Agent message received: second agent"
+            ]),
+            "{lane}"
+        );
+    }
+}
+
 /// The pending-capacity guard fails with the TS error string.
 #[tokio::test]
 async fn deliver_message_respects_the_pending_capacity() {

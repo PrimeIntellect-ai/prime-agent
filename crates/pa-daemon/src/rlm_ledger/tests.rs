@@ -356,6 +356,64 @@ fn moved_edge_paths_resolve_through_the_session_id() {
     assert_eq!(raw[0].child, recorded_child);
 }
 
+#[test]
+fn the_artifact_index_updates_after_a_new_partition() {
+    let agent_dir = temp_dir("index-partition");
+    let sessions_dir = agent_dir.join("sessions");
+    fs::create_dir_all(&sessions_dir).unwrap();
+    let ledger = ledger_over(&agent_dir, &sessions_dir);
+
+    let parent = sessions_dir.join("sess-p.jsonl");
+    fs::write(&parent, "{}").unwrap();
+    let first = agent_dir
+        .join("session-artifacts")
+        .join("sess-p")
+        .join("sub-1")
+        .join("sess-1.jsonl");
+    fs::create_dir_all(first.parent().unwrap()).unwrap();
+    fs::write(&first, "{}").unwrap();
+    let spawn = |child_id: &str, child: &str| {
+        ledger
+            .append_spawn(&RlmSpawnInput {
+                child_id: child_id.into(),
+                parent: parent.to_string_lossy().into(),
+                child: child.into(),
+                depth: 1,
+                name: "w".into(),
+            })
+            .unwrap();
+    };
+    spawn("sub-1", "/gone-root/sess-1.jsonl");
+    let edges = ledger.live_edges().unwrap();
+    assert_eq!(edges.len(), 1, "{edges:?}");
+    assert_eq!(
+        edges[0].child,
+        canonical_session_path(&first).to_string_lossy().to_string()
+    );
+
+    let second = agent_dir
+        .join("session-artifacts")
+        .join("sess-p")
+        .join("sub-2")
+        .join("sess-2.jsonl");
+    fs::create_dir_all(second.parent().unwrap()).unwrap();
+    fs::write(&second, "{}").unwrap();
+    spawn("sub-2", "/gone-root/sess-2.jsonl");
+    let edges = ledger.live_edges().unwrap();
+    assert_eq!(edges.len(), 2, "{edges:?}");
+    let appended = edges
+        .iter()
+        .find(|edge| edge.child_id == "sub-2")
+        .expect("the appended edge");
+    assert_eq!(
+        appended.child,
+        canonical_session_path(&second)
+            .to_string_lossy()
+            .to_string(),
+        "the new partition resolves after its append: {edges:?}"
+    );
+}
+
 /// The parent-scoped live read bounds the liveness work to the opened
 /// parent's own edges: foreign edges with missing endpoints never
 /// resolve (no per-edge stats, no artifacts-tree walk), while the own
@@ -434,8 +492,12 @@ fn live_edges_of_parent_bounds_the_liveness_work() {
     );
 
     let state = ledger.replay_of_parent(&parent).unwrap();
-    let mut resolver = LivePathResolver::new(agent_dir.clone(), sessions_dir.clone());
-    let scoped = resolve_live_edges(&state, &mut resolver);
+    let mut resolver = LivePathResolver::new(
+        agent_dir.clone(),
+        sessions_dir.clone(),
+        &state.artifact_index,
+    );
+    let scoped = resolve_live_edges(&state, &mut resolver).unwrap();
     assert_eq!(scoped.len(), 2, "{scoped:?}");
     assert_eq!(
         resolver.resolved.len(),
@@ -444,14 +506,50 @@ fn live_edges_of_parent_bounds_the_liveness_work() {
         resolver.resolved.keys().collect::<Vec<_>>()
     );
     assert!(
-        resolver.artifact_index.is_none(),
+        state.artifact_index.get().is_none(),
         "no foreign miss walks the artifacts tree"
     );
     let full = ledger.replay_cached().unwrap();
-    let mut unscoped = LivePathResolver::new(agent_dir, sessions_dir);
-    assert_eq!(resolve_live_edges(&full, &mut unscoped).len(), 2);
-    assert!(unscoped.artifact_index.is_some());
+    let mut unscoped = LivePathResolver::new(agent_dir, sessions_dir, &full.artifact_index);
+    assert_eq!(resolve_live_edges(&full, &mut unscoped).unwrap().len(), 2);
+    assert!(full.artifact_index.get().is_some());
     assert_eq!(unscoped.resolved.len(), 103);
+}
+
+#[test]
+fn a_dead_endpoint_under_an_archived_parent_resolves_without_a_tree_walk() {
+    let agent_dir = temp_dir("archive-dead");
+    let sessions_dir = agent_dir.join("sessions");
+    fs::create_dir_all(&sessions_dir).unwrap();
+    let ledger = ledger_over(&agent_dir, &sessions_dir);
+    let child = sessions_dir.join("sess-c.jsonl");
+    fs::write(&child, "{}").unwrap();
+    let archived = crate::session_archive::archive_dir(&agent_dir)
+        .join(crate::session_store::session_file_name("sess-p"));
+    fs::create_dir_all(archived.parent().unwrap()).unwrap();
+    fs::write(&archived, "{}").unwrap();
+    ledger
+        .append_spawn(&RlmSpawnInput {
+            child_id: "sub-1".into(),
+            parent: "/old-root/sessions/sess-p.jsonl".into(),
+            child: child.to_string_lossy().into(),
+            depth: 1,
+            name: "w".into(),
+        })
+        .unwrap();
+    assert!(
+        ledger.live_edges().unwrap().is_empty(),
+        "an archived parent is a dead endpoint"
+    );
+    assert!(
+        ledger
+            .replay_cached()
+            .unwrap()
+            .artifact_index
+            .get()
+            .is_none(),
+        "the archive stat answers without the artifacts walk"
+    );
 }
 
 /// A parent that moved (recorded path gone, same stem under the sessions
@@ -1253,4 +1351,180 @@ fn bucket_skips_recreated_live_paths() {
         .unwrap();
     let bucket = ledger.deleted_descendant_usage_by_parent().unwrap();
     assert!(bucket.is_empty(), "a live path never bills the bucket");
+}
+
+#[test]
+fn the_bucket_updates_after_an_append_on_the_same_ledger() {
+    let dir = temp_dir("bucket-append");
+    let ledger = ledger_for(&dir);
+    let sessions = dir.join("sessions");
+    fs::create_dir_all(&sessions).unwrap();
+    let parent = sessions.join("p.jsonl");
+    let child_1 = sessions.join("c1.jsonl");
+    let child_2 = sessions.join("c2.jsonl");
+    fs::write(&parent, "{}").unwrap();
+    fs::write(&child_1, "{}").unwrap();
+    fs::write(&child_2, "{}").unwrap();
+    let parent_key = crate::lease::canonical_session_path(&parent)
+        .to_string_lossy()
+        .to_string();
+    let spawn_delete = |child_id: &str, child: &Path, cost: f64| {
+        ledger
+            .append_spawn(&RlmSpawnInput {
+                child_id: child_id.into(),
+                parent: parent.to_string_lossy().into(),
+                child: child.to_string_lossy().into(),
+                depth: 1,
+                name: "w".into(),
+            })
+            .unwrap();
+        ledger
+            .append_delete_with_usage(
+                child_id,
+                &child.to_string_lossy(),
+                RlmLedgerDeleteReason::User,
+                &usage_summary(cost),
+            )
+            .unwrap();
+        fs::remove_file(child).unwrap();
+    };
+    spawn_delete("sub-1", &child_1, 0.25);
+    let bucket = ledger.deleted_descendant_usage_by_parent().unwrap();
+    assert_eq!(
+        bucket,
+        HashMap::from([(parent_key.clone(), usage_summary(0.25))]),
+        "the first delete bills: {bucket:?}"
+    );
+    spawn_delete("sub-2", &child_2, 0.50);
+    let bucket = ledger.deleted_descendant_usage_by_parent().unwrap();
+    assert_eq!(
+        bucket,
+        HashMap::from([(
+            parent_key,
+            SessionUsageSummary {
+                input_tokens: 2_000,
+                output_tokens: 200,
+                cost: 0.75,
+            }
+        )]),
+        "the appended delete bills on the same instance: {bucket:?}"
+    );
+}
+
+#[test]
+fn a_restored_tombstoned_child_stops_billing_the_parent_without_an_append() {
+    let dir = temp_dir("bucket-restore");
+    let sessions = dir.join("sessions");
+    fs::create_dir_all(&sessions).unwrap();
+    let parent = sessions.join("parent.jsonl");
+    let child = sessions.join("child.jsonl");
+    fs::write(&parent, "{}").unwrap();
+    fs::write(&child, assistant_usage_row("m1", 0.25)).unwrap();
+    let ledger = ledger_for(&dir);
+    ledger
+        .append_spawn(&RlmSpawnInput {
+            child_id: "sub-child".into(),
+            parent: parent.to_string_lossy().into(),
+            child: child.to_string_lossy().into(),
+            depth: 1,
+            name: "child".into(),
+        })
+        .unwrap();
+    ledger
+        .append_delete_with_usage(
+            "sub-child",
+            &child.to_string_lossy(),
+            RlmLedgerDeleteReason::User,
+            &usage_summary(0.25),
+        )
+        .unwrap();
+    let archive = crate::session_archive::archive_dir(&dir);
+    fs::create_dir_all(&archive).unwrap();
+    let archived = archive.join(crate::session_store::session_file_name("child"));
+    fs::rename(&child, &archived).unwrap();
+    let key = canonical_session_path(&parent)
+        .to_string_lossy()
+        .into_owned();
+    assert_eq!(
+        ledger.deleted_descendant_usage_by_parent().unwrap(),
+        HashMap::from([(key, usage_summary(0.25))])
+    );
+    crate::session_archive::restore_session(&archive, &sessions, "child").unwrap();
+    assert_eq!(
+        ledger.deleted_descendant_usage_by_parent().unwrap(),
+        HashMap::new()
+    );
+}
+
+#[test]
+fn the_artifact_index_rechecks_deleted_and_relocated_transcripts_without_an_append() {
+    let dir = temp_dir("index-disk-change");
+    let sessions = dir.join("sessions");
+    fs::create_dir_all(&sessions).unwrap();
+    let parent = sessions.join("parent.jsonl");
+    fs::write(&parent, "{}").unwrap();
+    let child = dir.join("session-artifacts/parent/sub/child.jsonl");
+    fs::create_dir_all(child.parent().unwrap()).unwrap();
+    fs::write(&child, "{}").unwrap();
+    let ledger = ledger_for(&dir);
+    ledger
+        .append_spawn(&RlmSpawnInput {
+            child_id: "sub".into(),
+            parent: parent.to_string_lossy().into(),
+            child: "/gone/child.jsonl".into(),
+            depth: 1,
+            name: "child".into(),
+        })
+        .unwrap();
+    let initial = ledger.live_edges().unwrap();
+    assert_eq!(initial.len(), 1);
+    fs::remove_file(&child).unwrap();
+    assert_eq!(ledger.live_edges().unwrap(), Vec::new());
+    let relocated = dir.join("session-artifacts/other/sub/child.jsonl");
+    fs::create_dir_all(relocated.parent().unwrap()).unwrap();
+    fs::write(&relocated, "{}").unwrap();
+    let mut expected = initial;
+    expected[0].child = canonical_session_path(&relocated)
+        .to_string_lossy()
+        .into_owned();
+    assert_eq!(ledger.live_edges().unwrap(), expected);
+}
+
+#[test]
+fn artifact_misses_stay_cached_until_a_directory_changes() {
+    let dir = temp_dir("index-negative-cache");
+    let sessions = dir.join("sessions");
+    fs::create_dir_all(&sessions).unwrap();
+    let parent = sessions.join("parent.jsonl");
+    fs::write(&parent, "{}").unwrap();
+    let partition = dir.join("session-artifacts/parent/sub");
+    fs::create_dir_all(&partition).unwrap();
+    let ledger = ledger_for(&dir);
+    ledger
+        .append_spawn(&RlmSpawnInput {
+            child_id: "sub".into(),
+            parent: parent.to_string_lossy().into(),
+            child: "/gone/child.jsonl".into(),
+            depth: 1,
+            name: "child".into(),
+        })
+        .unwrap();
+    let scans = replay::ARTIFACT_SCANS.with(std::cell::Cell::get);
+    assert_eq!(ledger.live_edges().unwrap(), Vec::new());
+    assert_eq!(ledger.live_edges().unwrap(), Vec::new());
+    assert_eq!(replay::ARTIFACT_SCANS.with(std::cell::Cell::get), scans + 1);
+    let restored = partition.join("child.jsonl");
+    fs::write(&restored, "{}").unwrap();
+    let expected = vec![RlmLedgerEdge {
+        child_id: "sub".into(),
+        parent: canonical_session_path(&parent).to_string_lossy().into(),
+        child: canonical_session_path(&restored).to_string_lossy().into(),
+        depth: 1,
+        name: "child".into(),
+        deleted: None,
+        deleted_usage: None,
+    }];
+    assert_eq!(ledger.live_edges().unwrap(), expected);
+    assert_eq!(ledger.live_edges().unwrap(), expected);
+    assert_eq!(replay::ARTIFACT_SCANS.with(std::cell::Cell::get), scans + 2);
 }

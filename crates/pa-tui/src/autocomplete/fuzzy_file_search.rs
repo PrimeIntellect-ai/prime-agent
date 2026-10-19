@@ -143,16 +143,36 @@ impl AtSearch<'_> {
         }
     }
 
-    /// The one scoring of a matched form, shared by the walk and the index scan: `None`
-    /// for a zero score; an empty query scores every form 1.
+    /// The one ranking key of a matched form, shared by the walk and the index scan, all
+    /// case-insensitive against the once-lowercased query: `None` when neither the name
+    /// nor the path contains the query; an empty query is a name prefix of every form.
+    /// The form is relative to the typed scope, so the scope's own dot directory
+    /// (`@.github/`) hides nothing.
     pub(super) fn score<'form>(&self, form: &'form str) -> Option<RankedForm<'form>> {
-        let score = if self.lower_query.is_empty() {
-            1
+        let name = form_name(form);
+        let class = if eq_ignore_case(name, self.lower_query) {
+            MatchClass::ExactName
+        } else if starts_with_ignore_case(name, self.lower_query) {
+            MatchClass::NamePrefix
+        } else if contains_ignore_case(name, self.lower_query) {
+            MatchClass::NameSubstring
+        } else if contains_ignore_case(form, self.lower_query) {
+            MatchClass::PathSubstring
         } else {
-            score_entry(form, self.lower_query, form.ends_with('/'))
+            return None;
         };
-        (score > 0).then(|| RankedForm {
-            score,
+        let dotted_query = self
+            .lower_query
+            .rsplit('/')
+            .next()
+            .is_some_and(|segment| segment.starts_with('.'));
+        let hidden = !dotted_query
+            && form_trimmed(form)
+                .split('/')
+                .any(|segment| segment.starts_with('.'));
+        Some(RankedForm {
+            class,
+            hidden,
             depth: form_depth(form),
             form,
         })
@@ -308,20 +328,37 @@ fn index_scope(display_base: &str) -> IndexScope {
     IndexScope::Prefix(normalized.to_string())
 }
 
-/// A scored candidate form, ordered by score (descending), then depth, then path.
+/// How a form contains the typed query, best first.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum MatchClass {
+    ExactName,
+    NamePrefix,
+    NameSubstring,
+    PathSubstring,
+}
+
+/// A matched candidate form with its ranking key (see [`RankedForm::cmp`]).
 pub(super) struct RankedForm<'a> {
-    score: i32,
+    class: MatchClass,
+    hidden: bool,
     depth: usize,
     form: &'a str,
 }
 
 impl RankedForm<'_> {
+    /// The `@` ranking, a total order (best first): the match class (exact name, name
+    /// prefix, name substring, path substring); visible before hidden (a segment starts
+    /// with `.`; nothing is hidden for a query whose last segment starts with `.`);
+    /// fewer segments; fewer chars; directories before files; byte order.
     fn cmp(&self, other: &Self) -> Ordering {
-        other
-            .score
-            .cmp(&self.score)
-            .then_with(|| self.depth.cmp(&other.depth))
-            .then_with(|| form_trimmed(self.form).cmp(form_trimmed(other.form)))
+        let (this, that) = (form_trimmed(self.form), form_trimmed(other.form));
+        self.class
+            .cmp(&other.class)
+            .then(self.hidden.cmp(&other.hidden))
+            .then(self.depth.cmp(&other.depth))
+            .then_with(|| this.chars().count().cmp(&that.chars().count()))
+            .then_with(|| other.form.ends_with('/').cmp(&self.form.ends_with('/')))
+            .then_with(|| this.cmp(that))
     }
 }
 
@@ -432,28 +469,6 @@ fn contains_ignore_case(haystack: &str, lower_needle: &str) -> bool {
     } else {
         haystack.to_lowercase().contains(lower_needle)
     }
-}
-
-/// Exact name 100, name prefix 80, name contains 50, path contains 30,
-/// +10 for directories (when positive), all case-insensitive against the
-/// once-lowercased query.
-fn score_entry(form: &str, lower_query: &str, is_directory: bool) -> i32 {
-    let file_name = form_name(form);
-    let mut score = if eq_ignore_case(file_name, lower_query) {
-        100
-    } else if starts_with_ignore_case(file_name, lower_query) {
-        80
-    } else if contains_ignore_case(file_name, lower_query) {
-        50
-    } else if contains_ignore_case(form, lower_query) {
-        30
-    } else {
-        0
-    };
-    if is_directory && score > 0 {
-        score += 10;
-    }
-    score
 }
 
 /// The raw query when it holds no `/`; otherwise the segments

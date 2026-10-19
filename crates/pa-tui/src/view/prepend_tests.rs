@@ -220,3 +220,66 @@ fn prepended_history_keeps_a_paused_tool_after_hidden_entries() {
         "removing a leading spacer must preserve the visible tool's content row"
     );
 }
+
+#[test]
+fn spliced_rows_off_screen_keep_a_paused_window_through_a_geometry_resolve() {
+    let mut sparse = view();
+    sparse.splash_suppressed = true;
+    for index in 0..300 {
+        sparse.push_entry(body("row", index));
+    }
+    sparse.render_frame(37, 24);
+    sparse.scroll_by(-120);
+    let paused = sparse.render_frame(37, 24);
+    let (first, last) = sparse.visible_entries().expect("visible entries");
+    assert!(
+        first > 40 && last + 20 < 300,
+        "the window sits mid-transcript"
+    );
+
+    // Below the window: the evicted rows leave a status row in their place.
+    let gap = ChatEntry::Status {
+        text: "gap".to_string(),
+        kind: crate::chat::StatusKind::Info,
+    };
+    sparse.replace_entries(last + 5..last + 15, vec![gap]);
+    // Above the window: the oldest rows drop.
+    sparse.drop_leading_entries(30);
+    assert_eq!(
+        sparse.render_frame(37, 24),
+        paused,
+        "the walked window keeps its rows"
+    );
+    sparse.resolve_sparse_geometry();
+    sparse.sparse_enabled = false;
+    assert_eq!(
+        sparse.render_frame(37, 24),
+        paused,
+        "the exact geometry places the window on the same rows"
+    );
+
+    // A top-anchored window: rows dropped above it move its absolute offset.
+    let mut top = view();
+    top.splash_suppressed = true;
+    for index in 0..300 {
+        top.push_entry(body("row", index));
+    }
+    top.render_frame(37, 24);
+    top.scroll_to_top();
+    top.render_frame(37, 24);
+    top.scroll_by(120);
+    let paused = top.render_frame(37, 24);
+    top.drop_leading_entries(30);
+    assert_eq!(
+        top.render_frame(37, 24),
+        paused,
+        "the walked window keeps its rows"
+    );
+    top.resolve_sparse_geometry();
+    top.sparse_enabled = false;
+    assert_eq!(
+        top.render_frame(37, 24),
+        paused,
+        "the exact geometry places the top-anchored window on the same rows"
+    );
+}

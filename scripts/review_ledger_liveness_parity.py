@@ -3,8 +3,9 @@
 
 A real parent kernel admits a child with rlm.spawn. The synthetic provider holds
 that child's turn while both daemons answer repeated list/roster reads. This is
-live-family baseline parity, not a TS proof of external symlink retargeting or
-passivation/registration timing; those boundaries are recorded as out of scope.
+live-family baseline parity plus real disk relocation/deletion and catalog wake
+restore observations. Historical flat-path tombstone rows are explicit fixture
+inputs. Symlink retargeting and registration timing remain out of scope.
 """
 import argparse
 import http.server
@@ -25,6 +26,7 @@ from review_restore_notice_parity import texts
 PARENT = 'Create the ledger liveness fixture child.'
 CHILD = 'LEDGER_LIVENESS_CHILD_HOLD'
 NAME = 'ledger-fixture-child'
+BILLING = 'LEDGER_CACHE_BILLING_TURN'
 MARKER = 'LEDGER_LIVENESS_ADMITTED='
 CODE = """import json
 ledger_handle = await rlm.spawn('LEDGER_LIVENESS_CHILD_HOLD', name='ledger-fixture-child')
@@ -95,6 +97,8 @@ class Provider(http.server.ThreadingHTTPServer):
         self.probe = None
         self.parent_calls = 0
         self.child_arrived = False
+        self.billing_calls = 0
+        self.restore_release = threading.Event()
 
     def ready(self):
         with self.arrived:
@@ -114,7 +118,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
         is_child = any(CHILD in text for text in user_texts)
         with self.server.arrived:
             self.server.requests.append(body)
-            if is_child:
+            billing = any(BILLING in text for text in user_texts)
+            if billing:
+                self.server.billing_calls += 1
+                delta, finish = {'content': 'Billing fixture completed.'}, 'stop'
+            elif is_child:
                 self.server.child_arrived = True
                 delta, finish = {'content': 'Child fixture released.'}, 'stop'
             else:
@@ -132,11 +140,16 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     self.server.probe = admitted_probe(body)
                     delta, finish = {'content': 'Parent fixture completed.'}, 'stop'
             self.server.arrived.notify_all()
-        if is_child:
+        if billing and self.server.billing_calls > 1:
+            # The restored session's new delivery remains in flight while
+            # its catalog own-usage is compared with the original captured usage.
+            self.server.restore_release.wait(LIMIT * 4)
+        elif is_child:
             self.server.release.wait(LIMIT * 4)
         def chunk(delta, reason=None):
             return {'id': 'ledger-fixture', 'object': 'chat.completion.chunk', 'created': 1,
-                    'model': 'parity-1', 'choices': [{'index': 0, 'delta': delta, 'finish_reason': reason}]}
+                    'model': 'parity-1', 'choices': [{'index': 0, 'delta': delta, 'finish_reason': reason}],
+                    'usage': {'prompt_tokens': 8, 'completion_tokens': 3, 'total_tokens': 11} if reason else None}
         wire = ''.join('data: ' + json.dumps(row) + '\n\n' for row in (
             chunk({'role': 'assistant', **delta}), chunk({}, finish))) + 'data: [DONE]\n\n'
         encoded = wire.encode()
@@ -163,7 +176,136 @@ def family_contract(rows, child_id, parent_active):
             'parent': '<resident-parent>', 'transcript_exists': True}
 
 
-def run_case(binary, kind, root, observed):
+def catalog_row(view, path):
+    rows = [row for row in view['sessions'] if Path(row['path']).resolve() == path.resolve()]
+    assert len(rows) == 1, 'expected exactly one actual catalog path: ' + repr(rows)
+    return rows[0]
+
+
+def archive_restore_unsupported(response, session_id):
+    return (response.get('type') == 'response' and response.get('command') == 'send_message'
+            and response.get('success') is False
+            and response.get('error') == 'Unknown active session: ' + session_id)
+
+
+def cache_boundaries(client, config, root, created, child, ledger_path, provider, kind, observed,
+                     require_current_sidecar):
+    parent_file = Path(created['sessionFile'])
+    child_file = Path(child['sessionFile'])
+    child_active = child.get('activeSessionId') or child.get('id')
+    assert child_active, child
+    headers = [json.loads(line) for line in child_file.read_text().splitlines()
+               if line.strip() and json.loads(line).get('type') == 'session']
+    assert len(headers) == 1 and headers[0].get('id'), headers
+    child_session_id = headers[0]['id']
+    provider.release.set()
+    client.call('wait_for_idle', activeSessionId=child_active)
+    client.call('wait_for_idle', activeSessionId=created.get('activeSessionId') or created['id'])
+    client.call('kill', activeSessionId=child_active)
+    sidecar = child_file.with_suffix('.info-cache.json')
+    if kind == 'rust':
+        observed['lease_exit_sidecar'] = {'path': str(sidecar), 'exists': sidecar.is_file()}
+        if sidecar.is_file():
+            data = json.loads(sidecar.read_text())
+            generation = data['state']['generation']['len']
+            offset = data['state']['offset']
+            length = child_file.stat().st_size
+            observed['lease_exit_sidecar'].update(version=data['version'], generation=generation,
+                offset=offset, transcript_bytes=length, current=(generation == offset == length))
+        if require_current_sidecar:
+            assert observed['lease_exit_sidecar'].get('current'), 'ended child sidecar is not current'
+    before = ledger_path.read_bytes()
+    trace = observed['cache_boundaries'] = {'artifact_reads': [], 'setup':
+        'actual spawned child transcript moved only after worker kill; historical flat-path tombstone fixture below'}
+    relocated = root / 'agent/session-artifacts/ledger-moved/first' / child_file.name
+    relocated.parent.mkdir(parents=True)
+    child_file.rename(relocated)
+    first = client.call('list_saved_sessions', cwd=str(root), scope='all')
+    trace['artifact_reads'].append(first)
+    first_matches = [row for row in first['sessions'] if Path(row['path']).resolve() == relocated.resolve()]
+    assert len(first_matches) <= 1, first_matches
+    trace['first_relocated_child_present'] = len(first_matches) == 1
+    if kind == 'rust':
+        assert catalog_row(first, relocated)['id'] == child_session_id
+    moved_again = root / 'agent/session-artifacts/ledger-moved/second' / child_file.name
+    moved_again.parent.mkdir(parents=True)
+    relocated.rename(moved_again)
+    second = client.call('list_saved_sessions', cwd=str(root), scope='all')
+    trace['artifact_reads'].append(second)
+    recovered = [row for row in second['sessions'] if Path(row['path']).resolve() == moved_again.resolve()]
+    removed = root / ('removed-' + child_file.name)
+    moved_again.rename(removed)
+    third = client.call('list_saved_sessions', cwd=str(root), scope='all')
+    trace['artifact_reads'].append(third)
+    stale = [row for row in third['sessions'] if row['id'] == child_session_id]
+    trace['artifact_contract'] = {'relocation_recovered': len(recovered) == 1, 'removed_child_absent': not stale}
+    if kind == 'rust':
+        assert trace['artifact_contract'] == {'relocation_recovered': True, 'removed_child_absent': True}, trace
+    assert ledger_path.read_bytes() == before, 'artifact mutations unexpectedly changed ledger'
+    # Restore the actual transcript so normal cleanup retains the original fixture layout.
+    removed.rename(child_file)
+
+    billing = client.call('create', name='ledger-billing-child', config=config)
+    billing_active = billing.get('activeSessionId') or billing.get('id')
+    billing_file = Path(billing['sessionFile'])
+    client.call('prompt_and_wait', activeSessionId=billing_active, message=BILLING)
+    client.call('kill', activeSessionId=billing_active)
+    own_view = client.call('list_saved_sessions', cwd=str(root), scope='all')
+    own = catalog_row(own_view, billing_file)
+    usage = own.get('usage')
+    assert usage and usage['inputTokens'] > 0 and usage['outputTokens'] > 0, own
+    # Controlled, valid historic ledger input: unlike the initial admission this
+    # edge is seeded by the fixture, never claimed to be an actual rlm.spawn.
+    records = [
+        {'v': 1, 'op': 'spawn', 'at': '2026-01-01T00:00:00Z', 'childId': 'fixture-flat-child',
+         'parent': str(parent_file), 'child': str(billing_file), 'depth': 1, 'name': 'billing-child'},
+        {'v': 1, 'op': 'delete', 'at': '2026-01-01T00:00:01Z', 'childId': 'fixture-flat-child',
+         'child': str(billing_file), 'reason': 'user', 'usage': usage}]
+    with ledger_path.open('a') as output:
+        for record in records:
+            output.write(json.dumps(record) + '\n')
+    trace['seeded_historical_records'] = records
+    archive = root / 'agent/sessions-archive' / billing_file.name
+    archive.parent.mkdir(parents=True, exist_ok=True)
+    billing_file.rename(archive)
+    unchanged = ledger_path.read_bytes()
+    warm = client.call('list_saved_sessions', cwd=str(root), scope='all')
+    trace['bucket_warm'] = warm
+    parent_before = catalog_row(warm, parent_file)
+    trace['warm_bucket_matches_actual_usage'] = parent_before.get('deletedDescendantUsage') == usage
+    if kind == 'rust':
+        assert trace['warm_bucket_matches_actual_usage'], parent_before
+    try:
+        wake = client.call('send_message', targetActiveSessionId=own['id'], message='Restore the billing fixture.')
+    except AssertionError:
+        response = client.wire[-1]
+        if kind != 'ts' or not archive_restore_unsupported(response, own['id']):
+            raise
+        # The pinned binary has now actually refused this archived selector.
+        # Retain the refusal; never simulate a restore or call it parity.
+        trace['actual_restore_wake'] = {'supported': False, 'response': response}
+        assert archive.is_file() and not billing_file.exists(), 'refused wake partially restored the file'
+        assert ledger_path.read_bytes() == unchanged, 'refused wake changed the ledger'
+        trace['bucket_contract'] = {'actual_archive_restore_supported': False,
+            'restored_child_has_own_usage': None, 'parent_bucket_withdrawn': None}
+        trace['ledger_unchanged_across_boundary_operations'] = True
+        return {'artifact': trace['artifact_contract'], 'bucket': trace['bucket_contract']}
+    trace['actual_restore_wake'] = {'supported': True, 'receipt': wake}
+    assert billing_file.is_file() and not archive.exists(), 'actual catalog wake did not restore transcript'
+    restored = client.call('list_saved_sessions', cwd=str(root), scope='all')
+    trace['bucket_after_actual_restore'] = restored
+    parent_after = catalog_row(restored, parent_file)
+    restored_child = catalog_row(restored, billing_file)
+    trace['bucket_contract'] = {'restored_child_has_own_usage': restored_child.get('usage') == usage,
+        'parent_bucket_withdrawn': 'deletedDescendantUsage' not in parent_after}
+    if kind == 'rust':
+        assert trace['bucket_contract'] == {'restored_child_has_own_usage': True, 'parent_bucket_withdrawn': True}, trace
+    assert ledger_path.read_bytes() == unchanged, 'actual restore unexpectedly appended ledger'
+    trace['ledger_unchanged_across_boundary_operations'] = True
+    return {'artifact': trace['artifact_contract'], 'bucket': trace['bucket_contract']}
+
+
+def run_case(binary, kind, root, observed, require_current_sidecar=False):
     env = env_for(root, kind)
     library = Path(os.environ['PI_PACKAGE_DIR']) / 'skills'
     env['PYTHONPATH'] = os.pathsep.join(sorted(str(path) for path in library.glob('*/src') if path.is_dir()))
@@ -218,12 +360,16 @@ def run_case(binary, kind, root, observed):
             listed = [row for row in observed['lists'][0]['sessions'] if row.get('rlmChildId') == child_id]
             assert Path(spawns[0]['child']).resolve() == Path(listed[0]['sessionFile']).resolve(), spawns
             assert Path(spawns[0]['child']).is_file(), spawns
+            assert len(ledgers) == 1, ledgers
+            cache_boundaries(client, config, root, created, listed[0], ledgers[0], provider, kind, observed,
+                             require_current_sidecar)
             return {'list': contracts, 'roster': roster_contract,
                     'durable_spawn': {'name': NAME, 'depth': 1, 'count': 1,
                                       'parent_matches_created_session': True, 'child_transcript_exists': True}}
     finally:
         observed['owned_before_shutdown'] = owned_processes(root)
         provider.release.set()
+        provider.restore_release.set()
         if process and process.poll() is None and client:
             try:
                 client.call('shutdown', force=True)
@@ -247,7 +393,7 @@ def run_case(binary, kind, root, observed):
         confirm_cleanup(root, observed)
 
 
-def main():
+def main(require_current_sidecar=False):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--receipt', type=Path, required=True)
     args = parser.parse_args()
@@ -264,12 +410,21 @@ def main():
                 binary = Path(os.environ['PA_' + kind.upper() + '_BINARY']).resolve()
                 observed = result['runs'][kind] = {'binary_sha256': digest(binary)}
                 try:
-                    observed['contract'] = run_case(binary, kind, Path(temporary) / kind, observed)
+                    observed['contract'] = run_case(binary, kind, Path(temporary) / kind, observed, require_current_sidecar)
                 except Exception as error:
                     observed['error'] = str(error)
             errors = {kind: run['error'] for kind, run in result['runs'].items() if 'error' in run}
             assert not errors, errors
             assert result['runs']['ts']['contract'] == result['runs']['rust']['contract'], 'family contract mismatch'
+        result['cache_boundary_observations'] = {kind: {key: run['cache_boundaries'][key] for key in
+            ('artifact_contract', 'bucket_contract')} for kind, run in result['runs'].items()}
+        result['cache_boundary_scope'] = ('Rust regression invariants required; actual TS observations retained. '
+            'Pinned TS omitted relocated passive children, did not expose the warmed deleted-spend bucket, and '
+            'refused the archived selector with Unknown active session in actual hosted reads. These are '
+            'explicit baseline limitations; no full cache-boundary parity is claimed.')
+        result['cache_boundary_comparison'] = ('identical' if result['cache_boundary_observations']['ts'] ==
+            result['cache_boundary_observations']['rust'] else 'actual TS/Rust difference; raw reads retained')
+        result['require_current_rust_lease_exit_sidecar'] = require_current_sidecar
         result['verified'] = True
     except Exception as error:
         result['error'] = str(error)

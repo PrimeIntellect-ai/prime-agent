@@ -27,8 +27,6 @@ struct MockSupervisor {
     /// leaves the request in flight across an exit or a transcript rebuild.
     hold_backfill: bool,
     rebuild_response: RebuildResponse,
-    validation_state: Option<Value>,
-    changed_prefix: bool,
     history_leaf_id: Option<&'static str>,
     requests: Arc<Mutex<Vec<Value>>>,
 }
@@ -41,10 +39,6 @@ impl MockSupervisor {
             failures: 0,
             hold_backfill: false,
             rebuild_response: RebuildResponse::FullHistory,
-            validation_state: Some(
-                json!({"compactionCount": 0, "sessionId": "sess-1", "activeSessionId": "s1"}),
-            ),
-            changed_prefix: false,
             history_leaf_id: Some(HISTORY_LEAF_ID),
             requests,
         }
@@ -84,17 +78,6 @@ impl MockSupervisor {
                 "attach" => {
                     write_json(&mut writer, &attach_response(id, self.windowed));
                 }
-                "get_connection_state" => {
-                    write_json(
-                        &mut writer,
-                        &json!({
-                            "type": "response", "id": id, "command": "get_connection_state",
-                            "success": self.validation_state.is_some(),
-                            "data": self.validation_state,
-                            "error": if self.validation_state.is_none() { json!("validation rejected") } else { Value::Null },
-                        }),
-                    );
-                }
                 "get_messages" => {
                     self.requests.lock().unwrap().push(command.clone());
                     if self.failures > 0 {
@@ -102,7 +85,7 @@ impl MockSupervisor {
                         write_json(&mut writer, &history_failure(id));
                         continue;
                     }
-                    if command.get("before").is_some() {
+                    if command["page"].get("before").is_some() {
                         if self.hold_backfill {
                             held_backfill = Some(id.to_string());
                             // The frame is proof the server received this request;
@@ -118,20 +101,14 @@ impl MockSupervisor {
                             );
                             continue;
                         }
-                        let mut response = get_messages_response(id, &self);
-                        if self.changed_prefix {
-                            // Simulate a compaction that happened before the prefix read,
-                            // while its completion event has not yet been delivered.
-                            response["data"]["messages"] = json!(all_messages()[4..8]);
-                        }
-                        write_json(&mut writer, &response);
+                        write_json(&mut writer, &get_messages_response(id, &self));
                         continue;
                     }
                     if matches!(self.rebuild_response, RebuildResponse::Reject) {
                         write_json(&mut writer, &history_failure(id));
                         continue;
                     }
-                    // A cursor-less fetch is a transcript rebuild. Release the
+                    // A cursor-less page is a transcript rebuild. Release the
                     // obsolete response before it; the separate unit regression
                     // injects an already-queued note to verify the epoch fence.
                     if let Some(held) = held_backfill.take() {
@@ -204,7 +181,7 @@ fn all_messages() -> Vec<Value> {
 fn attach_response(id: &str, windowed: bool) -> Value {
     let messages = all_messages();
     let (snapshot_messages, history_before) = if windowed {
-        (messages[4..].to_vec(), json!(4u64))
+        (messages[4..].to_vec(), json!(entry_id(HISTORY_MESSAGES)))
     } else {
         (messages, Value::Null)
     };
@@ -228,7 +205,7 @@ fn attach_response(id: &str, windowed: bool) -> Value {
         "lastEventCursor": null,
     });
     if windowed {
-        snapshot["historyBefore"] = history_before;
+        snapshot["historyBeforeEntryId"] = history_before;
         snapshot["lastUserPromptMs"] = json!(114u64);
     }
     json!({
@@ -259,7 +236,12 @@ fn get_messages_response(id: &str, supervisor: &MockSupervisor) -> Value {
         "id": id,
         "command": "get_messages",
         "success": true,
-        "data": { "messages": messages },
+        "data": {
+            "messages": messages,
+            "firstEntryId": entry_id(0),
+            "lastEntryId": entry_id(HISTORY_MESSAGES - 1),
+            "more": false,
+        },
     });
     if let Some(history_leaf_id) = supervisor.history_leaf_id {
         response["data"]["historyLeafId"] = json!(history_leaf_id);
@@ -273,8 +255,18 @@ fn whole_head_response(id: &str) -> Value {
         "id": id,
         "command": "get_messages",
         "success": true,
-        "data": { "messages": all_messages() },
+        "data": {
+            "messages": all_messages(),
+            "firstEntryId": entry_id(0),
+            "lastEntryId": entry_id(15),
+            "more": false,
+            "historyLeafId": HISTORY_LEAF_ID,
+        },
     })
+}
+
+fn entry_id(index: usize) -> String {
+    format!("e{index:02}")
 }
 
 fn options(socket: PathBuf) -> InteractiveOptions {
@@ -324,21 +316,12 @@ fn run_attached_with_failures(
     failures: usize,
     steps: Vec<HeadlessStep>,
 ) -> (Vec<String>, Vec<Value>) {
-    run_attached_with_validation(
-        windowed,
-        failures,
-        /*changed_prefix*/ false,
-        None,
-        Some(HISTORY_LEAF_ID),
-        steps,
-    )
+    run_attached_with_validation(windowed, failures, Some(HISTORY_LEAF_ID), steps)
 }
 
 fn run_attached_with_validation(
     windowed: bool,
     failures: usize,
-    changed_prefix: bool,
-    validation_state: Option<Value>,
     history_leaf_id: Option<&'static str>,
     steps: Vec<HeadlessStep>,
 ) -> (Vec<String>, Vec<Value>) {
@@ -349,10 +332,6 @@ fn run_attached_with_validation(
     let mut supervisor = MockSupervisor::bind(&socket, windowed, Arc::clone(&requests));
     supervisor.failures = failures;
     supervisor.history_leaf_id = history_leaf_id;
-    if changed_prefix {
-        supervisor.validation_state = validation_state;
-        supervisor.changed_prefix = true;
-    }
     let handle = std::thread::spawn(move || supervisor.serve());
 
     let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -486,8 +465,8 @@ fn a_windowed_open_backfills_history_above_the_tail() {
     );
     assert_eq!(requests.len(), 1, "exactly one backfill request");
     assert_eq!(
-        requests[0]["before"],
-        json!(HISTORY_MESSAGES as u64),
+        requests[0]["page"]["before"],
+        json!(entry_id(HISTORY_MESSAGES)),
         "the backfill requests the omitted history range"
     );
     assert_eq!(
@@ -506,11 +485,9 @@ fn an_unverified_history_leaf_echo_keeps_the_attached_tail_and_reports_incomplet
         let (frames, requests) = run_attached_with_validation(
             /*windowed*/ true,
             /*failures*/ 0,
-            /*changed_prefix*/ false,
-            None,
             history_leaf_id,
             vec![HeadlessStep::WaitRender {
-                needle: "Older history could not be loaded".to_string(),
+                needle: "History could not be loaded".to_string(),
                 timeout_ms: 5000,
             }],
         );
@@ -522,7 +499,7 @@ fn an_unverified_history_leaf_echo_keeps_the_attached_tail_and_reports_incomplet
         assert!(
             frames
                 .iter()
-                .any(|frame| frame.contains("Older history could not be loaded")),
+                .any(|frame| frame.contains("History could not be loaded")),
             "an absent or wrong history anchor must fail visibly: {history_leaf_id:?}"
         );
         assert_eq!(requests[0]["historyLeafId"], json!(HISTORY_LEAF_ID));
@@ -581,13 +558,13 @@ fn a_rejected_backfill_retries_then_reports_incomplete_history() {
         true,
         /*failures*/ 2,
         vec![HeadlessStep::WaitRender {
-            needle: "Older history could not be loaded".to_string(),
+            needle: "History could not be loaded".to_string(),
             timeout_ms: 5000,
         }],
     );
     assert!(frames
         .iter()
-        .any(|frame| frame.contains("Older history could not be loaded")));
+        .any(|frame| frame.contains("History could not be loaded")));
     assert_eq!(requests.len(), 2);
     assert_eq!(requests[0], requests[1]);
 }
@@ -609,8 +586,8 @@ fn an_exit_with_backfill_in_flight_releases_the_daemon_connection() {
         "the held history request stayed in flight across the run: {requests:?}"
     );
     assert_eq!(
-        requests[0]["before"],
-        json!(HISTORY_MESSAGES as u64),
+        requests[0]["page"]["before"],
+        json!(entry_id(HISTORY_MESSAGES)),
         "the windowed attach armed exactly the history backfill: {requests:?}"
     );
     assert!(!frames.is_empty(), "frames were captured");
@@ -654,12 +631,12 @@ fn a_reload_rebuild_during_an_in_flight_backfill_keeps_rows_unique_and_ordered()
         "one held backfill page plus the reload's whole-head rebuild: {requests:?}"
     );
     assert_eq!(
-        requests[0]["before"],
-        json!(HISTORY_MESSAGES as u64),
+        requests[0]["page"]["before"],
+        json!(entry_id(HISTORY_MESSAGES)),
         "the backfill page carries the history cursor: {requests:?}"
     );
     assert!(
-        requests[1].get("before").is_none(),
+        requests[1]["page"].get("before").is_none(),
         "the rebuild fetches the whole head without a cursor: {requests:?}"
     );
     for (index, frame) in frames.iter().enumerate() {
@@ -675,48 +652,6 @@ fn a_reload_rebuild_during_an_in_flight_backfill_keeps_rows_unique_and_ordered()
         Some("msg-00"),
         "the rebuild's true top renders the first message: {final_frame}"
     );
-}
-
-#[test]
-fn a_changed_or_unverifiable_prefix_is_rejected_before_the_compaction_event() {
-    for state in [
-        Some(json!({"compactionCount": 1, "sessionId": "sess-1", "activeSessionId": "s1"})),
-        Some(json!({"sessionId": "sess-1", "activeSessionId": "s1"})),
-        Some(json!({"compactionCount": 0, "sessionId": "replacement", "activeSessionId": "s1"})),
-        Some(
-            json!({"compactionCount": 0, "sessionId": "sess-1", "activeSessionId": "replacement"}),
-        ),
-        None,
-    ] {
-        let (frames, requests) = run_attached_with_validation(
-            /*windowed*/ true,
-            /*failures*/ 0,
-            /*changed_prefix*/ true,
-            state,
-            Some(HISTORY_LEAF_ID),
-            vec![HeadlessStep::WaitRender {
-                needle: "Older history could not be loaded".to_string(),
-                timeout_ms: 5000,
-            }],
-        );
-        for frame in &frames {
-            let markers = collapsed_markers(frame);
-            assert!(
-                markers.windows(2).all(|pair| pair[0] < pair[1]),
-                "the changed prefix must never duplicate existing tail rows: {frame}"
-            );
-        }
-        assert_eq!(requests.len(), 1, "one prefix read before validation");
-        assert!(
-            frames
-                .iter()
-                .any(|frame| frame.contains("Older history could not be loaded")),
-            "mismatched or unverified history is reported rather than silently prepended"
-        );
-        assert!(!frames
-            .iter()
-            .any(|frame| frame.contains("timed out waiting")));
-    }
 }
 
 #[test]
@@ -743,9 +678,12 @@ fn a_failed_rebuild_reports_cancelled_incomplete_history() {
         2,
         "held prefix and failed whole-history rebuild only"
     );
-    assert_eq!(requests[0]["before"], json!(HISTORY_MESSAGES as u64));
+    assert_eq!(
+        requests[0]["page"]["before"],
+        json!(entry_id(HISTORY_MESSAGES))
+    );
     assert!(
-        requests[1].get("before").is_none(),
+        requests[1]["page"].get("before").is_none(),
         "the cancelled positional cursor is never rearmed"
     );
     assert!(
