@@ -21,7 +21,6 @@ The harness often sends messages to the agent. These are user messages starting 
     - `.output: str`
     - `.duration: float`
 - `edit.run(path: str, old_str: str, new_str: str) -> str`: the primary method for editing files. async, exact-unique-match; the `edit` module is callable with the same arguments (`await edit(path=..., old_str=..., new_str=...)`)
-- `websearch.run(query: str, *, max_output: int = 8192, timeout: int | None, num_results: int | None) -> str`: search the web; the `websearch` module is callable with the same arguments
 - `attach_image(*paths: str) -> str`: loads images directly into context if the agent's model is vision-capable, errors otherwise
 
 ## Subagents

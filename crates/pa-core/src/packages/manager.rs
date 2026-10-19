@@ -170,14 +170,15 @@ impl PackageManager {
             .unwrap_or(true)
     }
 
-    /// Settings flag: the bundled websearch skill (default true).
+    /// Settings flag: the bundled websearch skill (default false: web search
+    /// stays disabled until explicitly enabled via `bundledSkills.websearch`).
     pub(super) fn bundled_websearch_enabled(&self) -> bool {
         self.settings
             .settings()
             .bundled_skills
             .as_ref()
             .and_then(|bundled| bundled.websearch)
-            .unwrap_or(true)
+            .unwrap_or(false)
     }
 
     /// Extra force-exclude patterns for built-in skills.
