@@ -1507,7 +1507,18 @@ async fn prompt_turn(
         eprintln!("pa-daemon: acp turn failed: {failure}");
         publish_error_boundary(&producer, turn_id).await;
         producer.finish_prompt(turn_id).await;
-        return super::internal_error(&id, &format!("prime-agent turn failed: {failure}"));
+        // The worker's failure text classifies through the #2117
+        // classifier (a fixed category + retryable verdict; the raw
+        // text still never rides past `details`), so the reply data is
+        // machine-readable at the transport boundary.
+        let classification =
+            pa_core::session_engine::error_classify::classify_error_message(&failure);
+        return super::turn_failure_error(
+            &id,
+            classification.category,
+            classification.retryable,
+            &format!("prime-agent turn failed: {failure}"),
+        );
     }
     // The autonomous accounting for the completion envelope: the daemon's
     // headless-completion status (TS `waitForHeadlessCompletion`), fetched

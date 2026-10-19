@@ -1398,6 +1398,59 @@ fn acp_daemon_attached_failed_turn_publishes_only_the_error_boundary() {
     );
 }
 
+#[test]
+fn acp_failed_prompt_error_data_classifies_the_transport_failure() {
+    // A provider connection failure fails the turn: the ACP error data
+    // carries the #2117 classifier's category and retryable verdict (the
+    // nano-rlm #200 `kind`/`retryable` contract) so a host separates
+    // retryable model transport from harness bugs without parsing the
+    // details text. `repeatLastResponse` keeps every auto-retry attempt
+    // failing with the same connection-reset disclosure, so the settled
+    // turn error is the scripted transport failure.
+    let mut client = AcpChild::spawn(
+        &["--mode", "acp", "--no-session"],
+        &json!({
+            "engine": "faux",
+            "repeatLastResponse": true,
+            "responses": [
+                { "stopReason": "error", "errorMessage": "ECONNRESET: model connection reset mid-stream" }
+            ]
+        }),
+    );
+    let init = client.request("initialize", &initialize_params());
+    let _ = client.wait_response(init, TIMEOUT);
+    let new = client.request("session/new", &json!({ "mcpServers": [] }));
+    let (new_response, _) = client.wait_response(new, TIMEOUT);
+    let session_id = new_response["result"]["sessionId"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let prompt = client.request(
+        "session/prompt",
+        &json!({ "sessionId": session_id, "prompt": [{ "type": "text", "text": "a question" }] }),
+    );
+    let (prompt_response, _) = client.wait_response(prompt, TIMEOUT);
+    assert_eq!(
+        prompt_response["error"]["code"], -32603,
+        "the failed turn errors the request: {prompt_response}"
+    );
+    assert_eq!(
+        prompt_response["error"]["data"]["kind"], "network",
+        "the connection reset classifies as the network category: {prompt_response}"
+    );
+    assert_eq!(
+        prompt_response["error"]["data"]["retryable"], true,
+        "the transport failure carries the classifier's retryable verdict: {prompt_response}"
+    );
+    assert!(
+        prompt_response["error"]["data"]["details"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("ECONNRESET"),
+        "the raw failure still rides the details text: {prompt_response}"
+    );
+}
+
 #[cfg(unix)]
 #[test]
 fn acp_daemon_attached_supervisor_loss_fails_the_prompt() {

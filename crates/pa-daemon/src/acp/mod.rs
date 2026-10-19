@@ -23,6 +23,21 @@ fn internal_error(id: &Value, details: &str) -> Value {
     )
 }
 
+/// The failed-turn reply: the #2117 classifier's category (`kind`) and
+/// retryable verdict ride as typed data alongside the details, so an
+/// ACP host can programmatically separate retryable model-transport
+/// failures from harness bugs instead of guessing from the text (the
+/// nano-rlm #200 `kind`/`retryable` contract; the retryable flag is
+/// advisory — the host's own retry policy decides).
+fn turn_failure_error(id: &Value, kind: &str, retryable: bool, details: &str) -> Value {
+    jsonrpc::error_response(
+        id,
+        jsonrpc::INTERNAL_ERROR,
+        "Internal error",
+        Some(&json!({ "details": details, "kind": kind, "retryable": retryable })),
+    )
+}
+
 /// Two paths are the same cwd when their canonical forms match, or when they
 /// are the same directory on disk (dev/inode) — the bind-mount and
 /// case-normalized-FS cases a lexical comparison misses.
