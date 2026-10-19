@@ -311,3 +311,55 @@ async fn ctrl_x_on_a_shell_row_stops_it_and_its_finished_row_leaves_the_list() {
         "the stopped shell left the list:\n{last}"
     );
 }
+
+/// A session opened from its shell row returns onto that row: the handoff carries the shells list,
+/// so the returning view's first frame already lists the shell the selection restores onto.
+#[tokio::test]
+async fn a_return_from_a_shells_session_restores_the_shell_row() {
+    let _guard = RUN_LOCK.lock().await;
+    let dir = tempfile::TempDir::new().expect("temp dir");
+    let socket = dir.path().join("agents-view.sock");
+    let listener = UnixListener::bind(&socket).expect("bind mock socket");
+    let _server = std::thread::spawn(move || serve(&listener));
+    let plan = |steps| {
+        AgentsViewUiMode::Headless(AgentsHeadlessPlan {
+            steps,
+            width: 100,
+            height: 30,
+        })
+    };
+    let first = Box::pin(run_agents_view(
+        view_options(&socket),
+        plan(vec![
+            AgentsStep::WaitSettle { timeout_ms: 2500 },
+            wait_render("$ orphan-watch"),
+            AgentsStep::Key("home".to_string()),
+            AgentsStep::Key("enter".to_string()),
+        ]),
+        None,
+    ))
+    .await
+    .expect("the first view opens the shell's session");
+    assert_eq!(
+        first.outcome.selected_row_identity.as_deref(),
+        Some("shell:b")
+    );
+    let mut options = view_options(&socket);
+    options.selected_row_identity = first.outcome.selected_row_identity.clone();
+    options.selected_key = first.outcome.selected_key.clone();
+    let second = Box::pin(run_agents_view(
+        options,
+        plan(vec![AgentsStep::Key("enter".to_string())]),
+        first.link,
+    ))
+    .await
+    .expect("the returning view")
+    .outcome;
+    let first_frame = second.frames.first().expect("a first frame");
+    assert!(first_frame.contains("$ build-watch"), "{first_frame}");
+    assert_eq!(
+        second.selected_row_identity.as_deref(),
+        Some("shell:b"),
+        "Enter reopened the shell row the return restored"
+    );
+}
