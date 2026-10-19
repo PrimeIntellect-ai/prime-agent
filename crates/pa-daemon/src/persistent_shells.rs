@@ -334,6 +334,33 @@ mod tests {
     }
 
     #[test]
+    fn kill_escalates_to_a_member_that_outlives_its_leaders_term() {
+        use std::io::BufRead;
+        let root = tempfile::tempdir().unwrap();
+        let (mut leader, member, id) = registered_group(root.path());
+        let mut stubborn = Command::new("sh")
+            .args(["-c", "trap '' TERM; echo ready; exec sleep 60"])
+            .process_group(leader.id() as i32)
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut ready = String::new();
+        std::io::BufReader::new(stubborn.stdout.take().unwrap())
+            .read_line(&mut ready)
+            .unwrap();
+
+        assert_eq!(kill_shell(root.path(), &id), Ok(true));
+
+        leader.wait().unwrap();
+        member.wait_with_output().unwrap();
+        assert_eq!(
+            stubborn.wait().unwrap().signal(),
+            Some(NixSignal::SIGKILL as i32),
+            "the member that ignored TERM got the group's KILL"
+        );
+    }
+
+    #[test]
     fn exited_leaders_group_is_unverified_and_never_signalled() {
         let root = tempfile::tempdir().unwrap();
         let (mut leader, member, id) = registered_group(root.path());
