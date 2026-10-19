@@ -1,6 +1,8 @@
-//! Terminal hyperlinks (OSC 8), gated on terminal capabilities: a
-//! positively-capable terminal wraps the link text in an OSC 8 pair; the
-//! legacy form prints the URL after the text. The renderer embeds the
+//! Terminal hyperlinks (OSC 8). Markdown retains label metadata even when
+//! the capability decision selects a visible URL fallback, matching TS's
+//! fullscreen backend and keeping in-app hit testing available. Other UI
+//! surfaces may gate their link presentation on terminal capabilities.
+//! The renderer embeds the
 //! zero-width sequences in span content; `width` skips them, the ratatui
 //! paint path strips them (`to_ratatui_line`), and [`HyperlinkWriter`]
 //! re-emits them around the painted link cells (the sequences must ride
@@ -46,19 +48,23 @@ pub fn rewrite_drive_path(url: &str) -> String {
 }
 
 /// TS `case "link"` href resolution: drive-path rewrite, then a WHATWG
-/// `new URL(target, baseUrl)` pass (the deployed renderer always sets
-/// `options.baseUrl`). Relative targets pass through raw — the one
-/// documented gap (they need cwd plumbing the markdown pipeline does not
-/// carry).
+/// `new URL(target, baseUrl)` pass. Standalone callers have no base; the
+/// session view supplies its own base through the crate-private Markdown context.
 #[must_use]
 pub fn resolve_link_href(token_href: &str) -> String {
+    resolve_link_href_with_base(token_href, None)
+}
+
+pub(crate) fn resolve_link_href_with_base(token_href: &str, base: Option<&url::Url>) -> String {
     let target = rewrite_drive_path(token_href);
     if target.starts_with('#') {
         return sanitize_control_bytes(target);
     }
     match url::Url::parse(&target) {
         Ok(parsed) => parsed.to_string(),
-        Err(_) => sanitize_control_bytes(target),
+        Err(_) => base
+            .and_then(|base| base.join(&target).ok())
+            .map_or_else(|| sanitize_control_bytes(target), |url| url.to_string()),
     }
 }
 
@@ -664,6 +670,34 @@ mod tests {
             out,
             "\x1b[1;3Hab\x1b[1;5H\x1b]8;;https://z\x1b\\cd\x1b]8;;\x1b\\\x1b[1;8Hxy"
         );
+    }
+
+    #[test]
+    fn fallback_capability_keeps_markdown_label_metadata_and_hit_testing() {
+        set_hyperlinks_override(Some(false));
+        let style = crate::markdown::MarkdownStyle::default();
+        let frame = vec![crate::markdown::render_inline(
+            "[docs](https://example.com)",
+            &style,
+        )];
+        let ranges = frame_link_ranges(&frame);
+        assert_eq!(link_at(&ranges, 0, 0), Some("https://example.com/"));
+        assert_eq!(
+            link_at(&ranges, 0, 4),
+            None,
+            "fallback URL is outside the label's region"
+        );
+        // The actual render has separate label/body and dim fallback spans.
+        // Pin that boundary; this is not a test of splitting a homogeneous
+        // writer chunk across a link range in the middle of its bytes.
+        let out = paint(&frame, &[b"\x1b[1;1Hdocs", b" (https://example.com)"]);
+        assert!(out.contains(&format!(
+            "{}docs{}",
+            osc8_open("https://example.com/"),
+            OSC8_CLOSE
+        )));
+        assert!(out.ends_with(" (https://example.com)"));
+        set_hyperlinks_override(None);
     }
 
     #[test]

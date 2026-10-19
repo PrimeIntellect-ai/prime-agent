@@ -747,6 +747,8 @@ impl Supervisor {
                     .insert("promotedOwnerClientId".to_string(), json!(owner));
                 crate::descriptor::persist_worker(&resident.descriptor_path, &descriptor)
                     .map_err(|error| error.to_string())?;
+                // The promotion clear (the TS `promoteOwnedWorker`).
+                resident.clear_launch_env();
                 Ok(())
             }
             // An already-promoted session stays promoted; a foreign owner

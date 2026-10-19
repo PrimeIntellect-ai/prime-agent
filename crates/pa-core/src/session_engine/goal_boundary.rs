@@ -45,7 +45,7 @@ impl SessionEngine {
         let state = driver.start(&mut session, objective, token_budget)?;
         drop(session);
         drop(driver);
-        let context = create_goal_context_message(&state, GoalContextKind::Continuation)?;
+        let context = create_goal_context_message(&state, GoalContextKind::Continuation, &[])?;
         self.session.queue_next_turn_row(context);
         Ok(true)
     }
@@ -79,6 +79,7 @@ impl SessionEngine {
         create_goal_context_message(
             &driver.state_with_creation_elapsed(),
             GoalContextKind::BudgetLimit,
+            &[],
         )
         .ok()
     }

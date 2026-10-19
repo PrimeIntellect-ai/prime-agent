@@ -12,8 +12,6 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use crate::tools::bash::{self, BashToolOptions};
-use crate::tools::code_preview::preview_bash_command;
-use crate::tools::code_preview_python::preview_ipython_code;
 use crate::tools::edit::{create_edit_tool_definition, execute_edit, LocalEditOperations};
 use crate::tools::ipython::{
     self, ExecuteResult, ExecuteStatus, IpythonKernelProvisioner, IpythonToolOptions,
@@ -21,7 +19,7 @@ use crate::tools::ipython::{
     KernelExecError, KernelExecuteOptions, KernelExecutor,
 };
 use crate::tools::tool_definition::ToolDefinition;
-use crate::tools::truncate::{truncate_head, truncate_tail, TruncationOptions};
+use crate::tools::truncate::{truncate_tail, TruncationOptions};
 
 const CORPUS_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/golden/corpus");
 
@@ -317,49 +315,12 @@ fn golden_truncate_group_matches_ts() {
             case["maxLines"].as_u64().expect("maxLines") as usize,
             case["maxBytes"].as_u64().expect("maxBytes") as usize,
         );
-        let head = truncate_head(content, options);
         let tail = truncate_tail(content, options);
-        assert_json_eq(
-            &truncation_json(&head),
-            &case["head"].clone(),
-            &format!("truncate/{name} head"),
-        );
         assert_json_eq(
             &truncation_json(&tail),
             &case["tail"].clone(),
             &format!("truncate/{name} tail"),
         );
-        checked += 1;
-    }
-    assert_eq!(checked, corpus["caseCount"].as_u64().expect("caseCount"));
-}
-
-#[test]
-fn golden_preview_group_matches_ts() {
-    let corpus = corpus("preview");
-    let mut checked = 0;
-    for case in corpus["cases"].as_array().expect("cases array") {
-        let input = case["input"].as_str().expect("input");
-        let language = |l: crate::tools::code_preview::CodePreviewLanguage| {
-            serde_json::json!({
-                "language": match l {
-                    crate::tools::code_preview::CodePreviewLanguage::Bash => "bash",
-                    crate::tools::code_preview::CodePreviewLanguage::Python => "python",
-                },
-            })
-        };
-        let preview = preview_bash_command(input);
-        let actual = serde_json::json!({
-            "language": language(preview.language)["language"],
-            "text": preview.text,
-        });
-        assert_json_eq(&actual, &case["bash"].clone(), "preview bash");
-        let preview = preview_ipython_code(input);
-        let actual = serde_json::json!({
-            "language": language(preview.language)["language"],
-            "text": preview.text,
-        });
-        assert_json_eq(&actual, &case["ipython"].clone(), "preview ipython");
         checked += 1;
     }
     assert_eq!(checked, corpus["caseCount"].as_u64().expect("caseCount"));

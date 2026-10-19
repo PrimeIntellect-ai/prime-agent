@@ -302,6 +302,15 @@ pub fn update_harness_state<R>(
     scope: HarnessScope,
     update: impl FnOnce(&mut HarnessState) -> R,
 ) -> anyhow::Result<(R, PathBuf)> {
+    try_update_harness_state(harness_state_dir, scope, |state| Ok(update(state)))
+}
+
+/// A rejected update must exit before saving, including an apply-time setting gate.
+pub(crate) fn try_update_harness_state<R>(
+    harness_state_dir: &Path,
+    scope: HarnessScope,
+    update: impl FnOnce(&mut HarnessState) -> anyhow::Result<R>,
+) -> anyhow::Result<(R, PathBuf)> {
     std::fs::create_dir_all(harness_state_dir)?;
     let state_path = get_harness_state_path(harness_state_dir);
     let lock = crate::platform::lock_dir::LockDir::acquire_owned_retrying(
@@ -311,7 +320,7 @@ pub fn update_harness_state<R>(
         std::time::Duration::from_millis(20),
     )?;
     let mut state = load_harness_state(harness_state_dir, scope);
-    let result = update(&mut state);
+    let result = update(&mut state)?;
     lock.ensure_owned()?;
     let written = save_harness_state(harness_state_dir, &state)?;
     Ok((result, written))
@@ -592,6 +601,21 @@ mod tests {
     }
 
     #[test]
+    fn rejected_harness_update_preserves_saved_state() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = empty_harness_state();
+        let path = save_harness_state(dir.path(), &state).unwrap();
+        let before = std::fs::read(&path).unwrap();
+        let result: anyhow::Result<((), PathBuf)> =
+            try_update_harness_state(dir.path(), HarnessScope::Global, |state| {
+                state.schema = 99;
+                anyhow::bail!("disabled before commit")
+            });
+        assert!(result.is_err());
+        assert_eq!(std::fs::read(path).unwrap(), before);
+    }
+
+    #[test]
     fn factory_opt_in_reads_leniently_and_fails_closed() {
         let tmp = tempfile::tempdir().unwrap();
         // No settings file: the opt-in default is disabled.
@@ -698,12 +722,16 @@ mod tests {
     fn concurrent_update_harness_state_writes_all_land() {
         let tmp = tempfile::tempdir().unwrap();
         let dir = get_global_harness_state_dir(tmp.path());
-        std::thread::scope(|scope| {
-            for worker in 0..8u32 {
-                let dir = &dir;
-                scope.spawn(move || {
-                    for i in 0..10u32 {
-                        let id = format!("m-{worker}-{i}");
+        // Each round, two fresh writers race one read-modify-write. The lock
+        // is unfair and its wait is bounded (~1s, shared with the kernel), so
+        // no writer loops back into it while the other polls: a waiter faces
+        // one foreign hold.
+        for round in 0..40u32 {
+            std::thread::scope(|scope| {
+                for worker in 0..2u32 {
+                    let dir = &dir;
+                    scope.spawn(move || {
+                        let id = format!("m-{worker}-{round}");
                         update_harness_state(dir, HarnessScope::Global, |state| {
                             let memories = state.entries.get_mut(&RefinementKind::Memory).unwrap();
                             memories.insert(
@@ -713,10 +741,10 @@ mod tests {
                             memories.len()
                         })
                         .unwrap();
-                    }
-                });
-            }
-        });
+                    });
+                }
+            });
+        }
         let loaded = load_harness_state(&dir, HarnessScope::Global);
         assert_eq!(loaded.entries[&RefinementKind::Memory].len(), 80);
     }

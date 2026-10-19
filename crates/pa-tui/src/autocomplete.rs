@@ -249,7 +249,7 @@ fn home_dir() -> std::path::PathBuf {
 
 /// The `@`-attachment token at the cursor: the token feeds the fuzzy
 /// file search below the session cwd (or the typed scope).
-fn extract_at_prefix(text: &[char]) -> Option<String> {
+pub(crate) fn extract_at_prefix(text: &[char]) -> Option<String> {
     if let Some(quoted) = extract_quoted_prefix(text) {
         if quoted.starts_with("@\"") {
             return Some(quoted);

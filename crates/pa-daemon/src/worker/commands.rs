@@ -14,23 +14,27 @@ impl Worker {
     pub(crate) async fn dispatch(&self, command_type: &str, payload: &Value) -> DaemonResponse {
         // Only operations that inspect or change historical branches need hydration.
         // Cancellation is deliberately excluded: it must reach the live turn immediately.
-        if matches!(
-            command_type,
-            "get_session_tree"
-                | "get_context_tree"
-                | "get_user_messages_for_forking"
-                | "set_session_entry_label"
-                | "navigate_tree"
-                | "fork"
-                | "export_html"
-                | "export_jsonl"
-        ) && self
-            .core
-            .lock()
-            .unwrap()
-            .store
-            .as_ref()
-            .is_some_and(|store| store.window.is_some())
+        let history_page = command_type == "get_messages"
+            && transcript_page(payload).is_some_and(|page| page.reads_history());
+        if (history_page
+            || matches!(
+                command_type,
+                "get_session_tree"
+                    | "get_context_tree"
+                    | "get_user_messages_for_forking"
+                    | "set_session_entry_label"
+                    | "navigate_tree"
+                    | "fork"
+                    | "export_html"
+                    | "export_jsonl"
+            ))
+            && self
+                .core
+                .lock()
+                .unwrap()
+                .store
+                .as_ref()
+                .is_some_and(|store| store.window.is_some())
         {
             let path = self
                 .core
@@ -161,7 +165,7 @@ impl Worker {
             "restore_next_turn" => self.handle_restore_next_turn(payload),
             "restore_actions" => self.handle_restore_actions(payload),
             "refine" => self.handle_refine(payload).await,
-            "reload" => self.handle_reload(),
+            "reload" => self.handle_reload().await,
             "cancel_rlm_child" => self.handle_cancel_rlm_child(payload).await,
             "delete_rlm_subagent" => self.handle_delete_rlm_subagent(payload).await,
             // The engine call blocks on the engine runtime, so it
@@ -313,13 +317,15 @@ impl Worker {
     /// flowing — the armed steering rows co-deliver, then the follow-up drains.
     ///
     /// SANCTIONED DIVERGENCE (operator ruling 2026-09-25): TS parks the queue
-    /// whenever nothing is armable; here the abort resumes. Returns whether
-    /// the queue was resumed.
+    /// whenever nothing is armable; here the abort resumes. The same divergence
+    /// covers a held admission pause: the abort clears the suspension and the
+    /// pump's own pause gate holds the delivery until the release re-notifies
+    /// it. Returns whether the queue was resumed.
     pub(crate) fn abort_and_send_queued(&self) -> bool {
-        // TS `canResume`: no admission pause held — the arm only
-        // fires in the send arm.
-        let can_resume =
-            !self.input_pauses.paused() && !self.core.lock().unwrap().shutdown_requested;
+        // TS `canResume` also parks under an admission pause; the pump's own
+        // pause gate is the one hold that matters, so only a shutting-down
+        // worker (whose queue survives via the restart journal) stays parked.
+        let can_resume = !self.core.lock().unwrap().shutdown_requested;
         if !can_resume {
             self.request_abort();
             return false;
@@ -461,10 +467,7 @@ impl Worker {
         if let Err(response) = self.require_created("get_messages") {
             return response;
         }
-        let before = payload
-            .get("before")
-            .and_then(Value::as_u64)
-            .and_then(|before| usize::try_from(before).ok());
+        let page = transcript_page(payload);
         let capabilities = payload
             .get("capabilities")
             .and_then(Value::as_array)
@@ -477,32 +480,48 @@ impl Worker {
             })
             .unwrap_or_default();
         let core = self.core.lock().unwrap();
-        // Validate ancestry atomically with the positional read. Appends keep the
+        let Some(page) = page else {
+            let mut messages = core
+                .store
+                .as_ref()
+                .map(SessionFile::messages)
+                .unwrap_or_default();
+            if crate::snapshot_stream::wants_image_elision(&capabilities) {
+                crate::snapshot_stream::elide_snapshot_image_payloads(&mut messages);
+            }
+            return response_success(None, "get_messages", Some(json!({ "messages": messages })));
+        };
+        let Some(store) = core.store.as_ref() else {
+            return response_failure(None, "get_messages", "History branch changed", None);
+        };
+        // Validate ancestry atomically with the page read. Appends keep the
         // attached leaf on this branch; navigation to another branch does not.
-        let history_leaf = payload.get("historyLeafId").filter(|_| before.is_some());
-        if let Some(anchor) = history_leaf {
-            let valid = anchor.as_str().is_some_and(|leaf| {
-                core.store
-                    .as_ref()
-                    .is_some_and(|store| store.branch().iter().any(|entry| entry.id == leaf))
-            });
-            if !valid {
+        let history_leaf = match payload.get("historyLeafId").map(Value::as_str) {
+            Some(Some(leaf)) if store.branch().iter().any(|entry| entry.id == leaf) => {
+                leaf.to_string()
+            }
+            Some(_) => {
                 return response_failure(None, "get_messages", "History branch changed", None);
             }
-        }
-        let mut messages: Vec<Value> = match (core.store.as_ref(), before) {
-            (Some(store), Some(before)) => store.messages_before(before),
-            (Some(store), None) => store.messages(),
-            (None, _) => Vec::new(),
+            None => store.leaf_id.clone().unwrap_or_default(),
+        };
+        let Some(mut rows) = store.transcript_page(&page) else {
+            return response_failure(None, "get_messages", "History branch changed", None);
         };
         if crate::snapshot_stream::wants_image_elision(&capabilities) {
-            crate::snapshot_stream::elide_snapshot_image_payloads(&mut messages);
+            crate::snapshot_stream::elide_snapshot_image_payloads(&mut rows.messages);
         }
-        let mut data = json!({ "messages": messages });
-        if let Some(anchor) = history_leaf {
-            data["historyLeafId"] = anchor.clone();
-        }
-        response_success(None, "get_messages", Some(data))
+        response_success(
+            None,
+            "get_messages",
+            Some(json!({
+                "messages": rows.messages,
+                "firstEntryId": rows.first_entry_id,
+                "lastEntryId": rows.last_entry_id,
+                "more": rows.more,
+                "historyLeafId": history_leaf,
+            })),
+        )
     }
 
     fn handle_get_queue(&self) -> DaemonResponse {
@@ -527,18 +546,25 @@ impl Worker {
             return response;
         }
         let mut core = self.core.lock().unwrap();
-        let drain_lane = |lane: &mut VecDeque<QueuedItem>| -> Vec<String> {
-            lane.drain(..)
-                .map(|item| {
-                    if let Some(id) = item.admission_id.as_deref() {
-                        self.prompt_admissions.clear(id);
-                    }
-                    item.message
-                })
-                .collect()
-        };
-        let steering: Vec<String> = drain_lane(&mut core.steering);
-        let follow_up: Vec<String> = drain_lane(&mut core.follow_up);
+        // The dropped agent-message rows bounce to their senders: a queued
+        // row's sender otherwise never learns its message will not deliver.
+        let mut dropped_agent_rows = Vec::new();
+        let drain_lane =
+            |lane: &mut VecDeque<QueuedItem>, dropped_agent_rows: &mut Vec<Value>| -> Vec<String> {
+                lane.drain(..)
+                    .map(|item| {
+                        if let Some(id) = item.admission_id.as_deref() {
+                            self.prompt_admissions.clear(id);
+                        }
+                        if item.agent_message.is_some() {
+                            dropped_agent_rows.extend(item.custom_message);
+                        }
+                        item.message
+                    })
+                    .collect()
+            };
+        let steering: Vec<String> = drain_lane(&mut core.steering, &mut dropped_agent_rows);
+        let follow_up: Vec<String> = drain_lane(&mut core.follow_up, &mut dropped_agent_rows);
         clear_withdrawn_progress_note(&core, self.engine.as_ref());
         let snapshot = Self::snapshot_locked(&core);
         drop(core);
@@ -548,11 +574,62 @@ impl Worker {
             operation: "queue_cleared",
         });
         let _ = self.emit_action_update(&snapshot);
+        for row in &dropped_agent_rows {
+            self.bounce_cleared_agent_message(row);
+        }
         response_success(
             None,
             "clear_queue",
             Some(json!({ "steering": steering, "followUp": follow_up })),
         )
+    }
+
+    /// One dropped agent-message row's sender notice: the row's own
+    /// `details` name the sender and the body, and the bounce rides the
+    /// supervisor `send_message` route from this session. Spawned off the
+    /// clear's response path — a failed bounce is logged, never retried.
+    fn bounce_cleared_agent_message(&self, row: &Value) {
+        let Some(details) = row.get("details") else {
+            return;
+        };
+        let sender = details
+            .get("from")
+            .and_then(|from| from.get("activeSessionId"))
+            .and_then(Value::as_str)
+            .filter(|id| !id.is_empty());
+        let Some(sender) = sender else {
+            // CLI-origin senders carry no session to bounce to.
+            return;
+        };
+        let message = details
+            .get("message")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        // The cleared queue is this worker's own; its identity — not the
+        // row's delivery-time copy — names the receiver.
+        let receiver = {
+            let core = self.core.lock().unwrap();
+            core.store
+                .as_ref()
+                .and_then(|store| store.session_name().map(str::to_string))
+                .filter(|name| !name.is_empty())
+                .unwrap_or_else(|| self.config.active_session_id.clone())
+        };
+        let command = json!({
+            "type": "send_message",
+            "targetActiveSessionId": sender,
+            "message": cleared_agent_message_bounce_text(&receiver, message),
+            "fromActiveSessionId": self.config.active_session_id,
+            "agentOrigin": true,
+        });
+        let link = std::sync::Arc::clone(&self.roster_link);
+        let sender = sender.to_string();
+        let timeout = std::time::Duration::from_millis(crate::messaging::WORKER_REQUEST_TIMEOUT_MS);
+        tokio::spawn(async move {
+            if let Err(error) = link.request_success(command, timeout).await {
+                eprintln!("pa-daemon: cleared agent-message bounce to {sender} failed: {error:#}");
+            }
+        });
     }
 
     fn handle_abort_and_clear_queue(&self) -> DaemonResponse {
@@ -780,5 +857,56 @@ impl Worker {
             command,
             Some(serde_json::to_value(&summary).unwrap_or(Value::Null)),
         )
+    }
+}
+
+/// The bounce body: the receiver label, the fact, and the dropped body —
+/// truncated so the whole notice stays inside the delivery size limit the
+/// receiving `worker_deliver_message` enforces.
+fn cleared_agent_message_bounce_text(receiver: &str, message: &str) -> String {
+    let limit = pa_core::session_engine::agent_messaging::DEFAULT_AGENT_MESSAGE_MAX_CHARS;
+    let opening = "Your agent message was cleared from ";
+    let ending = "'s queue before delivery: ";
+    // Session names are unbounded. Reserve the notice itself before fitting
+    // the receiver label, then spend the remaining characters on the body.
+    let receiver_budget = limit.saturating_sub(opening.chars().count() + ending.chars().count());
+    let receiver: String = receiver.chars().take(receiver_budget).collect();
+    let prefix = format!("{opening}{receiver}{ending}");
+    let budget = limit.saturating_sub(prefix.chars().count());
+    let body: String = message.chars().take(budget).collect();
+    format!("{prefix}{body}")
+}
+
+/// The display-transcript page a `get_messages` payload asks for, if any.
+fn transcript_page(payload: &Value) -> Option<pa_types::daemon::TranscriptPage> {
+    serde_json::from_value(payload.get("page")?.clone()).ok()
+}
+
+#[cfg(test)]
+mod bounce_text_tests {
+    use super::cleared_agent_message_bounce_text;
+    use pa_core::session_engine::agent_messaging::DEFAULT_AGENT_MESSAGE_MAX_CHARS;
+
+    #[test]
+    fn bounce_text_limits_receiver_and_body_without_losing_the_notice() {
+        for (receiver, message) in [
+            (
+                "target".to_string(),
+                "界".repeat(DEFAULT_AGENT_MESSAGE_MAX_CHARS),
+            ),
+            (
+                "界".repeat(DEFAULT_AGENT_MESSAGE_MAX_CHARS + 1),
+                "body".to_string(),
+            ),
+            (
+                "界".repeat(DEFAULT_AGENT_MESSAGE_MAX_CHARS + 1),
+                String::new(),
+            ),
+        ] {
+            let text = cleared_agent_message_bounce_text(&receiver, &message);
+            assert_eq!(text.chars().count(), DEFAULT_AGENT_MESSAGE_MAX_CHARS);
+            assert!(text.starts_with("Your agent message was cleared from "));
+            assert!(text.contains("'s queue before delivery: "));
+        }
     }
 }

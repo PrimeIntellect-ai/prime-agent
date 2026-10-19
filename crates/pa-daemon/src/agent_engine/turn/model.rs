@@ -24,6 +24,7 @@ impl AgentSessionEngine {
             thinking_level: pa_agent::types::ThinkingLevel,
             api_key: Option<String>,
             headers: Option<std::collections::BTreeMap<String, String>>,
+            session_restored: bool,
         }
         let model = match self.resolve_model() {
             Ok(model) => model,
@@ -31,7 +32,7 @@ impl AgentSessionEngine {
                 return TurnResult::Error {
                     error: error.to_string(),
                     assistant: None,
-                }
+                };
             }
         };
         // The preflight validates the model SERVING the run: a model whose
@@ -82,7 +83,7 @@ impl AgentSessionEngine {
                 return TurnResult::Error {
                     error: format!("{error:#}"),
                     assistant: None,
-                }
+                };
             }
         };
         // The delivery's cancel flag is consulted at the admission, before
@@ -112,15 +113,16 @@ impl AgentSessionEngine {
         // user message, so its turn starts as a continuation (TS
         // `agent.continue()`); ordinary turns start fresh.
         let first_attempt = std::cell::Cell::new(matches!(admission, TurnAdmission::FreshPrompt));
-        // Failover switch/restore re-bind the live agent's model and
-        // append the model-change row. The primary (model + thinking
-        // level) is captured at the first switch, restored on settle.
-        let persistence = {
+        // Failover switch/restore re-bind the live agent's model, append
+        // the model-change row, and re-bind the turn-boundary model facts
+        // (`model.info` follows the session model). The first successful
+        // backup response restores session state before tools, like TS; the
+        // captured run still serves backup traffic until it settles.
+        let core = {
             let guard = self.session.blocking_lock();
-            guard
-                .as_ref()
-                .map(|engine| engine.session.shared_persistence())
+            guard.as_ref().cloned()
         };
+        let persistence = core.as_ref().map(|core| core.session.shared_persistence());
         // Retry/failover adoption telemetry (TS `auto_retry_start` counting):
         // retries increment `retry_count`, provider switches `failover_count`.
         // The semantic-edge recorder rides the same snapshot (TS
@@ -137,9 +139,12 @@ impl AgentSessionEngine {
             )
         };
         // The failover-captured primary target state (TS `_backupModel`):
-        // model, thinking level, and request auth, restored on settle.
-        let primary_state: std::cell::RefCell<Option<FailoverPrimary>> =
-            std::cell::RefCell::new(None);
+        // Session state restores at successful message_end; request auth
+        // stays on the backup until the active run settles.
+        let primary_state = std::sync::Arc::new(std::sync::Mutex::new(None::<FailoverPrimary>));
+        let pending_model_changes = std::sync::Arc::new(std::sync::Mutex::new(Vec::<
+            pa_types::session::ModelChangeEntry,
+        >::new()));
         // The quota-park seam (TS #2375): the retry chain consults the
         // engine at its give-up; a quota failure whose reset exceeds
         // the wait cap parks the session. The weak self keeps the
@@ -168,6 +173,177 @@ impl AgentSessionEngine {
             Some(route) => route.target.model.context_window,
             None => model.context_window,
         };
+        let restore_subscription = self.runtime.block_on(async {
+            // Awaited before tool execution. The agent loop has already
+            // captured its serving model, so restoring session state here
+            // does not redirect the remaining backup provider requests.
+            let primary_state = primary_state.clone();
+            let pending_model_changes = pending_model_changes.clone();
+            let agent_weak = std::sync::Arc::downgrade(&agent);
+            let core = core.clone();
+            let persistence = persistence.clone();
+            agent
+                .subscribe(move |event, _signal| {
+                    let primary_state = primary_state.clone();
+                    let pending_model_changes = pending_model_changes.clone();
+                    let agent_weak = agent_weak.clone();
+                    let core = core.clone();
+                    let persistence = persistence.clone();
+                    Box::pin(async move {
+                        let pa_agent::types::AgentEvent::MessageEnd {
+                            message:
+                                pa_agent::types::AgentMessage::Standard(
+                                    pa_agent::types::Message::Assistant(assistant),
+                                ),
+                        } = event
+                        else {
+                            return Ok(());
+                        };
+                        if matches!(
+                            assistant.stop_reason,
+                            StopReason::Error | StopReason::Aborted
+                        ) {
+                            return Ok(());
+                        }
+                        let primary = primary_state
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                            .clone();
+                        let Some(primary) = primary.filter(|primary| !primary.session_restored)
+                        else {
+                            return Ok(());
+                        };
+                        let Some(agent) = agent_weak.upgrade() else {
+                            return Ok(());
+                        };
+                        let model = json_round_trip(&primary.model)
+                            .ok_or_else(|| anyhow::anyhow!("model conversion failed"))?;
+                        agent
+                            .set_model_and_thinking_level(model, primary.thinking_level)
+                            .await;
+                        if let Some(core) = core {
+                            core.update_model_facts(&primary.model);
+                        }
+                        if let Some(persistence) = persistence {
+                            persistence
+                                .lock()
+                                .await
+                                .append_model_change(&primary.model.provider, &primary.model.id)?;
+                        }
+                        // The later run_once subscriber forwards this after the
+                        // assistant row and before tool execution, matching TS.
+                        pending_model_changes
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                            .push(pa_types::session::ModelChangeEntry {
+                                provider: primary.model.provider.clone(),
+                                model_id: primary.model.id.clone(),
+                            });
+                        if let Some(primary) = primary_state
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                            .as_mut()
+                        {
+                            primary.session_restored = true;
+                        }
+                        Ok(())
+                    })
+                })
+                .await
+        });
+        let restore_primary = || {
+            let emit_cell = &emit_cell;
+            let primary_state = primary_state.clone();
+            let agent = agent.clone();
+            let persistence = persistence.clone();
+            let core = core.clone();
+            let primary = primary_state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone();
+            async move {
+                let Some(FailoverPrimary {
+                    model: primary_model,
+                    thinking_level,
+                    api_key: primary_api_key,
+                    headers: primary_headers,
+                    session_restored,
+                }) = primary
+                else {
+                    return Ok(None);
+                };
+                let agent_model = json_round_trip(&primary_model)
+                    .ok_or_else(|| anyhow::anyhow!("model conversion failed"))?;
+                {
+                    // The restore serializes with `/reload`'s
+                    // live-input refresh: without this fence a
+                    // reload landing between the restore's
+                    // resolution and its slot write is clobbered
+                    // by the restore's older pair — the lock
+                    // makes whichever runs last leave the newest
+                    // store standing. The whole turn (this
+                    // closure included) runs on the blocking
+                    // pool — the worker parks the turn there
+                    // (`worker/turn.rs`) — so the synchronous
+                    // credential resolution below, OAuth refresh
+                    // and all, never touches an async executor
+                    // worker; only a concurrently reloading
+                    // session waits on this span.
+                    let _reload_serialized = self
+                        .reload_lock
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    // The armed-route install goes through the
+                    // fenced helper (no provider-slot lock held
+                    // across the route read).
+                    if !self.install_armed_route_target() {
+                        // The primary's request auth re-resolves at
+                        // restore: a credential rotated (and
+                        // reloaded) during the failover serves from
+                        // the store, never the pre-failover
+                        // capture.
+                        let target = self.restored_primary_target(
+                            &primary_model,
+                            primary_api_key,
+                            primary_headers,
+                        );
+                        *self.provider_target.write().expect("provider target lock") = Some(target);
+                    }
+                }
+                agent.set_model(agent_model).await;
+                agent.set_thinking_level(thinking_level).await;
+                if let Some(core) = &core {
+                    core.update_model_facts(&primary_model);
+                }
+                if let Some(persistence) = persistence.filter(|_| !session_restored) {
+                    persistence
+                        .lock()
+                        .await
+                        .append_model_change(&primary_model.provider, &primary_model.id)?;
+                }
+                if !session_restored
+                    && !(emit_cell.borrow_mut())(EngineEvent::ModelChange(
+                        pa_types::session::ModelChangeEntry {
+                            provider: primary_model.provider.clone(),
+                            model_id: primary_model.id.clone(),
+                        },
+                    ))
+                {
+                    anyhow::bail!("Model restoration persistence was cancelled");
+                }
+                if let Some(primary) = primary_state
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .as_mut()
+                {
+                    primary.session_restored = true;
+                }
+                Ok(Some(format!(
+                    "{}/{}",
+                    primary_model.provider, primary_model.id
+                )))
+            }
+        };
         let result = self.runtime.block_on(
             pa_core::session_engine::provider_failover::run_turn_with_provider_failover(
                 &policy,
@@ -182,6 +358,7 @@ impl AgentSessionEngine {
                     let agent = agent.clone();
                     let prompt = prompt.clone();
                     let model = model.clone();
+                    let pending_model_changes = pending_model_changes.clone();
                     async move {
                         // A retry re-issues the failed turn: the failed
                         // assistant message leaves the loop context first
@@ -197,6 +374,7 @@ impl AgentSessionEngine {
                                     &prompt,
                                     admit_prompt,
                                     boundary_passed,
+                                    &pending_model_changes,
                                     aborted,
                                     &mut **emit,
                                 )
@@ -204,7 +382,7 @@ impl AgentSessionEngine {
                             {
                                 Ok(TurnOnce::Message { assistant }) => *assistant,
                                 Ok(TurnOnce::None) => {
-                                    return Err(anyhow::anyhow!("No response produced."))
+                                    return Err(anyhow::anyhow!("No response produced."));
                                 }
                                 Ok(TurnOnce::Aborted) => return Ok(aborted_message(&model)),
                                 Err(error) => return Err(error),
@@ -319,12 +497,16 @@ impl AgentSessionEngine {
                     }
                 },
                 |next: &pa_types::ai::Model| {
+                    let emit_cell = &emit_cell;
                     let agent = agent.clone();
                     let persistence = persistence.clone();
+                    let core = core.clone();
                     {
-                        let mut primary = primary_state.borrow_mut();
+                        let mut primary = primary_state
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner);
                         // Capture the primary state once (TS `_backupModel`), restored when the
-                        // turn settles.
+                        // successful backup response arrives.
                         if primary.is_none() {
                             let (api_key, headers) = self.resolve_request_key_and_headers(&model);
                             *primary = Some(FailoverPrimary {
@@ -332,7 +514,10 @@ impl AgentSessionEngine {
                                 thinking_level: map_thinking_level(self.effective_thinking()),
                                 api_key,
                                 headers,
+                                session_restored: false,
                             });
+                        } else if let Some(primary) = primary.as_mut() {
+                            primary.session_restored = false;
                         }
                     }
                     let next = next.clone();
@@ -347,13 +532,24 @@ impl AgentSessionEngine {
                         // The stream's provider target follows the switch (the same slot
                         // `set_model` swaps).
                         {
+                            // The switch's resolve-and-install serializes
+                            // with `/reload`'s live-input refresh — the
+                            // restore path in the sibling callback takes
+                            // the same lock: a reload landing between
+                            // this resolution and its slot write must not
+                            // be clobbered by the switch's older pair. The
+                            // turn runs on the blocking pool, so the
+                            // synchronous resolution never touches an
+                            // async executor worker.
+                            let _reload_serialized = self
+                                .reload_lock
+                                .lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner);
                             // A routed episode keeps serving the route's
-                            // target across the failover switch.
-                            if let Some(route) = self.armed_image_route() {
-                                let mut target =
-                                    self.provider_target.write().expect("provider target lock");
-                                *target = Some(route.target);
-                            } else {
+                            // target across the failover switch — through
+                            // the fenced install (the route lock covers
+                            // the clone and the slot write together).
+                            if !self.install_armed_route_target() {
                                 let (api_key, headers) =
                                     self.resolve_request_key_and_headers(&next);
                                 let mut target =
@@ -371,62 +567,41 @@ impl AgentSessionEngine {
                         }
                         agent.set_model(agent_model).await;
                         agent.set_thinking_level(map_thinking_level(clamped)).await;
+                        if let Some(core) = &core {
+                            core.update_model_facts(&next);
+                        }
                         if let Some(persistence) = persistence {
                             let mut session = persistence.lock().await;
                             session.append_model_change(&next.provider, &next.id)?;
                         }
+                        if !(emit_cell.borrow_mut())(EngineEvent::ModelChange(
+                            pa_types::session::ModelChangeEntry {
+                                provider: next.provider.clone(),
+                                model_id: next.id.clone(),
+                            },
+                        )) {
+                            anyhow::bail!("Model switch persistence was cancelled");
+                        }
                         Ok(())
                     }
                 },
-                || {
-                    let agent = agent.clone();
-                    let persistence = persistence.clone();
-                    let primary = primary_state.borrow().clone();
-                    async move {
-                        let Some(FailoverPrimary {
-                            model: primary_model,
-                            thinking_level,
-                            api_key: primary_api_key,
-                            headers: primary_headers,
-                        }) = primary
-                        else {
-                            return Ok(None);
-                        };
-                        let agent_model = json_round_trip(&primary_model)
-                            .ok_or_else(|| anyhow::anyhow!("model conversion failed"))?;
-                        {
-                            let mut target =
-                                self.provider_target.write().expect("provider target lock");
-                            if let Some(route) = self.armed_image_route() {
-                                *target = Some(route.target);
-                            } else {
-                                *target = Some(ProviderTarget {
-                                    service_tier: *self
-                                        .service_tier
-                                        .read()
-                                        .expect("service tier lock"),
-                                    api_key: primary_api_key,
-                                    model: primary_model.clone(),
-                                    headers: primary_headers,
-                                });
-                            }
-                        }
-                        agent.set_model(agent_model).await;
-                        agent.set_thinking_level(thinking_level).await;
-                        if let Some(persistence) = persistence {
-                            let mut session = persistence.lock().await;
-                            session
-                                .append_model_change(&primary_model.provider, &primary_model.id)?;
-                        }
-                        Ok(Some(format!(
-                            "{}/{}",
-                            primary_model.provider, primary_model.id
-                        )))
-                    }
-                },
+                &restore_primary,
                 park,
             ),
         );
+        self.runtime.block_on(restore_subscription.unsubscribe());
+        // A failing awaited listener (including a failed model-change
+        // append) exits the retry driver before its normal restore callback.
+        // Always restore the transport as well, while preserving both errors.
+        let result = match result {
+            Err(error) => match self.runtime.block_on(restore_primary()) {
+                Ok(_) => Err(error),
+                Err(cleanup) => Err(anyhow::anyhow!(
+                    "{error:#}; primary restoration also failed: {cleanup:#}"
+                )),
+            },
+            Ok(message) => Ok(message),
+        };
         match result {
             Ok(message) => match message.stop_reason {
                 // The failure already reached the transcript as the final

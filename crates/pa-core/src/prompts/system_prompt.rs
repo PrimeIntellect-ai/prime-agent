@@ -73,8 +73,6 @@ pub struct BuildSystemPromptOptions<'a> {
     pub vision_capable: Option<bool>,
     /// Active tools. Tool schemas carry tool descriptions outside the prompt.
     pub selected_tools: Option<Vec<&'a str>>,
-    /// Additional guideline bullets appended to the dynamic tail.
-    pub prompt_guidelines: Option<Vec<String>>,
     pub append_system_prompt: Option<String>,
     pub cwd: String,
     /// Conversation log path.
@@ -107,6 +105,7 @@ pub fn build_system_prompt(options: &BuildSystemPromptOptions) -> String {
 }
 
 /// Build the system prompt with its per-layer breakdown.
+#[must_use]
 pub fn system_prompt_breakdown(options: &BuildSystemPromptOptions) -> SystemPromptBreakdown {
     let mut segments: Vec<PromptSegment> = Vec::new();
 
@@ -215,19 +214,6 @@ pub fn system_prompt_breakdown(options: &BuildSystemPromptOptions) -> SystemProm
         ));
     }
 
-    let guidelines = options
-        .prompt_guidelines
-        .as_deref()
-        .map(format_prompt_guidelines)
-        .unwrap_or_default();
-    if !guidelines.is_empty() {
-        segments.push(PromptSegment::dynamic_segment(
-            "additional-guidance",
-            "prompt guidelines",
-            format!("# Additional Guidance\n\n{guidelines}"),
-        ));
-    }
-
     if let Some(extra) = options.append_system_prompt.as_deref() {
         if !extra.is_empty() {
             segments.push(PromptSegment::dynamic_segment(
@@ -324,6 +310,14 @@ fn session_role_section(options: &BuildSystemPromptOptions, has_ipython: bool) -
             "This session has no Python REPL (`python_repl` tool): the programmatic tools described above are unavailable here."
                 .to_string(),
         );
+    } else if !options.daemonless {
+        // The bounded-await runtime half runs only where the host registers
+        // the bash completion notice (the same sessions the daemonless flag
+        // excludes), so the contract renders only there.
+        lines.push(
+            "`await bash(cmd)` waits at most `yield_after` seconds (`bash(cmd, yield_after=...)`, default 10, max 300; `None` uses the default, not an unbounded wait). If the command is still running, it returns a snapshot: `r.running` is True, `r.exit_code` is None, `r.output` is the output so far, and `r.handle` is the live handle. A completed result has `r.running` False and an integer `r.exit_code`. The command keeps running after a snapshot; end the turn and collect the final result on the `[bash-done]` notification."
+                .to_string(),
+        );
     }
     if options.allow_recursion == Some(false) {
         lines.push("Subagent spawning is disabled in this session.".to_string());
@@ -362,18 +356,6 @@ fn today() -> String {
     let m = if mp < 10 { mp + 3 } else { mp - 9 };
     let y = if m <= 2 { y + 1 } else { y };
     format!("{y:04}-{m:02}-{d:02}")
-}
-
-fn format_prompt_guidelines(guidelines: &[String]) -> String {
-    let mut seen = std::collections::HashSet::new();
-    let mut list = Vec::new();
-    for guideline in guidelines {
-        let normalized = guideline.trim();
-        if !normalized.is_empty() && seen.insert(normalized.to_string()) {
-            list.push(format!("- {normalized}"));
-        }
-    }
-    list.join("\n")
 }
 
 fn format_generic_mcp_guidance(servers: &[String]) -> String {
@@ -523,10 +505,9 @@ mod tests {
     }
 
     #[test]
-    fn mcp_and_guidelines_are_tail_segments() {
+    fn mcp_servers_are_a_tail_segment() {
         let mut options = base_options();
         options.generic_mcp_servers = vec!["t".to_string(), "t".to_string()];
-        options.prompt_guidelines = Some(vec!["be careful".to_string(), "be careful".to_string()]);
         let breakdown = system_prompt_breakdown(&options);
         let names: Vec<&str> = breakdown
             .segments
@@ -534,14 +515,10 @@ mod tests {
             .map(|segment| segment.name)
             .collect();
         assert!(names.contains(&"mcp-servers"));
-        assert!(names.contains(&"additional-guidance"));
         assert!(breakdown.assembled.contains("# Generic MCP Connections"));
         assert!(breakdown
             .assembled
             .contains("Enabled generic MCP servers: `t`."));
-        assert!(breakdown
-            .assembled
-            .contains("# Additional Guidance\n\n- be careful"));
     }
 
     #[test]

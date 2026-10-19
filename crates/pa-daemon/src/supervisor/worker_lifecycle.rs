@@ -67,11 +67,12 @@ impl Supervisor {
             // only with a provably-gone process — the settle is not a death certificate.
             let settled = self.finalize_worker_stop(resident, None).await;
             if settled {
-                self.retire_worker_after_stop(resident).await;
-                self.log_line(&format!(
-                    "finished the tombstoned stop of session worker {}",
-                    resident.worker_id
-                ));
+                if self.retire_worker_after_stop(resident).await {
+                    self.log_line(&format!(
+                        "finished the tombstoned stop of session worker {}",
+                        resident.worker_id
+                    ));
+                }
             } else {
                 self.log_line(&format!(
                     "tombstoned stop of session worker {} not settled; descriptor kept",
@@ -86,11 +87,12 @@ impl Supervisor {
             if resident.descriptor.lock().await.owner_client_id.is_some() {
                 self.finalize_owned_stop(resident).await;
             }
-            self.retire_worker_after_stop(resident).await;
-            self.log_line(&format!(
-                "finished the tombstoned per-session stop of session worker {}",
-                resident.worker_id
-            ));
+            if self.retire_worker_after_stop(resident).await {
+                self.log_line(&format!(
+                    "finished the tombstoned per-session stop of session worker {}",
+                    resident.worker_id
+                ));
+            }
         }
     }
 
@@ -109,6 +111,7 @@ impl Supervisor {
             telemetry_disabled,
             runtime_metadata,
             env,
+            launch_env,
             ..
         } = create
         else {
@@ -124,6 +127,13 @@ impl Supervisor {
         let client_env = env
             .as_ref()
             .map(crate::herdr::filter_client_env)
+            .filter(|env| !env.is_empty());
+        // The client's launch env (TS `launchEnv`) re-filtered on receipt
+        // (the socket peer is untrusted). In-memory only; the lifetime is
+        // documented on the `ResidentWorker::launch_env` field.
+        let client_launch_env = launch_env
+            .clone()
+            .map(pa_types::daemon::launch_env::collect_launch_env)
             .filter(|env| !env.is_empty());
         // The shutdown gate: a create dispatched while the supervisor is
         // stopping must never launch a worker the stop pass would miss (a
@@ -341,6 +351,8 @@ impl Supervisor {
         };
         let descriptor_path = self.descriptor_dir.join(format!("{worker_id}.json"));
         let resident = ResidentWorker::new(worker_id.clone(), descriptor, descriptor_path.clone());
+        // TS stores `worker.launchEnv` before the spawn.
+        resident.set_launch_env(client_launch_env);
         // Register the resident before spawning: the worker's boot self-registration must
         // find its identity in the registry (registration races the create replay).
         self.registry.insert(Arc::clone(&resident)).await;
@@ -462,6 +474,11 @@ impl Supervisor {
         {
             let mut descriptor = resident.descriptor.lock().await;
             descriptor.lifecycle = DaemonWorkerLifecycle::Ready;
+            // TS clears `launchEnv` at ready; an owned worker keeps it
+            // for its recovery relaunch until ownership clears.
+            if descriptor.owner_client_id.is_none() {
+                resident.clear_launch_env();
+            }
             descriptor.root_session_id = create_summary
                 .get("sessionId")
                 .and_then(Value::as_str)
@@ -779,8 +796,11 @@ impl Supervisor {
 
     /// Delete one stopped worker's descriptor only after its process is provably gone (TS
     /// `stopWorkerUntracked`'s contract): deleting the descriptor of a live worker orphans
-    /// it behind its lease.
-    pub(super) async fn retire_worker_after_stop(self: &Arc<Self>, resident: &Arc<ResidentWorker>) {
+    /// it behind its lease. Returns whether the descriptor was deleted or already absent.
+    pub(super) async fn retire_worker_after_stop(
+        self: &Arc<Self>,
+        resident: &Arc<ResidentWorker>,
+    ) -> bool {
         let (pid, start_id, recovery_journal_path) = {
             let descriptor = resident.descriptor.lock().await;
             (
@@ -801,12 +821,14 @@ impl Supervisor {
                     "session worker {} survived the shutdown escalation; descriptor tombstoned for the next boot",
                     resident.worker_id
                 ));
+                false
             }
             _ if alive_unverified => {
                 self.log_line(&format!(
                     "session worker {} cannot be identity-verified; descriptor tombstoned for the next boot",
                     resident.worker_id
                 ));
+                false
             }
             _ => {
                 // The worker is provably gone, so its kernels can no longer
@@ -823,12 +845,22 @@ impl Supervisor {
                 ) {
                     let _ = std::fs::remove_file(&recovery_journal_path);
                 }
-                let _ = std::fs::remove_file(&resident.descriptor_path);
+                match std::fs::remove_file(&resident.descriptor_path) {
+                    Err(error) if error.kind() != std::io::ErrorKind::NotFound => {
+                        self.log_line(&format!(
+                            "failed to retire the descriptor of session worker {}: {error}; descriptor kept",
+                            resident.worker_id
+                        ));
+                        return false;
+                    }
+                    Ok(()) | Err(_) => {}
+                }
                 // The identity-pending side record dies with the descriptor it shadows
                 // (an orphaned pending would shadow the next identity).
                 let _ = crate::descriptor::clear_identity_pending(&resident.descriptor_path);
                 // The reaper alone owns orphan-journal removal. A read or
                 // identity-verified kill failure must preserve its retry records.
+                true
             }
         }
     }
@@ -891,6 +923,27 @@ pub(super) fn recovery_journal_owner_is_gone(
         },
         None => false,
     }
+}
+
+/// Whether a worker process is provably gone (the journal-owner rule: dead, or its pid now
+/// belongs to another process). Pid 0 records no identity and is never proof.
+pub(super) async fn worker_process_gone(pid: u64, start_id: Option<String>) -> bool {
+    let Ok(pid) = u32::try_from(pid) else {
+        return false;
+    };
+    if pid == 0 {
+        return false;
+    }
+    // On macOS the start-id probe shells out to `ps`: keep it off the executor.
+    tokio::task::spawn_blocking(move || {
+        recovery_journal_owner_is_gone(
+            crate::lease::is_process_alive(pid).ok(),
+            start_id.as_deref(),
+            crate::lease::get_process_start_id(pid).as_deref(),
+        )
+    })
+    .await
+    .unwrap_or(false)
 }
 
 /// Probe a worker socket until it accepts connections or the connect budget runs out; the
@@ -1109,7 +1162,7 @@ mod tests {
         let resident =
             ResidentWorker::new("w-gone".to_string(), descriptor, descriptor_path.clone());
 
-        supervisor.retire_worker_after_stop(&resident).await;
+        assert!(supervisor.retire_worker_after_stop(&resident).await);
 
         assert!(
             !journal_path.exists(),
@@ -1120,6 +1173,53 @@ mod tests {
         assert_eq!(std::fs::read(unowned_journal).unwrap(), retained);
         assert_eq!(std::fs::read(unknown_journal).unwrap(), retained);
     }
+    #[tokio::test]
+    async fn retirement_reports_unlink_failure_and_keeps_pending_identity_for_retry() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let supervisor = supervisor_in(dir.path());
+        let descriptor_path = supervisor.descriptor_dir.join("w-retire.json");
+        // No recorded identity means this fixture never reaches a signal
+        // carrier. A directory forces an unlink error even when run as root.
+        let descriptor: DaemonWorkerDescriptor = serde_json::from_value(json!({
+            "version": 2,
+            "workerId": "w-retire",
+            "pid": 0,
+            "socketPath": dir.path().join("worker.sock"),
+            "recoveryJournalPath": dir.path().join("recovery.jsonl"),
+            "supervisorSocketPath": supervisor.options.socket_path,
+            "authenticationToken": "token",
+            "rootActiveSessionId": "w-retire",
+            "createdAt": "2026-10-07T00:00:00Z",
+            "updatedAt": "2026-10-07T00:00:00Z",
+            "lifecycle": "stopping",
+            "createCommand": {},
+            "consecutiveFailures": 0,
+        }))
+        .expect("descriptor");
+        std::fs::create_dir(&descriptor_path).expect("blocked descriptor path");
+        crate::descriptor::write_identity_pending(
+            &descriptor_path,
+            "moved-session",
+            "moved.jsonl",
+            "2026-10-07T00:00:01Z",
+        )
+        .expect("pending identity");
+        let resident =
+            ResidentWorker::new("w-retire".to_string(), descriptor, descriptor_path.clone());
+
+        assert!(!supervisor.retire_worker_after_stop(&resident).await);
+        assert!(descriptor_path.is_dir());
+        assert!(crate::descriptor::read_identity_pending(&descriptor_path).is_some());
+
+        std::fs::remove_dir(&descriptor_path).expect("unblock descriptor path");
+        persist_worker(&descriptor_path, &*resident.descriptor.lock().await)
+            .expect("descriptor persisted for retry");
+        assert!(supervisor.retire_worker_after_stop(&resident).await);
+        assert!(!descriptor_path.exists());
+        assert!(crate::descriptor::read_identity_pending(&descriptor_path).is_none());
+        assert!(supervisor.retire_worker_after_stop(&resident).await);
+    }
+
     #[tokio::test]
     async fn a_live_worker_keeps_its_orphan_journal() {
         let dir = tempfile::tempdir().expect("temp dir");

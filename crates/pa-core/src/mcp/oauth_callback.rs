@@ -2,9 +2,11 @@
 //! redirect ports; the login flow races the browser callback against a manual paste. The served
 //! pages keep the TS product's success/error wording.
 
-use std::sync::Arc;
+use std::future::Future;
+use std::pin::Pin;
+use std::sync::{Arc, Mutex};
 
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, bail, Result};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 
@@ -23,12 +25,30 @@ fn redirect_uri_for(port: u16) -> String {
     format!("http://localhost:{port}{CALLBACK_PATH}")
 }
 
+pub(super) fn validate_callback_port(callback_port: Option<u16>) -> Result<()> {
+    if callback_port == Some(0) {
+        bail!("OAuth callbackPort must be between 1 and 65535");
+    }
+    Ok(())
+}
+
+fn candidate_ports(callback_port: Option<u16>) -> Result<Vec<u16>> {
+    validate_callback_port(callback_port)?;
+    Ok(match callback_port {
+        Some(port) => vec![port],
+        None => (0..CALLBACK_PORT_COUNT)
+            .map(|offset| CALLBACK_PORT_BASE + offset)
+            .collect(),
+    })
+}
+
 /// Every redirect URI a login registers (dynamic client registration
 /// offers them all).
-pub fn all_redirect_uris() -> Vec<String> {
-    (0..CALLBACK_PORT_COUNT)
-        .map(|offset| redirect_uri_for(CALLBACK_PORT_BASE + offset))
-        .collect()
+pub fn redirect_uris(callback_port: Option<u16>) -> Result<Vec<String>> {
+    Ok(candidate_ports(callback_port)?
+        .into_iter()
+        .map(redirect_uri_for)
+        .collect())
 }
 
 /// The authorization code plus the echoed `state` from the browser
@@ -66,16 +86,19 @@ impl CallbackShared {
 pub struct CallbackServer {
     shared: Arc<CallbackShared>,
     port: u16,
+    // The task only borrows the socket while polling accept. The owner can close it
+    // synchronously even when the runtime has not polled an aborted task yet.
+    listener: Arc<Mutex<Option<TcpListener>>>,
+    listener_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
 }
 
 impl CallbackServer {
-    /// Bind the first free candidate port. All candidates busy is a hard
-    /// error (the TS wording).
-    pub async fn start(label: &str) -> Result<Self> {
+    /// Bind a registered port exactly, or the first free DCR candidate. Never substitute
+    /// an unregistered redirect port when the registered one is occupied.
+    pub async fn start(label: &str, callback_port: Option<u16>) -> Result<Self> {
         let host = callback_host();
         let mut last_error: Option<String> = None;
-        for offset in 0..CALLBACK_PORT_COUNT {
-            let port = CALLBACK_PORT_BASE + offset;
+        for port in candidate_ports(callback_port)? {
             let listener = match TcpListener::bind((host.as_str(), port)).await {
                 Ok(listener) => listener,
                 Err(error) => {
@@ -85,9 +108,19 @@ impl CallbackServer {
             };
             let shared = Arc::new(CallbackShared::default());
             let task_shared = Arc::clone(&shared);
-            tokio::spawn(async move {
+            let listener = Arc::new(Mutex::new(Some(listener)));
+            let task_listener = Arc::clone(&listener);
+            let listener_task = tokio::spawn(async move {
                 loop {
-                    let Ok((stream, _)) = listener.accept().await else {
+                    let accepted = futures::future::poll_fn(|cx| {
+                        let slot = task_listener.lock().unwrap();
+                        match slot.as_ref() {
+                            Some(listener) => listener.poll_accept(cx).map(Some),
+                            None => std::task::Poll::Ready(None),
+                        }
+                    })
+                    .await;
+                    let Some(Ok((stream, _))) = accepted else {
                         break;
                     };
                     let shared = Arc::clone(&task_shared);
@@ -96,7 +129,19 @@ impl CallbackServer {
                     });
                 }
             });
-            return Ok(CallbackServer { shared, port });
+            return Ok(CallbackServer {
+                shared,
+                port,
+                listener,
+                listener_task: Mutex::new(Some(listener_task)),
+            });
+        }
+        if let Some(port) = callback_port {
+            return Err(anyhow!(
+                "Could not start the OAuth callback server on registered port {port}. \
+                 Close other login attempts and retry. ({label}; {})",
+                last_error.unwrap_or_default(),
+            ));
         }
         Err(anyhow!(
             "Could not start the OAuth callback server: ports {CALLBACK_PORT_BASE}-{} are all in use. \
@@ -121,10 +166,42 @@ impl CallbackServer {
         }
     }
 
+    /// Race a browser callback against manual input. The input future must settle the callback
+    /// (through cancellation) before completing; its outcome remains available to the caller.
+    pub async fn wait_for_code_or_input<F: Future + ?Sized>(
+        &self,
+        input: Pin<&mut F>,
+    ) -> (CallbackResult, Option<F::Output>) {
+        tokio::select! {
+            code = self.wait_for_code() => (code, None),
+            outcome = input => {
+                // Input cancellation may have lost settle() to an earlier browser redirect.
+                // Read that result even when fair select polls the input branch first.
+                (self.wait_for_code().await, Some(outcome))
+            },
+        }
+    }
+
     /// Cancel: settle the waiter with `None` so an in-flight redirect loses
     /// only because the caller chose to stop waiting.
     pub async fn cancel(&self) {
+        self.listener.lock().unwrap().take();
         self.shared.settle(None).await;
+        let task = self.listener_task.lock().unwrap().take();
+        if let Some(task) = task {
+            task.abort();
+            // Join cancellation so the listener task cannot outlive explicit cleanup.
+            let _ = task.await;
+        }
+    }
+}
+
+impl Drop for CallbackServer {
+    fn drop(&mut self) {
+        self.listener.lock().unwrap().take();
+        if let Some(task) = self.listener_task.get_mut().unwrap().take() {
+            task.abort();
+        }
     }
 }
 
@@ -313,13 +390,91 @@ mod tests {
     use super::*;
 
     #[tokio::test]
+    async fn settled_browser_code_survives_ready_input_after_listener_exit() {
+        // An accept loop can exit while a previously accepted request is still completing.
+        // Complete listener cleanup first so input cancellation will not yield on a join.
+        for _ in 0..64 {
+            let server = CallbackServer::start("Slack", /*callback_port*/ None)
+                .await
+                .unwrap();
+            let task = server.listener_task.lock().unwrap().take().unwrap();
+            task.abort();
+            assert!(task.await.unwrap_err().is_cancelled());
+            let browser_code = CallbackCode {
+                code: "browser-code".to_string(),
+                state: "state".to_string(),
+            };
+            server.shared.settle(Some(browser_code.clone())).await;
+            let mut input = Box::pin(async {
+                server.cancel().await;
+            });
+            let (code, _) = server.wait_for_code_or_input(input.as_mut()).await;
+            assert_eq!(
+                code,
+                Some(browser_code),
+                "the browser settled before input cancellation"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn dropping_a_registered_callback_releases_the_port_without_yielding() {
+        let reservation = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = reservation.local_addr().unwrap().port();
+        drop(reservation);
+        let server = CallbackServer::start("Slack", Some(port)).await.unwrap();
+        drop(server);
+        let rebound = std::net::TcpListener::bind(("127.0.0.1", port))
+            .expect("dropping the callback must release its registered port immediately");
+        drop(rebound);
+    }
+
+    #[tokio::test]
+    async fn registered_port_is_exact_and_released_after_cancel() {
+        let blocker = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = blocker.local_addr().unwrap().port();
+        let error = CallbackServer::start("Slack", Some(port))
+            .await
+            .unwrap_err();
+        assert!(error
+            .to_string()
+            .contains(&format!("registered port {port}")));
+        drop(blocker);
+        let server = CallbackServer::start("Slack", Some(port)).await.unwrap();
+        assert_eq!(
+            server.redirect_uri(),
+            format!("http://localhost:{port}/callback")
+        );
+        let response = reqwest::Client::new()
+            .get(format!(
+                "http://127.0.0.1:{port}/callback?code=code&state=state"
+            ))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), reqwest::StatusCode::OK);
+        assert_eq!(
+            server.wait_for_code().await,
+            Some(CallbackCode {
+                code: "code".to_string(),
+                state: "state".to_string(),
+            })
+        );
+        server.cancel().await;
+        let rebound = std::net::TcpListener::bind(("127.0.0.1", port)).unwrap();
+        drop(rebound);
+    }
+
+    #[tokio::test]
     async fn falls_back_to_the_next_free_port() {
         // The base port is occupied, so the login lands on a later candidate (a leaked login
         // cannot wedge all of them). Skip when a concurrent test already holds the base port.
         let Ok(blocker) = std::net::TcpListener::bind(("127.0.0.1", CALLBACK_PORT_BASE)) else {
             return;
         };
-        let server = CallbackServer::start("Linear").await.unwrap();
+        let server = CallbackServer::start("Linear", /*callback_port*/ None)
+            .await
+            .unwrap();
         assert_ne!(server.redirect_uri(), redirect_uri_for(CALLBACK_PORT_BASE));
         assert!(server.redirect_uri().starts_with("http://localhost:5370"));
         drop(blocker);
@@ -337,7 +492,7 @@ mod tests {
             // invariant on this machine.
             return;
         }
-        let error = CallbackServer::start("Linear")
+        let error = CallbackServer::start("Linear", /*callback_port*/ None)
             .await
             .unwrap_err()
             .to_string();
@@ -346,7 +501,9 @@ mod tests {
 
     #[tokio::test]
     async fn callback_flow_settles_code_and_state() {
-        let server = CallbackServer::start("Linear").await.unwrap();
+        let server = CallbackServer::start("Linear", /*callback_port*/ None)
+            .await
+            .unwrap();
         let response = reqwest::Client::new()
             .get(format!(
                 "http://127.0.0.1:{}/callback?code=the-code&state=the-state",
@@ -367,7 +524,9 @@ mod tests {
 
     #[tokio::test]
     async fn error_callback_settles_none() {
-        let server = CallbackServer::start("Linear").await.unwrap();
+        let server = CallbackServer::start("Linear", /*callback_port*/ None)
+            .await
+            .unwrap();
         let response = reqwest::Client::new()
             .get(format!(
                 "http://127.0.0.1:{}/callback?error=access_denied",
@@ -382,7 +541,9 @@ mod tests {
 
     #[tokio::test]
     async fn unknown_route_is_404_without_settling() {
-        let server = CallbackServer::start("Linear").await.unwrap();
+        let server = CallbackServer::start("Linear", /*callback_port*/ None)
+            .await
+            .unwrap();
         let response = reqwest::Client::new()
             .get(format!("http://127.0.0.1:{}/other", server.port))
             .send()
@@ -404,5 +565,28 @@ mod tests {
         );
         assert_eq!(query_param("code=a+b", "code"), Some("a b".to_string()));
         assert_eq!(query_param("code", "state"), None);
+    }
+    #[tokio::test]
+    async fn zero_callback_port_is_rejected_before_binding_or_registration() {
+        assert!(redirect_uris(Some(0))
+            .unwrap_err()
+            .to_string()
+            .contains("callbackPort"));
+        let error = CallbackServer::start("fixture", Some(0)).await.unwrap_err();
+        assert!(error.to_string().contains("callbackPort"));
+    }
+
+    #[tokio::test]
+    async fn pinned_port_rebinds_after_drop() {
+        let probe = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = probe.local_addr().unwrap().port();
+        drop(probe);
+        {
+            let first = CallbackServer::start("Linear", Some(port)).await.unwrap();
+            assert_eq!(first.redirect_uri(), redirect_uri_for(port));
+        }
+        tokio::task::yield_now().await;
+        let second = CallbackServer::start("Linear", Some(port)).await.unwrap();
+        assert_eq!(second.redirect_uri(), redirect_uri_for(port));
     }
 }

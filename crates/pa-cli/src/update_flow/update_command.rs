@@ -186,17 +186,7 @@ pub async fn run_update_command(options: &UpdateCommandOptions) -> Result<i32> {
         .env(super::coordinator::UPDATE_CANDIDATE_DIR_ENV, &candidate_dir)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        // The coordinator inherits this CLI's environment minus the worker role markers (the TS
-        // launcher deletes the same set).
-        .env_remove(pa_daemon::worker::WORKER_ROLE_ENV)
-        .env_remove(pa_daemon::worker::WORKER_TOKEN_ENV)
-        .env_remove(pa_daemon::worker::WORKER_ACTIVE_SESSION_ID_ENV)
-        .env_remove(pa_daemon::worker::WORKER_RECOVERY_JOURNAL_ENV)
-        .env_remove(pa_daemon::worker::WORKER_SUPERVISOR_SOCKET_ENV)
-        .env_remove(pa_daemon::worker::WORKER_SOCKET_ENV)
-        .env_remove(pa_daemon::worker::WORKER_INSTANCE_ID_ENV)
-        .env_remove(pa_daemon::worker::WORKER_SCRIPT_ENV);
+        .stderr(std::process::Stdio::null());
     // The coordinator must survive the CLI and its terminal closing.
     #[cfg(unix)]
     pa_core::platform::process::set_new_session(&mut command);

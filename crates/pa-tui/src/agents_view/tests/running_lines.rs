@@ -35,8 +35,8 @@ fn childless_scope() -> AgentsViewMode {
     )
 }
 
-/// A childless scope is an empty view that keeps its keys: the TS-identical empty-state row
-/// renders, search drives the no-match row, and every route out stays intact.
+/// A childless scope is an empty view that keeps its keys: the scoped empty-state row renders,
+/// search drives the no-match row, and every route out stays intact.
 #[test]
 fn a_childless_scope_is_an_empty_view_that_keeps_its_keys() {
     let mut mode = childless_scope();
@@ -44,7 +44,7 @@ fn a_childless_scope_is_an_empty_view_that_keeps_its_keys() {
     assert_eq!(mode.rows, Vec::<AgentsViewRow>::new());
     let (lines, _) = mode.render_frame(120, 36);
     let frame = lines.iter().map(flat).collect::<Vec<_>>().join("\n");
-    assert!(frame.contains("No sessions yet."), "frame: {frame}");
+    assert!(frame.contains("No subagents yet."), "frame: {frame}");
     mode.handle_key("z");
     assert_eq!(mode.query, "z");
     let (lines, _) = mode.render_frame(120, 36);

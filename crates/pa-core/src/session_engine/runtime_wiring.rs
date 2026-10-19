@@ -209,7 +209,11 @@ pub fn kernel_python_skills(skills: &[Skill]) -> Vec<KernelPythonSkill> {
 /// Build the kernel provisioner for a session: host handlers for the goal/heartbeat bridge
 /// plus the pre-imported skills. The session's agent dir is propagated into the kernel env
 /// (`PRIME_AGENT_CODING_AGENT_DIR`): an embedding host whose ambient env differs must not
-/// leak its own paths into the kernel (#109). `cwd` is the SESSION's working directory.
+/// leak its own paths into the kernel (#109). A persistent session's artifact dir is
+/// likewise propagated (`RLM_SESSION_DIR` + `RLM_HARNESS_STATE_DIR`), so kernel-side
+/// harness writes land in the session-local store. `cwd` is the SESSION's working directory.
+/// `shell_path` is the session-start-resolved kernel shell: an invalid `shellPath` fails
+/// `create_session`, not the kernel boot.
 #[allow(clippy::too_many_arguments)] // one wiring funnel, same style as AgentSession::from_session_arc
 #[must_use]
 pub fn kernel_provisioner(
@@ -218,30 +222,47 @@ pub fn kernel_provisioner(
     python_skills: Vec<KernelPythonSkill>,
     cwd: std::path::PathBuf,
     agent_dir: &std::path::Path,
-    snapshot_dir: Option<std::path::PathBuf>,
+    shell_path: Option<std::path::PathBuf>,
+    command_prefix: Option<String>,
+    serper_api_key: Option<String>,
+    session_artifact_dir: Option<std::path::PathBuf>,
     on_restore: Option<crate::kernel::provisioner::RestoreCallback>,
     on_background_work_settled: Option<crate::kernel::shared::BackgroundWorkSettledCallback>,
     on_unavailable_skills: Option<crate::kernel::provisioner::UnavailableSkillsCallback>,
     on_bootstrap_result: Option<crate::kernel::provisioner::KernelBootstrapResultHandler>,
 ) -> Arc<KernelProvisioner> {
-    let mut env = HashMap::with_capacity(1);
+    let mut env = HashMap::with_capacity(3);
     env.insert(
         "PRIME_AGENT_CODING_AGENT_DIR".to_string(),
         agent_dir.to_string_lossy().to_string(),
     );
+    for (key, value) in [
+        ("RLM_SESSION_DIR", session_artifact_dir.clone()),
+        (
+            "RLM_HARNESS_STATE_DIR",
+            crate::refinement::get_local_harness_state_dir(session_artifact_dir.as_deref()),
+        ),
+    ] {
+        if let Some(value) = value {
+            env.insert(key.to_string(), value.to_string_lossy().to_string());
+        }
+    }
+    if let Some(serper_api_key) = serper_api_key {
+        env.insert("SERPER_API_KEY".to_string(), serper_api_key);
+    }
     Arc::new(KernelProvisioner::new(
         cwd,
         IpythonKernelProvisionerOptions {
             python: None,
             env,
-            command_prefix: None,
-            shell_path: None,
+            command_prefix,
+            shell_path,
             session_id: Some(session_id),
             host_handlers: handlers,
             python_skills,
             // Only persistent sessions (which have an artifact dir) get
             // a revivable snapshot (TS `snapshotDir`).
-            snapshot_dir,
+            snapshot_dir: session_artifact_dir,
             ready_gate: None,
             on_restore,
             on_background_work_settled,
@@ -249,6 +270,34 @@ pub fn kernel_provisioner(
             on_bootstrap_result,
         },
     ))
+}
+
+/// TS `_addWebsearchKeyEnv` (agent-session.ts:11137-11158): the serper key
+/// rides the kernel env only when a websearch skill is loaded, the ambient
+/// env does not already carry one, and the stored `serper` credential is an
+/// api key that resolves non-empty. The websearch skill's own `!command`
+/// key refs cannot resolve in-kernel, so the host resolves them here; the
+/// caller reads the credential and runs this off the async runtime, because
+/// a `!command` key can block.
+#[must_use]
+pub(crate) fn websearch_api_key(
+    skills: &[Skill],
+    credential: Option<crate::auth::AuthCredential>,
+) -> Option<String> {
+    if std::env::var("SERPER_API_KEY").is_ok_and(|value| !value.trim().is_empty()) {
+        return None;
+    }
+    if !skills.iter().any(|skill| skill.name == "websearch") {
+        return None;
+    }
+    match credential {
+        Some(crate::auth::AuthCredential::ApiKey { key, .. }) => {
+            crate::auth::resolve_config_value::resolve_config_value(&key)
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty())
+        }
+        _ => None,
+    }
 }
 
 impl IpythonKernelProvisioner for KernelProvisioner {

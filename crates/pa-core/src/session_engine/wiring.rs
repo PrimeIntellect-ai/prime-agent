@@ -147,7 +147,7 @@ impl AgentSession {
 
     /// Whether the session may run auto-refinement.
     pub fn auto_refine_allowed(&self) -> bool {
-        self.auto_refine_allowed
+        self.auto_refine_allowed && self.harness_refinements_enabled()
     }
 
     /// The resolved auto-refine gates.
@@ -167,10 +167,19 @@ impl AgentSession {
     /// The resolved compaction settings: the in-run continuation consult reads the threshold
     /// headroom without owning the session (a compaction in flight owns it across its model turn).
     pub fn compaction_settings(&self) -> compaction::CompactionSettings {
-        *self
+        let mut resolved = *self
             .compaction
             .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // Read only the percentage at decision boundaries, off the paint path.
+        // Like auxiliary-model routing, another client's settings save applies
+        // to an already-running session without changing manual summary budgets.
+        if let Some(context) = &self.auxiliary_model {
+            resolved.threshold_percent =
+                crate::settings::SettingsManager::create(&context.cwd, &context.agent_dir)
+                    .get_compaction_threshold_percent();
+        }
+        resolved
     }
 
     /// Install the session's semantic-edge recorder (the engine build's

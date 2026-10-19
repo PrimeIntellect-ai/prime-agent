@@ -2,7 +2,8 @@
 //! sidecar layout, the source-checkout fallback, and the content identity
 //! that invalidates an existing venv on any runtime change.
 
-use super::{expand_home, Digest, Path, PathBuf, RUNTIME_REQUIREMENT};
+use super::{expand_home, Digest, Path, PathBuf};
+use anyhow::Context;
 
 /// Directory of the installed `prime-agent-runtime` sources. The Rust binary ships the same sidecar
 /// layout the compiled TS executable uses.
@@ -21,55 +22,47 @@ pub(in crate::kernel::bootstrap) fn package_dir() -> PathBuf {
 /// The packaged sidecar directory (the exe-adjacent layout): the TS `runtimeCandidateDirs`
 /// bun-binary candidates.
 pub(in crate::kernel::bootstrap) fn packaged_runtime_dir() -> Option<PathBuf> {
-    let package = package_dir();
-    [
+    resolve_runtime_source_dir(&package_dir(), None)
+}
+
+fn resolve_runtime_source_dir(package: &Path, checkout: Option<&Path>) -> Option<PathBuf> {
+    let mut candidates = vec![
         package.join("prime-agent-runtime"),
         package.join("dist").join("prime-agent-runtime"),
-    ]
-    .into_iter()
-    .find(|candidate| candidate.join("pyproject.toml").exists())
-}
-
-fn runtime_candidate_dirs() -> Vec<PathBuf> {
-    let mut candidates = packaged_runtime_dir().into_iter().collect::<Vec<_>>();
+    ];
     // Source checkouts keep the sidecar at the workspace root (TS resolves
     // module-relative monorepo candidates the same way).
-    if let Some(root) = crate::packages::source_checkout_root() {
+    if let Some(root) = checkout {
         candidates.push(root.join("prime-agent-runtime"));
     }
-    candidates
-}
-
-pub(super) fn resolve_runtime_source_dir() -> Option<PathBuf> {
-    runtime_candidate_dirs()
-        .into_iter()
-        .find(|candidate| candidate.join("pyproject.toml").exists())
-}
-
-/// Content identity of the runtime: a hash of every `rlm/*.py` file, the
-/// packaged machine library under `src/rlm/machines` (wheel package data:
-/// machine changes are runtime changes), and `pyproject.toml`, so any
-/// runtime change invalidates an existing venv. Falls back to the bare
-/// package name when the runtime resolves to a registry install (no local
-/// source).
-///
-/// # Panics
-///
-/// Panics when hashing the resolved local runtime source fails.
-#[must_use]
-pub fn resolve_runtime_identity() -> String {
-    let Some(source_dir) = resolve_runtime_source_dir() else {
-        return RUNTIME_REQUIREMENT.to_string();
-    };
-    hash_runtime_source(&source_dir).unwrap_or_else(|error| {
-        panic!(
-            "cannot hash runtime source at {}: {error}",
-            source_dir.display()
-        )
+    candidates.into_iter().find_map(|candidate| {
+        // Always pass an absolute filesystem path to uv, including when
+        // PI_PACKAGE_DIR was relative. A manifest alone is not a runtime.
+        let candidate = candidate.canonicalize().ok()?;
+        if !["pyproject.toml", "src/rlm/__init__.py", "src/rlm/repl.py"]
+            .iter()
+            .all(|file| candidate.join(file).is_file())
+        {
+            return None;
+        }
+        let manifest = std::fs::read_to_string(candidate.join("pyproject.toml")).ok()?;
+        let manifest: toml::Value = toml::from_str(&manifest).ok()?;
+        (manifest.get("project")?.get("name")?.as_str()? == "prime-agent-runtime")
+            .then_some(candidate)
     })
 }
 
-fn hash_runtime_source(source_dir: &Path) -> anyhow::Result<String> {
+pub(in crate::kernel::bootstrap) fn require_runtime_source_dir() -> anyhow::Result<PathBuf> {
+    resolve_runtime_source_dir(&package_dir(), crate::packages::source_checkout_root()).context(
+        "Prime Agent requires a local prime-agent-runtime directory containing its pyproject.toml and src/rlm sources; reinstall Prime Agent with the runtime beside the binary, or set PI_PACKAGE_DIR to the complete trusted package directory. The runtime will not be downloaded from a package index.",
+    )
+}
+
+/// Hash the manifest, Python sources, and packaged machine library so any
+/// runtime change invalidates an existing venv.
+pub(in crate::kernel::bootstrap) fn hash_runtime_source(
+    source_dir: &Path,
+) -> anyhow::Result<String> {
     let rlm_dir = source_dir.join("src").join("rlm");
     let mut files = vec![source_dir.join("pyproject.toml")];
     collect_python_files(&rlm_dir, &mut files)?;
@@ -130,14 +123,78 @@ mod tests {
             "X = 1
 ",
         )?;
+        std::fs::write(rlm.join("__init__.py"), "")?;
+        std::fs::write(rlm.join("repl.py"), "")?;
         let machines = rlm.join("machines").join("review-sweep");
         std::fs::create_dir_all(&machines)?;
         std::fs::write(machines.join("MACHINE.md"), machine_body)?;
         std::fs::write(
             temp.join("pyproject.toml"),
-            "[project]
-",
+            "[project]\nname = 'prime-agent-runtime'\n",
         )?;
+        Ok(())
+    }
+
+    #[test]
+    fn missing_or_incomplete_runtime_sources_are_not_resolved() -> anyhow::Result<()> {
+        let temp = tempfile::tempdir()?;
+        let package = temp.path();
+        assert_eq!(resolve_runtime_source_dir(package, None), None);
+        let runtime = package.join("prime-agent-runtime");
+        runtime_fixture(&runtime, "machine")?;
+        for file in ["pyproject.toml", "src/rlm/__init__.py", "src/rlm/repl.py"] {
+            let path = runtime.join(file);
+            let contents = std::fs::read(&path)?;
+            std::fs::remove_file(&path)?;
+            assert_eq!(resolve_runtime_source_dir(package, None), None);
+            // A directory with the expected file name is also invalid.
+            std::fs::create_dir(&path)?;
+            assert_eq!(resolve_runtime_source_dir(package, None), None);
+            std::fs::remove_dir(&path)?;
+            std::fs::write(&path, contents)?;
+        }
+        for manifest in ["not toml", "[project]", "[project]\nname = 'other'"] {
+            std::fs::write(runtime.join("pyproject.toml"), manifest)?;
+            assert_eq!(resolve_runtime_source_dir(package, None), None);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn packaged_dist_and_checkout_sources_resolve_to_absolute_paths() -> anyhow::Result<()> {
+        let temp = tempfile::tempdir()?;
+        let package = temp.path().join("package");
+        let checkout = temp.path().join("checkout");
+        let direct = package.join("prime-agent-runtime");
+        let dist = package.join("dist/prime-agent-runtime");
+        let source = checkout.join("prime-agent-runtime");
+        for runtime in [&source, &dist, &direct] {
+            runtime_fixture(runtime, "machine")?;
+            assert_eq!(
+                resolve_runtime_source_dir(&package, Some(&checkout)),
+                Some(runtime.canonicalize()?)
+            );
+        }
+        // An incomplete first candidate must not hide a valid dist payload.
+        std::fs::remove_file(direct.join("src/rlm/repl.py"))?;
+        assert_eq!(
+            resolve_runtime_source_dir(&package, Some(&checkout)),
+            Some(dist.canonicalize()?)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn relative_package_paths_are_never_returned_as_requirements() -> anyhow::Result<()> {
+        let cwd = std::env::current_dir()?;
+        let temp = tempfile::tempdir_in(&cwd)?;
+        let runtime = temp.path().join("prime-agent-runtime");
+        runtime_fixture(&runtime, "machine")?;
+        let relative = temp.path().strip_prefix(&cwd)?;
+        assert_eq!(
+            resolve_runtime_source_dir(relative, None),
+            Some(runtime.canonicalize()?)
+        );
         Ok(())
     }
 

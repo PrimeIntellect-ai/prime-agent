@@ -56,6 +56,9 @@ pub struct EngineModelSelection {
 /// emit callback cancels the prompt.
 #[derive(Debug, Clone, PartialEq)]
 pub enum EngineEvent {
+    /// A session model transition: the worker owns the durable `model_change`
+    /// row; this internal event adds no client-facing protocol frame.
+    ModelChange(pa_types::session::ModelChangeEntry),
     /// The user message that was accepted (recorded into the session store).
     UserMessage(Value),
     /// An assistant message update (streaming): the loop's shared

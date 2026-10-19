@@ -1,0 +1,1 @@
+- On macOS, socket paths are now checked against the native 103-byte limit, and a long `TMPDIR` (for example under Nix) no longer breaks the daemon: its sockets move to `/tmp/prime-agent-<uid>` when the default location would be too long.

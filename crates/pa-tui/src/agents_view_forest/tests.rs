@@ -41,7 +41,7 @@ fn rows_for(
     scope: Option<&AgentsViewScope>,
     expanded: &[&str],
 ) -> Vec<AgentsViewRow> {
-    let records = reconcile_unified_sessions(roster, &[]);
+    let records = reconcile_unified_sessions(roster, &[], None);
     let rollups = compute_rollups(&records);
     let expanded: HashSet<String> = expanded.iter().map(ToString::to_string).collect();
     build_rows(
@@ -482,7 +482,7 @@ fn scoped_rows_lift_direct_children_and_exclude_the_root() {
         active_session_id: Some("p-live".to_string()),
         session_name: None,
     };
-    let records = reconcile_unified_sessions(&roster, &[]);
+    let records = reconcile_unified_sessions(&roster, &[], None);
     let subtree = scope_to_subtree(&records, &scope).expect("subtree");
     assert_eq!(subtree.len(), 2);
     let rows = rows_for(&roster, Some(&scope), &[]);
@@ -523,7 +523,7 @@ fn a_root_with_an_empty_session_file_binds_nothing() {
         active_session_id: Some("p-live".to_string()),
         session_name: None,
     };
-    let records = reconcile_unified_sessions(&roster, &[]);
+    let records = reconcile_unified_sessions(&roster, &[], None);
     assert_eq!(
         scope_root(&records, &scope),
         Some(ScopeRoot {
@@ -554,7 +554,7 @@ fn saved_child_nests_under_its_saved_parent() {
             "messageCount": 1,
         }),
     ];
-    let records = reconcile_unified_sessions(&[], &saved);
+    let records = reconcile_unified_sessions(&[], &saved, None);
     let rollups = compute_rollups(&records);
     let rows = build_rows(
         &records,
@@ -671,7 +671,7 @@ fn rollups_sum_costs_over_descendants_only() {
             }),
         ),
     ];
-    let records = reconcile_unified_sessions(&roster, &[]);
+    let records = reconcile_unified_sessions(&roster, &[], None);
     let rollups = compute_rollups(&records);
     let parent = rollups.get("file:/x/p.jsonl").expect("parent rollup");
     assert!((parent.cost - 0.75).abs() < f64::EPSILON);
@@ -724,7 +724,7 @@ fn rollups_sum_costs_over_descendants_only() {
         ),
     ];
     let fixture_records =
-        reconcile_unified_sessions(&fixture_roster, std::slice::from_ref(&saved_parent));
+        reconcile_unified_sessions(&fixture_roster, std::slice::from_ref(&saved_parent), None);
     let fixture_rollups = compute_rollups(&fixture_records);
     let fixture_parent = fixture_rollups
         .get("file:/x/p.jsonl")
@@ -739,7 +739,8 @@ fn rollups_sum_costs_over_descendants_only() {
         "path": "/x/p.jsonl", "id": "p",
         "usage": { "inputTokens": 0, "outputTokens": 0, "cost": 0.0 },
     });
-    let bare_records = reconcile_unified_sessions(&fixture_roster, std::slice::from_ref(&bare));
+    let bare_records =
+        reconcile_unified_sessions(&fixture_roster, std::slice::from_ref(&bare), None);
     let bare_rollups = compute_rollups(&bare_records);
     let bare_parent = bare_rollups.get("file:/x/p.jsonl").expect("parent rollup");
     assert!(
@@ -797,7 +798,7 @@ fn an_active_query_ranks_hits_globally_ancestors_sink_last() {
             }),
         ),
     ];
-    let records = reconcile_unified_sessions(&roster, &[]);
+    let records = reconcile_unified_sessions(&roster, &[], None);
     let filtered = crate::agents_view_state::filter_unified_sessions(
         &records,
         &crate::agents_view_state::parse_search_query("sweep"),
@@ -805,7 +806,7 @@ fn an_active_query_ranks_hits_globally_ancestors_sink_last() {
     let by_name = |name: &str| {
         filtered
             .iter()
-            .find(|record| record.search.name == name)
+            .find(|record| crate::agents_view_state::record_search_text(record).name == name)
             .unwrap_or_else(|| panic!("missing record {name}"))
     };
     assert!(by_name("policy sweep").search_score.is_some());
@@ -885,7 +886,7 @@ fn equal_scores_break_ties_by_recency_not_section() {
             }),
         ),
     ];
-    let records = reconcile_unified_sessions(&roster, &[]);
+    let records = reconcile_unified_sessions(&roster, &[], None);
     let filtered = crate::agents_view_state::filter_unified_sessions(
         &records,
         &crate::agents_view_state::parse_search_query("sweep"),
@@ -963,7 +964,7 @@ fn the_summary_line_bills_the_deleted_descendant_bucket() {
         roster_entry("p", "idle", &parent),
         roster_entry("r1", "running", &runner),
     ];
-    let records = reconcile_unified_sessions(&roster, std::slice::from_ref(&saved_parent));
+    let records = reconcile_unified_sessions(&roster, std::slice::from_ref(&saved_parent), None);
     let rollups = compute_rollups(&records);
     assert!(
         (rollups
@@ -1167,7 +1168,7 @@ fn a_ledger_child_nests_across_the_windows_path_forms() {
             "rlmDepth": 1,
         }),
     ];
-    let records = reconcile_unified_sessions(&roster, &saved);
+    let records = reconcile_unified_sessions(&roster, &saved, None);
     let rollups = compute_rollups(&records);
     let rows = build_rows(
         &records,

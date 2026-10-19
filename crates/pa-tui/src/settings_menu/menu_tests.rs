@@ -52,7 +52,8 @@ fn tabs_partition_the_settings_rows() {
                     "steering-mode",
                     "follow-up-mode",
                     "quiet-startup",
-                    "warnings"
+                    "warnings",
+                    "autocompact-threshold"
                 ]
             ),
             (
@@ -85,7 +86,8 @@ fn tabs_partition_the_settings_rows() {
                     "skill-commands",
                     "builtin-skills",
                     "idle-eviction-minutes",
-                    "tree-filter-mode"
+                    "tree-filter-mode",
+                    "harness-refinements",
                 ]
             ),
         ]
@@ -416,8 +418,12 @@ fn a_paste_types_into_the_search_query_without_spaces() {
     let mut menu = menu();
     menu.paste("auto comp");
     assert_eq!(menu.tabs[menu.tab].search.value(), "autocomp");
-    assert_eq!(menu.tabs[menu.tab].filtered.len(), 1);
+    assert_eq!(menu.tabs[menu.tab].filtered.len(), 2);
     assert_eq!(menu.rows[menu.tabs[menu.tab].filtered[0]].id, "autocompact");
+    assert_eq!(
+        menu.rows[menu.tabs[menu.tab].filtered[1]].id,
+        "autocompact-threshold"
+    );
 }
 
 #[test]
@@ -641,4 +647,87 @@ fn space_activates_instead_of_typing_into_the_query() {
         field_before, field_after,
         "the sanitized Space never types into the search field"
     );
+}
+
+#[test]
+fn harness_refinement_row_cycles_both_values_in_the_agents_tab() {
+    let values = SettingsCurrentValues {
+        harness_refinements: true,
+        ..SettingsCurrentValues::default()
+    };
+    let mut menu = SettingsMenu::new(settings_menu_rows(&values));
+    menu.handle_key("5", &kb());
+    for key in ["h", "a", "r", "n", "e", "s", "s"] {
+        menu.handle_key(key, &kb());
+    }
+    assert_eq!(
+        menu.handle_key("right", &kb()),
+        SettingsMenuAction::Change {
+            id: "harness-refinements",
+            value: "false".to_string()
+        }
+    );
+    assert_eq!(
+        menu.handle_key("left", &kb()),
+        SettingsMenuAction::Change {
+            id: "harness-refinements",
+            value: "true".to_string()
+        }
+    );
+}
+
+#[test]
+fn threshold_control_uses_five_point_steps_and_wraps_at_preset_boundaries() {
+    let values = SettingsCurrentValues {
+        compaction_threshold_percent: 95.0,
+        ..Default::default()
+    };
+    let mut menu = SettingsMenu::new(settings_menu_rows(&values));
+    menu.paste("threshold");
+    for (key, expected) in [
+        ("left", "90"),
+        ("left", "85"),
+        ("right", "90"),
+        ("right", "95"),
+        ("right", "100"),
+        ("right", "5"),
+        ("left", "100"),
+    ] {
+        assert_eq!(
+            menu.handle_key(key, &kb()),
+            SettingsMenuAction::Change {
+                id: "autocompact-threshold",
+                value: expected.into()
+            }
+        );
+    }
+}
+
+#[test]
+fn threshold_control_retains_off_grid_values_and_selects_neighbouring_presets() {
+    for (saved, lower, upper) in [
+        (62.5, "60", "65"),
+        (63.0, "60", "65"),
+        (1.0, "100", "5"),
+        (99.0, "95", "100"),
+    ] {
+        for (key, expected) in [("left", lower), ("right", upper)] {
+            let values = SettingsCurrentValues {
+                compaction_threshold_percent: saved,
+                ..Default::default()
+            };
+            let mut menu = SettingsMenu::new(settings_menu_rows(&values));
+            menu.paste("threshold");
+            assert!(render_text(&menu)
+                .iter()
+                .any(|row| row.contains(&saved.to_string())));
+            assert_eq!(
+                menu.handle_key(key, &kb()),
+                SettingsMenuAction::Change {
+                    id: "autocompact-threshold",
+                    value: expected.into()
+                }
+            );
+        }
+    }
 }

@@ -186,9 +186,6 @@ impl AgentView {
         if self.layout_width == 0 {
             return;
         }
-        if let Some((index, rows)) = self.sparse_mutation {
-            self.sparse_mutation = Some((index + count, rows));
-        }
         let cursor_spacing_after = self.prepend_cursor_spacing(count);
         let Some(mut window) = self.sparse_window.take() else {
             return;
@@ -218,6 +215,15 @@ impl AgentView {
             None => None,
         };
         self.sparse_window = Some(window);
+    }
+
+    /// `count` leading entries above the window dropped: the cursor's entry moved up.
+    pub(super) fn note_dropped_entries(&mut self, count: usize) {
+        if let Some(window) = &mut self.sparse_window {
+            window.cursor = window.cursor.and_then(|(section, row)| {
+                Some((section.checked_sub(count).filter(|s| *s > 0)?, row))
+            });
+        }
     }
 
     /// The delta of a just-appended entry, countable because the push

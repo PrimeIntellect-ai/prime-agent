@@ -71,6 +71,7 @@ pub(crate) use config::CreateSessionResources;
 pub use config::SupervisorLinkConfig;
 use config::{GoalRuntimeHandles, ProducerUsageSink, RestoredSessionModel, StartupScope};
 
+mod reload;
 mod session_engine_impl;
 
 mod turn;
@@ -97,6 +98,14 @@ pub(crate) const QUOTA_WAKE_MAX_RETRIES: u32 = 3;
 /// The session's snapshot-flushing kernel stop as a boxed-future factory.
 pub(crate) type SettledKernelRelease =
     std::sync::Arc<dyn Fn() -> futures::future::BoxFuture<'static, ()> + Send + Sync>;
+
+/// A captured prompt boundary: an empty transcript or a stable durable leaf.
+/// The owning slot's None means no worker boundary has been supplied.
+#[derive(Clone, PartialEq, Eq)]
+enum PromptContextBoundary {
+    Empty,
+    Leaf(String),
+}
 
 /// A [`SessionEngine`] running real agent turns.
 pub struct AgentSessionEngine {
@@ -200,6 +209,8 @@ pub struct AgentSessionEngine {
     /// A branch move that landed before the first turn: consumed at build so
     /// the session starts on the moved branch.
     pending_branch: std::sync::Mutex<Option<Vec<pa_types::session::FileEntry>>>,
+    /// The worker's captured pre-admission boundary; None means unset.
+    prompt_context_boundary: std::sync::Mutex<Option<PromptContextBoundary>>,
     /// The `goal_update` payload a branch rebuild's goal reload stashed,
     /// taken by the worker that announces it. `None` when it changed nothing.
     reloaded_goal_update: std::sync::Mutex<Option<Value>>,
@@ -285,6 +296,13 @@ pub struct AgentSessionEngine {
     /// every model-turn attempt so retries keep serving it; cleared when the
     /// episode settles.
     pub(crate) image_route: std::sync::Mutex<Option<ImageRoute>>,
+    /// Serializes `/reload`'s whole live-input refresh: overlapping reloads
+    /// resolve the store at their own read times, so an earlier reload's
+    /// already-resolved key/header pair must never land over a later
+    /// reload's fresher pair (the last reload to run leaves the target
+    /// serving the newest store).
+    pub(crate) reload_lock: std::sync::Mutex<()>,
+
     /// Turn-boundary runs register their controller here;
     /// [`SessionEngine::abort_auto_compaction`] aborts whatever holds it.
     pub(crate) auto_compaction_abort: std::sync::Mutex<Option<std::sync::Arc<AbortController>>>,

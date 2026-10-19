@@ -201,6 +201,14 @@ fn daemon_acp_create(
         create_config["childScript"] =
             serde_json::Value::String(child_script.to_string_lossy().to_string());
     }
+    // TS main.ts `launchEnv` (:1092 via the daemon-client create): the
+    // client's own environment travels on the create so the session's
+    // worker runs in the environment of the terminal that invoked it,
+    // not the daemon's boot environment.
+    let launch_env = {
+        let env = pa_types::daemon::launch_env::collect_process_launch_env();
+        (!env.is_empty()).then_some(env)
+    };
     let create = pa_types::daemon::DaemonCommand::Create {
         id: None,
         session_path: session_path.map(|path| path.display().to_string()),
@@ -212,7 +220,7 @@ fn daemon_acp_create(
         runtime_metadata: None,
         lifecycle: Some(lifecycle),
         env: None,
-        launch_env: None,
+        launch_env,
         rest: serde_json::Map::default(),
     };
     Ok((cwd, create))
@@ -582,11 +590,14 @@ pub(crate) async fn build_headless_engine_with(
                 return Err("a scripted child builds through the faux builder".to_string());
             }
         },
-        HeadlessEmbedding::Root { .. } | HeadlessEmbedding::Rpc => select_model(
-            &mut registry,
-            config.provider.as_deref(),
-            config.model.as_deref(),
-        )?,
+        HeadlessEmbedding::Root { .. } | HeadlessEmbedding::Rpc => {
+            // The opened session's active context joins the selection (TS
+            // `createAgentSession`); `--no-session` selects from no session.
+            let session = session_manager
+                .as_ref()
+                .map(pa_core::session::manager::SessionManager::active_context);
+            select_model(&mut registry, config, session.as_ref()).await?
+        }
     };
     // Resolve request auth once: the stored team / `PRIME_TEAM_ID` reach the wire through these
     // headers (children resolve against the same catalog the spawn used).
@@ -1012,28 +1023,81 @@ async fn session_header_json(
     Some(serde_json::Value::Object(object).to_string())
 }
 
-fn select_model(
+async fn select_model(
     registry: &mut pa_core::models::ModelRegistry,
-    provider: Option<&str>,
-    model: Option<&str>,
+    config: &crate::mode::RuntimeConfig,
+    session: Option<&pa_core::session::SessionContext>,
 ) -> Result<Model, String> {
-    let available: Vec<Model> = registry.get_available().into_iter().cloned().collect();
-    let Some(model_name) = model else {
-        let all: Vec<Model> = registry.get_all().to_vec();
-        if let Some(default) = pa_core::models::find_preferred_default_model(&available) {
-            return Ok(default.clone());
+    // Explicit selectors retain the CLI resolver's provider inference and do
+    // not inherit an unrelated saved provider.
+    if let Some(model_name) = config.model.as_deref() {
+        let available: Vec<Model> = registry.get_available().into_iter().cloned().collect();
+        let resolved =
+            pa_core::models::resolve_cli_model(config.provider.as_deref(), model_name, &available);
+        if let Some(error) = resolved.error {
+            return Err(error);
         }
-        return all.first().cloned().ok_or_else(|| {
-            "No models available. Check your installation or add models to models.json.".to_string()
-        });
-    };
-    let resolved = pa_core::models::resolve_cli_model(provider, model_name, &available);
-    if let Some(error) = resolved.error {
-        return Err(error);
+        return resolved
+            .model
+            .ok_or_else(|| "No matching model found.".to_string());
     }
-    resolved
-        .model
-        .ok_or_else(|| "No matching model found.".to_string())
+    // A resumed session with messages restores its own model before the
+    // defaults chain (TS `createAgentSession`), through the daemon restore's
+    // bounded catalog-readiness wait; a miss falls through on the record.
+    if let Some((provider, model_id)) = session
+        .filter(|context| !context.messages.is_empty())
+        .and_then(|context| context.model.as_ref())
+    {
+        if let Some(model) = pa_core::models::find_session_model_with_readiness_wait(
+            registry,
+            provider,
+            model_id,
+            pa_core::models::SESSION_MODEL_RESTORE_READINESS_TIMEOUT_MS,
+        )
+        .await
+        {
+            return Ok(model);
+        }
+        eprintln!("Could not restore model {provider}/{model_id}");
+    }
+    // A missed restore's readiness window may have refreshed the catalog, so
+    // the defaults chain resolves against the refreshed view.
+    let settings = pa_core::settings::SettingsManager::create(&config.cwd, &config.agent_dir);
+    let available: Vec<Model> = registry.get_available().into_iter().cloned().collect();
+    let saved_provider = settings.get_default_provider();
+    let flag_provider = config.provider.as_deref();
+    let saved_model = settings.get_default_model().filter(|_| {
+        flag_provider.is_none_or(|provider| {
+            saved_provider.is_some_and(|saved| provider.eq_ignore_ascii_case(saved))
+        })
+    });
+    if let Some(saved_model) = saved_model {
+        // Saved IDs must exist in the authenticated catalog. Do not synthesize
+        // a fallback model, especially an unauthorized private Prime model.
+        // The lookup is scoped like TS findInitialModel's saved default: the
+        // flag, when given, has already matched the saved provider above.
+        let scope = flag_provider.or(saved_provider);
+        return available.iter().find(|model| {
+            scope.is_none_or(|provider| model.provider.eq_ignore_ascii_case(provider))
+                && (model.id.eq_ignore_ascii_case(saved_model)
+                    || format!("{}/{}", model.provider, model.id).eq_ignore_ascii_case(saved_model))
+        }).cloned().ok_or_else(|| format!("Configured default model \"{saved_model}\" is unavailable. Check settings.json, models.json, and provider authentication."));
+    }
+    // A settings defaultProvider without a defaultModel does not scope the
+    // no-flag choice (TS reads the two keys together); only the flag does.
+    let candidates: Vec<Model> = available
+        .into_iter()
+        .filter(|model| {
+            flag_provider.is_none_or(|provider| model.provider.eq_ignore_ascii_case(provider))
+        })
+        .collect();
+    pa_core::models::find_preferred_default_model(&candidates)
+        .or_else(|| candidates.first())
+        .cloned()
+        .ok_or_else(|| match flag_provider {
+            Some(provider) => format!("No available models for provider \"{provider}\". Check models.json and provider authentication."),
+            None => "No authenticated models available. Configure a provider or select a model explicitly.".to_string(),
+        })
 }
 
 /// Resolve the session thinking level: the CLI flag, then the settings
@@ -1426,6 +1490,7 @@ async fn run_prompts_and_emit(
                 global_harness_dir.clone(),
                 &autonomous_state,
                 &command,
+                &images,
             )
             .await;
             if let Some(error) = execution.error {
@@ -1841,17 +1906,22 @@ mod tests {
         )
         .unwrap();
         let built_manager = crate::mcp_login::cli_mcp_manager(&cwd, &agent_dir);
-        assert_eq!(
-            built_manager.get_enabled_persistent_generic_servers(),
-            vec!["fixture-echo".to_string()]
-        );
         let manager = std::sync::Arc::new(std::sync::Mutex::new(built_manager));
+        let gating_manager = std::sync::Arc::clone(&manager);
+        let enabled = tokio::task::spawn_blocking(move || {
+            gating_manager
+                .lock()
+                .unwrap()
+                .get_enabled_persistent_generic_servers()
+        })
+        .await
+        .unwrap();
+        assert_eq!(enabled, vec!["fixture-echo".to_string()]);
         let mut handlers = pa_core::kernel::shared::HostRequestHandlers::default();
         pa_core::mcp::McpManager::register_host_handlers(&manager, &mut handlers);
         let config = handlers.get("mcp.config").unwrap().clone();
         let result = config(pa_core::kernel::shared::HostRequestPayload {
             data: serde_json::json!({ "server": "fixture-echo" }),
-            cell_source_code: None,
         })
         .await
         .unwrap();
@@ -1872,33 +1942,34 @@ mod tests {
             .to_string(),
         )
         .unwrap();
-        {
-            let mut manager = manager.lock().unwrap();
+        let gating_manager = std::sync::Arc::clone(&manager);
+        tokio::task::spawn_blocking(move || {
+            let mut manager = gating_manager.lock().unwrap();
             manager.refresh();
             assert_eq!(
                 manager.get_enabled_persistent_generic_servers(),
                 vec!["second-echo".to_string()]
             );
-        }
+        })
+        .await
+        .unwrap();
         let result = config(pa_core::kernel::shared::HostRequestPayload {
-            data: serde_json::json!({ "server": "fixture-echo" }),
-            cell_source_code: None,
+            data: serde_json::json!({ "server": "second-echo" }),
         })
         .await
         .unwrap();
         assert_eq!(
-            result["command"], "python3",
-            "the registered handler serves its registration-time integrations"
+            result["command"], "node",
+            "the already-registered handler serves the live integrations"
         );
-        let missing = config(pa_core::kernel::shared::HostRequestPayload {
-            data: serde_json::json!({ "server": "second-echo" }),
-            cell_source_code: None,
+        let withdrawn = config(pa_core::kernel::shared::HostRequestPayload {
+            data: serde_json::json!({ "server": "fixture-echo" }),
         })
         .await
         .unwrap();
         assert!(
-            missing.as_object().unwrap().is_empty(),
-            "the pre-refresh handler does not know the new server"
+            withdrawn.as_object().unwrap().is_empty(),
+            "the rewrite withdrew the old server from the live integrations"
         );
     }
 
@@ -1960,3 +2031,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "print_model_tests.rs"]
+mod print_model_tests;

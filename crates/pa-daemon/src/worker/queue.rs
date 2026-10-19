@@ -2,7 +2,8 @@
 //! and queue recovery.
 use super::{
     emit_worker_event_with, json, oneshot, Arc, Duration, EventPump, Mutex, Notify, Result,
-    SessionCore, Value, VecDeque, WorkerRecoveryJournal, AUTONOMOUS_QUEUE_KEY,
+    SessionCore, Value, VecDeque, WorkerRecoveryJournal, AGENT_MESSAGE_SOURCE,
+    AUTONOMOUS_QUEUE_KEY,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -372,6 +373,18 @@ pub(crate) fn restore_queue_snapshot(
             .into_iter()
             .map(|record| {
                 let policy = record.policy();
+                // The journal retains the custom row, including the original
+                // body. Reconstruct the marker used by clear/pause/status.
+                let agent_message = record.custom_message.as_ref().and_then(|row| {
+                    (row.get("customType").and_then(Value::as_str) == Some(AGENT_MESSAGE_SOURCE))
+                        .then(|| {
+                            row.get("details")?
+                                .get("message")?
+                                .as_str()
+                                .map(str::to_string)
+                        })
+                        .flatten()
+                });
                 QueuedItem {
                     preview: record.preview,
                     message: record.message,
@@ -383,7 +396,7 @@ pub(crate) fn restore_queue_snapshot(
                         }
                     }),
                     custom_message: record.custom_message,
-                    agent_message: None,
+                    agent_message,
                     queue_key: record.queue_key,
                     admission_id: None,
                     images: Vec::new(),
