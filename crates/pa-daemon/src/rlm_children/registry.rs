@@ -88,6 +88,10 @@ impl SupervisorChildSessionsInner {
                 .command(&abort, KILL_TIMEOUT_MS)
                 .await
                 .with_context(|| format!("abort RLM child session {active_session_id}"));
+            // A cancelled run is the parent's action (nano-rlm #202's
+            // `agent.cancel` gap): the child leaves a parent -> child
+            // cancel line on the ledger, not a clean disappearance.
+            self.record_child_cancelled(record).await;
             // The settled/cancelled child releases an owed goal continuation.
             self.fire_settle_hook(record).await;
             return true;
@@ -206,12 +210,24 @@ impl SupervisorChildSessionsInner {
                     record.notice_delivered = true;
                 }
                 self.emit_child_usage(record).await;
-                let active_session_id = record.lock().await.active_session_id.clone();
+                let (active_session_id, was_running) = {
+                    let record = record.lock().await;
+                    (
+                        record.active_session_id.clone(),
+                        record.settled_status.is_none(),
+                    )
+                };
                 if let Err(error) = self.kill_child(&active_session_id, reason).await {
                     if unknown_session(&error).is_none() {
                         close_error.get_or_insert(error);
                         continue;
                     }
+                }
+                // A close that kills a live run is the parent's cancel
+                // (nano-rlm #202's killed-child gap): a killed child
+                // leaves a cancel line, not a clean disappearance.
+                if was_running {
+                    self.record_child_cancelled(record).await;
                 }
                 self.retain_retired_usage(record, super::RetirementIntent::Close);
                 self.emit_child_usage(record).await;
@@ -266,6 +282,13 @@ impl SupervisorChildSessionsInner {
             }
             row.rlm_child_id.clone()
         };
+        // A delete that killed a live run is the parent's cancel (nano-rlm
+        // #202's delete gap): the child's cancel line lands before the
+        // registry row is gone, so a deleted child never vanishes from the
+        // semantic graph.
+        if cancelled_by_delete {
+            self.record_child_cancelled(record).await;
+        }
         if deleted {
             let sink = self
                 .child_update_sink

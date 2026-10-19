@@ -575,10 +575,11 @@ impl SupervisorChildSessionsInner {
     /// committed request, read from the child's own ledger file (the
     /// cross-process form of TS's in-process
     /// `child.semanticEdges.lastCommittedRequestId`). Only a `done` or
-    /// `error` settle returns — TS never records a cancelled run (its done
-    /// arm throws on `run.error` and the record gates on `status ===
-    /// "error"`). A child without a durable session id, or a parent
-    /// without a recorder, records nothing.
+    /// `error` settle returns — a cancelled run never returns (it is the
+    /// parent's action, so it records through
+    /// [`Self::record_child_cancelled`] instead, nano-rlm #202). A child
+    /// without a durable session id, or a parent without a recorder,
+    /// records nothing.
     async fn record_child_return(&self, record: &Arc<Mutex<ChildRecord>>) {
         let recorder = self
             .semantic_edges
@@ -613,6 +614,28 @@ impl SupervisorChildSessionsInner {
         .ok()
         .flatten();
         recorder.record_child_returned(&child_session_id, last_committed);
+    }
+
+    /// Record a parent-cancelled child in the parent's semantic-edge
+    /// ledger (nano-rlm #202's `recordSubagentCancel`): the cancel twin
+    /// of a spawn — an action the PARENT took, anchored to the parent's
+    /// in-flight (cancelling) request, never a passive child return. A
+    /// child without a durable session id, or a parent without a
+    /// recorder, records nothing.
+    pub(super) async fn record_child_cancelled(&self, record: &Arc<Mutex<ChildRecord>>) {
+        let recorder = self
+            .semantic_edges
+            .lock()
+            .expect("semantic edges lock")
+            .clone();
+        let Some(recorder) = recorder else {
+            return;
+        };
+        let child_session_id = record.lock().await.session_id.clone();
+        let Some(child_session_id) = child_session_id else {
+            return;
+        };
+        recorder.record_child_cancelled(&child_session_id);
     }
 
     /// Deliver the no-reply terminal notice for a settled child that never

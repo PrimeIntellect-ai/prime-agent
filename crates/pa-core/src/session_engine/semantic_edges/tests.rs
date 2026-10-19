@@ -154,6 +154,85 @@ fn a_parked_retry_reuses_its_id_only_for_an_identical_body_in_the_same_epoch() {
     );
 }
 
+/// The parent cancels a child mid-run: one parent -> child
+/// `child_cancelled` line anchored to the cancelling request, recorded at
+/// most once per child — including across a reopen, whose replay rebuilds
+/// the at-most-once claim (nano-rlm #202's `recordSubagentCancel`).
+#[test]
+fn a_child_cancel_is_ledgered_once_anchored_to_the_cancelling_request() {
+    let (identity, _dir) = identity("session-h");
+    let recorder = SemanticEdgeRecorder::open(identity.clone());
+    let request_id = recorder
+        .start_turn_request(FINGERPRINT_A)
+        .expect("the recorder mints ids");
+    let cancel = SemanticEdgeLedgerEvent::ChildCancelled {
+        session_id: "session-h".to_string(),
+        child_session_id: "child-session".to_string(),
+        request_id: request_id.clone(),
+    };
+    // The same child cancelled twice records one line.
+    recorder.record_child_cancelled("child-session");
+    recorder.record_child_cancelled("child-session");
+    assert_eq!(
+        read_ledger(&identity),
+        vec![
+            session_registered("session-h"),
+            request_started("session-h", &request_id),
+            cancel.clone(),
+        ]
+    );
+    // A reopen replays the cancel line, so a later cancel of the same
+    // child records nothing.
+    drop(recorder);
+    let reopened = SemanticEdgeRecorder::open(identity.clone());
+    reopened.record_child_cancelled("child-session");
+    // A different child still records, anchored to the replayed last turn.
+    reopened.record_child_cancelled("child-other");
+    assert_eq!(
+        read_ledger(&identity),
+        vec![
+            session_registered("session-h"),
+            request_started("session-h", &request_id),
+            cancel,
+            SemanticEdgeLedgerEvent::ChildCancelled {
+                session_id: "session-h".to_string(),
+                child_session_id: "child-other".to_string(),
+                request_id,
+            },
+        ]
+    );
+}
+
+/// A cancel with no live request anchors to nothing: a recorder that
+/// never started a turn, or one whose ledger is disabled, records no
+/// cancel (an absent edge beats a wrong one).
+#[test]
+fn a_child_cancel_without_a_live_request_records_nothing() {
+    let (identity, _dir) = identity("session-i");
+    let recorder = SemanticEdgeRecorder::open(identity.clone());
+    // No turn ever started: nothing anchors the cancel.
+    recorder.record_child_cancelled("child-session");
+    assert_eq!(
+        read_ledger(&identity),
+        vec![session_registered("session-i")]
+    );
+    // A live turn first, then a directory at the ledger path fails the
+    // cancel's append and permanently disables the recorder (works as
+    // root too).
+    recorder
+        .start_turn_request(FINGERPRINT_A)
+        .expect("the recorder mints ids");
+    let path = identity.ledger_path.as_ref().unwrap();
+    std::fs::remove_file(path).unwrap();
+    std::fs::create_dir(path).unwrap();
+    recorder.record_child_cancelled("child-session");
+    std::fs::remove_dir(path).unwrap();
+    // The disabled recorder has no last turn: even a fresh child records
+    // no cancel.
+    recorder.record_child_cancelled("child-other");
+    assert_eq!(read_ledger(&identity), Vec::new());
+}
+
 #[tokio::test]
 async fn split_summary_slices_commit_in_resolve_order() {
     let (identity, _dir) = identity("session-g");

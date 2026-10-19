@@ -87,6 +87,16 @@ pub enum SemanticEdgeLedgerEvent {
         child_session_id: String,
         request_id: String,
     },
+    /// The parent cancelled a child mid-run (nano-rlm #202's
+    /// `subagent_cancel`): an action the PARENT took, so like a spawn
+    /// it is parent -> child, anchored to the cancelling request (the
+    /// parent's last turn); the child's cancelled state is derived from
+    /// this line, not carried on it.
+    ChildCancelled {
+        session_id: String,
+        child_session_id: String,
+        request_id: String,
+    },
     /// An event a newer writer appended (TS `JSON.parse` accepts any line
     /// and the replay ignores unknown types): forward-compatible resume.
     #[serde(other)]
@@ -156,6 +166,10 @@ struct RecorderState {
     last_turn: Option<Turn>,
     parked_retry: Option<Turn>,
     open_compactions: HashSet<String>,
+    /// Children this parent already cancelled (the durable half of
+    /// nano-rlm #202's at-most-once `cancel_recorded` flag): a replay
+    /// rebuilds it from the ledger's `child_cancelled` lines.
+    cancelled_children: HashSet<String>,
 }
 
 /// Append-only semantic-edge recorder for one session (TS
@@ -336,6 +350,37 @@ impl SemanticEdgeRecorder {
             },
         );
     }
+
+    /// The parent cancelled a child mid-run (nano-rlm #202's
+    /// `recordSubagentCancel`, the cancel twin of a spawn: an action the
+    /// PARENT took): a parent -> child cancel line anchored to the
+    /// parent's last request (the cancelling turn), recorded at most
+    /// once per child across resumes. `None` anchors to nothing — a
+    /// recorder with no live request (no turn ever started, or the
+    /// ledger disabled) records nothing: an absent edge beats a wrong
+    /// one.
+    pub fn record_child_cancelled(&self, child_session_id: &str) {
+        let mut state = self.state();
+        let Some(request_id) = state.last_turn.as_ref().map(|turn| turn.request_id.clone()) else {
+            return;
+        };
+        if state.cancelled_children.contains(child_session_id) {
+            return;
+        }
+        let recorded = self.append(
+            &mut state,
+            &SemanticEdgeLedgerEvent::ChildCancelled {
+                session_id: self.session_id.clone(),
+                child_session_id: child_session_id.to_string(),
+                request_id,
+            },
+        );
+        if recorded {
+            state
+                .cancelled_children
+                .insert(child_session_id.to_string());
+        }
+    }
 }
 
 /// The last `request_finished` in a ledger: the parent's read of a child's
@@ -400,6 +445,16 @@ fn replay_event(state: &mut RecorderState, session_id: &str, event: &SemanticEdg
         } if event_session_id == session_id => {
             state.open_compactions.insert(compaction_id.clone());
         }
+        // Restores the at-most-once cancel claim after a resume: a
+        // reopen must not append a second cancel line for a child the
+        // pre-restart session already cancelled.
+        SemanticEdgeLedgerEvent::ChildCancelled {
+            session_id: event_session_id,
+            child_session_id,
+            request_id: _,
+        } if event_session_id == session_id => {
+            state.cancelled_children.insert(child_session_id.clone());
+        }
         SemanticEdgeLedgerEvent::CompactionFinished {
             compaction_id,
             status,
@@ -416,6 +471,7 @@ fn replay_event(state: &mut RecorderState, session_id: &str, event: &SemanticEdg
         | SemanticEdgeLedgerEvent::SessionRegistered { .. }
         | SemanticEdgeLedgerEvent::CompactionBegun { .. }
         | SemanticEdgeLedgerEvent::ChildReturned { .. }
+        | SemanticEdgeLedgerEvent::ChildCancelled { .. }
         | SemanticEdgeLedgerEvent::Unknown => {}
     }
 }

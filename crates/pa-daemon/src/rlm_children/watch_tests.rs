@@ -1,5 +1,8 @@
 use super::*;
 use crate::protocol::{response_failure, response_success};
+use pa_core::session_engine::semantic_edges::{
+    SemanticEdgeIdentity, SemanticEdgeLedgerEvent, SemanticEdgeRecorder,
+};
 use pa_types::platform::transport::bind_transport;
 use pa_types::session::AgentMessage;
 use serde_json::{json, Value};
@@ -918,6 +921,184 @@ async fn a_replied_child_gets_no_terminal_notice() {
 
     let extra = tokio::time::timeout(std::time::Duration::from_secs(2), follow_up_rx.recv()).await;
     assert!(extra.is_err(), "a replied child must not deliver a notice");
+}
+
+/// A parent recorder over a fresh ledger seeded with one started request:
+/// the replay restores the in-flight turn, so the registry's cancel sites
+/// anchor the `child_cancelled` line to it (the same wire a live parent
+/// session would carry mid-turn).
+fn seeded_parent_recorder() -> (
+    std::sync::Arc<SemanticEdgeRecorder>,
+    PathBuf,
+    tempfile::TempDir,
+) {
+    let dir = tempfile::TempDir::new().expect("temp dir");
+    let ledger_path = dir.path().join("semantic-edges.jsonl");
+    let registered = SemanticEdgeLedgerEvent::SessionRegistered {
+        session_id: "parent-lead".to_string(),
+        parent_session_id: None,
+        spawned_by_request_id: None,
+    };
+    let started = SemanticEdgeLedgerEvent::RequestStarted {
+        request_id: "parent-request-1".to_string(),
+        session_id: "parent-lead".to_string(),
+        compaction_id: None,
+    };
+    std::fs::write(
+        &ledger_path,
+        format!(
+            "{}\n{}\n",
+            serde_json::to_string(&registered).expect("serialize the registered line"),
+            serde_json::to_string(&started).expect("serialize the started line")
+        ),
+    )
+    .expect("write the seeded ledger");
+    let recorder = std::sync::Arc::new(SemanticEdgeRecorder::open(SemanticEdgeIdentity {
+        session_id: "parent-lead".to_string(),
+        ledger_path: Some(ledger_path.clone()),
+        parent_session_id: None,
+        spawned_by_request_id: None,
+    }));
+    (recorder, ledger_path, dir)
+}
+
+/// The `child_cancelled` lines of one parent ledger: (parent, child,
+/// cancelling request).
+fn cancelled_lines(path: &Path) -> Vec<(String, String, String)> {
+    std::fs::read_to_string(path)
+        .unwrap_or_default()
+        .lines()
+        .filter_map(|line| serde_json::from_str::<SemanticEdgeLedgerEvent>(line.trim()).ok())
+        .filter_map(|event| match event {
+            SemanticEdgeLedgerEvent::ChildCancelled {
+                session_id,
+                child_session_id,
+                request_id,
+            } => Some((session_id, child_session_id, request_id)),
+            _ => None,
+        })
+        .collect()
+}
+
+/// A user-cancelled run records the cancel edge (nano-rlm #202's
+/// `agent.cancel` gap): one parent -> child line anchored to the
+/// parent's in-flight request, never a clean disappearance.
+#[tokio::test]
+async fn a_cancelled_run_records_the_cancel_edge_on_the_parent_ledger() {
+    let (follow_up_tx, _follow_up_rx) = mpsc::unbounded_channel();
+    let (sessions, _kill_rx) =
+        sessions_with_fake_supervisor(follow_up_tx, 10_000, FakeKill::Success, FakeChild::Healthy)
+            .await;
+    let (recorder, ledger_path, _dir) = seeded_parent_recorder();
+    sessions.set_semantic_edges(Some(recorder));
+    let handle = spawn_child(&sessions).await;
+
+    assert!(sessions.cancel_child_run(&handle.rlm_child_id).await);
+
+    assert_eq!(
+        cancelled_lines(&ledger_path),
+        vec![(
+            "parent-lead".to_string(),
+            "child-file".to_string(),
+            "parent-request-1".to_string()
+        )],
+        "the cancel lands as a parent -> child edge anchored to the cancelling request"
+    );
+}
+
+/// A delete that kills a live run records the cancel edge (nano-rlm
+/// #202's delete gap): a deleted child leaves a cancel line, not a clean
+/// disappearance.
+#[tokio::test]
+async fn a_deleted_running_child_records_the_cancel_edge_on_the_parent_ledger() {
+    let (follow_up_tx, _follow_up_rx) = mpsc::unbounded_channel();
+    let (sessions, _kill_rx) =
+        sessions_with_fake_supervisor(follow_up_tx, 10_000, FakeKill::Success, FakeChild::Healthy)
+            .await;
+    let (recorder, ledger_path, _dir) = seeded_parent_recorder();
+    sessions.set_semantic_edges(Some(recorder));
+    let handle = spawn_child(&sessions).await;
+
+    let deleted = sessions
+        .delete_subagent(handle.rlm_child_id.clone())
+        .await
+        .expect("delete the running child");
+    assert_eq!(deleted.outcome, Some("deleted"));
+
+    assert_eq!(
+        cancelled_lines(&ledger_path),
+        vec![(
+            "parent-lead".to_string(),
+            "child-file".to_string(),
+            "parent-request-1".to_string()
+        )],
+        "the running child's delete lands as a parent -> child cancel edge"
+    );
+}
+
+/// Only a cut-short run cancels: a delete of an already-settled child
+/// records no cancel line (its return line already stands).
+#[tokio::test]
+async fn a_deleted_settled_child_records_no_cancel_edge() {
+    let (follow_up_tx, _follow_up_rx) = mpsc::unbounded_channel();
+    let (sessions, _kill_rx) =
+        sessions_with_fake_supervisor(follow_up_tx, 0, FakeKill::Success, FakeChild::Healthy).await;
+    let (recorder, ledger_path, _dir) = seeded_parent_recorder();
+    sessions.set_semantic_edges(Some(recorder));
+    let handle = spawn_child(&sessions).await;
+    sessions.notify_turn_done();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let entries = sessions.list_subagents().await.expect("child roster");
+        if entries.iter().any(|entry| entry.status == "completed") {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "child never settled: {entries:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+
+    sessions
+        .delete_subagent(handle.rlm_child_id.clone())
+        .await
+        .expect("delete the settled child");
+
+    assert_eq!(
+        cancelled_lines(&ledger_path),
+        Vec::new(),
+        "a settled child's delete records no cancel edge"
+    );
+}
+
+/// A close that kills a live run records the cancel edge (nano-rlm
+/// #202's killed-child gap): a killed child leaves a cancel line on the
+/// parent's ledger, not a clean disappearance.
+#[tokio::test]
+async fn a_closed_running_child_records_the_cancel_edge_on_the_parent_ledger() {
+    let (follow_up_tx, _follow_up_rx) = mpsc::unbounded_channel();
+    let (sessions, _kill_rx) =
+        sessions_with_fake_supervisor(follow_up_tx, 10_000, FakeKill::Success, FakeChild::Healthy)
+            .await;
+    let (recorder, ledger_path, _dir) = seeded_parent_recorder();
+    sessions.set_semantic_edges(Some(recorder));
+    let _handle = spawn_child(&sessions).await;
+
+    sessions
+        .close_children(ChildCloseReason::Killed)
+        .await
+        .expect("close the running child");
+
+    assert_eq!(
+        cancelled_lines(&ledger_path),
+        vec![(
+            "parent-lead".to_string(),
+            "child-file".to_string(),
+            "parent-request-1".to_string()
+        )],
+        "the close's kill lands as a parent -> child cancel edge"
+    );
 }
 
 /// A target whose delete receipt already returned resolves immediately to the settled cancelled
