@@ -15,7 +15,8 @@ impl AgentsViewMode {
     ) -> (Vec<Line>, Option<(usize, usize)>) {
         // The frame height feeds the page step (TS reads `ui.terminal.rows` live at key time).
         self.last_height = height;
-        if let Some(view) = &self.shell_view {
+        if let Some(view) = self.shell_view.as_mut() {
+            view.set_viewport_rows(height);
             self.click_rows.clear();
             self.hover_row = None;
             let mut lines = view.render(&self.theme, width, &self.keybindings);

@@ -205,6 +205,11 @@ impl BashView {
         view
     }
 
+    /// The rows the view lays out in: a host whose frame resizes sets it before each render.
+    pub fn set_viewport_rows(&mut self, rows: usize) {
+        self.viewport_rows = rows;
+    }
+
     /// The list's muted line under its title.
     #[must_use]
     pub fn with_subtitle(mut self, subtitle: &str) -> Self {
