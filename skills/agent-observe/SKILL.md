@@ -46,8 +46,8 @@ if child is not None:
   `await rlm.list_subagents()` also exposes parent-owned lifecycle handles.
 - `await agent_observe.get_agent(target)` returns `agent`, where `agent`
   contains one agent summary (the same shape as the roster rows, including a
-  passive child's row). `target` is resolved by active id, session id, or
-  session name.
+  passive child's row). `target` is resolved like other live-session
+  selectors: active id, session id or name, or an unambiguous id suffix.
 - `await agent_observe.recent_messages(target, limit=8, max_chars=800)`
   returns `agent` (the target's summary), `messages` (up to `limit` recent
   bounded previews), the clamped `limit` and `maxChars`, and `truncated`
