@@ -683,15 +683,56 @@ async fn cancel_owned_admission_aborts_the_running_prompt() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// Forwards to the worker's faux provider and signals each request it
+/// serves. The provider takes the scripted step inside `stream`, so a
+/// signal means that request owns its step.
+struct RequestProbe {
+    inner: std::sync::Arc<dyn pa_ai::Provider>,
+    requested: std::sync::Arc<tokio::sync::Notify>,
+}
+
+impl pa_ai::Provider for RequestProbe {
+    fn api(&self) -> &str {
+        self.inner.api()
+    }
+
+    fn stream(
+        &self,
+        model: &pa_ai::types::Model,
+        context: &pa_ai::types::Context,
+        options: Option<&pa_ai::types::StreamOptions>,
+    ) -> pa_ai::AssistantMessageEventStream {
+        let stream = self.inner.stream(model, context, options);
+        self.requested.notify_one();
+        stream
+    }
+
+    fn stream_simple(
+        &self,
+        model: &pa_ai::types::Model,
+        context: &pa_ai::types::Context,
+        options: Option<&pa_ai::types::SimpleStreamOptions>,
+    ) -> pa_ai::AssistantMessageEventStream {
+        let stream = self.inner.stream_simple(model, context, options);
+        self.requested.notify_one();
+        stream
+    }
+}
+
 /// The faux-script worker for the abort-and-send probes: a fresh created
 /// session whose first response holds for 60s (the streaming turn the
-/// abort cuts) and whose next turn answers `reply`. The faux registry is
-/// process-global: hold `FAUX_TEST_LOCK` across the flow.
+/// abort cuts) and whose next turn answers `reply`, plus the signal for
+/// each provider request. The faux registry is process-global: hold
+/// `FAUX_TEST_LOCK` across the flow.
 async fn held_turn_worker(
     active_session_id: &str,
     name: &str,
     reply: &str,
-) -> (std::sync::Arc<Worker>, std::path::PathBuf) {
+) -> (
+    std::sync::Arc<Worker>,
+    std::path::PathBuf,
+    std::sync::Arc<tokio::sync::Notify>,
+) {
     let dir = std::env::temp_dir().join(format!("pa-worker-abort-am-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(&dir).unwrap();
     let config = WorkerConfig {
@@ -719,12 +760,33 @@ async fn held_turn_worker(
         )
         .await;
     assert!(created.success, "create failed: {created:?}");
-    (worker, dir)
+    // Resolving the model registers the script's provider once per engine.
+    // The create's background build resolves through the same slot on this
+    // single-threaded runtime, so no later registration replaces the probe.
+    let engine = worker
+        .agent_engine
+        .as_ref()
+        .expect("the faux script drives the agent engine");
+    let model = engine.resolve_model().expect("the script model");
+    let requested = std::sync::Arc::new(tokio::sync::Notify::new());
+    let probe = RequestProbe {
+        inner: pa_ai::registry::get_api_provider(&model.api).expect("the script provider"),
+        requested: std::sync::Arc::clone(&requested),
+    };
+    pa_ai::registry::register_api_provider(std::sync::Arc::new(probe), None);
+    (worker, dir, requested)
 }
 
-/// Start the held turn and wait until its run registers (ENG-5991's
-/// `waitForToolStart` discipline): the abort must land on the live run.
-async fn start_registered_held_turn(worker: &Worker, active_session_id: &str, prompt: &str) {
+/// Start the held turn and wait until its provider request is in flight
+/// (ENG-5991's `waitForToolStart` discipline): the abort must land on the
+/// held fetch. A registered run is not enough: an abort before the loop
+/// reaches the provider leaves the held step queued for the next turn.
+async fn start_in_flight_held_turn(
+    worker: &Worker,
+    requested: &tokio::sync::Notify,
+    active_session_id: &str,
+    prompt: &str,
+) {
     let held = worker
         .dispatch(
             "prompt",
@@ -732,29 +794,9 @@ async fn start_registered_held_turn(worker: &Worker, active_session_id: &str, pr
         )
         .await;
     assert!(held.success, "prompt failed: {held:?}");
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-    loop {
-        let registered = worker
-            .agent_engine
-            .as_ref()
-            .and_then(|engine| {
-                engine
-                    .turn_agent
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .clone()
-            })
-            .and_then(|agent| agent.signal())
-            .is_some();
-        if registered {
-            return;
-        }
-        assert!(
-            std::time::Instant::now() < deadline,
-            "the held turn's run never registered"
-        );
-        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
-    }
+    tokio::time::timeout(std::time::Duration::from_secs(10), requested.notified())
+        .await
+        .expect("the held turn's provider request never started");
 }
 
 /// Queue one agent message from `source-agent` on the busy session.
@@ -812,11 +854,12 @@ async fn abort_and_send_queued_delivers_the_parked_agent_message() {
     let _faux = crate::agent_engine::tests::FAUX_TEST_LOCK
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let (worker, dir) =
+    let (worker, dir, requested) =
         held_turn_worker("abort-am-session", "abort-am", "agent message reply").await;
     let mut subscription = worker.events.subscribe();
-    start_registered_held_turn(
+    start_in_flight_held_turn(
         &worker,
+        &requested,
         "abort-am-session",
         "held turn for the agent-message abort probe",
     )
@@ -891,10 +934,11 @@ async fn abort_and_send_queued_under_a_held_pause_delivers_on_the_release() {
     let _faux = crate::agent_engine::tests::FAUX_TEST_LOCK
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let (worker, dir) =
+    let (worker, dir, requested) =
         held_turn_worker("abort-pause-session", "abort-pause", "agent message reply").await;
-    start_registered_held_turn(
+    start_in_flight_held_turn(
         &worker,
+        &requested,
         "abort-pause-session",
         "held turn for the pause abort probe",
     )

@@ -9,6 +9,8 @@ use serde_json::Value;
 
 use crate::kernel::bootstrap::KernelPythonSkill;
 
+/// Per-cell stdout/stderr cap. `HeadTailBuffer` splits it between head and
+/// tail, so a long failing run keeps its printed verdict.
 pub const DEFAULT_MAX_OUTPUT_CHARS: usize = 65_536;
 pub const HOST_REQUEST_SHUTDOWN_TIMEOUT_MS: u64 = 5_000;
 pub const KERNEL_SHUTDOWN_TIMEOUT_MS: u64 = 5_000;
@@ -65,6 +67,11 @@ pub const AGENT_MESSAGE_DISPLAY_MIME: &str = "application/vnd.prime-agent.agent-
 pub const BASH_ACTIVITY_DISPLAY_MIME: &str = "application/vnd.prime-agent.bash-activity+json";
 /// One `bash()` call's command text (capped) and non-blank line count.
 pub const BASH_COMMAND_DISPLAY_MIME: &str = "application/vnd.prime-agent.bash-command+json";
+/// The kernel host request that reports a background bash completion
+/// (the `[bash-done]` lane). The daemon registers the handler
+/// (`bash_notices`), and the provisioner keys the bounded-await bootstrap
+/// default on its presence.
+pub const BASH_COMPLETED_REQUEST_TYPE: &str = "bash.completed";
 
 pub const EXECUTE_STATUS_OK: &str = "ok";
 pub const EXECUTE_STATUS_ERROR: &str = "error";

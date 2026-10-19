@@ -45,14 +45,14 @@ impl AgentView {
                 action: ClickAction::OpenAgentsView,
             });
         }
-        // The activity dock's group segments are click regions too:
-        // the groups sit on the frame's second row.
+        // The activity dock's group segments are click regions too: the
+        // dock frame starts right under the tray.
         if let Some(dock) = &self.chrome.activity {
             let (frame, segments) =
                 crate::chrome::render_activity_dock_segments(dock, &self.theme, width);
             for segment in segments {
                 self.click.record_dock_region(DockClickRegion {
-                    dock_row: tray_row + 2,
+                    dock_row: tray_row + 1 + segment.row,
                     cols: segment.cols,
                     action: ClickAction::OpenDockGroup(segment.group),
                 });

@@ -1,7 +1,8 @@
 //! The loaded-session view: the branch walks, the window/settings reads, the
 //! compacted message fold and its scalars, and the wire-shape message helpers.
 
-use super::{json, MessageWindowScalars, SessionEntry, SessionFile, Value, WindowedTranscript};
+use super::{json, MessageWindowScalars, SessionEntry, SessionFile, TranscriptPageRows, Value};
+use pa_types::daemon::TranscriptPage;
 
 /// Entry types that represent user intent (vs daemon bookkeeping).
 const CONTENT_ENTRY_TYPES: &[&str] = &[
@@ -279,20 +280,7 @@ impl SessionFile {
     #[must_use]
     pub fn messages(&self) -> Vec<Value> {
         let mut messages = Vec::new();
-        self.walk_message_values(|_, message| {
-            messages.push(message.into_owned());
-            true
-        });
-        messages
-    }
-
-    #[must_use]
-    pub fn messages_before(&self, before: usize) -> Vec<Value> {
-        let mut messages = Vec::new();
-        self.walk_message_values(|index, message| {
-            if index >= before {
-                return false;
-            }
+        self.walk_message_values(|message| {
             messages.push(message.into_owned());
             true
         });
@@ -304,7 +292,7 @@ impl SessionFile {
     #[must_use]
     pub fn scan_message_scalars(&self) -> MessageWindowScalars {
         let mut scalars = MessageWindowScalars::default();
-        self.walk_message_values(|_, message| {
+        self.walk_message_values(|message| {
             scalars.message_count += 1;
             if let Some(timestamp) = crate::types::message_timestamp_ms(&message) {
                 scalars.last_timestamp_ms = Some(timestamp);
@@ -314,41 +302,22 @@ impl SessionFile {
         scalars
     }
 
-    /// The windowed message sequence behind [`Self::messages`] (`custom_message`
+    /// The model-context message sequence behind [`Self::messages`] (`custom_message`
     /// rows rejoin as their wire form, `role: "custom"`; a compaction window
-    /// prepends its summary message). Every consumer derives from this one walk.
+    /// prepends its summary message).
     fn walk_message_values<'a>(
         &'a self,
-        mut visit: impl FnMut(usize, std::borrow::Cow<'a, Value>) -> bool,
+        mut visit: impl FnMut(std::borrow::Cow<'a, Value>) -> bool,
     ) {
-        let entry_message = |entry: &'a SessionEntry| -> Option<std::borrow::Cow<'a, Value>> {
-            match entry.type_.as_str() {
-                "message" => entry.fields.get("message").map(std::borrow::Cow::Borrowed),
-                "custom_message" => {
-                    let mut message = entry.fields.clone();
-                    if let Some(object) = message.as_object_mut() {
-                        object.insert("role".to_string(), Value::String("custom".to_string()));
-                        object.insert(
-                            "timestamp".to_string(),
-                            Value::String(entry.timestamp.clone()),
-                        );
-                    }
-                    Some(std::borrow::Cow::Owned(message))
-                }
-                _ => None,
-            }
-        };
         let branch = self.branch();
-        let mut index = 0usize;
         let Some(compaction_position) =
             branch.iter().rposition(|entry| entry.type_ == "compaction")
         else {
             for entry in &branch {
                 if let Some(message) = entry_message(entry) {
-                    if !visit(index, message) {
+                    if !visit(message) {
                         return;
                     }
-                    index += 1;
                 }
             }
             return;
@@ -376,133 +345,107 @@ impl SessionFile {
             }
         }
         let summary =
-            std::borrow::Cow::Owned(compaction_summary_message(compaction, retained_count));
-        if !visit(index, summary) {
+            std::borrow::Cow::Owned(compaction_summary_message(compaction, Some(retained_count)));
+        if !visit(summary) {
             return;
         }
-        index += 1;
         let mut keeping = false;
         for entry in &branch[..compaction_position] {
             // The durable cut can name bookkeeping, not just a message row.
             if !keeping && entry.id == first_kept_entry_id {
                 keeping = true;
             }
-            if !entry_bears_message(entry) {
-                continue;
-            }
             if keeping {
                 if let Some(message) = entry_message(entry) {
-                    if !visit(index, message) {
+                    if !visit(message) {
                         return;
                     }
-                    index += 1;
                 }
             }
         }
         for entry in &branch[compaction_position + 1..] {
             if let Some(message) = entry_message(entry) {
-                if !visit(index, message) {
+                if !visit(message) {
                     return;
                 }
-                index += 1;
             }
         }
     }
 
-    #[must_use]
-    pub fn windowed_messages(&self, tail_budget: usize) -> WindowedTranscript {
-        let mut visited: Vec<std::borrow::Cow<'_, Value>> = Vec::new();
-        let mut last_user_prompt_ms = None;
-        self.walk_message_values(|_, message| {
-            if message.get("role").and_then(Value::as_str) == Some("user") {
-                // The prompt scalar mirrors the TUI's numeric/ISO timestamp
-                // contract without changing the roster's activity-time fold.
-                let prompt_timestamp_ms = match message.get("timestamp") {
-                    Some(Value::Number(number)) => number.as_u64().or_else(|| {
-                        number
-                            .as_f64()
-                            .filter(|value| value.is_finite())
-                            .map(|value| value.max(0.0) as u64)
-                    }),
-                    Some(Value::String(iso)) => pa_types::incident::timestamp_to_ms(iso)
-                        .filter(|ms| *ms > 0)
-                        .map(|ms| ms as u64),
-                    _ => None,
+    /// The display transcript: the whole branch in order, each row with its entry id.
+    /// A compaction is its summary row at its own position, so every entry shows once.
+    fn display_rows(&self) -> Vec<(&str, std::borrow::Cow<'_, Value>)> {
+        self.branch()
+            .into_iter()
+            .filter_map(|entry| {
+                let message = if entry.type_ == "compaction" {
+                    std::borrow::Cow::Owned(compaction_summary_message(entry, None))
+                } else {
+                    entry_message(entry)?
                 };
-                if let Some(timestamp) = prompt_timestamp_ms {
-                    last_user_prompt_ms = Some(timestamp);
+                Some((entry.id.as_str(), message))
+            })
+            .collect()
+    }
+
+    /// One page of the display transcript; `None` when an anchor row is not on the branch.
+    #[must_use]
+    pub fn transcript_page(&self, page: &TranscriptPage) -> Option<TranscriptPageRows> {
+        let mut rows = self.display_rows();
+        let position = |rows: &[(&str, std::borrow::Cow<'_, Value>)], id: &str| {
+            rows.iter().position(|(row_id, _)| *row_id == id)
+        };
+        let (start, end, more) = match page {
+            TranscriptPage::End { before, limit } => {
+                let end = match before {
+                    Some(id) => position(&rows, id)?,
+                    None => rows.len(),
+                };
+                let start = settle_cut(&rows, end.saturating_sub(*limit));
+                // A windowed store's unloaded prefix is older history too.
+                (start, end, start > 0 || self.window.is_some())
+            }
+            TranscriptPage::Start {
+                after,
+                until,
+                limit,
+            } => {
+                let until = match until {
+                    Some(id) => position(&rows, id)?,
+                    None => rows.len(),
+                };
+                let start = match after {
+                    Some(id) => position(&rows, id)? + 1,
+                    None => 0,
                 }
+                .min(until);
+                let end = match start.saturating_add(*limit) {
+                    end if end >= until => until,
+                    end if end == start => start,
+                    end => Some(settle_cut(&rows, end))
+                        .filter(|cut| *cut > start)
+                        .unwrap_or(until),
+                };
+                (start, end, end < until)
             }
-            visited.push(message);
-            true
-        });
-        let mut cut = visited.len().saturating_sub(tail_budget);
-        while cut > 0
-            && matches!(
-                visited[cut].get("role").and_then(Value::as_str),
-                Some("toolResult" | "custom")
-            )
-        {
-            cut -= 1;
-        }
-        // User bash and other message rows can land between a call and its
-        // result. Match the same last-pending call as transcript replay, then
-        // move only across pairs intersecting the cut. Reverse result order
-        // also catches an earlier pair exposed by moving the boundary back.
-        let mut pending: std::collections::HashMap<&str, Vec<usize>> =
-            std::collections::HashMap::new();
-        let mut pairs = Vec::new();
-        for (index, message) in visited.iter().enumerate() {
-            match message.get("role").and_then(Value::as_str) {
-                Some("assistant") => {
-                    if let Some(content) = message.get("content").and_then(Value::as_array) {
-                        for block in content {
-                            if let Some(id) = block.get("id").and_then(Value::as_str).filter(|_| {
-                                block.get("type").and_then(Value::as_str) == Some("toolCall")
-                            }) {
-                                pending.entry(id).or_default().push(index);
-                            }
-                        }
-                    }
-                }
-                Some("toolResult") => {
-                    if let Some(call) = message
-                        .get("toolCallId")
-                        .and_then(Value::as_str)
-                        .and_then(|id| pending.get_mut(id))
-                        .and_then(Vec::pop)
-                    {
-                        pairs.push((call, index));
-                    }
-                }
-                _ => {}
-            }
-        }
-        for (call, result) in pairs.into_iter().rev() {
-            if call < cut && result >= cut {
-                cut = call;
-            }
-        }
-        if let Some(retained) = visited
-            .first()
-            .filter(|first| first.get("role").and_then(Value::as_str) == Some("compactionSummary"))
-            .and_then(|first| first.get("retainedMessageCount"))
-            .and_then(Value::as_u64)
-            .and_then(|retained| usize::try_from(retained).ok())
-        {
-            if cut > 0 && cut <= retained {
-                cut = 0;
-            }
-        }
-        let messages = visited.split_off(cut);
-        WindowedTranscript {
-            messages: messages
+        };
+        let last_user_prompt_ms = rows
+            .iter()
+            .rev()
+            .find(|(_, message)| message.get("role").and_then(Value::as_str) == Some("user"))
+            .and_then(|(_, message)| prompt_timestamp_ms(message));
+        rows.truncate(end);
+        let page_rows = rows.split_off(start);
+        Some(TranscriptPageRows {
+            first_entry_id: page_rows.first().map(|(id, _)| (*id).to_string()),
+            last_entry_id: page_rows.last().map(|(id, _)| (*id).to_string()),
+            messages: page_rows
                 .into_iter()
-                .map(std::borrow::Cow::into_owned)
+                .map(|(_, message)| message.into_owned())
                 .collect(),
-            omitted: cut,
+            more,
             last_user_prompt_ms,
-        }
+        })
     }
 
     /// The durable entry id the compaction cut keeps: the engine's
@@ -613,6 +556,88 @@ pub(super) fn message_role(message: &Value) -> Option<&str> {
     message.get("role").and_then(Value::as_str)
 }
 
+/// A row's wire message (`custom_message` rows rejoin as `role: "custom"`).
+fn entry_message(entry: &SessionEntry) -> Option<std::borrow::Cow<'_, Value>> {
+    match entry.type_.as_str() {
+        "message" => entry.fields.get("message").map(std::borrow::Cow::Borrowed),
+        "custom_message" => {
+            let mut message = entry.fields.clone();
+            if let Some(object) = message.as_object_mut() {
+                object.insert("role".to_string(), Value::String("custom".to_string()));
+                object.insert(
+                    "timestamp".to_string(),
+                    Value::String(entry.timestamp.clone()),
+                );
+            }
+            Some(std::borrow::Cow::Owned(message))
+        }
+        _ => None,
+    }
+}
+
+/// A user prompt's wall-clock time, mirroring the TUI's numeric/ISO timestamp contract.
+fn prompt_timestamp_ms(message: &Value) -> Option<u64> {
+    match message.get("timestamp") {
+        Some(Value::Number(number)) => number.as_u64().or_else(|| {
+            number
+                .as_f64()
+                .filter(|value| value.is_finite())
+                .map(|value| value.max(0.0) as u64)
+        }),
+        Some(Value::String(iso)) => pa_types::incident::timestamp_to_ms(iso)
+            .filter(|ms| *ms > 0)
+            .map(|ms| ms as u64),
+        _ => None,
+    }
+}
+
+/// Move a page boundary earlier until the page below it starts at neither a tool
+/// result nor a custom row, and no tool call is split from its result.
+fn settle_cut(rows: &[(&str, std::borrow::Cow<'_, Value>)], mut cut: usize) -> usize {
+    let role = |index: usize| rows[index].1.get("role").and_then(Value::as_str);
+    while cut > 0 && cut < rows.len() && matches!(role(cut), Some("toolResult" | "custom")) {
+        cut -= 1;
+    }
+    // User bash and other message rows can land between a call and its
+    // result. Match the same last-pending call as transcript replay, then
+    // move only across pairs intersecting the cut. Reverse result order
+    // also catches an earlier pair exposed by moving the boundary back.
+    let mut pending: std::collections::HashMap<&str, Vec<usize>> = std::collections::HashMap::new();
+    let mut pairs = Vec::new();
+    for (index, (_, message)) in rows.iter().enumerate() {
+        match message.get("role").and_then(Value::as_str) {
+            Some("assistant") => {
+                if let Some(content) = message.get("content").and_then(Value::as_array) {
+                    for block in content {
+                        if let Some(id) = block.get("id").and_then(Value::as_str).filter(|_| {
+                            block.get("type").and_then(Value::as_str) == Some("toolCall")
+                        }) {
+                            pending.entry(id).or_default().push(index);
+                        }
+                    }
+                }
+            }
+            Some("toolResult") => {
+                if let Some(call) = message
+                    .get("toolCallId")
+                    .and_then(Value::as_str)
+                    .and_then(|id| pending.get_mut(id))
+                    .and_then(Vec::pop)
+                {
+                    pairs.push((call, index));
+                }
+            }
+            _ => {}
+        }
+    }
+    for (call, result) in pairs.into_iter().rev() {
+        if call < cut && result >= cut {
+            cut = call;
+        }
+    }
+    cut
+}
+
 /// Whether one entry contributes a message to the fold: `message` rows need
 /// their persisted message; `custom_message` rows rejoin as their wire form.
 /// The borrowing twin of the `entry_message` Some-ness.
@@ -624,8 +649,9 @@ fn entry_bears_message(entry: &SessionEntry) -> bool {
     }
 }
 
-/// The `compactionSummary` message a compaction fold starts with.
-fn compaction_summary_message(entry: &SessionEntry, retained_count: usize) -> Value {
+/// The `compactionSummary` message of a compaction entry; the context walk's
+/// copy carries its retained count.
+fn compaction_summary_message(entry: &SessionEntry, retained_count: Option<usize>) -> Value {
     let timestamp = crate::util::iso_to_unix_ms(&entry.timestamp).unwrap_or(0);
     // The TS `compactionSummary` key order: role, summary, tokensBefore,
     // retainedMessageCount, customInstructions?, harnessDigest?, timestamp —
@@ -634,8 +660,10 @@ fn compaction_summary_message(entry: &SessionEntry, retained_count: usize) -> Va
         "role": "compactionSummary",
         "summary": entry.fields.get("summary").cloned().unwrap_or_default(),
         "tokensBefore": entry.fields.get("tokensBefore").cloned().unwrap_or(json!(0)),
-        "retainedMessageCount": retained_count as u64,
     });
+    if let Some(retained_count) = retained_count {
+        message["retainedMessageCount"] = json!(retained_count as u64);
+    }
     if let Some(custom_instructions) = entry.fields.get("customInstructions") {
         message["customInstructions"] = custom_instructions.clone();
     }

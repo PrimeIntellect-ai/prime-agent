@@ -269,8 +269,8 @@ fn at_prefix_lists_nested_fuzzy_matches() {
             other => panic!("expected a searching lookup, got {other:?}"),
         }
     };
-    // The exact `.hidden/partial` name (score 100) sorts ahead of
-    // the `partial_match.rs` prefix match (80); `.git` never lists.
+    // The exact `.hidden/partial` name sorts ahead of the
+    // `partial_match.rs` prefix match; `.git` never lists.
     assert_eq!(
         values("see @partial"),
         ["@.hidden/partial", "@src/deep/partial_match.rs"]
@@ -611,6 +611,84 @@ fn at_values(provider: &CombinedAutocompleteProvider, text: &str) -> Vec<Complet
             .map(|suggestions| suggestions.items)
             .unwrap_or_default(),
         other => panic!("expected a searching lookup, got {other:?}"),
+    }
+}
+
+/// The `@` item values of one provider query.
+fn at_item_values(provider: &CombinedAutocompleteProvider, text: &str) -> Vec<String> {
+    at_values(provider, text)
+        .into_iter()
+        .map(|item| item.value)
+        .collect()
+}
+
+/// A typed directory scope with an empty query lists the directory's children.
+#[test]
+fn at_directory_scope_lists_its_children() {
+    let base = tempfile::TempDir::new().expect("temp dir");
+    std::fs::create_dir_all(base.path().join("prime-agent/src")).expect("mkdir");
+    for file in [
+        "prime-agent/src/lib.rs",
+        "prime-agent/README.md",
+        "prime-agent/Cargo.toml",
+        "prime-agent/.env",
+        "other.md",
+    ] {
+        std::fs::write(base.path().join(file), "x").expect("write");
+    }
+    let provider = provider(base.path().to_str().expect("utf8"));
+    assert_eq!(
+        at_item_values(&provider, "@prime-agent/"),
+        [
+            "@prime-agent/src/",
+            "@prime-agent/README.md",
+            "@prime-agent/Cargo.toml",
+            "@prime-agent/src/lib.rs",
+            "@prime-agent/.env",
+        ]
+    );
+}
+
+/// The `@` ranking: match class, hidden entries below unless the query is dotted, fewer
+/// segments, fewer chars, directories before files, then byte order.
+#[test]
+fn at_ranking_orders_by_class_hidden_and_length() {
+    let base = tempfile::TempDir::new().expect("temp dir");
+    for dir in ["main/", "main.d/", "src/", ".github/", "deploy/k8s/"] {
+        std::fs::create_dir_all(base.path().join(dir)).expect("mkdir");
+    }
+    for file in [
+        "main.c",
+        "main.rs",
+        "main.json",
+        "src/main.rs",
+        "src/domain.rs",
+        ".mainrc",
+        ".github/main.yml",
+        "deploy/k8s/app.yml",
+    ] {
+        std::fs::write(base.path().join(file), "x").expect("write");
+    }
+    let provider = provider(base.path().to_str().expect("utf8"));
+    for (query, expected) in [
+        (
+            "@main",
+            vec![
+                "@main/",
+                "@main.d/",
+                "@main.c",
+                "@main.rs",
+                "@main.json",
+                "@src/main.rs",
+                "@.github/main.yml",
+                "@src/domain.rs",
+                "@.mainrc",
+            ],
+        ),
+        ("@yml", vec!["@deploy/k8s/app.yml", "@.github/main.yml"]),
+        ("@.yml", vec!["@.github/main.yml", "@deploy/k8s/app.yml"]),
+    ] {
+        assert_eq!(at_item_values(&provider, query), expected, "query {query}");
     }
 }
 

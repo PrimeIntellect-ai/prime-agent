@@ -469,7 +469,8 @@ impl TurnRunner {
                 );
                 let abort_settle = matches!(
                     &event,
-                    EngineEvent::ToolExecutionEnd { .. }
+                    EngineEvent::ModelChange(_)
+                        | EngineEvent::ToolExecutionEnd { .. }
                         | EngineEvent::ToolResultMessage(_)
                         | EngineEvent::TurnEnd { .. }
                         | EngineEvent::AgentEnd { .. }
@@ -490,7 +491,9 @@ impl TurnRunner {
                 if agent_end && !more_queued {
                     engine.clear_progress_note();
                 }
-                if core.abort_requested {
+                // Durable model cleanup is independent of visual abort-row
+                // suppression and emits no client-facing frame.
+                if core.abort_requested && !matches!(&event, EngineEvent::ModelChange(_)) {
                     // The sighting arms the fallback's silence only when
                     // load-bearing: a sighting on a run that completed on its own
                     // cancels nothing.
@@ -578,6 +581,19 @@ impl TurnRunner {
                     }
                 }
                 match &event {
+                    EngineEvent::ModelChange(change) => {
+                        if let Some(Err(error)) = core.store.as_mut().map(|store| {
+                            store.persist_entry(
+                                "model_change",
+                                json!({
+                                    "provider": change.provider, "modelId": change.model_id,
+                                }),
+                            )
+                        }) {
+                            eprintln!("pa-daemon: model-change persistence failed: {error:#}");
+                            return false;
+                        }
+                    }
                     // A `message` entry per row (TS's appendMessage path).
                     EngineEvent::UserMessage(message)
                     | EngineEvent::AssistantMessage(message)
@@ -857,7 +873,9 @@ impl TurnRunner {
                         "type": "turn_end",
                         "error": ABORTED_TURN_SETTLE_ERROR,
                     })],
-                    EngineEvent::Done(Ok(()) | Err(_)) | EngineEvent::DoneAborted => Vec::new(),
+                    EngineEvent::ModelChange(_)
+                    | EngineEvent::Done(Ok(()) | Err(_))
+                    | EngineEvent::DoneAborted => Vec::new(),
                     EngineEvent::AutoRetryStart {
                         attempt,
                         max_attempts,
@@ -1009,6 +1027,23 @@ impl TurnRunner {
                 }
             }
             emitting_prefix_rows.set(false);
+            // Sample the worker-owned leaf in memory before accepted rows
+            // persist. The engine stays lazy and the accepted event stays first.
+            let (file_backed, prompt_context_leaf) = {
+                let core = core.lock().unwrap();
+                core.store.as_ref().map_or((false, None), |store| {
+                    (
+                        !store.path.as_os_str().is_empty(),
+                        store.leaf_id().map(str::to_string),
+                    )
+                })
+            };
+            // noSession's in-memory prefix IDs do not identify any durable
+            // context the engine can restore. Only file-backed stores supply
+            // this boundary; their missing-ID validation remains strict.
+            if file_backed {
+                engine.set_prompt_context_boundary(prompt_context_leaf);
+            }
             engine.run_prompt(prompt_index, request, &aborted_probe, &mut emit);
         });
         let _ = turn.await;

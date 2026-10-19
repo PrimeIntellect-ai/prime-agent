@@ -117,6 +117,14 @@ pub enum McpServerConfig {
             skip_serializing_if = "Option::is_none"
         )]
         call_timeout_ms: Option<u64>,
+        #[serde(rename = "clientId", default, skip_serializing_if = "Option::is_none")]
+        client_id: Option<String>,
+        #[serde(
+            rename = "callbackPort",
+            default,
+            skip_serializing_if = "Option::is_none"
+        )]
+        callback_port: Option<u16>,
     },
     #[serde(rename_all = "camelCase")]
     Stdio {
@@ -998,15 +1006,6 @@ fn is_generic_server_name(name: &str) -> bool {
     chars.all(|char| char.is_ascii_alphanumeric() || char == '_' || char == '-')
 }
 
-impl ResolvedIntegration {
-    fn config_url(&self) -> Option<&str> {
-        match &self.config {
-            McpServerConfig::Http { url, .. } => Some(url.as_str()),
-            McpServerConfig::Stdio { .. } => None,
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1041,6 +1040,8 @@ mod tests {
             disabled_tools: None,
             startup_timeout_ms: None,
             call_timeout_ms: None,
+            client_id: None,
+            callback_port: None,
         }
     }
 
@@ -1064,7 +1065,7 @@ mod tests {
         let manager = manager_with(Some(user_servers));
         let roster = manager.connection_roster();
         let names: Vec<&str> = roster.iter().map(|entry| entry.server.as_str()).collect();
-        assert_eq!(names, vec!["fixture-echo", "linear", "notion"]);
+        assert_eq!(names, vec!["fixture-echo", "linear", "notion", "slack"]);
         let fixture = &roster[0];
         assert!(fixture.connected);
         assert!(fixture.generic);
@@ -1120,7 +1121,7 @@ mod tests {
             ]
         );
         let status = manager.list_status();
-        assert_eq!(status.len(), 2);
+        assert_eq!(status.len(), 3);
         let linear = status.iter().find(|row| row.server == "linear").unwrap();
         assert!(!linear.enabled);
         assert!(linear.uses_oauth);
@@ -1217,13 +1218,16 @@ mod tests {
             },
         );
         let manager = std::sync::Arc::new(std::sync::Mutex::new(manager_with(Some(user_servers))));
-        assert_eq!(
-            manager
+        let gating_manager = Arc::clone(&manager);
+        let enabled = tokio::task::spawn_blocking(move || {
+            gating_manager
                 .lock()
                 .unwrap()
-                .get_enabled_persistent_generic_servers(),
-            vec!["fixture-echo".to_string()]
-        );
+                .get_enabled_persistent_generic_servers()
+        })
+        .await
+        .unwrap();
+        assert_eq!(enabled, vec!["fixture-echo".to_string()]);
         let mut handlers = HostRequestHandlers::default();
         McpManager::register_host_handlers(&manager, &mut handlers);
         let config = handlers.get("mcp.config").unwrap().clone();

@@ -134,6 +134,20 @@ impl FactoryRunSnapshot {
     }
 }
 
+/// The activity dock's factory row: the live runs (the dock count's own
+/// set), paused first, each `<name> <state>`.
+#[must_use]
+pub fn dock_factory_items(runs: &[FactoryRunSnapshot]) -> Vec<String> {
+    let mut live: Vec<&FactoryRunSnapshot> = runs.iter().filter(|run| run.is_live()).collect();
+    live.sort_by_key(|run| run.state.as_deref() != Some("paused"));
+    live.iter()
+        .map(|run| match &run.state {
+            Some(state) => format!("{} {state}", run.display_name()),
+            None => run.display_name(),
+        })
+        .collect()
+}
+
 /// One run-level action the page offers on a live run (the heartbeats
 /// picker's action-row grammar): the stop that tears the run and its
 /// children down, and the pause complement's resume.
@@ -496,8 +510,7 @@ impl FactoryView {
     pub fn handle_key(&mut self, key: &str, kb: &KeybindingsManager) -> FactoryViewAction {
         if key == "ctrl+c" || kb.matches(key, "tui.select.cancel") {
             // Esc backs out of the open action rows before it closes
-            // the page — the drill-in's back, on the one close key the
-            // page carries (the keyset stays arrows + Enter + Esc).
+            // the page — the drill-in's back.
             if self.mode != Mode::Feed {
                 self.mode = Mode::Feed;
                 return FactoryViewAction::None;
@@ -514,6 +527,19 @@ impl FactoryView {
             return FactoryViewAction::None;
         }
         if kb.matches(key, "tui.select.confirm") {
+            return self.confirm_selection();
+        }
+        // The horizontal arrows mirror back/confirm — as fallbacks only,
+        // after the configured bindings, so a rebound Left/Right keeps
+        // its configured action.
+        if key == "left" {
+            if self.mode != Mode::Feed {
+                self.mode = Mode::Feed;
+                return FactoryViewAction::None;
+            }
+            return FactoryViewAction::Close;
+        }
+        if key == "right" {
             return self.confirm_selection();
         }
         FactoryViewAction::None
