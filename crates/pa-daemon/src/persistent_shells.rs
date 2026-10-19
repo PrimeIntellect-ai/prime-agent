@@ -182,18 +182,27 @@ pub(crate) fn kill_shell(agent_dir: &Path, id: &str) -> Result<bool, String> {
     Ok(true)
 }
 
-/// A missing or changed leader no longer proves the durable group's identity.
+/// The KILL after a verified TERM. A leader that exited during the grace still names the group
+/// verified before the TERM: a PGID is not reused while its group has members. A leader pid
+/// that runs again under another start identity was recycled, so its group is refused.
 fn kill_group(shell: &Shell) -> Result<(), String> {
-    if runs_as_registered(shell) {
-        if signal_process_group(shell.pid as i32, Signal::Kill) {
-            Ok(())
+    let leader_exited = matches!(crate::lease::is_process_alive(shell.pid), Ok(false));
+    if !runs_as_registered(shell) && !leader_exited {
+        return if group_unverified(shell) {
+            Err(
+                "Cannot verify persistent shell group ownership; no further signal sent"
+                    .to_string(),
+            )
         } else {
-            Err("Could not signal persistent shell group".to_string())
-        }
-    } else if group_unverified(shell) {
-        Err("Cannot verify persistent shell group ownership; no further signal sent".to_string())
-    } else {
+            Ok(())
+        };
+    }
+    if signal_process_group(shell.pid as i32, Signal::Kill)
+        || !process_group_exists(shell.pid as i32).unwrap_or(true)
+    {
         Ok(())
+    } else {
+        Err("Could not signal persistent shell group".to_string())
     }
 }
 
