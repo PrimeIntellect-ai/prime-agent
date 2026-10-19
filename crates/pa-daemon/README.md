@@ -34,7 +34,7 @@ routed `send_message` as the never-retried fallback),
 saved-session wake
 for non-resident `send_message` targets (`session_catalog.rs`: catalog
 resolve by session-id prefix or exact name, cwd-scoped first; a live miss
-lazily restores a matching file from legacy `sessions-archive/` without
+lazily restores a matching file from `sessions-archive/` without
 overwriting an existing live file; no new sessions are physically archived;
 a resident worker hosting the file is reused, otherwise one spawns over it; RLM
 children fall back to the spawn ledger's live child edges when the catalog

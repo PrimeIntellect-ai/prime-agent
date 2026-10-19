@@ -517,7 +517,7 @@ fn live_edges_of_parent_bounds_the_liveness_work() {
 }
 
 #[test]
-fn a_parent_left_in_the_legacy_archive_dir_is_a_dead_endpoint_walked_once() {
+fn a_parent_left_in_the_archive_dir_is_a_dead_endpoint_walked_once() {
     let agent_dir = temp_dir("archive-dead");
     let sessions_dir = agent_dir.join("sessions");
     fs::create_dir_all(&sessions_dir).unwrap();

@@ -27,8 +27,8 @@ fn catalog_session_match<'a>(
 }
 
 /// Resolve one selector to a saved session: cwd-scoped sessions first, the
-/// whole live catalog second. A live miss lazily restores a match from the
-/// legacy archive before waking its worker. Misses are `None` (the caller
+/// whole live catalog second. A live miss lazily restores a match from
+/// `sessions-archive/` (written by older Rust releases) before waking its worker. Misses are `None` (the caller
 /// answers its unknown-target error, not a catalog one).
 pub(crate) fn resolve_saved_session(
     sessions_dir: &Path,
@@ -153,7 +153,7 @@ mod tests {
     }
 
     #[test]
-    fn legacy_archived_roots_restore_by_id_prefix_or_name_and_resolve_again() {
+    fn archived_roots_restore_by_id_prefix_or_name_and_resolve_again() {
         for selector_index in 0..3 {
             let root = tempfile::TempDir::new().unwrap();
             let sessions = root.path().join("sessions");
@@ -168,7 +168,7 @@ mod tests {
             // A global lookup must still recover a root created before upgrade.
             let restored = resolve_saved_session(&sessions, &archive, selector, "/other")
                 .unwrap()
-                .expect("legacy selector resolves");
+                .expect("archived selector resolves");
             assert_eq!(restored, expected);
             assert_eq!(std::fs::read(&restored.path).unwrap(), bytes);
             assert_eq!(
@@ -189,7 +189,7 @@ mod tests {
     }
 
     #[test]
-    fn legacy_restore_never_clobbers_an_unreadable_live_session() {
+    fn a_restore_never_clobbers_an_unreadable_live_session() {
         let root = tempfile::TempDir::new().unwrap();
         let sessions = root.path().join("sessions");
         let archive = root.path().join("sessions-archive");
@@ -213,7 +213,7 @@ mod tests {
     }
 
     #[test]
-    fn live_matches_win_over_legacy_archives() {
+    fn live_matches_win_over_archived_ones() {
         let root = tempfile::TempDir::new().unwrap();
         let sessions = root.path().join("sessions");
         let archive = root.path().join("sessions-archive");
@@ -230,7 +230,7 @@ mod tests {
     }
 
     #[test]
-    fn legacy_archive_keeps_local_scope_and_ambiguity_rules() {
+    fn archived_matches_keep_local_scope_and_ambiguity_rules() {
         let root = tempfile::TempDir::new().unwrap();
         let sessions = root.path().join("sessions");
         let archive = root.path().join("sessions-archive");
@@ -241,7 +241,7 @@ mod tests {
         assert_eq!(error.to_string(), "Ambiguous session selector \"alpha\"");
         let found = resolve_saved_session(&sessions, &archive, "alpha", "/work/a")
             .unwrap()
-            .expect("local legacy match wins");
+            .expect("local archived match wins");
         assert_eq!(found.id, local_id);
         assert!(other_path.is_file(), "unselected archives stay in place");
     }

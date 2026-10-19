@@ -243,7 +243,7 @@ fn messages(client: &mut Client, id: &str, active_session_id: &str) -> String {
 #[derive(Clone, Copy)]
 enum SavedLocation {
     Live,
-    LegacyArchive,
+    Archive,
 }
 
 #[test]
@@ -252,8 +252,8 @@ fn send_to_a_saved_session_wakes_it_and_runs_the_turn() {
 }
 
 #[test]
-fn send_to_a_legacy_archived_root_restores_it_and_runs_the_turn() {
-    saved_session_wake(SavedLocation::LegacyArchive);
+fn send_to_an_archived_root_restores_it_and_runs_the_turn() {
+    saved_session_wake(SavedLocation::Archive);
 }
 
 fn saved_session_wake(location: SavedLocation) {
@@ -360,7 +360,7 @@ fn saved_session_wake(location: SavedLocation) {
     assert_eq!(saved_rows[0]["name"], "alpha");
 
     // Simulate upgrading a store archived by an older Rust daemon. The
-    // current daemon starts with the root already in the legacy directory.
+    // current daemon starts with the root already in its archive directory.
     let archive_path = agent_dir
         .join("sessions-archive")
         .join(format!("{session_id}.jsonl"));
@@ -368,10 +368,10 @@ fn saved_session_wake(location: SavedLocation) {
     let saved_bytes = std::fs::read(&live_path).expect("saved transcript");
     let (_daemon, mut client) = match location {
         SavedLocation::Live => (daemon, client),
-        SavedLocation::LegacyArchive => {
+        SavedLocation::Archive => {
             drop(client);
             drop(daemon);
-            std::fs::create_dir_all(archive_path.parent().unwrap()).expect("legacy archive dir");
+            std::fs::create_dir_all(archive_path.parent().unwrap()).expect("archive dir");
             std::fs::rename(&live_path, &archive_path).expect("pre-upgrade archive fixture");
             let daemon = spawn_daemon(&socket, &agent_dir);
             let (client, _) = Client::connect(&socket);
