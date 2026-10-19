@@ -1176,6 +1176,25 @@ fn registry_changes_preserve_failed_tail_fetches_and_their_retry() {
     );
 }
 
+/// The hosts clear a kill error before they apply the refresh. A refresh that drops the open
+/// detail's row still retires that detail's fetch error, without a second changed refresh.
+#[test]
+fn dropping_the_detail_retires_its_fetch_error() {
+    let mut view = BashView::new(activities(), 40);
+    let BashViewAction::OpenDetail { generation, .. } = open(&mut view, "a") else {
+        panic!("open detail")
+    };
+    view.set_error(
+        "Bash output: unavailable".to_string(),
+        true,
+        Some(generation),
+    );
+    view.clear_error();
+    view.apply_activities(activities().split_off(1));
+    let text = frame_text(&view.render(&theme(), 70, &kb())).join("\n");
+    assert!(!text.contains("unavailable"), "{text}");
+}
+
 #[test]
 fn running_shell_count_skips_finished_shells() {
     let data = json!({"activities": [
