@@ -613,10 +613,8 @@ fn generic_mcp_skill_renders_in_the_prompt_inventory() {
 
 /// The async-turn contract is session-scoped: notification sessions are told to end the
 /// turn and collect results on the notice, daemonless sessions are told to await commands
-/// before ending the turn (nothing wakes them). Observed gap (async-discipline eval,
-/// hosted baseline xdhf6w72abxj8xjuvb7ldzzs): the D3 turn-held/sleep/poll violation rate
-/// sat at 0.85 — agents slept 97-157 s through turns and held turns 166 s while builds ran
-/// inline, against the grader's 60 s inline-span contract.
+/// before ending the turn (nothing wakes them). The static usage layer renders in every
+/// session, so any turn-end guidance it carries must itself be scoped to notifications.
 #[test]
 fn usage_layer_async_turn_contract_stays_session_scoped() {
     let mut options = BuildSystemPromptOptions {
@@ -653,8 +651,13 @@ fn usage_layer_async_turn_contract_stays_session_scoped() {
             .contains("await them before ending your turn"),
         "the daemonless role line must repeat the await rule"
     );
-    assert!(
-        !USAGE_LAYER.contains("end the turn with a short text reply"),
-        "an unscoped static turn-end rule renders in daemonless sessions too, where nothing          wakes the turn, contradicting the await rule: keep the turn-end contract in the          daemon role line"
-    );
+    for sentence in USAGE_LAYER.split(". ") {
+        if sentence.contains("end the turn") || sentence.contains("ending the turn") {
+            assert!(
+                sentence.contains("notification"),
+                "static turn-end guidance renders in daemonless sessions too, where nothing \
+                 wakes the turn: scope every turn-end sentence to notifications (sentence: {sentence})"
+            );
+        }
+    }
 }
