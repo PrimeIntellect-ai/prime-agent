@@ -1589,6 +1589,13 @@ class PersistentBashTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([r["pid"] for r in self.records()], [held_pid])
         self.assertEqual(len(self.files()), 2)
 
+        # Re-attached before the notices were wired, its await still degrades:
+        # the bound resolves at await time.
+        bash_module._set_completion_notices_wired(True)
+        self.addCleanup(bash_module._set_completion_notices_wired, False)
+        with mock.patch.object(bash_module, "_DEFAULT_YIELD_AFTER_SECONDS", 0.2):
+            self.assertIsInstance(await held, bash_module.BashSnapshot)
+
         held.kill()
         await held
         await _poll_group_dead(held_pid)

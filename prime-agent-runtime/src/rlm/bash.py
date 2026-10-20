@@ -94,14 +94,14 @@ _MAX_DEGRADE_HINTS = 3
 _degrade_hints_written = 0
 
 
-def _note_degrade(handle: "BashHandle") -> None:
+def _note_degrade(handle: "BashHandle", bound: float) -> None:
     """Write the degrade hint to the awaiting cell's stderr, within budget."""
     global _degrade_hints_written
     if _degrade_hints_written >= _MAX_DEGRADE_HINTS:
         return
     _degrade_hints_written += 1
     sys.stderr.write(
-        f"bash: still running after {handle._yield_after:g}s (pid {handle._pid}); "
+        f"bash: still running after {bound:g}s (pid {handle._pid}); "
         "returned a snapshot: r.running is True, r.output is the output so "
         "far, r.handle is the live handle. End the turn — a [bash-done] "
         "notification arrives when it finishes.\n"
@@ -381,8 +381,8 @@ class BashHandle:
 
     def __init__(self, command: str, yield_after: float | None = None) -> None:
         self.command = command
-        # The bound every await of this handle uses (None = unbounded); the
-        # caller's effective value, resolved once in bash().
+        # The requested bound (None = the session default); every await
+        # resolves it through _effective_yield_after.
         self._yield_after = yield_after
         self._activity_id = secrets.token_hex(16)
         completion_context = _current_cell_completion_context()
@@ -1070,13 +1070,14 @@ class BashHandle:
         except RuntimeError:
             current_task = None
         creating_cell_waited = _creating_cell_waits_for(self._creating_cell_task, current_task)
+        bound = _effective_yield_after(self._yield_after)
         owned = not self._released
         wait = self._wait_owned() if owned else self._wait()
         self._released = True
         completed = False
         degraded = False
         try:
-            result = yield from _bounded_wait(wait, self._yield_after).__await__()
+            result = yield from _bounded_wait(wait, bound).__await__()
             if result is None:
                 degraded = True
             else:
@@ -1096,7 +1097,7 @@ class BashHandle:
             if completed:
                 self._note_result_consumed(current_task)
         if degraded:
-            _note_degrade(self)
+            _note_degrade(self, cast("float", bound))
             return self._degrade_snapshot()
         return cast("BashResult", result)
 
@@ -1176,8 +1177,10 @@ class PersistentBashHandle(BashHandle):
         home: str,
         proc: subprocess.Popen[bytes] | None,
         running: bool = True,
+        yield_after: float | None = None,
     ) -> None:
         self.command = command
+        self._yield_after = yield_after
         self._activity_id = shell_id
         completion_context = _current_cell_completion_context()
         self._creating_cell_finished = completion_context[0] if completion_context else None
@@ -1335,22 +1338,23 @@ def bash(command: str, yield_after: float | None = None, persistent: bool = Fals
     shell survives kernel, worker, and daemon restarts and its session's
     delete or archive (a deleted session's shells keep running as orphans);
     only its own exit or an explicit kill() ends it. Its output and exit
-    status live in files under the agent dir, and awaits never own it. After
-    a restart, get the handles back with `from rlm import persistent_shells;
-    persistent_shells()`; a shell that finished while no kernel ran is listed
-    once, finished. Completion of a re-attached shell is polled, so its result
-    and completion notice lag by up to a second; its exit_code is -1 when it
-    was killed before recording a status.
+    status live in files under the agent dir, and awaits never own it: an
+    await bounded by yield_after degrades as for any handle and the shell runs
+    on. After a restart, get the handles back with `from rlm import
+    persistent_shells; persistent_shells()`; a shell that finished while no
+    kernel ran is listed once, finished. Completion of a re-attached shell is
+    polled, so its result and completion notice lag by up to a second; its
+    exit_code is -1 when it was killed before recording a status.
     """
     if not isinstance(command, str) or not command:
         raise TypeError("command must be a non-empty str")
     if yield_after is not None and yield_after <= 0:
         raise ValueError("yield_after must be a positive number of seconds")
     if persistent:
-        handle: BashHandle = _spawn_persistent(command)
+        handle: BashHandle = _spawn_persistent(command, yield_after)
     else:
         _install_shutdown_hook()
-        handle = BashHandle(command, _effective_yield_after(yield_after))
+        handle = BashHandle(command, yield_after)
     from . import repl
 
     repl.emit(
@@ -1546,7 +1550,7 @@ def _shell_identity(pid: int, start_id: str) -> bool | None:
     return None if current is None else current == start_id
 
 
-def _spawn_persistent(command: str) -> PersistentBashHandle:
+def _spawn_persistent(command: str, yield_after: float | None) -> PersistentBashHandle:
     if not _IS_POSIX:
         raise RuntimeError("bash(persistent=True) is only supported on POSIX")
     session_id = os.environ.get("RLM_SESSION_ID")
@@ -1590,7 +1594,9 @@ def _spawn_persistent(command: str) -> PersistentBashHandle:
         gate.write(b"\n")
     finally:
         gate.close()
-    return PersistentBashHandle(command, shell_id, proc.pid, start_id, started_at, home, proc)
+    return PersistentBashHandle(
+        command, shell_id, proc.pid, start_id, started_at, home, proc, yield_after=yield_after
+    )
 
 
 def persistent_shells() -> list[BashHandle]:
