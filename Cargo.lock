@@ -1658,6 +1658,7 @@ dependencies = [
  "unicode-width 0.2.0",
  "url",
  "uuid",
+ "vt100",
 ]
 
 [[package]]

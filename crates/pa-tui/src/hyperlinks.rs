@@ -376,14 +376,28 @@ impl<W: Write> HyperlinkWriter<W> {
 
     /// Emit the buffered printable run and advance the tracked column.
     fn flush_text(&mut self) -> io::Result<()> {
+        use unicode_segmentation::UnicodeSegmentation;
         if self.text.is_empty() {
             return Ok(());
         }
         let chunk = std::mem::take(&mut self.text);
-        self.inner.write_all(&chunk)?;
-        if let Ok(text) = std::str::from_utf8(&chunk) {
+        let Ok(text) = std::str::from_utf8(&chunk) else {
+            return self.inner.write_all(&chunk);
+        };
+        for grapheme in text.graphemes(true) {
+            let width = crate::width::str_width(grapheme) as u16;
+            // Terminals disagree on the width of a multi-codepoint two-column cluster (a VS16
+            // emoji, a ZWJ sequence, a flag): blank both of its cells first, so a terminal that
+            // advances one column keeps no stale cell beside the glyph.
+            if let Some((row, col)) = self
+                .pos
+                .filter(|_| width == 2 && grapheme.chars().nth(1).is_some())
+            {
+                write!(self.inner, "  \x1b[{};{}H", row + 1, col + 1)?;
+            }
+            self.inner.write_all(grapheme.as_bytes())?;
             if let Some((_, col)) = self.pos.as_mut() {
-                *col = col.saturating_add(crate::width::str_width(text) as u16);
+                *col = col.saturating_add(width);
             }
         }
         Ok(())
@@ -654,6 +668,46 @@ mod tests {
         writer.flush().expect("flush");
         install_frame(&[]);
         String::from_utf8(writer.into_inner()).expect("utf-8")
+    }
+
+    /// A terminal that measures a VS16 emoji one column wide (vt100, like iTerm2) keeps no stale
+    /// character in the second cell the paint assigns it.
+    #[test]
+    fn a_two_column_cluster_leaves_no_stale_cell_on_a_narrow_measuring_terminal() {
+        #[derive(Clone, Default)]
+        struct Sink(std::rc::Rc<RefCell<Vec<u8>>>);
+        impl Write for Sink {
+            fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+                self.0.borrow_mut().extend_from_slice(buf);
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+        let sink = Sink::default();
+        let area = ratatui::layout::Rect::new(0, 0, 4, 1);
+        let mut terminal = ratatui::Terminal::with_options(
+            ratatui::backend::CrosstermBackend::new(HyperlinkWriter::new(sink.clone())),
+            ratatui::TerminalOptions {
+                viewport: ratatui::Viewport::Fixed(area),
+            },
+        )
+        .unwrap();
+        for text in ["abcd", "\u{26a0}\u{fe0f}cd"] {
+            terminal
+                .draw(|frame| frame.render_widget(ratatui::text::Line::raw(text), area))
+                .unwrap();
+        }
+        let mut parser = vt100::Parser::new(1, 4, 0);
+        parser.process(&sink.0.borrow());
+        let screen = parser.screen();
+        assert_eq!(screen.cell(0, 0).unwrap().contents(), "\u{26a0}\u{fe0f}");
+        let second = screen.cell(0, 1).unwrap().contents();
+        assert!(
+            second.trim().is_empty(),
+            "the second cell still shows the previous frame's {second:?}"
+        );
     }
 
     #[test]
