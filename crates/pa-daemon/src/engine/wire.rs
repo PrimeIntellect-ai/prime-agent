@@ -241,29 +241,12 @@ pub enum GoalTurnEndWork {
 /// held suspension owns the next turn boundary, so the goal mint defers.
 pub type SessionInputProbe = std::sync::Arc<dyn Fn() -> bool + Send + Sync>;
 
-/// One detached kernel bash completion (the `bash.completed` host
-/// request): the finished command's identity and exit code.
-#[derive(Debug, Clone)]
-pub struct BashCompletionNotice {
-    pub pid: u32,
-    pub command: String,
-    pub exit_code: i64,
-}
-
-/// The queue-admission seam for one completion notice (the worker's
-/// steering lane + runner wake + recovery busy-evidence).
-pub type BashCompletionSink = std::sync::Arc<dyn Fn(BashCompletionNotice) + Send + Sync>;
-
-/// The kernel read a finished command's result before its notice
-/// delivered (the `bash.consumed` host request): the queued notice is stale.
-#[derive(Debug, Clone)]
-pub struct BashConsumedNotice {
-    pub pid: u32,
-    pub command: String,
-}
-
-/// The queue-withdrawal seam for a consumed notice.
-pub type BashConsumedSink = std::sync::Arc<dyn Fn(BashConsumedNotice) + Send + Sync>;
+// The bash-notice plumbing lives in pa-core
+// (`session_engine::bash_notices`); the re-export keeps the
+// `crate::engine::*` paths the worker's queue lanes compile against.
+pub use pa_core::session_engine::bash_notices::{
+    BashCompletionNotice, BashCompletionSink, BashConsumedNotice, BashConsumedSink,
+};
 
 /// The worker's goal admission sink: the queue lanes admit a minted goal
 /// follow-up, the `goal_update` surfaces, and the runner wakes.

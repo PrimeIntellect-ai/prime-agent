@@ -9,7 +9,6 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use super::runtime::QueuedGoalContextPurge;
-use crate::cron::store::AgentCronJobStore;
 use crate::kernel::bootstrap::KernelPythonSkill;
 use crate::kernel::provisioner::{
     IpythonKernelProvisioner as KernelProvisioner, IpythonKernelProvisionerOptions,
@@ -93,8 +92,9 @@ pub struct SessionKernelWiring {
     pub rlm_usage: Arc<super::rlm_usage::RlmChildUsageAttributions>,
 }
 
-/// Build the session runtime and register the `goal.*`, `rlm_heartbeat.*`, and `rlm.*`
-/// host handlers; `goal_complete_purge` is the embedding's queued-goal-context purge.
+/// Build the session runtime and register the `goal.*`, `rlm.*`, and —
+/// only when `cron_store` wiring exists — the `rlm_heartbeat.*` host
+/// handlers; `goal_complete_purge` is the embedding's queued-goal-context purge.
 #[must_use]
 pub fn wire_session_runtime(
     session: SessionManager,
@@ -134,16 +134,14 @@ pub fn wire_session_runtime(
         ),
         None => fallback_binding(),
     };
-    // An embedding-owned store replaces the engine-private one, so
-    // kernel `rlm_heartbeat.*` writes reach the daemon catalog; the
-    // private file store remains the embedded/standalone default.
+    // An embedding-owned store, so kernel `rlm_heartbeat.*` writes reach
+    // the daemon catalog. Kernel heartbeat requests need the embedding's
+    // scheduler to fire the jobs they create: without cron wiring they
+    // stay unregistered (TS registers only with the heartbeat controller).
     let mutation_hook = cron_store
         .as_ref()
         .and_then(|wiring| wiring.mutation_hook.clone());
-    let cron_store = cron_store.map_or_else(
-        || Arc::new(AgentCronJobStore::new(agent_dir.join("cron-jobs.json"))),
-        |wiring| wiring.store,
-    );
+    let cron_store = cron_store.map(|wiring| wiring.store);
     let mut runtime = SessionRuntime::new(&session, cron_store, active_session_id, binding);
     if let Some(purge) = goal_complete_purge {
         runtime.set_goal_complete_purge(purge);
@@ -190,6 +188,33 @@ pub fn wire_session_runtime(
         rlm: rlm_bridge,
         rlm_usage,
     }
+}
+
+/// Bundled skills whose kernel host requests are controller-backed: the
+/// skill is model-visible only when its host request is registered (the
+/// registry decides, like TS `_modelVisibleSkills` reads its controllers).
+const CONTROLLER_BACKED_SKILLS: [(&str, &str); 3] = [
+    // skills/agent-message sends `agent_message.send`.
+    ("agent-message", "agent_message.send"),
+    // skills/agent-observe sends `agent_observe.list`.
+    ("agent-observe", "agent_observe.list"),
+    // skills/rlm-heartbeat sends `rlm_heartbeat.create`.
+    ("rlm-heartbeat", "rlm_heartbeat.create"),
+];
+
+/// The model-visible skill list for a final host-handler registry: a
+/// controller-backed bundled skill whose host request is not registered
+/// (print/RPC builds without that wiring) drops out.
+#[must_use]
+pub fn model_visible_skills(skills: Vec<Skill>, handlers: &HostRequestHandlers) -> Vec<Skill> {
+    skills
+        .into_iter()
+        .filter(|skill| {
+            !CONTROLLER_BACKED_SKILLS
+                .iter()
+                .any(|(name, request)| skill.name == *name && handlers.get(request).is_none())
+        })
+        .collect()
 }
 
 /// Kernel-side Python skill modules, pre-imported at bootstrap.
@@ -438,6 +463,96 @@ pub fn ipython_tool_options(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cron::store::AgentCronJobStore;
+    use crate::kernel::shared::{host_handler, HostRequestHandlers};
+    use serde_json::Value;
+
+    fn cron_wiring(dir: &std::path::Path) -> KernelCronWiring {
+        KernelCronWiring {
+            store: Arc::new(AgentCronJobStore::new(dir.join("jobs.json"))),
+            binding: None,
+            mutation_hook: None,
+        }
+    }
+
+    /// An engine build without cron wiring (print/RPC) serves no
+    /// `rlm_heartbeat.*` requests: no scheduler fires the jobs they create.
+    #[test]
+    fn without_cron_wiring_the_rlm_heartbeat_handlers_stay_unregistered() {
+        let dir = tempfile::tempdir().unwrap();
+        let session = SessionManager::in_memory(dir.path());
+        let wiring = wire_session_runtime(session, dir.path(), RlmWiring::default(), None, None);
+        assert!(wiring.handlers.get("rlm_heartbeat.create").is_none());
+        assert!(wiring.handlers.get("rlm_heartbeat.list").is_none());
+        // The goal surface needs no scheduler and stays registered.
+        assert!(wiring.handlers.get("goal.get").is_some());
+    }
+
+    #[test]
+    fn with_cron_wiring_the_rlm_heartbeat_handlers_register() {
+        let dir = tempfile::tempdir().unwrap();
+        let session = SessionManager::in_memory(dir.path());
+        let wiring = wire_session_runtime(
+            session,
+            dir.path(),
+            RlmWiring::default(),
+            None,
+            Some(cron_wiring(dir.path())),
+        );
+        assert!(wiring.handlers.get("rlm_heartbeat.create").is_some());
+    }
+
+    fn skill_named(name: &str) -> crate::skills::Skill {
+        use crate::skills::{create_synthetic_source_info, SkillKind, SourceScope};
+        crate::skills::Skill {
+            name: name.to_string(),
+            description: "a skill".to_string(),
+            file_path: std::path::PathBuf::from("/skills/SKILL.md"),
+            base_dir: std::path::PathBuf::from("/skills"),
+            source_info: create_synthetic_source_info("/skills", "user", SourceScope::User, None),
+            disable_model_invocation: false,
+            kind: SkillKind::Markdown,
+            python: None,
+        }
+    }
+
+    /// A controller-backed bundled skill whose host request is not
+    /// registered drops out; the registered ones and plain skills stay.
+    #[test]
+    fn model_visible_skills_follow_the_handler_registry() {
+        let skills = vec![
+            skill_named("agent-message"),
+            skill_named("agent-observe"),
+            skill_named("rlm-heartbeat"),
+            skill_named("websearch"),
+        ];
+        let mut handlers = HostRequestHandlers::default();
+        handlers.register(
+            "agent_message.send",
+            host_handler(|_payload| Box::pin(async { Ok(Value::Null) })),
+        );
+        let visible = model_visible_skills(skills, &handlers);
+        let names: Vec<&str> = visible.iter().map(|skill| skill.name.as_str()).collect();
+        assert_eq!(names, ["agent-message", "websearch"]);
+
+        handlers.register(
+            "agent_observe.list",
+            host_handler(|_payload| Box::pin(async { Ok(Value::Null) })),
+        );
+        handlers.register(
+            "rlm_heartbeat.create",
+            host_handler(|_payload| Box::pin(async { Ok(Value::Null) })),
+        );
+        let visible = model_visible_skills(
+            vec![
+                skill_named("agent-message"),
+                skill_named("agent-observe"),
+                skill_named("rlm-heartbeat"),
+            ],
+            &handlers,
+        );
+        assert_eq!(visible.len(), 3);
+    }
 
     #[test]
     fn cell_timeout_env_falls_back_to_default() {
