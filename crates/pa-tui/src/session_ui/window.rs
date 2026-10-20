@@ -18,9 +18,9 @@ use crate::view::AgentView;
 /// Messages per page request.
 pub(crate) const CHUNK_MESSAGES: usize = 256;
 /// Fetched chunks resident above the tail.
-const RESIDENT_CHUNKS: usize = 3;
+const RESIDENT_CHUNKS: usize = 8;
 /// A page loads once the viewport is this many entries from the resident edge.
-const PREFETCH_ENTRIES: usize = 128;
+const PREFETCH_ENTRIES: usize = 256;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum PageKind {

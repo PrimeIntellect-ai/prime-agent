@@ -46,7 +46,7 @@ const CHILD_SOCKET_ENV: &str = "PA_EXIT_BACKFILL_CHILD_SOCKET";
 /// above a clean detach-and-flush exit.
 const EXIT_BOUND: Duration = Duration::from_secs(5);
 /// The windowed attach's cursor sits this many messages into the history.
-const HISTORY_BEFORE: usize = 2_000;
+const HISTORY_BEFORE: usize = 3_000;
 /// The tail the snapshot carries: rows 0 and 8 are user rows (contiguous
 /// needles; assistant rows carry SGR spans).
 const TAIL_MESSAGES: usize = 9;
@@ -124,7 +124,7 @@ fn the_top_key_loads_the_session_start_as_the_last_input() {
 
 /// Older pages the window keeps resident above the tail; one more evicts the
 /// chunk next to the tail.
-const RESIDENT_CHUNKS: usize = 3;
+const RESIDENT_CHUNKS: usize = 8;
 const PAGE_UP: &[u8] = b"\x1b[5~";
 
 /// Scrolled far up, the resident rows are cut off from the tail: the exit flush
@@ -142,7 +142,7 @@ fn exit_flushes_the_tail_without_a_disjoint_resident_run() {
     harness.wait_from_start(KITTY_QUERY, "the kitty capability query");
     harness.write(KITTY_ANSWER);
     harness.wait_from_start(LAST_ROW, "the attach tail rendered");
-    for _ in 0..200 {
+    for _ in 0..600 {
         harness.write(PAGE_UP);
         harness.master.drain_until_quiet(1);
         if served.load(Ordering::SeqCst) > RESIDENT_CHUNKS {

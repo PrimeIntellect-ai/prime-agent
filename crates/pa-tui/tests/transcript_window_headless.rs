@@ -20,11 +20,14 @@ use pa_tui::interactive::{
 };
 use serde_json::{json, Value};
 
-const MESSAGES: usize = 2_000;
 const TAIL: usize = 300;
 /// The window's page size and resident chunk count (the bound under test).
 const CHUNK: usize = 256;
-const RESIDENT_CHUNKS: usize = 3;
+const RESIDENT_CHUNKS: usize = 8;
+/// Enough history above the tail that a climb to the top evicts resident chunks.
+const MESSAGES: usize = TAIL + (RESIDENT_CHUNKS + 3) * CHUNK;
+/// Paced batches that cover the whole session (about 13 messages per page at `HEIGHT`).
+const CLIMB: usize = MESSAGES / 12;
 const LEAF: &str = "leaf";
 const GAP_ROW: &str = "Loading newer history";
 const WHEEL_UP: &str = "\x1b[<64;10;10M";
@@ -334,7 +337,7 @@ fn scrolling_up_through_older_pages_keeps_the_viewport_anchored() {
         .map(|_| HeadlessStep::Mouse(WHEEL_UP.to_string()))
         .collect();
     batch.push(key(crossterm::event::KeyCode::PageUp));
-    let (frames, pages) = run(Paging::default(), paced(&batch, 220));
+    let (frames, pages) = run(Paging::default(), paced(&batch, CLIMB));
     let reached_top = frames
         .iter()
         .position(|frame| top_marker(frame) == Some(0))
@@ -369,9 +372,9 @@ fn scrolling_up_through_older_pages_keeps_the_viewport_anchored() {
 fn the_resident_run_stays_bounded_and_refills_on_return() {
     // Climb to the session top, then descend with newer pages held: the rows still
     // resident below the top end at the gap row after at most the resident chunks.
-    let mut up = paced(&[key(crossterm::event::KeyCode::PageUp)], 150);
+    let mut up = paced(&[key(crossterm::event::KeyCode::PageUp)], CLIMB);
     up.extend(
-        paced(&[key(crossterm::event::KeyCode::PageDown)], 60)
+        paced(&[key(crossterm::event::KeyCode::PageDown)], CLIMB)
             .into_iter()
             .skip(1),
     );
@@ -416,10 +419,10 @@ fn the_resident_run_stays_bounded_and_refills_on_return() {
     // Unheld, the descent refetches the evicted rows: every message renders on the way
     // back down, in order, without a skip.
     // The climb ends with the top key, so the descent starts from a top-anchored window.
-    let mut steps = paced(&[key(crossterm::event::KeyCode::PageUp)], 150);
+    let mut steps = paced(&[key(crossterm::event::KeyCode::PageUp)], CLIMB);
     steps.push(HeadlessStep::ScrollTop);
     steps.extend(
-        paced(&[key(crossterm::event::KeyCode::PageDown)], 150)
+        paced(&[key(crossterm::event::KeyCode::PageDown)], CLIMB)
             .into_iter()
             .skip(1),
     );
