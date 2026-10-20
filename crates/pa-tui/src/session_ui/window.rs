@@ -479,13 +479,20 @@ impl SessionUi {
         let Some(ReaderAnchor::Chunk { leaf_id, page, .. }) = anchor else {
             return None;
         };
-        fetch_page(
+        let fetch = fetch_page(
             &self.client,
             self.active_session_id.clone(),
             leaf_id.clone(),
             page.clone(),
+        );
+        // Awaited on the interactive loop: the UI request budget bounds it, and a late page
+        // follows the tail instead.
+        tokio::time::timeout(
+            std::time::Duration::from_millis(super::UI_REQUEST_TIMEOUT_MS),
+            fetch,
         )
         .await
+        .ok()?
         .ok()
     }
 
@@ -549,8 +556,9 @@ impl SessionUi {
         view.older_history_loading = false;
         self.last_status_index = None;
         self.pressed_click = None;
-        let data = self
-            .bounded_request(
+        // The anchor page is validated against the old branch, independent of the tail.
+        let (data, anchor_page) = tokio::join!(
+            self.bounded_request(
                 std::time::Duration::from_millis(super::UI_REQUEST_TIMEOUT_MS),
                 DaemonCommand::GetMessages {
                     id: None,
@@ -562,8 +570,9 @@ impl SessionUi {
                     capabilities: Some(crate::session_ui::attach_capabilities()),
                     rest: Map::default(),
                 },
-            )
-            .await;
+            ),
+            self.load_reader_anchor(anchor.as_ref()),
+        );
         let leaf_id = data
             .as_ref()
             .ok()
@@ -586,7 +595,6 @@ impl SessionUi {
             }
             return;
         };
-        let anchor_page = self.load_reader_anchor(anchor.as_ref()).await;
         self.window
             .reset(leaf_id, page.first_id.filter(|_| page.more), page.seam);
         view.clear_chat();
