@@ -553,12 +553,42 @@ impl Supervisor {
                 RouteAdmission::SupervisorInternal,
             )
             .await;
-        match response {
-            Ok(response) if response.success => response
-                .data
-                .unwrap_or_else(|| offline_summary(&resident.worker_id)),
-            _ => offline_summary(&resident.worker_id),
+        if let Some(summary) = response
+            .ok()
+            .filter(|response| response.success)
+            .and_then(|response| response.data)
+        {
+            return summary;
         }
+        let root_active_session_id = resident
+            .descriptor
+            .lock()
+            .await
+            .root_active_session_id
+            .clone();
+        let roster = self
+            .roster
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut summary = offline_summary(&resident.worker_id);
+        // A failed live pull loses activity, not the supervisor's trusted family
+        // binding. Never borrow identity from a row now owned by another worker.
+        if let Some(entry) = roster
+            .by_active_session_id(&root_active_session_id)
+            .filter(|entry| entry.worker_id.as_deref() == Some(resident.worker_id.as_str()))
+        {
+            for key in [
+                "parentActiveSessionId",
+                "parentSessionId",
+                "parentSessionPath",
+                "sessionName",
+            ] {
+                if let Some(value) = entry.summary.get(key) {
+                    summary[key] = value.clone();
+                }
+            }
+        }
+        summary
     }
 
     async fn worker_summaries(self: &Arc<Self>, residents: &[Arc<ResidentWorker>]) -> Vec<Value> {
@@ -978,6 +1008,42 @@ mod tests {
         assert!(
             elapsed < std::time::Duration::from_millis(ROUTE_TIMEOUT_MS),
             "one wedged resident held the list for {elapsed:?}"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_degraded_summary_keeps_only_its_own_workers_family_binding() {
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let supervisor = Arc::new(supervisor(dir.path()));
+        let resident = resident("sibling", None);
+        resident.descriptor.lock().await.root_active_session_id = "sibling".to_string();
+        let _requests = wedged_worker(&resident).await;
+        let binding = json!({
+            "activeSessionId": "sibling", "sessionId": "session-sibling",
+            "sessionName": "sibling-name", "parentActiveSessionId": "parent",
+            "parentSessionId": "session-parent", "parentSessionPath": "/parent.jsonl",
+        });
+        supervisor
+            .roster
+            .lock()
+            .unwrap()
+            .write_summary(binding.clone(), Some("sibling"), None);
+        let summary = supervisor.worker_summary(&resident).await;
+        let mut expected = offline_summary("sibling");
+        expected["sessionName"] = binding["sessionName"].clone();
+        expected["parentActiveSessionId"] = binding["parentActiveSessionId"].clone();
+        expected["parentSessionId"] = binding["parentSessionId"].clone();
+        expected["parentSessionPath"] = binding["parentSessionPath"].clone();
+        assert_eq!(summary, expected);
+
+        supervisor
+            .roster
+            .lock()
+            .unwrap()
+            .write_summary(binding, Some("replacement"), None);
+        assert_eq!(
+            supervisor.worker_summary(&resident).await,
+            offline_summary("sibling")
         );
     }
 

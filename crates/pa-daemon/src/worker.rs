@@ -321,6 +321,7 @@ impl Worker {
             active_action: None,
             running_tool_calls: std::collections::HashSet::new(),
             running_admission_ids: std::collections::HashSet::new(),
+            tool_use_count: 0,
         };
         let active_session_id = config.active_session_id.clone();
         let script = config.script.clone();

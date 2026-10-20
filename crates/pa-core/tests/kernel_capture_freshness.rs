@@ -56,7 +56,7 @@ fn test_options(snapshot_dir: Option<&Path>) -> Option<KernelManagerOptions> {
             max_variable_bytes: None,
             debounce_ms: None,
         }),
-        bootstrap_code: Some(build_rlm_bootstrap_code(&[])),
+        bootstrap_code: Some(build_rlm_bootstrap_code(&[], false)),
         stderr_log_path: None,
         on_background_work_settled: None,
     })

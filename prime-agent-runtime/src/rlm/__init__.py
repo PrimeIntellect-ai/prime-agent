@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from .bash import BashHandle, BashResult, bash, persistent_shells
+from .bash import BashHandle, BashResult, BashSnapshot, bash, persistent_shells, _set_completion_notices_wired
 from .factory import (
     FACTORY_HELP,
     graph_factory,
