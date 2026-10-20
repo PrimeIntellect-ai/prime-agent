@@ -281,15 +281,20 @@ pub(crate) struct HostedSession {
     /// Live steered-work admissions: incremented at the steering
     /// admission point (before the worker round trip, under the same
     /// lock as the guard checks) and unwound when an admission provably
-    /// never landed (a request error, a refused steer, a malformed
-    /// receipt) or was withdrawn (it raced an armed cancel). A count
-    /// keeps concurrent steers independently tracked. `session/cancel`
-    /// with no turn slot arms the stop sequence for it instead of
-    /// no-opping; only a completed stop sequence resets it. A prompt
-    /// admission never touches it: a prompt that fails after admission
-    /// (invalid blocks, a refused turn) releases its slot without
-    /// running, and must not orphan the steered work.
+    /// never landed (a refused steer). A count keeps concurrent steers
+    /// independently tracked. `session/cancel` with no turn slot arms the
+    /// stop sequence for it instead of no-opping; only a completed stop
+    /// sequence resets it. A prompt admission never touches it: a prompt
+    /// that fails after admission (invalid blocks, a refused turn)
+    /// releases its slot without running, and must not orphan the steered
+    /// work.
     steer_work: usize,
+    /// The stop-sequence reset epoch for the steered-work count: a
+    /// completed stop resets the count and bumps the epoch, so a late
+    /// refusal from an admission that predates the reset unwinds nothing
+    /// (its unit is already gone; the count now belongs to newer
+    /// admissions).
+    steer_generation: u64,
     /// The newest assistant stop reason observed on the event stream,
     /// cleared when a prompt turn is admitted so a turn never reads a
     /// previous turn's stop reason (read after the settlement for the
@@ -870,8 +875,10 @@ async fn run_cancel_stop(
         {
             hosted.cancelling = false;
             hosted.cancel_task = None;
-            // This stop sequence dealt with the steered work.
+            // This stop sequence dealt with the steered work; the epoch
+            // bump retires any admission still in flight across it.
             hosted.steer_work = 0;
+            hosted.steer_generation = hosted.steer_generation.wrapping_add(1);
             match &outcome {
                 Ok(lease) => {
                     if hosted.input_pause_id.as_deref() == Some(&lease.pause_id) {
@@ -1228,6 +1235,7 @@ pub(crate) async fn admit_session(
         cancel_task: None,
         turn: None,
         steer_work: 0,
+        steer_generation: 0,
         assistant_stop_reason: None,
         mapping: WireMappingState::default(),
         observed_children: std::collections::HashSet::new(),
@@ -1537,7 +1545,7 @@ async fn handle_session_steering(
     // already tracked. The send then runs without holding the lock (the
     // busy prompt's settle locks the same state, and the session-event
     // consumer must pass through while the round trip is in flight).
-    let (daemon_session_id, turn_running, message) = {
+    let (daemon_session_id, turn_running, admitted_epoch, message) = {
         let mut guard = state.lock().await;
         let session_closing = guard.session_close_done.is_some();
         let Some(hosted) = guard
@@ -1614,15 +1622,20 @@ async fn handle_session_steering(
         // the count - a `session/cancel` that arms while the Steer
         // command is in flight must see it. A count keeps concurrent
         // steers independently tracked, so one admission can unwind
-        // below without wiping another's tracking.
+        // below without wiping another's tracking; the captured epoch
+        // retires an admission whose round trip spans a stop reset (its
+        // unit is already gone - the count now belongs to newer
+        // admissions - so a late refusal must not eat one of theirs).
+        let mut admitted_epoch = 0;
         if let Some(hosted) = guard
             .session
             .as_mut()
             .filter(|hosted| hosted.acp_session_id == params.session_id)
         {
+            admitted_epoch = hosted.steer_generation;
             hosted.steer_work += 1;
         }
-        (daemon_session_id, turn_running, message)
+        (daemon_session_id, turn_running, admitted_epoch, message)
     };
     let steer = DaemonCommand::Steer {
         id: None,
@@ -1658,11 +1671,14 @@ async fn handle_session_steering(
         // A refused steer provably never landed (the queue command
         // rejects before it enqueues), so this admission unwinds its own
         // tracking: a later idle `session/cancel` no-ops again instead
-        // of arming a full stop for work that does not exist. A link
-        // error or a malformed receipt does NOT unwind - the steer may
-        // have landed there (the envelope was written; the busy flag was
-        // the malformed part), and the armed cancel path must stay to
-        // clean it.
+        // of arming a full stop for work that does not exist. The unwind
+        // is epoch-guarded: an admission whose round trip spans a stop
+        // reset unwinds nothing (the reset already retired its unit, and
+        // the count now tracks newer admissions whose units a bare
+        // subtraction would eat). A link error or a malformed receipt
+        // does NOT unwind - the steer may have landed there (the envelope
+        // was written; the busy flag was the malformed part), and the
+        // armed cancel path must stay to clean it.
         {
             let mut guard = state.lock().await;
             if let Some(hosted) = guard
@@ -1670,7 +1686,9 @@ async fn handle_session_steering(
                 .as_mut()
                 .filter(|hosted| hosted.acp_session_id == params.session_id)
             {
-                hosted.steer_work = hosted.steer_work.saturating_sub(1);
+                if hosted.steer_generation == admitted_epoch {
+                    hosted.steer_work = hosted.steer_work.saturating_sub(1);
+                }
             }
         }
         let _ = tx.send(super::internal_error(
@@ -2409,6 +2427,7 @@ mod tests {
             cancel_task: None,
             turn: None,
             steer_work: 0,
+            steer_generation: 0,
             assistant_stop_reason: None,
             mapping: WireMappingState::default(),
             observed_children: std::collections::HashSet::new(),
@@ -2906,6 +2925,91 @@ mod tests {
         );
     }
 
+    /// An admission whose round trip spans a completed stop reset
+    /// unwinds nothing: the reset retired its unit, and a late refusal
+    /// must not eat a newer admission's tracking (the count now belongs
+    /// to the admissions after the reset).
+    #[tokio::test]
+    async fn a_late_refusal_after_a_stop_reset_orphans_nothing() {
+        let (writer, mut commands) = mpsc::unbounded_channel::<String>();
+        let (_frames_tx, frames) = mpsc::unbounded_channel();
+        let link = Arc::new(DaemonLink {
+            writer,
+            pending: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            closed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            frames: Mutex::new(frames),
+            protocol_version: DAEMON_PROTOCOL_VERSION,
+            next_request_id: std::sync::atomic::AtomicU64::new(0),
+        });
+        let state = Arc::new(Mutex::new(state(Some(hosted_session()))));
+        let (tx, mut responses) = mpsc::unbounded_channel();
+        let handler_state = Arc::clone(&state);
+        let handler_link = Arc::clone(&link);
+        tokio::spawn(async move {
+            handle_session_steering(
+                json!(1),
+                json!({
+                    "sessionId": "acp-1",
+                    "prompt": [{ "type": "text", "text": "steer note" }],
+                }),
+                &handler_link,
+                &handler_state,
+                tx,
+            )
+            .await;
+        });
+        let steer_line = commands.recv().await.expect("the steer command");
+        let envelope: DaemonCommandEnvelope = serde_json::from_str(&steer_line).unwrap();
+        let steer_id = envelope.id.clone();
+        assert!(matches!(envelope.command, DaemonCommand::Steer { .. }));
+        // The stop completes while the round trip is in flight: the count
+        // resets and the generation retires the admission, then a newer
+        // steer is admitted under the new generation.
+        {
+            let mut guard = state.lock().await;
+            let hosted = guard.session.as_mut().unwrap();
+            hosted.steer_work = 0;
+            hosted.steer_generation += 1;
+            hosted.steer_work += 1;
+        }
+        // The stale admission's late refusal arrives now.
+        link.pending
+            .lock()
+            .unwrap()
+            .remove(&steer_id)
+            .expect("the steer round trip is pending")
+            .send(DaemonResponse {
+                id: Some(steer_id),
+                command: "steer".to_string(),
+                success: false,
+                data: None,
+                error: Some("steer refused late".to_string()),
+                error_info: None,
+            })
+            .expect("the late refusal lands");
+        let reply = responses.recv().await.expect("the steering reply");
+        assert!(
+            reply["error"]["data"]["details"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("steer refused late"),
+            "the refused steer answers the worker refusal: {reply}"
+        );
+        let mut guard = state.lock().await;
+        assert_eq!(
+            guard.session.as_ref().unwrap().steer_work,
+            1,
+            "the late refusal unwound nothing: the newer admission keeps its tracking"
+        );
+        assert!(
+            matches!(
+                arm_cancel_locked("acp-1", &mut guard),
+                CancelOrder::Armed(_)
+            ),
+            "the cancel still arms for the newer steered work"
+        );
+    }
+
     /// A malformed steer receipt (the busy flag missing) means the steer
     /// DID land - only the receipt was malformed - so the admission
     /// stays tracked and a later `session/cancel` cleans the work.
@@ -2976,6 +3080,93 @@ mod tests {
                 CancelOrder::Armed(_)
             ),
             "the cancel arms for the steered work the receipt lost track of"
+        );
+    }
+
+    /// A refusal whose round trip spans a stop reset unwinds nothing: the
+    /// reset retired the stale admission's unit already, and the count
+    /// now tracks newer admissions - a bare subtraction would eat one of
+    /// theirs and orphan its steered turn.
+    #[tokio::test]
+    async fn a_late_refusal_across_a_stop_reset_unwinds_nothing() {
+        let (writer, mut commands) = mpsc::unbounded_channel::<String>();
+        let (_frames_tx, frames) = mpsc::unbounded_channel();
+        let link = Arc::new(DaemonLink {
+            writer,
+            pending: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            closed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            frames: Mutex::new(frames),
+            protocol_version: DAEMON_PROTOCOL_VERSION,
+            next_request_id: std::sync::atomic::AtomicU64::new(0),
+        });
+        let state = Arc::new(Mutex::new(state(Some(hosted_session()))));
+        let (tx, mut responses) = mpsc::unbounded_channel();
+        let handler_state = Arc::clone(&state);
+        let handler_link = Arc::clone(&link);
+        tokio::spawn(async move {
+            handle_session_steering(
+                json!(1),
+                json!({
+                    "sessionId": "acp-1",
+                    "prompt": [{ "type": "text", "text": "stale steer" }],
+                }),
+                &handler_link,
+                &handler_state,
+                tx,
+            )
+            .await;
+        });
+        let steer_line = commands.recv().await.expect("the steer command");
+        let envelope: DaemonCommandEnvelope = serde_json::from_str(&steer_line).unwrap();
+        let steer_id = envelope.id.clone();
+        assert!(matches!(envelope.command, DaemonCommand::Steer { .. }));
+        // A stop sequence completes while the steer round trip is in
+        // flight: the count resets and the epoch retires the in-flight
+        // admission, then a newer steer is admitted.
+        {
+            let mut guard = state.lock().await;
+            let hosted = guard.session.as_mut().unwrap();
+            assert_eq!(hosted.steer_work, 1, "the in-flight admission is tracked");
+            hosted.steer_work = 0;
+            hosted.steer_generation += 1;
+            hosted.steer_work += 1;
+        }
+        // The stale admission's refusal arrives: it must not eat the
+        // newer admission's unit.
+        link.pending
+            .lock()
+            .unwrap()
+            .remove(&steer_id)
+            .expect("the steer round trip is pending")
+            .send(DaemonResponse {
+                id: Some(steer_id),
+                command: "steer".to_string(),
+                success: false,
+                data: None,
+                error: Some("steer refused".to_string()),
+                error_info: None,
+            })
+            .expect("the stale refusal lands");
+        let reply = responses.recv().await.expect("the steering reply");
+        assert!(
+            reply["error"]["data"]["details"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("steer refused"),
+            "the stale refusal answers the worker refusal: {reply}"
+        );
+        let mut guard = state.lock().await;
+        assert_eq!(
+            guard.session.as_ref().unwrap().steer_work,
+            1,
+            "the newer admission's tracking survived the stale refusal"
+        );
+        assert!(
+            matches!(
+                arm_cancel_locked("acp-1", &mut guard),
+                CancelOrder::Armed(_)
+            ),
+            "the cancel still arms for the newer admission's steered work"
         );
     }
 }
