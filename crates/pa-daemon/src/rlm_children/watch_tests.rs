@@ -41,15 +41,28 @@ enum FakeChild {
 /// deliveries). `idle_delay_ms` paces `wait_for_idle` so a test can act
 /// while the child is still "running". `child` scripts the child link
 /// (`FakeChild`).
+/// The fake supervisor's scripted answers: the kill and child behaviors
+/// plus the pushed worker roster `list_agent_peers` serves.
+struct FakeSupervisorScript {
+    kill: FakeKill,
+    child: FakeChild,
+    child_subagents: Arc<FakeChildSubagents>,
+    peers: Arc<std::sync::Mutex<Vec<Value>>>,
+}
+
 async fn spawn_fake_supervisor(
     socket: std::path::PathBuf,
     follow_up_tx: mpsc::UnboundedSender<Value>,
     idle_delay_ms: u64,
     kill_tx: mpsc::UnboundedSender<Value>,
-    kill_behavior: FakeKill,
-    child: FakeChild,
-    child_subagents: Arc<FakeChildSubagents>,
+    script: FakeSupervisorScript,
 ) {
+    let FakeSupervisorScript {
+        kill: kill_behavior,
+        child,
+        child_subagents,
+        peers,
+    } = script;
     let kill_behavior = std::sync::Arc::new(kill_behavior);
     // Per-fake child session file: a fixed path would let a leftover file
     // from another test (or run) carry the prompt text, flip the
@@ -83,6 +96,7 @@ async fn spawn_fake_supervisor(
             let state_reads = Arc::clone(&state_reads);
             let child_session_file = std::sync::Arc::clone(&child_session_file);
             let child_subagents = Arc::clone(&child_subagents);
+            let peers = Arc::clone(&peers);
             tokio::spawn(async move {
                 let (reader, mut writer) = stream.split();
                 let mut reader = BufReader::new(reader);
@@ -167,12 +181,32 @@ async fn spawn_fake_supervisor(
                         "get_state" => response_success(
                             Some(&id),
                             command_type,
-                            Some(json!({
-                                "isStreaming": false,
-                                "hasRunningSubagents": child_subagents.running.load(Ordering::SeqCst),
-                                "sessionActions": { "queuedCount": 0 },
+                            Some(child_subagents.live_state.lock().unwrap().clone().unwrap_or_else(|| {
+                                json!({
+                                    "isStreaming": false,
+                                    "hasRunningSubagents": child_subagents.running.load(Ordering::SeqCst),
+                                    "sessionActions": { "queuedCount": 0 },
+                                    "progressNote": "halfway through the task",
+                                    "toolUseCount": 3,
+                                })
                             })),
                         ),
+                        "list_agent_peers" => {
+                            let snapshot = peers.lock().unwrap().clone();
+                            if let Some(gate) = child_subagents
+                                .peer_gate
+                                .as_ref()
+                                .filter(|gate| gate.armed.swap(false, Ordering::SeqCst))
+                            {
+                                gate.copied.notify_one();
+                                gate.release.notified().await;
+                            }
+                            response_success(
+                                Some(&id),
+                                command_type,
+                                Some(json!({ "peers": snapshot })),
+                            )
+                        }
                         "get_last_assistant_text" => {
                             // The settle capture: with the knob set, the
                             // worker leaves right after its final answer.
@@ -261,6 +295,15 @@ struct FakeChildSubagents {
     running: AtomicBool,
     quiescent_waits: std::sync::atomic::AtomicUsize,
     answer_reads: AtomicU32,
+    live_state: std::sync::Mutex<Option<Value>>,
+    peer_gate: Option<Arc<FakePeerGate>>,
+}
+
+#[derive(Default)]
+struct FakePeerGate {
+    armed: AtomicBool,
+    copied: tokio::sync::Notify,
+    release: tokio::sync::Notify,
 }
 
 /// [`sessions_with_fake_supervisor`] whose child reports its own running
@@ -282,9 +325,12 @@ async fn sessions_with_fake_child_subagents(
         follow_up_tx,
         idle_delay_ms,
         kill_tx,
-        kill_behavior,
-        child,
-        child_subagents,
+        FakeSupervisorScript {
+            kill: kill_behavior,
+            child,
+            child_subagents,
+            peers: Arc::new(std::sync::Mutex::new(Vec::new())),
+        },
     )
     .await;
     let link = Arc::new(crate::supervisor_link::SupervisorLink::new(socket));
@@ -296,6 +342,7 @@ async fn sessions_with_fake_child_subagents(
             std::env::temp_dir(),
             /*telemetry_disabled*/ true,
         )),
+        String::new(),
     );
     // A live parent carries its resolved model on the identity; the
     // spawn path resolves the child's model from it.
@@ -320,6 +367,50 @@ async fn spawn_child(sessions: &SupervisorChildSessions) -> RlmSpawnHandle {
         .expect("spawn must succeed against the fake supervisor")
 }
 
+/// [`sessions_with_fake_supervisor`] whose fake answers `list_agent_peers`
+/// from `peers`: the supervisor's pushed worker roster that the live roster
+/// read joins each child row onto.
+async fn sessions_with_roster_peers(
+    peers: Arc<std::sync::Mutex<Vec<Value>>>,
+    idle_delay_ms: u64,
+) -> (SupervisorChildSessions, mpsc::UnboundedReceiver<Value>) {
+    let socket = std::env::temp_dir().join(format!(
+        "pa-rlm-peers-{}.sock",
+        uuid::Uuid::new_v4().simple()
+    ));
+    let (kill_tx, kill_rx) = mpsc::unbounded_channel();
+    spawn_fake_supervisor(
+        socket.clone(),
+        mpsc::unbounded_channel().0,
+        idle_delay_ms,
+        kill_tx,
+        FakeSupervisorScript {
+            kill: FakeKill::Success,
+            child: FakeChild::Healthy,
+            child_subagents: Arc::new(FakeChildSubagents::default()),
+            peers,
+        },
+    )
+    .await;
+    let link = Arc::new(crate::supervisor_link::SupervisorLink::new(socket));
+    let sessions = SupervisorChildSessions::new(
+        link,
+        std::env::temp_dir(),
+        "parent-live".to_string(),
+        std::sync::Arc::new(crate::model_allowlist::ModelRefusalTelemetry::new(
+            std::env::temp_dir(),
+            /*telemetry_disabled*/ true,
+        )),
+        String::new(),
+    );
+    sessions.set_identity(ParentIdentity {
+        model: Some("mock/mock-1".to_string()),
+        cwd: Some(std::env::temp_dir().to_string_lossy().to_string()),
+        ..ParentIdentity::with_default_depth()
+    });
+    (sessions, kill_rx)
+}
+
 #[tokio::test]
 async fn roster_snapshot_does_not_wait_for_a_slow_child_worker() {
     let (follow_up_tx, _follow_up_rx) = mpsc::unbounded_channel();
@@ -334,12 +425,275 @@ async fn roster_snapshot_does_not_wait_for_a_slow_child_worker() {
             session_name: "slow-child".to_string(),
         })
         .await;
-    let roster = tokio::time::timeout(Duration::from_millis(10), sessions.list_subagents())
+    let roster = tokio::time::timeout(Duration::from_millis(250), sessions.list_subagents())
         .await
-        .expect("roster must not make a supervisor round trip")
+        .expect("the roster read never waits on the slow child worker")
         .expect("roster snapshot");
     assert_eq!(roster.len(), 1);
     assert_eq!(roster[0].status, "running");
+}
+
+/// #4 A1/A2: a running child's row carries its latest accepted note and its
+/// tool-call count within one roster read — the supervisor's pushed worker
+/// roster joined onto the registry row (the watcher's 60s slice is too
+/// coarse to be the source; TS bumps the child's counter per
+/// `tool_execution_start` and omits a zero count).
+#[tokio::test]
+async fn a_running_childs_roster_row_carries_its_live_note_and_tool_count() {
+    let peers = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let (sessions, _kill_rx) = sessions_with_roster_peers(peers.clone(), 5_000).await;
+    let handle = spawn_child(&sessions).await;
+    *peers.lock().unwrap() = vec![json!({
+        "activeSessionId": "child-live",
+        "rlmChildId": handle.rlm_child_id.clone(),
+        "progressNote": "halfway through the task",
+        "toolUseCount": 3,
+    })];
+    let roster = sessions.list_subagents().await.expect("child roster");
+    assert_eq!(roster[0].status, "running");
+    assert_eq!(
+        roster[0].progress_note.as_deref(),
+        Some("halfway through the task"),
+        "the row joins the pushed roster's live note: {roster:?}"
+    );
+    assert_eq!(
+        roster[0].tool_use_count,
+        Some(3),
+        "the row joins the pushed roster's live count: {roster:?}"
+    );
+}
+
+/// #4: `collect` rows carry the same count: the refresh's `get_state`
+/// round trip (already in flight for the busy verdict) observes the child's
+/// live summary onto the record.
+#[tokio::test]
+async fn a_collect_row_counts_the_childs_tool_calls() {
+    let peers = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let (sessions, _kill_rx) = sessions_with_roster_peers(peers, 5_000).await;
+    sessions
+        .push_test_child(RlmChildIdentity {
+            rlm_child_id: "sub-collect".to_string(),
+            active_session_id: "child-live".to_string(),
+            session_id: Some("child-file".to_string()),
+            session_name: "counted-child".to_string(),
+        })
+        .await;
+    let results = sessions.collect(Vec::new(), 0).await.expect("collect");
+    assert_eq!(results[0].status, "done");
+    assert_eq!(
+        results[0].tool_use_count,
+        Some(3),
+        "the collect row reads the observed count: {results:?}"
+    );
+}
+
+/// An old list reply must not undo a newer direct child observation, even
+/// when that direct read settled the child before the list reply arrived.
+#[tokio::test]
+async fn a_delayed_roster_reply_keeps_the_newer_settled_observation() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let socket = dir.path().join("sup.sock");
+    let gate = Arc::new(FakePeerGate::default());
+    gate.armed.store(true, Ordering::SeqCst);
+    let state = Arc::new(FakeChildSubagents {
+        peer_gate: Some(Arc::clone(&gate)),
+        ..FakeChildSubagents::default()
+    });
+    let peers = Arc::new(std::sync::Mutex::new(vec![json!({
+        "activeSessionId": "child-live",
+        "workerInstanceId": "instance-1",
+        "rosterDeltaSequence": 3,
+        "progressNote": "older note",
+        "toolUseCount": 3,
+    })]));
+    *state.live_state.lock().unwrap() = Some(json!({
+        "workerInstanceId": "instance-1",
+        "rosterDeltaSequence": 4,
+        "isStreaming": false,
+        "progressNote": "newer note",
+        "toolUseCount": 4,
+    }));
+    spawn_fake_supervisor(
+        socket.clone(),
+        mpsc::unbounded_channel().0,
+        0,
+        mpsc::unbounded_channel().0,
+        FakeSupervisorScript {
+            kill: FakeKill::Success,
+            child: FakeChild::Healthy,
+            child_subagents: state,
+            peers: Arc::clone(&peers),
+        },
+    )
+    .await;
+    let sessions = SupervisorChildSessions::new(
+        Arc::new(crate::supervisor_link::SupervisorLink::new(socket)),
+        dir.path().to_path_buf(),
+        "parent-live".to_string(),
+        Arc::new(crate::model_allowlist::ModelRefusalTelemetry::new(
+            dir.path().to_path_buf(),
+            /*telemetry_disabled*/ true,
+        )),
+        String::new(),
+    );
+    sessions
+        .push_test_child(RlmChildIdentity {
+            rlm_child_id: "child-id".to_string(),
+            active_session_id: "child-live".to_string(),
+            session_id: Some("child-file".to_string()),
+            session_name: "worker".to_string(),
+        })
+        .await;
+    let listing = {
+        let sessions = sessions.clone();
+        tokio::spawn(async move { sessions.list_subagents().await.unwrap() })
+    };
+    gate.copied.notified().await;
+    let collected = sessions.collect(Vec::new(), 0).await.unwrap();
+    assert_eq!(collected[0].tool_use_count, Some(4));
+    gate.release.notify_one();
+    let roster = listing.await.unwrap();
+    assert_eq!(
+        (roster[0].tool_use_count, roster[0].progress_note.as_deref()),
+        (Some(4), Some("newer note")),
+    );
+    // Completed rows do not read peers again: the accepted observation
+    // must survive even when no further direct refresh is requested.
+    let roster = sessions.list_subagents().await.unwrap();
+    assert_eq!(roster[0].tool_use_count, Some(4));
+}
+
+/// A later roster request may still read older pushed state. Sequence
+/// wins over request order; a replacement worker may legitimately reset.
+#[tokio::test]
+async fn child_observations_order_worker_sequences_and_allow_recovery_resets() {
+    let peers = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let (sessions, _kill_rx) = sessions_with_roster_peers(peers, 0).await;
+    sessions
+        .push_test_child(RlmChildIdentity {
+            rlm_child_id: "child-id".to_string(),
+            active_session_id: "child-live".to_string(),
+            session_id: Some("child-file".to_string()),
+            session_name: "worker".to_string(),
+        })
+        .await;
+    let record = sessions.inner.children.lock().await[0].clone();
+    let direct_observation = Arc::clone(&record.lock().await.direct_observation);
+    let direct = direct_observation.lock().await;
+    sessions
+        .inner
+        .observe_live_state(
+            &record,
+            &json!({
+                "workerInstanceId": "initial-roster",
+                "rosterDeltaSequence": 99,
+                "toolUseCount": 99,
+            }),
+            0,
+            ChildObservationSource::Roster,
+        )
+        .await;
+    assert!(record.lock().await.live_observation.is_none());
+    drop(direct);
+    for (request_order, instance, sequence, count, note, source, expected) in [
+        (
+            1,
+            "i1",
+            4,
+            4,
+            "new",
+            ChildObservationSource::Direct,
+            (Some(4), Some("new")),
+        ),
+        (
+            2,
+            "i1",
+            3,
+            3,
+            "old",
+            ChildObservationSource::Roster,
+            (Some(4), Some("new")),
+        ),
+        (
+            3,
+            "i1",
+            4,
+            5,
+            "pushed",
+            ChildObservationSource::Roster,
+            (Some(4), Some("new")),
+        ),
+        (
+            4,
+            "i1",
+            4,
+            4,
+            "equal",
+            ChildObservationSource::Direct,
+            (Some(4), Some("equal")),
+        ),
+        (
+            5,
+            "i1",
+            5,
+            6,
+            "advanced",
+            ChildObservationSource::Roster,
+            (Some(6), Some("advanced")),
+        ),
+        (
+            6,
+            "i2",
+            0,
+            1,
+            "recovered",
+            ChildObservationSource::Direct,
+            (Some(1), Some("recovered")),
+        ),
+        (
+            8,
+            "i1",
+            99,
+            99,
+            "retired",
+            ChildObservationSource::Roster,
+            (Some(1), Some("recovered")),
+        ),
+    ] {
+        sessions
+            .inner
+            .observe_live_state(
+                &record,
+                &json!({
+                    "workerInstanceId": instance,
+                    "rosterDeltaSequence": sequence,
+                    "toolUseCount": count,
+                    "progressNote": note,
+                }),
+                request_order,
+                source,
+            )
+            .await;
+        let record = record.lock().await;
+        assert_eq!(
+            (record.tool_use_count, record.progress_note.as_deref()),
+            expected,
+        );
+    }
+    sessions
+        .inner
+        .observe_live_state(
+            &record,
+            &json!({ "workerInstanceId": "i3", "rosterDeltaSequence": 0 }),
+            7,
+            ChildObservationSource::Direct,
+        )
+        .await;
+    let record = record.lock().await;
+    assert_eq!(
+        (record.tool_use_count, &record.progress_note),
+        (None, &None)
+    );
 }
 
 #[tokio::test]
@@ -1252,6 +1606,10 @@ fn an_already_settled_child_never_re_scores_as_an_unreachable_error() {
         answer_text: None,
         answer_captured: false,
         replied_since_task: false,
+        progress_note: None,
+        tool_use_count: None,
+        live_observation: None,
+        direct_observation: Arc::new(Mutex::new(())),
         notice_delivered: false,
         prompt_admitted: true,
         error: None,
@@ -1320,6 +1678,10 @@ async fn the_unreachable_give_up_skips_the_exit_capture_when_a_capture_stands() 
         answer_text: Some("the captured say".to_string()),
         answer_captured: true,
         replied_since_task: false,
+        progress_note: None,
+        tool_use_count: None,
+        live_observation: None,
+        direct_observation: Arc::new(Mutex::new(())),
         notice_delivered: false,
         prompt_admitted: true,
         error: None,

@@ -527,6 +527,9 @@ impl Worker {
             core.cwd = cwd;
             core.steering = steering;
             core.follow_up = follow_up;
+            // A resumed session's tool counter re-seeds from its file: a
+            // revived worker keeps the count its roster rows carried.
+            core.tool_use_count = store.tool_call_count();
             core.store = Some(store);
             if let Some(disclosure) = &interrupted_compaction {
                 if let Some(store) = core.store.as_mut() {

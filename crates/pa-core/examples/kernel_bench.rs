@@ -84,6 +84,7 @@ fn manager_options(
         }),
         bootstrap_code: Some(pa_core::kernel::bootstrap::build_rlm_bootstrap_code(
             &bench_python_skills(),
+            false,
         )),
         stderr_log_path: None,
     }

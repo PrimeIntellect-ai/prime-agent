@@ -3,13 +3,13 @@
 //! spawn-admission outbox types (`CreatedSessionIds`, `CreatedChild`).
 use super::{
     anyhow, cap_text, compact_rlm_text, create_rlm_child_failure_message,
-    create_rlm_child_terminal_notice, json, now_ms, Arc, ChildCloseReason, ChildRecord, Context,
-    CustomMessage, DaemonCommand, DaemonSessionLifecycle, Duration, Map, Mutex, ParentIdentity,
-    Path, PromptInput, Result, RlmChildTerminalNotice, SupervisorChildSessionsInner, Value,
-    ANSWER_TEXT_MAX_CHARS, CREATE_TIMEOUT_MS, IDLE_WAIT_GRACE_MS, KILL_TIMEOUT_MS,
-    NOTICE_DELIVERY_TIMEOUT_MS, PROMPT_TIMEOUT_MS, RUNTIME_METADATA_PROMPT_MAX, STATE_TIMEOUT_MS,
-    WATCH_MAX_UNREACHABLE_POLLS, WATCH_POLL_INTERVAL_MS, WATCH_SETTLE_GRACE_MS,
-    WATCH_WAIT_SLICE_MS,
+    create_rlm_child_terminal_notice, json, now_ms, Arc, ChildCloseReason, ChildObservationSource,
+    ChildRecord, Context, CustomMessage, DaemonCommand, DaemonSessionLifecycle, Duration, Map,
+    Mutex, ParentIdentity, Path, PromptInput, Result, RlmChildTerminalNotice,
+    SupervisorChildSessionsInner, Value, ANSWER_TEXT_MAX_CHARS, CREATE_TIMEOUT_MS,
+    IDLE_WAIT_GRACE_MS, KILL_TIMEOUT_MS, NOTICE_DELIVERY_TIMEOUT_MS, PROMPT_TIMEOUT_MS,
+    RUNTIME_METADATA_PROMPT_MAX, STATE_TIMEOUT_MS, WATCH_MAX_UNREACHABLE_POLLS,
+    WATCH_POLL_INTERVAL_MS, WATCH_SETTLE_GRACE_MS, WATCH_WAIT_SLICE_MS,
 };
 
 /// Parsed ids of one created child session.
@@ -344,26 +344,24 @@ impl SupervisorChildSessionsInner {
         Ok(())
     }
 
-    /// Whether the child worker still has work in flight (streaming,
-    /// queued, or its own children still running - so a child stays
-    /// running while any descendant does). `Err` means the child cannot be
-    /// reached right now.
-    pub(super) async fn child_busy(&self, active_session_id: &str) -> Result<bool> {
+    /// The child's live session summary (`get_state`): the busy verdict,
+    /// the note, and the tool count read one round trip.
+    pub(super) async fn child_state(&self, active_session_id: &str) -> Result<Value> {
         let command = DaemonCommand::GetState {
             id: None,
             active_session_id: active_session_id.to_string(),
             rest: Map::default(),
         };
-        let state = self.command(&command, STATE_TIMEOUT_MS).await?;
-        let flag = |name: &str| state.get(name).and_then(Value::as_bool).unwrap_or(false);
-        Ok(flag("isStreaming")
-            || flag("hasRunningSubagents")
-            || state
-                .get("sessionActions")
-                .and_then(|actions| actions.get("queuedCount"))
-                .and_then(Value::as_u64)
-                .unwrap_or(0)
-                > 0)
+        self.command(&command, STATE_TIMEOUT_MS).await
+    }
+
+    /// Whether the child worker still has work in flight (streaming,
+    /// queued, or its own children still running - so a child stays
+    /// running while any descendant does). `Err` means the child cannot be
+    /// reached right now.
+    pub(super) async fn child_busy(&self, active_session_id: &str) -> Result<bool> {
+        let state = self.child_state(active_session_id).await?;
+        Ok(child_busy_flags(&state))
     }
 
     /// One `GetLastAssistantText` round trip: the raw text the roster
@@ -408,7 +406,8 @@ impl SupervisorChildSessionsInner {
     }
 
     /// Refresh one record against its worker: settle a child whose worker ran out of work and
-    /// capture its answer once; an unreachable child keeps its last known state.
+    /// capture its answer once; an unreachable child keeps its last known state. The same
+    /// round trip observes the child's live note and tool count onto the record.
     pub(super) async fn refresh_record(&self, record: &Arc<Mutex<ChildRecord>>) {
         {
             let record = record.lock().await;
@@ -416,9 +415,32 @@ impl SupervisorChildSessionsInner {
                 return;
             }
         }
-        let active_session_id = record.lock().await.active_session_id.clone();
-        let busy = self.child_busy(&active_session_id).await;
-        if !matches!(busy, Ok(false)) {
+        let (active_session_id, direct_observation) = {
+            let record = record.lock().await;
+            (
+                record.active_session_id.clone(),
+                Arc::clone(&record.direct_observation),
+            )
+        };
+        let state = {
+            let _direct = direct_observation.lock().await;
+            let request_order = self
+                .observation_requests
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let state = self.child_state(&active_session_id).await;
+            if let Ok(state) = &state {
+                self.observe_live_state(
+                    record,
+                    state,
+                    request_order,
+                    ChildObservationSource::Direct,
+                )
+                .await;
+            }
+            state
+        };
+        let idle = matches!(&state, Ok(state) if !child_busy_flags(state));
+        if !idle {
             return;
         }
         // Capture the answer before taking the record lock (the capture is
@@ -838,6 +860,20 @@ pub(super) fn last_assistant_text_from_file(session_file: &str) -> Option<String
         }
     }
     None
+}
+
+/// The busy flags of one child `get_state` summary (streaming, its own
+/// descendants, or queued work in flight).
+fn child_busy_flags(state: &Value) -> bool {
+    let flag = |name: &str| state.get(name).and_then(Value::as_bool).unwrap_or(false);
+    flag("isStreaming")
+        || flag("hasRunningSubagents")
+        || state
+            .get("sessionActions")
+            .and_then(|actions| actions.get("queuedCount"))
+            .and_then(Value::as_u64)
+            .unwrap_or(0)
+            > 0
 }
 
 #[cfg(test)]
