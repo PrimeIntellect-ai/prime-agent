@@ -230,14 +230,22 @@ impl TranscriptWindow {
             }
             PageKind::Newer => {
                 let at = self.resident_entries();
+                // The page joins the chunk it continues: a restored or head chunk never met
+                // the rows after it.
+                let superseded = self.chunks.back_mut().map_or(0, |back| {
+                    let rows = &view.chat[at - back.entries..at];
+                    let superseded = crate::snapshot::superseded_by_seam(rows, page.seam);
+                    back.entries -= superseded;
+                    superseded
+                });
                 let count = entries.len();
                 if page.more {
                     entries.push(gap_row());
                 }
-                view.replace_entries(at..at + 1, entries);
+                view.replace_entries(at - superseded..at + 1, entries);
                 self.chunks.push_back(chunk(count));
                 self.gap = page.more;
-                let mut grown = count as isize - isize::from(!page.more);
+                let mut grown = count as isize - isize::from(!page.more) - superseded as isize;
                 if self.chunks.len() > RESIDENT_CHUNKS {
                     let oldest = self.chunks.pop_front().map_or(0, |chunk| chunk.entries);
                     view.drop_leading_entries(oldest);
@@ -835,5 +843,69 @@ mod tests {
             }],
             "the tail's retry outcome supersedes the attempt the head page ends with"
         );
+    }
+
+    #[test]
+    fn a_newer_page_supersedes_the_failed_attempt_a_restored_chunk_ends_with() {
+        let user = |text: &str| json!({"role": "user", "content": text, "timestamp": 1});
+        let attempt = json!({
+            "role": "assistant", "content": [], "stopReason": "error",
+            "errorMessage": "attempt failed", "timestamp": 2,
+        });
+        let outcome = json!({
+            "role": "custom", "customType": "provider_retry_outcome",
+            "content": "Recovered after retries", "display": true,
+            "details": { "success": true }, "timestamp": 3,
+        });
+        let answer = json!({
+            "role": "assistant", "content": [{"type": "text", "text": "done"}], "timestamp": 4,
+        });
+        let page = |messages: &[Value], first: &str, last: &str| {
+            let (entries, seam) = crate::snapshot::transcript_with_backfill_seam(messages);
+            LoadedPage {
+                entries,
+                seam,
+                first_id: Some(first.to_string()),
+                last_id: Some(last.to_string()),
+                more: false,
+            }
+        };
+        let mut window = TranscriptWindow::default();
+        window.reset(
+            Some("leaf".to_string()),
+            Some("tail".to_string()),
+            BackfillSeam::Preserve,
+        );
+        let mut view = AgentView::new(crate::theme::Theme::builtin(
+            "prime",
+            crate::theme::ColorMode::TrueColor,
+        ));
+        view.push_entry(crate::snapshot::transcript_to_entries(&[user("later")]).remove(0));
+        let anchor_page = TranscriptPage::End {
+            before: Some("e2".to_string()),
+            limit: CHUNK_MESSAGES,
+        };
+        let loaded = page(&[user("run"), attempt.clone()], "e0", "e1");
+        let mut grown = window.restore_chunk(anchor_page, loaded, None, true, &mut view);
+        let request = TranscriptPage::Start {
+            after: Some("e1".to_string()),
+            until: Some("tail".to_string()),
+            limit: CHUNK_MESSAGES,
+        };
+        let newer = page(&[outcome.clone(), answer.clone()], "e2", "e3");
+        grown += window.apply(PageKind::Newer, request, newer, &mut view);
+        let full = crate::snapshot::transcript_to_entries(&[
+            user("run"),
+            attempt,
+            outcome,
+            answer,
+            user("later"),
+        ]);
+        assert_eq!(
+            view.chat, full,
+            "the newer page's retry outcome supersedes the attempt the restored chunk ends with"
+        );
+        assert_eq!(grown, full.len() as isize - 1, "the rows above the tail");
+        assert_eq!(window.tail_start(), full.len() - 1);
     }
 }
