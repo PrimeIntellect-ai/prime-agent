@@ -385,7 +385,7 @@ fn activity_rows(parent: &BaseRow, depth: usize) -> Vec<AgentsViewRow> {
     let line = |kind: RowKind, prefix: &str, title: String| AgentsViewRow {
         kind,
         section: parent.section,
-        identity: format!("{prefix}:{}", parent.identity),
+        identity: format!("{prefix}{}", parent.identity),
         parent_identity: Some(parent.identity.clone()),
         summary: parent.summary.clone(),
         title,
@@ -406,14 +406,14 @@ fn activity_rows(parent: &BaseRow, depth: usize) -> Vec<AgentsViewRow> {
     if shells > 0 {
         rows.push(line(
             RowKind::Shells,
-            "shells",
+            super::SHELLS_ROW_PREFIX,
             format!("$ {shells} shell{}", if shells == 1 { "" } else { "s" }),
         ));
     }
     if factory_runs > 0 {
         rows.push(line(
             RowKind::FactoryRuns,
-            "factory",
+            super::FACTORY_ROW_PREFIX,
             format!(
                 "\u{2699} {factory_runs} factory run{}",
                 if factory_runs == 1 { "" } else { "s" }
