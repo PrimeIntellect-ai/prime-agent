@@ -340,6 +340,7 @@ async fn subscribe_after_spawn_then_shutdown_seeds_the_passive_child() {
             agent_dir.clone(),
             /*telemetry_disabled*/ true,
         )),
+        String::new(),
     );
     children.set_identity(ParentIdentity {
         rlm_depth: 0,
