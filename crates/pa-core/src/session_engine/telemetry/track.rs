@@ -59,15 +59,6 @@ pub fn track_model_refused(
     client.track("model refused", properties);
 }
 
-/// Track the disk-archive sweep's `daemon event` (schema v1, kind
-/// `sessions_archived`): a count only, never session payload.
-pub fn track_sessions_archived(client: &TelemetryClient, count: usize) {
-    let mut properties = base_properties("daemon");
-    properties.set("kind", Value::from("sessions_archived"));
-    properties.set("count", Value::from(count));
-    client.track("daemon event", properties);
-}
-
 /// Track the boot descriptor-adoption pass's `daemon event` (schema v1, kind
 /// `worker_adoption`): the boot kind and per-outcome counts, never session payload.
 /// `skipped_idle` counts the dead descriptors the busy-evidence filter parked.
