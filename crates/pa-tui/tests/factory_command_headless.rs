@@ -99,6 +99,9 @@ impl MockSupervisor {
         });
         write_json(&mut writer, &hello);
 
+        // A page stop also stops the mock's session: the daemon's `session_closed` follows the
+        // stop's reply, and the closed session's graph lane answers a refusal from then on.
+        let mut session_closed = false;
         let mut line = String::new();
         loop {
             line.clear();
@@ -169,8 +172,35 @@ impl MockSupervisor {
                     // kernel-not-running wire shape) or the configured
                     // runs reply; every other action answers empty data
                     // (the guard reads the graph list only).
+                    if command.get("action").and_then(Value::as_str) == Some("stop") {
+                        write_json(
+                            &mut writer,
+                            &json!({
+                                "type": "response",
+                                "id": id,
+                                "command": "factory_activity",
+                                "success": true,
+                                "data": { "state": "stopping" },
+                            }),
+                        );
+                        write_json(
+                            &mut writer,
+                            &json!({
+                                "type": "session_closed",
+                                "activeSessionId": "s1",
+                                "reason": "killed",
+                            }),
+                        );
+                        session_closed = true;
+                        continue;
+                    }
                     if command.get("action").and_then(Value::as_str) == Some("graph") {
-                        if let Some(error) = factory_graph_error.as_ref() {
+                        let error = if session_closed {
+                            Some("Unknown active session: s1".to_string())
+                        } else {
+                            factory_graph_error.clone()
+                        };
+                        if let Some(error) = error.as_ref() {
                             write_json(
                                 &mut writer,
                                 &json!({
@@ -881,5 +911,38 @@ fn factory_page_picker_keys_paint_the_moved_selection_on_the_key() {
     assert!(
         all.contains("\u{25b8} factory: first-run"),
         "the arrow's own repaint painted the moved selection before the page closed:\n{all}"
+    );
+}
+
+/// A session the daemon stops while its factory page is open leaves no stale run cards: the
+/// close clears the dock's run cache and the mounted page with it.
+#[test]
+fn a_closed_session_clears_the_open_factory_page() {
+    let graph = json!({ "runs": [factory_page_run("run-1", "only-run")] });
+    let steps = vec![
+        HeadlessStep::Key(alt_a()),
+        HeadlessStep::Key(down()),
+        HeadlessStep::Key(down()),
+        HeadlessStep::Key(down()),
+        HeadlessStep::Key(enter()),
+        HeadlessStep::WaitRender {
+            needle: "factory: only-run".to_string(),
+            timeout_ms: 5_000,
+        },
+        // Enter opens the run's action rows, the second Enter stops it; the mock's daemon then
+        // closes the session.
+        HeadlessStep::Key(enter()),
+        HeadlessStep::Key(enter()),
+        HeadlessStep::WaitRender {
+            needle: "No live factory runs.".to_string(),
+            timeout_ms: 5_000,
+        },
+        HeadlessStep::WaitMs(200),
+    ];
+    let frames = run_plan_config(vec!["factory_activity".to_string()], Some(graph), steps);
+    let last = flat_text(&frames[frames.len() - 1..]);
+    assert!(
+        last.contains("No live factory runs.") && !last.contains("only-run"),
+        "the closed session's page drops its run cards:\n{last}"
     );
 }

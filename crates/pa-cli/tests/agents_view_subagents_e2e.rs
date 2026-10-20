@@ -264,7 +264,7 @@ async fn panel_expand_drill_in_and_back_re_expands_the_tree() {
     // aggregates the whole not-running descendant tree.
     let collapsed = first_frame_of(&view.frames, "orchestrator chat");
     assert!(
-        collapsed.contains("\u{25b8} 2 subagents (0 running)"),
+        collapsed.contains("\u{25b8} 2 subagents · 0 running"),
         "the collapsed parent shows its ONE tree-aggregated summary row:\n{collapsed}"
     );
     assert!(
@@ -276,7 +276,7 @@ async fn panel_expand_drill_in_and_back_re_expands_the_tree() {
     // collapsed summary keeps the grandchild hidden until the child expands.
     let expanded = first_frame_of(&view.frames, "worker alpha");
     assert!(
-        expanded.contains("\u{25be} 2 subagents (0 running)"),
+        expanded.contains("\u{25be} 2 subagents · 0 running"),
         "the expanded summary row keeps the tree aggregate and flips its marker:\n{expanded}"
     );
     assert!(
@@ -399,7 +399,7 @@ async fn panel_expand_drill_in_and_back_re_expands_the_tree() {
     // frame renders from the live roster alone — TS `applySessionList`).
     let returned = first_frame_of(&back.frames, "orchestrator chat");
     assert!(
-        returned.contains("\u{25b8} 2 subagents (0 running)"),
+        returned.contains("\u{25b8} 2 subagents · 0 running"),
         "the opened child rides the parent's ONE aggregate (a top-level flip would leave the grandchild alone behind the summary):\n{returned}"
     );
     assert!(
@@ -408,7 +408,7 @@ async fn panel_expand_drill_in_and_back_re_expands_the_tree() {
     );
     let expanded = frame_of(&back.frames, "worker alpha");
     assert!(
-        expanded.contains("\u{25be} 2 subagents (0 running)"),
+        expanded.contains("\u{25be} 2 subagents · 0 running"),
         "the expanded parent tree carries the live child:\n{expanded}"
     );
     assert!(
@@ -416,7 +416,7 @@ async fn panel_expand_drill_in_and_back_re_expands_the_tree() {
         "the grandchild stays hidden until the resumed child expands:\n{expanded}"
     );
     assert!(
-        expanded.contains("\u{25b8} 1 subagents (0 running)"),
+        expanded.contains("\u{25b8} 1 subagent · 0 running"),
         "the resumed child's own subtree stays behind its collapsed summary row:\n{expanded}"
     );
     assert!(
