@@ -174,8 +174,13 @@ pub(crate) fn kill_shell(agent_dir: &Path, id: &str) -> Result<bool, String> {
     if !signal_process_group(shell.pid as i32, Signal::Term) {
         return Err("Could not signal persistent shell group".to_string());
     }
+    // The grace belongs to the whole group: a leader that exits on TERM must not cut short
+    // its members' own TERM handling.
     let deadline = Instant::now() + TERM_GRACE;
-    while Instant::now() < deadline && runs_as_registered(&shell) {
+    while Instant::now() < deadline {
+        if !process_group_exists(shell.pid as i32).unwrap_or(true) {
+            return Ok(true);
+        }
         std::thread::sleep(Duration::from_millis(50));
     }
     kill_group(&shell)?;
@@ -366,6 +371,41 @@ mod tests {
             stubborn.wait().unwrap().signal(),
             Some(NixSignal::SIGKILL as i32),
             "the member that ignored TERM got the group's KILL"
+        );
+    }
+
+    #[test]
+    fn a_leader_exiting_on_term_leaves_its_members_the_full_grace() {
+        use std::io::BufRead;
+        let root = tempfile::tempdir().unwrap();
+        let marker = root.path().join("cleaned-up");
+        let (leader, member, id) = registered_group(root.path());
+        let mut cleanup = Command::new("sh")
+            .args([
+                "-c",
+                "trap 'sleep 1; touch \"$0\"; exit 0' TERM; echo ready; while :; do sleep 0.05; done",
+            ])
+            .arg(&marker)
+            .process_group(leader.id() as i32)
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut ready = String::new();
+        std::io::BufReader::new(cleanup.stdout.take().unwrap())
+            .read_line(&mut ready)
+            .unwrap();
+        // Reaped as the kernel reaps them: only live members keep the group.
+        let reapers: Vec<_> = [leader, member, cleanup]
+            .into_iter()
+            .map(|mut child| std::thread::spawn(move || child.wait().unwrap()))
+            .collect();
+
+        assert_eq!(kill_shell(root.path(), &id), Ok(true));
+
+        let statuses: Vec<_> = reapers.into_iter().map(|r| r.join().unwrap()).collect();
+        assert!(
+            marker.exists() && statuses[2].success(),
+            "the member finished its TERM cleanup after the leader exited: {statuses:?}"
         );
     }
 
