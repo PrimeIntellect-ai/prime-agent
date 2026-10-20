@@ -395,7 +395,14 @@ pub const STARTUP_KINDS: &[&str] = &["cold", "warm_attach", "resumed", "unknown"
 
 pub const BUILD_CHANNELS: &[&str] = &["release", "prerelease", "development", "unknown"];
 
-pub const WORKLOAD_ORIGINS: &[&str] = &["interactive", "automated", "internal", "test", "unknown"];
+pub const WORKLOAD_ORIGINS: &[&str] = &[
+    "interactive",
+    "automated",
+    "internal",
+    "test",
+    "eval",
+    "unknown",
+];
 
 // Rule constructors
 

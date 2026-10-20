@@ -133,7 +133,7 @@ def main():
         for key in list(env):
             if key.startswith(("PI_", "PRIME_AGENT_")):
                 del env[key]
-        env.update(HOME=str(home), TMPDIR=str(temporary), DO_NOT_TRACK="1",
+        env.update(HOME=str(home), TMPDIR=str(temporary), DO_NOT_TRACK="1", PRIME_AGENT_TELEMETRY_ORIGIN="test",
                    XDG_CONFIG_HOME=str(home / ".config"), XDG_DATA_HOME=str(home / ".local/share"),
                    XDG_CACHE_HOME=str(home / ".cache"),
                    PRIME_AGENT_CODING_AGENT_DIR=str(agent), PRIME_AGENT_OFFLINE="1",

@@ -29,7 +29,13 @@ impl AgentSessionEngine {
     /// # Panics
     ///
     /// The MCP closures here panic on a poisoned engine cwd lock.
-    pub fn new(config: AgentEngineConfig) -> anyhow::Result<Self> {
+    pub fn new(mut config: AgentEngineConfig) -> anyhow::Result<Self> {
+        // Faux runs exercise the real engine, including refusal and child
+        // seams. Suppress telemetry before any of those clients can exist,
+        // even when a caller explicitly supplied telemetryDisabled=false.
+        if config.faux_script.is_some() {
+            config.telemetry_disabled = Some(true);
+        }
         let runtime = crate::async_safe_runtime::AsyncSafeRuntime::new_multi_thread()?;
         let session_file = std::sync::Mutex::new(config.session_file.clone());
         let selection = EngineModelSelection {

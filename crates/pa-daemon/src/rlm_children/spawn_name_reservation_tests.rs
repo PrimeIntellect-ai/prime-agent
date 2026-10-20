@@ -464,3 +464,42 @@ async fn concurrent_parent_renames_keep_the_last_applied_name() {
     let rows = sessions.list_subagents().await.expect("roster");
     assert_eq!(rows[0].session_name, "second");
 }
+
+#[tokio::test]
+async fn parent_opt_out_reaches_both_subagent_and_depth_zero_child_creates() {
+    for depth in [0, 1] {
+        let (create_seen_tx, mut create_seen_rx) = mpsc::unbounded_channel();
+        let (verdict_tx, verdict_rx) = mpsc::unbounded_channel();
+        let (rename_seen_tx, _rename_seen_rx) = mpsc::unbounded_channel();
+        let sessions =
+            sessions_with_gated_supervisor(create_seen_tx, verdict_rx, rename_seen_tx, None).await;
+        let identity = ParentIdentity::with_default_depth();
+        let dir = tempfile::tempdir().unwrap();
+        let inner = Arc::clone(&sessions.inner);
+        let create = tokio::spawn(async move {
+            inner
+                .create_child(
+                    "child",
+                    None,
+                    None,
+                    depth,
+                    "custom/custom",
+                    None,
+                    "/tmp",
+                    dir.path(),
+                    None,
+                    None,
+                    &identity,
+                    None,
+                )
+                .await
+        });
+        let command = tokio::time::timeout(Duration::from_secs(5), create_seen_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(command["telemetryDisabled"], true);
+        verdict_tx.send(true).unwrap();
+        create.await.unwrap().unwrap();
+    }
+}

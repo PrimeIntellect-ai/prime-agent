@@ -26,11 +26,13 @@ pub const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_millis(1500);
 /// timeout, non-2xx status, or a 2xx that accepted nothing (the backend
 /// answers `{"accepted": 0}` when its `PostHog` delivery failed) reports
 /// [`SinkOutcome::Dropped`], and the client's bounded retry re-sends the
-/// same event ids.
+/// same event ids. Explicit test/eval workloads are consumed without an
+/// HTTP request or retry; other sinks can still keep local diagnostics.
 #[derive(Clone)]
 pub struct AnalyticsSink {
     http: reqwest::Client,
     endpoint: String,
+    suppressed: bool,
 }
 
 impl AnalyticsSink {
@@ -77,6 +79,11 @@ impl AnalyticsSink {
         Self {
             http,
             endpoint: endpoint.into(),
+            // Snapshot the harness identity before events queue. An explicit
+            // telemetry opt-in must never turn a synthetic run into adoption.
+            suppressed: crate::env::synthetic_workload(|key| {
+                std::env::var_os(key).map(|value| value.to_string_lossy().into_owned())
+            }),
         }
     }
 
@@ -97,6 +104,23 @@ impl TelemetrySink for AnalyticsSink {
         events: Vec<TelemetryEvent>,
     ) -> Pin<Box<dyn Future<Output = SinkOutcome> + Send + 'a>> {
         Box::pin(async move {
+            if self.suppressed {
+                return SinkOutcome::Sent;
+            }
+            // Keep the event-time marker authoritative if the process marker
+            // changes before a batch is delivered. Local mirrors remain useful.
+            let events: Vec<_> = events
+                .into_iter()
+                .filter(|event| {
+                    !matches!(
+                        event
+                            .properties
+                            .get("workload_origin")
+                            .and_then(Value::as_str),
+                        Some("test" | "eval")
+                    )
+                })
+                .collect();
             if events.is_empty() {
                 return SinkOutcome::Sent;
             }

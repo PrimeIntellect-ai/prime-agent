@@ -59,7 +59,9 @@ async fn batch_posts_the_exact_ts_request() {
     let outcome = sink.send_batch(INSTALL_ID, events.clone()).await;
     assert_eq!(outcome, SinkOutcome::Sent);
 
-    let request = rx.recv().expect("stub captured request");
+    let request = rx.recv_timeout(Duration::from_secs(5)).expect(
+        "stub captured request (run positive sink tests without a synthetic origin marker)",
+    );
     assert!(request
         .request_line
         .starts_with("POST /api/v1/agent-analytics/events "));
@@ -93,7 +95,9 @@ async fn the_client_batches_through_the_sink() {
     client.track("agent command used", properties("command_name", "resume"));
     client.flush().await.unwrap();
 
-    let request = rx.recv().expect("one request for both events");
+    let request = rx.recv_timeout(Duration::from_secs(5)).expect(
+        "one request for both events (run positive sink tests without a synthetic origin marker)",
+    );
     assert_eq!(request.body["installation_id"], INSTALL_ID);
     let events = request.body["events"].as_array().unwrap();
     assert_eq!(events.len(), 2);
@@ -239,4 +243,101 @@ fn header<'a>(headers: &'a [(String, String)], name: &str) -> Option<&'a str> {
         .iter()
         .find(|(candidate, _)| candidate == name)
         .map(|(_, value)| value.as_str())
+}
+
+#[tokio::test]
+async fn synthetic_events_are_filtered_while_custom_automated_usage_is_delivered() {
+    let (base, rx) = spawn_stub(vec![(202, json!({ "accepted": 1 }))]);
+    let sink = AnalyticsSink::new(base);
+    let events: Vec<_> = ["test", "eval", "automated"]
+        .into_iter()
+        .map(|origin| {
+            let mut properties = pa_telemetry::base_properties("unknown");
+            properties.set("workload_origin", json!(origin));
+            properties.set("provider", json!("custom"));
+            properties.set("model", json!("custom"));
+            TelemetryEvent::new("agent run completed", properties)
+        })
+        .collect();
+    let expected = ts_body(&events[2..]);
+    assert_eq!(sink.send_batch(INSTALL_ID, events).await, SinkOutcome::Sent);
+    assert_eq!(
+        rx.recv_timeout(Duration::from_secs(5)).unwrap().body,
+        expected
+    );
+}
+
+#[tokio::test]
+async fn a_synthetic_only_batch_never_opens_a_connection() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let sink = AnalyticsSink::new(format!("http://{}", listener.local_addr().unwrap()));
+    for origin in ["test", "eval"] {
+        let event = TelemetryEvent::new("agent started", properties("workload_origin", origin));
+        assert_eq!(
+            sink.send_batch(INSTALL_ID, vec![event]).await,
+            SinkOutcome::Sent
+        );
+    }
+    assert_eq!(
+        listener.accept().unwrap_err().kind(),
+        std::io::ErrorKind::WouldBlock
+    );
+}
+
+// Child-process isolation verifies real environment-to-sink wiring without
+// mutating this test binary's environment or contacting production.
+#[test]
+fn explicit_harness_markers_suppress_even_unmarked_events_with_telemetry_opted_in() {
+    for (key, value, expected_origin) in [
+        ("PRIME_AGENT_TELEMETRY_ORIGIN", "test", "test"),
+        ("PRIME_AGENT_TELEMETRY_ORIGIN", "eval", "eval"),
+        ("PRIME_AGENT_FAUX_SCRIPT", "/unused/script.json", "test"),
+    ] {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let result = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "synthetic_sink_child"])
+            .env_remove("PRIME_AGENT_TELEMETRY_ORIGIN")
+            .env_remove("PRIME_AGENT_FAUX_SCRIPT")
+            .env(
+                "PA_TEST_ANALYTICS_ENDPOINT",
+                format!("http://{}", listener.local_addr().unwrap()),
+            )
+            .env("PA_TEST_EXPECTED_ORIGIN", expected_origin)
+            .env("PRIME_AGENT_TELEMETRY", "1")
+            .env("DO_NOT_TRACK", "0")
+            .env("PI_OFFLINE", "0")
+            .env(key, value)
+            .output()
+            .unwrap();
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stdout)
+        );
+        assert_eq!(
+            listener.accept().unwrap_err().kind(),
+            std::io::ErrorKind::WouldBlock
+        );
+    }
+}
+
+#[tokio::test]
+async fn synthetic_sink_child() {
+    let Ok(endpoint) = std::env::var("PA_TEST_ANALYTICS_ENDPOINT") else {
+        return;
+    };
+    // Refuse remote destinations even if the test helper is run by hand.
+    assert!(endpoint.starts_with("http://127.0.0.1:"));
+    assert_eq!(
+        pa_telemetry::base_properties("unknown").get("workload_origin"),
+        Some(&json!(std::env::var("PA_TEST_EXPECTED_ORIGIN").unwrap()))
+    );
+    let sink = AnalyticsSink::with_timeout(endpoint, Duration::from_millis(100));
+    assert_eq!(
+        sink.send_batch(INSTALL_ID, vec![event("agent started")])
+            .await,
+        SinkOutcome::Sent
+    );
 }

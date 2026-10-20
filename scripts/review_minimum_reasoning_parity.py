@@ -161,7 +161,7 @@ def run_case(binary, label, scenario, root, observation):
     paths = sorted(str(path) for path in library.glob('*/src') if path.is_dir())
     for skill in ('compact', 'refine'):
         assert (library / skill / 'src' / skill / '__init__.py').is_file(), skill + ' skill missing'
-    env.update(HOME=str(root / 'home'), TMPDIR=str(root / 'tmp'), DO_NOT_TRACK='1',
+    env.update(HOME=str(root / 'home'), TMPDIR=str(root / 'tmp'), DO_NOT_TRACK='1', PRIME_AGENT_TELEMETRY_ORIGIN='test',
                PI_OFFLINE='1', PI_CODING_AGENT_DIR=str(agent),
                PRIME_AGENT_CODING_AGENT_DIR=str(agent), PI_SESSION_DIR=str(sessions),
                PRIME_AGENT_SESSION_DIR=str(sessions), XDG_CONFIG_HOME=str(root / 'config'),

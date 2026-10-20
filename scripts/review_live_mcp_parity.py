@@ -184,7 +184,7 @@ def run_case(binary, label, root, observation):
         env['PI_PACKAGE_DIR'] = os.environ['PI_PACKAGE_DIR']
     library = Path(os.environ['PI_PACKAGE_DIR']) / 'skills'
     env['PYTHONPATH'] = os.pathsep.join(sorted(str(p) for p in library.glob('*/src') if p.is_dir()))
-    env.update(HOME=str(root / 'home'), TMPDIR=str(root / 'tmp'), DO_NOT_TRACK='1',
+    env.update(HOME=str(root / 'home'), TMPDIR=str(root / 'tmp'), DO_NOT_TRACK='1', PRIME_AGENT_TELEMETRY_ORIGIN='test',
                PI_OFFLINE='1', PI_CODING_AGENT_DIR=str(agent),
                PRIME_AGENT_CODING_AGENT_DIR=str(agent), PI_SESSION_DIR=str(root / 'sessions'),
                PRIME_AGENT_SESSION_DIR=str(root / 'sessions'), XDG_CONFIG_HOME=str(root / 'config'),

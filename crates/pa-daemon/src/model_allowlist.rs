@@ -91,7 +91,8 @@ pub(crate) fn assert_allowed(allowlist: &DaemonAllowlist, selector: &str) -> Res
 /// telemetry when the create command opted the session out.
 pub struct ModelRefusalTelemetry {
     agent_dir: std::path::PathBuf,
-    enabled: bool,
+    /// The parent invocation's hard opt-out, shared with child creation.
+    pub(crate) disabled: bool,
     client: std::sync::Mutex<Option<(std::path::PathBuf, TelemetryClient)>>,
     /// Already-noted `(surface, selector)` pairs: one event per distinct
     /// refusal per worker, so a polling getter that re-resolves a refused
@@ -104,7 +105,7 @@ impl ModelRefusalTelemetry {
     pub fn new(agent_dir: std::path::PathBuf, telemetry_disabled: bool) -> Self {
         Self {
             agent_dir,
-            enabled: !telemetry_disabled,
+            disabled: telemetry_disabled,
             client: std::sync::Mutex::new(None),
             noted: std::sync::Mutex::new(std::collections::HashSet::new()),
         }
@@ -121,7 +122,7 @@ impl ModelRefusalTelemetry {
     /// Panics when an internal mutex is poisoned; the client-bound expect
     /// is an internal invariant and cannot fire.
     pub fn note_refused(&self, surface: &str, selector: &str, cwd: &Path) {
-        if !self.enabled {
+        if self.disabled {
             return;
         }
         let settings = pa_core::settings::SettingsManager::create(cwd, &self.agent_dir);

@@ -54,9 +54,24 @@ async fn resolve_child_model_allowlisted(
 /// The `rlm.create_session` launch env (TS `createRlmRootSession`'s
 /// minimal map: `collectDaemonLaunchEnv({ PATH })` plus the provider's
 /// env API-key var plus `PRIME_TEAM_ID` for prime-inference).
-fn create_session_launch_env(model: &str) -> std::collections::BTreeMap<String, String> {
+fn create_session_launch_env(
+    model: &str,
+    read_env: impl Fn(&str) -> Option<String>,
+) -> std::collections::BTreeMap<String, String> {
     let mut env = std::collections::BTreeMap::new();
-    if let Ok(path) = std::env::var("PATH") {
+    // A depth-zero session uses a minimal provider environment, but must
+    // retain the caller's privacy and explicit test/eval classification.
+    for key in [
+        "DO_NOT_TRACK",
+        "PI_OFFLINE",
+        "PRIME_AGENT_TELEMETRY",
+        "PRIME_AGENT_TELEMETRY_ORIGIN",
+    ] {
+        if let Some(value) = read_env(key) {
+            env.insert(key.to_string(), value);
+        }
+    }
+    if let Some(path) = read_env("PATH") {
         env.insert("PATH".to_string(), path);
     }
     let provider = model
@@ -65,12 +80,12 @@ fn create_session_launch_env(model: &str) -> std::collections::BTreeMap<String, 
     if let Some(env_key) =
         pa_ai::env_api_keys::find_env_keys(provider).and_then(|keys| keys.first().cloned())
     {
-        if let Ok(value) = std::env::var(&env_key) {
+        if let Some(value) = read_env(&env_key) {
             env.insert(env_key, value);
         }
     }
     if provider == "prime-inference" {
-        if let Ok(team) = std::env::var("PRIME_TEAM_ID") {
+        if let Some(team) = read_env("PRIME_TEAM_ID") {
             env.insert("PRIME_TEAM_ID".to_string(), team);
         }
     }
@@ -349,7 +364,9 @@ impl RlmSubagentHost for SupervisorChildSessions {
                     &identity,
                     // The TS minimal map for a depth-0 root (the
                     // env-key heuristic is stated in the PR).
-                    Some(create_session_launch_env(&model)),
+                    Some(create_session_launch_env(&model, |key| {
+                        std::env::var(key).ok()
+                    })),
                 )
                 .await?;
             // The TS create-path summary validation: a resident depth-0
@@ -744,4 +761,32 @@ fn session_file_carries_spawn_kickoff(session_file: Option<&str>, spawn_row_id: 
                     == Some(pa_core::session_engine::agent_messaging::AGENT_MESSAGE_CUSTOM_TYPE)
                 && entry.pointer("/details/id").and_then(Value::as_str) == Some(spawn_row_id)
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::create_session_launch_env;
+    use std::collections::BTreeMap;
+
+    #[test]
+    fn depth_zero_children_preserve_telemetry_controls_in_the_minimal_environment() {
+        for origin in ["test", "eval", "internal"] {
+            let expected = BTreeMap::from([
+                ("PATH".to_string(), "/usr/bin".to_string()),
+                ("DO_NOT_TRACK".to_string(), "1".to_string()),
+                ("PI_OFFLINE".to_string(), "true".to_string()),
+                ("PRIME_AGENT_TELEMETRY".to_string(), "1".to_string()),
+                (
+                    "PRIME_AGENT_TELEMETRY_ORIGIN".to_string(),
+                    origin.to_string(),
+                ),
+            ]);
+            let mut parent = expected.clone();
+            parent.insert("UNRELATED_SECRET".to_string(), "not forwarded".to_string());
+            assert_eq!(
+                create_session_launch_env("custom/custom", |key| parent.get(key).cloned()),
+                expected
+            );
+        }
+    }
 }
