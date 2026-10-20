@@ -161,7 +161,7 @@ def wait_gone(identities):
                 current, state = process_identity(pid)
                 if current == identity and state != 'Z':
                     alive.append(pid)
-            except FileNotFoundError:
+            except (FileNotFoundError, ProcessLookupError):
                 pass
         if not alive:
             return
@@ -229,7 +229,7 @@ def live_identities(identities):
             current, state = process_identity(pid)
             if current == identity and state != 'Z':
                 alive.add((pid, identity))
-        except FileNotFoundError:
+        except (FileNotFoundError, ProcessLookupError):
             pass
     return alive
 

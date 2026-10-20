@@ -517,14 +517,15 @@ fn live_edges_of_parent_bounds_the_liveness_work() {
 }
 
 #[test]
-fn a_dead_endpoint_under_an_archived_parent_resolves_without_a_tree_walk() {
+fn a_parent_left_in_the_archive_dir_is_a_dead_endpoint_walked_once() {
     let agent_dir = temp_dir("archive-dead");
     let sessions_dir = agent_dir.join("sessions");
     fs::create_dir_all(&sessions_dir).unwrap();
     let ledger = ledger_over(&agent_dir, &sessions_dir);
     let child = sessions_dir.join("sess-c.jsonl");
     fs::write(&child, "{}").unwrap();
-    let archived = crate::session_archive::archive_dir(&agent_dir)
+    let archived = agent_dir
+        .join("sessions-archive")
         .join(crate::session_store::session_file_name("sess-p"));
     fs::create_dir_all(archived.parent().unwrap()).unwrap();
     fs::write(&archived, "{}").unwrap();
@@ -537,19 +538,10 @@ fn a_dead_endpoint_under_an_archived_parent_resolves_without_a_tree_walk() {
             name: "w".into(),
         })
         .unwrap();
-    assert!(
-        ledger.live_edges().unwrap().is_empty(),
-        "an archived parent is a dead endpoint"
-    );
-    assert!(
-        ledger
-            .replay_cached()
-            .unwrap()
-            .artifact_index
-            .get()
-            .is_none(),
-        "the archive stat answers without the artifacts walk"
-    );
+    let scans = replay::ARTIFACT_SCANS.with(std::cell::Cell::get);
+    assert_eq!(ledger.live_edges().unwrap(), Vec::new());
+    assert_eq!(ledger.live_edges().unwrap(), Vec::new());
+    assert_eq!(replay::ARTIFACT_SCANS.with(std::cell::Cell::get), scans + 1);
 }
 
 /// A parent that moved (recorded path gone, same stem under the sessions
@@ -1438,7 +1430,7 @@ fn a_restored_tombstoned_child_stops_billing_the_parent_without_an_append() {
             &usage_summary(0.25),
         )
         .unwrap();
-    let archive = crate::session_archive::archive_dir(&dir);
+    let archive = dir.join("sessions-archive");
     fs::create_dir_all(&archive).unwrap();
     let archived = archive.join(crate::session_store::session_file_name("child"));
     fs::rename(&child, &archived).unwrap();
@@ -1449,7 +1441,7 @@ fn a_restored_tombstoned_child_stops_billing_the_parent_without_an_append() {
         ledger.deleted_descendant_usage_by_parent().unwrap(),
         HashMap::from([(key, usage_summary(0.25))])
     );
-    crate::session_archive::restore_session(&archive, &sessions, "child").unwrap();
+    fs::rename(&archived, &child).unwrap();
     assert_eq!(
         ledger.deleted_descendant_usage_by_parent().unwrap(),
         HashMap::new()
