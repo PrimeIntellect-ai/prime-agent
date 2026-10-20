@@ -946,22 +946,6 @@ async fn run_agents_view_surface(
                     // The parked suggestion request materializes once the key's edits
                     // landed.
                     mode.materialize_composer_autocomplete();
-                    // A failed saved-catalog fetch re-arms on the next query change: one honest
-                    // retry behind a terminal failure.
-                    if mode.take_saved_fetch_rearm() {
-                        catalog_request = Some(spawn_saved_catalog_fetch(
-                            &client,
-                            ui_tx.clone(),
-                            cwd.clone(),
-                            session_dir.clone(),
-                            None,
-                            Some(SAVED_CATALOG_PAGE_FILES),
-                        ));
-                        // A superseded fetch's stream stops applying: the new fetch owns the
-                        // catalog.
-                        mode.drop_saved_stream();
-                        saved_flush = None;
-                    }
                     // The executed stop-or-delete dispatch (the second ctrl+x): the wire call runs
                     // off the key loop, its outcome lands as a `DeleteResult` status line.
                     if let Some(action) = mode.take_delete_action() {
@@ -1300,6 +1284,22 @@ async fn run_agents_view_surface(
             incident_poll_at = tokio::time::Instant::now()
                 + Duration::from_millis(crate::incident_notices::INCIDENT_NOTICE_POLL_INTERVAL_MS);
             redraw |= mode.refresh_incident_notices();
+        }
+        // A failed saved-catalog fetch re-arms on the next query change or deferred shell open
+        // (a key, a paste, or a click): one honest retry behind a terminal failure.
+        if mode.take_saved_fetch_rearm() {
+            catalog_request = Some(spawn_saved_catalog_fetch(
+                &client,
+                ui_tx.clone(),
+                cwd.clone(),
+                session_dir.clone(),
+                None,
+                Some(SAVED_CATALOG_PAGE_FILES),
+            ));
+            // A superseded fetch's stream stops applying: the new fetch owns the
+            // catalog.
+            mode.drop_saved_stream();
+            saved_flush = None;
         }
         // The unfolded rest of the store: a scroll near the list's end fetches the next page, a
         // search fetches all of it (its rows stream in as they fold).

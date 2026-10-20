@@ -158,6 +158,26 @@ fn enter_on_a_shell_of_a_session_past_the_loaded_pages_opens_that_session() {
 }
 
 #[test]
+fn enter_after_a_failed_store_walk_retries_the_walk() {
+    let mut mode = mode_with_a_partial_catalog();
+    enter_on_shell(&mut mode, "s1");
+    // The continuation fails (the loop's `SavedFailed` arm).
+    mode.settle_anchor_wait_on_saved_failure();
+    mode.saved_fetch_failed = true;
+    assert!(mode.next_saved_fetch().is_none());
+    enter_on_shell(&mut mode, "s1");
+    assert!(
+        !mode.take_saved_fetch_rearm(),
+        "the retry never refetches the first page over the loaded rows"
+    );
+    assert_eq!(
+        mode.next_saved_fetch(),
+        Some(("page-two".to_string(), None)),
+        "the second Enter resumes the failed walk"
+    );
+}
+
+#[test]
 fn enter_on_a_shell_of_a_session_missing_from_the_whole_store_opens_the_orphans() {
     let mut mode = mode_with_a_partial_catalog();
     enter_on_shell(&mut mode, "s1");

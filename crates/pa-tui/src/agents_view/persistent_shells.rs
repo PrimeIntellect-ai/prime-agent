@@ -195,6 +195,8 @@ impl AgentsViewMode {
             return;
         }
         if !self.saved_catalog_loaded || self.saved_more.is_some() {
+            // The open is an explicit retry, like a query change, of a walk that failed.
+            self.saved_query_rearm = self.saved_fetch_failed;
             self.pending_shell_open = Some(id.to_string());
             self.set_status(ANCHOR_LOADING_HINT);
             return;
