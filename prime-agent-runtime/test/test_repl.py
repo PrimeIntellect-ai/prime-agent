@@ -515,6 +515,28 @@ class ReplTest(unittest.TestCase):
             time.sleep(1.6)
             self.assertFalse(os.path.exists(marker))
 
+    def test_interrupted_await_inside_bounded_window_still_kills(self):
+        # The bounded wait observes an interrupt instead of abandoning on it:
+        # inside the window the owned await keeps its kill-on-cancel contract.
+        with tempfile.TemporaryDirectory() as tmp:
+            marker = os.path.join(tmp, "marker")
+            code = "\n".join(
+                [
+                    "import rlm",
+                    "rlm._set_completion_notices_wired(True)",
+                    "from rlm import bash",
+                    f"r = await bash('sleep 1.5 && touch {marker}', yield_after=3)",
+                ]
+            )
+            self.repl.send({"type": "execute", "id": "ibash-bounded", "code": code})
+            time.sleep(0.4)
+            self.repl.send({"type": "interrupt"})
+            events = self.repl.until_done("ibash-bounded")
+            self.assertEqual(one(events, "error")["ename"], "KeyboardInterrupt")
+            self.assertEqual(one(events, "done")["status"], "error")
+            time.sleep(1.6)
+            self.assertFalse(os.path.exists(marker))
+
     def _interrupt_after_running(self, rid: str, code: str) -> list[dict]:
         self.repl.send({"type": "execute", "id": rid, "code": code})
         # Give the cell time to enter its blocking region before interrupting.
@@ -1153,6 +1175,34 @@ class ReplTest(unittest.TestCase):
         reply_ok(self.repl, request)
         inspected = self.repl.execute("bash-inspect", "handle.poll().output")
         self.assertIn("detached", one(inspected, "result")["text"])
+
+    def test_degraded_await_in_creating_cell_still_sends_bash_completion(self):
+        # A bounded await that degrades inside the creating cell must count as
+        # neither awaited nor consumed, or the [bash-done] notice (the only
+        # wake-up) would never fire.
+        code = "\n".join(
+            [
+                "import rlm",
+                "rlm._set_completion_notices_wired(True)",
+                "from rlm import bash",
+                "handle = bash('sleep 0.6; printf degraded', yield_after=0.3)",
+                "await handle",
+                "handle.pid",
+            ]
+        )
+        events = self.repl.execute("bash-degrade", code)
+        pid = int(one(events, "result")["text"])
+        request = wait_for_host_request(self.repl, events)
+        self.assertEqual(
+            request["data"],
+            {
+                "type": "bash.completed",
+                "pid": pid,
+                "command": "sleep 0.6; printf degraded",
+                "exitCode": 0,
+            },
+        )
+        reply_ok(self.repl, request)
 
     def test_result_read_after_notice_requests_one_withdrawal(self):
         reads = (

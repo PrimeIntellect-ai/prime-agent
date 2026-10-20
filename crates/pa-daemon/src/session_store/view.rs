@@ -494,6 +494,28 @@ impl SessionFile {
         }
     }
 
+    /// The session's persisted tool calls on the ACTIVE BRANCH (gap-bridged,
+    /// the same chain the usage accounting walks): `toolCall` blocks on
+    /// assistant messages, the window's folded prefix included (the
+    /// summary's `toolUseCount` seed; TS counts a child's assistant tool
+    /// calls over the active chain).
+    #[must_use]
+    pub fn tool_call_count(&self) -> u64 {
+        let older = self
+            .window
+            .as_ref()
+            .map_or(0, |window| window.older_path_stats.tool_calls);
+        older
+            + self
+                .branch_bridged()
+                .iter()
+                .filter(|entry| entry.type_ == "message")
+                .filter_map(|entry| entry.fields.get("message"))
+                .filter(|message| message_role(message) == Some("assistant"))
+                .map(crate::session_stats::tool_call_count)
+                .sum::<u64>()
+    }
+
     pub fn first_message(&self) -> Option<String> {
         if let Some(window) = &self.window {
             return window.first_message.clone();
