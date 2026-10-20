@@ -44,9 +44,10 @@ pub use prime_inference::{
 pub use resolver::{
     build_fallback_model, failover_candidates, find_exact_model_reference_match,
     find_initial_model, find_preferred_default_model, resolve_cli_model,
-    resolve_model_scope_from_models, InitialModelOptions, ResolveCliModelResult, ScopedModel,
-    PRIME_INFERENCE_DEFAULT_MODEL_ID,
+    resolve_model_scope_from_models, scope_patterns_select_reference, InitialModelOptions,
+    ResolveCliModelResult, ScopedModel, PRIME_INFERENCE_DEFAULT_MODEL_ID,
 };
 pub use session_restore::{
-    find_session_model_with_readiness_wait, SESSION_MODEL_RESTORE_READINESS_TIMEOUT_MS,
+    find_session_model_with_readiness_wait, resolve_model_scope_from_models_with_readiness,
+    SESSION_MODEL_RESTORE_READINESS_TIMEOUT_MS,
 };

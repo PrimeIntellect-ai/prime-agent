@@ -301,28 +301,6 @@ fn the_switch_query_can_only_match_switch_b() {
     assert_eq!(scanned, options.sessions, "every session checked");
 }
 
-/// The corpus settings disable BOTH archive rules: the daemon's boot sweep
-/// would otherwise retire corpus sessions out from under the manifest
-/// baseline (the defaults keep 200 files / 30 days).
-#[test]
-fn the_archive_policy_is_off() {
-    let dir = tempfile::tempdir().expect("temp dir");
-    let options = tiny(Profile::Small, dir.path());
-    let manifest = generate(&options).expect("generate");
-    let settings: serde_json::Value = serde_json::from_str(
-        &std::fs::read_to_string(manifest.paths.agent_dir.join("settings.json")).expect("settings"),
-    )
-    .expect("a settings object");
-    assert_eq!(
-        settings["sessionArchiveMaxAgeDays"],
-        serde_json::json!("off")
-    );
-    assert_eq!(
-        settings["sessionArchiveMaxSessions"],
-        serde_json::json!("off")
-    );
-}
-
 /// The corpus manifest records the generated file set (the bench's
 /// per-run restore baseline) and the archive dir holds the archived files.
 #[test]

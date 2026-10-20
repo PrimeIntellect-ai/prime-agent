@@ -1,0 +1,2 @@
+- Remove automatic session archiving and the `sessionArchiveMaxAgeDays` and `sessionArchiveMaxSessions` settings. The agents view and `/resume` page through the live session store instead.
+- Keep lazy recovery of files archived by older Rust versions: a saved-session wake by ID, ID prefix or exact name restores a matching archived file when no live session matches. Existing live files are never overwritten; other archived files stay in place until addressed.
