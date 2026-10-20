@@ -1,6 +1,6 @@
 use serde_json::Value;
 
-use super::{is_summary_row_identity, AgentsViewRow, RowKind, SelectionKey};
+use super::{pinned_row_kind, AgentsViewRow, RowKind, SelectionKey};
 
 /// Session ids of every ancestor of a nested row, root-most first: the chain the view
 /// re-expands when the drilled-in child returns to it.
@@ -53,9 +53,8 @@ pub fn resolve_selection(
     if rows.is_empty() {
         return 0;
     }
-    let selected_summary_row = identity.is_some_and(is_summary_row_identity);
-    let preserves_kind =
-        |row: &AgentsViewRow| !selected_summary_row || row.kind == RowKind::SubagentSummary;
+    let pinned_kind = identity.and_then(pinned_row_kind);
+    let preserves_kind = |row: &AgentsViewRow| pinned_kind.is_none_or(|kind| row.kind == kind);
     if let Some(identity) = identity {
         if let Some(index) = find_selectable(rows, |row| row.identity == identity) {
             // Synthetic nested rows deliberately reuse their parent's session key, so their
@@ -66,16 +65,24 @@ pub fn resolve_selection(
         }
     }
     if let Some(active) = key.and_then(|key| key.active_session_id.as_deref()) {
-        if let Some(index) = find_selectable(rows, |row| {
-            preserves_kind(row)
-                && row
-                    .summary
-                    .get("activeSessionId")
-                    .or_else(|| row.summary.get("id"))
-                    .and_then(Value::as_str)
-                    == Some(active)
-        }) {
+        let matches_active = |row: &AgentsViewRow| {
+            row.summary
+                .get("activeSessionId")
+                .or_else(|| row.summary.get("id"))
+                .and_then(Value::as_str)
+                == Some(active)
+        };
+        if let Some(index) = find_selectable(rows, |row| preserves_kind(row) && matches_active(row))
+        {
             return index;
+        }
+        // The pinned line vanished (its count dropped to zero): stay with this session by
+        // landing on its parent row rather than keeping an index that may now be another
+        // session's row.
+        if pinned_kind.is_some() {
+            if let Some(index) = find_selectable(rows, matches_active) {
+                return index;
+            }
         }
     }
     if let Some(identity) = identity {
@@ -84,11 +91,18 @@ pub fn resolve_selection(
         }
     }
     if let Some(session) = key.and_then(|key| key.session_id.as_deref()) {
-        if let Some(index) = find_selectable(rows, |row| {
-            preserves_kind(row)
-                && row.summary.get("sessionId").and_then(Value::as_str) == Some(session)
-        }) {
+        let matches_session = |row: &AgentsViewRow| {
+            row.summary.get("sessionId").and_then(Value::as_str) == Some(session)
+        };
+        if let Some(index) =
+            find_selectable(rows, |row| preserves_kind(row) && matches_session(row))
+        {
             return index;
+        }
+        if pinned_kind.is_some() {
+            if let Some(index) = find_selectable(rows, matches_session) {
+                return index;
+            }
         }
     }
     let bounded = current.min(rows.len() - 1);

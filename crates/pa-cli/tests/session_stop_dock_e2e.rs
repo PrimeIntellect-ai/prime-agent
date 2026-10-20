@@ -50,6 +50,7 @@ fn kernel_python() -> PathBuf {
     python
 }
 
+// The spawned daemon is killed and reaped by `Supervisor::drop`, which clippy cannot see.
 #[allow(clippy::zombie_processes)]
 fn spawn_supervisor(dir: &Path) -> Supervisor {
     let socket = dir.join("daemon.sock");
