@@ -38,12 +38,47 @@ struct RpcChild {
 
 impl RpcChild {
     fn spawn(args: &[&str], script: &Value) -> RpcChild {
-        Self::spawn_seeded(args, script, None)
+        Self::spawn_seeded(args, script, None, None)
+    }
+
+    /// Spawn with a live kernel Python: the background-bash lane needs a
+    /// real kernel behind the `ipython` tool.
+    fn spawn_kernel(args: &[&str], script: &Value) -> RpcChild {
+        Self::spawn_seeded(args, script, None, Some(Self::kernel_python()))
+    }
+
+    /// The kernel Python with prime-agent-runtime installed; a missing
+    /// kernel FAILS the lane loudly (the wake lane's proof).
+    fn kernel_python() -> std::path::PathBuf {
+        if let Some(explicit) = std::env::var_os("PA_E2E_KERNEL_PYTHON") {
+            let explicit = std::path::PathBuf::from(explicit);
+            assert!(
+                explicit.exists(),
+                "PA_E2E_KERNEL_PYTHON {} not found",
+                explicit.display()
+            );
+            return explicit;
+        }
+        let candidate = std::path::PathBuf::from(std::env::var("HOME").map_or_else(
+            |_| "/home/ubuntu/.prime/agent/kernel-venv/bin/python".to_string(),
+            |home| format!("{home}/.prime/agent/kernel-venv/bin/python"),
+        ));
+        assert!(
+            candidate.exists(),
+            "kernel python {} not found: set PA_E2E_KERNEL_PYTHON",
+            candidate.display()
+        );
+        candidate
     }
 
     /// Spawn with a seeded `models.json`: the faux provider needs its
     /// provider entry + key to pass the registry's configured-auth gate.
-    fn spawn_seeded(args: &[&str], script: &Value, models: Option<Value>) -> RpcChild {
+    fn spawn_seeded(
+        args: &[&str],
+        script: &Value,
+        models: Option<Value>,
+        kernel_python: Option<std::path::PathBuf>,
+    ) -> RpcChild {
         let home = tempfile::TempDir::new().unwrap();
         if let Some(models) = models {
             let agent_dir = home.path().join("agent");
@@ -51,11 +86,18 @@ impl RpcChild {
             std::fs::write(agent_dir.join("models.json"), models.to_string()).unwrap();
         }
         let bin = env!("CARGO_BIN_EXE_prime-agent");
-        let mut child = Command::new(bin)
+        let mut command = Command::new(bin);
+        command
             .args(args)
             .env("HOME", home.path())
             .env("PRIME_AGENT_CODING_AGENT_DIR", home.path().join("agent"))
             .env("PRIME_AGENT_FAUX_SCRIPT", script.to_string())
+            .env_remove("RLM_DEPTH")
+            .env_remove("RLM_MAX_DEPTH");
+        if let Some(kernel) = kernel_python {
+            command.env("PRIME_AGENT_KERNEL_PYTHON", kernel);
+        }
+        let mut child = command
             .current_dir(home.path())
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -638,6 +680,7 @@ fn rpc_get_available_models_lists_the_catalog() {
                 }
             }
         })),
+        None,
     );
     let response = client.request(&json!({ "type": "get_available_models" }));
     assert_eq!(response["success"], true, "the response: {response}");
@@ -867,6 +910,47 @@ fn rpc_failed_replacement_restarts_the_queue_pump() {
             }
         }
     }
+}
+
+/// An idle RPC session wakes on a background `bash()` completion
+/// (audit #3; TS registers `bash.completed` in every mode): turn 1
+/// starts a detached command and settles, and the completion row runs
+/// as a second turn with no further client command driving it. The
+/// lane must survive a whole-session replacement (the listener serves
+/// the live engine's wake).
+#[test]
+fn rpc_idle_session_runs_a_turn_on_a_background_bash_completion() {
+    let mut client = RpcChild::spawn_kernel(
+        &["--mode", "rpc", "--no-session"],
+        &json!({
+            "responses": [
+                { "content": [
+                    { "type": "toolCall", "name": "ipython",
+                      "arguments": { "code": "h = bash(\"sleep 3; echo RPC_BG\")\nprint(\"STARTED\")" } },
+                ] },
+                "WAITING",
+                { "content": [
+                    { "type": "toolCall", "name": "ipython",
+                      "arguments": { "code": "print(\"WOKEN\", \"RPC_BG\" in h.output())" } },
+                ] },
+                "RPC WOKEN",
+            ],
+            "repeatLastResponse": true,
+        }),
+    );
+    // Replace the whole session BEFORE the background lane runs: the
+    // wake listener must serve the replacement's engine too.
+    let fresh = client.request(&json!({ "type": "new_session" }));
+    assert_eq!(fresh["data"], json!({ "cancelled": false }));
+    let id = client
+        .command(&json!({ "type": "prompt", "message": "run the long command in the background" }));
+    let (response, _) = client.wait_response(&id, TIMEOUT);
+    assert_eq!(response["success"], true, "the response: {response}");
+    // Turn 1 settles on the background command still running.
+    client.wait_event("agent_end", TIMEOUT);
+    // The completion row arrives unprompted: its turn is the second
+    // agent_end (the queue pump delivers the steered row).
+    client.wait_event("agent_end", Duration::from_secs(30));
 }
 
 /// The 143 exit must not queue behind the replacement's settle.

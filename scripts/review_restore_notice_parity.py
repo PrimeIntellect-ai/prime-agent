@@ -10,6 +10,7 @@ import argparse
 import http.server
 import json
 import os
+import re
 from pathlib import Path
 import signal
 import subprocess
@@ -23,7 +24,13 @@ from review_goal_backoff_parity import TS_ARCHIVE_SHA256, sha256
 RESET = ("The working directory and environment variables were reset to the session defaults; "
          "re-apply any os.chdir(...) or os.environ[...] changes you still need.")
 PROBE = "RESTORE_PARITY_RESULT="
-SETUP = """import os
+SKILL_PROBE = 'HEADLESS_SKILL_AVAILABILITY='
+SKILLS = {'agent-message': 'agent_message', 'agent-observe': 'agent_observe',
+          'rlm-heartbeat': 'rlm_heartbeat'}
+SETUP = """print('HEADLESS_SKILL_AVAILABILITY=' + __import__('json').dumps({name: name in globals() for name in ('agent_message', 'agent_observe', 'rlm_heartbeat')}))
+# Explicit equal fixture imports isolate restore from the deliberate headless skill gate.
+import agent_observe, rlm_heartbeat
+import os
 restore_parity_marker = 'namespace-survived'
 os.mkdir('moved')
 os.chdir('moved')
@@ -137,6 +144,29 @@ def notices_in(request):
             for text in texts(message.get('content')) if '[python-state-restored]' in text]
 
 
+
+def skill_availability(requests):
+    preimports = probe_from(requests, SKILL_PROBE)
+    system = '\n'.join(text for message in requests[0].get('messages', [])
+                       if message.get('role') == 'system'
+                       for text in texts(message.get('content')))
+    inventory = re.search(r'<available_skills>(.*?)</available_skills>', system, re.S)
+    assert inventory, 'missing actual model-visible skill inventory'
+    names = set(re.findall(r'<name>(.*?)</name>', inventory.group(1)))
+    return {'preimports': preimports,
+            'model_visible': {name: name in names for name in SKILLS}}
+
+
+def validate_skill_availability(runs):
+    for label, expected in [('ts', True), ('rust', False)]:
+        actual = runs[label]['skill_availability']
+        assert actual == {
+            'preimports': {'agent_message': True, 'agent_observe': expected,
+                           'rlm_heartbeat': expected},
+            'model_visible': {'agent-message': True, 'agent-observe': expected,
+                              'rlm-heartbeat': expected}}, (label, actual)
+
+
 def run_case(binary, label, root, observation):
     for name in ('home', 'agent', 'sessions', 'work', 'tmp'):
         (root / name).mkdir(parents=True)
@@ -174,6 +204,7 @@ def run_case(binary, label, root, observation):
         observation.update(setup_stdout=setup['stdout'], setup_stderr=setup['stderr'],
                            setup_requests=server.requests['setup'],
                            snapshot_ready_before_setup_completion=server.snapshot_ready)
+        observation['skill_availability'] = skill_availability(server.requests['setup'])
         setup_probe = probe_from(server.requests['setup'], 'RESTORE_PARITY_SETUP=')
         observation['setup'] = setup_probe
         assert setup_probe == {'cwd': str(cwd / 'moved'), 'env': 'changed'}, setup_probe
@@ -245,7 +276,7 @@ def main():
               'fixture_prerequisites': [
                   'Wait for observable nonempty debounced snapshot before setup final answer in both binaries.',
                   'Existing Rust print shutdown disposes descendants but does not await root snapshot; no disposal parity claimed.',
-                  'Both kernels receive the same pinned TS skills/src library via PYTHONPATH; this is fixture setup, not a production namespace claim.'],
+                  'Both kernels receive the same pinned TS skills/src library via PYTHONPATH; initial preimports and prompt inventory are separately asserted before explicit equal restore imports.'],
               'runs': {}, 'verified': False}
     try:
         with tempfile.TemporaryDirectory(prefix='restore-notice-parity-') as temp:
@@ -259,6 +290,7 @@ def main():
         ts, rust = result['runs']['ts'], result['runs']['rust']
         errors = {label: run['error'] for label, run in result['runs'].items() if 'error' in run}
         assert not errors, errors
+        validate_skill_availability(result['runs'])
         assert rust['notice'].removesuffix('\n' + RESET) == ts['notice'], 'additional notice difference'
         assert rust['restored'] == ts['restored'], 'restored state differs'
         assert rust['request_counts'] == ts['request_counts'] == {'setup': 2, 'resume': 3}
@@ -271,6 +303,23 @@ def main():
         result['error'] = str(error)
     args.receipt.parent.mkdir(parents=True, exist_ok=True)
     args.receipt.write_text(json.dumps(result, indent=2) + '\n')
+    availability = {
+        'ts_release_archive_sha256': archive_hash,
+        'binaries': result['binaries'],
+        'scope': 'Actual initial print REPL preimports and model-visible inventory, before equal restore fixture imports.',
+        'intended_difference': 'Rust hides unwired agent-observe and rlm-heartbeat; TS print exposes them. agent-message stays visible.',
+        'not_verified': ['RPC/daemon skill availability', 'controller handler operation',
+                         'background bash wake/quiescence', 'late-receipt delivery'],
+        'runs': {label: run.get('skill_availability') for label, run in result['runs'].items()},
+        'verified': False,
+    }
+    try:
+        validate_skill_availability(result['runs'])
+        availability['verified'] = True
+    except Exception as error:
+        availability['error'] = str(error)
+    args.receipt.with_name('headless_skill_availability.json').write_text(
+        json.dumps(availability, indent=2) + '\n')
     print(json.dumps({'receipt': str(args.receipt), 'verified': result['verified'],
                       'error': result.get('error')}))
     return 0 if result['verified'] else 1
