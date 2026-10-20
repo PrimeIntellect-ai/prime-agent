@@ -209,6 +209,7 @@ async fn turn_boundary_host_requests_round_trip_through_a_real_kernel() {
         mcp_manager: None,
         prewarm_ipython_kernel: None,
         on_background_work_settled: None,
+        bash_notice_wake: None,
         queued_goal_context_purge: None,
     })
     .await
