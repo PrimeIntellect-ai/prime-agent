@@ -304,6 +304,7 @@ impl ReplKernelManager {
             restores_namespace,
             buffers: Mutex::new(buffers),
             result_tx: Mutex::new(Some(result_tx)),
+            cell_started: Mutex::new(None),
             opts,
         });
         {
@@ -375,6 +376,9 @@ impl ReplKernelManager {
             (send_task, stdin_retire)
         };
 
+        // The cell's own window starts as its frame goes on the wire: boot and
+        // queue wait are excluded so a cold kernel cannot trip the watchdog.
+        *lock(&execution.cell_started) = Some(Instant::now());
         let mut settled_result: Option<anyhow::Result<InternalExecuteResult>> = None;
         let send_outcome: anyhow::Result<()> = {
             let send_promise = &mut send_task;

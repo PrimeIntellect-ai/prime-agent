@@ -3,8 +3,8 @@
 
 use super::{
     anyhow, json, lock, parse_sent_agent_message, AbortSignal, ActiveExecution, Arc, AsyncWriteExt,
-    Duration, ExecuteResult, ExecuteStatus, Inner, Instant, InternalExecuteResult, KernelState,
-    LateSentAgentMessageCallback, Value, AGENT_MESSAGE_DISPLAY_MIME,
+    Duration, ExecuteResult, ExecuteStatus, Inner, Instant, InternalExecuteResult, KernelError,
+    KernelState, LateSentAgentMessageCallback, Value, AGENT_MESSAGE_DISPLAY_MIME,
     KERNEL_BUSY_AFTER_INTERRUPT_MESSAGE, KERNEL_BUSY_INTERRUPT_INTERVAL_MS,
     KERNEL_BUSY_REUSE_WAIT_MS, MAX_BACKGROUND_OUTPUT_CHARS, MAX_LATE_SENT_AGENT_MESSAGE_HANDLERS,
 };
@@ -190,6 +190,18 @@ impl Inner {
             {
                 status = ExecuteStatus::Aborted;
             }
+            // The watchdog teaches instead of killing: a cell that outlived its
+            // budget but still settled ok becomes a CellTimeout error, so the
+            // model stops treating an over-budget cell as a quiet success. A
+            // cell that failed or was aborted keeps its own outcome.
+            let watchdog_error = if status == ExecuteStatus::Ok {
+                cell_watchdog_error(execution)
+            } else {
+                None
+            };
+            if watchdog_error.is_some() {
+                status = ExecuteStatus::Error;
+            }
 
             let mut background_output = std::mem::take(&mut buffers.background_output);
             buffers.background_output_chars = 0;
@@ -211,7 +223,7 @@ impl Inner {
                 bash_commands: buffers.bash_commands.take(),
                 background_output: (!background_output.is_empty()).then_some(background_output),
                 status,
-                error: buffers.error.take(),
+                error: buffers.error.take().or(watchdog_error),
                 duration_ms: execution.started.elapsed().as_millis() as u64,
             };
             drop(buffers);
@@ -273,5 +285,39 @@ impl Inner {
         };
         callback(message);
         true
+    }
+}
+
+/// The watchdog's teaching error for a cell that outlived its budget, or `None`
+/// when the watchdog is off or the cell stayed inside the budget. Measured from
+/// the wire write to the settle: queue wait and kernel boot are excluded.
+fn cell_watchdog_error(execution: &ActiveExecution) -> Option<KernelError> {
+    let timeout_ms = execution.opts.cell_timeout_ms.filter(|ms| *ms > 0)?;
+    let started = (*lock(&execution.cell_started))?;
+    let elapsed_ms = started.elapsed().as_millis() as u64;
+    if elapsed_ms <= timeout_ms {
+        return None;
+    }
+    let message = format!(
+        "Cell exceeded {} (ran {}). The kernel state is preserved (snapshot). Run long work via bash() so it can auto-background.",
+        humanize_ms(timeout_ms),
+        humanize_ms(elapsed_ms),
+    );
+    Some(KernelError {
+        ename: "CellTimeout".to_string(),
+        evalue: message.clone(),
+        traceback: vec![message],
+    })
+}
+
+/// Milliseconds as one plain reading: whole seconds when the value divides,
+/// a decimal otherwise, raw milliseconds under one second.
+fn humanize_ms(ms: u64) -> String {
+    if ms < 1000 {
+        format!("{ms}ms")
+    } else if ms.is_multiple_of(1000) {
+        format!("{}s", ms / 1000)
+    } else {
+        format!("{}.{}s", ms / 1000, ms % 1000)
     }
 }

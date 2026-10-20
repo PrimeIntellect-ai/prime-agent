@@ -344,6 +344,7 @@ impl KernelExecutor for KernelManagerExecutor {
         let code = code.to_string();
         let signal = options.signal;
         let on_late_sent_agent_message = options.on_late_sent_agent_message;
+        let cell_timeout_ms = Some(resolve_cell_watchdog_timeout_ms());
         Box::pin(async move {
             let result = manager
                 .execute(
@@ -351,6 +352,7 @@ impl KernelExecutor for KernelManagerExecutor {
                     crate::kernel::shared::ExecuteOptions {
                         signal: signal.map(crate::kernel::cancellation::AbortSignal::from_token),
                         on_late_sent_agent_message,
+                        cell_timeout_ms,
                         ..Default::default()
                     },
                 )
@@ -359,6 +361,24 @@ impl KernelExecutor for KernelManagerExecutor {
             Ok(convert_execute_result(result))
         })
     }
+}
+
+/// Default per-cell watchdog budget for user `python_repl` cells: 60 seconds.
+const DEFAULT_CELL_TIMEOUT_SECS: u64 = 60;
+/// Env var configuring the budget: whole seconds, `0` disables the watchdog.
+const CELL_TIMEOUT_ENV: &str = "PRIME_AGENT_PYTHON_CELL_TIMEOUT_S";
+
+/// The per-cell watchdog budget for user cells, in milliseconds. The bootstrap
+/// and the internal state ops never arm it, so only model-facing cells can be
+/// taught toward `bash()`.
+fn resolve_cell_watchdog_timeout_ms() -> u64 {
+    cell_timeout_secs(std::env::var(CELL_TIMEOUT_ENV).ok()).saturating_mul(1000)
+}
+
+/// Env text to whole seconds; unparsable or absent text falls back to the default.
+fn cell_timeout_secs(raw: Option<String>) -> u64 {
+    raw.and_then(|raw| raw.trim().parse::<u64>().ok())
+        .unwrap_or(DEFAULT_CELL_TIMEOUT_SECS)
 }
 
 fn convert_status(
@@ -412,5 +432,25 @@ pub fn ipython_tool_options(
         provisioner,
         ui: None,
         on_late_sent_agent_message,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cell_timeout_env_falls_back_to_default() {
+        assert_eq!(cell_timeout_secs(None), 60);
+        assert_eq!(cell_timeout_secs(Some(String::new())), 60);
+        assert_eq!(cell_timeout_secs(Some("junk".to_string())), 60);
+        assert_eq!(cell_timeout_secs(Some("-5".to_string())), 60);
+    }
+
+    #[test]
+    fn cell_timeout_env_parses_whole_seconds() {
+        assert_eq!(cell_timeout_secs(Some("0".to_string())), 0);
+        assert_eq!(cell_timeout_secs(Some(" 25 ".to_string())), 25);
+        assert_eq!(cell_timeout_secs(Some("600".to_string())), 600);
     }
 }
