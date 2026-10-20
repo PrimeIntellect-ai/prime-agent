@@ -157,6 +157,7 @@ impl SessionUi {
             session_file: None,
             pending_selection: None,
             return_to_agents_view: !options.no_session,
+            panel_returns_to_agents_view: false,
             client_auth: options.client_auth.clone(),
             keybindings: options.keybindings.clone(),
             prompt_stash: options.prompt_stash.clone(),
@@ -577,6 +578,9 @@ impl SessionUi {
                 self.factory_view_session = None;
                 self.factory_graph = serde_json::json!({"runs": []});
             }
+            // An agents-view panel the rebind tore down takes its return-to-agents-view flag
+            // with it; a kept factory page keeps it.
+            self.panel_returns_to_agents_view &= view.factory_view.is_some();
             // The goal panel dies with the old session too: it is a
             // snapshot of the previous session's goal state, and until
             // the new session's own `goal_update` lands it would keep
@@ -784,6 +788,172 @@ mod backfill_tests {
     use super::*;
     use serde_json::json;
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+    /// One session attached over a mock daemon that answers `attach` and `get_messages`.
+    async fn mock_session(
+        socket: &std::path::Path,
+        backfill_tx: mpsc::UnboundedSender<TranscriptPageNote>,
+    ) -> (SessionUi, tokio::task::JoinHandle<()>) {
+        let listener = tokio::net::UnixListener::bind(socket).unwrap();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let (read, mut write) = stream.into_split();
+            write.write_all(b"{\"type\":\"daemon_hello\",\"protocol\":{\"name\":\"prime-agent.daemon\",\"version\":7},\"serverCapabilities\":[],\"clientId\":\"mock\"}\n").await.unwrap();
+            let mut lines = BufReader::new(read).lines();
+            while let Some(line) = lines.next_line().await.unwrap() {
+                let request: Value = serde_json::from_str(&line).unwrap();
+                let kind = request["command"]["type"].as_str().unwrap();
+                let data = match kind {
+                    "attach" => json!({
+                        "activeSessionId": "s1", "snapshot": {
+                            "activeSessionId": "s1", "summary": {"id": "s1", "cwd": "/tmp"},
+                            "state": {"sessionId": "s1", "cwd": "/tmp", "isStreaming": false},
+                            "messages": [], "historyBefore": 1, "lastEventSequence": 0,
+                        }, "replay": {"status": "complete", "toSequence": 0},
+                        "lastEventSequence": 0,
+                    }),
+                    "get_messages" => {
+                        json!({"messages": [{"role": "user", "content": "rebuilt transcript", "timestamp": 1}]})
+                    }
+                    _ => json!({}),
+                };
+                let mut reply = serde_json::to_vec(&json!({
+                    "type": "response", "id": request["id"], "command": kind,
+                    "success": true, "data": data,
+                }))
+                .unwrap();
+                reply.push(b'\n');
+                write.write_all(&reply).await.unwrap();
+            }
+        });
+        let mut options =
+            crate::interactive::tests::options(crate::interactive::ModelSelection::default());
+        options.socket_path = socket.to_path_buf();
+        options.session = SessionSelection::Attach("s1".to_string());
+        let (client, _events) = DaemonClient::connect(socket).await.unwrap();
+        let session = SessionUi::open(
+            client,
+            &options,
+            mpsc::unbounded_channel().0,
+            mpsc::unbounded_channel().0,
+            mpsc::unbounded_channel().0,
+            mpsc::unbounded_channel().0,
+            mpsc::unbounded_channel().0,
+            mpsc::unbounded_channel().0,
+            mpsc::unbounded_channel().0,
+            mpsc::unbounded_channel().0,
+            mpsc::unbounded_channel().0,
+            ActivityUpdates {
+                heartbeats: mpsc::unbounded_channel().0,
+                bash: mpsc::unbounded_channel().0,
+                factory: mpsc::unbounded_channel().0,
+                commands: mpsc::unbounded_channel().0,
+            },
+            backfill_tx,
+        )
+        .await
+        .unwrap();
+        (session, server)
+    }
+
+    /// A rebind that tears down an agents-view panel drops its return: a later dock-opened shells
+    /// panel closes back to the dock, never to the agents view.
+    #[tokio::test]
+    async fn a_rebind_drops_the_agents_view_panel_return() {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            let dir = tempfile::tempdir().unwrap();
+            let socket = dir.path().join("panel.sock");
+            let (mut session, server) = mock_session(&socket, mpsc::unbounded_channel().0).await;
+            let mut view = AgentView::new(crate::theme::Theme::builtin(
+                "prime",
+                crate::theme::ColorMode::TrueColor,
+            ));
+            session.open_agents_view_panel(
+                crate::interactive::SessionPanel::Shells { shell_id: None },
+                &mut view,
+            );
+            session.rebuild_view(&mut view, &RebuildKind::Rebind);
+            assert!(view.bash_view.is_none(), "the rebind tore the panel down");
+            session.open_bash_view(&mut view);
+            let esc = crossterm::event::KeyEvent::new(
+                crossterm::event::KeyCode::Esc,
+                crossterm::event::KeyModifiers::NONE,
+            );
+            session.handle_bash_view_key(esc, &mut view).unwrap();
+            assert!(view.bash_view.is_none(), "Esc closed the dock's panel");
+            assert!(
+                !session.open_agents_view && !session.exit_requested,
+                "the dock's panel closes to the dock"
+            );
+            drop(session);
+            server.abort();
+        })
+        .await
+        .expect("mock session open, rebind and panel close complete within ten seconds");
+    }
+
+    /// An agents-view shell open selects its shell in the Bash panel, also when the shell lands in
+    /// a later poll than the panel's first (empty) snapshot.
+    #[tokio::test]
+    async fn an_agents_view_shell_open_selects_its_shell() {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            let dir = tempfile::tempdir().unwrap();
+            let socket = dir.path().join("shell.sock");
+            let (mut session, server) = mock_session(&socket, mpsc::unbounded_channel().0).await;
+            let shells = json!({"activities": [
+                {"id": "a", "command": "cargo build", "status": "running"},
+                {"id": "s2", "command": "sleep 600", "status": "running"},
+            ]});
+            for preloaded in [true, false] {
+                let theme =
+                    || crate::theme::Theme::builtin("prime", crate::theme::ColorMode::TrueColor);
+                let mut view = AgentView::new(theme());
+                session.bash_activities = if preloaded {
+                    shells.clone()
+                } else {
+                    json!({"activities": []})
+                };
+                session.open_agents_view_panel(
+                    crate::interactive::SessionPanel::Shells {
+                        shell_id: Some("s2".to_string()),
+                    },
+                    &mut view,
+                );
+                if !preloaded {
+                    session.apply_bash_activity(
+                        crate::session_ui::bash::BashActivityUpdate::List {
+                            session: session.active_session_id.clone(),
+                            epoch: session.bash_list_epoch,
+                            data: shells.clone(),
+                        },
+                        &mut view,
+                    );
+                }
+                let lines = view.bash_view.as_ref().expect("the Bash panel").render(
+                    &theme(),
+                    80,
+                    view.editor.keybindings(),
+                );
+                let selected = lines
+                    .iter()
+                    .map(|line| {
+                        line.iter()
+                            .map(|span| span.content.as_str())
+                            .collect::<String>()
+                    })
+                    .find(|text| text.starts_with('\u{203a}'))
+                    .expect("a selected row");
+                assert!(
+                    selected.contains("sleep 600"),
+                    "preloaded {preloaded}: {selected}"
+                );
+            }
+            drop(session);
+            server.abort();
+        })
+        .await
+        .expect("mock session open and both panel opens complete within ten seconds");
+    }
 
     #[tokio::test]
     async fn an_attach_summary_model_fallback_warns_at_the_session_open() {

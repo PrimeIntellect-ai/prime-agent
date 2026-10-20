@@ -51,6 +51,7 @@ fn supervisor_end_to_end_scripted_session_lifecycle() {
             "side_question_transcript",
             "transient_bash",
             "kernel_bash_activity",
+            "persistent_shells",
             "session_input_admission",
             "prompt_admission_cancellation",
             "owned_prompt_cancellation",

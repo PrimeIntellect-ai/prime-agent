@@ -569,8 +569,12 @@ fn run_plan(
     let options = options_with_session(socket, selection);
     let outcome = runtime.block_on(async {
         if agents_view_open {
-            pa_tui::interactive::run_interactive_agents_view_open(options, UiMode::Headless(plan))
-                .await
+            pa_tui::interactive::run_interactive_agents_view_open(
+                options,
+                UiMode::Headless(plan),
+                None,
+            )
+            .await
         } else {
             run_interactive(options, UiMode::Headless(plan)).await
         }

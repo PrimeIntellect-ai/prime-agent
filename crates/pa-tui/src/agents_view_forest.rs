@@ -54,7 +54,7 @@ pub struct AgentsViewRow {
     pub has_spawn_code: bool,
 }
 
-/// The four list row shapes (TS `AgentsViewRowKind`).
+/// The list row shapes (TS `AgentsViewRowKind`, plus the activity lines and persistent shells).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RowKind {
     /// A top-level agent row.
@@ -65,6 +65,12 @@ pub enum RowKind {
     Subagent,
     /// A read-only spawn-program line.
     Code,
+    /// The node's own running kernel shells line.
+    Shells,
+    /// The node's own live factory runs line.
+    FactoryRuns,
+    /// One machine-wide persistent shell with its assigned session.
+    PersistentShell,
 }
 
 /// The summary line's identity prefix (the `subagents:` prefix, so a carried selection
@@ -84,7 +90,12 @@ impl AgentsViewRow {
     pub fn selectable(&self) -> bool {
         match self.kind {
             RowKind::Code => false,
-            RowKind::Agent | RowKind::SubagentSummary | RowKind::Subagent => true,
+            RowKind::Agent
+            | RowKind::SubagentSummary
+            | RowKind::Subagent
+            | RowKind::Shells
+            | RowKind::FactoryRuns
+            | RowKind::PersistentShell => true,
         }
     }
 }
@@ -95,6 +106,14 @@ impl AgentsViewRow {
 pub struct SelectionKey {
     pub session_id: Option<String>,
     pub active_session_id: Option<String>,
+}
+
+/// One live session's own activity counts, keyed by its `activeSessionId`: the shells and
+/// factory-run lines render them.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SessionActivity {
+    pub shells: usize,
+    pub factory_runs: usize,
 }
 
 /// One recursive rollup over the record hierarchy (TS

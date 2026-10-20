@@ -203,6 +203,15 @@ pub fn factory_reply_lists_runs(data: &Value) -> bool {
     data.get("runs").is_some_and(Value::is_array)
 }
 
+/// The live runs in a graph reply ([`FactoryRunSnapshot::is_live`]).
+#[must_use]
+pub fn live_run_count(data: &Value) -> usize {
+    parse_factory_runs(data)
+        .iter()
+        .filter(|run| run.is_live())
+        .count()
+}
+
 /// The malformed-lane error line (one message for the mount and the
 /// fold): a reply without the runs list is a malformed lane, never
 /// zero runs.
