@@ -3,8 +3,10 @@
 //! journaled for the orphan reaper nor killed by the kernel's exit hook), shows
 //! on the INACTIVE session's saved-catalog row, is re-attached by the kernel of
 //! the reopened session, and keeps running after the session's delete, its
-//! record still assigned to the deleted session. The live-kernel test skips
-//! (with a note) without a kernel install.
+//! record still assigned to the deleted session. The machine-wide
+//! `list_persistent_shells` lists every shell with its assignment, and
+//! `kill_persistent_shell` ends an orphan. The live-kernel test skips (with a
+//! note) without a kernel install.
 #![cfg(target_os = "linux")]
 // Narrowing casts sit at OS boundaries (pid) where the kernel bounds the values.
 #![allow(clippy::cast_possible_wrap, clippy::cast_possible_truncation)]
@@ -201,7 +203,7 @@ fn persistent_python_unit_regressions() {
 }
 
 #[test]
-fn inactive_session_row_lists_only_its_live_persistent_shells() {
+fn saved_row_lists_its_live_shells_and_the_machine_wide_list_every_shell() {
     let dir = tempfile::TempDir::new().expect("temp dir");
     let agent_dir = dir.path().join("agent");
     let sessions_dir = agent_dir.join("sessions");
@@ -257,6 +259,23 @@ fn inactive_session_row_lists_only_its_live_persistent_shells() {
         json!([{ "id": "a".repeat(32), "command": "sleep 60", "pid": sleeper.id(),
                  "startedAt": "2026-01-01T00:00:00+00:00", "status": "running",
                  "persistent": true }])
+    );
+    let listed = client.request("s1", &json!({ "type": "list_persistent_shells" }));
+    let mut shells: Vec<String> = listed["data"]["activities"]
+        .as_array()
+        .expect("activities")
+        .iter()
+        .map(|row| format!("{} {} {}", row["id"], row["status"], row["sessionId"]))
+        .collect();
+    shells.sort();
+    assert_eq!(
+        shells,
+        [
+            format!("\"{}\" \"running\" \"{session_id}\"", "a".repeat(32)),
+            format!("\"{}\" \"finished\" \"{session_id}\"", "b".repeat(32)),
+            format!("\"{}\" \"running\" \"another-session\"", "c".repeat(32)),
+        ],
+        "the machine-wide list holds every shell with its assignment"
     );
     sleeper.kill().expect("kill sleeper");
     sleeper.wait().expect("reap sleeper");
@@ -400,6 +419,31 @@ fn persistent_shell_survives_daemon_shutdown_is_reattached_and_outlives_session_
     assert_eq!(records.len(), 1);
     assert_eq!(records[0]["pid"], pid);
     assert_eq!(records[0]["sessionId"], session_id.as_str());
+
+    // The machine-wide list still names the deleted session; its kill ends the orphan.
+    let listed = client.request("s1", &json!({ "type": "list_persistent_shells" }));
+    let shell = &listed["data"]["activities"][0];
+    assert_eq!(
+        (&shell["pid"], &shell["sessionId"], &shell["status"]),
+        (&json!(pid), &json!(session_id), &json!("running"))
+    );
+    client.request(
+        "x1",
+        &json!({ "type": "kill_persistent_shell", "shellId": shell["id"] }),
+    );
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while group_alive(pid) {
+        assert!(
+            Instant::now() < deadline,
+            "the kill left the orphan's group alive"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let listed = client.request("s2", &json!({ "type": "list_persistent_shells" }));
+    assert_eq!(
+        listed["data"]["activities"][0]["status"], "finished",
+        "the killed orphan stays listed as finished"
+    );
 }
 
 fn write_faux_script(path: &Path, cell: &str) -> PathBuf {

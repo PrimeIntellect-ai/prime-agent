@@ -73,6 +73,7 @@ impl AgentsViewMode {
             &self.expanded_parents,
             &self.program_shown_parents,
             &rollups,
+            &self.session_activity,
             self.options.anchor_session_id.as_deref(),
         );
         // The entry anchor's row may be nested: arm the same ancestor expansion below so this
@@ -99,7 +100,7 @@ impl AgentsViewMode {
             while added {
                 added = false;
                 for row in &rows {
-                    if row.kind == RowKind::SubagentSummary {
+                    if !matches!(row.kind, RowKind::Agent | RowKind::Subagent) {
                         continue;
                     }
                     let session_id = row.summary.get("sessionId").and_then(Value::as_str);
@@ -117,10 +118,15 @@ impl AgentsViewMode {
                         &self.expanded_parents,
                         &self.program_shown_parents,
                         &rollups,
+                        &self.session_activity,
                         self.options.anchor_session_id.as_deref(),
                     );
                 }
             }
+        }
+        // The machine-wide persistent shells head the unscoped, unsearched list.
+        if !scope_active && self.query.trim().is_empty() {
+            rows.splice(0..0, self.persistent_shell_rows(&records));
         }
         // Keep the selection on the same row across rebuilds, falling back to the carried
         // identity/key.
@@ -145,6 +151,12 @@ impl AgentsViewMode {
             }
         }
         self.rows = rows;
+        if let Some(view) = self.shell_view.as_mut() {
+            view.apply_activities(super::persistent_shells::activities(
+                &self.persistent_shells,
+                &self.rows,
+            ));
+        }
         // The armed confirm only rides a row the list still carries under the session key it
         // armed with: a removed, re-created, or re-keyed row retires it.
         if let Some(pending) = &self.pending_delete {
@@ -445,6 +457,10 @@ impl AgentsViewMode {
         // A sticky line clears on any keypress (the transient lines ride their own
         // expiry).
         self.clear_sticky_status();
+        if self.shell_view.is_some() {
+            self.handle_shell_view_key(key);
+            return;
+        }
         let was_armed = self.exit_armed;
         // The notice panel: any key closes it (the refusal's ways out stay copy-pasteable while
         // it is up), except the exit key, which falls through so the double-press exit convention
@@ -552,6 +568,7 @@ impl AgentsViewMode {
                 has_children: false,
                 status_message: None,
                 cwd,
+                panel: None,
             });
             self.running = false;
             return;
@@ -723,6 +740,19 @@ impl AgentsViewMode {
     /// selection-centered, not scroll-driven).
     pub(super) fn handle_mouse(&mut self, event: &crate::mouse::MouseEvent) {
         if !crate::mouse_tracking::active() {
+            return;
+        }
+        if let Some(view) = self.shell_view.as_mut() {
+            // Mouse movement is semantic: remapped keyboard arrows must not
+            // change it, and clicks must not reach hidden session rows.
+            if let Some(delta) = crate::mouse::wheel_scroll_delta(event) {
+                for _ in 0..delta.unsigned_abs() {
+                    match view.scroll_output(delta.signum()) {
+                        crate::bash_view::BashViewAction::None => {}
+                        action => self.pending_shell_action = Some(action),
+                    }
+                }
+            }
             return;
         }
         // A buttonless motion report is the hover (operator directive 2026-09-29, `?1003` any-event
