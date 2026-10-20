@@ -765,7 +765,13 @@ pub fn render_activity_dock_segments(
         let start = line.iter().map(|s| str_width(&s.content)).sum();
         match group {
             ActivityGroup::Subagents => {
-                line.push(theme.fg_span(activity_color(running), format!("◆ {running} subagents")));
+                line.push(theme.fg_span(
+                    activity_color(running),
+                    format!(
+                        "◆ {running} subagent{}",
+                        if running == 1 { "" } else { "s" }
+                    ),
+                ));
             }
             ActivityGroup::Heartbeats => {
                 line.push(theme.fg_span(

@@ -1,7 +1,8 @@
 //! Headless e2e for the dock panels' exit focus (operator ruling
 //! 2026-09-26): ESC/left from a dock panel returns to chat with the
 //! panel's dock item still selected — the dock holds focus, not the
-//! prompt bar; the next Enter re-opens the SAME panel.
+//! prompt bar; the next Enter re-opens the SAME panel. A panel the agents view requested on open
+//! closes back to the agents view instead.
 #![cfg(unix)]
 // Casts: structurally bounded terminal-layout arithmetic; guarded conversions add panic paths.
 #![allow(
@@ -25,19 +26,22 @@ use std::path::PathBuf;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use pa_tui::interactive::{
-    run_interactive, HeadlessPlan, HeadlessStep, InteractiveOptions, InteractiveOutcome,
-    ModelSelection, SessionSelection, UiMode,
+    run_interactive, run_interactive_agents_view_open, HeadlessPlan, HeadlessStep,
+    InteractiveOptions, InteractiveOutcome, ModelSelection, SessionPanel, SessionSelection, UiMode,
 };
 use serde_json::{json, Value};
 
 struct MockSupervisor {
     listener: UnixListener,
+    /// The factory graph reply; `Some` also advertises the factory lane.
+    factory_graph: Option<Value>,
 }
 
 impl MockSupervisor {
-    fn bind(socket: &std::path::Path) -> Self {
+    fn bind(socket: &std::path::Path, factory_graph: Option<Value>) -> Self {
         MockSupervisor {
             listener: UnixListener::bind(socket).expect("bind mock socket"),
+            factory_graph,
         }
     }
 
@@ -51,10 +55,14 @@ impl MockSupervisor {
 
         // The hello advertises the kernel-bash activity capability: the registry poll is
         // capability-gated (the dock and the shells view stay empty without it).
+        let mut capabilities = vec!["kernel_bash_activity"];
+        if self.factory_graph.is_some() {
+            capabilities.push("factory_activity");
+        }
         let hello = json!({
             "type": "daemon_hello",
             "protocol": { "name": "prime-agent.daemon", "version": 7 },
-            "serverCapabilities": ["kernel_bash_activity"],
+            "serverCapabilities": capabilities,
             "clientId": "mock",
         });
         write_json(&mut writer, &hello);
@@ -139,6 +147,18 @@ impl MockSupervisor {
                                     {"id": "shell-1", "command": "render the frames", "pid": 4242, "status": "running"},
                                 ]
                             },
+                        }),
+                    );
+                }
+                "factory_activity" => {
+                    write_json(
+                        &mut writer,
+                        &json!({
+                            "type": "response",
+                            "id": id,
+                            "command": "factory_activity",
+                            "success": true,
+                            "data": self.factory_graph.clone().unwrap_or(Value::Null),
                         }),
                     );
                 }
@@ -273,10 +293,18 @@ fn options(socket: PathBuf) -> InteractiveOptions {
 }
 
 fn run_plan(steps: Vec<HeadlessStep>) -> InteractiveOutcome {
+    run_plan_with(steps, None, None)
+}
+
+fn run_plan_with(
+    steps: Vec<HeadlessStep>,
+    open_panel: Option<SessionPanel>,
+    factory_graph: Option<Value>,
+) -> InteractiveOutcome {
     std::env::remove_var("TMUX");
     let dir = tempfile::TempDir::new().expect("temp dir");
     let socket = dir.path().join("tui.sock");
-    let supervisor = MockSupervisor::bind(&socket);
+    let supervisor = MockSupervisor::bind(&socket, factory_graph);
     let handle = std::thread::spawn(move || supervisor.serve());
 
     let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -289,7 +317,19 @@ fn run_plan(steps: Vec<HeadlessStep>) -> InteractiveOutcome {
         height: 30,
     };
     let outcome = runtime
-        .block_on(run_interactive(options(socket), UiMode::Headless(plan)))
+        .block_on(async {
+            match open_panel {
+                Some(panel) => {
+                    run_interactive_agents_view_open(
+                        options(socket),
+                        UiMode::Headless(plan),
+                        Some(panel),
+                    )
+                    .await
+                }
+                None => run_interactive(options(socket), UiMode::Headless(plan)).await,
+            }
+        })
         .expect("interactive run");
     handle.join().expect("mock supervisor finished");
     outcome
@@ -504,5 +544,59 @@ fn goal_panel_left_returns_to_the_dock_item() {
     assert!(
         !outcome.return_to_agents_view,
         "the exit stays in the chat view"
+    );
+}
+
+/// The agents view's shells line opens the chat with the shells panel mounted; Esc hands the pane
+/// straight back to the agents view.
+#[test]
+fn agents_view_shells_panel_esc_returns_to_the_agents_view() {
+    let outcome = run_plan_with(
+        vec![wait_render("render the frames"), key(KeyCode::Esc)],
+        Some(SessionPanel::Shells { shell_id: None }),
+        None,
+    );
+    assert!(
+        outcome
+            .frames
+            .iter()
+            .any(|frame| frame.contains("render the frames")),
+        "the shells panel mounted on open"
+    );
+    assert!(
+        outcome.return_to_agents_view,
+        "the panel's close returns to the agents view"
+    );
+}
+
+/// The factory line mounts the factory page on its run list even with exactly one live run.
+#[test]
+fn agents_view_factory_panel_opens_on_the_run_list_and_returns() {
+    let graph = json!({
+        "runs": [{
+            "runId": "run-1",
+            "specId": "solo-spec",
+            "state": "running",
+            "elapsedMs": 100,
+            "machine": { "states": [], "transitions": [] },
+            "nodes": [],
+            "usage": { "running": 0 },
+        }]
+    });
+    let outcome = run_plan_with(
+        vec![wait_render("solo-spec"), key(KeyCode::Esc)],
+        Some(SessionPanel::FactoryRuns),
+        Some(graph),
+    );
+    assert!(
+        outcome
+            .frames
+            .iter()
+            .any(|frame| frame.contains("solo-spec") && frame.contains("actions \u{b7}")),
+        "the factory page mounted on its run list"
+    );
+    assert!(
+        outcome.return_to_agents_view,
+        "the page's close returns to the agents view"
     );
 }

@@ -213,9 +213,12 @@ impl Supervisor {
         let scan_command_id = command_id.to_string();
         let scan_active_session_id = active_session_id.clone();
         let scan_cwd = cwd.clone();
+        let agent_dir = self.options.agent_dir.clone();
         let cursor = cursor.clone();
         let limit = limit.map(|limit| limit as usize);
         let scan = tokio::task::spawn_blocking(move || {
+            let persistent_shells =
+                crate::persistent_shells::live_shell_rows_by_session(&agent_dir);
             let mut file_total = 0usize;
             let page = list_sessions_with(&dir, cursor.as_deref(), limit, |index, total, info| {
                 file_total = total;
@@ -223,7 +226,7 @@ impl Supervisor {
                     // The row is out of scope, but the scan itself goes on.
                     return true;
                 }
-                let row = saved_session_row(info);
+                let row = saved_session_row(info, &persistent_shells);
                 let mut item = json!({
                     "id": scan_command_id,
                     "type": "session_list_item",
@@ -262,9 +265,9 @@ impl Supervisor {
                     }
                 }
             });
-            (page, file_total)
+            (page, file_total, persistent_shells)
         });
-        let (page, file_total) = match scan.await {
+        let (page, file_total, persistent_shells) = match scan.await {
             Ok(scanned) => scanned,
             Err(error) => {
                 return vec![response_line(&response_failure(
@@ -335,7 +338,7 @@ impl Supervisor {
             .filter(|info| !scope_current || info.cwd == cwd)
             .collect();
         for info in &merged {
-            let row = saved_session_row(info);
+            let row = saved_session_row(info, &persistent_shells);
             let mut item = json!({
                 "id": command_id,
                 "type": "session_list_item",
@@ -384,7 +387,10 @@ impl Supervisor {
         // The streamed rows already reached the client; the terminal response is
         // the authoritative array (the scan never re-orders after streaming).
         let mut lines = Vec::new();
-        let sessions: Vec<Value> = infos.iter().map(saved_session_row).collect();
+        let sessions: Vec<Value> = infos
+            .iter()
+            .map(|info| saved_session_row(info, &persistent_shells))
+            .collect();
         let mut data = json!({ "sessions": sessions, "remaining": remaining });
         if let Some(next_cursor) = next_cursor {
             data["nextCursor"] = json!(next_cursor);
@@ -831,7 +837,10 @@ fn offline_summary(worker_id: &str) -> Value {
     })
 }
 
-pub(super) fn saved_session_row(info: &crate::session_store::SessionInfo) -> Value {
+pub(super) fn saved_session_row(
+    info: &crate::session_store::SessionInfo,
+    persistent_shells: &std::collections::HashMap<String, Vec<Value>>,
+) -> Value {
     let mut row = json!({
         "path": info.path.to_string_lossy(),
         "id": info.id,
@@ -872,6 +881,11 @@ pub(super) fn saved_session_row(info: &crate::session_store::SessionInfo) -> Val
     // live summaries that lack one.
     if let Some(level) = &info.thinking_level {
         object.insert("thinkingLevel".to_string(), json!(level));
+    }
+    // Persistent `bash()` shells outlive the session's kernel: an inactive row still
+    // shows the live ones (kernel activity row shape).
+    if let Some(shells) = persistent_shells.get(&info.id) {
+        object.insert("persistentShells".to_string(), json!(shells));
     }
     row
 }
