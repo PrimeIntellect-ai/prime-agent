@@ -199,7 +199,8 @@ impl Inner {
             } else {
                 None
             };
-            if watchdog_error.is_some() {
+            let watchdog_flipped = watchdog_error.is_some();
+            if watchdog_flipped {
                 status = ExecuteStatus::Error;
             }
 
@@ -231,6 +232,7 @@ impl Inner {
                 let _ = tx.send(Ok(InternalExecuteResult {
                     result,
                     done_fields,
+                    watchdog_flipped,
                 }));
             }
         }
@@ -318,6 +320,21 @@ fn humanize_ms(ms: u64) -> String {
     } else if ms.is_multiple_of(1000) {
         format!("{}s", ms / 1000)
     } else {
-        format!("{}.{}s", ms / 1000, ms % 1000)
+        format!("{}.{:03}s", ms / 1000, ms % 1000)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn humanize_ms_pads_the_millisecond_remainder() {
+        assert_eq!(humanize_ms(500), "500ms");
+        assert_eq!(humanize_ms(2000), "2s");
+        assert_eq!(humanize_ms(60_000), "60s");
+        assert_eq!(humanize_ms(1500), "1.500s");
+        // A sub-100ms remainder must not read as tenths: 60.005s, not 60.5s.
+        assert_eq!(humanize_ms(60_005), "60.005s");
     }
 }

@@ -122,6 +122,10 @@ pub(crate) struct ActiveExecution {
 pub(crate) struct InternalExecuteResult {
     result: ExecuteResult,
     done_fields: Option<Value>,
+    /// The kernel settled this cell ok; the watchdog flipped the model-facing
+    /// status to a `CellTimeout` error. The namespace committed regardless, so
+    /// post-cell work keyed on success (the auto-snapshot) still applies.
+    watchdog_flipped: bool,
 }
 
 impl InternalExecuteResult {
@@ -141,6 +145,7 @@ impl InternalExecuteResult {
                 duration_ms: started.elapsed().as_millis() as u64,
             },
             done_fields: None,
+            watchdog_flipped: false,
         }
     }
 }
@@ -603,7 +608,10 @@ impl ReplKernelManager {
         let result = self
             .enqueue_execute(code, opts, execution_timeout_ms)
             .await?;
-        if result.result.status == ExecuteStatus::Ok {
+        // A watchdog-flipped cell completed ok in the kernel and committed its
+        // namespace changes: the auto-snapshot applies exactly as for a plain
+        // ok cell, or a crash would revive a namespace missing the cell.
+        if result.result.status == ExecuteStatus::Ok || result.watchdog_flipped {
             self.schedule_snapshot();
         }
         Ok(result.result)

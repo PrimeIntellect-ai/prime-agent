@@ -17,11 +17,13 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::time::Duration;
 
 use pa_core::kernel::manager::{KernelStartOptions, ReplKernelManager};
 use pa_core::kernel::shared::{
-    ExecuteOptions, ExecuteStatus, HostRequestHandlers, KernelManagerOptions,
+    ExecuteOptions, ExecuteStatus, HostRequestHandlers, KernelManagerOptions, KernelSnapshotConfig,
 };
+use pa_core::kernel::state_snapshot::{manifest_path_in, snapshot_path_in};
 
 /// The kernel Python with prime-agent-runtime installed. Ambient product
 /// state, not test input: skipped (with a note) when absent;
@@ -154,6 +156,71 @@ async fn overage_cell_resolves_as_timeout_error_with_teaching_text() {
     let alive = execute(&manager, "time is not None and sys.executable", None).await;
     assert_eq!(alive.status, ExecuteStatus::Ok);
     assert!(alive.result.is_some(), "kernel state survived the watchdog");
+
+    manager
+        .shutdown(pa_core::kernel::shared::KernelShutdownOptions::default())
+        .await
+        .expect("shutdown");
+}
+
+#[tokio::test]
+async fn watchdog_flipped_cell_still_schedules_the_snapshot() {
+    let Some(python) = kernel_python() else {
+        return;
+    };
+    let dir = tempfile::TempDir::new().expect("temp dir");
+    let options = KernelManagerOptions {
+        python: Some(python),
+        cwd: Some(std::env::temp_dir()),
+        env: HashMap::new(),
+        session_id: Some("cell-watchdog-snapshot-test".to_string()),
+        host_handlers: HostRequestHandlers::new(),
+        python_skills: Vec::new(),
+        on_background_work_settled: None,
+        snapshot: Some(KernelSnapshotConfig {
+            path: snapshot_path_in(dir.path()),
+            manifest_path: manifest_path_in(dir.path()),
+            max_bytes: None,
+            max_variable_bytes: None,
+            debounce_ms: Some(100),
+        }),
+        bootstrap_code: None,
+        stderr_log_path: None,
+    };
+    let manager = ReplKernelManager::new(options);
+    manager
+        .start(KernelStartOptions::default())
+        .await
+        .expect("kernel must start");
+
+    // The cell commits a variable but outruns a 500ms budget: the watchdog
+    // flips the status to a CellTimeout error, yet the cell completed ok in
+    // the kernel, so the debounced namespace snapshot must still fire.
+    let overage = execute(
+        &manager,
+        "import time\ntime.sleep(2)\nwatch_var = 'committed'",
+        Some(500),
+    )
+    .await;
+    assert_eq!(overage.status, ExecuteStatus::Error);
+    let error = overage.error.expect("watchdog error present");
+    assert_eq!(error.ename, "CellTimeout");
+
+    let snapshot = snapshot_path_in(dir.path());
+    let mut flushed = false;
+    for _ in 0..30 {
+        let written =
+            snapshot.exists() && std::fs::metadata(&snapshot).is_ok_and(|meta| meta.len() > 0);
+        if written {
+            flushed = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(
+        flushed,
+        "the watchdog-flipped cell must still schedule the namespace snapshot"
+    );
 
     manager
         .shutdown(pa_core::kernel::shared::KernelShutdownOptions::default())
