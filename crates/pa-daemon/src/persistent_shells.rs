@@ -351,7 +351,10 @@ mod tests {
             "the group's TERM reached the member"
         );
         assert_eq!(shell_rows(root.path())[0]["status"], "finished");
-        assert_eq!(output_tail(root.path(), &id, 1), Ok(Some("line".to_string())));
+        assert_eq!(
+            output_tail(root.path(), &id, 1),
+            Ok(Some("line".to_string()))
+        );
         assert_eq!(kill_shell(root.path(), "unknown"), Ok(false));
     }
 
