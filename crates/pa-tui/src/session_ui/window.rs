@@ -35,6 +35,7 @@ pub(crate) enum PageKind {
 pub(crate) struct TranscriptPageNote {
     pub epoch: u64,
     pub kind: PageKind,
+    pub request: TranscriptPage,
     pub page: std::result::Result<LoadedPage, String>,
 }
 
@@ -51,6 +52,29 @@ struct Chunk {
     last_id: String,
     entries: usize,
     seam: BackfillSeam,
+    /// The request that loaded the chunk: replaying it on the same branch reloads the same rows.
+    page: TranscriptPage,
+}
+
+/// Where a paused reader sits, captured before the transcript is replaced so the rebuilt view
+/// can put them back.
+pub(crate) enum ReaderAnchor {
+    /// Inside the tail: restorable while the rebuilt tail starts at the same row.
+    Tail {
+        tail_first_id: Option<String>,
+        entry: usize,
+        row: usize,
+    },
+    /// Inside a resident chunk: its page is reloaded, validated against the old branch.
+    Chunk {
+        leaf_id: String,
+        page: TranscriptPage,
+        /// The tail's first row when the chunk joined the tail directly.
+        joins_tail: Option<String>,
+        start_resident: bool,
+        entry: usize,
+        row: usize,
+    },
 }
 
 #[derive(Default)]
@@ -163,7 +187,13 @@ impl TranscriptWindow {
 
     /// Fold a loaded page into the view. Returns how many entries the rows above
     /// the tail grew by (negative when they shrank).
-    fn apply(&mut self, kind: PageKind, page: LoadedPage, view: &mut AgentView) -> isize {
+    fn apply(
+        &mut self,
+        kind: PageKind,
+        request: TranscriptPage,
+        page: LoadedPage,
+        view: &mut AgentView,
+    ) -> isize {
         let (Some(first_id), Some(last_id)) = (page.first_id, page.last_id) else {
             match kind {
                 PageKind::Older | PageKind::Head => self.start_resident = true,
@@ -182,6 +212,7 @@ impl TranscriptWindow {
             last_id,
             entries,
             seam: page.seam,
+            page: request,
         };
         match kind {
             PageKind::Older => {
@@ -250,6 +281,72 @@ impl TranscriptWindow {
         }
     }
 
+    /// The anchor of a reader paused with row `row` of `entry` at the viewport top.
+    fn reader_anchor(&self, entry: usize, row: usize) -> Option<ReaderAnchor> {
+        let tail_start = self.tail_start();
+        if entry >= tail_start {
+            return Some(ReaderAnchor::Tail {
+                tail_first_id: self.tail_first_id.clone(),
+                entry: entry - tail_start,
+                row,
+            });
+        }
+        let mut start = 0;
+        for (index, chunk) in self.chunks.iter().enumerate() {
+            if entry < start + chunk.entries {
+                let last = index + 1 == self.chunks.len();
+                return Some(ReaderAnchor::Chunk {
+                    leaf_id: self.leaf_id.clone()?,
+                    page: chunk.page.clone(),
+                    joins_tail: (last && !self.gap)
+                        .then(|| self.tail_first_id.clone())
+                        .flatten(),
+                    start_resident: index == 0 && self.start_resident,
+                    entry: entry - start,
+                    row,
+                });
+            }
+            start += chunk.entries;
+        }
+        None
+    }
+
+    /// Put a reloaded anchor chunk above the freshly reset tail. Returns how many entries
+    /// the rows above the tail grew by.
+    fn restore_chunk(
+        &mut self,
+        page: TranscriptPage,
+        loaded: LoadedPage,
+        joins_tail: Option<&str>,
+        start_resident: bool,
+        view: &mut AgentView,
+    ) -> isize {
+        let (Some(first_id), Some(last_id)) = (loaded.first_id, loaded.last_id) else {
+            return 0;
+        };
+        let joins = joins_tail.is_some() && joins_tail == self.tail_first_id.as_deref();
+        let mut entries = loaded.entries;
+        if joins {
+            crate::snapshot::join_backfilled_entries(&mut entries, self.tail_seam);
+        }
+        let count = entries.len();
+        if !joins {
+            entries.push(gap_row());
+        }
+        let inserted = entries.len();
+        view.prepend_entries(entries);
+        self.chunks = VecDeque::from([Chunk {
+            first_id,
+            last_id,
+            entries: count,
+            seam: loaded.seam,
+            page,
+        }]);
+        self.gap = !joins;
+        self.start_resident = start_resident;
+        inserted as isize
+    }
+
     /// Drop a disjoint resident run, leaving the contiguous tail. Returns how many
     /// entries the rows above the tail shrank by.
     fn collapse_to_tail(&mut self, view: &mut AgentView) -> usize {
@@ -291,37 +388,19 @@ impl SessionUi {
         let leaf_id = self.window.leaf_id.clone();
         let notes = self.page_notes.clone();
         let task = tokio_util::task::AbortOnDropHandle::new(tokio::spawn(async move {
-            let page: Result<LoadedPage> = async {
+            let loaded = async {
                 let leaf_id =
                     leaf_id.ok_or_else(|| anyhow::anyhow!("missing history branch anchor"))?;
-                let command = DaemonCommand::GetMessages {
-                    id: None,
-                    active_session_id,
-                    page: Some(page),
-                    capabilities: Some(crate::session_ui::attach_capabilities()),
-                    rest: Map::from_iter([(
-                        "historyLeafId".to_owned(),
-                        Value::String(leaf_id.clone()),
-                    )]),
-                };
-                // A read-only request can safely retry once on a live link. Keep
-                // the same cursor; a second failure must not masquerade as an empty page.
-                let data = match client.request_ok(command.clone()).await {
-                    Ok(data) => data,
-                    Err(error) if crate::daemon_client::is_daemon_timeout(&error) => {
-                        return Err(error)
-                    }
-                    Err(_) => client.request_ok(command).await?,
-                };
-                // Require the echo so workers that ignore the anchor fail closed.
-                if data.get("historyLeafId").and_then(Value::as_str) != Some(leaf_id.as_str()) {
-                    return Err(anyhow::anyhow!("unverified history branch anchor"));
-                }
-                parse_page(data).await
+                fetch_page(&client, active_session_id, leaf_id, page.clone()).await
             }
-            .await;
-            let page = page.map_err(|error| error.to_string());
-            let _ = notes.send(TranscriptPageNote { epoch, kind, page });
+            .await
+            .map_err(|error| error.to_string());
+            let _ = notes.send(TranscriptPageNote {
+                epoch,
+                kind,
+                request: page,
+                page: loaded,
+            });
         }));
         self.window.fetch = Some(task);
     }
@@ -348,7 +427,7 @@ impl SessionUi {
         if self.last_assistant_text.is_none() {
             self.last_assistant_text = super::last_assistant_text_of(&page.entries);
         }
-        let grown = self.window.apply(note.kind, page, view);
+        let grown = self.window.apply(note.kind, note.request, page, view);
         self.shift_tail_indices(grown);
         self.pressed_click = None;
         self.trim_after_frame = true;
@@ -379,9 +458,86 @@ impl SessionUi {
         }
     }
 
+    /// Where the paused reader sits, captured before a transcript replace.
+    pub(crate) fn reader_anchor(&self, view: &AgentView) -> Option<ReaderAnchor> {
+        let (entry, row) = view.reader_position()?;
+        self.window.reader_anchor(entry, row)
+    }
+
+    /// Reload the anchor's chunk on the (re)attached session while the old rows are still on
+    /// screen. `None` when the anchor needs no page or the old branch no longer holds it.
+    pub(crate) async fn load_reader_anchor(
+        &self,
+        anchor: Option<&ReaderAnchor>,
+    ) -> Option<LoadedPage> {
+        let Some(ReaderAnchor::Chunk { leaf_id, page, .. }) = anchor else {
+            return None;
+        };
+        fetch_page(
+            &self.client,
+            self.active_session_id.clone(),
+            leaf_id.clone(),
+            page.clone(),
+        )
+        .await
+        .ok()
+    }
+
+    /// Put the reader back on their entry in the rebuilt view; follow the tail when their place
+    /// is gone (another branch, a tail that moved past it).
+    pub(crate) fn restore_reader(
+        &mut self,
+        anchor: Option<ReaderAnchor>,
+        loaded: Option<LoadedPage>,
+        view: &mut AgentView,
+    ) {
+        match (anchor, loaded) {
+            (
+                Some(ReaderAnchor::Tail {
+                    tail_first_id,
+                    entry,
+                    row,
+                }),
+                _,
+            ) if tail_first_id == self.window.tail_first_id => view.scroll_to_entry(entry, row),
+            (
+                Some(ReaderAnchor::Chunk {
+                    page,
+                    joins_tail,
+                    start_resident,
+                    entry,
+                    row,
+                    ..
+                }),
+                Some(loaded),
+            ) => {
+                let grown = self.window.restore_chunk(
+                    page,
+                    loaded,
+                    joins_tail.as_deref(),
+                    start_resident,
+                    view,
+                );
+                self.shift_tail_indices(grown);
+                view.scroll_to_entry(entry, row);
+            }
+            _ => view.follow(),
+        }
+        self.dirty = true;
+    }
+
+    /// Rebuild the view from a re-attach snapshot, keeping a paused reader on their entry.
+    pub(crate) async fn resync_view(&mut self, anchor: Option<ReaderAnchor>, view: &mut AgentView) {
+        let loaded = self.load_reader_anchor(anchor.as_ref()).await;
+        self.rebuild_view(view, &super::RebuildKind::Resync);
+        self.restore_reader(anchor, loaded, view);
+    }
+
     /// Re-read the transcript tail and replace the view with it (the navigation,
-    /// fork, import, and reload rebuilds). Best effort: a failed fetch keeps the view.
+    /// fork, import, and reload rebuilds), keeping a paused reader on their entry while
+    /// the branch still holds it. Best effort: a failed fetch keeps the view.
     pub(crate) async fn rebuild_transcript(&mut self, view: &mut AgentView) {
+        let anchor = self.reader_anchor(view);
         let incomplete_history = self.window.incomplete();
         self.window.retire();
         self.last_status_index = None;
@@ -423,15 +579,43 @@ impl SessionUi {
             }
             return;
         };
+        let anchor_page = self.load_reader_anchor(anchor.as_ref()).await;
         self.window
             .reset(leaf_id, page.first_id.filter(|_| page.more), page.seam);
         view.clear_chat();
         for entry in page.entries {
             view.push_entry(entry);
         }
-        view.follow();
-        self.dirty = true;
+        self.restore_reader(anchor, anchor_page, view);
     }
+}
+
+/// One display-transcript page validated against the attached branch `leaf_id`.
+async fn fetch_page(
+    client: &crate::daemon_client::DaemonClient,
+    active_session_id: String,
+    leaf_id: String,
+    page: TranscriptPage,
+) -> Result<LoadedPage> {
+    let command = DaemonCommand::GetMessages {
+        id: None,
+        active_session_id,
+        page: Some(page),
+        capabilities: Some(crate::session_ui::attach_capabilities()),
+        rest: Map::from_iter([("historyLeafId".to_owned(), Value::String(leaf_id.clone()))]),
+    };
+    // A read-only request can safely retry once on a live link. Keep
+    // the same cursor; a second failure must not masquerade as an empty page.
+    let data = match client.request_ok(command.clone()).await {
+        Ok(data) => data,
+        Err(error) if crate::daemon_client::is_daemon_timeout(&error) => return Err(error),
+        Err(_) => client.request_ok(command).await?,
+    };
+    // Require the echo so workers that ignore the anchor fail closed.
+    if data.get("historyLeafId").and_then(Value::as_str) != Some(leaf_id.as_str()) {
+        return Err(anyhow::anyhow!("unverified history branch anchor"));
+    }
+    parse_page(data).await
 }
 
 /// Decode a page response off the UI thread.
@@ -540,6 +724,10 @@ mod tests {
             .send(TranscriptPageNote {
                 epoch: old_epoch,
                 kind: PageKind::Older,
+                request: TranscriptPage::End {
+                    before: Some("e1".to_string()),
+                    limit: CHUNK_MESSAGES,
+                },
                 page: Ok(LoadedPage {
                     entries: crate::snapshot::transcript_to_entries(&[
                         json!({"role": "user", "content": "stale history", "timestamp": 0}),
@@ -597,7 +785,12 @@ mod tests {
             last_id: Some("e1".to_string()),
             more: false,
         };
-        window.apply(PageKind::Head, page, &mut view);
+        let request = TranscriptPage::Start {
+            after: None,
+            until: Some("tail".to_string()),
+            limit: CHUNK_MESSAGES,
+        };
+        window.apply(PageKind::Head, request, page, &mut view);
         assert_eq!(
             view.chat,
             vec![ChatEntry::User {

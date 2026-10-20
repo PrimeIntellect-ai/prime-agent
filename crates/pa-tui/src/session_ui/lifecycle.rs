@@ -249,6 +249,7 @@ impl SessionUi {
             self.client.hard_close();
             anyhow::bail!("the session's durable id is unknown; cannot reattach");
         }
+        let anchor = self.reader_anchor(view);
         let attach = tokio::time::timeout(
             REATTACH_BUDGET,
             self.attach_session(&durable, DockFold::Held),
@@ -272,9 +273,9 @@ impl SessionUi {
                 return Ok(ReattachOutcome::AttachBudgetExceeded);
             }
         }
-        // Flush the attach snapshot BEFORE the banner lands: `rebuild_view` replaces the transcript
+        // Flush the attach snapshot BEFORE the banner lands: the rebuild replaces the transcript
         // from the snapshot, so the banner must come after it to survive the rebuild.
-        self.rebuild_view(view, &RebuildKind::Resync);
+        self.resync_view(anchor, view).await;
         match kind {
             RecoveryKind::Update => match complete {
                 Some(false) => view.push_entry(crate::chat::ChatEntry::Status {

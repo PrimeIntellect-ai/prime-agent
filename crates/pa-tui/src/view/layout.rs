@@ -188,6 +188,11 @@ pub(crate) struct TranscriptLayout {
 }
 
 impl TranscriptLayout {
+    /// The absolute first row of chat entry `index` (the end sentinel past the last entry).
+    pub(super) fn entry_start(&self, index: usize) -> usize {
+        self.offsets[index.min(self.offsets.len() - 1)]
+    }
+
     pub(super) fn cursor_at(&self, row: usize) -> (usize, usize) {
         if row < self.splash.len() {
             return (0, row);

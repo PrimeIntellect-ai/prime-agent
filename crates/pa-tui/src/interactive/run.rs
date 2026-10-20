@@ -1803,6 +1803,7 @@ async fn run_interactive_surface(
                 // The reconnect attempt's budget covers the attach alone: the surface is already
                 // up and its dock holds, so the first-frame fold's bounded fetches cannot eat the
                 // 10s attempt budget on a slow daemon.
+                let anchor = session.reader_anchor(&view);
                 let attempt = tokio::time::timeout(
                     Duration::from_secs(SESSION_RECONNECT_ATTEMPT_TIMEOUT_S),
                     session.attach_session(
@@ -1815,10 +1816,7 @@ async fn run_interactive_surface(
                     Ok(Ok(())) => {
                         // The resynced transcript replaces the chat, then the reconnected status
                         // lands on the rebuilt chat.
-                        session.rebuild_view(
-                            &mut view,
-                            &crate::session_ui::RebuildKind::Resync,
-                        );
+                        session.resync_view(anchor, &mut view).await;
                         session.note_as(
                             "Daemon reconnected",
                             crate::chat::StatusKind::Info,

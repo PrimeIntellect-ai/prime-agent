@@ -217,6 +217,31 @@ impl AgentView {
         self.sparse_window = Some(window);
     }
 
+    /// The chat entry and its row at the top of a paused viewport; `None` while following or
+    /// when the top is the splash or the tail section.
+    pub(crate) fn reader_position(&self) -> Option<(usize, usize)> {
+        if self.following {
+            return None;
+        }
+        let (section, row) = self.sparse_window?.cursor?;
+        (1..=self.chat.len())
+            .contains(&section)
+            .then(|| (section - 1, row))
+    }
+
+    /// Pause the viewport with row `row` of entry `index` at its top.
+    pub(crate) fn scroll_to_entry(&mut self, index: usize, row: usize) {
+        if self.layout_width == 0 {
+            return;
+        }
+        let sparse = self.sparse_enabled;
+        let offset = self.layout_pass(self.layout_width).entry_start(index) + row;
+        self.sparse_enabled = sparse;
+        self.sparse_window = None;
+        self.scroll_top = offset;
+        self.following = false;
+    }
+
     /// `count` leading entries above the window dropped: the cursor's entry moved up.
     pub(super) fn note_dropped_entries(&mut self, count: usize) {
         if let Some(window) = &mut self.sparse_window {
