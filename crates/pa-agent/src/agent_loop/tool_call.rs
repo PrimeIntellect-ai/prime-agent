@@ -7,7 +7,8 @@ use std::sync::Arc;
 use crate::abort::{is_abort_error, AbortSignal};
 use crate::types::{
     AfterToolCallContext, AgentContext, AgentEvent, AgentMessage, AgentTool, AgentToolResult,
-    AgentToolUpdateCallback, AssistantMessage, BeforeToolCallContext, ToolCall, ToolResultMessage,
+    AgentToolUpdateCallback, AssistantMessage, BeforeToolCallContext, ToolCall,
+    ToolProgressCadence, ToolResultMessage,
 };
 
 use super::abort::race_with_abort;
@@ -114,6 +115,7 @@ pub(crate) struct ExecutedToolCallOutcome {
 /// the tool fails (or aborts, with the TS message "Tool execution aborted").
 pub(crate) async fn execute_prepared_tool_call(
     prepared: &PreparedToolCall,
+    progress: ToolProgressCadence,
     signal: Option<&AbortSignal>,
     emit: &AgentEventSink,
 ) -> ExecutedToolCallOutcome {
@@ -125,6 +127,28 @@ pub(crate) async fn execute_prepared_tool_call(
     let tool_name = prepared.tool.name().to_string();
     let args = prepared.tool_call.arguments.clone();
     let sink = Arc::clone(emit);
+    let started_at = std::time::Instant::now();
+    // Lifecycle heartbeat: quiet until `progress.after_ms`, then one
+    // `ToolExecutionProgress` event every `progress.every_ms` while the call
+    // still runs, so a stalled call is visible while it runs (aborted after
+    // the execution race settles below).
+    let heartbeat = {
+        let sink = Arc::clone(emit);
+        let tool_call_id = tool_call_id.clone();
+        let tool_name = tool_name.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(progress.after_ms)).await;
+            loop {
+                let _ = sink(AgentEvent::ToolExecutionProgress {
+                    tool_call_id: tool_call_id.clone(),
+                    tool_name: tool_name.clone(),
+                    elapsed_ms: started_at.elapsed().as_millis() as u64,
+                })
+                .await;
+                tokio::time::sleep(std::time::Duration::from_millis(progress.every_ms)).await;
+            }
+        })
+    };
     let signal_for_updates = signal.cloned().unwrap_or_default();
     let emit_updates = tokio::spawn(async move {
         while let Some(partial_result) = update_rx.recv().await {
@@ -161,6 +185,8 @@ pub(crate) async fn execute_prepared_tool_call(
         signal,
     )
     .await;
+    heartbeat.abort();
+    let elapsed_ms = started_at.elapsed().as_millis() as u64;
 
     accepting_updates.store(false, std::sync::atomic::Ordering::SeqCst);
     drop(update_tx);
@@ -182,7 +208,7 @@ pub(crate) async fn execute_prepared_tool_call(
                         // Success path: a failing update emitter mirrors a
                         // rejecting updateEvents promise in TS.
                         return ExecutedToolCallOutcome {
-                            result: error_tool_result(signal, &error),
+                            result: error_tool_result(signal, &error, elapsed_ms),
                             is_error: true,
                         };
                     }
@@ -191,7 +217,7 @@ pub(crate) async fn execute_prepared_tool_call(
                     let aborted = signal.is_some_and(AbortSignal::is_aborted);
                     if !(aborted && is_abort_error(&error)) {
                         return ExecutedToolCallOutcome {
-                            result: error_tool_result(signal, &error),
+                            result: error_tool_result(signal, &error, elapsed_ms),
                             is_error: true,
                         };
                     }
@@ -216,19 +242,31 @@ pub(crate) async fn execute_prepared_tool_call(
             )
             .await;
             ExecutedToolCallOutcome {
-                result: error_tool_result(signal, &error),
+                result: error_tool_result(signal, &error, elapsed_ms),
                 is_error: true,
             }
         }
     }
 }
 
-fn error_tool_result(signal: Option<&AbortSignal>, error: &anyhow::Error) -> AgentToolResult {
-    if signal.is_some_and(AbortSignal::is_aborted) {
+fn error_tool_result(
+    signal: Option<&AbortSignal>,
+    error: &anyhow::Error,
+    elapsed_ms: u64,
+) -> AgentToolResult {
+    let aborted = signal.is_some_and(AbortSignal::is_aborted);
+    let mut result = if aborted {
         AgentToolResult::error("Tool execution aborted")
     } else {
         AgentToolResult::error(format!("{error:#}"))
-    }
+    };
+    // The aborted/killed completion carries the elapsed duration: without
+    // it the trace shows an aborted call but never how long it ran.
+    result.details = serde_json::json!({
+        "status": if aborted { "aborted" } else { "error" },
+        "durationMs": elapsed_ms,
+    });
+    result
 }
 
 /// Apply the `afterToolCall` overrides.

@@ -405,6 +405,35 @@ async fn persist_event(
                 eprintln!("pa-core: message row not persisted: {error}");
             }
         }
+        // Tool-call lifecycle rows: the start and running sides of the
+        // trace (the completion side is the toolResult message row). Like
+        // the message arm, a failed durable write never fails the run.
+        AgentEvent::ToolExecutionStart {
+            tool_call_id,
+            tool_name,
+            args,
+        } => {
+            let result = session
+                .lock()
+                .await
+                .append_tool_started(&tool_call_id, &tool_name, args);
+            if let Err(error) = result {
+                eprintln!("pa-core: tool_started row not persisted: {error}");
+            }
+        }
+        AgentEvent::ToolExecutionProgress {
+            tool_call_id,
+            tool_name,
+            elapsed_ms,
+        } => {
+            let result = session
+                .lock()
+                .await
+                .append_tool_progress(&tool_call_id, &tool_name, elapsed_ms);
+            if let Err(error) = result {
+                eprintln!("pa-core: tool_progress row not persisted: {error}");
+            }
+        }
         // Git state is captured at both run boundaries, exactly like the
         // TS run-boundary event path: a commit or branch switch made during the run
         // (e.g. via the bash tool) lands in the session file at `agent_end`.

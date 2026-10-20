@@ -826,6 +826,336 @@ async fn prompt_persists_tool_results() {
     assert!(entry["timestamp"].as_str().is_some());
 }
 
+/// The tool-call lifecycle trace: a `tool_started` row at call issuance
+/// (call id, tool name, the command text), `tool_progress` heartbeat ticks
+/// while a long call runs, and the completed result carrying its duration.
+/// A stalled call is visible in the session trace while it runs — the
+/// Oscar incident showed a 13-minute recursive grep with a blank trace
+/// between issuance and the user's cancel.
+#[tokio::test]
+async fn long_tool_call_persists_started_tick_and_duration_rows() {
+    struct SlowTool;
+    impl pa_agent::types::AgentTool for SlowTool {
+        fn name(&self) -> &'static str {
+            "slow"
+        }
+        fn description(&self) -> &'static str {
+            "sleeps before answering"
+        }
+        fn parameters(&self) -> &serde_json::Value {
+            static PARAMETERS: std::sync::OnceLock<serde_json::Value> = std::sync::OnceLock::new();
+            PARAMETERS.get_or_init(|| serde_json::json!({ "type": "object" }))
+        }
+        fn execute(
+            self: Arc<Self>,
+            _tool_call_id: String,
+            _params: serde_json::Value,
+            _signal: pa_agent::abort::AbortSignal,
+            _on_update: pa_agent::types::AgentToolUpdateCallback,
+        ) -> pa_agent::BoxFut<'static, anyhow::Result<pa_agent::types::AgentToolResult>> {
+            Box::pin(async {
+                let started = std::time::Instant::now();
+                // Staged long call: ~5s run with the tick threshold pinned
+                // at 1s, so the heartbeat fires well before completion.
+                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                let mut result = pa_agent::types::AgentToolResult::text("done");
+                result.details = serde_json::json!({
+                    "status": "ok",
+                    "durationMs": started.elapsed().as_millis() as u64,
+                });
+                Ok(result)
+            })
+        }
+    }
+    let provider = Arc::new(ScriptedProvider::new(test_model()));
+    provider.push_tool_call_turn(
+        Some("calling"),
+        vec![(
+            "call-1",
+            "slow",
+            serde_json::json!({ "command": "grep -rli training ~/" }),
+        )],
+    );
+    provider.push_text_turn("done");
+    let options = AgentOptions {
+        initial_state: AgentInitialState {
+            model: Some(test_model()),
+            ..Default::default()
+        },
+        stream_fn: Some(provider.stream_fn()),
+        tool_progress: Some(pa_agent::types::ToolProgressCadence {
+            after_ms: 1_000,
+            every_ms: 1_000,
+        }),
+        ..Default::default()
+    };
+    let agent = Agent::new(options);
+    agent.set_tools(vec![Arc::new(SlowTool)]).await;
+    let tmp = tempfile::tempdir().unwrap();
+    let session = SessionManager::persisted(std::path::Path::new("/w"), tmp.path());
+    let engine = AgentSession::new(Arc::new(agent), session, vec![])
+        .await
+        .unwrap();
+    engine.prompt("hi", PromptOptions::default()).await.unwrap();
+    engine.agent().wait_for_idle().await;
+    let entries = engine.entries().await;
+
+    let started = entries
+        .iter()
+        .find_map(|entry| match entry {
+            FileEntry::ToolStarted { payload, .. } => Some(payload.clone()),
+            _ => None,
+        })
+        .expect("tool_started row persisted");
+    assert_eq!(started.tool_call_id, "call-1");
+    assert_eq!(started.tool_name, "slow");
+    assert_eq!(
+        started.args,
+        serde_json::json!({ "command": "grep -rli training ~/" })
+    );
+
+    let ticks: Vec<pa_types::session::ToolProgressEntry> = entries
+        .iter()
+        .filter_map(|entry| match entry {
+            FileEntry::ToolProgress { payload, .. } => Some(payload.clone()),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        !ticks.is_empty(),
+        "a 5s call with a 1s tick must emit at least one tool_progress row"
+    );
+    assert!(ticks.len() <= 5, "ticks bounded by the cadence: {ticks:?}");
+    assert!(ticks.iter().all(|tick| tick.tool_call_id == "call-1"));
+    assert!(ticks.iter().all(|tick| tick.tool_name == "slow"));
+    assert!(
+        ticks
+            .iter()
+            .all(|tick| tick.elapsed_ms >= 900 && tick.elapsed_ms < 5_500),
+        "tick elapsed is wall-clock time since the call started: {ticks:?}"
+    );
+
+    let tool_result = entries
+        .iter()
+        .find_map(|entry| match entry {
+            FileEntry::Message {
+                message: SessionAgentMessage::ToolResult(result),
+                ..
+            } => Some(result.clone()),
+            _ => None,
+        })
+        .expect("toolResult entry persisted");
+    assert!(!tool_result.is_error);
+    assert_eq!(
+        tool_result.details.as_ref().and_then(|d| d.get("status")),
+        Some(&serde_json::json!("ok"))
+    );
+    let duration = tool_result
+        .details
+        .as_ref()
+        .and_then(|d| d.get("durationMs"))
+        .and_then(serde_json::Value::as_u64)
+        .expect("completed result carries durationMs");
+    assert!(duration >= 4_500, "durationMs: {duration}");
+
+    // The rows also live on disk in the session jsonl (the trace the
+    // session zip contains), with the new types round-tripping.
+    let file = tmp
+        .path()
+        .join(format!("{}.jsonl", engine.session_id().await))
+        .to_string_lossy()
+        .to_string();
+    let lines: Vec<serde_json::Value> = std::fs::read_to_string(file)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    let started_line = lines
+        .iter()
+        .find(|line| line.get("type") == Some(&serde_json::json!("tool_started")))
+        .expect("tool_started line on disk");
+    assert_eq!(started_line["toolCallId"], "call-1");
+    assert_eq!(started_line["toolName"], "slow");
+    assert_eq!(started_line["args"]["command"], "grep -rli training ~/");
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.get("type") == Some(&serde_json::json!("tool_progress"))),
+        "tool_progress line on disk"
+    );
+}
+
+/// The short-call contract: the start row and the result row persist, and
+/// the heartbeat stays quiet (no tool_progress row under the threshold).
+#[tokio::test]
+async fn short_tool_call_persists_started_row_without_progress() {
+    struct FastTool;
+    impl pa_agent::types::AgentTool for FastTool {
+        fn name(&self) -> &'static str {
+            "fast"
+        }
+        fn description(&self) -> &'static str {
+            "answers immediately"
+        }
+        fn parameters(&self) -> &serde_json::Value {
+            static PARAMETERS: std::sync::OnceLock<serde_json::Value> = std::sync::OnceLock::new();
+            PARAMETERS.get_or_init(|| serde_json::json!({ "type": "object" }))
+        }
+        fn execute(
+            self: Arc<Self>,
+            _tool_call_id: String,
+            _params: serde_json::Value,
+            _signal: pa_agent::abort::AbortSignal,
+            _on_update: pa_agent::types::AgentToolUpdateCallback,
+        ) -> pa_agent::BoxFut<'static, anyhow::Result<pa_agent::types::AgentToolResult>> {
+            Box::pin(async { Ok(pa_agent::types::AgentToolResult::text("done")) })
+        }
+    }
+    let provider = Arc::new(ScriptedProvider::new(test_model()));
+    provider.push_tool_call_turn(
+        Some("calling"),
+        vec![("call-1", "fast", serde_json::json!({}))],
+    );
+    provider.push_text_turn("done");
+    let options = AgentOptions {
+        initial_state: AgentInitialState {
+            model: Some(test_model()),
+            ..Default::default()
+        },
+        stream_fn: Some(provider.stream_fn()),
+        tool_progress: Some(pa_agent::types::ToolProgressCadence {
+            after_ms: 1_000,
+            every_ms: 1_000,
+        }),
+        ..Default::default()
+    };
+    let agent = Agent::new(options);
+    agent.set_tools(vec![Arc::new(FastTool)]).await;
+    let tmp = tempfile::tempdir().unwrap();
+    let session = SessionManager::in_memory(tmp.path());
+    let engine = AgentSession::new(Arc::new(agent), session, vec![])
+        .await
+        .unwrap();
+    engine.prompt("hi", PromptOptions::default()).await.unwrap();
+    engine.agent().wait_for_idle().await;
+    let entries = engine.entries().await;
+    assert!(
+        entries.iter().any(|entry| matches!(entry, FileEntry::ToolStarted { payload, .. } if payload.tool_call_id == "call-1")),
+        "short call still persists its tool_started row"
+    );
+    assert!(
+        entries
+            .iter()
+            .all(|entry| !matches!(entry, FileEntry::ToolProgress { .. })),
+        "a fast call must not emit tool_progress rows"
+    );
+    assert!(
+        entries
+            .iter()
+            .any(|entry| matches!(entry, FileEntry::Message { message: SessionAgentMessage::ToolResult(_), .. })),
+        "short call persists its toolResult row"
+    );
+}
+
+/// The aborted completion carries the elapsed duration: the trace shows how
+/// long the call ran before the kill, not just that it died. Before this
+/// fix, the aborted toolResult row carried only the bare "Tool execution
+/// aborted" text with no duration.
+#[tokio::test]
+async fn aborted_tool_call_result_carries_elapsed_duration() {
+    struct StalledTool(Arc<std::sync::atomic::AtomicBool>);
+    impl pa_agent::types::AgentTool for StalledTool {
+        fn name(&self) -> &'static str {
+            "stalled"
+        }
+        fn description(&self) -> &'static str {
+            "never finishes on its own"
+        }
+        fn parameters(&self) -> &serde_json::Value {
+            static PARAMETERS: std::sync::OnceLock<serde_json::Value> = std::sync::OnceLock::new();
+            PARAMETERS.get_or_init(|| serde_json::json!({ "type": "object" }))
+        }
+        fn execute(
+            self: Arc<Self>,
+            _tool_call_id: String,
+            _params: serde_json::Value,
+            _signal: pa_agent::abort::AbortSignal,
+            _on_update: pa_agent::types::AgentToolUpdateCallback,
+        ) -> pa_agent::BoxFut<'static, anyhow::Result<pa_agent::types::AgentToolResult>> {
+            let entered = Arc::clone(&self.0);
+            Box::pin(async move {
+                entered.store(true, std::sync::atomic::Ordering::SeqCst);
+                // The recursive-scan shape: unbounded runtime, only the
+                // abort ends it.
+                tokio::time::sleep(std::time::Duration::from_secs(600)).await;
+                Ok(pa_agent::types::AgentToolResult::text("done"))
+            })
+        }
+    }
+    let entered = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let provider = Arc::new(ScriptedProvider::new(test_model()));
+    provider.push_tool_call_turn(
+        Some("calling"),
+        vec![("call-1", "stalled", serde_json::json!({}))],
+    );
+    provider.push_text_turn("done");
+    let options = AgentOptions {
+        initial_state: AgentInitialState {
+            model: Some(test_model()),
+            ..Default::default()
+        },
+        stream_fn: Some(provider.stream_fn()),
+        ..Default::default()
+    };
+    let agent = Agent::new(options);
+    agent
+        .set_tools(vec![Arc::new(StalledTool(Arc::clone(&entered)))])
+        .await;
+    let tmp = tempfile::tempdir().unwrap();
+    let session = SessionManager::in_memory(tmp.path());
+    let engine = Arc::new(
+        AgentSession::new(Arc::new(agent), session, vec![])
+            .await
+            .unwrap(),
+    );
+    let prompt_engine = Arc::clone(&engine);
+    let prompting =
+        tokio::spawn(async move { prompt_engine.prompt("hi", PromptOptions::default()).await });
+    while !entered.load(std::sync::atomic::Ordering::SeqCst) {
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    // Let the call run briefly so the elapsed duration is non-zero.
+    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+    engine.agent().abort();
+    prompting.await.unwrap().unwrap();
+    engine.agent().wait_for_idle().await;
+    let entries = engine.entries().await;
+    let tool_result = entries
+        .iter()
+        .find_map(|entry| match entry {
+            FileEntry::Message {
+                message: SessionAgentMessage::ToolResult(result),
+                ..
+            } => Some(result.clone()),
+            _ => None,
+        })
+        .expect("aborted toolResult entry persisted");
+    assert!(tool_result.is_error);
+    match &tool_result.content[..] {
+        [pa_types::ai::UserContentBlock::Text(text)] => {
+            assert_eq!(text.text, "Tool execution aborted");
+        }
+        other => panic!("expected the abort error text: {other:?}"),
+    }
+    let details = tool_result.details.as_ref().expect("aborted result has details");
+    assert_eq!(details.get("status"), Some(&serde_json::json!("aborted")));
+    let duration = details
+        .get("durationMs")
+        .and_then(serde_json::Value::as_u64)
+        .expect("aborted result carries durationMs");
+    assert!(duration >= 100, "durationMs: {duration}");
+}
+
 /// Persisted `ipython`/`python` calls dispatch through `ToolDefinitionBridge`
 /// to the registered Python tool.
 #[tokio::test]
