@@ -79,6 +79,7 @@ pub struct Reconstructed {
     /// The session's effective service tier (`state.serviceTier`), the
     /// `/fast` toggle's baseline.
     pub service_tier: Option<String>,
+    pub model_fallback_message: Option<String>,
     /// The tail's oldest row when older history exists (the page cursor).
     pub history_before_entry_id: Option<String>,
     pub(crate) backfill_seam: BackfillSeam,
@@ -382,6 +383,11 @@ pub fn reconstruct(attach: &AttachData) -> Reconstructed {
         .and_then(|state| state.get("serviceTier"))
         .and_then(Value::as_str)
         .map(str::to_string);
+    let model_fallback_message = snapshot
+        .get("summary")
+        .and_then(|summary| summary.get("modelFallbackMessage"))
+        .and_then(Value::as_str)
+        .map(str::to_string);
     let history_before_entry_id = snapshot
         .get("historyBeforeEntryId")
         .and_then(Value::as_str)
@@ -415,6 +421,7 @@ pub fn reconstruct(attach: &AttachData) -> Reconstructed {
         cursor_present,
         queued,
         service_tier,
+        model_fallback_message,
         last_user_prompt_ms,
         history_before_entry_id,
         backfill_seam,

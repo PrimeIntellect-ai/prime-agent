@@ -287,6 +287,63 @@ fn glob_matches(pattern: &str, model: &Model) -> bool {
     }
 }
 
+/// Whether the scope would select this reference if it became available.
+/// Only the reference may join the authorized candidates; unrelated models
+/// from the full catalog must not change fuzzy selection.
+#[must_use]
+pub fn scope_patterns_select_reference(
+    patterns: &[String],
+    provider: &str,
+    model_id: &str,
+    available_models: &[Model],
+    all_models: &[Model],
+) -> bool {
+    let mut candidates = available_models.to_vec();
+    if !candidates
+        .iter()
+        .any(|model| model.provider == provider && model.id == model_id)
+    {
+        let Some(reference) = all_models
+            .iter()
+            .find(|model| model.provider == provider && model.id == model_id)
+            .cloned()
+            .or_else(|| build_fallback_model(provider, model_id, all_models))
+        else {
+            return false;
+        };
+        candidates.push(reference);
+    }
+    resolve_model_scope_from_models(patterns, &candidates)
+        .iter()
+        .any(|scoped| scoped.model.provider == provider && scoped.model.id == model_id)
+}
+
+fn pattern_matches<'a>(
+    pattern: &str,
+    available_models: &'a [Model],
+) -> (Vec<&'a Model>, Option<ThinkingLevel>, Option<String>) {
+    if pattern.contains('*') || pattern.contains('?') || pattern.contains('[') {
+        let (glob_pattern, thinking_level) = match pattern.rfind(':') {
+            Some(idx) if is_valid_thinking_level(&pattern[idx + 1..]) => {
+                (&pattern[..idx], parse_thinking_level(&pattern[idx + 1..]))
+            }
+            _ => (pattern, None),
+        };
+        let case_fold = glob_pattern.to_lowercase();
+        let matching = available_models
+            .iter()
+            .filter(|model| glob_matches(&case_fold, model) || glob_matches(glob_pattern, model))
+            .collect();
+        return (matching, thinking_level, None);
+    }
+    let parsed = parse_model_pattern(pattern, available_models, false);
+    (
+        parsed.model.into_iter().collect(),
+        parsed.thinking_level,
+        parsed.warning,
+    )
+}
+
 /// Resolve model patterns to scoped models: exact/fuzzy for plain patterns,
 /// glob expansion for wildcard patterns; `pattern:level` applies a level.
 #[must_use]
@@ -296,47 +353,21 @@ pub fn resolve_model_scope_from_models(
 ) -> Vec<ScopedModel> {
     let mut scoped: Vec<ScopedModel> = Vec::new();
     for pattern in patterns {
-        if pattern.contains('*') || pattern.contains('?') || pattern.contains('[') {
-            let (glob_pattern, thinking_level) = match pattern.rfind(':') {
-                Some(idx) if is_valid_thinking_level(&pattern[idx + 1..]) => {
-                    (&pattern[..idx], parse_thinking_level(&pattern[idx + 1..]))
-                }
-                _ => (pattern.as_str(), None),
-            };
-            let matching: Vec<&Model> = available_models
-                .iter()
-                .filter(|model| {
-                    let case_fold = glob_pattern.to_lowercase();
-                    glob_matches(&case_fold, model) || glob_matches(glob_pattern, model)
-                })
-                .collect();
-            if matching.is_empty() {
-                eprintln!("Warning: No models match pattern \"{pattern}\"");
-                continue;
-            }
-            for model in matching {
-                if !scoped.iter().any(|sm| models_equal(&sm.model, model)) {
-                    scoped.push(ScopedModel {
-                        model: model.clone(),
-                        thinking_level,
-                    });
-                }
-            }
-            continue;
-        }
-        let parsed = parse_model_pattern(pattern, available_models, false);
-        if let Some(warning) = &parsed.warning {
+        let (matching, thinking_level, warning) = pattern_matches(pattern, available_models);
+        if let Some(warning) = &warning {
             eprintln!("Warning: {warning}");
         }
-        let Some(model) = parsed.model else {
+        if matching.is_empty() {
             eprintln!("Warning: No models match pattern \"{pattern}\"");
             continue;
-        };
-        if !scoped.iter().any(|sm| models_equal(&sm.model, model)) {
-            scoped.push(ScopedModel {
-                model: model.clone(),
-                thinking_level: parsed.thinking_level,
-            });
+        }
+        for model in matching {
+            if !scoped.iter().any(|sm| models_equal(&sm.model, model)) {
+                scoped.push(ScopedModel {
+                    model: model.clone(),
+                    thinking_level,
+                });
+            }
         }
     }
     scoped
@@ -615,7 +646,8 @@ pub fn find_initial_model(options: &InitialModelOptions<'_>) -> Option<Model> {
 
 /// The private-model predicate without a full `Model` value (TS
 /// `isPrivatePrimeInferenceModel({ provider, id })`).
-fn is_private_prime_inference_reference(provider: &str, model_id: &str) -> bool {
+#[must_use]
+pub(super) fn is_private_prime_inference_reference(provider: &str, model_id: &str) -> bool {
     provider == "prime-inference"
         && super::prime_inference::is_private_prime_inference_model_id(model_id)
 }
@@ -643,6 +675,100 @@ mod tests {
             model("prime-inference", "z-ai/glm-5.3", "GLM"),
             model("openrouter", "openai/gpt-4o", "GPT-4o"),
         ]
+    }
+
+    #[test]
+    fn a_display_name_pattern_selects_a_cataloged_private_default() {
+        let all = private_prime_inference_models();
+        assert!(scope_patterns_select_reference(
+            &["GLM 5.2 Fast".to_string()],
+            "prime-inference",
+            "internal/glm-5.2-fast",
+            &all,
+            &all,
+        ));
+    }
+
+    #[test]
+    fn a_fuzzy_scope_uses_the_catalog_winner_not_a_singleton_default() {
+        let mut all = private_prime_inference_models();
+        all.push(model("prime-inference", "z-ai/glm-5.3", "GLM 5.3"));
+        let patterns = vec!["glm".to_string()];
+        let scoped = resolve_model_scope_from_models(&patterns, &all);
+        assert_eq!(
+            scoped
+                .iter()
+                .map(|entry| (entry.model.provider.as_str(), entry.model.id.as_str()))
+                .collect::<Vec<_>>(),
+            [("prime-inference", "z-ai/glm-5.3")]
+        );
+        assert!(!scope_patterns_select_reference(
+            &patterns,
+            "prime-inference",
+            "internal/glm-5.2-fast",
+            &all,
+            &all,
+        ));
+        assert!(scope_patterns_select_reference(
+            &patterns,
+            "prime-inference",
+            "z-ai/glm-5.3",
+            &all,
+            &all,
+        ));
+    }
+
+    #[test]
+    fn an_unlisted_private_reference_competes_with_the_full_catalog() {
+        let mut all = private_prime_inference_models();
+        all.push(model("prime-inference", "z-ai/glm-5.3", "GLM 5.3"));
+        for (pattern, selected) in [
+            ("glm", false),
+            ("prime-inference/internal/glm-5.9-turbo", true),
+            ("prime-inference/internal/*:high", true),
+        ] {
+            assert_eq!(
+                scope_patterns_select_reference(
+                    &[pattern.to_string()],
+                    "prime-inference",
+                    "internal/glm-5.9-turbo",
+                    &all,
+                    &all,
+                ),
+                selected,
+                "pattern {pattern}"
+            );
+        }
+    }
+
+    #[test]
+    fn unavailable_competitors_do_not_hide_a_missing_scoped_default() {
+        let available = vec![model("prime-inference", "a-glm-5.2", "Public GLM 5.2")];
+        let mut all = private_prime_inference_models();
+        all.extend(available.iter().cloned());
+        all.push(model("custom", "zz-glm-5.2", "Unavailable GLM 5.2"));
+        let patterns = vec!["glm-5.2".to_string()];
+        assert_eq!(
+            resolve_model_scope_from_models(&patterns, &available)
+                .iter()
+                .map(|entry| entry.model.id.as_str())
+                .collect::<Vec<_>>(),
+            ["a-glm-5.2"]
+        );
+        assert!(scope_patterns_select_reference(
+            &patterns,
+            "prime-inference",
+            "internal/glm-5.2-fast",
+            &available,
+            &all,
+        ));
+        assert!(!scope_patterns_select_reference(
+            &patterns,
+            "prime-inference",
+            "internal/glm-5.2-fast",
+            &all,
+            &all,
+        ));
     }
 
     #[test]
