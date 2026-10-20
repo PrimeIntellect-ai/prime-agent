@@ -244,7 +244,12 @@ impl SessionUi {
         view: &mut AgentView,
     ) {
         match panel {
-            crate::interactive::SessionPanel::Shells => self.open_bash_view(view),
+            crate::interactive::SessionPanel::Shells { shell_id } => {
+                self.open_bash_view(view);
+                if let (Some(id), Some(bash_view)) = (shell_id, view.bash_view.as_mut()) {
+                    bash_view.select(&id);
+                }
+            }
             crate::interactive::SessionPanel::FactoryRuns => self.open_factory_page(view),
         }
         self.panel_returns_to_agents_view = view.bash_view.is_some() || view.factory_view.is_some();

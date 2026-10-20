@@ -51,7 +51,7 @@ fn next_spinner_deadline(started: Instant, now: Instant) -> Instant {
 /// The open route for one interactive run (TS `runAgentsViewLoop`'s
 /// open versus the CLI's own open): the agents-view open waits through a
 /// daemon update restart (TS #2391) instead of failing the open hard.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum SessionOpenRoute {
     /// The CLI's open (`prime-agent`, `--resume`, `--attach`): a single attempt.
     Cli,

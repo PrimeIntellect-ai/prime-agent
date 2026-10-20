@@ -868,7 +868,10 @@ mod backfill_tests {
                 "prime",
                 crate::theme::ColorMode::TrueColor,
             ));
-            session.open_agents_view_panel(crate::interactive::SessionPanel::Shells, &mut view);
+            session.open_agents_view_panel(
+                crate::interactive::SessionPanel::Shells { shell_id: None },
+                &mut view,
+            );
             session.rebuild_view(&mut view, &RebuildKind::Rebind);
             assert!(view.bash_view.is_none(), "the rebind tore the panel down");
             session.open_bash_view(&mut view);
@@ -887,6 +890,69 @@ mod backfill_tests {
         })
         .await
         .expect("mock session open, rebind and panel close complete within ten seconds");
+    }
+
+    /// An agents-view shell open selects its shell in the Bash panel, also when the shell lands in
+    /// a later poll than the panel's first (empty) snapshot.
+    #[tokio::test]
+    async fn an_agents_view_shell_open_selects_its_shell() {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            let dir = tempfile::tempdir().unwrap();
+            let socket = dir.path().join("shell.sock");
+            let (mut session, server) = mock_session(&socket, mpsc::unbounded_channel().0).await;
+            let shells = json!({"activities": [
+                {"id": "a", "command": "cargo build", "status": "running"},
+                {"id": "s2", "command": "sleep 600", "status": "running"},
+            ]});
+            for preloaded in [true, false] {
+                let theme =
+                    || crate::theme::Theme::builtin("prime", crate::theme::ColorMode::TrueColor);
+                let mut view = AgentView::new(theme());
+                session.bash_activities = if preloaded {
+                    shells.clone()
+                } else {
+                    json!({"activities": []})
+                };
+                session.open_agents_view_panel(
+                    crate::interactive::SessionPanel::Shells {
+                        shell_id: Some("s2".to_string()),
+                    },
+                    &mut view,
+                );
+                if !preloaded {
+                    session.apply_bash_activity(
+                        crate::session_ui::bash::BashActivityUpdate::List {
+                            session: session.active_session_id.clone(),
+                            epoch: session.bash_list_epoch,
+                            data: shells.clone(),
+                        },
+                        &mut view,
+                    );
+                }
+                let lines = view.bash_view.as_ref().expect("the Bash panel").render(
+                    &theme(),
+                    80,
+                    view.editor.keybindings(),
+                );
+                let selected = lines
+                    .iter()
+                    .map(|line| {
+                        line.iter()
+                            .map(|span| span.content.as_str())
+                            .collect::<String>()
+                    })
+                    .find(|text| text.starts_with('\u{203a}'))
+                    .expect("a selected row");
+                assert!(
+                    selected.contains("sleep 600"),
+                    "preloaded {preloaded}: {selected}"
+                );
+            }
+            drop(session);
+            server.abort();
+        })
+        .await
+        .expect("mock session open and both panel opens complete within ten seconds");
     }
 
     #[tokio::test]

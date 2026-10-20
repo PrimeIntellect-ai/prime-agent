@@ -45,7 +45,7 @@ fn enter_on_the_shells_line_opens_the_node_with_the_shells_panel() {
         opened.selection,
         SessionSelection::Attach("p-live".to_string())
     );
-    assert_eq!(opened.panel, Some(SessionPanel::Shells));
+    assert_eq!(opened.panel, Some(SessionPanel::Shells { shell_id: None }));
     assert_eq!(opened.selected_row_identity, "shells:file:/x/p.jsonl");
     assert!(opened.expanded_ancestors.is_empty());
 }

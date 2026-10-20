@@ -632,9 +632,16 @@ pub fn build_layout(rows: &[crate::agents_view_forest::AgentsViewRow], width: us
         .iter()
         .filter(|row| row.kind != crate::agents_view_forest::RowKind::Code)
         .collect();
+    let cost = |row: &crate::agents_view_forest::AgentsViewRow| {
+        if row.kind == crate::agents_view_forest::RowKind::PersistentShell {
+            "-".to_string()
+        } else {
+            format!("${:.2}", row.cost)
+        }
+    };
     let cost_width = rows
         .iter()
-        .map(|row| str_width(&format!("${:.2}", row.cost)))
+        .map(|row| str_width(&cost(row)))
         .max()
         .unwrap_or(0)
         .max(4);
@@ -668,12 +675,7 @@ pub fn build_layout(rows: &[crate::agents_view_forest::AgentsViewRow], width: us
     headings.push(detail_line("Cost", "Age"));
     let details = rows
         .iter()
-        .map(|row| {
-            (
-                row.identity.clone(),
-                detail_line(&format!("${:.2}", row.cost), &row.age),
-            )
-        })
+        .map(|row| (row.identity.clone(), detail_line(&cost(row), &row.age)))
         .collect();
     RowLayout {
         legend: table_cell(&headings.join("  "), width),

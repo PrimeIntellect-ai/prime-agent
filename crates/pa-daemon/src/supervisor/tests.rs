@@ -823,14 +823,14 @@ fn saved_session_rows_publish_deleted_descendant_usage() {
         output_tokens: 110,
         cost: 0.5,
     });
-    let row = saved_session_row(&info);
+    let row = saved_session_row(&info, &std::collections::HashMap::new());
     assert_eq!(
         row["deletedDescendantUsage"],
         json!({ "inputTokens": 1_100, "outputTokens": 110, "cost": 0.5 })
     );
     // Absent again: the field never rides as a null.
     info.deleted_descendant_usage = None;
-    let row = saved_session_row(&info);
+    let row = saved_session_row(&info, &std::collections::HashMap::new());
     assert!(row.get("deletedDescendantUsage").is_none());
 }
 
@@ -850,7 +850,7 @@ fn saved_session_rows_carry_the_persisted_thinking_level() {
     let summary = saved_session_summary(&info);
     assert_eq!(summary["thinkingLevel"], json!("high"));
     assert!(summary["model"].is_null(), "saved rows carry no model");
-    let row = saved_session_row(&info);
+    let row = saved_session_row(&info, &std::collections::HashMap::new());
     assert_eq!(row["thinkingLevel"], json!("high"));
     assert_eq!(row["model"], json!({ "provider": "p", "modelId": "m" }));
     // A session file without a persisted level stays bare (a fresh
@@ -864,9 +864,11 @@ fn saved_session_rows_carry_the_persisted_thinking_level() {
     assert!(saved_session_summary(&draft_info)
         .get("thinkingLevel")
         .is_none());
-    assert!(saved_session_row(&draft_info)
-        .get("thinkingLevel")
-        .is_none());
+    assert!(
+        saved_session_row(&draft_info, &std::collections::HashMap::new())
+            .get("thinkingLevel")
+            .is_none()
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -889,7 +891,7 @@ fn saved_session_rows_publish_the_own_usage_summary() {
     }));
     session.rewrite().unwrap();
     let info = crate::session_store::read_session_info(&path).unwrap();
-    let row = saved_session_row(&info);
+    let row = saved_session_row(&info, &std::collections::HashMap::new());
     assert_eq!(
         row["usage"],
         json!({ "inputTokens": 105, "outputTokens": 10, "cost": 0.25 })
@@ -905,7 +907,11 @@ fn saved_session_rows_publish_the_own_usage_summary() {
     draft.set_path(draft_path.clone());
     draft.rewrite().unwrap();
     let draft_info = crate::session_store::read_session_info(&draft_path).unwrap();
-    assert!(saved_session_row(&draft_info).get("usage").is_none());
+    assert!(
+        saved_session_row(&draft_info, &std::collections::HashMap::new())
+            .get("usage")
+            .is_none()
+    );
     assert!(saved_session_summary(&draft_info).get("usage").is_none());
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -949,7 +955,7 @@ fn saved_session_rows_match_the_catalog_row_golden() {
 
     let info = crate::session_store::read_session_info(&path).unwrap();
     assert_eq!(
-        saved_session_row(&info),
+        saved_session_row(&info, &std::collections::HashMap::new()),
         json!({
             "path": path.to_string_lossy(),
             "id": "golden-session",

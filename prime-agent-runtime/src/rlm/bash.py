@@ -94,14 +94,14 @@ _MAX_DEGRADE_HINTS = 3
 _degrade_hints_written = 0
 
 
-def _note_degrade(handle: "BashHandle") -> None:
+def _note_degrade(handle: "BashHandle", bound: float) -> None:
     """Write the degrade hint to the awaiting cell's stderr, within budget."""
     global _degrade_hints_written
     if _degrade_hints_written >= _MAX_DEGRADE_HINTS:
         return
     _degrade_hints_written += 1
     sys.stderr.write(
-        f"bash: still running after {handle._yield_after:g}s (pid {handle._pid}); "
+        f"bash: still running after {bound:g}s (pid {handle._pid}); "
         "returned a snapshot: r.running is True, r.output is the output so "
         "far, r.handle is the live handle. End the turn — a [bash-done] "
         "notification arrives when it finishes.\n"
@@ -147,6 +147,22 @@ _ACTIVITY_HISTORY_CAP = 64
 _live_lock = threading.Lock()
 _hook_installed = False
 _hook_lock = threading.Lock()
+
+# bash(persistent=True): every session's persistent shells live in one home
+# under the agent dir (the cross-language contract pa-daemon reads): per shell
+# a <id>.json record assigned to its session (RLM_SESSION_ID, the durable
+# session id the host exports), plus <id>.out and <id>.rc.
+_PERSISTENT_DIR = "persistent-shells"
+_PERSISTENT_POLL = 1.0
+# Gate on stdin, then run the command in its own shell so exit/exec/set -e
+# cannot skip the atomic status write.
+_PERSISTENT_WRAPPER = (
+    "read -r _prime_agent_gate || exit 127\n"
+    "exec 0</dev/null\n"
+    '"$1" -c "$2"\n'
+    "__prime_status=$?\n"
+    "printf '%s\\n' \"$__prime_status\" > \"$3.tmp\" && mv -f \"$3.tmp\" \"$3\"\n"
+)
 
 
 def _current_cell_completion_context() -> tuple[asyncio.Event, asyncio.Task[Any] | None] | None:
@@ -365,8 +381,8 @@ class BashHandle:
 
     def __init__(self, command: str, yield_after: float | None = None) -> None:
         self.command = command
-        # The bound every await of this handle uses (None = unbounded); the
-        # caller's effective value, resolved once in bash().
+        # The requested bound (None = the session default); every await
+        # resolves it through _effective_yield_after.
         self._yield_after = yield_after
         self._activity_id = secrets.token_hex(16)
         completion_context = _current_cell_completion_context()
@@ -1054,13 +1070,14 @@ class BashHandle:
         except RuntimeError:
             current_task = None
         creating_cell_waited = _creating_cell_waits_for(self._creating_cell_task, current_task)
+        bound = _effective_yield_after(self._yield_after)
         owned = not self._released
         wait = self._wait_owned() if owned else self._wait()
         self._released = True
         completed = False
         degraded = False
         try:
-            result = yield from _bounded_wait(wait, self._yield_after).__await__()
+            result = yield from _bounded_wait(wait, bound).__await__()
             if result is None:
                 degraded = True
             else:
@@ -1080,7 +1097,7 @@ class BashHandle:
             if completed:
                 self._note_result_consumed(current_task)
         if degraded:
-            _note_degrade(self)
+            _note_degrade(self, cast("float", bound))
             return self._degrade_snapshot()
         return cast("BashResult", result)
 
@@ -1107,7 +1124,193 @@ class BashHandle:
         return f"<BashHandle pid={self._pid} {state} command={self.command!r}>"
 
 
-def bash(command: str, yield_after: float | None = None) -> BashHandle:
+class _OutputFile:
+    """Bounded view of a persistent shell's output file: first _HEAD_CAP plus last _TAIL_CAP bytes.
+
+    keep() holds the final text in memory, so the file can be removed.
+    """
+
+    def __init__(self, path: str) -> None:
+        self._path = path
+        self._kept: str | None = None
+
+    def keep(self) -> None:
+        self._kept = self.text()
+
+    def text(self) -> str:
+        if self._kept is not None:
+            return self._kept
+        try:
+            f = open(self._path, "rb")
+        except FileNotFoundError:
+            return ""
+        with f:
+            size = os.fstat(f.fileno()).st_size
+            if size <= _HEAD_CAP + _TAIL_CAP:
+                return f.read(size).decode("utf-8", errors="replace")
+            head = f.read(_HEAD_CAP)
+            f.seek(size - _TAIL_CAP)
+            tail = f.read(_TAIL_CAP)
+        marker = f"\n... [{size - _HEAD_CAP - _TAIL_CAP} bytes dropped] ...\n"
+        return head.decode("utf-8", errors="replace") + marker + tail.decode("utf-8", errors="replace")
+
+
+class PersistentBashHandle(BashHandle):
+    """bash(..., persistent=True); see bash() for its lifecycle.
+
+    Its record (assigned to the session), output, and exit status are files in
+    the agent dir's persistent-shells home instead of an orphan journal entry.
+    Awaits never own it: cancelling an await leaves it running. Finished
+    output is kept in memory. Files remain recoverable on read errors or when
+    a leaderless group cannot be verified because no watcher saw its leader
+    exit; such a group is never signalled using only its old numeric
+    process-group id.
+    """
+
+    def __init__(
+        self,
+        command: str,
+        shell_id: str,
+        pid: int,
+        start_id: str,
+        started_at: str,
+        home: str,
+        proc: subprocess.Popen[bytes] | None,
+        running: bool = True,
+        yield_after: float | None = None,
+    ) -> None:
+        self.command = command
+        self._yield_after = yield_after
+        self._activity_id = shell_id
+        completion_context = _current_cell_completion_context()
+        self._creating_cell_finished = completion_context[0] if completion_context else None
+        self._creating_cell_task = completion_context[1] if completion_context else None
+        self._awaited_by_creating_cell = False
+        self._home = home
+        self._buffer = _OutputFile(_persistent_file(home, shell_id, "out"))  # type: ignore[assignment]
+        self._rc_path = _persistent_file(home, shell_id, "rc")
+        self._done = threading.Event()
+        self._result: BashResult | None = None
+        self._completion_error: OSError | ValueError | None = None
+        self._callbacks: list[Callable[[], None]] = []
+        self._reap_callback: Callable[[], None] | None = None
+        self._result_consumed = False
+        self._consumed_notice: Callable[[], None] | None = None
+        self._callback_lock = threading.Lock()
+        self._reaped = False
+        self._kill_lock = threading.Lock()
+        self._started_at = started_at
+        self._started = time.monotonic() - max(
+            0.0, (datetime.now(timezone.utc) - datetime.fromisoformat(started_at)).total_seconds()
+        )
+        self._pid = pid
+        self._start_id = start_id
+        self._proc = proc  # type: ignore[assignment]
+        self._released = True
+        with _live_lock:
+            _activity_handles[shell_id] = self
+        threading.Thread(target=self._watch, args=(running,), daemon=True).start()
+        self._schedule_background_completion_notice()
+
+    def kill(self, sig: int = signal.SIGTERM, grace: float = 5.0) -> None:
+        # Even a fresh Popen may have been reaped by the watcher before it
+        # commits _reaped. Every persistent signal must check its identity.
+        with self._kill_lock:
+            if self._reaped or _shell_identity(self._pid, self._start_id) is not True:
+                return
+            super().kill(sig, grace)
+
+    def _force_kill(self) -> None:
+        with self._kill_lock:
+            if not self._reaped:
+                _reap_persistent_group(self._pid, self._start_id)
+
+    def _watch(self, running: bool) -> None:
+        # running=False: the shell finished while no kernel ran; its pid may
+        # since name another process, so it is never polled or signalled.
+        exit_code = -1
+        if self._proc is not None:
+            exit_code = self._proc.wait()
+        elif running:
+            # Not our child, so nothing to wait() on: poll the rc file and the
+            # pid identity (completion lags by up to _PERSISTENT_POLL seconds).
+            while not os.path.exists(self._rc_path) and _shell_identity(self._pid, self._start_id) is not False:
+                time.sleep(_PERSISTENT_POLL)
+        try:
+            with open(self._rc_path) as f:
+                exit_code = int(f.read())
+        except FileNotFoundError:
+            pass  # killed before the wrapper recorded a status
+        except (OSError, ValueError) as error:
+            self._completion_error = error
+        # A dead leader's group can still contain the shell's children. A live
+        # recycled pid instead names a stranger's group and must not be signalled.
+        with self._kill_lock:
+            reaped = _reap_persistent_group(
+                self._pid, self._start_id, leader_exit_witnessed=self._proc is not None or running
+            )
+            self._reaped = True
+        try:
+            cast("_OutputFile", self._buffer).keep()
+        except OSError as error:
+            self._completion_error = error
+        if self._completion_error is None and reaped:
+            _remove_shell_files(self._home, self._activity_id)
+        # Failed I/O must settle waiters too, without losing the recoverable files.
+        self._finalize(exit_code, "" if self._completion_error is not None else None)
+        with self._callback_lock:
+            callback, self._reap_callback = self._reap_callback, None
+        if callback is not None:
+            callback()
+        with _live_lock:
+            _activity_order.append(self._activity_id)
+            while len(_activity_order) > _ACTIVITY_HISTORY_CAP:
+                _activity_handles.pop(_activity_order.popleft(), None)
+
+    async def _wait(self) -> BashResult:
+        result = await super()._wait()
+        if self._completion_error is not None:
+            raise self._completion_error
+        return result
+
+    def poll(self) -> BashResult | None:
+        result = super().poll()
+        if result is not None and self._completion_error is not None:
+            raise self._completion_error
+        return result
+
+    def _schedule_background_completion_notice(self) -> None:
+        # No bash-activity residency hold: the shell survives kernel release.
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        loop.create_task(self._notify_completion()).add_done_callback(_consume_notice_task)
+
+    async def _notify_completion(self) -> None:
+        from . import repl
+
+        try:
+            result = await self._wait()
+            if self._creating_cell_finished is not None:
+                await self._creating_cell_finished.wait()
+            if self._awaited_by_creating_cell or self._result_consumed or not repl.is_active():
+                return
+            command = _capped(self.command)
+            reply = await repl.host_request(
+                {"type": "bash.completed", "pid": self._pid, "command": command, "exitCode": result.exit_code}
+            )
+            if isinstance(reply, dict) and reply.get("status") == "ok":
+                self._arm_consumed_notice(command)
+        except (OSError, RuntimeError):
+            return
+
+    def __repr__(self) -> str:
+        state = f"exit_code={self._result.exit_code}" if self._result else "running"
+        return f"<BashHandle persistent pid={self._pid} {state} command={self.command!r}>"
+
+
+def bash(command: str, yield_after: float | None = None, persistent: bool = False) -> BashHandle:
     """Start a shell command immediately; await the handle for the result.
 
     `await bash(cmd)` is a one-shot: cancelling the await (e.g. an interrupt)
@@ -1129,13 +1332,29 @@ def bash(command: str, yield_after: float | None = None) -> BashHandle:
     Output written after the completion fence (e.g. by an EXIT trap or a
     background job) is not in BashResult.output but stays visible via
     handle.output()/tail().
+
+    persistent=True (POSIX, saved sessions only; use only when really
+    required, e.g. a server or long job that must outlive a restart): the
+    shell survives kernel, worker, and daemon restarts and its session's
+    delete or archive (a deleted session's shells keep running as orphans);
+    only its own exit or an explicit kill() ends it. Its output and exit
+    status live in files under the agent dir, and awaits never own it: an
+    await bounded by yield_after degrades as for any handle and the shell runs
+    on. After a restart, get the handles back with `from rlm import
+    persistent_shells; persistent_shells()`; a shell that finished while no
+    kernel ran is listed once, finished. Completion of a re-attached shell is
+    polled, so its result and completion notice lag by up to a second; its
+    exit_code is -1 when it was killed before recording a status.
     """
     if not isinstance(command, str) or not command:
         raise TypeError("command must be a non-empty str")
     if yield_after is not None and yield_after <= 0:
         raise ValueError("yield_after must be a positive number of seconds")
-    _install_shutdown_hook()
-    handle = BashHandle(command, _effective_yield_after(yield_after))
+    if persistent:
+        handle: BashHandle = _spawn_persistent(command, yield_after)
+    else:
+        _install_shutdown_hook()
+        handle = BashHandle(command, yield_after)
     from . import repl
 
     repl.emit(
@@ -1257,6 +1476,185 @@ def _system32(*parts: str) -> str:
 
 def _helper_env() -> dict[str, str]:
     return {**os.environ, "NoDefaultCurrentDirectoryInExePath": "1"}
+
+
+def _persistent_home() -> str:
+    return os.path.join(os.environ["PRIME_AGENT_CODING_AGENT_DIR"], _PERSISTENT_DIR)
+
+
+def _persistent_file(home: str, shell_id: str, kind: str) -> str:
+    return os.path.join(home, f"{shell_id}.{kind}")
+
+
+def _remove_shell_files(home: str, shell_id: str) -> None:
+    # The record goes last: until then, the next boot still finds and removes the rest.
+    for kind in ("rc", "out", "json"):
+        try:
+            os.remove(_persistent_file(home, shell_id, kind))
+        except OSError:
+            pass
+
+
+def _session_records(home: str, session_id: str) -> list[dict[str, Any]]:
+    """The records assigned to session_id, oldest first."""
+    try:
+        names = os.listdir(home)
+    except FileNotFoundError:
+        return []
+    records = []
+    for name in names:
+        if not name.endswith(".json"):
+            continue
+        try:
+            with open(os.path.join(home, name)) as f:
+                record = json.load(f)
+        except FileNotFoundError:
+            continue  # its kernel removed the finished shell meanwhile
+        if record["sessionId"] == session_id:
+            records.append(record)
+    return sorted(records, key=lambda record: record["startedAt"])
+
+
+def _pid_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        pass
+    # kill(0) also accepts zombies. Match the host's liveness policy so a
+    # reattached shell can finish without waiting for another process to reap it.
+    try:
+        if sys.platform.startswith("linux"):
+            with open(f"/proc/{pid}/stat") as stat_file:
+                stat = stat_file.read()
+            return stat[stat.rindex(")") + 2:].split()[0] != "Z"
+        if sys.platform == "darwin":
+            state = subprocess.run(
+                ["/bin/ps", "-p", str(pid), "-o", "stat="],
+                capture_output=True, text=True, timeout=5,
+                env={**os.environ, "LC_ALL": "C", "LANG": "C"},
+            )
+            return state.returncode != 0 or not state.stdout.lstrip().startswith("Z")
+    except (OSError, ValueError, IndexError, subprocess.SubprocessError):
+        pass  # unknown state stays alive; never claim a recycled group
+    return True
+
+
+def _shell_identity(pid: int, start_id: str) -> bool | None:
+    """True while pid still names the recorded shell, False once it is provably
+    gone (dead, or recycled under a new start identity), None when unprovable."""
+    if not _pid_alive(pid):
+        return False
+    current = _process_start_id(pid)
+    return None if current is None else current == start_id
+
+
+def _spawn_persistent(command: str, yield_after: float | None) -> PersistentBashHandle:
+    if not _IS_POSIX:
+        raise RuntimeError("bash(persistent=True) is only supported on POSIX")
+    session_id = os.environ.get("RLM_SESSION_ID")
+    if not session_id:
+        raise RuntimeError(
+            "bash(persistent=True) needs a saved session (RLM_SESSION_ID is unset): "
+            "the shell is assigned to the session that started it"
+        )
+    home = _persistent_home()
+    shell_id = secrets.token_hex(16)
+    os.makedirs(home, exist_ok=True)
+    shell = _shell()
+    script = f'{{\n{_with_prefix(command)}\n}}\n__prime_status=$?\nwait\nexit "$__prime_status"\n'
+    with open(_persistent_file(home, shell_id, "out"), "wb") as out:
+        proc = subprocess.Popen(
+            [shell, "-c", _PERSISTENT_WRAPPER, "prime-agent-persistent", shell, script,
+             _persistent_file(home, shell_id, "rc")],
+            cwd=os.getcwd(),
+            env=_child_env(),
+            stdin=subprocess.PIPE,
+            stdout=out,
+            stderr=subprocess.STDOUT,
+            start_new_session=True,
+        )
+    gate = cast("Any", proc.stdin)
+    try:
+        # The wrapper runs nothing until the shell is registered: a failure
+        # (or a kernel death) before the gate byte closes the pipe instead.
+        start_id = _process_start_id(proc.pid)
+        if start_id is None:
+            raise RuntimeError("bash(persistent=True): the shell's start identity is unreadable")
+        started_at = datetime.now(timezone.utc).isoformat()
+        record = {
+            "id": shell_id, "pid": proc.pid, "startId": start_id, "command": command,
+            "startedAt": started_at, "sessionId": session_id,
+        }
+        path = _persistent_file(home, shell_id, "json")
+        with open(f"{path}.tmp", "w") as f:
+            json.dump(record, f)
+        os.replace(f"{path}.tmp", path)
+        gate.write(b"\n")
+    finally:
+        gate.close()
+    return PersistentBashHandle(
+        command, shell_id, proc.pid, start_id, started_at, home, proc, yield_after=yield_after
+    )
+
+
+def persistent_shells() -> list[BashHandle]:
+    """This kernel's persistent bash() handles, including the ones re-attached at boot.
+
+    After a kernel restart (or a worker/daemon restart), call this to get the
+    session's persistent shells back. A shell that finished while no kernel ran
+    is listed once, finished, in the first kernel after it ended.
+    """
+    with _live_lock:
+        return [h for h in _activity_handles.values() if isinstance(h, PersistentBashHandle)]
+
+
+def _rehydrate_persistent_shells() -> None:
+    """Kernel boot: re-attach this session's live shells, surface the ones that
+    finished while no kernel ran, and remove its dead ones. Records with an
+    unprovable identity and other sessions' records stay untouched."""
+    session_id = os.environ.get("RLM_SESSION_ID")
+    if not session_id or not _IS_POSIX:
+        return
+    home = _persistent_home()
+    for record in _session_records(home, session_id):
+        identity = _shell_identity(record["pid"], record["startId"])
+        if identity is None:
+            continue
+        if identity or os.path.exists(_persistent_file(home, record["id"], "rc")):
+            PersistentBashHandle(
+                record["command"], record["id"], record["pid"], record["startId"], record["startedAt"],
+                home, None, identity,
+            )
+        elif _reap_persistent_group(record["pid"], record["startId"]):
+            _remove_shell_files(home, record["id"])
+
+
+def _reap_persistent_group(pid: int, start_id: str, leader_exit_witnessed: bool = False) -> bool:
+    """Reap stragglers without ever signalling a live recycled or unverified pid."""
+    # Existence is distinct from liveness: a recycled zombie can still own an
+    # unrelated group. It must pass the same start-identity check as a live pid.
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        if leader_exit_witnessed:
+            return _signal_group(pid, signal.SIGKILL)
+        # A durable record can outlive its original group. An extant group
+        # without the recorded leader may be a reused PGID: retain it, do not kill.
+        try:
+            os.killpg(pid, 0)
+        except ProcessLookupError:
+            return True
+        except OSError:
+            return False
+        return False
+    except PermissionError:
+        pass
+    current = _process_start_id(pid)
+    if current == start_id:
+        return _signal_group(pid, signal.SIGKILL)
+    return current is not None
 
 
 def _taskkill_tree(pid: int) -> bool:
@@ -1424,6 +1822,7 @@ def activity_request(action: str, activity_id: str | None = None, lines: int = 5
                 "durationMs": int((handle._result.duration if handle._result else time.monotonic() - handle._started) * 1000),
                 "status": "finished" if handle._reaped else "running",
                 "exitCode": handle._result.exit_code if handle._result else None,
+                "persistent": isinstance(handle, PersistentBashHandle),
             }
             for key, handle in handles
         ]

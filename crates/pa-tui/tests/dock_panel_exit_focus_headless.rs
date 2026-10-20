@@ -553,7 +553,7 @@ fn goal_panel_left_returns_to_the_dock_item() {
 fn agents_view_shells_panel_esc_returns_to_the_agents_view() {
     let outcome = run_plan_with(
         vec![wait_render("render the frames"), key(KeyCode::Esc)],
-        Some(SessionPanel::Shells),
+        Some(SessionPanel::Shells { shell_id: None }),
         None,
     );
     assert!(

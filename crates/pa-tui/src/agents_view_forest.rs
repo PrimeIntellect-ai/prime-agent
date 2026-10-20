@@ -54,7 +54,7 @@ pub struct AgentsViewRow {
     pub has_spawn_code: bool,
 }
 
-/// The list row shapes (TS `AgentsViewRowKind`, plus the activity lines).
+/// The list row shapes (TS `AgentsViewRowKind`, plus the activity lines and persistent shells).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RowKind {
     /// A top-level agent row.
@@ -69,6 +69,8 @@ pub enum RowKind {
     Shells,
     /// The node's own live factory runs line.
     FactoryRuns,
+    /// One machine-wide persistent shell with its assigned session.
+    PersistentShell,
 }
 
 /// The summary line's identity prefix (the `subagents:` prefix, so a carried selection
@@ -105,7 +107,8 @@ impl AgentsViewRow {
             | RowKind::SubagentSummary
             | RowKind::Subagent
             | RowKind::Shells
-            | RowKind::FactoryRuns => true,
+            | RowKind::FactoryRuns
+            | RowKind::PersistentShell => true,
         }
     }
 }

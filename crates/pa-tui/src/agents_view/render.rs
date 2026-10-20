@@ -15,6 +15,14 @@ impl AgentsViewMode {
     ) -> (Vec<Line>, Option<(usize, usize)>) {
         // The frame height feeds the page step (TS reads `ui.terminal.rows` live at key time).
         self.last_height = height;
+        if let Some(view) = self.shell_view.as_mut() {
+            view.set_viewport_rows(height);
+            self.click_rows.clear();
+            self.hover_row = None;
+            let mut lines = view.render(&self.theme, width, &self.keybindings);
+            lines.resize_with(height, Vec::new);
+            return (lines, None);
+        }
         let mut lines: Vec<Line> = Vec::new();
         // The splash counts agent-kind rows only — nested subagent and summary rows never
         // inflate the header.
@@ -275,6 +283,7 @@ impl AgentsViewMode {
         enum DisplayItem<'a> {
             Spacer,
             Heading(Section),
+            ShellsHeading(usize),
             Row(usize, &'a AgentsViewRow),
             /// One note line of the selected row's expansion; one item per
             /// line so the viewport clips at line granularity.
@@ -317,6 +326,20 @@ impl AgentsViewMode {
         // While a query is active the list is a ranked picker: one flat, relevance-ordered run
         // of hits (per-row icons carry the status), not status section blocks.
         if self.query.trim().is_empty() {
+            let shells: Vec<(usize, &AgentsViewRow)> = self
+                .rows
+                .iter()
+                .enumerate()
+                .filter(|(_, row)| row.kind == RowKind::PersistentShell)
+                .collect();
+            if !shells.is_empty() {
+                display.push(DisplayItem::ShellsHeading(shells.len()));
+                display.extend(
+                    shells
+                        .into_iter()
+                        .map(|(index, row)| DisplayItem::Row(index, row)),
+                );
+            }
             for (section, count) in &counts {
                 if *count == 0 {
                     continue;
@@ -421,6 +444,12 @@ impl AgentsViewMode {
                     lines.push(vec![self.theme.fg(
                         ThemeColor::Muted,
                         truncate_text(&format!("{} ({count})", section_title(*section)), width),
+                    )]);
+                }
+                DisplayItem::ShellsHeading(count) => {
+                    lines.push(vec![self.theme.fg(
+                        ThemeColor::Muted,
+                        truncate_text(&format!("Persistent shells ({count})"), width),
                     )]);
                 }
                 DisplayItem::Row(index, row) => {
@@ -542,6 +571,7 @@ impl AgentsViewMode {
             return finish_session_row(theme, line, selected, hovered, width);
         }
         let icon = match row.section {
+            _ if row.kind == RowKind::PersistentShell => "$",
             Section::Running => ["\u{25c7}", "\u{25c8}", "\u{25c6}", "\u{25c8}"][self.pulse % 4],
             _ => "\u{2022}",
         };

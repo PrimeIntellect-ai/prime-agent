@@ -80,9 +80,12 @@ pub enum SessionSelection {
 
 /// The session panel an agents-view activity line mounts when its session opens; the panel's close
 /// returns to the agents view.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SessionPanel {
-    Shells,
+    /// The Bash panel, on `shell_id`'s row when a persistent shell row opened it.
+    Shells {
+        shell_id: Option<String>,
+    },
     FactoryRuns,
 }
 
@@ -94,7 +97,7 @@ pub enum SessionPanel {
 pub const TELEMETRY_EXIT_TIMEOUT_MS: u64 = 500;
 
 /// The kernel activity poll cadence: the session's shells/factory refresh and the agents view's
-/// activity-line counts.
+/// activity-line counts and persistent shells list.
 pub(crate) const ACTIVITY_POLL_INTERVAL: Duration = Duration::from_secs(2);
 
 /// Explicit model selection carried into every `create` config: the CLI
