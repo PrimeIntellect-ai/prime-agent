@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex, Weak};
 
 use serde_json::Value;
 
-use crate::kernel::shared::{host_handler, HostRequestHandlers};
+use crate::kernel::shared::{host_handler, HostRequestHandlers, BASH_COMPLETED_REQUEST_TYPE};
 use pa_agent::types::AgentMessage;
 
 use super::messages::{self, ASYNC_BASH_COMPLETION_CUSTOM_TYPE};
@@ -51,7 +51,7 @@ pub fn register_bash_notice_host_handlers(
     handlers: &mut HostRequestHandlers,
 ) {
     handlers.register(
-        "bash.completed",
+        BASH_COMPLETED_REQUEST_TYPE,
         host_handler(move |payload| {
             let completion = completion.clone();
             Box::pin(async move {

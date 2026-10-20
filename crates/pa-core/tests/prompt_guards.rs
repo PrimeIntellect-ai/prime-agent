@@ -548,11 +548,10 @@ fn bundled_skills_match_the_ts_packaged_set() {
     );
 }
 
-/// The bounded-await contract renders only in daemon sessions: the
-/// runtime half (the degrade) exists only where the host registers the
-/// bash completion notice, so a daemonless prompt must carry no trace of it.
+/// The bounded-await contract renders wherever the Python REPL does: every session kind, daemon
+/// or daemonless, registers the bash completion notice the degrade relies on.
 #[test]
-fn bounded_await_contract_render_is_daemon_only() {
+fn bounded_await_contract_renders_in_daemon_and_daemonless_sessions() {
     let mut options = BuildSystemPromptOptions {
         cwd: "/w".to_string(),
         messages_path: Some("/log.jsonl".to_string()),
@@ -560,24 +559,16 @@ fn bounded_await_contract_render_is_daemon_only() {
         selected_tools: Some(vec!["python_repl"]),
         ..Default::default()
     };
-    let daemon = system_prompt_breakdown(&options);
-    assert!(
-        daemon.assembled.contains("yield_after")
-            && daemon.assembled.contains("[bash-done]")
-            && daemon.assembled.contains("`r.running` is True")
-            && daemon.assembled.contains("`r.exit_code` is None"),
-        "the daemon session prompt must carry the bounded-await result contract"
-    );
-    options.daemonless = true;
-    let daemonless = system_prompt_breakdown(&options);
-    assert!(
-        !daemonless.assembled.contains("yield_after")
-            && !daemonless.assembled.contains("[bash-done]")
-            && !daemonless.assembled.contains("still-running snapshot")
-            && !daemonless.assembled.contains("about 10 seconds"),
-        "the daemonless session prompt must not leak the bounded-await contract: {0}",
-        daemonless.assembled
-    );
+    for daemonless in [false, true] {
+        options.daemonless = daemonless;
+        let prompt = system_prompt_breakdown(&options).assembled;
+        assert!(
+            prompt.contains("yield_after")
+                && prompt.contains("`r.running` is True")
+                && prompt.contains("`r.exit_code` is None"),
+            "daemonless={daemonless}: the prompt must carry the bounded-await result contract: {prompt}"
+        );
+    }
 }
 
 /// The generic mcp skill loads through the normal markdown discovery and renders in the
