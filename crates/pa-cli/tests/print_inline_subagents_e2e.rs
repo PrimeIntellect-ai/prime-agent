@@ -1105,3 +1105,151 @@ Path("cancel-child-finished").write_text("unexpected")
         "cancelled child's Python process {child_pid} outlived the print run"
     );
 }
+
+/// The injected `[bash-done]` row in one session file's entries (the
+/// `async_bash_completion` custom row the completion handler steers).
+fn bash_done_row(entries: &[serde_json::Value]) -> serde_json::Value {
+    entries
+        .iter()
+        .find(|entry| {
+            entry.get("type").and_then(|t| t.as_str()) == Some("custom_message")
+                && entry.get("customType").and_then(|t| t.as_str()) == Some("async_bash_completion")
+        })
+        .cloned()
+        .unwrap_or_else(|| panic!("the [bash-done] completion row: {entries:?}"))
+}
+
+/// The root print session wakes on a background `bash()` completion
+/// (audit #3; TS registers `bash.completed` in every mode): turn 1
+/// starts a detached command and ends, the run stays open (the
+/// quiescence predicate counts live background bash), and the
+/// completion row steers onto the agent and runs as the second turn.
+#[test]
+fn print_root_wakes_on_a_background_bash_completion() {
+    let lane = lane();
+    let kernel = PrintLane::kernel_python();
+    let script = serde_json::json!({
+        "responses": [
+            { "content": [
+                { "type": "toolCall", "name": "ipython",
+                  "arguments": { "code": "h = bash(\"sleep 3; echo BG_DONE\")\nprint(\"STARTED\", h.pid)" } },
+            ] },
+            "WAITING",
+            { "content": [
+                { "type": "toolCall", "name": "ipython",
+                  "arguments": { "code": "print(\"WOKEN\", \"BG_DONE\" in h.output())" } },
+            ] },
+            "COMPLETED WOKEN",
+        ],
+        "repeatLastResponse": true,
+    });
+    let (stdout, stderr, code) = lane.run(
+        &["-p", "run the long command in the background"],
+        &script,
+        &kernel,
+        &[],
+    );
+    assert_eq!(code, 0, "stderr: {stderr}\nstdout: {stdout}");
+    assert_eq!(
+        stdout.trim_end(),
+        "COMPLETED WOKEN",
+        "the completion row ran as the second turn, not the pre-completion \"WAITING\" answer"
+    );
+
+    // The injected row is durable in the session transcript.
+    let entries = PrintLane::entries(&lane.parent_session_file());
+    let row = bash_done_row(&entries);
+    assert_eq!(
+        row.pointer("/details/exitCode")
+            .and_then(serde_json::Value::as_i64),
+        Some(0),
+        "the row carries the finished exit code: {row}"
+    );
+}
+
+/// A spawned child's own background `bash()` holds the print run open
+/// (TS `child.isSessionActive` includes the kernel's background work):
+/// the child's completion row wakes its driver, the reply turn runs,
+/// and the parent answers with the combined text before it exits.
+#[test]
+fn print_inline_child_wakes_on_a_background_bash_completion() {
+    let lane = lane();
+    let kernel = PrintLane::kernel_python();
+    let script = serde_json::json!({
+        "responses": [
+            { "content": [
+                { "type": "toolCall", "name": "ipython",
+                  "arguments": { "code": "kid = await rlm.spawn(\"run the background task\", name=\"bgkid\")\nprint(\"KID\", kid.rlm_child_id)" } },
+            ] },
+            "WAITING",
+            "COMBINED KID-BG-RESULT",
+        ],
+        "repeatLastResponse": true,
+        "children": {
+            "bgkid": { "responses": [
+                { "content": [
+                    { "type": "toolCall", "name": "ipython",
+                      "arguments": { "code": "h = bash(\"sleep 3; echo KID_BG\")\nprint(\"KID STARTED\")" } },
+                ] },
+                "kid waiting",
+                { "content": [
+                    { "type": "toolCall", "name": "ipython",
+                      "arguments": { "code": "await agent_message.send(\"KID-BG-RESULT\", receiver_role=\"parent\")\nprint(\"KID WOKEN\", \"KID_BG\" in h.output())" } },
+                ] },
+                "kid finished",
+            ] },
+        },
+    });
+    let (stdout, stderr, code) = lane.run(
+        &["-p", "delegate the background work"],
+        &script,
+        &kernel,
+        &[],
+    );
+    assert_eq!(code, 0, "stderr: {stderr}\nstdout: {stdout}");
+    assert_eq!(
+        stdout.trim_end(),
+        "COMBINED KID-BG-RESULT",
+        "the child's completion woke its driver and the reply drained before the exit"
+    );
+
+    // The reply the woken child sent is durable in the parent's
+    // transcript (on a base tree the parent's "combined" turn runs over
+    // the no-reply notice instead).
+    let parent_file = lane.parent_session_file();
+    let parent_text = serde_json::to_string(&PrintLane::entries(&parent_file)).unwrap();
+    assert!(
+        parent_text.contains("KID-BG-RESULT"),
+        "the woken child's reply reached the parent: {parent_text}"
+    );
+    let parent_id = Path::new(&parent_file)
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .expect("the parent session id")
+        .to_string();
+    let artifacts = lane.agent_dir.join("session-artifacts").join(&parent_id);
+    let child_dirs: Vec<PathBuf> = std::fs::read_dir(&artifacts)
+        .expect("the child's session dir exists")
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with("sub-"))
+        })
+        .collect();
+    assert_eq!(child_dirs.len(), 1, "one child session dir: {child_dirs:?}");
+    let kid_file: Vec<PathBuf> = std::fs::read_dir(&child_dirs[0])
+        .unwrap()
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| path.extension().and_then(|e| e.to_str()) == Some("jsonl"))
+        .collect();
+    let row = bash_done_row(&PrintLane::entries(&kid_file[0]));
+    assert_eq!(
+        row.pointer("/details/exitCode")
+            .and_then(serde_json::Value::as_i64),
+        Some(0),
+        "the child's row carries the finished exit code: {row}"
+    );
+}
