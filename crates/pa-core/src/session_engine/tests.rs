@@ -1050,9 +1050,13 @@ async fn short_tool_call_persists_started_row_without_progress() {
         "a fast call must not emit tool_progress rows"
     );
     assert!(
-        entries
-            .iter()
-            .any(|entry| matches!(entry, FileEntry::Message { message: SessionAgentMessage::ToolResult(_), .. })),
+        entries.iter().any(|entry| matches!(
+            entry,
+            FileEntry::Message {
+                message: SessionAgentMessage::ToolResult(_),
+                ..
+            }
+        )),
         "short call persists its toolResult row"
     );
 }
@@ -1147,7 +1151,10 @@ async fn aborted_tool_call_result_carries_elapsed_duration() {
         }
         other => panic!("expected the abort error text: {other:?}"),
     }
-    let details = tool_result.details.as_ref().expect("aborted result has details");
+    let details = tool_result
+        .details
+        .as_ref()
+        .expect("aborted result has details");
     assert_eq!(details.get("status"), Some(&serde_json::json!("aborted")));
     let duration = details
         .get("durationMs")

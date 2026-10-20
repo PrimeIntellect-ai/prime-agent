@@ -426,10 +426,11 @@ async fn persist_event(
             tool_name,
             elapsed_ms,
         } => {
-            let result = session
-                .lock()
-                .await
-                .append_tool_progress(&tool_call_id, &tool_name, elapsed_ms);
+            let result =
+                session
+                    .lock()
+                    .await
+                    .append_tool_progress(&tool_call_id, &tool_name, elapsed_ms);
             if let Err(error) = result {
                 eprintln!("pa-core: tool_progress row not persisted: {error}");
             }
