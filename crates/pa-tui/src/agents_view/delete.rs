@@ -41,13 +41,22 @@ pub(super) enum DeleteAction {
     },
     /// A saved, non-live agent: delete the session file
     /// (`delete_saved_session`).
-    DeleteSavedSession { session_path: String, name: String },
+    DeleteSavedSession {
+        session_path: String,
+        name: String,
+    },
+    StopShell {
+        shell_id: String,
+        name: String,
+    },
 }
 
 impl DeleteAction {
     fn success_message(&self) -> String {
         match self {
-            DeleteAction::StopSubagent { name, .. } | DeleteAction::StopAgent { name, .. } => {
+            DeleteAction::StopSubagent { name, .. }
+            | DeleteAction::StopAgent { name, .. }
+            | DeleteAction::StopShell { name, .. } => {
                 format!("Stopped {name}")
             }
             DeleteAction::DeleteSubagent { name, .. } => {
@@ -61,7 +70,9 @@ impl DeleteAction {
 
     fn fail_word(&self) -> &'static str {
         match self {
-            DeleteAction::StopSubagent { .. } | DeleteAction::StopAgent { .. } => "Stop",
+            DeleteAction::StopSubagent { .. }
+            | DeleteAction::StopAgent { .. }
+            | DeleteAction::StopShell { .. } => "Stop",
             DeleteAction::DeleteSubagent { .. } | DeleteAction::DeleteSavedSession { .. } => {
                 "Delete"
             }
@@ -81,7 +92,7 @@ impl DeleteAction {
             DeleteAction::DeleteSubagent { .. } => {
                 data.get("deleted") != Some(&serde_json::json!(false))
             }
-            DeleteAction::StopAgent { .. } => true,
+            DeleteAction::StopAgent { .. } | DeleteAction::StopShell { .. } => true,
             DeleteAction::DeleteSavedSession { .. } => {
                 data.get("ok").map(serde_json::Value::as_bool) != Some(Some(false))
             }
@@ -153,6 +164,11 @@ pub(super) fn spawn_delete_dispatch(
                     rest: serde_json::Map::default(),
                 }
             }
+            DeleteAction::StopShell { shell_id, .. } => DaemonCommand::KillPersistentShell {
+                id: None,
+                shell_id: shell_id.clone(),
+                rest: serde_json::Map::default(),
+            },
         };
         // The outcome's tone is explicit: success muted, a no-effect stop warning, a
         // failure error — the status line never re-derives it from the text.
@@ -192,7 +208,8 @@ pub(super) fn spawn_delete_dispatch(
             DeleteAction::DeleteSavedSession { .. }
             | DeleteAction::StopSubagent { .. }
             | DeleteAction::DeleteSubagent { .. }
-            | DeleteAction::StopAgent { .. } => None,
+            | DeleteAction::StopAgent { .. }
+            | DeleteAction::StopShell { .. } => None,
         };
         let _ = ui_tx.send(UiInput::DeleteResult {
             message: outcome,
@@ -225,7 +242,10 @@ impl AgentsViewMode {
         let row = self.rows.get(self.selected)?;
         let stop = Self::delete_arm_word(row);
         match row.kind {
-            RowKind::SubagentSummary | RowKind::Code => None,
+            RowKind::SubagentSummary | RowKind::Code | RowKind::Shells | RowKind::FactoryRuns => {
+                None
+            }
+            RowKind::PersistentShell => Some(()),
             // An agent with a live session stops (an idle-but-live row still stops, never
             // deletes its file); a saved-only row deletes.
             RowKind::Agent if row.summary.get("activeSessionId").is_some() => row
@@ -313,7 +333,10 @@ impl AgentsViewMode {
     /// The row's stop-or-delete word: true while the row rides a live session or the running
     /// section, false for a saved-only row.
     pub(super) fn delete_arm_word(row: &AgentsViewRow) -> bool {
-        if row.summary.get("rlmChildId").is_some() {
+        if row.kind == RowKind::PersistentShell {
+            // A listed shell is live: it always stops.
+            true
+        } else if row.summary.get("rlmChildId").is_some() {
             // A child rides its own activity: the running section is its live work, an idle
             // child deletes — the retained activeSessionId on an idle child is not live work.
             row.section == crate::agents_view_state::Section::Running
@@ -344,7 +367,10 @@ impl AgentsViewMode {
         // Subagent rows (and promoted children) target the child through
         // the parent's live session.
         if let Some(child_id) = child_id {
-            if row.kind == RowKind::SubagentSummary {
+            if matches!(
+                row.kind,
+                RowKind::SubagentSummary | RowKind::Shells | RowKind::FactoryRuns
+            ) {
                 return None;
             }
             // The child arms always run through the PARENT's session: a scoped promoted child has
@@ -366,7 +392,15 @@ impl AgentsViewMode {
         // Agent rows: a live session stops (idle-but-live included); a saved-only row deletes
         // its file.
         match row.kind {
-            RowKind::SubagentSummary | RowKind::Subagent | RowKind::Code => None,
+            RowKind::SubagentSummary
+            | RowKind::Subagent
+            | RowKind::Code
+            | RowKind::Shells
+            | RowKind::FactoryRuns => None,
+            RowKind::PersistentShell => {
+                let shell_id = row.summary.get("shellId")?.as_str()?.to_string();
+                Some(DeleteAction::StopShell { shell_id, name })
+            }
             RowKind::Agent => {
                 if let Some(active_session_id) = active_session_id {
                     Some(DeleteAction::StopAgent {
