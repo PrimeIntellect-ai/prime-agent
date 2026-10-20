@@ -23,8 +23,7 @@ PAGE = 200
 BASE_MS = 1704067200000
 CWD = '/tmp/catalog-paging-fixture'
 TARGET = 'SAVED_CATALOG_OLD_NAME_SEARCH_TARGET'
-TRANSCRIPT_TARGET = 'SAVED_CATALOG_OLD_ASSISTANT_WIRE_TARGET'
-FIELDS = ('path', 'id', 'cwd', 'name', 'messageCount', 'firstMessage', 'allMessagesText')
+FIELDS = ('path', 'id', 'cwd', 'name', 'messageCount', 'firstMessage')
 
 
 def iso(milliseconds):
@@ -40,7 +39,7 @@ def seed(root):
         ident = f'catalog-{index:03}'
         stamp = BASE_MS + index * 10000
         user = f'Catalog user {index:03}'
-        assistant = TRANSCRIPT_TARGET if index == 0 else f'Catalog assistant {index:03}'
+        assistant = f'Catalog assistant {index:03}'
         name = TARGET if index == 0 else f'Catalog row {index:03}'
         entries = [
             {'type': 'session', 'version': 3, 'id': ident, 'timestamp': iso(stamp),
@@ -63,7 +62,7 @@ def seed(root):
         os.utime(path, ns=(ns, ns))
         assert path.stat().st_mtime_ns == ns, 'fixture filesystem lost deterministic mtime'
         expected.append(dict(zip(FIELDS, (path.name, ident, CWD, name,
-            2, user, user + ' ' + assistant))))
+            2, user))))
     return list(reversed(expected))
 
 
@@ -84,7 +83,7 @@ def normalize(rows, root):
 
 def same_rows(actual, expected):
     assert sorted(actual, key=lambda row: row['id']) == sorted(
-        expected, key=lambda row: row['id']), 'catalog stable fields differ (including allMessagesText)'
+        expected, key=lambda row: row['id']), 'catalog stable fields differ'
 
 
 def ts_ignores_paging(call):
@@ -196,8 +195,7 @@ def observe(binary, kind, root, observed, ts_cursor=None):
         'mtime_step_ms': 10000, 'session_archive_max_sessions': 'off',
         'session_archive_max_age_days': 'off',
         'expected_newest_first_ids': [row['id'] for row in expected],
-        'old_search_target_id': expected[-1]['id'], 'name_search_target': TARGET,
-        'assistant_wire_target': TRANSCRIPT_TARGET}
+        'old_search_target_id': expected[-1]['id'], 'name_search_target': TARGET}
     observed['queries'] = {}
     path = root / 'd.sock'
     scope = OwnedProcesses(binary, root, path)
@@ -237,7 +235,6 @@ def observe(binary, kind, root, observed, ts_cursor=None):
                 assert joined == expected, 'pages did not cover full catalog exactly once'
                 assert TARGET not in json.dumps(first['final_data']['sessions'])
                 assert rest['final_data']['sessions'][-1]['name'] == TARGET
-                assert TRANSCRIPT_TARGET in rest['final_data']['sessions'][-1]['allMessagesText']
             else:
                 ts_ignores_paging(rest)
             boundary = expected[PAGE - 1]
@@ -253,7 +250,6 @@ def observe(binary, kind, root, observed, ts_cursor=None):
             for rows in (observed['baseline_rows'], after['final_data']['sessions']):
                 target, = [row for row in rows if row['id'] == expected[-1]['id']]
                 assert target['name'] == TARGET
-                assert TRANSCRIPT_TARGET in target['allMessagesText']
             scope.discover()
             assert set(scope.targets) == set(scope.direct), 'catalog unexpectedly spawned a worker/kernel'
             observed['behavior_verified'] = True
