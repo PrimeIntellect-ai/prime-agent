@@ -120,6 +120,7 @@ pub fn kick_queue_pump(
     tokio::spawn(async move {
         let _lane = state.queue_pump.lock().await;
         if state.session.pump_generation() != generation
+            || state.session.shutdown_fired()
             || !state.session.engine_is_live(&engine).await
             || state.session.is_replacing()
         {
@@ -128,6 +129,7 @@ pub fn kick_queue_pump(
         let agent = engine.session.agent();
         loop {
             if state.session.pump_generation() != generation
+                || state.session.shutdown_fired()
                 || !state.session.engine_is_live(&engine).await
                 || state.session.is_replacing()
             {
@@ -173,6 +175,32 @@ pub fn kick_queue_pump(
             if agent.continue_run().await.is_err() {
                 break;
             }
+        }
+    });
+}
+
+/// Serve the live engine's background-bash wakes: every wake kicks the
+/// queued-work pump, so the `[bash-done]` row a completion steers onto
+/// the agent runs as a turn with no client command driving it. The
+/// handle's wake is re-read each cycle, so a replacement rebinds.
+pub fn serve_background_bash_wakes(state: &Arc<RpcState>) {
+    let state = Arc::clone(state);
+    tokio::spawn(async move {
+        loop {
+            let (bash_wake, engine) = {
+                let handle = state.session.handle().await;
+                (Arc::clone(&handle.bash_wake), Arc::clone(&handle.engine))
+            };
+            let notified = bash_wake.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            // A wake that fired between the handle read and the armed
+            // park already queued its row: kick before parking.
+            if engine.session.agent().has_queued_messages() {
+                kick_queue_pump(&state, &engine);
+            }
+            notified.await;
+            kick_queue_pump(&state, &engine);
         }
     });
 }
