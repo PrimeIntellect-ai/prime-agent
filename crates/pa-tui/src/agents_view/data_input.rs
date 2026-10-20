@@ -296,6 +296,7 @@ impl AgentsViewMode {
         let rows = std::mem::take(&mut self.saved_stream);
         self.upsert_saved(rows);
         self.rebuild_rows();
+        self.settle_pending_shell_open();
         true
     }
 
@@ -328,7 +329,7 @@ impl AgentsViewMode {
             .saved_more
             .as_ref()
             .filter(|_| !self.saved_fetch_failed)?;
-        if !self.query.trim().is_empty() {
+        if !self.query.trim().is_empty() || self.pending_shell_open.is_some() {
             return Some((more.cursor.clone(), None));
         }
         if self.anchor_selection_pending {
@@ -357,6 +358,7 @@ impl AgentsViewMode {
         if self.saved_more.is_none() {
             self.end_anchor_wait();
         }
+        self.settle_pending_shell_open();
     }
 
     /// Drop the unflushed stream batch: the terminal response replaces the catalog wholesale, and
@@ -365,10 +367,11 @@ impl AgentsViewMode {
         self.saved_stream.clear();
     }
 
-    /// The saved-catalog fetch settled on a terminal failure: the entry anchor's wait ends with
-    /// it (the anchor's row can only arrive through this fetch).
+    /// The saved-catalog fetch settled on a terminal failure: the entry anchor's wait and a
+    /// pending shell open end with it (their rows can only arrive through this fetch).
     pub(super) fn settle_anchor_wait_on_saved_failure(&mut self) {
         self.end_anchor_wait();
+        self.pending_shell_open = None;
     }
 
     /// One search edit (TS `queryChanged`). The rebuilt list selects its

@@ -114,6 +114,64 @@ fn enter_on_a_shell_while_the_catalog_loads_opens_nothing() {
     assert_eq!(mode.status_text(), Some(ANCHOR_LOADING_HINT));
 }
 
+/// The first catalog page holds only `newer`; the store has more files after it.
+fn mode_with_a_partial_catalog() -> AgentsViewMode {
+    let mut mode = fresh_mode(Vec::new());
+    mode.apply_saved_loaded(vec![saved_catalog_row("/x/new.jsonl", "new", "newer")]);
+    mode.rebuild_rows();
+    mode.finish_saved_page(Some(SavedMore {
+        cursor: "page-two".to_string(),
+        remaining: 300,
+    }));
+    mode.apply_persistent_shells(serde_json::json!({ "activities": [
+        shell("s1", "cargo watch", "older"),
+    ]}));
+    mode
+}
+
+#[test]
+fn enter_on_a_shell_of_a_session_past_the_loaded_pages_opens_that_session() {
+    let mut mode = mode_with_a_partial_catalog();
+    enter_on_shell(&mut mode, "s1");
+    assert!(
+        mode.opened.is_none() && mode.shell_view.is_none(),
+        "a partial catalog cannot prove the session deleted"
+    );
+    assert_eq!(
+        mode.next_saved_fetch(),
+        Some(("page-two".to_string(), None)),
+        "the daemon walks the rest of the store"
+    );
+    mode.buffer_saved_stream_item(saved_catalog_row("/x/older.jsonl", "older", "older"));
+    mode.flush_saved_stream();
+    let opened = mode.opened.as_ref().expect("the session opens once listed");
+    assert_eq!(
+        opened.selection,
+        SessionSelection::Resume(PathBuf::from("/x/older.jsonl"))
+    );
+    assert_eq!(
+        opened.panel,
+        Some(SessionPanel::Shells {
+            shell_id: Some("s1".to_string())
+        })
+    );
+}
+
+#[test]
+fn enter_on_a_shell_of_a_session_missing_from_the_whole_store_opens_the_orphans() {
+    let mut mode = mode_with_a_partial_catalog();
+    enter_on_shell(&mut mode, "s1");
+    mode.upsert_saved(Vec::new());
+    mode.rebuild_rows();
+    mode.finish_saved_page(None);
+    assert!(mode.opened.is_none());
+    let text = frame(&mut mode).join("\n");
+    assert!(
+        text.contains("Session deleted") && text.contains("cargo watch"),
+        "{text}"
+    );
+}
+
 #[test]
 fn enter_on_an_orphan_lists_the_orphans_with_it_selected() {
     let mut mode = fresh_mode(vec![roster_entry("p", "idle", &parent_summary("p"))]);

@@ -158,8 +158,8 @@ impl AgentsViewMode {
     }
 
     /// Enter on a shell row: its session opens on the Bash panel with the shell selected; an orphan
-    /// opens the bash view over the orphans with it selected, once the catalog says the session is
-    /// gone.
+    /// opens the bash view over the orphans with it selected, once the daemon's walk of the whole
+    /// store says the session is gone (a shell's session may sit past the loaded pages).
     pub(super) fn open_persistent_shell(&mut self, row: &AgentsViewRow) {
         let Some(id) = row.summary.get("shellId").and_then(Value::as_str) else {
             return;
@@ -194,7 +194,8 @@ impl AgentsViewMode {
             }
             return;
         }
-        if !self.saved_catalog_loaded {
+        if !self.saved_catalog_loaded || self.saved_more.is_some() {
+            self.pending_shell_open = Some(id.to_string());
             self.set_status(ANCHOR_LOADING_HINT);
             return;
         }
@@ -205,6 +206,22 @@ impl AgentsViewMode {
         .with_subtitle("Session deleted");
         view.select(id);
         self.shell_view = Some(view);
+    }
+
+    /// Retry the pending shell open after the catalog grew or its walk ended, while its row is
+    /// still the selected one (moving the selection away abandons it).
+    pub(super) fn settle_pending_shell_open(&mut self) {
+        let Some(id) = self.pending_shell_open.take() else {
+            return;
+        };
+        if let Some(row) = self
+            .rows
+            .get(self.selected)
+            .filter(|row| row.identity == format!("{ROW_PREFIX}{id}"))
+            .cloned()
+        {
+            self.open_persistent_shell(&row);
+        }
     }
 
     /// One key while the bash view is open: it owns every key; its close returns to the list.

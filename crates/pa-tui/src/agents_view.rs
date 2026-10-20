@@ -478,6 +478,9 @@ struct AgentsViewMode {
     shell_view: Option<crate::bash_view::BashView>,
     /// The open bash view's action the run loop dispatches (output fetch or kill).
     pending_shell_action: Option<crate::bash_view::BashViewAction>,
+    /// The shell whose open waits on the daemon's walk of the rest of the saved store: its
+    /// session opens once the walk lists it, the orphan view once the walk ends without it.
+    pending_shell_open: Option<String>,
     /// Each live session's own shells and factory-run counts, keyed by `activeSessionId`.
     session_activity: std::collections::HashMap<String, SessionActivity>,
 }
@@ -585,6 +588,7 @@ impl AgentsViewMode {
             persistent_shells: Value::Null,
             shell_view: None,
             pending_shell_action: None,
+            pending_shell_open: None,
             session_activity: std::collections::HashMap::new(),
         }
     }
