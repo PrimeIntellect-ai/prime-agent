@@ -178,6 +178,11 @@ pub fn process_group_exists(pgid: i32) -> std::io::Result<bool> {
     }
 }
 
+/// No process groups: none exists.
+///
+/// # Errors
+///
+/// Never: the not-unix arm has no group to probe.
 #[cfg(not(unix))]
 pub fn process_group_exists(_pgid: i32) -> std::io::Result<bool> {
     Ok(false)
