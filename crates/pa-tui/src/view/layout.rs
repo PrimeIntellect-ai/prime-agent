@@ -272,6 +272,22 @@ impl AgentView {
         }
     }
 
+    /// The rows above the first entry: the splash, or, once a transcript suppressed it, the
+    /// marker of an older history page on its way (styled like the gap row's status row).
+    pub(super) fn top_section_rows(&self, width: usize) -> Vec<Line> {
+        if !self.splash_suppressed {
+            return render_splash(&self.chrome, &self.theme, width);
+        }
+        if self.older_history_loading {
+            return crate::chat::render_text_rows(
+                "Loading older history\u{2026}",
+                self.theme.fg_style(crate::theme::ThemeColor::Dim),
+                width,
+            );
+        }
+        Vec::new()
+    }
+
     /// Measure entries through shared count-only render geometry.
     pub(crate) fn layout_pass(&mut self, width: usize) -> TranscriptLayout {
         self.sparse_enabled = false;
@@ -281,13 +297,7 @@ impl AgentView {
             crate::chat::Detail::Details => 1,
             crate::chat::Detail::All => 2,
         };
-        // A suppressed splash contributes no rows: the offsets start at
-        // the first entry.
-        let splash = if self.splash_suppressed {
-            Vec::new()
-        } else {
-            render_splash(&self.chrome, &self.theme, width)
-        };
+        let splash = self.top_section_rows(width);
         let mut offsets = Vec::with_capacity(self.chat.len() + 1);
         offsets.push(splash.len());
         let mut first = true;

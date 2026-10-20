@@ -7,7 +7,6 @@ use crate::chat::Detail;
 /// immediately; only a resumed session's pad-scale row sets cross this.
 const HUGE_PACKED_ROWS: usize = 8192;
 
-use crate::chrome::render_splash;
 use crate::Line;
 
 #[cfg(test)]
@@ -302,13 +301,9 @@ impl AgentView {
                 let splash = splash.get_or_insert_with(|| {
                     #[cfg(test)]
                     SPLASH_RENDERS.with(|count| count.set(count.get() + 1));
-                    // The suppressed splash is an empty section: the sparse walker skips
-                    // zero-row sections like an empty tail.
-                    if view.splash_suppressed {
-                        std::sync::Arc::new(Vec::new())
-                    } else {
-                        std::sync::Arc::new(render_splash(&view.chrome, &view.theme, window.width))
-                    }
+                    // An empty top section: the sparse walker skips zero-row sections like an
+                    // empty tail.
+                    std::sync::Arc::new(view.top_section_rows(window.width))
                 });
                 EntryRows::Fresh(splash.clone())
             } else if section == last {
@@ -486,13 +481,9 @@ impl AgentView {
                 let splash = splash.get_or_insert_with(|| {
                     #[cfg(test)]
                     SPLASH_RENDERS.with(|count| count.set(count.get() + 1));
-                    // The suppressed splash is an empty section: the sparse walker skips
-                    // zero-row sections like an empty tail.
-                    if view.splash_suppressed {
-                        std::sync::Arc::new(Vec::new())
-                    } else {
-                        std::sync::Arc::new(render_splash(&view.chrome, &view.theme, width))
-                    }
+                    // An empty top section: the sparse walker skips zero-row sections like an
+                    // empty tail.
+                    std::sync::Arc::new(view.top_section_rows(width))
                 });
                 return EntryRows::Fresh(splash.clone());
             }

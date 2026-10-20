@@ -52,6 +52,8 @@ fn message(index: usize) -> Value {
 struct Paging {
     /// Never answer newer pages (`from: start` with an `after` cursor).
     hold_newer: bool,
+    /// Never answer older pages (`from: end` with a `before` cursor).
+    hold_older: bool,
     /// After a `reload`, every page answers this late.
     slow_after_reload_ms: u64,
     /// After a `reload`, the old branch anchor is gone (a navigation or fork).
@@ -103,6 +105,9 @@ impl MockSupervisor {
                     self.pages.lock().unwrap().push(page.clone());
                     let paging = self.paging;
                     if paging.hold_newer && page["from"] == "start" && page.get("after").is_some() {
+                        continue;
+                    }
+                    if paging.hold_older && page["from"] == "end" && page.get("before").is_some() {
                         continue;
                     }
                     if reloaded {
@@ -520,5 +525,26 @@ fn a_transcript_replace_onto_another_branch_follows_the_tail() {
     assert!(
         last.contains(&format!("msg-{:05}", MESSAGES - 1)),
         "the reader's place left the branch, so the view follows the tail:\n{last}"
+    );
+}
+
+#[test]
+fn an_older_page_in_flight_marks_the_top_of_the_resident_rows() {
+    let (frames, _) = run(
+        Paging {
+            hold_older: true,
+            ..Paging::default()
+        },
+        paced(&[key(crossterm::event::KeyCode::PageUp)], 40),
+    );
+    let last = frames.last().expect("frames rendered");
+    let marker = last
+        .lines()
+        .position(|line| line.contains("Loading older history"))
+        .unwrap_or_else(|| panic!("no loading marker at the top of the rows:\n{last}"));
+    assert!(
+        marker_rows(last).iter().all(|(row, _)| *row > marker)
+            && top_marker(last) == Some(MESSAGES - TAIL),
+        "the marker stands above the stale first resident row:\n{last}"
     );
 }

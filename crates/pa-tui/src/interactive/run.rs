@@ -828,7 +828,7 @@ async fn run_interactive_surface(
 
     'run: while running {
         if !session.dirty {
-            session.spawn_transcript_page(&view);
+            session.spawn_transcript_page(&mut view);
         }
         if enhanced_keys_pending {
             if let Some((kitty, modify_other_keys)) = crate::enhanced_keys::settle_state() {

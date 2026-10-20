@@ -378,10 +378,14 @@ impl SessionUi {
 
     /// Start the page the viewport needs, if any. Runs at the loop top after a paint,
     /// so the visible range is the painted one.
-    pub(crate) fn spawn_transcript_page(&mut self, view: &AgentView) {
+    pub(crate) fn spawn_transcript_page(&mut self, view: &mut AgentView) {
         let Some((kind, page)) = self.window.next_page(view) else {
             return;
         };
+        if kind != PageKind::Newer {
+            view.older_history_loading = true;
+            self.dirty = true;
+        }
         let client = self.client.clone();
         let active_session_id = self.active_session_id.clone();
         let epoch = self.window.epoch;
@@ -410,6 +414,7 @@ impl SessionUi {
             return;
         }
         self.window.fetch = None;
+        view.older_history_loading = false;
         let page = match note.page {
             Ok(page) => page,
             Err(error) => {
@@ -438,6 +443,7 @@ impl SessionUi {
     pub(crate) fn collapse_transcript_window(&mut self, view: &mut AgentView) {
         let dropped = self.window.collapse_to_tail(view);
         if dropped > 0 {
+            view.older_history_loading = false;
             self.shift_tail_indices(-(dropped as isize));
             self.dirty = true;
         }
@@ -540,6 +546,7 @@ impl SessionUi {
         let anchor = self.reader_anchor(view);
         let incomplete_history = self.window.incomplete();
         self.window.retire();
+        view.older_history_loading = false;
         self.last_status_index = None;
         self.pressed_click = None;
         let data = self
