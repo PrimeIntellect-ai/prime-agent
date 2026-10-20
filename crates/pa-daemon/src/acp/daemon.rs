@@ -278,15 +278,18 @@ pub(crate) struct HostedSession {
     /// The running prompt turn; one at a time. A cancelled turn keeps
     /// the slot until its cancel stop finishes.
     turn: Option<ActiveTurn>,
-    /// Steered work was admitted: set at the steering admission point
-    /// (before the worker round trip, under the same lock as the guard
-    /// checks) and sticky - only a completed stop sequence clears it.
-    /// `session/cancel` with no turn slot arms the stop sequence for the
-    /// steered work instead of no-opping. A prompt admission never clears
-    /// it: a prompt that fails after admission (invalid blocks, a refused
-    /// turn) releases its slot without running, and must not orphan the
-    /// steered work.
-    steer_work: bool,
+    /// Live steered-work admissions: incremented at the steering
+    /// admission point (before the worker round trip, under the same
+    /// lock as the guard checks) and unwound when an admission provably
+    /// never landed (a request error, a refused steer, a malformed
+    /// receipt) or was withdrawn (it raced an armed cancel). A count
+    /// keeps concurrent steers independently tracked. `session/cancel`
+    /// with no turn slot arms the stop sequence for it instead of
+    /// no-opping; only a completed stop sequence resets it. A prompt
+    /// admission never touches it: a prompt that fails after admission
+    /// (invalid blocks, a refused turn) releases its slot without
+    /// running, and must not orphan the steered work.
+    steer_work: usize,
     /// The newest assistant stop reason observed on the event stream,
     /// cleared when a prompt turn is admitted so a turn never reads a
     /// previous turn's stop reason (read after the settlement for the
@@ -806,7 +809,9 @@ fn arm_cancel_locked(session_id: &str, guard: &mut DaemonAcpState) -> CancelOrde
             turn.cancelled = true;
             Some(turn.admission_id.clone())
         }
-        None if hosted.stop_failure.is_none() && !hosted.steer_work => return CancelOrder::None,
+        None if hosted.stop_failure.is_none() && hosted.steer_work == 0 => {
+            return CancelOrder::None
+        }
         // No prompt slot, but steered work the slot never covered (an
         // idle steer's own turn, or one admitted in a prompt settle's
         // trailing window - or the stop-failure retry): the stop
@@ -866,7 +871,7 @@ async fn run_cancel_stop(
             hosted.cancelling = false;
             hosted.cancel_task = None;
             // This stop sequence dealt with the steered work.
-            hosted.steer_work = false;
+            hosted.steer_work = 0;
             match &outcome {
                 Ok(lease) => {
                     if hosted.input_pause_id.as_deref() == Some(&lease.pause_id) {
@@ -1222,7 +1227,7 @@ pub(crate) async fn admit_session(
         input_pause_id: None,
         cancel_task: None,
         turn: None,
-        steer_work: false,
+        steer_work: 0,
         assistant_stop_reason: None,
         mapping: WireMappingState::default(),
         observed_children: std::collections::HashSet::new(),
@@ -1605,15 +1610,17 @@ async fn handle_session_steering(
             return;
         }
         // The admission point: the steered work is tracked BEFORE the
-        // worker round trip, and only a completed stop sequence clears
-        // it - a `session/cancel` that arms while the Steer command is in
-        // flight must see it.
+        // worker round trip, and only a completed stop sequence resets
+        // the count - a `session/cancel` that arms while the Steer
+        // command is in flight must see it. A count keeps concurrent
+        // steers independently tracked, so one admission can unwind
+        // below without wiping another's tracking.
         if let Some(hosted) = guard
             .session
             .as_mut()
             .filter(|hosted| hosted.acp_session_id == params.session_id)
         {
-            hosted.steer_work = true;
+            hosted.steer_work += 1;
         }
         (daemon_session_id, turn_running, message)
     };
@@ -1648,6 +1655,24 @@ async fn handle_session_steering(
         let failure = response
             .error
             .unwrap_or_else(|| "unknown error".to_string());
+        // A refused steer provably never landed (the queue command
+        // rejects before it enqueues), so this admission unwinds its own
+        // tracking: a later idle `session/cancel` no-ops again instead
+        // of arming a full stop for work that does not exist. A link
+        // error or a malformed receipt does NOT unwind - the steer may
+        // have landed there (the envelope was written; the busy flag was
+        // the malformed part), and the armed cancel path must stay to
+        // clean it.
+        {
+            let mut guard = state.lock().await;
+            if let Some(hosted) = guard
+                .session
+                .as_mut()
+                .filter(|hosted| hosted.acp_session_id == params.session_id)
+            {
+                hosted.steer_work = hosted.steer_work.saturating_sub(1);
+            }
+        }
         let _ = tx.send(super::internal_error(
             &id,
             &format!("prime-agent steering failed: {failure}"),
@@ -2383,7 +2408,7 @@ mod tests {
             input_pause_id: None,
             cancel_task: None,
             turn: None,
-            steer_work: false,
+            steer_work: 0,
             assistant_stop_reason: None,
             mapping: WireMappingState::default(),
             observed_children: std::collections::HashSet::new(),
@@ -2642,7 +2667,7 @@ mod tests {
     #[test]
     fn arm_cancel_arms_for_live_steered_work_without_a_turn_slot() {
         let mut steered = state(Some(hosted_session()));
-        steered.session.as_mut().unwrap().steer_work = true;
+        steered.session.as_mut().unwrap().steer_work = 1;
         let CancelOrder::Armed(stop) = arm_cancel_locked("acp-1", &mut steered) else {
             panic!("steered work with no turn slot arms the stop sequence");
         };
@@ -2660,7 +2685,7 @@ mod tests {
         // turn) releases its slot without running: the steered work stays
         // tracked so `session/cancel` still arms.
         let mut steered = state(Some(hosted_session()));
-        steered.session.as_mut().unwrap().steer_work = true;
+        steered.session.as_mut().unwrap().steer_work = 1;
         let steered = Arc::new(Mutex::new(steered));
         let admitted = admit_prompt(&json!({ "sessionId": "acp-1" }), &steered)
             .await
@@ -2790,5 +2815,167 @@ mod tests {
         // prompt turn at all.
         assert_eq!(steer_outcome(false, true), "queued");
         assert_eq!(steer_outcome(false, false), "queued");
+    }
+
+    /// A steer the worker refused never landed, so its admission
+    /// unwinds: a later idle `session/cancel` no-ops again instead of
+    /// arming a full stop for work that does not exist. A refused steer
+    /// over earlier live steered work keeps that work tracked (the count
+    /// unwinds only the refused admission's own increment).
+    #[tokio::test]
+    async fn a_refused_steer_restores_the_pre_admission_tracking() {
+        async fn refused_steer_reply(start_count: usize) -> DaemonAcpState {
+            let (writer, mut commands) = mpsc::unbounded_channel::<String>();
+            let (_frames_tx, frames) = mpsc::unbounded_channel();
+            let link = Arc::new(DaemonLink {
+                writer,
+                pending: Arc::new(std::sync::Mutex::new(HashMap::new())),
+                closed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                frames: Mutex::new(frames),
+                protocol_version: DAEMON_PROTOCOL_VERSION,
+                next_request_id: std::sync::atomic::AtomicU64::new(0),
+            });
+            let mut daemon_state = state(Some(hosted_session()));
+            daemon_state.session.as_mut().unwrap().steer_work = start_count;
+            let state = Arc::new(Mutex::new(daemon_state));
+            let (tx, mut responses) = mpsc::unbounded_channel();
+            let handler_state = Arc::clone(&state);
+            let handler_link = Arc::clone(&link);
+            let handler = tokio::spawn(async move {
+                handle_session_steering(
+                    json!(1),
+                    json!({
+                        "sessionId": "acp-1",
+                        "prompt": [{ "type": "text", "text": "steer note" }],
+                    }),
+                    &handler_link,
+                    &handler_state,
+                    tx,
+                )
+                .await;
+            });
+            let steer_line = commands.recv().await.expect("the steer command");
+            let envelope: DaemonCommandEnvelope = serde_json::from_str(&steer_line).unwrap();
+            let steer_id = envelope.id.clone();
+            assert!(matches!(envelope.command, DaemonCommand::Steer { .. }));
+            // The in-flight steer is tracked (the admission point), and
+            // the worker then refuses it: nothing landed.
+            assert_eq!(
+                state.lock().await.session.as_ref().unwrap().steer_work,
+                start_count + 1,
+                "the admission tracks the steer before the round trip"
+            );
+            link.pending
+                .lock()
+                .unwrap()
+                .remove(&steer_id)
+                .expect("the steer round trip is pending")
+                .send(DaemonResponse {
+                    id: Some(steer_id),
+                    command: "steer".to_string(),
+                    success: false,
+                    data: None,
+                    error: Some("steer refused".to_string()),
+                    error_info: None,
+                })
+                .expect("the refusal lands");
+            let reply = responses.recv().await.expect("the steering reply");
+            assert!(
+                reply["error"]["data"]["details"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .contains("steer refused"),
+                "the refused steer answers the worker refusal: {reply}"
+            );
+            handler.await.expect("the handler settles");
+            Arc::try_unwrap(state).map_err(|_| ()).unwrap().into_inner()
+        }
+
+        let restored = refused_steer_reply(0).await;
+        assert_eq!(
+            restored.session.as_ref().unwrap().steer_work,
+            0,
+            "the refused steer's admission came back down: a later idle cancel no-ops again"
+        );
+
+        let kept = refused_steer_reply(2).await;
+        assert_eq!(
+            kept.session.as_ref().unwrap().steer_work,
+            2,
+            "earlier live steered work keeps its tracking through a refused steer"
+        );
+    }
+
+    /// A malformed steer receipt (the busy flag missing) means the steer
+    /// DID land - only the receipt was malformed - so the admission
+    /// stays tracked and a later `session/cancel` cleans the work.
+    #[tokio::test]
+    async fn a_malformed_steer_receipt_keeps_the_admission_tracked() {
+        let (writer, mut commands) = mpsc::unbounded_channel::<String>();
+        let (_frames_tx, frames) = mpsc::unbounded_channel();
+        let link = Arc::new(DaemonLink {
+            writer,
+            pending: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            closed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            frames: Mutex::new(frames),
+            protocol_version: DAEMON_PROTOCOL_VERSION,
+            next_request_id: std::sync::atomic::AtomicU64::new(0),
+        });
+        let state = Arc::new(Mutex::new(state(Some(hosted_session()))));
+        let (tx, mut responses) = mpsc::unbounded_channel();
+        let handler_state = Arc::clone(&state);
+        let handler_link = Arc::clone(&link);
+        tokio::spawn(async move {
+            handle_session_steering(
+                json!(1),
+                json!({
+                    "sessionId": "acp-1",
+                    "prompt": [{ "type": "text", "text": "steer note" }],
+                }),
+                &handler_link,
+                &handler_state,
+                tx,
+            )
+            .await;
+        });
+        let steer_line = commands.recv().await.expect("the steer command");
+        let envelope: DaemonCommandEnvelope = serde_json::from_str(&steer_line).unwrap();
+        let steer_id = envelope.id.clone();
+        assert!(matches!(envelope.command, DaemonCommand::Steer { .. }));
+        link.pending
+            .lock()
+            .unwrap()
+            .remove(&steer_id)
+            .expect("the steer round trip is pending")
+            .send(DaemonResponse {
+                id: Some(steer_id),
+                command: "steer".to_string(),
+                success: true,
+                data: Some(json!({ "queued": true })),
+                error: None,
+                error_info: None,
+            })
+            .expect("the malformed receipt lands");
+        let reply = responses.recv().await.expect("the steering reply");
+        assert!(
+            reply["error"]["data"]["details"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("no steering busy flag"),
+            "the malformed receipt answers the internal error: {reply}"
+        );
+        let mut guard = state.lock().await;
+        assert_eq!(
+            guard.session.as_ref().unwrap().steer_work,
+            1,
+            "the landed steer keeps its tracking through the malformed receipt"
+        );
+        assert!(
+            matches!(
+                arm_cancel_locked("acp-1", &mut guard),
+                CancelOrder::Armed(_)
+            ),
+            "the cancel arms for the steered work the receipt lost track of"
+        );
     }
 }
