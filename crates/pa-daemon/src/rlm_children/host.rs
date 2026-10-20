@@ -510,15 +510,20 @@ impl RlmSubagentHost for SupervisorChildSessions {
             };
             drop(record_guard);
             let was_running = {
-                // A delete in flight must not let a settle watcher that
+                // A delete of a LIVE run must not let a settle watcher that
                 // wakes inside the kill window append a clean
                 // `child_returned` beside the cancel line. The gate is this
                 // mark, not a fake settle: a fake settle would make the
                 // watcher treat the live run as finished and exit, which a
                 // failed kill would then strand (a live, unwatched child).
+                // A settled child's delete records no cancel line, so it
+                // leaves its return alone.
                 let mut row = record.lock().await;
-                row.retiring = true;
-                row.settled_status.is_none()
+                let was_running = row.settled_status.is_none();
+                if was_running {
+                    row.retiring = true;
+                }
+                was_running
             };
             // Capture before the kill: a deleted running child's durable
             // rows are its last observable spend on the parent side.

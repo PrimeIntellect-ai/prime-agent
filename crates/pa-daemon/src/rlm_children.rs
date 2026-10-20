@@ -706,14 +706,23 @@ impl SupervisorChildSessions {
     /// registry).
     #[cfg(test)]
     pub(crate) async fn settle_test_child(&self, child_active_session_id: &str) {
-        let children = self.inner.children.lock().await;
-        for record in children.iter() {
-            let mut record = record.lock().await;
-            if record.active_session_id == child_active_session_id {
-                record.settled_status = Some("done");
-                // The settle funnel's flag: the quiescence predicate reads it, not
-                // the terminal status.
-                record.settled = true;
+        let children = self.inner.children.lock().await.clone();
+        for record in children {
+            let matched = {
+                let mut record = record.lock().await;
+                let matched = record.active_session_id == child_active_session_id;
+                if matched {
+                    record.settled_status = Some("done");
+                    // The settle funnel's flag: the quiescence predicate reads it, not
+                    // the terminal status.
+                    record.settled = true;
+                }
+                matched
+            };
+            if matched {
+                // The settle FUNNEL, not just the flags: the goal
+                // continuation is released by the hook a real settle fires.
+                self.inner.fire_settle_hook(&record).await;
             }
         }
     }

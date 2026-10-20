@@ -119,6 +119,11 @@ impl SupervisorChildSessionsInner {
                 row.settled_status = None;
                 row.error = None;
                 row.notice_delivered = false;
+                drop(row);
+                // The pre-abort update published `cancelled`; publish the
+                // restored live row so subscribers do not keep showing a
+                // child that is still running as cancelled.
+                self.emit_child_update(record).await;
                 return true;
             }
             // The settled/cancelled child releases an owed goal continuation.

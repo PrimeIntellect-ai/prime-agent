@@ -1677,6 +1677,70 @@ async fn a_deleted_running_child_records_the_cancel_edge_on_the_parent_ledger() 
     );
 }
 
+/// A settled child's delete leaves its return alone (PR #3680 review
+/// finding): the delete marks only a LIVE run, so a `done` child torn down
+/// inside its settle grace still records its `child_returned` edge, and no
+/// `child_cancelled` line is written for it.
+#[tokio::test]
+async fn a_deleted_settled_child_still_records_its_return() {
+    let (follow_up_tx, _follow_up_rx) = mpsc::unbounded_channel();
+    let (sessions, _kill_rx) =
+        sessions_with_fake_supervisor(follow_up_tx, 0, FakeKill::Success, FakeChild::Healthy).await;
+    let (recorder, ledger_path, _dir) = seeded_parent_recorder();
+    sessions.set_semantic_edges(Some(recorder));
+    let handle = spawn_child(&sessions).await;
+    // The child committed one request: the return recording reads it.
+    std::fs::create_dir_all(&handle.session_dir).expect("child session dir");
+    let mut child_ledger = String::new();
+    child_ledger.push_str("{\"type\":\"session_registered\",\"session_id\":\"child-file\"}");
+    child_ledger.push('\n');
+    child_ledger.push_str("{\"type\":\"request_finished\",\"request_id\":\"child-request-1\"}");
+    child_ledger.push('\n');
+    std::fs::write(
+        Path::new(&handle.session_dir).join("semantic-edges.jsonl"),
+        child_ledger,
+    )
+    .expect("write the child ledger");
+    sessions.notify_turn_done();
+    // The watcher's refresh settles the row `done`; the tail that records
+    // the return follows the settle grace.
+    let settled = Instant::now() + Duration::from_secs(10);
+    loop {
+        let entries = sessions.list_subagents().await.expect("child roster");
+        if entries.iter().any(|entry| entry.status == "completed") {
+            break;
+        }
+        assert!(Instant::now() < settled, "child never settled: {entries:?}");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    // Delete inside the grace window: the run already settled, so no cancel
+    // is owed and the return must still land.
+    sessions
+        .delete_subagent(handle.rlm_child_id.clone())
+        .await
+        .expect("delete the settled child");
+
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while returned_children(&ledger_path).is_empty() {
+        assert!(
+            Instant::now() < deadline,
+            "the deleted settled child never recorded its return"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert_eq!(
+        returned_children(&ledger_path),
+        vec!["child-file".to_string()],
+        "a settled child's delete leaves its return edge alone"
+    );
+    assert!(
+        cancelled_lines(&ledger_path).is_empty(),
+        "a settled child's delete records no cancel line: {:?}",
+        cancelled_lines(&ledger_path)
+    );
+}
+
 /// Only a cut-short run cancels: a delete of an already-settled child
 /// records no cancel line (its return line already stands).
 #[tokio::test]
@@ -1780,6 +1844,11 @@ async fn a_refused_abort_leaves_the_child_running_and_a_later_cancel_records_the
     sessions.set_settle_hook(Arc::new(move || {
         let _ = hook_tx.send(());
     }));
+    let rows: Arc<std::sync::Mutex<Vec<Value>>> = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let sink_rows = Arc::clone(&rows);
+    sessions.set_child_update_sink(Arc::new(move |child| {
+        sink_rows.lock().unwrap().push(child);
+    }));
     let handle = spawn_child(&sessions).await;
 
     assert!(
@@ -1805,6 +1874,16 @@ async fn a_refused_abort_leaves_the_child_running_and_a_later_cancel_records_the
         sessions.any_running().await,
         "a refused abort must leave the run unsettled"
     );
+    // The restored row is republished: subscribers must not keep showing a
+    // live child as cancelled.
+    {
+        let published = rows.lock().unwrap();
+        assert_eq!(
+            published.last().and_then(|row| row["status"].as_str()),
+            Some("running"),
+            "the refused abort must republish the live row: {published:?}"
+        );
+    }
     assert!(
         tokio::time::timeout(Duration::from_millis(300), hook_rx.recv())
             .await
