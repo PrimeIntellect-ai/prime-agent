@@ -455,6 +455,7 @@ mod tests {
             &std::collections::HashSet::new(),
             &std::collections::HashSet::new(),
             &rollups,
+            &std::collections::HashMap::new(),
             None,
         );
         let row = rows

@@ -67,6 +67,7 @@ pub mod paths;
 pub(crate) mod peer;
 pub(crate) mod peer_client;
 pub(crate) mod peer_tickets;
+pub(crate) mod persistent_shells;
 pub mod platform;
 pub mod prompt_admission;
 pub mod protocol;
