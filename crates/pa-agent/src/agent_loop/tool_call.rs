@@ -130,15 +130,16 @@ pub(crate) async fn execute_prepared_tool_call(
     let started_at = std::time::Instant::now();
     // Lifecycle heartbeat: quiet until `progress.after_ms`, then one
     // `ToolExecutionProgress` event every `progress.every_ms` while the call
-    // still runs, so a stalled call is visible while it runs (aborted after
-    // the execution race settles below).
-    let heartbeat = spawn_tool_heartbeat(
+    // still runs. The guard aborts the task on EVERY exit path — return,
+    // panic, and cancellation of this frame — so the unbounded tick loop
+    // never leaks as a detached task.
+    let mut heartbeat = HeartbeatGuard(Some(spawn_tool_heartbeat(
         Arc::clone(emit),
         tool_call_id.clone(),
         tool_name.clone(),
         started_at,
         progress,
-    );
+    )));
     let signal_for_updates = signal.cloned().unwrap_or_default();
     let emit_updates = tokio::spawn(async move {
         while let Some(partial_result) = update_rx.recv().await {
@@ -175,7 +176,7 @@ pub(crate) async fn execute_prepared_tool_call(
         signal,
     )
     .await;
-    heartbeat.abort();
+    heartbeat.stop();
     let elapsed_ms = elapsed_ms_since(started_at);
 
     accepting_updates.store(false, std::sync::atomic::Ordering::SeqCst);
@@ -215,6 +216,29 @@ pub(crate) async fn execute_prepared_tool_call(
                 is_error: true,
             }
         }
+    }
+}
+
+/// Aborts the heartbeat task on every exit path. Dropping the bare
+/// `JoinHandle` only detaches the unbounded tick task: on a panic or a
+/// cancellation (a dropped `execute_prepared_tool_call` future) the explicit
+/// `stop()` never runs, and the detached task would keep emitting
+/// `ToolExecutionProgress` — and pin the event sink — forever.
+struct HeartbeatGuard(Option<tokio::task::JoinHandle<()>>);
+
+impl HeartbeatGuard {
+    /// Stop the heartbeat on the normal path (ticks stop before the
+    /// drain/result emission); `drop` covers panic and cancellation.
+    fn stop(&mut self) {
+        if let Some(handle) = self.0.take() {
+            handle.abort();
+        }
+    }
+}
+
+impl Drop for HeartbeatGuard {
+    fn drop(&mut self) {
+        self.stop();
     }
 }
 
@@ -400,4 +424,85 @@ pub(crate) async fn emit_tool_result_message(
         message: AgentMessage::from(tool_result_message.clone()),
     })
     .await
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    struct NeverTool;
+
+    impl AgentTool for NeverTool {
+        fn name(&self) -> &'static str {
+            "never"
+        }
+        fn description(&self) -> &'static str {
+            "never finishes on its own"
+        }
+        fn parameters(&self) -> &serde_json::Value {
+            static PARAMETERS: std::sync::OnceLock<serde_json::Value> = std::sync::OnceLock::new();
+            PARAMETERS.get_or_init(|| serde_json::json!({ "type": "object" }))
+        }
+        fn execute(
+            self: Arc<Self>,
+            _tool_call_id: String,
+            _params: serde_json::Value,
+            _signal: crate::abort::AbortSignal,
+            _on_update: AgentToolUpdateCallback,
+        ) -> crate::BoxFut<'static, anyhow::Result<AgentToolResult>> {
+            Box::pin(std::future::pending())
+        }
+    }
+
+    /// Cancelling the call frame (a dropped `execute_prepared_tool_call`
+    /// future) must stop the heartbeat task: a detached tick loop would
+    /// keep emitting `ToolExecutionProgress` — and pin the event sink —
+    /// after the run that owned it is gone.
+    #[tokio::test]
+    async fn cancelling_the_call_frame_stops_the_heartbeat() {
+        let ticks: Arc<Mutex<usize>> = Arc::new(Mutex::new(0));
+        let sink: AgentEventSink = {
+            let ticks = Arc::clone(&ticks);
+            Arc::new(move |event| {
+                let ticks = Arc::clone(&ticks);
+                Box::pin(async move {
+                    if matches!(event, AgentEvent::ToolExecutionProgress { .. }) {
+                        *ticks.lock().unwrap() += 1;
+                    }
+                    Ok(())
+                })
+            })
+        };
+        let prepared = PreparedToolCall {
+            tool_call: ToolCall {
+                id: "call-1".to_string(),
+                name: "never".to_string(),
+                arguments: serde_json::json!({}),
+                thought_signature: None,
+            },
+            tool: Arc::new(NeverTool),
+            args: serde_json::json!({}),
+        };
+        let progress = ToolProgressCadence {
+            after_ms: 25,
+            every_ms: 25,
+        };
+        let execution = tokio::spawn(async move {
+            execute_prepared_tool_call(&prepared, progress, None, &sink).await;
+        });
+        let count = || *ticks.lock().unwrap();
+        while count() == 0 {
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        // Cancel the frame mid-await: the Drop guard (not the explicit
+        // stop) must abort the heartbeat.
+        execution.abort();
+        let after_cancel = count();
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        assert_eq!(
+            count(),
+            after_cancel,
+            "the heartbeat must stop when the call frame is cancelled"
+        );
+    }
 }
