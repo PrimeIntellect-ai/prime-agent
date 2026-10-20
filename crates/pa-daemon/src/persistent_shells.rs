@@ -140,22 +140,30 @@ pub(crate) fn shell_rows(agent_dir: &Path) -> Vec<Value> {
 }
 
 /// The newest `lines` lines of the shell's output (read from its last
-/// [`TAIL_BYTES`]); `None` for an unknown shell.
-pub(crate) fn output_tail(agent_dir: &Path, id: &str, lines: usize) -> Option<String> {
-    let shell = find_shell(agent_dir, id)?;
-    let mut bytes = Vec::new();
-    if let Ok(mut file) = std::fs::File::open(shell_file(agent_dir, &shell.id, "out")) {
-        let size = file.metadata().map_or(0, |metadata| metadata.len());
-        if file
-            .seek(SeekFrom::Start(size.saturating_sub(TAIL_BYTES)))
-            .is_ok()
-        {
-            let _ = file.take(TAIL_BYTES).read_to_end(&mut bytes);
-        }
-    }
+/// [`TAIL_BYTES`]); `None` for an unknown shell. The kernel creates the `.out`
+/// before it writes the record, so a failed read is an error, never an empty tail.
+pub(crate) fn output_tail(
+    agent_dir: &Path,
+    id: &str,
+    lines: usize,
+) -> Result<Option<String>, String> {
+    let Some(shell) = find_shell(agent_dir, id) else {
+        return Ok(None);
+    };
+    let bytes = read_tail(&shell_file(agent_dir, &shell.id, "out"))
+        .map_err(|error| format!("Could not read persistent shell output: {error}"))?;
     let text = String::from_utf8_lossy(&bytes);
     let all: Vec<&str> = text.lines().collect();
-    Some(all[all.len().saturating_sub(lines)..].join("\n"))
+    Ok(Some(all[all.len().saturating_sub(lines)..].join("\n")))
+}
+
+fn read_tail(path: &Path) -> std::io::Result<Vec<u8>> {
+    let mut file = std::fs::File::open(path)?;
+    let size = file.metadata()?.len();
+    file.seek(SeekFrom::Start(size.saturating_sub(TAIL_BYTES)))?;
+    let mut bytes = Vec::new();
+    file.take(TAIL_BYTES).read_to_end(&mut bytes)?;
+    Ok(bytes)
 }
 
 /// Kill a shell only while the recorded leader identity still proves ownership.
@@ -343,7 +351,7 @@ mod tests {
             "the group's TERM reached the member"
         );
         assert_eq!(shell_rows(root.path())[0]["status"], "finished");
-        assert_eq!(output_tail(root.path(), &id, 1).as_deref(), Some("line"));
+        assert_eq!(output_tail(root.path(), &id, 1), Ok(Some("line".to_string())));
         assert_eq!(kill_shell(root.path(), "unknown"), Ok(false));
     }
 
@@ -486,11 +494,25 @@ mod tests {
         );
         assert!(running["durationMs"].is_u64() && done_row["durationMs"].is_u64());
         assert_eq!(
-            output_tail(root.path(), &finished, 2).as_deref(),
-            Some("two\nthree")
+            output_tail(root.path(), &finished, 2),
+            Ok(Some("two\nthree".to_string()))
         );
-        assert_eq!(output_tail(root.path(), "unknown", 2), None);
+        assert_eq!(output_tail(root.path(), "unknown", 2), Ok(None));
         sleeper.kill().unwrap();
         sleeper.wait().unwrap();
+    }
+
+    #[test]
+    fn an_unreadable_output_file_is_an_error_not_an_empty_tail() {
+        let root = tempfile::tempdir().unwrap();
+        let mut sleeper = registered_sleeper(root.path(), "s1", None);
+        let id = format!("{:032}", sleeper.id());
+        std::fs::create_dir(shell_file(root.path(), &id, "out")).unwrap();
+
+        let tail = output_tail(root.path(), &id, 5);
+
+        sleeper.kill().unwrap();
+        sleeper.wait().unwrap();
+        assert!(tail.is_err(), "{tail:?}");
     }
 }

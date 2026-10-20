@@ -842,10 +842,8 @@ impl Supervisor {
                 let agent_dir = self.options.agent_dir.clone();
                 let (shell_id, lines) = (shell_id.clone(), *lines as usize);
                 let line = crate::persistent_shells::respond(&command_id, &type_name, move || {
-                    Ok(
-                        crate::persistent_shells::output_tail(&agent_dir, &shell_id, lines)
-                            .map(|tail| json!({ "shellId": shell_id, "tail": tail })),
-                    )
+                    crate::persistent_shells::output_tail(&agent_dir, &shell_id, lines)
+                        .map(|tail| tail.map(|tail| json!({ "shellId": shell_id, "tail": tail })))
                 })
                 .await;
                 (vec![line], false)
