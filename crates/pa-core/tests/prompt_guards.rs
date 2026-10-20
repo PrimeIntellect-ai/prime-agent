@@ -615,10 +615,11 @@ fn generic_mcp_skill_renders_in_the_prompt_inventory() {
 
 // Async turn discipline
 
-/// The async-turn contract is session-scoped: notification sessions are told to end the
-/// turn and collect results on the notice, daemonless sessions are told to await commands
-/// before ending the turn (nothing wakes them). The static usage layer renders in every
-/// session, so any turn-end guidance it carries must itself be scoped to notifications.
+/// The async-turn contract is wake-based and session-scoped: background `bash()`
+/// completions wake the agent with a queued `[bash-done]` turn in daemon and daemonless
+/// sessions alike (main #3640), so every prompt's turn-end rule must name that wake, not
+/// an unscoped await. The static usage layer renders in every session, so any turn-end
+/// guidance it carries must mention the notification wake too.
 #[test]
 fn usage_layer_async_turn_contract_stays_session_scoped() {
     let mut options = BuildSystemPromptOptions {
@@ -644,23 +645,29 @@ fn usage_layer_async_turn_contract_stays_session_scoped() {
     options.daemonless = true;
     let daemonless = system_prompt_breakdown(&options);
     assert!(
-        daemonless.assembled.contains(
-            "In sessions without completion notifications, await commands before ending the turn."
-        ),
-        "the daemonless await rule must render"
-    );
-    assert!(
         daemonless
             .assembled
+            .contains("background `bash()` completions wake you with a queued `[bash-done]` turn"),
+        "the daemonless role line must name the `[bash-done]` wake that ends the turn"
+    );
+    assert!(
+        daemonless.assembled.contains(
+            "end the turn and collect the final result on the `[bash-done]` notification"
+        ),
+        "the daemonless prompt must carry the same collect-on-notice turn-end contract"
+    );
+    assert!(
+        !daemonless
+            .assembled
             .contains("await them before ending your turn"),
-        "the daemonless role line must repeat the await rule"
+        "turns end on the `[bash-done]` wake: the stale daemonless await rule must not come back"
     );
     for sentence in USAGE_LAYER.split(". ") {
         if sentence.contains("end the turn") || sentence.contains("ending the turn") {
             assert!(
                 sentence.contains("notification"),
-                "static turn-end guidance renders in daemonless sessions too, where nothing \
-                 wakes the turn: scope every turn-end sentence to notifications (sentence: {sentence})"
+                "static turn-end guidance renders in every session, woken or not: scope every \
+                 turn-end sentence to the notification wake (sentence: {sentence})"
             );
         }
     }
