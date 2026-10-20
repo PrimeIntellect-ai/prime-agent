@@ -1482,6 +1482,71 @@ async fn a_failed_delete_leaves_the_child_running_and_can_still_record_its_cance
     );
 }
 
+/// A failed delete leaves the child watched (PR #3680 review finding): the
+/// delete mark is cleared, so the watcher survives and the still-live run's
+/// later natural settle still lands its return edge.
+#[tokio::test]
+async fn a_failed_delete_leaves_the_child_watched_and_its_later_return_able_to_land() {
+    let (follow_up_tx, _follow_up_rx) = mpsc::unbounded_channel();
+    let child_subagents = Arc::new(FakeChildSubagents::default());
+    // A live grandchild keeps the run unsettled (and so its watcher alive)
+    // until the test releases it.
+    child_subagents.running.store(true, Ordering::SeqCst);
+    let (sessions, _kill_rx) = sessions_with_fake_child_subagents(
+        follow_up_tx,
+        100,
+        FakeKill::Failure,
+        FakeChild::Healthy,
+        Arc::clone(&child_subagents),
+    )
+    .await;
+    let (recorder, ledger_path, _dir) = seeded_parent_recorder();
+    sessions.set_semantic_edges(Some(recorder));
+    let handle = spawn_child(&sessions).await;
+    // The child committed one request: the return recording reads it from
+    // the child's own ledger.
+    std::fs::create_dir_all(&handle.session_dir).expect("child session dir");
+    let mut child_ledger = String::new();
+    child_ledger.push_str("{\"type\":\"session_registered\",\"session_id\":\"child-file\"}");
+    child_ledger.push('\n');
+    child_ledger.push_str("{\"type\":\"request_finished\",\"request_id\":\"child-request-1\"}");
+    child_ledger.push('\n');
+    std::fs::write(
+        Path::new(&handle.session_dir).join("semantic-edges.jsonl"),
+        child_ledger,
+    )
+    .expect("write the child ledger");
+    sessions.notify_turn_done();
+    one_running_child(&sessions).await;
+
+    let error = sessions
+        .delete_subagent(handle.rlm_child_id.clone())
+        .await
+        .expect_err("a real delete failure must propagate");
+    assert!(
+        format!("{error:#}").contains("kill refused"),
+        "the delete error must surface the kill failure: {error:#}"
+    );
+
+    // The child finishes naturally afterwards: its watcher is still live,
+    // so the return edge lands instead of being dropped by a stale mark.
+    child_subagents.running.store(false, Ordering::SeqCst);
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while returned_children(&ledger_path).is_empty() {
+        assert!(
+            Instant::now() < deadline,
+            "the settled child never recorded its return: {:?}",
+            returned_children(&ledger_path)
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert_eq!(
+        returned_children(&ledger_path),
+        vec!["child-file".to_string()],
+        "the failed delete must not drop the child's terminal edge"
+    );
+}
+
 #[tokio::test]
 async fn a_replied_child_gets_no_terminal_notice() {
     let (follow_up_tx, mut follow_up_rx) = mpsc::unbounded_channel();
@@ -1711,6 +1776,10 @@ async fn a_refused_abort_leaves_the_child_running_and_a_later_cancel_records_the
     .await;
     let (recorder, ledger_path, _dir) = seeded_parent_recorder();
     sessions.set_semantic_edges(Some(recorder));
+    let (hook_tx, mut hook_rx) = mpsc::unbounded_channel();
+    sessions.set_settle_hook(Arc::new(move || {
+        let _ = hook_tx.send(());
+    }));
     let handle = spawn_child(&sessions).await;
 
     assert!(
@@ -1730,6 +1799,18 @@ async fn a_refused_abort_leaves_the_child_running_and_a_later_cancel_records_the
         Vec::new(),
         "a refused abort records no cancel line"
     );
+    // And nothing is released: the quiescence barrier still sees the live
+    // child, so no settle hook may fire.
+    assert!(
+        sessions.any_running().await,
+        "a refused abort must leave the run unsettled"
+    );
+    assert!(
+        tokio::time::timeout(Duration::from_millis(300), hook_rx.recv())
+            .await
+            .is_err(),
+        "a refused abort must not fire the settle hook"
+    );
 
     // A later confirmed cancel records the edge the refused attempt could
     // not: the settle undo left the row live for the retry.
@@ -1747,6 +1828,10 @@ async fn a_refused_abort_leaves_the_child_running_and_a_later_cancel_records_the
         )],
         "the confirmed retry records the cancel edge"
     );
+    tokio::time::timeout(Duration::from_secs(5), hook_rx.recv())
+        .await
+        .expect("the confirmed cancel fires the settle hook")
+        .expect("hook channel open");
 }
 
 /// A close-killed live run never records a clean return beside its cancel
@@ -2171,6 +2256,7 @@ fn an_already_settled_child_never_re_scores_as_an_unreachable_error() {
         prompt_admitted: true,
         error: None,
         closed_by_parent: false,
+        retiring: false,
         retirement_finished: false,
         retirement_notified: false,
         retirement_roster_emitted: false,
@@ -2243,6 +2329,7 @@ async fn the_unreachable_give_up_skips_the_exit_capture_when_a_capture_stands() 
         prompt_admitted: true,
         error: None,
         closed_by_parent: false,
+        retiring: false,
         retirement_finished: false,
         retirement_notified: false,
         retirement_roster_emitted: false,

@@ -599,9 +599,10 @@ impl SupervisorChildSessionsInner {
     /// `child.semanticEdges.lastCommittedRequestId`). Only a `done` or
     /// `error` settle returns — a cancelled run never returns (it is the
     /// parent's action, so it records through
-    /// [`Self::record_child_cancelled`] instead, nano-rlm #202). A child
-    /// without a durable session id, or a parent without a recorder,
-    /// records nothing.
+    /// [`Self::record_child_cancelled`] instead, nano-rlm #202) — and a
+    /// delete in flight ([`ChildRecord::retiring`]) returns nothing either.
+    /// A child without a durable session id, or a parent without a
+    /// recorder, records nothing.
     async fn record_child_return(&self, record: &Arc<Mutex<ChildRecord>>) {
         let recorder = self
             .semantic_edges
@@ -613,7 +614,10 @@ impl SupervisorChildSessionsInner {
         };
         let (child_session_id, child_dir) = {
             let record = record.lock().await;
-            if !matches!(record.settled_status, Some("done" | "error")) {
+            // A delete in flight owns this child's terminal edge: the
+            // delete records a cancel line, so a watcher that wakes inside
+            // the kill window must not append a clean return beside it.
+            if record.retiring || !matches!(record.settled_status, Some("done" | "error")) {
                 return;
             }
             (record.session_id.clone(), record.session_dir.clone())

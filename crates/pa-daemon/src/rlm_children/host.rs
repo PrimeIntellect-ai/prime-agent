@@ -173,6 +173,7 @@ impl RlmSubagentHost for SupervisorChildSessions {
                     prompt_admitted: false,
                     error: None,
                     closed_by_parent: false,
+                    retiring: false,
                     retirement_finished: false,
                     retirement_notified: false,
                     retirement_roster_emitted: false,
@@ -509,17 +510,15 @@ impl RlmSubagentHost for SupervisorChildSessions {
             };
             drop(record_guard);
             let was_running = {
-                // The pre-kill settle (the same coordination the close walk
-                // uses): a watcher parked inside its wait slice must not
-                // refresh the killed run back to `done` and append a clean
-                // `child_returned` beside the cancel line. A failed kill
-                // undoes it below — the child stays live and retryable.
+                // A delete in flight must not let a settle watcher that
+                // wakes inside the kill window append a clean
+                // `child_returned` beside the cancel line. The gate is this
+                // mark, not a fake settle: a fake settle would make the
+                // watcher treat the live run as finished and exit, which a
+                // failed kill would then strand (a live, unwatched child).
                 let mut row = record.lock().await;
-                let was_running = row.settled_status.is_none();
-                if was_running && !already_terminated {
-                    row.settled_status = Some("cancelled");
-                }
-                was_running
+                row.retiring = true;
+                row.settled_status.is_none()
             };
             // Capture before the kill: a deleted running child's durable
             // rows are its last observable spend on the parent side.
@@ -530,12 +529,10 @@ impl RlmSubagentHost for SupervisorChildSessions {
                     .await
                     .with_context(|| format!("kill RLM child \"{target}\""))
                 {
-                    // The kill never landed: undo the pre-kill settle so
-                    // the still-live child is not reported cancelled and a
-                    // later successful delete can still record the edge.
-                    if was_running {
-                        record.lock().await.settled_status = None;
-                    }
+                    // The kill never landed: clear the mark so the
+                    // still-live child stays watchable and a later cancel
+                    // can still record the parent -> child edge.
+                    record.lock().await.retiring = false;
                     return Err(error);
                 }
                 this.retain_retired_usage(&record, super::RetirementIntent::Delete { was_running });

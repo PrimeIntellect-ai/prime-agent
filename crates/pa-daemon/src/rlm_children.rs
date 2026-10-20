@@ -198,6 +198,13 @@ struct ChildRecord {
     /// The parent session closed while this child ran: the settle watcher
     /// exits without a notice — none is owed to a session being torn down.
     closed_by_parent: bool,
+    /// A parent delete is in flight for this child: a settle watcher that
+    /// wakes inside the kill window must not record a clean
+    /// `child_returned` (the delete records a cancel edge instead). Kept
+    /// apart from `settled_status` so the live run is never faked settled:
+    /// the watcher stays alive and the row stays correctly reported, which
+    /// also lets a failed kill simply clear the mark.
+    retiring: bool,
     /// Confirmed retirement completed its roster, notice and settle bookkeeping.
     retirement_finished: bool,
     /// Claim the synchronous delete notifier once across interrupted retirement retries.
@@ -742,6 +749,7 @@ impl SupervisorChildSessions {
                 prompt_admitted: true,
                 error: None,
                 closed_by_parent: false,
+                retiring: false,
                 retirement_finished: false,
                 retirement_notified: false,
                 retirement_roster_emitted: false,
