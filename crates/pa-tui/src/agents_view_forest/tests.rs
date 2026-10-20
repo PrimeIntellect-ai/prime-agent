@@ -407,6 +407,25 @@ fn the_expanded_group_renders_each_agent_once() {
     );
 }
 
+/// A shells/factory activity identity pins the selection's fallbacks to the same-kind line:
+/// when the carried identity goes stale (the parent's identity flips on persist/re-attach),
+/// the session-key fallback must re-find the activity line, not the parent agent row that
+/// shares its summary.
+#[test]
+fn selection_pins_a_stale_activity_identity_to_its_kind() {
+    let roster = vec![roster_entry("p", "idle", &parent_summary("p"))];
+    let counts = activity(&[("p-live", 2, 1)]);
+    let rows = rows_with_activity(&roster, None, &[], &counts);
+    let key = SelectionKey {
+        session_id: Some("p".to_string()),
+        active_session_id: Some("p-live".to_string()),
+    };
+    let index = resolve_selection(&rows, 0, Some("shells:file:/x/OLD.jsonl"), Some(&key));
+    assert_eq!(rows[index].kind, RowKind::Shells);
+    let index = resolve_selection(&rows, 0, Some("factory:file:/x/OLD.jsonl"), Some(&key));
+    assert_eq!(rows[index].kind, RowKind::FactoryRuns);
+}
+
 /// Summary-line identities pin the selection's fallbacks to the ONE summary row. A carried
 /// legacy `subagents-inactive:` identity (the 2026-09-25 two-line scheme) resolves by its session
 /// key onto the PARENT row.

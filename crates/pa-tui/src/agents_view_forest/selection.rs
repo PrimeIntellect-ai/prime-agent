@@ -1,6 +1,6 @@
 use serde_json::Value;
 
-use super::{is_summary_row_identity, AgentsViewRow, RowKind, SelectionKey};
+use super::{pinned_row_kind, AgentsViewRow, RowKind, SelectionKey};
 
 /// Session ids of every ancestor of a nested row, root-most first: the chain the view
 /// re-expands when the drilled-in child returns to it.
@@ -53,9 +53,8 @@ pub fn resolve_selection(
     if rows.is_empty() {
         return 0;
     }
-    let selected_summary_row = identity.is_some_and(is_summary_row_identity);
-    let preserves_kind =
-        |row: &AgentsViewRow| !selected_summary_row || row.kind == RowKind::SubagentSummary;
+    let pinned_kind = identity.and_then(pinned_row_kind);
+    let preserves_kind = |row: &AgentsViewRow| pinned_kind.is_none_or(|kind| row.kind == kind);
     if let Some(identity) = identity {
         if let Some(index) = find_selectable(rows, |row| row.identity == identity) {
             // Synthetic nested rows deliberately reuse their parent's session key, so their
