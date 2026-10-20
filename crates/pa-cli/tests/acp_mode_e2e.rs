@@ -3219,3 +3219,111 @@ fn acp_cancel_stops_a_queued_idle_steer_turn() {
     );
     drop(client);
 }
+
+/// A prompt that fails after admission (an invalid block) releases its
+/// turn slot without running - the steered turn must stay inside the
+/// cancellation lifecycle, so `session/cancel` still stops it (the prompt
+/// admission must not orphan the steered work).
+#[test]
+fn acp_cancel_stops_a_steered_turn_after_a_failed_prompt_admission() {
+    let Some(kernel_python) = kernel_python() else {
+        return;
+    };
+    let sleep_cell = "import time\ntime.sleep(4)\nprint('slept')";
+    let script = json!({
+        "engine": "faux",
+        "responses": [
+            { "content": [
+                { "type": "text", "text": "The queued steer starts the sleep cell." },
+                { "type": "toolCall", "name": "python_repl", "id": "toolu_idle2",
+                  "arguments": { "code": sleep_cell } },
+            ] },
+            { "content": [{ "type": "text", "text": "PROMPT-TURN-REPLY" }] },
+            { "content": [{ "type": "text", "text": "MUTATION-ONLY-REPLY" }] },
+        ],
+    });
+    let child = json!({ "responses": ["unused"] });
+    let mut client = AcpChild::spawn_with_child_script(
+        &["--mode", "acp", "--no-session"],
+        &script,
+        &child,
+        &kernel_python,
+    );
+    let session_id = initialize_and_new_session(&mut client);
+    let steer = client.request(
+        "session/steering",
+        &json!({
+            "sessionId": session_id,
+            "prompt": [{ "type": "text", "text": "run the sleep cell when idle" }],
+        }),
+    );
+    let (steer_response, _) = client.wait_response(steer, TIMEOUT);
+    assert_eq!(
+        steer_response["result"],
+        json!({ "outcome": "queued" }),
+        "the idle steer answers the queued receipt: {steer_response}"
+    );
+    client.wait_frame(TIMEOUT, |frame| {
+        frame["params"]["update"]["sessionUpdate"] == "tool_call"
+    });
+    // A prompt that admits and then fails on its blocks: the slot is
+    // taken and released without any turn running.
+    let invalid = client.request(
+        "session/prompt",
+        &json!({
+            "sessionId": session_id,
+            "prompt": [{ "type": "image", "data": "AAAA" }],
+        }),
+    );
+    let (invalid_response, _) = client.wait_response(invalid, TIMEOUT);
+    assert_eq!(
+        invalid_response["error"]["code"], -32602,
+        "the invalid-block prompt refuses: {invalid_response}"
+    );
+    client.notify("session/cancel", &json!({ "sessionId": session_id }));
+    let mut chunks = Vec::new();
+    let deadline = Instant::now() + TIMEOUT;
+    let response = loop {
+        assert!(
+            Instant::now() < deadline,
+            "the prompt was never admitted after the cancel stop"
+        );
+        let candidate = client.request(
+            "session/prompt",
+            &json!({ "sessionId": session_id, "prompt": [{ "type": "text", "text": "fresh prompt" }] }),
+        );
+        let (response, notifications) = client.wait_response(candidate, TIMEOUT);
+        chunks.extend(notifications);
+        if response.get("error").is_none() {
+            break response;
+        }
+        assert!(
+            response["error"]["data"]["details"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("cancelling"),
+            "an unexpected refusal: {response}"
+        );
+    };
+    assert_end_turn(&response);
+    let text = |frame: &Value| {
+        frame["params"]["update"]["content"]["text"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string()
+    };
+    assert!(
+        chunks.iter().any(|frame| {
+            frame["params"]["update"]["sessionUpdate"] == "agent_message_chunk"
+                && text(frame).contains("PROMPT-TURN-REPLY")
+        }),
+        "the prompt turn's reply is the script's second response: {chunks:?}"
+    );
+    assert!(
+        !chunks
+            .iter()
+            .any(|frame| text(frame).contains("MUTATION-ONLY-REPLY")),
+        "the orphaned steer turn's continuation ran despite the cancel: {chunks:?}"
+    );
+    drop(client);
+}

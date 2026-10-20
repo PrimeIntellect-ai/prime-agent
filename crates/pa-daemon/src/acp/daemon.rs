@@ -278,12 +278,14 @@ pub(crate) struct HostedSession {
     /// The running prompt turn; one at a time. A cancelled turn keeps
     /// the slot until its cancel stop finishes.
     turn: Option<ActiveTurn>,
-    /// A steer was admitted into worker work the ACP turn slot does not
-    /// own (an idle steer's own turn, or one admitted in a prompt
-    /// settle's trailing window). `session/cancel` with no turn slot arms
-    /// the stop sequence for it instead of no-opping; a prompt turn's
-    /// own stop owns the whole worker, and a completed stop sequence
-    /// dealt with the steered work, so both clear it.
+    /// Steered work was admitted: set at the steering admission point
+    /// (before the worker round trip, under the same lock as the guard
+    /// checks) and sticky - only a completed stop sequence clears it.
+    /// `session/cancel` with no turn slot arms the stop sequence for the
+    /// steered work instead of no-opping. A prompt admission never clears
+    /// it: a prompt that fails after admission (invalid blocks, a refused
+    /// turn) releases its slot without running, and must not orphan the
+    /// steered work.
     steer_work: bool,
     /// The newest assistant stop reason observed on the event stream,
     /// cleared when a prompt turn is admitted so a turn never reads a
@@ -764,9 +766,10 @@ async fn admit_prompt(
     // The stop reason is per-turn: a turn that runs no model call (a
     // slash command) must not inherit the previous turn's stop reason.
     hosted.assistant_stop_reason = None;
-    // A prompt turn's stop owns the whole worker - the abort clears both
-    // lanes - so the slot covers steered work admitted before it.
-    hosted.steer_work = false;
+    // The steered-work tracking stays: a prompt that fails after
+    // admission (invalid blocks, a refused turn) releases this slot
+    // without ever running, and must not orphan the steered work the
+    // slot would have covered.
     hosted.turn = Some(ActiveTurn {
         admission_id: admission_id.clone(),
         cancelled: false,
@@ -1522,87 +1525,98 @@ async fn handle_session_steering(
     tx: producer::FrameSink,
 ) {
     let params = types::SteeringParams::parse(&params);
-    // The turn slot is the ACP layer's own admission state: read under one
-    // lock, then send without holding it (the busy prompt's settle locks
-    // the same state).
-    let resolved = {
-        let guard = state.lock().await;
+    // The admission is one lock window: the guard checks, the block
+    // validation (no awaits), and the steered-work registration all run
+    // under it, so a `session/cancel` either refuses the steer (it is
+    // cancelling) or arms its stop only after the steered work is
+    // already tracked. The send then runs without holding the lock (the
+    // busy prompt's settle locks the same state, and the session-event
+    // consumer must pass through while the round trip is in flight).
+    let (daemon_session_id, turn_running, message) = {
+        let mut guard = state.lock().await;
         let session_closing = guard.session_close_done.is_some();
-        guard
+        let Some(hosted) = guard
             .session
             .as_ref()
             .filter(|hosted| hosted.acp_session_id == params.session_id)
-            .map(|hosted| {
-                (
-                    hosted.daemon_active_session_id.clone(),
-                    hosted.turn.is_some(),
-                    hosted.cancelling,
-                    hosted.stop_failure.clone(),
-                    session_closing,
-                )
-            })
+        else {
+            let _ = tx.send(jsonrpc::error_response(
+                &id,
+                jsonrpc::INVALID_PARAMS,
+                "Invalid params",
+                Some(&json!({ "reason": format!("Unknown ACP session: {}", params.session_id) })),
+            ));
+            return;
+        };
+        let (daemon_session_id, turn_running) = (
+            hosted.daemon_active_session_id.clone(),
+            hosted.turn.is_some(),
+        );
+        if session_closing {
+            let _ = tx.send(jsonrpc::error_response(
+                &id,
+                jsonrpc::INVALID_PARAMS,
+                "Invalid params",
+                Some(&json!({ "reason": "ACP session is closed or closing" })),
+            ));
+            return;
+        }
+        if hosted.cancelling {
+            let _ = tx.send(jsonrpc::error_response(
+                &id,
+                jsonrpc::INVALID_PARAMS,
+                "Invalid params",
+                Some(&json!({
+                    "reason": format!("ACP session is cancelling: {}", params.session_id)
+                })),
+            ));
+            return;
+        }
+        if let Some(stop_failure) = hosted.stop_failure.clone() {
+            let _ = tx.send(jsonrpc::error_response(
+                &id,
+                jsonrpc::INVALID_PARAMS,
+                "Invalid params",
+                Some(&json!({ "reason": format!("ACP session stop failed: {stop_failure}") })),
+            ));
+            return;
+        }
+        // Steering admits text blocks only: the daemon's steer lane has no
+        // image surface, and a dropped image block would let a client
+        // believe it was accepted (the prompt-block rule).
+        let blocks_invalid = params.prompt.is_empty()
+            || params.prompt.iter().any(|block| {
+                block.get("type").and_then(Value::as_str) != Some("text")
+                    || block.get("text").and_then(Value::as_str).is_none()
+            });
+        let message = params
+            .prompt
+            .iter()
+            .filter_map(|block| block.get("text").and_then(Value::as_str))
+            .collect::<Vec<_>>()
+            .join("\n");
+        if blocks_invalid || message.trim().is_empty() {
+            let _ = tx.send(jsonrpc::error_response(
+                &id,
+                jsonrpc::INVALID_PARAMS,
+                "Invalid params",
+                Some(&json!({ "reason": "steering requires non-empty text content blocks" })),
+            ));
+            return;
+        }
+        // The admission point: the steered work is tracked BEFORE the
+        // worker round trip, and only a completed stop sequence clears
+        // it - a `session/cancel` that arms while the Steer command is in
+        // flight must see it.
+        if let Some(hosted) = guard
+            .session
+            .as_mut()
+            .filter(|hosted| hosted.acp_session_id == params.session_id)
+        {
+            hosted.steer_work = true;
+        }
+        (daemon_session_id, turn_running, message)
     };
-    let Some((daemon_session_id, turn_running, cancelling, stop_failure, session_closing)) =
-        resolved
-    else {
-        let _ = tx.send(jsonrpc::error_response(
-            &id,
-            jsonrpc::INVALID_PARAMS,
-            "Invalid params",
-            Some(&json!({ "reason": format!("Unknown ACP session: {}", params.session_id) })),
-        ));
-        return;
-    };
-    if session_closing {
-        let _ = tx.send(jsonrpc::error_response(
-            &id,
-            jsonrpc::INVALID_PARAMS,
-            "Invalid params",
-            Some(&json!({ "reason": "ACP session is closed or closing" })),
-        ));
-        return;
-    }
-    if cancelling {
-        let _ = tx.send(jsonrpc::error_response(
-            &id,
-            jsonrpc::INVALID_PARAMS,
-            "Invalid params",
-            Some(&json!({ "reason": format!("ACP session is cancelling: {}", params.session_id) })),
-        ));
-        return;
-    }
-    if let Some(stop_failure) = stop_failure {
-        let _ = tx.send(jsonrpc::error_response(
-            &id,
-            jsonrpc::INVALID_PARAMS,
-            "Invalid params",
-            Some(&json!({ "reason": format!("ACP session stop failed: {stop_failure}") })),
-        ));
-        return;
-    }
-    // Steering admits text blocks only: the daemon's steer lane has no
-    // image surface, and a dropped image block would let a client believe
-    // it was accepted (the prompt-block rule).
-    let blocks_invalid = params.prompt.is_empty()
-        || params.prompt.iter().any(|block| {
-            block.get("type").and_then(Value::as_str) != Some("text")
-                || block.get("text").and_then(Value::as_str).is_none()
-        });
-    let message = params
-        .prompt
-        .iter()
-        .filter_map(|block| block.get("text").and_then(Value::as_str))
-        .collect::<Vec<_>>()
-        .join("\n");
-    if blocks_invalid || message.trim().is_empty() {
-        let _ = tx.send(jsonrpc::error_response(
-            &id,
-            jsonrpc::INVALID_PARAMS,
-            "Invalid params",
-            Some(&json!({ "reason": "steering requires non-empty text content blocks" })),
-        ));
-        return;
-    }
     let steer = DaemonCommand::Steer {
         id: None,
         active_session_id: daemon_session_id.clone(),
@@ -1719,20 +1733,6 @@ async fn handle_session_steering(
             })),
         ));
         return;
-    }
-    // The admission is live steered work: track it so a later
-    // `session/cancel` with no turn slot still arms the stop sequence
-    // for it (cleared when a prompt turn is admitted or a stop sequence
-    // dealt with it).
-    {
-        let mut guard = state.lock().await;
-        if let Some(hosted) = guard
-            .session
-            .as_mut()
-            .filter(|hosted| hosted.acp_session_id == params.session_id)
-        {
-            hosted.steer_work = true;
-        }
     }
     let outcome = steer_outcome(turn_running, worker_busy);
     let _ = tx.send(jsonrpc::response(&id, &json!({ "outcome": outcome })));
@@ -2652,6 +2652,132 @@ mod tests {
         );
         assert!(steered.session.as_ref().unwrap().cancelling);
         assert!(steered.session.as_ref().unwrap().cancel_task.is_some());
+    }
+
+    #[tokio::test]
+    async fn a_prompt_admission_never_orphans_the_steered_work() {
+        // A prompt that fails after admission (invalid blocks, a refused
+        // turn) releases its slot without running: the steered work stays
+        // tracked so `session/cancel` still arms.
+        let mut steered = state(Some(hosted_session()));
+        steered.session.as_mut().unwrap().steer_work = true;
+        let steered = Arc::new(Mutex::new(steered));
+        let admitted = admit_prompt(&json!({ "sessionId": "acp-1" }), &steered)
+            .await
+            .expect("the prompt admits over steered work");
+        assert!(admitted.starts_with("prompt-admission:"));
+        let mut guard = steered.lock().await;
+        guard.session.as_mut().unwrap().turn = None;
+        let CancelOrder::Armed(stop) = arm_cancel_locked("acp-1", &mut guard) else {
+            panic!("the failed prompt admission orphaned the steered work");
+        };
+        assert!(
+            stop.admission_id.is_none(),
+            "the released slot holds no prompt admission: the abort owns the steered work"
+        );
+    }
+
+    /// A steer whose worker round trip is still in flight is already
+    /// tracked: a `session/cancel` landing in that window arms the stop
+    /// sequence (the flag is set at the admission point, before the
+    /// send), and the steer itself is withdrawn with the cancelling
+    /// refusal once its response arrives.
+    #[tokio::test]
+    async fn a_cancel_during_the_steer_round_trip_arms_and_withdraws_the_steer() {
+        let (writer, mut commands) = mpsc::unbounded_channel::<String>();
+        let (_frames_tx, frames) = mpsc::unbounded_channel();
+        let link = Arc::new(DaemonLink {
+            writer,
+            pending: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            closed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            frames: Mutex::new(frames),
+            protocol_version: DAEMON_PROTOCOL_VERSION,
+            next_request_id: std::sync::atomic::AtomicU64::new(0),
+        });
+        let state = Arc::new(Mutex::new(state(Some(hosted_session()))));
+        let (tx, mut responses) = mpsc::unbounded_channel();
+        let handler_link = Arc::clone(&link);
+        let handler_state = Arc::clone(&state);
+        let handler = tokio::spawn(async move {
+            handle_session_steering(
+                json!(1),
+                json!({
+                    "sessionId": "acp-1",
+                    "prompt": [{ "type": "text", "text": "steer note" }],
+                }),
+                &handler_link,
+                &handler_state,
+                tx,
+            )
+            .await;
+        });
+        // The Steer command reached the fake daemon and stays unanswered:
+        // the round trip is provably in flight.
+        let steer_line = commands.recv().await.expect("the steer command");
+        let envelope: DaemonCommandEnvelope = serde_json::from_str(&steer_line).unwrap();
+        let steer_id = envelope.id.clone();
+        assert!(matches!(envelope.command, DaemonCommand::Steer { .. }));
+        // A cancel in this window must arm for the steered work.
+        let order = frame_order_prefix(
+            &Incoming::Notification {
+                method: "session/cancel".to_string(),
+                params: json!({ "sessionId": "acp-1" }),
+            },
+            &state,
+        )
+        .await;
+        assert!(
+            matches!(order, FrameOrder::Cancel(CancelOrder::Armed(_))),
+            "the in-flight steer was invisible to the cancel"
+        );
+        // The steer's own response arrives after the cancel armed: the
+        // handler must withdraw it and answer with the cancelling refusal.
+        link.pending
+            .lock()
+            .unwrap()
+            .remove(&steer_id)
+            .expect("the steer round trip is pending")
+            .send(DaemonResponse {
+                id: Some(steer_id),
+                command: "steer".to_string(),
+                success: true,
+                data: Some(json!({ "queued": true, "busy": false })),
+                error: None,
+                error_info: None,
+            })
+            .expect("the steer answer lands");
+        let withdrawal = commands.recv().await.expect("the withdrawal abort");
+        let withdrawal: DaemonCommandEnvelope = serde_json::from_str(&withdrawal).unwrap();
+        let withdrawal_id = withdrawal.id.clone();
+        assert!(
+            matches!(withdrawal.command, DaemonCommand::AbortAndClearQueue { .. }),
+            "the withdrawal is the stop's abort: {:?}",
+            withdrawal.command
+        );
+        link.pending
+            .lock()
+            .unwrap()
+            .remove(&withdrawal_id)
+            .expect("the withdrawal round trip is pending")
+            .send(DaemonResponse {
+                id: Some(withdrawal_id),
+                command: "abort_and_clear_queue".to_string(),
+                success: true,
+                data: None,
+                error: None,
+                error_info: None,
+            })
+            .expect("the withdrawal answer lands");
+        let reply = responses.recv().await.expect("the steering reply");
+        assert_eq!(reply["id"], json!(1), "{reply}");
+        assert!(
+            reply["error"]["data"]["reason"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("ACP session is cancelling"),
+            "the raced steer answers the cancelling refusal: {reply}"
+        );
+        handler.await.expect("the handler settles");
     }
 
     #[test]
