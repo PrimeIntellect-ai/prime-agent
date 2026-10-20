@@ -3,7 +3,9 @@
 
 Both binaries receive identical REPL cells. A loopback HTTP gate holds the
 background process until the JSON transcript reports the first assistant turn
-ended. The completion must wake a second turn and persist the same notice.
+ended. Expected difference: TS 0.9.8 --print exits after that first turn
+without waiting for the command (no notice); Rust print waits for it on
+purpose, and its completion must wake a second turn and persist the notice.
 """
 import argparse
 import http.server
@@ -105,6 +107,13 @@ def validate(observed):
     assert observed['notice']['matches_started_pid'] is True
 
 
+def validate_ts(observed):
+    # TS --print ends with its first turn: no wake request, no notice.
+    assert observed['first_turn_ended_before_release'] is True
+    assert observed['request_count'] == 2
+    assert observed['notice_count'] == 0
+
+
 def observe(binary, kind, root, observed):
     env = env_for(root, kind)
     env[TAG] = str(root)
@@ -151,11 +160,16 @@ def observe(binary, kind, root, observed):
         assert process.returncode == 0, process.returncode
         assert not provider.errors, provider.errors
         started = probe_from(provider.requests, START)
-        finished = probe_from(provider.requests, DONE)
         rows = [json.loads(line) for path in (root / 'sessions').rglob('*.jsonl')
                 for line in path.read_text().splitlines()]
         notices = [row for row in rows if row.get('type') == 'custom_message'
                    and row.get('customType') == 'async_bash_completion']
+        if kind == 'ts':
+            observed.update(first_turn_ended_before_release=provider.first_turn_ended,
+                request_count=len(provider.requests), notice_count=len(notices))
+            validate_ts(observed)
+            return
+        finished = probe_from(provider.requests, DONE)
         assert len(notices) == 1, notices
         notice = notices[0]
         observed.update(first_turn_ended_before_release=provider.first_turn_ended,
@@ -198,7 +212,6 @@ def main():
                     observed['error'] = str(error)
             assert all(r.get('behavior_verified') and r.get('cleanup_verified') and 'error' not in r
                        for r in result['runs'].values()), 'actual print bash observation failed'
-            assert result['runs']['ts']['notice'] == result['runs']['rust']['notice']
         result['verified'] = True
     except Exception as error:
         result['error'] = str(error)
