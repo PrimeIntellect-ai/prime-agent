@@ -5,9 +5,9 @@ use super::{
     apply_startup_chrome, arm_shutdown_recovery, check_tmux_keyboard_setup, mpsc,
     run_onboarding_phase, spawn_session_reader, AgentView, DaemonClient, Duration, ExitGuard,
     HeadlessSettle, Instant, InteractiveOptions, InteractiveOutcome, PaneDrive, ReconnectConnect,
-    ReconnectLoop, RecoveryKind, Renderer, Result, SessionReconnect, SessionSelection, SessionUi,
-    TerminalHandoff, UiInput, UiMode, VecDeque, SESSION_RECONNECT_ATTEMPT_TIMEOUT_S,
-    TELEMETRY_EXIT_TIMEOUT_MS,
+    ReconnectLoop, RecoveryKind, Renderer, Result, SessionPanel, SessionReconnect,
+    SessionSelection, SessionUi, TerminalHandoff, UiInput, UiMode, VecDeque,
+    ACTIVITY_POLL_INTERVAL, SESSION_RECONNECT_ATTEMPT_TIMEOUT_S, TELEMETRY_EXIT_TIMEOUT_MS,
 };
 use crate::suspend::SuspendTerminal;
 use anyhow::Context;
@@ -51,12 +51,13 @@ fn next_spinner_deadline(started: Instant, now: Instant) -> Instant {
 /// The open route for one interactive run (TS `runAgentsViewLoop`'s
 /// open versus the CLI's own open): the agents-view open waits through a
 /// daemon update restart (TS #2391) instead of failing the open hard.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum SessionOpenRoute {
     /// The CLI's open (`prime-agent`, `--resume`, `--attach`): a single attempt.
     Cli,
-    /// The agents view's open: waits through the update-restart window and retries.
-    AgentsView,
+    /// The agents view's open: waits through the update-restart window and retries; `panel`
+    /// mounts on open and its close returns to the agents view.
+    AgentsView { panel: Option<SessionPanel> },
 }
 
 /// Run one interactive session (the CLI open route).
@@ -82,8 +83,9 @@ pub async fn run_interactive(
 pub async fn run_interactive_agents_view_open(
     options: InteractiveOptions,
     ui: UiMode,
+    panel: Option<SessionPanel>,
 ) -> Result<InteractiveOutcome> {
-    run_interactive_route(options, ui, SessionOpenRoute::AgentsView).await
+    run_interactive_route(options, ui, SessionOpenRoute::AgentsView { panel }).await
 }
 
 async fn run_interactive_route(
@@ -310,7 +312,7 @@ async fn run_interactive_surface(
         let factory_tx = factory_tx.clone();
         let commands_tx = commands_tx.clone();
         let page_tx = page_tx.clone();
-        let waits_through_update_restart = route == SessionOpenRoute::AgentsView;
+        let waits_through_update_restart = matches!(route, SessionOpenRoute::AgentsView { .. });
         tokio::spawn(async move {
             crate::update_restart_wait::wait_through_update_restart(
                 waits_through_update_restart,
@@ -708,6 +710,9 @@ async fn run_interactive_surface(
     // previous chat view of this session left via the agents view or a
     // switch) returns to the editor when its chat reopens.
     session.restore_prompt_stash_on_open(&mut view);
+    if let SessionOpenRoute::AgentsView { panel: Some(panel) } = route {
+        session.open_agents_view_panel(panel, &mut view);
+    }
     // Declared above the onboarding phase: the pane's drive marks it.
     let mut headless_done = false;
     // The settle bound's deadline (see [`HEADLESS_SETTLE_TIMEOUT_MS`]).
@@ -1886,7 +1891,7 @@ async fn run_interactive_surface(
                     std::future::pending::<()>().await;
                 }
                 tokio::time::sleep_until(
-                    tokio::time::Instant::from_std(last_bash_refresh + Duration::from_secs(2)),
+                    tokio::time::Instant::from_std(last_bash_refresh + ACTIVITY_POLL_INTERVAL),
                 )
                 .await;
             } => {
@@ -1905,7 +1910,7 @@ async fn run_interactive_surface(
                     std::future::pending::<()>().await;
                 }
                 tokio::time::sleep_until(
-                    tokio::time::Instant::from_std(last_factory_refresh + Duration::from_secs(2)),
+                    tokio::time::Instant::from_std(last_factory_refresh + ACTIVITY_POLL_INTERVAL),
                 )
                 .await;
             } => {

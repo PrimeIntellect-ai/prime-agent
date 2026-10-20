@@ -1430,6 +1430,27 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn an_unsaved_session_blanks_the_kernel_session_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let agent_dir = dir.path().join("agent");
+        let cwd = dir.path().join("project");
+        std::fs::create_dir_all(&agent_dir).unwrap();
+        std::fs::create_dir_all(cwd.join(".prime/agent")).unwrap();
+        let engine = shell_test_session(cwd, agent_dir).await.unwrap();
+        assert_eq!(
+            engine
+                .provisioner
+                .inner
+                .options
+                .env
+                .get("RLM_SESSION_ID")
+                .map(String::as_str),
+            Some(""),
+            "an inherited RLM_SESSION_ID must not reach an unsaved session's kernel"
+        );
+    }
+
+    #[tokio::test]
     async fn without_a_websearch_skill_no_serper_key_env() {
         let dir = tempfile::tempdir().unwrap();
         let agent_dir = dir.path().join("agent");
