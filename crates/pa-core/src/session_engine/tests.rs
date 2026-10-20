@@ -1125,9 +1125,18 @@ async fn aborted_tool_call_result_carries_elapsed_duration() {
     let prompt_engine = Arc::clone(&engine);
     let prompting =
         tokio::spawn(async move { prompt_engine.prompt("hi", PromptOptions::default()).await });
-    while !entered.load(std::sync::atomic::Ordering::SeqCst) {
-        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-    }
+    // Bounded entered wait: a stalled tool that never starts fails the
+    // test instead of hanging the suite.
+    let tool_entered = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        while !entered.load(std::sync::atomic::Ordering::SeqCst) {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await;
+    assert!(
+        tool_entered.is_ok(),
+        "the stalled tool never entered within 2s"
+    );
     // Let the call run briefly so the elapsed duration is non-zero.
     tokio::time::sleep(std::time::Duration::from_millis(150)).await;
     engine.agent().abort();
