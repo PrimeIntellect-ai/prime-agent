@@ -76,11 +76,24 @@ pub enum RowKind {
 /// The summary line's identity prefix (the `subagents:` prefix, so a carried selection
 /// restores onto it).
 pub(crate) const SUMMARY_ROW_PREFIX: &str = "subagents:";
+/// The shells activity line's identity prefix.
+pub(crate) const SHELLS_ROW_PREFIX: &str = "shells:";
+/// The factory-runs activity line's identity prefix.
+pub(crate) const FACTORY_ROW_PREFIX: &str = "factory:";
 
-/// Whether a row identity is one of a parent's summary lines: such identities pin selection
-/// fallbacks to summary rows, which reuse their parent's session key.
-pub(crate) fn is_summary_row_identity(identity: &str) -> bool {
-    identity.starts_with(SUMMARY_ROW_PREFIX)
+/// The row kind a synthetic nested-row identity pins selection fallbacks to: these rows all
+/// reuse their parent's session key, so a session-id fallback must stay on the same kind of
+/// line instead of resolving to the parent agent row.
+pub(crate) fn pinned_row_kind(identity: &str) -> Option<RowKind> {
+    if identity.starts_with(SUMMARY_ROW_PREFIX) {
+        Some(RowKind::SubagentSummary)
+    } else if identity.starts_with(SHELLS_ROW_PREFIX) {
+        Some(RowKind::Shells)
+    } else if identity.starts_with(FACTORY_ROW_PREFIX) {
+        Some(RowKind::FactoryRuns)
+    } else {
+        None
+    }
 }
 
 impl AgentsViewRow {
