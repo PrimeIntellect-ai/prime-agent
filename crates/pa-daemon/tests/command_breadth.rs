@@ -520,6 +520,10 @@ const WIRE_FIXTURES: &[(&str, &str)] = &[
         "mark_anthropic_warning_shown",
         r#"{"type": "mark_anthropic_warning_shown", "activeSessionId": "sess"}"#,
     ),
+    (
+        "auth_changed",
+        r#"{"type": "auth_changed", "providerId": "prime-inference"}"#,
+    ),
 ];
 
 /// The accept list is the TS list, in TS order, then the Rust-native supervisor/worker frames.
@@ -536,7 +540,8 @@ fn known_command_types_match_the_ts_list() {
         assert!(
             matches!(
                 *extra,
-                "worker_register"
+                "auth_changed"
+                    | "worker_register"
                     | "worker_roster_delta"
                     | "get_worker_peer_transport"
                     | "commit_update_restart"

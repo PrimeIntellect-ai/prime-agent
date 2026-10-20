@@ -317,34 +317,50 @@ impl Worker {
         if let Err(response) = self.require_created("reload") {
             return response;
         }
+        self.reload_engine_live_inputs("reload", None).await
+    }
+
+    /// Refresh only the changed provider, including before a session is created.
+    pub(crate) async fn handle_auth_changed(&self, payload: &Value) -> DaemonResponse {
+        let Some(provider_id) = payload.get("providerId").and_then(Value::as_str) else {
+            return response_failure(None, "auth_changed", "providerId is required", None);
+        };
+        self.reload_engine_live_inputs("auth_changed", Some(provider_id))
+            .await
+    }
+
+    async fn reload_engine_live_inputs(
+        &self,
+        type_name: &str,
+        provider_id: Option<&str>,
+    ) -> DaemonResponse {
+        let provider_id = provider_id.map(str::to_string);
         if let Some(engine) = &self.agent_engine {
             let engine = std::sync::Arc::clone(engine);
             // The blocking thread's reload can fail two ways: the auth
             // store's reload (a malformed document, an unacquirable lock)
-            // or the join itself (a panic). Both answer the client's
-            // reload with the failure, never a success the session did
-            // not apply.
-            match tokio::task::spawn_blocking(move || engine.reload_live_inputs()).await {
-                Ok(Ok(())) => {}
-                Ok(Err(error)) => {
-                    return response_failure(
-                        None,
-                        "reload",
-                        &format!("session reload failed: {error}"),
-                        None,
-                    );
-                }
-                Err(error) => {
-                    return response_failure(
-                        None,
-                        "reload",
-                        &format!("session reload failed: {error}"),
-                        None,
-                    );
-                }
+            // or the join itself (a panic). Both answer with the failure,
+            // never a success the session did not apply.
+            let error = match tokio::task::spawn_blocking(move || match provider_id {
+                Some(provider_id) => engine.apply_auth_changed(&provider_id),
+                None => engine.reload_live_inputs(),
+            })
+            .await
+            {
+                Ok(Ok(())) => None,
+                Ok(Err(error)) => Some(error),
+                Err(error) => Some(error.to_string()),
+            };
+            if let Some(error) = error {
+                return response_failure(
+                    None,
+                    type_name,
+                    &format!("session reload failed: {error}"),
+                    None,
+                );
             }
         }
-        response_success(None, "reload", None)
+        response_success(None, type_name, None)
     }
 }
 
@@ -434,6 +450,13 @@ mod tests {
                     .collect()
             })
             .unwrap_or_default()
+    }
+
+    #[tokio::test]
+    async fn auth_changed_requires_the_provider_id() {
+        let worker = created_worker().await;
+        let response = worker.dispatch("auth_changed", &json!({})).await;
+        assert!(!response.success);
     }
 
     #[tokio::test]

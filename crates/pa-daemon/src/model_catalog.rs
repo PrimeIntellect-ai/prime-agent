@@ -147,10 +147,8 @@ mod tests {
     use std::time::{Duration, Instant};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-    // NOTE on ambient credentials: these tests pin the Prime Inference
-    // scope through the temp agent dir's auth.json — an ambient
-    // `PRIME_API_KEY` would win over the stored credential and change
-    // the resolved scope.
+    // These tests pin the Prime Inference scope through the temp agent
+    // dir's auth.json, not a machine's ambient credentials.
 
     /// One scripted answer: raw bytes, or a gate the test releases.
     enum Answer {

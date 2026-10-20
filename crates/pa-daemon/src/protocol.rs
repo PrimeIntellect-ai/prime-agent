@@ -156,6 +156,7 @@ pub const KNOWN_COMMAND_TYPES: &[&str] = &[
     "list_kernel_bash",
     "tail_kernel_bash",
     "kill_kernel_bash",
+    "auth_changed",
     "worker_register",
     "worker_roster_delta",
     "get_worker_peer_transport",
@@ -923,6 +924,7 @@ pub fn command_active_session_id(command: &DaemonCommand) -> Option<&str> {
         | DaemonCommand::Create { .. }
         | DaemonCommand::SendMessage { .. }
         | DaemonCommand::AckResult { .. }
+        | DaemonCommand::AuthChanged { .. }
         | DaemonCommand::PrepareUpdateRestart { .. }
         | DaemonCommand::CommitUpdateRestart { .. }
         | DaemonCommand::UpdateRestoreStatus { .. }
@@ -1026,6 +1028,7 @@ pub fn command_type_name(command: &DaemonCommand) -> &'static str {
         DaemonCommand::AbortRetry { .. } => "abort_retry",
         DaemonCommand::ExecuteBashAndWait { .. } => "execute_bash_and_wait",
         DaemonCommand::Reload { .. } => "reload",
+        DaemonCommand::AuthChanged { .. } => "auth_changed",
         DaemonCommand::NewSession { .. } => "new_session",
         DaemonCommand::SwitchSession { .. } => "switch_session",
         DaemonCommand::Fork { .. } => "fork",

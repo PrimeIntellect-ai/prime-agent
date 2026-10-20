@@ -189,6 +189,7 @@ const ANTHROPIC_SUBSCRIPTION_AUTH_WARNING: &str = "Anthropic subscription auth i
 pub struct ProviderAuth {
     cwd: PathBuf,
     agent_dir: PathBuf,
+    daemon_socket: Option<PathBuf>,
 }
 
 impl ProviderAuth {
@@ -196,6 +197,51 @@ impl ProviderAuth {
         ProviderAuth {
             cwd: cwd.into(),
             agent_dir: agent_dir.into(),
+            daemon_socket: None,
+        }
+    }
+
+    pub fn with_daemon_socket(mut self, socket: PathBuf) -> Self {
+        self.daemon_socket = Some(socket);
+        self
+    }
+
+    /// A successful login/logout for any provider updates already-built worker
+    /// targets before the flow reports completion; the daemon refresh matches
+    /// by provider id. The saved credential remains valid even when the
+    /// daemon cannot accept the notification.
+    async fn notify_daemon_auth_changed(
+        socket: Option<PathBuf>,
+        provider: &str,
+        outcome: ProviderAuthOutcome,
+    ) -> ProviderAuthOutcome {
+        if !matches!(outcome, ProviderAuthOutcome::Status(_)) {
+            return outcome;
+        }
+        let Some(socket) = socket else { return outcome };
+        let provider_id = provider.to_string();
+        let result = tokio::task::spawn_blocking(move || {
+            let mut client = crate::daemon_client::DaemonClient::connect(&socket)?;
+            let response = client.request(pa_types::daemon::DaemonCommand::AuthChanged {
+                id: None,
+                provider_id,
+                rest: serde_json::Map::new(),
+            })?;
+            anyhow::ensure!(
+                response.success,
+                "daemon could not update all running sessions"
+            );
+            Ok::<_, anyhow::Error>(())
+        })
+        .await;
+        match result {
+            Ok(Ok(())) => outcome,
+            _ => match outcome {
+                ProviderAuthOutcome::Status(message) => ProviderAuthOutcome::Status(format!(
+                    "{message} Warning: shut down and restart Prime Agent to update running sessions."
+                )),
+                other => other,
+            },
         }
     }
 
@@ -259,10 +305,15 @@ impl ProviderAuthCommands for ProviderAuth {
         let provider_row = provider.clone();
         let agent_dir = self.agent_dir.clone();
         let api_key = api_key.map(str::to_string);
+        let daemon_socket = self.daemon_socket.clone();
         Box::pin(async move {
-            tokio::task::spawn_blocking(move || login_blocking(&provider_row, &agent_dir, api_key))
-                .await
-                .expect("the login task ran")
+            let provider_id = provider_row.id.clone();
+            let outcome = tokio::task::spawn_blocking(move || {
+                login_blocking(&provider_row, &agent_dir, api_key)
+            })
+            .await
+            .expect("the login task ran");
+            Self::notify_daemon_auth_changed(daemon_socket, &provider_id, outcome).await
         })
     }
 
@@ -276,14 +327,17 @@ impl ProviderAuthCommands for ProviderAuth {
         let provider_row = provider.clone();
         let cwd = self.cwd.clone();
         let agent_dir = self.agent_dir.clone();
+        let daemon_socket = self.daemon_socket.clone();
         Box::pin(async move {
+            let provider_id = provider_row.id.clone();
             // The panel round-trips stay off the async workers (a prompt's answer arrives from the
             // TUI loop's thread).
-            tokio::task::spawn_blocking(move || {
+            let outcome = tokio::task::spawn_blocking(move || {
                 login_blocking_on_panel(&provider_row, cwd, agent_dir, panel)
             })
             .await
-            .expect("the login task ran")
+            .expect("the login task ran");
+            Self::notify_daemon_auth_changed(daemon_socket, &provider_id, outcome).await
         })
     }
 
@@ -308,10 +362,14 @@ impl ProviderAuthCommands for ProviderAuth {
     fn logout(&self, provider: &ProviderRow) -> ProviderAuthFuture {
         let provider_row = provider.clone();
         let agent_dir = self.agent_dir.clone();
+        let daemon_socket = self.daemon_socket.clone();
         Box::pin(async move {
-            tokio::task::spawn_blocking(move || logout_blocking(&provider_row, &agent_dir))
-                .await
-                .expect("the logout task ran")
+            let provider_id = provider_row.id.clone();
+            let outcome =
+                tokio::task::spawn_blocking(move || logout_blocking(&provider_row, &agent_dir))
+                    .await
+                    .expect("the logout task ran");
+            Self::notify_daemon_auth_changed(daemon_socket, &provider_id, outcome).await
         })
     }
 }

@@ -146,6 +146,9 @@ pub struct Supervisor {
     /// restarts, overloads, saved-session listings), counted and sent as
     /// one `daemon event` summary per window instead of one event each.
     daemon_event_counts: std::sync::Mutex<notes::DaemonEventCounts>,
+    /// Creates/replays publish Ready under a read guard; auth fanout takes
+    /// the write guard so it cannot miss a target built by an in-flight create.
+    pub(crate) auth_refresh_barrier: tokio::sync::RwLock<()>,
     pub(crate) registry: SessionRegistry,
     /// Worker outbound frames, with their client routing. The payload is shared (`Arc`):
     /// a per-receiver deep `Value` clone would multiply the heap by the connection
@@ -259,6 +262,7 @@ impl Supervisor {
             worker_connect_budget: std::sync::Mutex::new(None),
             session_bindings: crate::session_bindings::SessionBindingTable::new(),
             opening_files: std::sync::Mutex::new(std::collections::HashMap::new()),
+            auth_refresh_barrier: tokio::sync::RwLock::new(()),
             telemetry: std::sync::Mutex::new(None),
             daemon_event_counts: std::sync::Mutex::default(),
             registry: SessionRegistry::new(),

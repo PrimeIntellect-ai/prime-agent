@@ -92,6 +92,22 @@ pub fn trace_credential(agent_dir: &Path) -> Option<TraceCredential> {
             label: "Prime Agent Traces credential".to_string(),
         });
     }
+    // A saved inference login outranks an ambient PRIME_API_KEY, which may
+    // still be inherited from daemon startup after the user logs in again.
+    let inference = auth.get_api_key_with_source_token(PRIME_INFERENCE_PROVIDER_ID, false);
+    if inference
+        .source_token
+        .as_ref()
+        .is_some_and(|token| token.source == crate::auth::AuthSource::Stored)
+    {
+        if let Some(key) = inference.api_key.filter(|key| !key.is_empty()) {
+            return Some(TraceCredential {
+                api_key: key,
+                source: TraceCredentialSource::PrimeInference,
+                label: "Prime Inference credential".to_string(),
+            });
+        }
+    }
     if let Ok(value) = std::env::var("PRIME_API_KEY") {
         if !value.trim().is_empty() {
             return Some(TraceCredential {
@@ -100,13 +116,6 @@ pub fn trace_credential(agent_dir: &Path) -> Option<TraceCredential> {
                 label: "PRIME_API_KEY".to_string(),
             });
         }
-    }
-    if let Some(key) = stored_key(&mut auth, PRIME_INFERENCE_PROVIDER_ID) {
-        return Some(TraceCredential {
-            api_key: key,
-            source: TraceCredentialSource::PrimeInference,
-            label: "Prime Inference credential".to_string(),
-        });
     }
     None
 }

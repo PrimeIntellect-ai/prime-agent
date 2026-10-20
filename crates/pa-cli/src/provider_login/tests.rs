@@ -313,3 +313,187 @@ async fn a_stored_web_search_key_pairs_with_the_logout_row() {
         );
     assert!(auth.logout_options().await.is_empty());
 }
+
+#[cfg(unix)]
+fn prime_inference_row() -> ProviderRow {
+    ProviderRow {
+        id: PRIME_INFERENCE_PROVIDER_ID.to_string(),
+        name: "Prime Inference".to_string(),
+        auth_type: AuthType::ApiKey,
+        status: None,
+        flow: AuthFlow::TerminalFlow,
+        configured: true,
+        available: true,
+    }
+}
+
+#[cfg(unix)]
+fn anthropic_row() -> ProviderRow {
+    ProviderRow {
+        id: "anthropic".to_string(),
+        name: "Anthropic".to_string(),
+        auth_type: AuthType::ApiKey,
+        status: None,
+        flow: AuthFlow::ApiKeyPrompt,
+        configured: true,
+        available: true,
+    }
+}
+
+/// The notifier harness: a fake daemon reads one `auth_changed` notification
+/// for `provider_id` and acks only when released — a flow still pending at the
+/// release proves it reports completion after the worker refresh.
+#[cfg(unix)]
+async fn auth_flow_waits_for_worker_refresh_ack(
+    provider_id: &str,
+    seed: impl FnOnce(&mut pa_core::auth::AuthStorage),
+    build_flow: impl FnOnce(ProviderAuth) -> ProviderAuthFuture,
+    ack_success: bool,
+) -> (ProviderAuthOutcome, tempfile::TempDir) {
+    use std::io::{BufRead, Write};
+    let dir = tempfile::tempdir().expect("temp dir");
+    let agent_dir = dir.path().join("agent");
+    std::fs::create_dir_all(&agent_dir).expect("agent dir");
+    let socket = dir.path().join("daemon.sock");
+    let listener = std::os::unix::net::UnixListener::bind(&socket).expect("bind fake daemon");
+    let (received_tx, received_rx) = tokio::sync::oneshot::channel();
+    let (ack_tx, ack_rx) = std::sync::mpsc::channel::<()>();
+    let expected_provider_id = provider_id.to_string();
+    let server = std::thread::spawn(move || {
+        let (stream, _) = listener.accept().expect("accept notification");
+        let mut writer = stream.try_clone().expect("clone daemon stream");
+        let mut reader = std::io::BufReader::new(stream);
+        writer.write_all(b"{\"type\":\"daemon_hello\",\"protocol\":{\"name\":\"prime-agent.daemon\",\"version\":7},\"serverCapabilities\":[]}\n").expect("hello");
+        let mut frame = String::new();
+        reader.read_line(&mut frame).expect("read notification");
+        let command: serde_json::Value = serde_json::from_str(&frame).expect("command frame");
+        assert_eq!(command["command"]["type"], "auth_changed");
+        assert_eq!(command["command"]["providerId"], expected_provider_id);
+        assert!(command["command"].get("key").is_none());
+        let id = command["id"].as_str().expect("request id").to_string();
+        received_tx.send(()).expect("notification observed");
+        ack_rx.recv().expect("release notification");
+        writeln!(
+            writer,
+            "{}",
+            serde_json::json!({
+                "type": "response", "id": id, "command": "auth_changed", "success": ack_success
+            })
+        )
+        .expect("notification ack");
+    });
+    let mut stored = pa_core::auth::AuthStorage::create(&agent_dir);
+    seed(&mut stored);
+    let auth = ProviderAuth::new(dir.path(), &agent_dir).with_daemon_socket(socket);
+    let flow = tokio::spawn(build_flow(auth));
+    received_rx.await.expect("daemon saw change");
+    assert!(
+        !flow.is_finished(),
+        "the flow must wait for all workers to refresh"
+    );
+    ack_tx.send(()).expect("ack release");
+    let outcome = flow.await.expect("auth flow task");
+    server.join().expect("daemon thread");
+    (outcome, dir)
+}
+
+#[cfg(unix)]
+async fn prime_logout_waits_for_ack(ack_success: bool) -> (ProviderAuthOutcome, tempfile::TempDir) {
+    auth_flow_waits_for_worker_refresh_ack(
+        PRIME_INFERENCE_PROVIDER_ID,
+        |stored| {
+            stored.set_prime_inference_api_key(
+                "old-login",
+                pa_core::auth::PrimeTeamAssignment::PersonalAccount,
+            );
+        },
+        |auth| auth.logout(&prime_inference_row()),
+        ack_success,
+    )
+    .await
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_prime_logout_waits_for_worker_refresh_ack_before_reporting_success() {
+    let (outcome, dir) = prime_logout_waits_for_ack(/*ack_success*/ true).await;
+    let agent_dir = dir.path().join("agent");
+    assert!(
+        matches!(outcome, ProviderAuthOutcome::Status(_)),
+        "expected logout status, got {outcome:?}"
+    );
+    assert!(pa_core::auth::AuthStorage::create(&agent_dir)
+        .get_all()
+        .credential(PRIME_INFERENCE_PROVIDER_ID)
+        .is_none());
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_failed_logout_notification_still_completes_the_logout() {
+    let (outcome, dir) = prime_logout_waits_for_ack(/*ack_success*/ false).await;
+    let agent_dir = dir.path().join("agent");
+    assert!(
+        matches!(outcome, ProviderAuthOutcome::Status(_)),
+        "expected logout status, got {outcome:?}"
+    );
+    assert!(pa_core::auth::AuthStorage::create(&agent_dir)
+        .get_all()
+        .credential(PRIME_INFERENCE_PROVIDER_ID)
+        .is_none());
+}
+
+/// The ungated notifier reaches the daemon for a non-prime provider too.
+#[cfg(unix)]
+#[tokio::test]
+async fn an_anthropic_logout_notifies_the_daemon_with_its_provider_id() {
+    let (outcome, dir) = auth_flow_waits_for_worker_refresh_ack(
+        "anthropic",
+        |stored| {
+            stored.set(
+                "anthropic",
+                AuthCredential::ApiKey {
+                    key: "old-key".to_string(),
+                    prime_team: None,
+                },
+            );
+        },
+        |auth| auth.logout(&anthropic_row()),
+        /*ack_success*/ true,
+    )
+    .await;
+    let agent_dir = dir.path().join("agent");
+    assert!(
+        matches!(outcome, ProviderAuthOutcome::Status(_)),
+        "expected logout status, got {outcome:?}"
+    );
+    assert!(pa_core::auth::AuthStorage::create(&agent_dir)
+        .get_all()
+        .credential("anthropic")
+        .is_none());
+}
+
+/// The ungated notifier reaches the daemon for a saved api key too.
+#[cfg(unix)]
+#[tokio::test]
+async fn an_anthropic_login_notifies_the_daemon_with_its_provider_id() {
+    let (outcome, dir) = auth_flow_waits_for_worker_refresh_ack(
+        "anthropic",
+        |_| {},
+        |auth| auth.login(&anthropic_row(), Some("sk-ant-test")),
+        /*ack_success*/ true,
+    )
+    .await;
+    let agent_dir = dir.path().join("agent");
+    assert!(
+        matches!(outcome, ProviderAuthOutcome::Status(_)),
+        "expected login status, got {outcome:?}"
+    );
+    match pa_core::auth::AuthStorage::create(&agent_dir)
+        .get_all()
+        .credential("anthropic")
+    {
+        Some(AuthCredential::ApiKey { key, .. }) if key == "sk-ant-test" => {}
+        other => panic!("expected the stored anthropic api key, got {other:?}"),
+    }
+}

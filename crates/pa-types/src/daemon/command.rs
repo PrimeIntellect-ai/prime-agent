@@ -1000,6 +1000,15 @@ pub enum DaemonCommand {
         #[serde(flatten)]
         rest: JsonMap,
     },
+    /// One saved auth change: the supervisor refreshes resident workers.
+    /// Carries a provider id, never credential material.
+    AuthChanged {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
+        provider_id: String,
+        #[serde(flatten)]
+        rest: JsonMap,
+    },
     NewSession {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         id: Option<String>,
@@ -1289,6 +1298,11 @@ mod tests {
         rt::<DaemonCommand>(
             r#"{"type":"cancel_prompt_admission","activeSessionId":"s1","admissionId":"a1","cancelOwned":true}"#,
         );
+    }
+
+    #[test]
+    fn auth_changed_carries_only_the_provider_id() {
+        rt::<DaemonCommand>(r#"{"type":"auth_changed","providerId":"prime-inference"}"#);
     }
 
     #[test]

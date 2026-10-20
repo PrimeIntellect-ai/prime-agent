@@ -429,6 +429,7 @@ impl Supervisor {
                 (payload, None)
             }
         };
+        let _auth_barrier = self.auth_refresh_barrier.read().await;
         let response = match self
             .route_command_typed(
                 resident,

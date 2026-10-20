@@ -33,10 +33,8 @@ use serde_json::{json, Value};
 /// invariant keeps fetched entries to compiled transports.
 const LAYER_A_PROBE_ID: &str = "gpt-5.7-probe";
 
-/// The hermetic auth storage: one Prime Inference key+team, with no ambient environment credential
-/// source (an env `PRIME_API_KEY` would otherwise win over the stored credential). Write the file
-/// auth.json the supervisor's credential read uses: one Prime Inference key+team (the warm-up and
-/// the polled registry resolve through the same file auth).
+/// Write auth.json with the Prime Inference key+team the supervisor's credential read uses;
+/// the warm-up and polled registry resolve through the same file auth.
 fn write_prime_auth(agent_dir: &Path, api_key: &str, team_id: &str) {
     std::fs::write(
         agent_dir.join("auth.json"),

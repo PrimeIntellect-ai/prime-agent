@@ -391,6 +391,7 @@ impl Supervisor {
             create_command_payload(&descriptor.create_command)
         };
         let mut child = child;
+        let _auth_barrier = self.auth_refresh_barrier.read().await;
         let response = match self
             .route_command_typed(
                 &resident,

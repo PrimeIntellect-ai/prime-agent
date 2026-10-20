@@ -128,11 +128,11 @@ fn reload_rebinds_the_request_auth_from_the_credential_store() {
     );
 }
 
-/// With nothing stored for the live model the reload keeps the slot
-/// untouched (a models.json lost mid-session loses nothing) — the MCP
-/// re-read alone still runs.
+/// With nothing stored or configured for the live model the reload keeps
+/// the slot's model but drops the key: the session serves what a fresh
+/// resolution yields, which is nothing.
 #[test]
-fn reload_with_nothing_stored_keeps_the_target() {
+fn reload_with_nothing_resolvable_drops_the_key() {
     let dir = tempfile::TempDir::new().unwrap();
     let agent_dir = dir.path().join("agent");
     std::fs::create_dir_all(&agent_dir).unwrap();
@@ -171,10 +171,10 @@ fn reload_with_nothing_stored_keeps_the_target() {
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .clone()
         .expect("the target stays");
-    assert_eq!(
-        target.api_key.as_deref(),
-        Some("stale-access"),
-        "an unresolvable model leaves the target untouched"
+    assert_eq!(target.model.id, "mock-1", "the reload keeps the model");
+    assert!(
+        target.api_key.is_none(),
+        "a key nothing resolves any more stops serving"
     );
 }
 
@@ -291,17 +291,10 @@ fn reload_without_a_live_target_installs_nothing() {
     );
 }
 
-/// A routed image episode re-applies its armed target on every model-turn
-/// attempt (overflow retries, failover restores): the reload must refresh
-/// the armed route's auth too, or the next attempt reinstalls the stale
-/// credentials a re-login just replaced.
-#[test]
-fn reload_refreshes_the_armed_image_route_target_auth() {
-    let dir = tempfile::TempDir::new().unwrap();
-    let agent_dir = dir.path().join("agent");
-    write_two_model_provider(&agent_dir);
-    write_oauth_credential(&agent_dir, "fresh-access");
-    let engine = credential_backed_engine(dir.path());
+/// Arms an image route on `mock-vision` whose target serves `route_key`
+/// and whose saved session target (on the pinned `mock-1`) serves
+/// `session_key`.
+fn arm_image_route(engine: &AgentSessionEngine, route_key: &str, session_key: &str) {
     let session_model = engine.resolve_model().expect("the pinned model resolves");
     let routed: pa_types::ai::Model =
         pa_core::session_engine::provider_adapter::json_round_trip(&serde_json::json!({
@@ -327,7 +320,7 @@ fn reload_refreshes_the_armed_image_route_target_auth() {
         Some(crate::image_route::ImageRoute {
             target: ProviderTarget {
                 service_tier: None,
-                api_key: Some("stale-access".to_string()),
+                api_key: Some(route_key.to_string()),
                 model: routed,
                 headers: None,
             },
@@ -335,46 +328,86 @@ fn reload_refreshes_the_armed_image_route_target_auth() {
                 model: override_model,
                 thinking_level: pa_agent::types::ThinkingLevel::default(),
             },
-            // The saved session target a failing route clear restores: it
-            // carries the pre-login key and must re-bind with the rest.
             session_target: Some(ProviderTarget {
                 service_tier: None,
-                api_key: Some("stale-session-access".to_string()),
+                api_key: Some(session_key.to_string()),
                 model: session_model,
                 headers: None,
             }),
         });
-    engine.reload_live_inputs().expect("the reload applies");
-    let armed = engine
+}
+
+/// The armed route's target and its saved session target keys.
+fn armed_route_keys(engine: &AgentSessionEngine) -> (Option<String>, Option<String>) {
+    let route = engine
         .image_route
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .take()
         .expect("the reload keeps the armed route");
     assert_eq!(
-        armed.target.model.id, "mock-vision",
+        route.target.model.id, "mock-vision",
         "the armed route keeps its routed model"
     );
-    assert_eq!(
-        armed.target.api_key.as_deref(),
-        Some("fresh-access"),
+    let saved = route
+        .session_target
+        .expect("the saved session target stays");
+    (route.target.api_key, saved.api_key)
+}
+
+/// A routed image episode re-applies its armed target on every model-turn
+/// attempt (overflow retries, failover restores): the reload must refresh
+/// the armed route's auth too, or the next attempt reinstalls the stale
+/// credentials a re-login just replaced. The saved session target a
+/// failing route clear restores re-binds with the rest.
+#[test]
+fn reload_refreshes_the_armed_image_route_target_auth() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let agent_dir = dir.path().join("agent");
+    write_two_model_provider(&agent_dir);
+    write_oauth_credential(&agent_dir, "fresh-access");
+    let engine = credential_backed_engine(dir.path());
+    arm_image_route(&engine, "stale-access", "stale-session-access");
+    engine.reload_live_inputs().expect("the reload applies");
+    let (route_key, session_key) = armed_route_keys(&engine);
+    assert!(
+        route_key.as_deref() == Some("fresh-access"),
         "the armed route's request auth rebinds from the store"
     );
-    let saved = armed
-        .session_target
-        .as_ref()
-        .expect("the saved session target stays");
-    assert_eq!(
-        saved.api_key.as_deref(),
-        Some("fresh-access"),
+    assert!(
+        session_key.as_deref() == Some("fresh-access"),
         "the saved session target's request auth rebinds from the store"
     );
 }
 
+/// A logout during a routed image episode clears the removed key from the
+/// armed route and its saved session target, so neither the next attempt
+/// nor the route clear reinstalls it.
+#[test]
+fn reload_clears_a_removed_credential_from_the_armed_image_route() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let agent_dir = dir.path().join("agent");
+    write_two_model_provider(&agent_dir);
+    write_oauth_credential(&agent_dir, "live-access");
+    let engine = credential_backed_engine(dir.path());
+    arm_image_route(&engine, "live-access", "live-access");
+    std::fs::write(agent_dir.join("auth.json"), "{}").unwrap();
+    engine.reload_live_inputs().expect("the reload applies");
+    let (route_key, session_key) = armed_route_keys(&engine);
+    assert!(
+        route_key.as_deref() == Some("sk-config-fallback"),
+        "the armed route stops serving the removed credential"
+    );
+    assert!(
+        session_key.as_deref() == Some("sk-config-fallback"),
+        "the saved session target stops serving the removed credential"
+    );
+}
+
 /// A failover's primary restore re-resolves the request auth from the
-/// store: a credential rotated (and reloaded) during the failover serves
-/// from the store, never the pre-failover capture; the capture only backs
-/// a resolution that yields nothing.
+/// store: a credential rotated or removed during the failover serves the
+/// fresh resolution, never the pre-failover capture; the capture only
+/// backs a failed store read.
 #[test]
 fn restored_primary_target_serves_the_store_auth() {
     let dir = tempfile::TempDir::new().unwrap();
@@ -395,32 +428,18 @@ fn restored_primary_target_serves_the_store_auth() {
         "the restore keeps the primary model"
     );
 
-    // A provider with nothing configured anywhere: the capture backs the
-    // restore, not an empty key.
-    let ghost: pa_types::ai::Model =
-        pa_core::session_engine::provider_adapter::json_round_trip(&serde_json::json!({
-            "id": "ghost-1",
-            "name": "Ghost 1",
-            "api": "openai-completions",
-            "provider": "ghost",
-            "baseUrl": "http://127.0.0.1:9",
-            "reasoning": false,
-            "input": ["text"],
-            "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0 },
-            "contextWindow": 128_000,
-            "maxTokens": 4096,
-        }))
-        .expect("the ghost model converts");
-    let restored = engine.restored_primary_target(&ghost, Some("stale-capture".to_string()), None);
-    assert_eq!(
-        restored.api_key.as_deref(),
-        Some("stale-capture"),
-        "a resolution that yields nothing falls back to the capture"
+    // A logout during the episode: the healthy store serves the fresh
+    // resolution (the configured key), never the captured removed key.
+    std::fs::write(agent_dir.join("auth.json"), "{}").unwrap();
+    let restored =
+        engine.restored_primary_target(&primary, Some("stale-capture".to_string()), None);
+    assert!(
+        restored.api_key.as_deref() == Some("sk-config-fallback"),
+        "a logout never restores the captured key"
     );
 
     // An unreadable store keeps the captured pair: the fresh resolution
-    // would serve the configured fallback key, which is not a credential
-    // — the same overwrite /reload's gate avoids.
+    // would serve the configured fallback key off a failed read.
     std::fs::write(agent_dir.join("auth.json"), "not json").unwrap();
     let restored = engine.restored_primary_target(
         &primary,
@@ -678,12 +697,11 @@ fn restored_primary_target_keeps_the_override_key_and_captured_headers_off_a_fai
     );
 }
 
-/// A healthy store that no longer holds the provider's credential
-/// leaves the target untouched: the resolution would serve the
-/// configured models.json fallback key, which is not a stored
-/// credential — the same never-clears contract a broken store keeps.
+/// A healthy store that no longer holds the provider's credential (a
+/// logout) stops serving the removed key: the target falls to what a fresh
+/// resolution serves, here the configured models.json key.
 #[test]
-fn reload_keeps_the_target_when_the_credential_leaves_the_store() {
+fn reload_stops_serving_a_credential_that_left_the_store() {
     let dir = tempfile::TempDir::new().unwrap();
     let agent_dir = dir.path().join("agent");
     write_credential_backed_provider(&agent_dir);
@@ -710,8 +728,8 @@ fn reload_keeps_the_target_when_the_credential_leaves_the_store() {
         .clone()
         .expect("the reload keeps the target set");
     assert!(
-        target.api_key.as_deref() == Some("live-access"),
-        "an empty store keeps the last-good stored credential"
+        target.api_key.as_deref() == Some("sk-config-fallback"),
+        "an empty store serves the configured key, not the removed credential"
     );
     // A re-login restores the credential and the rebind resumes.
     write_oauth_credential(&agent_dir, "fresh-access");
@@ -725,5 +743,181 @@ fn reload_keeps_the_target_when_the_credential_leaves_the_store() {
     assert!(
         target.api_key.as_deref() == Some("fresh-access"),
         "a restored credential rebinds the request auth"
+    );
+}
+
+/// A Prime login or logout notification rebinds an already-built target,
+/// with the key and team header resolved together.
+#[test]
+fn prime_login_and_logout_rebind_the_live_target_and_team() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let agent_dir = dir.path().join("agent");
+    write_prime_inference_provider(&agent_dir);
+    write_prime_inference_credential(&agent_dir, "previous-key", Some("previous-team"));
+    let engine = prime_inference_backed_engine(dir.path());
+    let model = engine.resolve_model().expect("custom prime model");
+    *engine.provider_target.write().unwrap() = Some(ProviderTarget {
+        service_tier: None,
+        api_key: Some("previous-key".to_string()),
+        model,
+        headers: Some(team_headers("previous-team")),
+    });
+    write_prime_inference_credential(&agent_dir, "fresh-key", Some("fresh-team"));
+    engine
+        .apply_auth_changed("prime-inference")
+        .expect("login applied");
+    let target = engine.provider_target.read().unwrap().clone().unwrap();
+    assert_eq!(target.api_key.as_deref(), Some("fresh-key"));
+    assert_eq!(target.headers, Some(team_headers("fresh-team")));
+    // A logout must not leave the removed key or team on the target. The
+    // models.json key (or an ambient key) is what a fresh resolution serves.
+    std::fs::write(agent_dir.join("auth.json"), "{}").unwrap();
+    engine
+        .apply_auth_changed("prime-inference")
+        .expect("logout applied");
+    let target = engine.provider_target.read().unwrap().clone().unwrap();
+    let (fallback, headers) = engine.resolve_request_key_and_headers(&target.model);
+    assert_eq!(target.api_key, fallback);
+    assert_ne!(target.api_key.as_deref(), Some("fresh-key"));
+    assert_eq!(target.headers, headers);
+    assert_ne!(target.headers, Some(team_headers("fresh-team")));
+}
+
+#[test]
+fn auth_changed_only_rebinds_matching_provider_targets() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let agent_dir = dir.path().join("agent");
+    write_two_model_provider(&agent_dir);
+    write_oauth_credential(&agent_dir, "fresh-access");
+    let engine = credential_backed_engine(dir.path());
+    arm_image_route(&engine, "route-old", "session-old");
+    let mut live = engine
+        .image_route
+        .lock()
+        .unwrap()
+        .as_ref()
+        .unwrap()
+        .target
+        .clone();
+    live.model.provider = "unrelated".to_string();
+    live.api_key = Some("unrelated-key".to_string());
+    *engine.provider_target.write().unwrap() = Some(live);
+    engine.apply_auth_changed("battery").unwrap();
+    assert_eq!(
+        engine
+            .provider_target
+            .read()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .api_key
+            .as_deref(),
+        Some("unrelated-key")
+    );
+    let (route, saved) = armed_route_keys(&engine);
+    assert_eq!(route.as_deref(), Some("fresh-access"));
+    assert_eq!(saved.as_deref(), Some("fresh-access"));
+}
+
+#[test]
+fn failed_per_target_auth_read_preserves_the_serving_pair() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let agent_dir = dir.path().join("agent");
+    write_credential_backed_provider(&agent_dir);
+    write_oauth_credential(&agent_dir, "stored-key");
+    let engine = credential_backed_engine(dir.path());
+    let target = ProviderTarget {
+        model: engine.resolve_model().unwrap(),
+        api_key: Some("last-good".to_string()),
+        headers: Some(std::collections::BTreeMap::from([(
+            "X-Prime-Team-ID".to_string(),
+            "last-team".to_string(),
+        )])),
+        service_tier: None,
+    };
+    // An earlier MCP read succeeded; the fresh per-target read must still be checked.
+    engine.mcp.lock().unwrap().reload_auth_storage().unwrap();
+    std::fs::write(agent_dir.join("auth.json"), "{broken").unwrap();
+    *engine.provider_target.write().unwrap() = Some(target);
+    assert!(engine.apply_auth_changed("battery").is_err());
+    let slot = engine.provider_target.read().unwrap();
+    let target = slot.as_ref().unwrap();
+    assert_eq!(target.api_key.as_deref(), Some("last-good"));
+    assert_eq!(
+        target
+            .headers
+            .as_ref()
+            .unwrap()
+            .get("X-Prime-Team-ID")
+            .map(String::as_str),
+        Some("last-team")
+    );
+}
+
+#[test]
+fn auth_changed_preserves_an_unrelated_armed_route() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let agent_dir = dir.path().join("agent");
+    write_two_model_provider(&agent_dir);
+    write_oauth_credential(&agent_dir, "fresh-access");
+    let engine = credential_backed_engine(dir.path());
+    arm_image_route(&engine, "unrelated-route", "saved-old");
+    engine
+        .image_route
+        .lock()
+        .unwrap()
+        .as_mut()
+        .unwrap()
+        .target
+        .model
+        .provider = "unrelated".to_string();
+    engine.apply_auth_changed("battery").unwrap();
+    let (route, saved) = armed_route_keys(&engine);
+    assert_eq!(route.as_deref(), Some("unrelated-route"));
+    assert_eq!(saved.as_deref(), Some("fresh-access"));
+}
+
+#[test]
+fn failed_route_auth_read_preserves_both_cached_targets() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let agent_dir = dir.path().join("agent");
+    write_two_model_provider(&agent_dir);
+    write_oauth_credential(&agent_dir, "stored-key");
+    let engine = credential_backed_engine(dir.path());
+    arm_image_route(&engine, "route-good", "saved-good");
+    engine.mcp.lock().unwrap().reload_auth_storage().unwrap();
+    std::fs::write(agent_dir.join("auth.json"), "{broken").unwrap();
+    assert!(engine.apply_auth_changed("battery").is_err());
+    let (route, saved) = armed_route_keys(&engine);
+    assert_eq!(route.as_deref(), Some("route-good"));
+    assert_eq!(saved.as_deref(), Some("saved-good"));
+}
+
+#[test]
+fn unrelated_auth_change_does_not_read_or_replace_live_credentials() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let agent_dir = dir.path().join("agent");
+    write_credential_backed_provider(&agent_dir);
+    write_oauth_credential(&agent_dir, "stored-key");
+    let engine = credential_backed_engine(dir.path());
+    let target = ProviderTarget {
+        model: engine.resolve_model().unwrap(),
+        api_key: Some("last-good".to_string()),
+        headers: None,
+        service_tier: None,
+    };
+    *engine.provider_target.write().unwrap() = Some(target);
+    std::fs::write(agent_dir.join("auth.json"), "{broken").unwrap();
+    engine.apply_auth_changed("anthropic").unwrap();
+    assert_eq!(
+        engine
+            .provider_target
+            .read()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .api_key
+            .as_deref(),
+        Some("last-good")
     );
 }
