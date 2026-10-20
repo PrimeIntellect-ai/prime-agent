@@ -2,10 +2,11 @@
 """Actual TS/Rust print background completion wake, held until the first turn ends.
 
 Both binaries receive identical REPL cells. A loopback HTTP gate holds the
-background process until the JSON transcript reports the first assistant turn
-ended. Expected difference: TS 0.9.8 --print exits after that first turn
-without waiting for the command (no notice); Rust print waits for it on
-purpose, and its completion must wake a second turn and persist the notice.
+background process. Expected difference: TS 0.9.8 --print exits after its
+first turn without waiting for the command, so its gate opens only when the
+process is gone (no wake, no notice); Rust print waits for it on purpose, so
+its gate opens once the first turn ended, and the completion must wake a
+second turn and persist the notice.
 """
 import argparse
 import http.server
@@ -149,9 +150,10 @@ def observe(binary, kind, root, observed):
                 if event.get('type') == 'message_end' and message.get('role') == 'assistant':
                     if list(texts(message.get('content'))) == ['WAITING']:
                         provider.waiting_seen = True
-                if event.get('type') == 'turn_end' and provider.waiting_seen and not provider.release.is_set():
+                if event.get('type') == 'turn_end' and provider.waiting_seen and not provider.first_turn_ended:
                     provider.first_turn_ended = True
-                    provider.release.set()
+                    if kind != 'ts':
+                        provider.release.set()
         reader = threading.Thread(target=read_events, daemon=True)
         reader.start()
         process.wait(timeout=110)
