@@ -61,7 +61,7 @@ struct Chunk {
 pub(crate) enum ReaderAnchor {
     /// Inside the tail: restorable while the rebuilt tail starts at the same row.
     Tail {
-        tail_first_id: Option<String>,
+        tail_first_id: String,
         entry: usize,
         row: usize,
     },
@@ -285,8 +285,9 @@ impl TranscriptWindow {
     fn reader_anchor(&self, entry: usize, row: usize) -> Option<ReaderAnchor> {
         let tail_start = self.tail_start();
         if entry >= tail_start {
+            // Without an older-history anchor nothing ties the tail to its rebuilt successor.
             return Some(ReaderAnchor::Tail {
-                tail_first_id: self.tail_first_id.clone(),
+                tail_first_id: self.tail_first_id.clone()?,
                 entry: entry - tail_start,
                 row,
             });
@@ -512,7 +513,9 @@ impl SessionUi {
                     row,
                 }),
                 _,
-            ) if tail_first_id == self.window.tail_first_id => view.scroll_to_entry(entry, row),
+            ) if self.window.tail_first_id.as_ref() == Some(&tail_first_id) => {
+                view.scroll_to_entry(entry, row);
+            }
             (
                 Some(ReaderAnchor::Chunk {
                     page,
@@ -771,6 +774,25 @@ mod tests {
         drop(session);
         server.abort();
         }).await.expect("mock session open, rebuild and stale-note delivery complete within ten seconds");
+    }
+
+    #[test]
+    fn only_a_tail_with_an_older_history_anchor_restores_a_reader() {
+        let mut window = TranscriptWindow::default();
+        window.reset(Some("leaf".to_string()), None, BackfillSeam::Preserve);
+        assert!(
+            window.reader_anchor(3, 0).is_none(),
+            "a whole-session tail cannot tell its rebuilt successor from another branch"
+        );
+        window.reset(
+            Some("leaf".to_string()),
+            Some("tail".to_string()),
+            BackfillSeam::Preserve,
+        );
+        assert!(matches!(
+            window.reader_anchor(3, 0),
+            Some(ReaderAnchor::Tail { entry: 3, .. })
+        ));
     }
 
     #[test]
