@@ -45,7 +45,10 @@ rustls = { version = "0.23", default-features = false, features = [
 ] }
 rustls-native-certs = "0.8"
 webpki-roots = "1"
-tokio-tungstenite = { version = "0.28", default-features = false, features = ["connect", "handshake", "rustls-tls-native-roots", "rustls-tls-webpki-roots"] }
+# No webpki-roots feature: the one WS connect always passes our own rustls config
+# (utils_inner/tls.rs native-certs + custom-CA store), and the bundled-roots crate
+# sits on the RUSTSEC-2026-0381/0382 advisories (no patched 0.26.x).
+tokio-tungstenite = { version = "0.28", default-features = false, features = ["connect", "handshake", "rustls-tls-native-roots"] }
 http = "1"
 
 [dev-dependencies]
