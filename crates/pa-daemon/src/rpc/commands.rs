@@ -120,6 +120,7 @@ pub fn kick_queue_pump(
     tokio::spawn(async move {
         let _lane = state.queue_pump.lock().await;
         if state.session.pump_generation() != generation
+            || state.session.shutdown_fired()
             || !state.session.engine_is_live(&engine).await
             || state.session.is_replacing()
         {
@@ -128,6 +129,7 @@ pub fn kick_queue_pump(
         let agent = engine.session.agent();
         loop {
             if state.session.pump_generation() != generation
+                || state.session.shutdown_fired()
                 || !state.session.engine_is_live(&engine).await
                 || state.session.is_replacing()
             {
