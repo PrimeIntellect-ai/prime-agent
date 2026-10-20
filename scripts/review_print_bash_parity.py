@@ -37,6 +37,7 @@ class Provider(http.server.ThreadingHTTPServer):
         self.errors = []
         self.waiting_seen = False
         self.first_turn_ended = False
+        self.gate_timed_out = False
 
 
 class Handler(http.server.BaseHTTPRequestHandler):
@@ -48,6 +49,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.send_error(404)
             return
         if not self.server.release.wait(75):
+            self.server.gate_timed_out = True
             self.send_error(504)
             return
         payload = b'BG_DONE'
@@ -113,6 +115,7 @@ def validate_ts(observed):
     assert observed['first_turn_ended_before_release'] is True
     assert observed['request_count'] == 2
     assert observed['notice_count'] == 0
+    assert observed['gate_timed_out'] is False
 
 
 def observe(binary, kind, root, observed):
@@ -168,7 +171,8 @@ def observe(binary, kind, root, observed):
                    and row.get('customType') == 'async_bash_completion']
         if kind == 'ts':
             observed.update(first_turn_ended_before_release=provider.first_turn_ended,
-                request_count=len(provider.requests), notice_count=len(notices))
+                request_count=len(provider.requests), notice_count=len(notices),
+                gate_timed_out=provider.gate_timed_out)
             validate_ts(observed)
             return
         finished = probe_from(provider.requests, DONE)

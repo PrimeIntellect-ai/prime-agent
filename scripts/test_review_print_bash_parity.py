@@ -23,9 +23,10 @@ class PrintBashGuards(unittest.TestCase):
                 validate(changed)
 
     def test_ts_print_exits_after_its_first_turn_without_a_notice(self):
-        exited = {'first_turn_ended_before_release': True, 'request_count': 2, 'notice_count': 0}
+        exited = {'first_turn_ended_before_release': True, 'request_count': 2, 'notice_count': 0,
+                  'gate_timed_out': False}
         validate_ts(exited)
-        for key, value in [('request_count', 4), ('notice_count', 1)]:
+        for key, value in [('request_count', 4), ('notice_count', 1), ('gate_timed_out', True)]:
             with self.assertRaises(AssertionError):
                 validate_ts({**exited, key: value})
 
