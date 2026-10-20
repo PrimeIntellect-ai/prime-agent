@@ -132,23 +132,13 @@ pub(crate) async fn execute_prepared_tool_call(
     // `ToolExecutionProgress` event every `progress.every_ms` while the call
     // still runs, so a stalled call is visible while it runs (aborted after
     // the execution race settles below).
-    let heartbeat = {
-        let sink = Arc::clone(emit);
-        let tool_call_id = tool_call_id.clone();
-        let tool_name = tool_name.clone();
-        tokio::spawn(async move {
-            tokio::time::sleep(std::time::Duration::from_millis(progress.after_ms)).await;
-            loop {
-                let _ = sink(AgentEvent::ToolExecutionProgress {
-                    tool_call_id: tool_call_id.clone(),
-                    tool_name: tool_name.clone(),
-                    elapsed_ms: started_at.elapsed().as_millis() as u64,
-                })
-                .await;
-                tokio::time::sleep(std::time::Duration::from_millis(progress.every_ms)).await;
-            }
-        })
-    };
+    let heartbeat = spawn_tool_heartbeat(
+        Arc::clone(emit),
+        tool_call_id.clone(),
+        tool_name.clone(),
+        started_at,
+        progress,
+    );
     let signal_for_updates = signal.cloned().unwrap_or_default();
     let emit_updates = tokio::spawn(async move {
         while let Some(partial_result) = update_rx.recv().await {
@@ -186,42 +176,21 @@ pub(crate) async fn execute_prepared_tool_call(
     )
     .await;
     heartbeat.abort();
-    let elapsed_ms = started_at.elapsed().as_millis() as u64;
+    let elapsed_ms = elapsed_ms_since(started_at);
 
     accepting_updates.store(false, std::sync::atomic::Ordering::SeqCst);
     drop(update_tx);
 
     match execute_result {
         Ok(result) => {
-            match race_with_abort(
-                async {
-                    emit_updates.await.map_err(|error| {
-                        anyhow::anyhow!("Tool update emitter task failed: {error}")
-                    })
-                },
-                signal,
-            )
-            .await
-            {
-                Ok(update_result) => {
-                    if let Err(error) = update_result {
-                        // Success path: a failing update emitter mirrors a
-                        // rejecting updateEvents promise in TS.
-                        return ExecutedToolCallOutcome {
-                            result: error_tool_result(signal, &error, elapsed_ms),
-                            is_error: true,
-                        };
-                    }
-                }
-                Err(error) => {
-                    let aborted = signal.is_some_and(AbortSignal::is_aborted);
-                    if !(aborted && is_abort_error(&error)) {
-                        return ExecutedToolCallOutcome {
-                            result: error_tool_result(signal, &error, elapsed_ms),
-                            is_error: true,
-                        };
-                    }
-                }
+            // Success path: a failing update emitter mirrors a rejecting
+            // updateEvents promise in TS; an aborted drain (the call itself
+            // succeeded) settles cleanly.
+            if let Err(error) = settle_success_drain(emit_updates, signal).await {
+                return ExecutedToolCallOutcome {
+                    result: error_tool_result(signal, &error, elapsed_ms),
+                    is_error: true,
+                };
             }
             ExecutedToolCallOutcome {
                 result,
@@ -247,6 +216,65 @@ pub(crate) async fn execute_prepared_tool_call(
             }
         }
     }
+}
+
+/// Drain the update emitter on the success path, racing the drain against
+/// abort: an aborted drain settles cleanly, any other failure surfaces as
+/// the call's error.
+async fn settle_success_drain(
+    emit_updates: tokio::task::JoinHandle<anyhow::Result<()>>,
+    signal: Option<&AbortSignal>,
+) -> anyhow::Result<()> {
+    match race_with_abort(
+        async {
+            emit_updates
+                .await
+                .map_err(|error| anyhow::anyhow!("Tool update emitter task failed: {error}"))
+        },
+        signal,
+    )
+    .await
+    {
+        Ok(update_result) => update_result,
+        Err(error) => {
+            let aborted = signal.is_some_and(AbortSignal::is_aborted);
+            if aborted && is_abort_error(&error) {
+                Ok(())
+            } else {
+                Err(error)
+            }
+        }
+    }
+}
+
+/// Elapsed milliseconds since a call started (millis fit `u64`; the
+/// saturating conversion only guards the type-level truncation lint).
+fn elapsed_ms_since(started_at: std::time::Instant) -> u64 {
+    u64::try_from(started_at.elapsed().as_millis()).unwrap_or(u64::MAX)
+}
+
+/// The heartbeat task behind the `ToolExecutionProgress` events: quiet until
+/// `progress.after_ms`, then one event every `progress.every_ms` while the
+/// call runs; aborted by the caller once the execution race settles.
+fn spawn_tool_heartbeat(
+    sink: AgentEventSink,
+    tool_call_id: String,
+    tool_name: String,
+    started_at: std::time::Instant,
+    progress: ToolProgressCadence,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_millis(progress.after_ms)).await;
+        loop {
+            let _ = sink(AgentEvent::ToolExecutionProgress {
+                tool_call_id: tool_call_id.clone(),
+                tool_name: tool_name.clone(),
+                elapsed_ms: elapsed_ms_since(started_at),
+            })
+            .await;
+            tokio::time::sleep(std::time::Duration::from_millis(progress.every_ms)).await;
+        }
+    })
 }
 
 fn error_tool_result(

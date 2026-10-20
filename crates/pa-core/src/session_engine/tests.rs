@@ -986,7 +986,7 @@ async fn long_tool_call_persists_started_tick_and_duration_rows() {
 }
 
 /// The short-call contract: the start row and the result row persist, and
-/// the heartbeat stays quiet (no tool_progress row under the threshold).
+/// the heartbeat stays quiet (no `tool_progress` row under the threshold).
 #[tokio::test]
 async fn short_tool_call_persists_started_row_without_progress() {
     struct FastTool;
