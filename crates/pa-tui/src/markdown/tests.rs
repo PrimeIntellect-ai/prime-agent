@@ -1892,3 +1892,71 @@ fn an_escaped_bang_before_a_link_is_not_an_image() {
     let joined: String = spans.iter().map(|s| s.content.as_str()).collect();
     assert_eq!(joined, "\\alt");
 }
+
+/// Text carrying escape sequences and control characters (a model or a tool can emit any of
+/// them) paints only its visible characters, in exactly as many cells as `str_width` measures.
+#[test]
+fn painted_cells_hold_no_control_characters_and_match_the_measured_width() {
+    let text = "a\x07b\x08c\x1b[31md\x0be\u{9b}f\x1b[2Jg\x1bch\x1b[?1049li\x1b]0;title\x07j\x1bPq\x1b\\k\x7fl\u{85}m\tn";
+    let line: Line = vec![Span::raw(text)];
+    let area = ratatui::layout::Rect::new(0, 0, 30, 1);
+    let mut buffer = ratatui::buffer::Buffer::empty(area);
+    ratatui::widgets::Widget::render(to_ratatui_line(&line), area, &mut buffer);
+    let cells: Vec<&str> = (0..area.width).map(|x| buffer[(x, 0)].symbol()).collect();
+    assert!(
+        cells.iter().all(|cell| !cell.chars().any(char::is_control)),
+        "{cells:?}"
+    );
+    assert_eq!(cells.concat().trim_end(), "abcdefgchijklm   n");
+    assert_eq!(str_width(text), "abcdefgchijklm   n".len());
+}
+
+/// Screen-clearing and screen-switching sequences inside message text never reach the terminal:
+/// the painted bytes hold only the paint's own cursor moves, colors and cursor visibility.
+#[test]
+fn screen_clearing_sequences_in_message_text_never_reach_the_terminal() {
+    #[derive(Clone, Default)]
+    struct Sink(std::rc::Rc<std::cell::RefCell<Vec<u8>>>);
+    impl std::io::Write for Sink {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.borrow_mut().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let text = "keep\x1b[2Jone\x1b[3Jtwo\x1bcthree\x1b[?1049lfour";
+    let sink = Sink::default();
+    let area = ratatui::layout::Rect::new(0, 0, 40, 1);
+    let mut terminal = ratatui::Terminal::with_options(
+        ratatui::backend::CrosstermBackend::new(sink.clone()),
+        ratatui::TerminalOptions {
+            viewport: ratatui::Viewport::Fixed(area),
+        },
+    )
+    .unwrap();
+    terminal
+        .draw(|frame| frame.render_widget(to_ratatui_line(&vec![Span::raw(text)]), area))
+        .unwrap();
+    let bytes = String::from_utf8(sink.0.borrow().clone()).unwrap();
+    let mut visible = String::new();
+    let mut rest = bytes.as_str();
+    while let Some(c) = rest.chars().next() {
+        if let Some(len) = crate::width::escape_len(rest) {
+            let sequence = &rest[..len];
+            assert!(
+                sequence.ends_with('H')
+                    || sequence.ends_with('m')
+                    || matches!(sequence, "\x1b[?25l" | "\x1b[?25h"),
+                "{sequence:?} reached the terminal"
+            );
+            rest = &rest[len..];
+            continue;
+        }
+        assert!(!c.is_control(), "{c:?} reached the terminal");
+        visible.push(c);
+        rest = &rest[c.len_utf8()..];
+    }
+    assert_eq!(visible.trim_end(), "keeponetwocthreefour");
+}

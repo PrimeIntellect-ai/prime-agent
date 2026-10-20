@@ -356,20 +356,32 @@ pub fn is_punctuation_char(c: char) -> bool {
 
 /// Normalize text for terminal output without changing logical content: Thai/Lao AM vowels
 /// decompose to compatibility forms (same width, no stale cells); tabs expand to three spaces.
+/// Escape sequences and the remaining control characters drop: [`str_width`] measures them as
+/// zero columns, and painted raw they would move the cursor or erase cells the differential
+/// paint believes are drawn.
 #[must_use]
 pub fn normalize_terminal_output(s: &str) -> String {
-    let has_thai_lao_am = s.contains('\u{0e33}') || s.contains('\u{0eb3}');
-    if !has_thai_lao_am && !s.contains('\t') {
+    if !s
+        .chars()
+        .any(|c| matches!(c, '\u{0e33}' | '\u{0eb3}') || c.is_control())
+    {
         return s.to_string();
     }
     let mut out = String::with_capacity(s.len() + 8);
-    for c in s.chars() {
+    let mut rest = s;
+    while let Some(c) = rest.chars().next() {
+        if let Some(len) = escape_len(rest) {
+            rest = &rest[len..];
+            continue;
+        }
         match c {
             '\u{0e33}' => out.push_str("\u{0e4d}\u{0e32}"),
             '\u{0eb3}' => out.push_str("\u{0ecd}\u{0eb2}"),
             '\t' => out.push_str("   "),
+            c if c.is_control() => {}
             c => out.push(c),
         }
+        rest = &rest[c.len_utf8()..];
     }
     out
 }
