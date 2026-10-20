@@ -321,7 +321,7 @@ impl TranscriptWindow {
     }
 
     /// Put a reloaded anchor chunk above the freshly reset tail. Returns how many entries
-    /// the rows above the tail grew by.
+    /// the rows above the tail grew by; `None` when the page came back empty.
     fn restore_chunk(
         &mut self,
         page: TranscriptPage,
@@ -329,9 +329,9 @@ impl TranscriptWindow {
         joins_tail: Option<&str>,
         start_resident: bool,
         view: &mut AgentView,
-    ) -> isize {
+    ) -> Option<isize> {
         let (Some(first_id), Some(last_id)) = (loaded.first_id, loaded.last_id) else {
-            return 0;
+            return None;
         };
         let joins = joins_tail.is_some() && joins_tail == self.tail_first_id.as_deref();
         let mut entries = loaded.entries;
@@ -353,7 +353,7 @@ impl TranscriptWindow {
         }]);
         self.gap = !joins;
         self.start_resident = start_resident;
-        inserted as isize
+        Some(inserted as isize)
     }
 
     /// Drop a disjoint resident run, leaving the contiguous tail. Returns how many
@@ -534,17 +534,19 @@ impl SessionUi {
                     ..
                 }),
                 Some(loaded),
-            ) => {
-                let grown = self.window.restore_chunk(
-                    page,
-                    loaded,
-                    joins_tail.as_deref(),
-                    start_resident,
-                    view,
-                );
-                self.shift_tail_indices(grown);
-                view.scroll_to_entry(entry, row);
-            }
+            ) => match self.window.restore_chunk(
+                page,
+                loaded,
+                joins_tail.as_deref(),
+                start_resident,
+                view,
+            ) {
+                Some(grown) => {
+                    self.shift_tail_indices(grown);
+                    view.scroll_to_entry(entry, row);
+                }
+                None => view.follow(),
+            },
             _ => view.follow(),
         }
         self.dirty = true;
@@ -785,6 +787,38 @@ mod tests {
     }
 
     #[test]
+    fn an_empty_anchor_page_restores_nothing() {
+        let mut window = TranscriptWindow::default();
+        window.reset(
+            Some("leaf".to_string()),
+            Some("tail".to_string()),
+            BackfillSeam::Preserve,
+        );
+        let mut view = AgentView::new(crate::theme::Theme::builtin(
+            "prime",
+            crate::theme::ColorMode::TrueColor,
+        ));
+        let empty = LoadedPage {
+            entries: Vec::new(),
+            seam: BackfillSeam::Preserve,
+            first_id: None,
+            last_id: None,
+            more: false,
+        };
+        let page = TranscriptPage::End {
+            before: Some("tail".to_string()),
+            limit: CHUNK_MESSAGES,
+        };
+        assert!(
+            window
+                .restore_chunk(page, empty, Some("tail"), false, &mut view)
+                .is_none(),
+            "the reader follows the tail instead of scrolling to a chunk that never came back"
+        );
+        assert!(view.chat.is_empty() && window.chunks.is_empty());
+    }
+
+    #[test]
     fn only_a_tail_with_an_older_history_anchor_restores_a_reader() {
         let mut window = TranscriptWindow::default();
         window.reset(Some("leaf".to_string()), None, BackfillSeam::Preserve);
@@ -886,7 +920,9 @@ mod tests {
             limit: CHUNK_MESSAGES,
         };
         let loaded = page(&[user("run"), attempt.clone()], "e0", "e1");
-        let mut grown = window.restore_chunk(anchor_page, loaded, None, true, &mut view);
+        let mut grown = window
+            .restore_chunk(anchor_page, loaded, None, true, &mut view)
+            .expect("a non-empty anchor page restores");
         let request = TranscriptPage::Start {
             after: Some("e1".to_string()),
             until: Some("tail".to_string()),
