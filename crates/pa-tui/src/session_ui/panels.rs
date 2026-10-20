@@ -236,6 +236,36 @@ impl SessionUi {
         self.dirty = true;
     }
 
+    /// Mount the panel an agents-view activity line requested; its close returns to the agents
+    /// view.
+    pub(crate) fn open_agents_view_panel(
+        &mut self,
+        panel: crate::interactive::SessionPanel,
+        view: &mut AgentView,
+    ) {
+        match panel {
+            crate::interactive::SessionPanel::Shells { shell_id } => {
+                self.open_bash_view(view);
+                if let (Some(id), Some(bash_view)) = (shell_id, view.bash_view.as_mut()) {
+                    bash_view.select(&id);
+                }
+            }
+            crate::interactive::SessionPanel::FactoryRuns => self.open_factory_page(view),
+        }
+        self.panel_returns_to_agents_view = view.bash_view.is_some() || view.factory_view.is_some();
+    }
+
+    /// The close of a panel the agents view requested hands the pane back to it; returns whether
+    /// it did.
+    pub(super) fn close_panel_to_agents_view(&mut self) -> bool {
+        if !std::mem::take(&mut self.panel_returns_to_agents_view) {
+            return false;
+        }
+        self.open_agents_view = true;
+        self.exit_requested = true;
+        true
+    }
+
     /// The dock's Enter hand-off (the operator's direct-navigation redesign):
     /// the focused group opens its own view directly, no intermediate list.
     pub(super) fn open_dock_group_view(&mut self, view: &mut AgentView) {

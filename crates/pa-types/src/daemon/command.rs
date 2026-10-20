@@ -557,6 +557,29 @@ pub enum DaemonCommand {
         #[serde(flatten)]
         rest: JsonMap,
     },
+    /// Every persistent `bash()` shell machine-wide with its assigned session id.
+    /// Rust-native extension, advertised by the `persistent_shells` capability.
+    ListPersistentShells {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
+        #[serde(flatten)]
+        rest: JsonMap,
+    },
+    TailPersistentShell {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
+        shell_id: String,
+        lines: u32,
+        #[serde(flatten)]
+        rest: JsonMap,
+    },
+    KillPersistentShell {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
+        shell_id: String,
+        #[serde(flatten)]
+        rest: JsonMap,
+    },
     /// The `/factory` view's bridge lane over the session kernel's factory
     /// executor (`graph`/`status`/`watch`/`run`/`stop`/`resume`).
     /// Rust-native extension, advertised by the `factory_activity` capability.
