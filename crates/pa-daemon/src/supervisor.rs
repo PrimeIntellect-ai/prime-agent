@@ -467,16 +467,6 @@ impl Supervisor {
             });
         }
 
-        // Session-archive sweep (roadmap: the sessions directory must not
-        // grow forever): boot sweep, then the periodic re-sweep at the TS
-        // idle-eviction cadence. Housekeeping only — it never gates serving.
-        {
-            let supervisor = Arc::clone(&self);
-            tokio::spawn(async move {
-                crate::session_archive::archive_sweep_loop(&supervisor).await;
-            });
-        }
-
         // Journals without verifiable ownership and flat TS update status
         // records stay intact: a missing descriptor or a dead coordinator
         // does not prove that no worker or waiting caller still needs them.
