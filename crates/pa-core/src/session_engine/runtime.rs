@@ -27,7 +27,7 @@ pub type QueuedGoalContextPurge = Arc<dyn Fn() + Send + Sync>;
 /// Session-scoped runtime state the kernel bridge reaches.
 pub struct SessionRuntime {
     goal_driver: Arc<Mutex<GoalDriver>>,
-    cron_store: Arc<AgentCronJobStore>,
+    cron_store: Option<Arc<AgentCronJobStore>>,
     active_session_id: String,
     binding: SessionBinding,
     /// Invoked after a kernel `goal.complete` settles the goal; `None`
@@ -39,10 +39,14 @@ pub struct SessionRuntime {
 }
 
 impl SessionRuntime {
-    /// Build a runtime around a cron store, rehydrating any persisted goal.
+    /// Build a runtime around the embedding's cron store, rehydrating any
+    /// persisted goal. `None` is an embedding with no scheduler: kernel
+    /// `rlm_heartbeat.*` requests stay unregistered (TS gates on the
+    /// heartbeat controller).
+    #[must_use]
     pub fn new(
         session: &SessionManager,
-        cron_store: Arc<AgentCronJobStore>,
+        cron_store: Option<Arc<AgentCronJobStore>>,
         active_session_id: String,
         binding: SessionBinding,
     ) -> Self {
@@ -72,12 +76,15 @@ impl SessionRuntime {
         &self.goal_driver
     }
 
+    /// The embedding's cron store; `None` when no scheduler is wired.
     #[must_use]
-    pub fn cron_store(&self) -> &Arc<AgentCronJobStore> {
-        &self.cron_store
+    pub fn cron_store(&self) -> Option<&Arc<AgentCronJobStore>> {
+        self.cron_store.as_ref()
     }
 
-    /// Register the `goal.*` and `rlm_heartbeat.*` handlers onto a handler map.
+    /// Register the `goal.*` and `rlm_heartbeat.*` handlers onto a handler
+    /// map; the heartbeat handlers register only on a runtime that serves
+    /// them (embeddings with cron wiring).
     pub fn register_host_handlers(
         &self,
         session: Arc<Mutex<SessionManager>>,
@@ -121,7 +128,10 @@ impl SessionRuntime {
                 }),
             );
         }
-        let store = self.cron_store.clone();
+        // Scheduler-less embeddings expose goals but cannot create heartbeat jobs.
+        let Some(store) = self.cron_store.clone() else {
+            return;
+        };
         let active_session_id = self.active_session_id.clone();
         let binding_session_id = self.binding.session_id.clone();
         let binding_session_file = self.binding.session_file.clone();
@@ -206,7 +216,9 @@ mod tests {
         let dir = tempfile::TempDir::new().unwrap();
         let mut runtime = SessionRuntime::new(
             &*session.lock().await,
-            Arc::new(AgentCronJobStore::new(dir.path().join("jobs.json"))),
+            Some(Arc::new(AgentCronJobStore::new(
+                dir.path().join("jobs.json"),
+            ))),
             "live-1".to_string(),
             SessionBinding {
                 session_id: "session-1".to_string(),
@@ -248,7 +260,9 @@ mod tests {
         let dir = tempfile::TempDir::new().unwrap();
         let runtime = SessionRuntime::new(
             &*session.lock().await,
-            Arc::new(AgentCronJobStore::new(dir.path().join("jobs.json"))),
+            Some(Arc::new(AgentCronJobStore::new(
+                dir.path().join("jobs.json"),
+            ))),
             "live-1".to_string(),
             SessionBinding {
                 session_id: "session-1".to_string(),
@@ -302,7 +316,9 @@ mod tests {
         let dir = tempfile::TempDir::new().unwrap();
         let runtime = SessionRuntime::new(
             &*session.lock().await,
-            Arc::new(AgentCronJobStore::new(dir.path().join("jobs.json"))),
+            Some(Arc::new(AgentCronJobStore::new(
+                dir.path().join("jobs.json"),
+            ))),
             "live-1".to_string(),
             SessionBinding {
                 session_id: "session-1".to_string(),
@@ -334,7 +350,10 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(response["heartbeat"]["status"], "paused");
-        let jobs = runtime.cron_store().list_rlm_heartbeats("live-1", true);
+        let jobs = runtime
+            .cron_store()
+            .expect("the wired store")
+            .list_rlm_heartbeats("live-1", true);
         assert_eq!(jobs.len(), 1);
     }
 
@@ -345,7 +364,9 @@ mod tests {
         let dir = tempfile::TempDir::new().unwrap();
         let mut runtime = SessionRuntime::new(
             &*session.lock().await,
-            Arc::new(AgentCronJobStore::new(dir.path().join("jobs.json"))),
+            Some(Arc::new(AgentCronJobStore::new(
+                dir.path().join("jobs.json"),
+            ))),
             "live-1".to_string(),
             SessionBinding {
                 session_id: "session-1".to_string(),

@@ -278,6 +278,13 @@ impl IpythonKernelProvisioner {
         self.lock_state().manager.clone()
     }
 
+    /// The Python skills pre-imported at kernel bootstrap.
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) fn python_skills(&self) -> &[KernelPythonSkill] {
+        &self.inner.options.python_skills
+    }
+
     /// Result of reviving a prior session's namespace on the last kernel start.
     #[must_use]
     pub fn last_restore(&self) -> Option<RestoreResult> {
