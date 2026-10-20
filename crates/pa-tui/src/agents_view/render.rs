@@ -511,7 +511,10 @@ impl AgentsViewMode {
             // BOTH summary lines bill the descendant tree in the Cost column (operator directive
             // 2026-09-26: an all-done tree renders no running line, so the inactive line carries
             // the same aggregate; deliberate divergence from TS, which renders no cost there).
-            if crate::agents_view_forest::is_summary_row_identity(&row.identity) {
+            if row
+                .identity
+                .starts_with(crate::agents_view_forest::SUMMARY_ROW_PREFIX)
+            {
                 let zone = layout.name_width + 2 + layout.model_width;
                 let title = crate::agents_view_state::truncate_text(&text, zone);
                 let pad = zone.saturating_sub(str_width(&title));

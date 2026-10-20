@@ -426,6 +426,28 @@ fn selection_pins_a_stale_activity_identity_to_its_kind() {
     assert_eq!(rows[index].kind, RowKind::FactoryRuns);
 }
 
+/// When the pinned activity line vanished (count back to zero), the session key still wins:
+/// the selection lands on that session's own row, never on whatever row holds the old index.
+#[test]
+fn a_vanished_activity_line_falls_back_to_its_sessions_row() {
+    let roster = vec![
+        roster_entry("p", "idle", &parent_summary("p")),
+        roster_entry("q", "idle", &parent_summary("q")),
+    ];
+    let rows = rows_for(&roster, None, &[]);
+    let q_index = rows
+        .iter()
+        .position(|row| row.title == "q name")
+        .expect("the second agent row");
+    let key = SelectionKey {
+        session_id: Some("p".to_string()),
+        active_session_id: Some("p-live".to_string()),
+    };
+    let index = resolve_selection(&rows, q_index, Some("shells:file:/x/p.jsonl"), Some(&key));
+    assert_eq!(rows[index].kind, RowKind::Agent);
+    assert_eq!(rows[index].title, "p name");
+}
+
 /// Summary-line identities pin the selection's fallbacks to the ONE summary row. A carried
 /// legacy `subagents-inactive:` identity (the 2026-09-25 two-line scheme) resolves by its session
 /// key onto the PARENT row.
