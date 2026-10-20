@@ -3,7 +3,9 @@
 
 Runs the same setup, resume, and acknowledgement fixture against the pinned TS 0.9.8 release and Rust.
 Both must revive a namespace while resetting cwd/env; Rust alone must disclose
-that reset. Only the exact added sentence is excluded from notice parity.
+that reset. Notice parity excludes the exact added sentence, requires the shared
+baseline names to survive, and allows Rust-only names that this workspace's own
+bundled skills contribute (the pinned reference predates them).
 All provider traffic, homes, sessions, and subprocesses belong to this fixture.
 """
 import argparse
@@ -43,6 +45,58 @@ def texts(value):
         # Content blocks have one text member. Avoid matching tool-call arguments.
         if isinstance(value.get('text'), str):
             yield value['text']
+
+
+NAMES_MARKER = 'These names are available again: '
+
+
+def names_of(notice: str) -> tuple[list[str], str]:
+    """Split one restore notice into its restored-names list and normalized text."""
+    prefix, _, rest = notice.partition(NAMES_MARKER)
+    listing, terminator, tail = rest.partition('.')
+    names = [name.strip() for name in listing.split(',') if name.strip()]
+    normalized = prefix + NAMES_MARKER + '<names>' + terminator + tail
+    return names, normalized
+
+
+def _skill_packages(skills_root: Path) -> set[str]:
+    names: set[str] = set()
+    if skills_root.is_dir():
+        for package in skills_root.glob('*/src/*'):
+            if package.is_dir() and (package / '__init__.py').is_file():
+                names.add(package.name)
+    return names
+
+
+def bundled_python_imports(repo_root: Path, ts_package_dir: Path | None = None) -> set[str]:
+    """Rust-workspace-bundled skill packages the pinned TS package lacks.
+
+    The pinned TS reference predates skills bundled only in the Rust
+    workspace, so the Rust kernel can restore names the reference never
+    imported; this derivation names exactly those packages - packages the
+    reference also bundles stay under the shared-baseline subset check -
+    so an undeclared restored global still fails the verifier. With no
+    ts_package_dir (a local run) the whole workspace set is the allowance.
+    """
+    workspace = _skill_packages(repo_root / 'skills')
+    if ts_package_dir is None:
+        return workspace
+    return workspace - _skill_packages(ts_package_dir / 'skills')
+
+
+def compare_notices(ts_notice: str, rust_notice: str, allowed: set[str]) -> dict:
+    """Validate the notice pair: shared baseline survives, extras declared, text equal modulo names."""
+    assert NAMES_MARKER in ts_notice and NAMES_MARKER in rust_notice, 'restore names marker missing'
+    ts_names, ts_normalized = names_of(ts_notice)
+    rust_notice = rust_notice.removesuffix('\n' + RESET)
+    rust_names, rust_normalized = names_of(rust_notice)
+    additional = sorted(set(rust_names) - set(ts_names))
+    assert set(ts_names) <= set(rust_names), 'shared baseline names missing from the Rust notice'
+    assert set(additional) <= set(allowed), 'undeclared additional Rust notice names: %r' % additional
+    assert rust_normalized == ts_normalized, 'additional notice difference'
+    return {'restored_names': {'ts': ts_names, 'rust': rust_names},
+            'additional_rust_names': additional,
+            'bundled_python_imports': sorted(allowed)}
 
 
 class Server(http.server.ThreadingHTTPServer):
@@ -150,8 +204,10 @@ def run_case(binary, label, root, observation):
                PRIME_AGENT_CODING_AGENT_DIR=str(agent), PI_SESSION_DIR=str(sessions),
                PRIME_AGENT_SESSION_DIR=str(sessions), XDG_CONFIG_HOME=str(root / 'config'),
                XDG_CACHE_HOME=str(root / 'cache'), XDG_DATA_HOME=str(root / 'data'))
-    # Both runtimes receive the same fixture skill library. This isolates the
-    # restore notice from different installed/bundled skill discovery paths.
+    # Both runtimes receive the same fixture skill library through PYTHONPATH;
+    # the Rust binary additionally bundles this workspace's own skills, whose
+    # restored names the pinned reference cannot have — the allowance for those
+    # is derived and bounded in compare_notices.
     library = Path(os.environ['PI_PACKAGE_DIR']) / 'skills'
     skill_paths = sorted(str(path) for path in library.glob('*/src') if path.is_dir())
     env['PYTHONPATH'] = os.pathsep.join(skill_paths + [env.get('PYTHONPATH', '')])
@@ -246,6 +302,7 @@ def main():
                   'Wait for observable nonempty debounced snapshot before setup final answer in both binaries.',
                   'Existing Rust print shutdown disposes descendants but does not await root snapshot; no disposal parity claimed.',
                   'Both kernels receive the same pinned TS skills/src library via PYTHONPATH; this is fixture setup, not a production namespace claim.'],
+              'names_normalization': 'The pinned TS reference predates skills bundled only in the Rust workspace: the shared baseline must survive (every TS name in the Rust names list) while the Rust binary\'s own bundled skills may add names; the notice text compares with the names segment normalized, and additional Rust names are recorded as additional_rust_names.',
               'runs': {}, 'verified': False}
     try:
         with tempfile.TemporaryDirectory(prefix='restore-notice-parity-') as temp:
@@ -259,7 +316,12 @@ def main():
         ts, rust = result['runs']['ts'], result['runs']['rust']
         errors = {label: run['error'] for label, run in result['runs'].items() if 'error' in run}
         assert not errors, errors
-        assert rust['notice'].removesuffix('\n' + RESET) == ts['notice'], 'additional notice difference'
+        ts_package_dir = os.environ.get('PI_PACKAGE_DIR')
+        allowed = bundled_python_imports(
+            Path(__file__).resolve().parents[1],
+            Path(ts_package_dir) if ts_package_dir else None,
+        )
+        result.update(compare_notices(ts['notice'], rust['notice'], allowed))
         assert rust['restored'] == ts['restored'], 'restored state differs'
         assert rust['request_counts'] == ts['request_counts'] == {'setup': 2, 'resume': 3}
         result['notice_timing_equal'] = ts['notice_request_numbers'] == rust['notice_request_numbers']
