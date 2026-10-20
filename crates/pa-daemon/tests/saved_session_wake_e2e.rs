@@ -240,8 +240,23 @@ fn messages(client: &mut Client, id: &str, active_session_id: &str) -> String {
     serde_json::to_string(&response["data"]).expect("messages json")
 }
 
+#[derive(Clone, Copy)]
+enum SavedLocation {
+    Live,
+    Archive,
+}
+
 #[test]
 fn send_to_a_saved_session_wakes_it_and_runs_the_turn() {
+    saved_session_wake(SavedLocation::Live);
+}
+
+#[test]
+fn send_to_an_archived_root_restores_it_and_runs_the_turn() {
+    saved_session_wake(SavedLocation::Archive);
+}
+
+fn saved_session_wake(location: SavedLocation) {
     let dir = tempfile::TempDir::new().expect("temp dir");
     let agent_dir = dir.path().join("agent");
     let sessions = agent_dir.join("sessions");
@@ -271,7 +286,7 @@ fn send_to_a_saved_session_wakes_it_and_runs_the_turn() {
     )
     .expect("write models.json");
     let socket = dir.path().join("daemon.sock");
-    let _daemon = spawn_daemon(&socket, &agent_dir);
+    let daemon = spawn_daemon(&socket, &agent_dir);
     let (mut client, hello) = Client::connect(&socket);
     assert_eq!(hello["type"], "daemon_hello");
 
@@ -344,6 +359,26 @@ fn send_to_a_saved_session_wakes_it_and_runs_the_turn() {
     assert_eq!(saved_rows.len(), 1, "the killed session is saved");
     assert_eq!(saved_rows[0]["name"], "alpha");
 
+    // Simulate upgrading a store archived by an older Rust daemon. The
+    // current daemon starts with the root already in its archive directory.
+    let archive_path = agent_dir
+        .join("sessions-archive")
+        .join(format!("{session_id}.jsonl"));
+    let live_path = sessions.join(format!("{session_id}.jsonl"));
+    let saved_bytes = std::fs::read(&live_path).expect("saved transcript");
+    let (_daemon, mut client) = match location {
+        SavedLocation::Live => (daemon, client),
+        SavedLocation::Archive => {
+            drop(client);
+            drop(daemon);
+            std::fs::create_dir_all(archive_path.parent().unwrap()).expect("archive dir");
+            std::fs::rename(&live_path, &archive_path).expect("pre-upgrade archive fixture");
+            let daemon = spawn_daemon(&socket, &agent_dir);
+            let (client, _) = Client::connect(&socket);
+            (daemon, client)
+        }
+    };
+
     client.send_command(
         "s1",
         &json!({ "type": "send_message", "targetActiveSessionId": "alpha", "message": "wake up" }),
@@ -358,6 +393,11 @@ fn send_to_a_saved_session_wakes_it_and_runs_the_turn() {
         .expect("woken active id")
         .to_string();
     assert_ne!(woken_id, active_id, "a new worker hosts the woken session");
+    assert!(!archive_path.exists(), "woken root is in the live store");
+    assert!(
+        std::fs::read(&live_path).unwrap().starts_with(&saved_bytes),
+        "wake preserves the complete pre-upgrade transcript"
+    );
 
     let listed = wait_until(Duration::from_secs(15), || {
         client.send_command("l3", &json!({ "type": "list" }));

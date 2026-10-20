@@ -82,6 +82,7 @@ impl SessionUi {
             show_images: options.show_images,
             fullscreen_mouse: options.fullscreen_mouse,
             service_tier: None,
+            pending_model_fallback_message: None,
             speed_display_enabled: false,
             speed_stats: None,
             client_settings: options.client_settings.clone(),
@@ -421,6 +422,7 @@ impl SessionUi {
         self.daemon_closing_notice = None;
         self.session_name.clone_from(&reconstructed.session_name);
         self.service_tier.clone_from(&reconstructed.service_tier);
+        self.pending_model_fallback_message = reconstructed.model_fallback_message;
         self.session_file = attach
             .snapshot
             .get("state")
@@ -593,6 +595,13 @@ impl SessionUi {
             for entry in items {
                 view.push_entry(entry);
             }
+        }
+        if let Some(message) = self.pending_model_fallback_message.take() {
+            view.push_entry(ChatEntry::Status {
+                text: format!("\u{26a0} {message}"),
+                kind: crate::chat::StatusKind::Warning,
+            });
+            self.last_status_index = None;
         }
         // The rebuild re-registers the live tool cards (the resumed turn's streamed calls re-enter
         // the pending map): a post-reconnect failure frame can still settle them.
@@ -767,5 +776,110 @@ impl SessionUi {
         )
         .await;
         resume_hint_from_stats(&stats.ok()?.ok()?)
+    }
+}
+
+#[cfg(all(test, unix))]
+mod backfill_tests {
+    use super::*;
+    use serde_json::json;
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+    #[tokio::test]
+    async fn an_attach_summary_model_fallback_warns_at_the_session_open() {
+        tokio::time::timeout(Duration::from_secs(10), async {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("fallback.sock");
+        let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let (read, mut write) = stream.into_split();
+            write.write_all(b"{\"type\":\"daemon_hello\",\"protocol\":{\"name\":\"prime-agent.daemon\",\"version\":7},\"serverCapabilities\":[],\"clientId\":\"mock\"}\n").await.unwrap();
+            let mut lines = BufReader::new(read).lines();
+            while let Some(line) = lines.next_line().await.unwrap() {
+                let request: Value = serde_json::from_str(&line).unwrap();
+                let kind = request["command"]["type"].as_str().unwrap();
+                let data = match kind {
+                    "attach" => json!({
+                        "activeSessionId": "s1", "snapshot": {
+                            "activeSessionId": "s1",
+                            "summary": {
+                                "id": "s1", "cwd": "/tmp",
+                                "modelFallbackMessage":
+                                    "Default model prime-inference/internal/glm-5.3-fast is not available. Using prime-inference/z-ai/glm-5.3",
+                            },
+                            "state": {"sessionId": "s1", "cwd": "/tmp", "isStreaming": false},
+                            "messages": [], "lastEventSequence": 0,
+                        }, "replay": {"status": "complete", "toSequence": 0},
+                        "lastEventSequence": 0,
+                    }),
+                    _ => json!({}),
+                };
+                let mut reply = serde_json::to_vec(&json!({
+                    "type": "response", "id": request["id"], "command": kind,
+                    "success": true, "data": data,
+                }))
+                .unwrap();
+                reply.push(b'\n');
+                write.write_all(&reply).await.unwrap();
+            }
+        });
+        let mut options =
+            crate::interactive::tests::options(crate::interactive::ModelSelection::default());
+        options.socket_path = socket.clone();
+        options.session = SessionSelection::Attach("s1".to_string());
+        let (client, _events) = DaemonClient::connect(&socket).await.unwrap();
+        let mut session = SessionUi::open(
+            client,
+            &options,
+            mpsc::unbounded_channel().0,
+            mpsc::unbounded_channel().0,
+            mpsc::unbounded_channel().0,
+            mpsc::unbounded_channel().0,
+            mpsc::unbounded_channel().0,
+            mpsc::unbounded_channel().0,
+            mpsc::unbounded_channel().0,
+            mpsc::unbounded_channel().0,
+            mpsc::unbounded_channel().0,
+            ActivityUpdates {
+                heartbeats: mpsc::unbounded_channel().0,
+                bash: mpsc::unbounded_channel().0,
+                factory: mpsc::unbounded_channel().0,
+                commands: mpsc::unbounded_channel().0,
+            },
+            mpsc::unbounded_channel().0,
+        )
+        .await
+        .unwrap();
+        let mut view = AgentView::new(crate::theme::Theme::builtin(
+            "prime",
+            crate::theme::ColorMode::TrueColor,
+        ));
+        session.rebuild_view(&mut view, &RebuildKind::Rebind);
+        let warnings: Vec<String> = view
+            .chat
+            .iter()
+            .filter_map(|entry| match entry {
+                ChatEntry::Status { text, kind } if *kind == crate::chat::StatusKind::Warning => {
+                    Some(text.clone())
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            warnings,
+            vec!["\u{26a0} Default model prime-inference/internal/glm-5.3-fast is not available. Using prime-inference/z-ai/glm-5.3".to_string()],
+            "the startup fallback warns once at the open"
+        );
+        session.rebuild_view(&mut view, &RebuildKind::Resync);
+        assert!(
+            view.chat
+                .iter()
+                .all(|entry| !matches!(entry, ChatEntry::Status { kind: crate::chat::StatusKind::Warning, .. })),
+            "a second rebuild adds no second warning"
+        );
+        drop(session);
+        server.abort();
+        }).await.expect("mock session open, warning rebuild complete within ten seconds");
     }
 }
