@@ -1204,6 +1204,42 @@ class ReplTest(unittest.TestCase):
         )
         reply_ok(self.repl, request)
 
+    def test_degraded_await_of_a_persistent_shell_keeps_it_running_to_its_notice(self):
+        # yield_after and persistent= compose: the persistent handle's await
+        # degrades like any handle's, and the shell (never owned by an await)
+        # runs on to its [bash-done] notice.
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        repl = ReplProcess(
+            env={"PRIME_AGENT_CODING_AGENT_DIR": temp.name, "RLM_SESSION_ID": "own-session"}
+        )
+        self.addCleanup(repl.close)
+        repl.ready()
+        code = "\n".join(
+            [
+                "import rlm",
+                "rlm._set_completion_notices_wired(True)",
+                "from rlm import bash",
+                "handle = bash('sleep 0.6; printf persisted', persistent=True, yield_after=0.3)",
+                "snapshot = await handle",
+                "(snapshot.running, snapshot.handle is handle, handle.pid)",
+            ]
+        )
+        events = repl.execute("persistent-degrade", code)
+        running, same, pid = one(events, "result")["text"].strip("()").split(", ")
+        self.assertEqual((running, same), ("True", "True"))
+        request = wait_for_host_request(repl, events)
+        self.assertEqual(
+            request["data"],
+            {
+                "type": "bash.completed",
+                "pid": int(pid),
+                "command": "sleep 0.6; printf persisted",
+                "exitCode": 0,
+            },
+        )
+        reply_ok(repl, request)
+
     def test_result_read_after_notice_requests_one_withdrawal(self):
         reads = (
             ("poll", "handle.poll().output"),
