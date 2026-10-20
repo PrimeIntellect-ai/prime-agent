@@ -3,7 +3,10 @@
 //! session's live-model and thinking-level surfaces, and the request
 //! API-key seam.
 
-use super::{AgentSessionEngine, EngineModelSelection, Model, RestoredSessionModel, SessionEngine};
+use super::{
+    AgentSessionEngine, EngineModelSelection, Model, RestoredSessionModel, SessionEngine,
+    StartupScope,
+};
 
 impl AgentSessionEngine {
     /// The startup chain: the saved settings default, then the featured
@@ -13,28 +16,84 @@ impl AgentSessionEngine {
         let all: Vec<Model> = registry.get_all().to_vec();
         let settings =
             pa_core::settings::SettingsManager::create(self.cwd(), &self.config.agent_dir);
+        let default = settings
+            .get_default_provider()
+            .zip(settings.get_default_model())
+            .map(|(provider, model)| (provider.to_string(), model.to_string()));
         // The create-time `--models` scope: a fresh session starts on the
         // saved default when in scope, else the first scoped model.
-        let (scoped_models, is_continuing) = match self
+        let scope = self
             .startup_scope
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone()
-        {
-            Some(scope) => (scope.scoped_models, scope.is_continuing),
-            None => (Vec::new(), false),
-        };
-        pa_core::models::find_initial_model(&pa_core::models::InitialModelOptions {
+            .unwrap_or_default();
+        let resolved = pa_core::models::find_initial_model(&pa_core::models::InitialModelOptions {
             cli_provider: None,
             cli_model: None,
-            scoped_models: &scoped_models,
-            is_continuing,
-            default_provider: settings.get_default_provider(),
-            default_model_id: settings.get_default_model(),
+            scoped_models: &scope.scoped_models,
+            is_continuing: scope.is_continuing,
+            default_provider: default.as_ref().map(|(provider, _)| provider.as_str()),
+            default_model_id: default.as_ref().map(|(_, model)| model.as_str()),
             all_models: &all,
             available_models: &available,
         })
-        .or_else(|| all.first().cloned())
+        .or_else(|| all.first().cloned());
+        if let (Some(model), Some(default)) = (&resolved, &default) {
+            self.record_startup_default_fallback(model, default, &scope, &available, &all);
+        }
+        resolved
+    }
+
+    fn record_startup_default_fallback(
+        &self,
+        model: &Model,
+        default: &(String, String),
+        scope: &StartupScope,
+        available_models: &[Model],
+        all_models: &[Model],
+    ) {
+        let (provider, model_id) = default;
+        if scope.is_continuing || (model.provider == *provider && model.id == *model_id) {
+            return;
+        }
+        let session_file = self
+            .session_file
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+            .unwrap_or_default();
+        let mut decision = self
+            .restored_model
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if decision
+            .as_ref()
+            .is_some_and(|decision| decision.session_file == session_file)
+        {
+            return;
+        }
+        let wanted = scope.patterns.is_empty()
+            || pa_core::models::scope_patterns_select_reference(
+                &scope.patterns,
+                provider,
+                model_id,
+                available_models,
+                all_models,
+            );
+        if !wanted {
+            return;
+        }
+        let message = format!(
+            "Default model {provider}/{model_id} is not available. Using {}/{}",
+            model.provider, model.id
+        );
+        eprintln!("{message}");
+        *decision = Some(RestoredSessionModel {
+            session_file,
+            model: None,
+            fallback_message: Some(message),
+        });
     }
 
     /// The runtime-config reset at every session restore: the create's own
