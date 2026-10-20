@@ -195,6 +195,11 @@ impl Worker {
             }
         }
         let mut core = self.core.lock().unwrap();
+        // The receipt's busy flag: the ACP steering arm maps its
+        // injected/queued outcome from the worker's own turn state at the
+        // enqueue, not an ACP-side snapshot that races the prompt
+        // admission (the same lock serializes the flag with the enqueue).
+        let busy = core.busy;
         let images = parse_prompt_images(payload);
         let item = QueuedItem {
             priority: if custom_message.is_some() {
@@ -237,7 +242,7 @@ impl Worker {
         } else {
             "follow_up"
         };
-        response_success(None, command, Some(json!({ "queued": true })))
+        response_success(None, command, Some(json!({ "queued": true, "busy": busy })))
     }
 
     /// Agent-to-agent delivery: render the `[agent-message from ...]` prompt and queue

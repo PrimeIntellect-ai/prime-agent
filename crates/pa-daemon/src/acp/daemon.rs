@@ -278,6 +278,13 @@ pub(crate) struct HostedSession {
     /// The running prompt turn; one at a time. A cancelled turn keeps
     /// the slot until its cancel stop finishes.
     turn: Option<ActiveTurn>,
+    /// A steer was admitted into worker work the ACP turn slot does not
+    /// own (an idle steer's own turn, or one admitted in a prompt
+    /// settle's trailing window). `session/cancel` with no turn slot arms
+    /// the stop sequence for it instead of no-opping; a prompt turn's
+    /// own stop owns the whole worker, and a completed stop sequence
+    /// dealt with the steered work, so both clear it.
+    steer_work: bool,
     /// The newest assistant stop reason observed on the event stream,
     /// cleared when a prompt turn is admitted so a turn never reads a
     /// previous turn's stop reason (read after the settlement for the
@@ -757,6 +764,9 @@ async fn admit_prompt(
     // The stop reason is per-turn: a turn that runs no model call (a
     // slash command) must not inherit the previous turn's stop reason.
     hosted.assistant_stop_reason = None;
+    // A prompt turn's stop owns the whole worker - the abort clears both
+    // lanes - so the slot covers steered work admitted before it.
+    hosted.steer_work = false;
     hosted.turn = Some(ActiveTurn {
         admission_id: admission_id.clone(),
         cancelled: false,
@@ -793,7 +803,12 @@ fn arm_cancel_locked(session_id: &str, guard: &mut DaemonAcpState) -> CancelOrde
             turn.cancelled = true;
             Some(turn.admission_id.clone())
         }
-        None if hosted.stop_failure.is_none() => return CancelOrder::None,
+        None if hosted.stop_failure.is_none() && !hosted.steer_work => return CancelOrder::None,
+        // No prompt slot, but steered work the slot never covered (an
+        // idle steer's own turn, or one admitted in a prompt settle's
+        // trailing window - or the stop-failure retry): the stop
+        // sequence's AbortAndClearQueue clears the steer item or aborts
+        // its running turn, exactly like a slot-holding prompt turn.
         None => None,
     };
     let (done_tx, done_rx) = tokio::sync::watch::channel(false);
@@ -847,6 +862,8 @@ async fn run_cancel_stop(
         {
             hosted.cancelling = false;
             hosted.cancel_task = None;
+            // This stop sequence dealt with the steered work.
+            hosted.steer_work = false;
             match &outcome {
                 Ok(lease) => {
                     if hosted.input_pause_id.as_deref() == Some(&lease.pause_id) {
@@ -1202,6 +1219,7 @@ pub(crate) async fn admit_session(
         input_pause_id: None,
         cancel_task: None,
         turn: None,
+        steer_work: false,
         assistant_stop_reason: None,
         mapping: WireMappingState::default(),
         observed_children: std::collections::HashSet::new(),
@@ -1494,7 +1512,8 @@ async fn handle_session_prompt(
 /// `steer` lane). The text joins the busy turn's conversation at its next
 /// delivery boundary - tools are never interrupted - and with no running
 /// turn it is admitted as the next turn. The receipt maps the two
-/// admissions: `injected` while a prompt turn runs, `queued` otherwise.
+/// admissions: `injected` only when both the ACP turn slot is held and the
+/// worker reported its own turn running, `queued` otherwise.
 async fn handle_session_steering(
     id: Value,
     params: Value,
@@ -1586,7 +1605,7 @@ async fn handle_session_steering(
     }
     let steer = DaemonCommand::Steer {
         id: None,
-        active_session_id: daemon_session_id,
+        active_session_id: daemon_session_id.clone(),
         message,
         input: pa_types::daemon::PromptInput {
             content: None,
@@ -1621,8 +1640,116 @@ async fn handle_session_steering(
         ));
         return;
     }
-    let outcome = if turn_running { "injected" } else { "queued" };
+    // The receipt's truth is the worker's own busy flag at the enqueue,
+    // not the ACP slot snapshot: the slot is set before the prompt
+    // reaches the worker and stays held through the settle's trailing
+    // fetches, so either side alone lies in a race window.
+    let worker_busy = response
+        .data
+        .as_ref()
+        .and_then(|data| data.get("busy"))
+        .and_then(Value::as_bool);
+    let Some(worker_busy) = worker_busy else {
+        let _ = tx.send(super::internal_error(
+            &id,
+            "the daemon returned no steering busy flag",
+        ));
+        return;
+    };
+    // The guard raced a `session/cancel` that armed while the steer was
+    // in flight: its `AbortAndClearQueue` can have landed before the
+    // steer, leaving the message past the stop. Withdraw it - the
+    // re-issued abort clears the just-admitted steer (a queued item or a
+    // turn that already started) - and answer with the cancel's own
+    // refusal instead of a receipt for work that will not run. A close
+    // owns its own stop, so only the cancelling case withdraws.
+    let raced_cancel = {
+        let guard = state.lock().await;
+        guard
+            .session
+            .as_ref()
+            .filter(|hosted| hosted.acp_session_id == params.session_id)
+            .is_some_and(|hosted| hosted.cancelling)
+    };
+    if raced_cancel {
+        let _ = link
+            .request_ok(DaemonCommand::AbortAndClearQueue {
+                id: None,
+                active_session_id: daemon_session_id.clone(),
+                rest: Map::default(),
+            })
+            .await;
+        let _ = tx.send(jsonrpc::error_response(
+            &id,
+            jsonrpc::INVALID_PARAMS,
+            "Invalid params",
+            Some(&json!({
+                "reason": format!("ACP session is cancelling: {}", params.session_id)
+            })),
+        ));
+        return;
+    }
+    // The session closed during the admission: the close's own stop
+    // sequence dealt with the steer, so this is only the refusal.
+    let still_live = {
+        let guard = state.lock().await;
+        let session_closing = guard.session_close_done.is_some();
+        guard
+            .session
+            .as_ref()
+            .filter(|hosted| hosted.acp_session_id == params.session_id)
+            .map(|_| session_closing)
+    };
+    if let Some(true) = still_live {
+        let _ = tx.send(jsonrpc::error_response(
+            &id,
+            jsonrpc::INVALID_PARAMS,
+            "Invalid params",
+            Some(&json!({ "reason": "ACP session is closed or closing" })),
+        ));
+        return;
+    }
+    if still_live.is_none() {
+        let _ = tx.send(jsonrpc::error_response(
+            &id,
+            jsonrpc::INVALID_PARAMS,
+            "Invalid params",
+            Some(&json!({
+                "reason": format!("Unknown ACP session: {}", params.session_id)
+            })),
+        ));
+        return;
+    }
+    // The admission is live steered work: track it so a later
+    // `session/cancel` with no turn slot still arms the stop sequence
+    // for it (cleared when a prompt turn is admitted or a stop sequence
+    // dealt with it).
+    {
+        let mut guard = state.lock().await;
+        if let Some(hosted) = guard
+            .session
+            .as_mut()
+            .filter(|hosted| hosted.acp_session_id == params.session_id)
+        {
+            hosted.steer_work = true;
+        }
+    }
+    let outcome = steer_outcome(turn_running, worker_busy);
     let _ = tx.send(jsonrpc::response(&id, &json!({ "outcome": outcome })));
+}
+
+/// The steer receipt: `injected` only when BOTH the ACP turn slot is
+/// held and the worker reported its own turn running. Either side alone
+/// lies in a race window - the slot outlives the worker's idle (the
+/// settle's trailing fetches) and precedes the worker's busy (the prompt
+/// in flight), while the worker's busy flag can belong to steer-only
+/// work with no prompt turn at all.
+fn steer_outcome(turn_slot_running: bool, worker_busy: bool) -> &'static str {
+    if turn_slot_running && worker_busy {
+        "injected"
+    } else {
+        "queued"
+    }
 }
 
 /// Release this prompt's turn slot, after its stop sequence if it was
@@ -2256,6 +2383,7 @@ mod tests {
             input_pause_id: None,
             cancel_task: None,
             turn: None,
+            steer_work: false,
             assistant_stop_reason: None,
             mapping: WireMappingState::default(),
             observed_children: std::collections::HashSet::new(),
@@ -2509,5 +2637,32 @@ mod tests {
             arm_cancel_locked("acp-1", &mut stopping),
             CancelOrder::None
         ));
+    }
+
+    #[test]
+    fn arm_cancel_arms_for_live_steered_work_without_a_turn_slot() {
+        let mut steered = state(Some(hosted_session()));
+        steered.session.as_mut().unwrap().steer_work = true;
+        let CancelOrder::Armed(stop) = arm_cancel_locked("acp-1", &mut steered) else {
+            panic!("steered work with no turn slot arms the stop sequence");
+        };
+        assert!(
+            stop.admission_id.is_none(),
+            "no prompt slot to cancel: the abort owns the steered work"
+        );
+        assert!(steered.session.as_ref().unwrap().cancelling);
+        assert!(steered.session.as_ref().unwrap().cancel_task.is_some());
+    }
+
+    #[test]
+    fn steer_outcome_requires_both_the_slot_and_the_worker_turn() {
+        assert_eq!(steer_outcome(true, true), "injected");
+        // The slot alone lies twice: it is set before the prompt reaches
+        // the worker and held through the settle's trailing fetches.
+        assert_eq!(steer_outcome(true, false), "queued");
+        // The worker's busy flag alone can be steer-only work with no
+        // prompt turn at all.
+        assert_eq!(steer_outcome(false, true), "queued");
+        assert_eq!(steer_outcome(false, false), "queued");
     }
 }
