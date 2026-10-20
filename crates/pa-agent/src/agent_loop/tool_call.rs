@@ -491,12 +491,26 @@ mod tests {
             execute_prepared_tool_call(&prepared, progress, None, &sink).await;
         });
         let count = || *ticks.lock().unwrap();
-        while count() == 0 {
-            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-        }
+        // Bounded first-tick wait: a broken heartbeat fails the test
+        // instead of hanging the suite.
+        let first_tick = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while count() == 0 {
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        })
+        .await;
+        assert!(
+            first_tick.is_ok(),
+            "the heartbeat never ticked within 2s at a 25ms cadence"
+        );
         // Cancel the frame mid-await: the Drop guard (not the explicit
         // stop) must abort the heartbeat.
         execution.abort();
+        // Awaiting the cancelled handle settles only once the frame (and
+        // its HeartbeatGuard) has dropped, so the abort is in effect; the
+        // settle window absorbs an in-flight tick before sampling.
+        let _ = execution.await;
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         let after_cancel = count();
         tokio::time::sleep(std::time::Duration::from_millis(200)).await;
         assert_eq!(
