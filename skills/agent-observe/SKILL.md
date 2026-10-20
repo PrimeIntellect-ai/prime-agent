@@ -7,9 +7,10 @@ description: Read-only roster and observation of an agent's parent, siblings, an
 
 Observe the current agent's nuclear family through the local daemon: parent,
 siblings, direct children, and self. `list_agents` is the one family roster and
-covers every member `agent_message.send` can reach. `get_agent` and
-`recent_messages` hydrate an inactive child before reading it. They cannot read
-a root sibling that has no live session in this worker.
+covers every member `agent_message.send` can reach. `get_agent` also returns an
+inactive child's roster row. `recent_messages` reads live sessions only; it
+does not rehydrate an inactive member. They cannot read a root sibling that has
+no live session in this worker.
 This skill is read-only: it can list family sessions, inspect one session, and fetch
 bounded recent message previews. It cannot prompt, steer, clear, kill, rename, or
 otherwise mutate another session.
@@ -28,22 +29,31 @@ if child is not None:
 
 ## API
 
-- `await agent_observe.list_agents()` returns `current` and `agents`, the full
-  nuclear family: parent, siblings, and direct children, active or not. Each
-  agent carries `sessionId`, optional `sessionName`, `relationship`
-  (`parent`/`sibling`/`child`), `status`, `isSessionActive`, and the counts and
-  message previews known for it: `latestMessage` for a live session,
-  `firstMessage` for an inactive child. A member with no live session has
-  no `activeSessionId` and no live detail; address it with `agent_message.send`
-  using its `relationship` plus its `sessionName`, or its `sessionId` when the
-  member has no name. For direct children,
+- `await agent_observe.list_agents()` returns `current` (the calling agent's
+  own row) and `agents` (the family: parent, siblings, and direct children,
+  active or not; the caller is excluded from `agents`). Each row carries
+  `sessionId`, optional `sessionName`, `relationship`
+  (`parent`/`sibling`/`child`), `status` (`running`/`idle` for live sessions,
+  `inactive` without one), the live `activity` (`tool`/`model`/`compacting`/
+  `busy`/`user`/`idle`), `isSessionActive`, the counts known
+  for it (`messageCount`, `queuedCount`, `attachedClients`), `cwd` when the
+  roster row carries it, the parent edges (`parentActiveSessionId`,
+  `parentSessionId`) and `rlmChildId` for subagents, and `firstMessage`
+  (capped at 240 chars) for an inactive child. A member with no live session
+  has no `activeSessionId` and no live detail; address it with
+  `agent_message.send` using its `relationship` plus its `sessionName`, or its
+  `sessionId` when the member has no name. For direct children,
   `await rlm.list_subagents()` also exposes parent-owned lifecycle handles.
 - `await agent_observe.get_agent(target)` returns `agent`, where `agent`
-  contains one live agent summary. `target` is resolved like other live-session
-  selectors: active id, session id/name, or unambiguous suffix.
+  contains one agent summary (the same shape as the roster rows, including a
+  passive child's row). `target` is resolved like other live-session
+  selectors: active id, session id or name, or an unambiguous id suffix.
 - `await agent_observe.recent_messages(target, limit=8, max_chars=800)`
-  returns up to `limit` recent bounded message previews for the target session.
-  `limit` must be 1-50, and `max_chars` must be 80-2000.
+  returns `agent` (the target's summary), `messages` (up to `limit` recent
+  bounded previews), the clamped `limit` and `maxChars`, and `truncated`
+  (true when older messages exist beyond the returned window). `limit` must be
+  1-50, and `max_chars` must be 80-2000. The target must be a live family
+  member: a member with no live session errors instead of hydrating.
 
 ## Safety
 

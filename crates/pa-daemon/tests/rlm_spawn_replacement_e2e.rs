@@ -209,6 +209,7 @@ fn children(socket: &Path, agent_dir: &Path, script: &Path) -> SupervisorChildSe
             agent_dir.to_path_buf(),
             /*telemetry_disabled*/ true,
         )),
+        String::new(),
     );
     sessions.set_identity(ParentIdentity {
         rlm_depth: 0,

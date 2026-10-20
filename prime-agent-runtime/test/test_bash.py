@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import io
 import json
 import os
 import resource
@@ -538,8 +539,8 @@ class BashTest(unittest.IsolatedAsyncioTestCase):
             pids: list[int] = []
             original_init = bash_module.BashHandle.__init__
 
-            def capturing_init(handle_self, command):
-                original_init(handle_self, command)
+            def capturing_init(handle_self, command, *args, **kwargs):
+                original_init(handle_self, command, *args, **kwargs)
                 pids.append(handle_self._pid)
 
             async def run_oneshot():
@@ -566,8 +567,8 @@ class BashTest(unittest.IsolatedAsyncioTestCase):
             pids: list[int] = []
             original_init = bash_module.BashHandle.__init__
 
-            def capturing_init(handle_self, command):
-                original_init(handle_self, command)
+            def capturing_init(handle_self, command, *args, **kwargs):
+                original_init(handle_self, command, *args, **kwargs)
                 pids.append(handle_self._pid)
 
             async def run_oneshot():
@@ -641,8 +642,8 @@ class BashTest(unittest.IsolatedAsyncioTestCase):
         pids: list[int] = []
         original_init = bash_module.BashHandle.__init__
 
-        def capturing_init(handle_self, command):
-            original_init(handle_self, command)
+        def capturing_init(handle_self, command, *args, **kwargs):
+            original_init(handle_self, command, *args, **kwargs)
             pids.append(handle_self._pid)
 
         async def run_oneshot():
@@ -1277,17 +1278,11 @@ class BashTest(unittest.IsolatedAsyncioTestCase):
         with mock.patch.object(bash_module.os, "killpg", side_effect=OSError):
             self.assertFalse(bash_module._signal_group(1234567, signal.SIGKILL))
 
-    async def test_journal_configured_but_unwritable_kills_child_and_raises(self):
+    async def test_journal_configured_but_unwritable_stays_best_effort(self):
+        # TS parity (#2524): a journal that cannot be written means the
+        # command runs untracked, never that the spawn dies.
         with tempfile.TemporaryDirectory() as tmp:
             marker = os.path.join(tmp, "marker")
-            pids: list[int] = []
-            real_popen = subprocess.Popen
-
-            def capturing_popen(*args, **kwargs):
-                proc = real_popen(*args, **kwargs)
-                pids.append(proc.pid)
-                return proc
-
             with mock.patch.dict(
                 os.environ,
                 {
@@ -1295,14 +1290,9 @@ class BashTest(unittest.IsolatedAsyncioTestCase):
                     "PRIME_AGENT_KERNEL_OWNER_PID": str(os.getpid()),
                 },
             ):
-                with mock.patch.object(bash_module.subprocess, "Popen", capturing_popen):
-                    with self.assertRaises(RuntimeError):
-                        bash(f"touch {marker}")
-            await _poll_group_dead(pids[0])
-            await asyncio.sleep(0.2)
-            self.assertFalse(os.path.exists(marker))
-            with bash_module._live_lock:
-                self.assertFalse(bash_module._live_handles)
+                result = await asyncio.wait_for(bash(f"touch {marker}"), timeout=5)
+            self.assertEqual(result.exit_code, 0)
+            self.assertTrue(os.path.exists(marker))
 
     async def test_journal_bad_owner_pid_rejects(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1317,7 +1307,10 @@ class BashTest(unittest.IsolatedAsyncioTestCase):
                 with self.assertRaises(RuntimeError):
                     bash("echo hi")
 
-    async def test_missing_start_id_rejects_when_configured(self):
+    async def test_missing_start_id_records_identity_free(self):
+        # Identity-free records (no processStartId) are valid and still
+        # safely reaped on POSIX via the group-scoped kill: the spawn must
+        # not fail when the start id is unavailable.
         with tempfile.TemporaryDirectory() as tmp:
             journal = os.path.join(tmp, "journal.jsonl")
             with mock.patch.dict(
@@ -1328,12 +1321,17 @@ class BashTest(unittest.IsolatedAsyncioTestCase):
                 },
             ):
                 with mock.patch.object(bash_module, "_process_start_id", return_value=None):
-                    with self.assertRaises(RuntimeError):
-                        bash("sleep 30")
+                    result = await bash("echo ok")
+            self.assertEqual(result.exit_code, 0)
+            self.assertIn("ok", result.output)
+            with open(journal) as f:
+                record = json.loads(next(line for line in f if line.strip()))
+            self.assertNotIn("processStartId", record)
+            self.assertTrue(record["active"])
 
-    async def test_journal_short_write_rejects_when_configured(self):
-        # A partial os.write would leave a truncated JSON line the host
-        # discards; enrollment must treat it as failure.
+    async def test_journal_short_write_stays_best_effort(self):
+        # A zero-write leaves no complete record (the host discards truncated
+        # lines) but enrollment still returns True: the command is alive.
         with tempfile.TemporaryDirectory() as tmp:
             journal = os.path.join(tmp, "journal.jsonl")
 
@@ -1348,7 +1346,8 @@ class BashTest(unittest.IsolatedAsyncioTestCase):
                 },
             ):
                 with mock.patch.object(bash_module.os, "write", short_write):
-                    self.assertFalse(bash_module._record_journal(os.getpid(), active=False))
+                    self.assertTrue(bash_module._record_journal(os.getpid(), active=False))
+            self.assertEqual(os.path.getsize(journal), 0)
 
     async def test_journal_partial_writes_complete_the_record(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1379,6 +1378,92 @@ class BashTest(unittest.IsolatedAsyncioTestCase):
             result = await bash("echo ok")
         self.assertEqual(result.exit_code, 0)
         self.assertIn("ok", result.output)
+
+
+class BoundedAwaitTest(unittest.IsolatedAsyncioTestCase):
+    """The yield_after contract: with completion notices wired (the kernel
+    bootstrap call) an await degrades to the live handle past its bound;
+    without them every await stays unbounded (nothing wakes a collector)."""
+
+    def _wire_notices(self) -> None:
+        bash_module._set_completion_notices_wired(True)
+        self.addCleanup(bash_module._set_completion_notices_wired, False)
+        bash_module._degrade_hints_written = 0
+        self.addCleanup(setattr, bash_module, "_degrade_hints_written", 0)
+
+    async def test_wired_default_and_maximum_bounds(self):
+        self._wire_notices()
+        self.assertEqual(bash_module._effective_yield_after(None), 10.0)
+        self.assertEqual(bash_module._effective_yield_after(500), 300.0)
+        self.assertEqual(bash_module._effective_yield_after(0.25), 0.25)
+        bash_module._set_completion_notices_wired(False)
+        self.assertIsNone(bash_module._effective_yield_after(None))
+        self.assertIsNone(bash_module._effective_yield_after(0.25))
+
+    async def test_bounded_await_degrades_to_a_snapshot(self):
+        self._wire_notices()
+        handle = bash("sleep 0.5", yield_after=0.3)
+        returned = await handle
+        self.assertIsInstance(returned, bash_module.BashSnapshot)
+        self.assertIs(returned.handle, handle)
+        self.assertIsNone(returned.exit_code)
+        self.assertTrue(returned.running)
+        self.assertIsInstance(returned.output, str)
+        # The prompt's collect idiom: re-awaiting the live handle returns the
+        # final result once the command finishes inside the window.
+        result = await returned.handle
+        self.assertEqual(result.exit_code, 0)
+
+    async def test_bounded_await_returns_the_result_within_the_window(self):
+        self._wire_notices()
+        result = await bash("printf quick", yield_after=5)
+        self.assertEqual(result.exit_code, 0)
+        self.assertIn("quick", result.output)
+        self.assertIs(result.running, False)
+        with self.assertRaises(ValueError):
+            bash("echo no", yield_after=0)
+        with self.assertRaises(ValueError):
+            bash("echo no", yield_after=-1)
+
+    async def test_daemonless_await_ignores_the_bound(self):
+        # No completion notices wired: no wake-up exists to collect a
+        # degraded command, so the await stays unbounded and yield_after
+        # has no effect.
+        result = await bash("sleep 1", yield_after=0.2)
+        self.assertEqual(result.exit_code, 0)
+
+    async def test_cancelling_a_later_await_of_a_degraded_handle_only_waits(self):
+        self._wire_notices()
+        handle = bash("sleep 1.5", yield_after=0.3)
+        snapshot = await handle
+        self.assertIsInstance(snapshot, bash_module.BashSnapshot)
+
+        async def consume():
+            return await handle
+
+        task = asyncio.create_task(consume())
+        await asyncio.sleep(0.2)
+        task.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await task
+        # The degrade released the handle: a cancelled later await stops
+        # waiting without killing the still-running command.
+        self.assertTrue(handle.running)
+        result = await asyncio.wait_for(handle._wait(), 10)
+        self.assertEqual(result.exit_code, 0)
+
+    async def test_degrade_hints_are_budgeted_to_the_first_three(self):
+        self._wire_notices()
+        handles = []
+        hints = io.StringIO()
+        with mock.patch.object(sys, "stderr", hints):
+            for _ in range(5):
+                handle = bash("sleep 3", yield_after=0.2)
+                handles.append(handle)
+                self.assertIsInstance(await handle, bash_module.BashSnapshot)
+        for handle in handles:
+            handle.kill(grace=0.1)
+        self.assertEqual(hints.getvalue().count("still running after"), 3)
 
 
 async def _poll_group_dead(pgid: int, timeout: float = 5.0) -> None:
