@@ -405,6 +405,7 @@ async fn rlm_children_key_the_roster_by_parent_path_and_child_id() {
             agent_dir.clone(),
             /*telemetry_disabled*/ true,
         )),
+        String::new(),
     );
     children.set_identity(ParentIdentity {
         rlm_depth: 0,

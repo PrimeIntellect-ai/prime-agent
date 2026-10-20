@@ -297,7 +297,7 @@ fn all_string_literals(text: &str) -> Vec<String> {
 /// Kernel-bound REPL names from the real bootstrap code (`rlm`, `bash`,
 /// `mcp`), derived from `build_rlm_bootstrap_code`.
 fn kernel_bound_names() -> BTreeSet<String> {
-    let code = pa_core::kernel::bootstrap::build_rlm_bootstrap_code(&[]);
+    let code = pa_core::kernel::bootstrap::build_rlm_bootstrap_code(&[], false);
     let mut names = BTreeSet::new();
     for line in code.lines() {
         let line = line.trim_start();
@@ -545,6 +545,38 @@ fn bundled_skills_match_the_ts_packaged_set() {
     assert_eq!(
         mcp_skill.description,
         "Use external MCP services generically from Python - search the supported-service catalog, inspect the user's connections, discover live tool schemas, and call tools on any connection (Notion, Linear, Slack, and the rest of the catalog) without per-service packages."
+    );
+}
+
+/// The bounded-await contract renders only in daemon sessions: the
+/// runtime half (the degrade) exists only where the host registers the
+/// bash completion notice, so a daemonless prompt must carry no trace of it.
+#[test]
+fn bounded_await_contract_render_is_daemon_only() {
+    let mut options = BuildSystemPromptOptions {
+        cwd: "/w".to_string(),
+        messages_path: Some("/log.jsonl".to_string()),
+        skills: sorted_bundled_skills(),
+        selected_tools: Some(vec!["python_repl"]),
+        ..Default::default()
+    };
+    let daemon = system_prompt_breakdown(&options);
+    assert!(
+        daemon.assembled.contains("yield_after")
+            && daemon.assembled.contains("[bash-done]")
+            && daemon.assembled.contains("`r.running` is True")
+            && daemon.assembled.contains("`r.exit_code` is None"),
+        "the daemon session prompt must carry the bounded-await result contract"
+    );
+    options.daemonless = true;
+    let daemonless = system_prompt_breakdown(&options);
+    assert!(
+        !daemonless.assembled.contains("yield_after")
+            && !daemonless.assembled.contains("[bash-done]")
+            && !daemonless.assembled.contains("still-running snapshot")
+            && !daemonless.assembled.contains("about 10 seconds"),
+        "the daemonless session prompt must not leak the bounded-await contract: {0}",
+        daemonless.assembled
     );
 }
 
