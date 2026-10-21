@@ -254,7 +254,7 @@ impl SessionFile {
         }
 
         for entry in &path_without_labels {
-            forked.adopt_entry((*entry).clone());
+            forked.index_entry((*entry).clone());
         }
         // Re-record the carried labels after the path (TS appends them
         // parented onto the path tail, keeping their original timestamps).
@@ -273,7 +273,7 @@ impl SessionFile {
                     fields: json!({ "targetId": id, "label": label }),
                 };
                 parent = Some(entry.id.clone());
-                forked.adopt_entry(entry);
+                forked.index_entry(entry);
             }
         }
         forked.hydrate_anthropic_warning_flag();
@@ -301,13 +301,6 @@ impl SessionFile {
         (!path.is_empty()).then_some(path)
     }
 
-    /// Adopt an entry as-is (used by the in-memory fork variant).
-    fn adopt_entry(&mut self, entry: SessionEntry) {
-        self.by_id.insert(entry.id.clone(), self.entries.len());
-        self.leaf_id = Some(entry.id.clone());
-        self.entries.push(entry);
-    }
-
     /// In-memory fork: replace this store's entries with the root-to-`leaf_id`
     /// path, carrying the labels of the kept entries.
     ///
@@ -330,11 +323,9 @@ impl SessionFile {
             .iter()
             .map(|entry| entry.id.clone())
             .collect();
-        self.entries.clear();
-        self.by_id.clear();
-        self.leaf_id = None;
+        self.clear_index();
         for entry in path_without_labels {
-            self.adopt_entry(entry);
+            self.index_entry(entry);
         }
         let mut parent = self.leaf_id.clone();
         for id in &path_ids {
@@ -351,7 +342,7 @@ impl SessionFile {
                     fields: json!({ "targetId": id, "label": label }),
                 };
                 parent = Some(entry.id.clone());
-                self.adopt_entry(entry);
+                self.index_entry(entry);
             }
         }
         // The kept path decides the gate from here on (the in-memory fork
