@@ -376,14 +376,28 @@ impl<W: Write> HyperlinkWriter<W> {
 
     /// Emit the buffered printable run and advance the tracked column.
     fn flush_text(&mut self) -> io::Result<()> {
+        use unicode_segmentation::UnicodeSegmentation;
         if self.text.is_empty() {
             return Ok(());
         }
         let chunk = std::mem::take(&mut self.text);
-        self.inner.write_all(&chunk)?;
-        if let Ok(text) = std::str::from_utf8(&chunk) {
+        let Ok(text) = std::str::from_utf8(&chunk) else {
+            return self.inner.write_all(&chunk);
+        };
+        for grapheme in text.graphemes(true) {
+            let width = crate::width::str_width(grapheme) as u16;
+            // Terminals disagree on the width of a multi-codepoint two-column cluster (a VS16
+            // emoji, a ZWJ sequence, a flag): blank both of its cells first, so a terminal that
+            // advances one column keeps no stale cell beside the glyph.
+            if let Some((row, col)) = self
+                .pos
+                .filter(|_| width == 2 && grapheme.chars().nth(1).is_some())
+            {
+                write!(self.inner, "  \x1b[{};{}H", row + 1, col + 1)?;
+            }
+            self.inner.write_all(grapheme.as_bytes())?;
             if let Some((_, col)) = self.pos.as_mut() {
-                *col = col.saturating_add(crate::width::str_width(text) as u16);
+                *col = col.saturating_add(width);
             }
         }
         Ok(())
@@ -654,6 +668,110 @@ mod tests {
         writer.flush().expect("flush");
         install_frame(&[]);
         String::from_utf8(writer.into_inner()).expect("utf-8")
+    }
+
+    /// The bytes the chat paint writes for consecutive frames of one row each: every frame
+    /// passes `to_ratatui_line` and the [`HyperlinkWriter`], as `app::draw` does.
+    fn paint_frames(frames: &[&str], width: u16) -> Vec<u8> {
+        #[derive(Clone, Default)]
+        struct Sink(std::rc::Rc<RefCell<Vec<u8>>>);
+        impl Write for Sink {
+            fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+                self.0.borrow_mut().extend_from_slice(buf);
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+        let sink = Sink::default();
+        let area = ratatui::layout::Rect::new(0, 0, width, 1);
+        let mut terminal = ratatui::Terminal::with_options(
+            ratatui::backend::CrosstermBackend::new(HyperlinkWriter::new(sink.clone())),
+            ratatui::TerminalOptions {
+                viewport: ratatui::Viewport::Fixed(area),
+            },
+        )
+        .unwrap();
+        for text in frames {
+            let line = crate::markdown::to_ratatui_line(&vec![crate::Span::raw(*text)]);
+            terminal
+                .draw(|frame| frame.render_widget(line, area))
+                .unwrap();
+        }
+        let bytes = sink.0.borrow().clone();
+        bytes
+    }
+
+    /// A minimal terminal that measures graphemes with `columns` (the width choice vt100 cannot
+    /// model): it follows cursor moves, skips the other escape sequences, and records the first
+    /// row's cells.
+    fn screen_row(bytes: &[u8], width: usize, columns: impl Fn(&str) -> usize) -> Vec<String> {
+        use unicode_segmentation::UnicodeSegmentation;
+        let text = std::str::from_utf8(bytes).unwrap();
+        let mut row = vec![" ".to_string(); width];
+        let mut col = 0;
+        let mut rest = text;
+        while !rest.is_empty() {
+            if let Some(len) = crate::width::escape_len(rest) {
+                let sequence = &rest[..len];
+                if let Some(position) = sequence
+                    .strip_prefix("\x1b[")
+                    .and_then(|s| s.strip_suffix('H'))
+                {
+                    col = position
+                        .split(';')
+                        .nth(1)
+                        .and_then(|c| c.parse::<usize>().ok())
+                        .unwrap_or(1)
+                        - 1;
+                }
+                rest = &rest[len..];
+                continue;
+            }
+            let grapheme = rest.graphemes(true).next().unwrap();
+            let advance = columns(grapheme);
+            if advance > 0 && col < width {
+                row[col] = grapheme.to_string();
+                for cell in row.iter_mut().skip(col + 1).take(advance - 1) {
+                    cell.clear();
+                }
+            }
+            col += advance;
+            rest = &rest[grapheme.len()..];
+        }
+        row
+    }
+
+    /// A terminal that gives the soft hyphen a column (glibc `wcwidth`, pyte) and one that gives
+    /// it none (iTerm2) paint the same row: the hyphen never reaches the terminal.
+    #[test]
+    fn a_soft_hyphen_never_shifts_the_cells_after_it() {
+        let bytes = paint_frames(&["a\u{ad}b"], 4);
+        let row = screen_row(&bytes, 4, |grapheme| {
+            usize::from(grapheme == "\u{ad}") + crate::width::str_width(grapheme)
+        });
+        assert_eq!(
+            row[..2],
+            ["a", "b"],
+            "the row a one-column soft hyphen terminal paints"
+        );
+    }
+
+    /// A terminal that measures a VS16 emoji one column wide (vt100, like iTerm2) keeps no stale
+    /// character in the second cell the paint assigns it.
+    #[test]
+    fn a_two_column_cluster_leaves_no_stale_cell_on_a_narrow_measuring_terminal() {
+        let bytes = paint_frames(&["abcd", "\u{26a0}\u{fe0f}cd"], 4);
+        let mut parser = vt100::Parser::new(1, 4, 0);
+        parser.process(&bytes);
+        let screen = parser.screen();
+        assert_eq!(screen.cell(0, 0).unwrap().contents(), "\u{26a0}\u{fe0f}");
+        let second = screen.cell(0, 1).unwrap().contents();
+        assert!(
+            second.trim().is_empty(),
+            "the second cell still shows the previous frame's {second:?}"
+        );
     }
 
     #[test]

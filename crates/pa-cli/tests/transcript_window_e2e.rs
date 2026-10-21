@@ -28,6 +28,9 @@ const TURNS: usize = 900;
 const COMPACTED_AFTER_TURN: usize = 600;
 const FIRST_KEPT_TURN: usize = 590;
 const SUMMARY_TEXT: &str = "fixture compaction summary";
+/// Turns the window keeps resident above the tail (eight 256-message chunks of
+/// four-message turns), with slack.
+const RESIDENT_TURNS: usize = 520;
 
 struct Supervisor {
     child: Child,
@@ -379,8 +382,8 @@ async fn the_compaction_summary_renders_once_across_eviction_and_refetch() {
     // Climb far enough above the compaction that its chunk is evicted, then descend
     // past it again so it is refetched.
     let mut steps = attached();
-    steps.extend(paced_keys(crossterm::event::KeyCode::PageUp, 90));
-    steps.extend(paced_keys(crossterm::event::KeyCode::PageDown, 75));
+    steps.extend(paced_keys(crossterm::event::KeyCode::PageUp, 140));
+    steps.extend(paced_keys(crossterm::event::KeyCode::PageDown, 110));
     let frames = run_plan(&session, steps, 40).await;
     let highest = frames
         .iter()
@@ -390,7 +393,7 @@ async fn the_compaction_summary_renders_once_across_eviction_and_refetch() {
         .expect("frames rendered");
     let highest_turn = turn_markers(&frames[highest])[0];
     assert!(
-        highest_turn + 300 < COMPACTED_AFTER_TURN,
+        highest_turn + RESIDENT_TURNS < COMPACTED_AFTER_TURN,
         "the climb must pass the compaction by more than the resident window, \
          reached turn {highest_turn}:\n{}",
         frames[highest]
