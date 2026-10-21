@@ -521,22 +521,18 @@ pub(crate) fn admit_goal_follow_up(
     work_notify.notify_one();
 }
 
-/// Admit one detached kernel bash completion notice: the row queues on the
-/// steering lane (busy sessions keep a visible steer row, idle sessions wake
-/// into it); a crash before the delivery revives with the row replaying.
-pub(crate) fn admit_bash_completion_notice(
+/// Admit one kernel notice (a detached bash completion or a factory run
+/// milestone): the row queues on the steering lane (busy sessions keep a
+/// visible steer row, idle sessions wake into it); a crash before the
+/// delivery revives with the row replaying.
+pub(crate) fn admit_kernel_notice(
     recovery: &std::sync::Mutex<Option<WorkerRecoveryJournal>>,
     core: &Arc<Mutex<SessionCore>>,
     work_notify: &Arc<Notify>,
-    notice: &crate::engine::BashCompletionNotice,
+    notice: crate::engine::KernelNotice,
     session_is_closed: impl Fn() -> bool,
 ) {
-    let row = pa_core::session_engine::messages::create_async_bash_completion_message(
-        notice.pid,
-        &notice.command,
-        notice.exit_code,
-        crate::util::now_ms(),
-    );
+    let crate::engine::KernelNotice { row, preview_label } = notice;
     let content = match &row.content {
         pa_types::ai::UserContent::Text(text) => text.clone(),
         pa_types::ai::UserContent::Blocks(_) => String::new(),
@@ -558,10 +554,7 @@ pub(crate) fn admit_bash_completion_notice(
         core_guard.steering.push_back(QueuedItem {
             priority: QueuePriority::Background,
             // The queue strip's labeled preview (TS `previewLabel`).
-            preview: Some(format!(
-                "{}: {content}",
-                pa_core::session_engine::messages::ASYNC_BASH_COMPLETION_PREVIEW_LABEL
-            )),
+            preview: Some(format!("{preview_label}: {content}")),
             message: content,
             custom_message: Some(crate::session_commands::custom_message_value(&row)),
             agent_message: None,

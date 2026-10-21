@@ -22,11 +22,10 @@ pub enum Scenario {
     WarmStart,
     /// The warm launch timed to the attach pill.
     WarmReady,
-    /// Fresh daemon+TUI: left-arrow -> the roster scan delivered the oldest
-    /// session (its unique search-result row paints).
+    /// Fresh daemon+TUI: left-arrow -> the settled first catalog page.
     AgentsView,
     /// The same daemon's second populate (its in-process scan cache warm):
-    /// a second TUI's left-arrow -> the completed roster.
+    /// a second TUI's left-arrow -> the settled first catalog page.
     AgentsViewWarm,
     /// Fresh daemon: `--resume <huge session>` -> the huge marker paints.
     OpenSession,
