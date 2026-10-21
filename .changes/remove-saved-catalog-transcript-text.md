@@ -1,1 +1,0 @@
-- Saved-session catalog rows no longer include `allMessagesText`; full session transcripts remain unchanged. Current Rust and Desktop clients do not use this field, but older TypeScript clients and older typed consumers that require it are incompatible with the new daemon.

@@ -1,1 +1,0 @@
-- Client-owned sessions (`--no-session` ACP and TUI sessions) now stop 30 seconds after their client disconnects without closing them, or 30 seconds after a daemon restart if the client does not reconnect, instead of running on hidden until the daemon stops.

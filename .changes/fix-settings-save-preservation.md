@@ -1,1 +1,0 @@
-- Settings changes preserve unrelated and concurrently updated fields, and no longer overwrite a settings file that failed to parse. Adding the first MCP server also recovers from the null server map written by older settings saves.

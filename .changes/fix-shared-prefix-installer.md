@@ -1,1 +1,0 @@
-- Upgrading from the npm package no longer deletes the native `prime-agent` command when npm and the installer share a bin directory, even if the npm uninstall fails or is interrupted. The installer now fails when the installed command cannot answer `--version`, instead of reporting success with a broken command.
