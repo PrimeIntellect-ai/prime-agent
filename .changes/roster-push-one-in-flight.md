@@ -1,1 +1,0 @@
-- With many agents running, session workers send at most one roster update at a time and no longer look up model details while holding the session lock, which cuts background CPU during subagent fan-outs and keeps state queries responsive.

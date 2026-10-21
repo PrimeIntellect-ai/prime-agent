@@ -1,1 +1,0 @@
-- Replacement session workers stay supervised after re-registration, and failed worker relaunches after an abandoned update resume crash recovery instead of leaving the session unsupervised.
