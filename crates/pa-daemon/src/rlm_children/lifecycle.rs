@@ -502,6 +502,22 @@ impl SupervisorChildSessionsInner {
             self.refresh_record(record).await;
             let settled = record.lock().await.settled_status.is_some();
             if settled {
+                // A delete in flight (`retiring`) owns this run's terminal
+                // edge: the watcher must not run the settle tail into the
+                // delete's kill window. The tail would record nothing
+                // (`record_child_return` holds the mark), deliver the
+                // terminal notice and exit, so a failed kill would strand
+                // a settled row with no watcher and no ledger line, and a
+                // confirmed kill would race its cancel line with the
+                // notice, the goal hook and the display flip. Park
+                // instead: a failed kill clears the mark and the loop
+                // settles the run normally, and a confirmed kill closes
+                // the record (`closed_by_parent` ends the watch at the
+                // loop top).
+                if record.lock().await.retiring {
+                    tokio::time::sleep(Duration::from_millis(WATCH_POLL_INTERVAL_MS)).await;
+                    continue;
+                }
                 // Stability re-check: a prompt admitted to an idle worker
                 // can read idle once between the admission and the turn
                 // pop (the queue snapshot and the busy flag change under

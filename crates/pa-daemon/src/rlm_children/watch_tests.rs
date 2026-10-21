@@ -21,6 +21,10 @@ enum FakeKill {
     UnknownSession,
     /// The kill fails for a real reason (a stuck worker).
     Failure,
+    /// The kill fails for a real reason, but only after `ms` (the delete
+    /// race window with a refused kill: the watcher wakes and settles while
+    /// the kill is still pending).
+    FailureAfterMs(u64),
 }
 
 /// How the fake answers the child link: healthy, a failing `prompt`,
@@ -273,12 +277,18 @@ async fn spawn_fake_supervisor(
                                     "Unknown active session: child-live",
                                     None,
                                 ),
-                                FakeKill::Failure => response_failure(
-                                    Some(&id),
-                                    command_type,
-                                    "kill refused by the fake supervisor",
-                                    None,
-                                ),
+                                FakeKill::Failure | FakeKill::FailureAfterMs(_) => {
+                                    if let FakeKill::FailureAfterMs(ms) = *kill_behavior {
+                                        tokio::time::sleep(std::time::Duration::from_millis(ms))
+                                            .await;
+                                    }
+                                    response_failure(
+                                        Some(&id),
+                                        command_type,
+                                        "kill refused by the fake supervisor",
+                                        None,
+                                    )
+                                }
                             }
                         }
                         "follow_up" => {
@@ -1407,16 +1417,19 @@ async fn a_deleted_live_child_never_records_a_clean_return() {
     let kill = kill_rx.recv().await.expect("the delete reaches the kill");
     assert_eq!(kill["type"], "kill");
     child_subagents.running.store(false, Ordering::SeqCst);
-    // The watcher's wait slice answers, its settle tail runs (the delete
-    // fires the settle hook too, so the second fire bounds that tail).
-    let mut hook_fires = 0;
-    while hook_fires < 2 {
-        tokio::time::timeout(Duration::from_secs(15), hook_rx.recv())
-            .await
-            .expect("the watcher runs its settle tail")
-            .expect("hook channel open");
-        hook_fires += 1;
-    }
+    // The watcher parks while the delete owns the terminal edge (the kill
+    // window holds the `retiring` mark), so the hook fires exactly once:
+    // the delete's own `finish_retirement`. A watcher that ran its settle
+    // tail into the window would fire here too and deliver the terminal
+    // notice before the delete's cancel overwrites the verdict.
+    tokio::time::timeout(Duration::from_secs(15), hook_rx.recv())
+        .await
+        .expect("the delete fires the settle hook")
+        .expect("hook channel open");
+    assert!(
+        hook_rx.try_recv().is_err(),
+        "the watcher must not fire the settle hook inside the delete's kill window"
+    );
     delete
         .await
         .expect("the delete task joins")
@@ -1553,6 +1566,99 @@ async fn a_failed_delete_leaves_the_child_watched_and_its_later_return_able_to_l
         returned_children(&ledger_path),
         vec!["child-file".to_string()],
         "the failed delete must not drop the child's terminal edge"
+    );
+}
+
+/// A run that settles inside a failed delete's kill window must not lose
+/// its return edge (PR #3680 review finding): the watcher parks while the
+/// kill is pending, so the refused kill leaves it alive to settle the run
+/// normally once the mark clears. A watcher that ran its settle tail into
+/// the window would exit before the failure lands, stranding a settled row
+/// with no watcher and no ledger line.
+#[tokio::test]
+async fn a_child_settling_inside_a_failed_deletes_kill_window_still_lands_its_return() {
+    let (follow_up_tx, _follow_up_rx) = mpsc::unbounded_channel();
+    let child_subagents = Arc::new(FakeChildSubagents::default());
+    // A live grandchild holds the watcher's wait slice open until the test
+    // releases it inside the delete's in-flight kill window.
+    child_subagents.running.store(true, Ordering::SeqCst);
+    let (sessions, mut kill_rx) = sessions_with_fake_child_subagents(
+        follow_up_tx,
+        100,
+        FakeKill::FailureAfterMs(1_500),
+        FakeChild::Healthy,
+        Arc::clone(&child_subagents),
+    )
+    .await;
+    let (recorder, ledger_path, _dir) = seeded_parent_recorder();
+    sessions.set_semantic_edges(Some(recorder));
+    let handle = spawn_child(&sessions).await;
+    // The child committed one request: the return recording reads it from
+    // the child's own ledger.
+    std::fs::create_dir_all(&handle.session_dir).expect("child session dir");
+    let mut child_ledger = String::new();
+    child_ledger.push_str("{\"type\":\"session_registered\",\"session_id\":\"child-file\"}");
+    child_ledger.push('\n');
+    child_ledger.push_str("{\"type\":\"request_finished\",\"request_id\":\"child-request-1\"}");
+    child_ledger.push('\n');
+    std::fs::write(
+        Path::new(&handle.session_dir).join("semantic-edges.jsonl"),
+        child_ledger,
+    )
+    .expect("write the child ledger");
+    sessions.notify_turn_done();
+    // Wait until the watcher is provably parked inside its held quiescence
+    // wait (the fake counts them), never on one still starting.
+    let parked = Instant::now() + Duration::from_secs(10);
+    while child_subagents.quiescent_waits.load(Ordering::SeqCst) == 0 {
+        assert!(
+            Instant::now() < parked,
+            "the watcher never parked in its wait slice"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    // The delete sets `retiring` and sends the kill; the fake holds its
+    // refusal, so releasing the watcher now puts its refresh inside the
+    // delete's kill window: the run settles while the kill is pending.
+    let delete_sessions = sessions.clone();
+    let child_id = handle.rlm_child_id.clone();
+    let delete = tokio::spawn(async move { delete_sessions.delete_subagent(child_id).await });
+    let kill = kill_rx.recv().await.expect("the delete reaches the kill");
+    assert_eq!(kill["type"], "kill");
+    child_subagents.running.store(false, Ordering::SeqCst);
+
+    let error = delete
+        .await
+        .expect("the delete task joins")
+        .expect_err("the refused kill must fail the delete");
+    assert!(
+        format!("{error:#}").contains("kill refused"),
+        "the delete error must surface the kill failure: {error:#}"
+    );
+    assert!(
+        cancelled_lines(&ledger_path).is_empty(),
+        "a failed delete records no cancel edge: {:?}",
+        cancelled_lines(&ledger_path)
+    );
+
+    // The watcher survived the window (it parked instead of running its
+    // tail into it), so the run's natural settle still lands its return
+    // edge. A watcher that exited inside the window would leave this line
+    // forever absent.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while returned_children(&ledger_path).is_empty() {
+        assert!(
+            Instant::now() < deadline,
+            "a run settling inside a failed delete's kill window never recorded its return: {:?}",
+            returned_children(&ledger_path)
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert_eq!(
+        returned_children(&ledger_path),
+        vec!["child-file".to_string()],
+        "the parked watcher settles the run once the delete fails"
     );
 }
 
