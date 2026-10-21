@@ -869,8 +869,8 @@ mod tests {
         };
         assert!(text.contains("## Outstanding Work"));
         assert!(text.contains("rlm.list_subagents()"));
-        assert!(text.contains("the bash journal"));
-        assert!(text.contains("heartbeat list"));
+        assert!(text.contains("the [bash-done] notification"));
+        assert!(text.contains("rlm_heartbeat.list()"));
 
         let update = crate::session_engine::compaction_exec::build_summarization_request(
             &messages,
