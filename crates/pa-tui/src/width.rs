@@ -363,7 +363,7 @@ pub fn is_punctuation_char(c: char) -> bool {
 pub fn normalize_terminal_output(s: &str) -> String {
     if !s
         .chars()
-        .any(|c| matches!(c, '\u{0e33}' | '\u{0eb3}') || c.is_control())
+        .any(|c| matches!(c, '\u{0e33}' | '\u{0eb3}' | '\u{ad}') || c.is_control())
     {
         return s.to_string();
     }
@@ -378,7 +378,8 @@ pub fn normalize_terminal_output(s: &str) -> String {
             '\u{0e33}' => out.push_str("\u{0e4d}\u{0e32}"),
             '\u{0eb3}' => out.push_str("\u{0ecd}\u{0eb2}"),
             '\t' => out.push_str("   "),
-            c if c.is_control() => {}
+            // The soft hyphen measures zero columns, but terminals give it zero or one.
+            c if c.is_control() || c == '\u{ad}' => {}
             c => out.push(c),
         }
         rest = &rest[c.len_utf8()..];
