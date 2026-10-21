@@ -1,1 +1,0 @@
-- A malformed escape sequence containing a non-ASCII character (for example, Option-key input mixed with Cyrillic or accented text) is now passed through as typed text instead of crashing the terminal UI.

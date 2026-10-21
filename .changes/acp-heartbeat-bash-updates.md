@@ -1,1 +1,0 @@
-- ACP mode now reports heartbeat schedule changes and shell commands that another client runs in the session (as tool calls), and leaves out empty tool output, like the TypeScript version.

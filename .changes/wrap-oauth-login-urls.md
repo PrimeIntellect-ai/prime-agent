@@ -1,1 +1,0 @@
-- Wrap complete sign-in URLs and login actions in narrow terminals, giving the onboarding login panel more space when needed.
