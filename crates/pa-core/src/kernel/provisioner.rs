@@ -1403,11 +1403,6 @@ mod tests {
         std::fs::create_dir_all(&agent_dir).unwrap();
         std::fs::create_dir_all(cwd.join(".prime/agent")).unwrap();
         std::fs::write(
-            agent_dir.join("settings.json"),
-            serde_json::json!({ "bundledSkills": { "websearch": true } }).to_string(),
-        )
-        .unwrap();
-        std::fs::write(
             agent_dir.join("auth.json"),
             r#"{ "serper": { "type": "api_key", "key": "!printf key-from-cmd" } }"#,
         )

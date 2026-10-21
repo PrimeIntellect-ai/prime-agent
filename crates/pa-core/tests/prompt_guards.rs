@@ -362,17 +362,18 @@ fn auth_gated_bundled_skills() -> BTreeSet<String> {
         .collect()
 }
 
-/// Bundled skills gated by settings instead of auth: the websearch skill is
-/// off by default (`bundledSkills.websearch` in settings.json opts in), so it
-/// must never be documented as static core-tool surface — the dynamic skills
-/// inventory renders it only on installs that enable it.
+/// Conditionally-available bundled skills: the websearch skill rides with its
+/// credential (an unset `bundledSkills.websearch` resolves with the stored or
+/// ambient Serper key), so keyless installs exclude it — it must never be
+/// documented as static core-tool surface; the dynamic skills inventory
+/// renders it only on installs where it resolves enabled.
 fn settings_gated_bundled_skills() -> BTreeSet<String> {
     ["websearch".to_string()].into_iter().collect()
 }
 
 /// (import name, public functions) for every bundled Python skill that is
-/// always available (auth-gated integrations and settings-gated skills
-/// excluded).
+/// always available (auth-gated integrations and the conditionally-available
+/// websearch skill excluded).
 fn bundled_python_skills() -> Vec<(String, Vec<String>)> {
     let gated = auth_gated_bundled_skills();
     let settings_gated = settings_gated_bundled_skills();
@@ -624,35 +625,4 @@ fn generic_mcp_skill_renders_in_the_prompt_inventory() {
     assert!(second
         .assembled
         .contains("await mcp.list_tools(\"notion\")"));
-}
-
-/// The websearch skill is settings-gated (`bundledSkills.websearch`, default off), so the static
-/// core layer must not mention it: with default settings the skill is excluded, no tool bullet and
-/// no inventory row exists, and the only documentation surface is the dynamic `<available_skills>`
-/// inventory on installs that enable it.
-#[test]
-fn core_layer_never_documents_the_settings_gated_websearch_skill() {
-    assert!(
-        !CORE_LAYER.contains("websearch"),
-        "websearch is settings-gated: the core layer must not document it statically"
-    );
-
-    // Enabled path: when the skill resolves, the dynamic inventory renders it.
-    let mut options = BuildSystemPromptOptions {
-        cwd: "/w".to_string(),
-        messages_path: Some("/log.jsonl".to_string()),
-        skills: vec![sorted_bundled_skills()
-            .into_iter()
-            .find(|skill| skill.name == "websearch")
-            .expect("the websearch skill is packaged")],
-        selected_tools: Some(vec!["python_repl"]),
-        ..Default::default()
-    };
-    let enabled = system_prompt_breakdown(&options);
-    assert!(enabled.assembled.contains("<name>websearch</name>"));
-
-    // Default path: the skill absent from the resolved list, the prompt stays silent.
-    options.skills = Vec::new();
-    let disabled = system_prompt_breakdown(&options);
-    assert!(!disabled.assembled.contains("websearch"));
 }

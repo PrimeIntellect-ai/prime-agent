@@ -181,21 +181,6 @@ impl SettingsManager {
         self.save_global_scope(&["enableBuiltinSkills"])
     }
 
-    /// `bundledSkills.websearch`: the bundled websearch skill's opt-in gate
-    /// (unset reads as disabled). The `/mcp` Serper key flow flips it on, so
-    /// pasting the key the skill needs is enough to make the skill run.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the global settings scope cannot be saved.
-    pub fn set_bundled_websearch_enabled(&mut self, enabled: bool) -> Result<()> {
-        self.global_mut()
-            .bundled_skills
-            .get_or_insert_with(Default::default)
-            .websearch = Some(enabled);
-        self.save_global_scope(&["bundledSkills.websearch"])
-    }
-
     /// `showHardwareCursor` (TS default false; the `PI_HARDWARE_CURSOR`
     /// override is not part of this port).
     #[must_use]
