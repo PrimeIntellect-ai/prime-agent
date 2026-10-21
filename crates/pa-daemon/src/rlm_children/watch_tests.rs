@@ -1,7 +1,7 @@
 use super::*;
 use crate::protocol::{response_failure, response_success};
 use pa_core::session_engine::semantic_edges::{
-    SemanticEdgeIdentity, SemanticEdgeLedgerEvent, SemanticEdgeRecorder,
+    ChildCancelledReason, SemanticEdgeIdentity, SemanticEdgeLedgerEvent, SemanticEdgeRecorder,
 };
 use pa_types::platform::transport::bind_transport;
 use pa_types::session::AgentMessage;
@@ -1337,7 +1337,8 @@ async fn a_failed_close_leaves_the_child_running_and_can_still_record_its_cancel
         vec![(
             "parent-lead".to_string(),
             "child-file".to_string(),
-            "parent-request-1".to_string()
+            "parent-request-1".to_string(),
+            ChildCancelledReason::UserCancel
         )],
         "the retry records the cancel edge the failed close could not"
     );
@@ -1426,7 +1427,8 @@ async fn a_deleted_live_child_never_records_a_clean_return() {
         vec![(
             "parent-lead".to_string(),
             "child-file".to_string(),
-            "parent-request-1".to_string()
+            "parent-request-1".to_string(),
+            ChildCancelledReason::ParentDelete
         )],
         "the delete's kill records the cancel line"
     );
@@ -1482,7 +1484,8 @@ async fn a_failed_delete_leaves_the_child_running_and_can_still_record_its_cance
         vec![(
             "parent-lead".to_string(),
             "child-file".to_string(),
-            "parent-request-1".to_string()
+            "parent-request-1".to_string(),
+            ChildCancelledReason::UserCancel
         )],
         "the retry records the cancel edge the failed delete could not"
     );
@@ -1610,8 +1613,8 @@ fn seeded_parent_recorder() -> (
 }
 
 /// The `child_cancelled` lines of one parent ledger: (parent, child,
-/// cancelling request).
-fn cancelled_lines(path: &Path) -> Vec<(String, String, String)> {
+/// cancelling request, which parent-side action cancelled the run).
+fn cancelled_lines(path: &Path) -> Vec<(String, String, String, ChildCancelledReason)> {
     std::fs::read_to_string(path)
         .unwrap_or_default()
         .lines()
@@ -1621,7 +1624,8 @@ fn cancelled_lines(path: &Path) -> Vec<(String, String, String)> {
                 session_id,
                 child_session_id,
                 request_id,
-            } => Some((session_id, child_session_id, request_id)),
+                reason,
+            } => Some((session_id, child_session_id, request_id, reason)),
             _ => None,
         })
         .collect()
@@ -1647,7 +1651,8 @@ async fn a_cancelled_run_records_the_cancel_edge_on_the_parent_ledger() {
         vec![(
             "parent-lead".to_string(),
             "child-file".to_string(),
-            "parent-request-1".to_string()
+            "parent-request-1".to_string(),
+            ChildCancelledReason::UserCancel
         )],
         "the cancel lands as a parent -> child edge anchored to the cancelling request"
     );
@@ -1677,7 +1682,8 @@ async fn a_deleted_running_child_records_the_cancel_edge_on_the_parent_ledger() 
         vec![(
             "parent-lead".to_string(),
             "child-file".to_string(),
-            "parent-request-1".to_string()
+            "parent-request-1".to_string(),
+            ChildCancelledReason::ParentDelete
         )],
         "the running child's delete lands as a parent -> child cancel edge"
     );
@@ -1806,10 +1812,57 @@ async fn a_closed_running_child_records_the_cancel_edge_on_the_parent_ledger() {
         vec![(
             "parent-lead".to_string(),
             "child-file".to_string(),
-            "parent-request-1".to_string()
+            "parent-request-1".to_string(),
+            ChildCancelledReason::CloseKilled
         )],
         "the close's kill lands as a parent -> child cancel edge"
     );
+}
+
+/// A daemon lifecycle close (Shutdown: the daemon stops; Replaced: an
+/// upgrade) kills running children but records NO `child_cancelled` line
+/// (PR #3680 review finding): the close walk is not a parent action, so a
+/// permanent cancel line anchored to the parent's stale last request would
+/// mislabel every restart or upgrade as a parent cancel — and the
+/// at-most-once dedup would make it permanent. Only the session-kill
+/// close (`Killed`) is the parent's cancel.
+#[tokio::test]
+async fn a_lifecycle_close_records_no_cancel_line() {
+    for reason in [ChildCloseReason::Shutdown, ChildCloseReason::Replaced] {
+        let (follow_up_tx, _follow_up_rx) = mpsc::unbounded_channel();
+        let (sessions, _kill_rx) = sessions_with_fake_supervisor(
+            follow_up_tx,
+            10_000,
+            FakeKill::Success,
+            FakeChild::Healthy,
+        )
+        .await;
+        let (recorder, ledger_path, _dir) = seeded_parent_recorder();
+        sessions.set_semantic_edges(Some(recorder));
+        let _handle = spawn_child(&sessions).await;
+
+        sessions
+            .close_children(reason)
+            .await
+            .expect("close the running child");
+
+        assert!(
+            cancelled_lines(&ledger_path).is_empty(),
+            "a lifecycle close records no cancel line: {:?}",
+            cancelled_lines(&ledger_path)
+        );
+        assert!(
+            returned_children(&ledger_path).is_empty(),
+            "a lifecycle close records no return line either: {:?}",
+            returned_children(&ledger_path)
+        );
+        // The close still tore the live child down.
+        let entries = sessions.list_subagents().await.expect("child roster");
+        assert!(
+            entries.is_empty() || entries.iter().all(|entry| entry.status == "cancelled"),
+            "the lifecycle close tore the running child down: {entries:?}"
+        );
+    }
 }
 
 /// The `child_returned` lines of one parent ledger: the child session ids.
@@ -1858,8 +1911,8 @@ async fn a_refused_abort_leaves_the_child_running_and_a_later_cancel_records_the
     let handle = spawn_child(&sessions).await;
 
     assert!(
-        sessions.cancel_child_run(&handle.rlm_child_id).await,
-        "the cancel still claims the registry row"
+        !sessions.cancel_child_run(&handle.rlm_child_id).await,
+        "a refused abort answers the confirmed effect: the cancel did not happen"
     );
 
     // The refused abort never reached the child: the row stays live, so a
@@ -1909,7 +1962,8 @@ async fn a_refused_abort_leaves_the_child_running_and_a_later_cancel_records_the
         vec![(
             "parent-lead".to_string(),
             "child-file".to_string(),
-            "parent-request-1".to_string()
+            "parent-request-1".to_string(),
+            ChildCancelledReason::UserCancel
         )],
         "the confirmed retry records the cancel edge"
     );
@@ -1925,6 +1979,112 @@ async fn a_refused_abort_leaves_the_child_running_and_a_later_cancel_records_the
 /// refresh used to re-mark the killed run `done` — appending a
 /// `child_returned` line after the cancel line. The close now settles
 /// the row `cancelled`, so the parked watcher's tail records nothing.
+/// A registry-set `cancelled` survives the watcher's grace re-check (PR
+/// #3680 review finding): the watcher parks mid-slice while a user cancel
+/// settles the row with its abort in flight; a busy child at the grace
+/// re-check used to wipe the registry's settle, refresh the still-live run
+/// back to `done`, and record a clean `child_returned` beside the cancel
+/// line. The re-check now wipes only a watcher-set `done` (the admission
+/// race it exists for), so the registry's cancelled stands: the cut-short
+/// run never records a return, and the roster keeps reporting it
+/// cancelled.
+#[tokio::test]
+async fn a_cancelled_rows_settle_survives_the_watcher_grace_recheck() {
+    let (follow_up_tx, _follow_up_rx) = mpsc::unbounded_channel();
+    let child_subagents = Arc::new(FakeChildSubagents::default());
+    // The child reads busy for the whole cancel window: the parked watcher
+    // provably hits its grace re-check with the row already settled
+    // `cancelled` by the registry and the child still busy — the exact
+    // wipe window.
+    child_subagents.live_state.lock().unwrap().replace(json!({
+        "isStreaming": true,
+        "hasRunningSubagents": false,
+        "sessionActions": { "queuedCount": 0 },
+    }));
+    let (sessions, _kill_rx) = sessions_with_fake_child_subagents(
+        follow_up_tx,
+        100,
+        FakeKill::Success,
+        FakeChild::Healthy,
+        Arc::clone(&child_subagents),
+    )
+    .await;
+    let (recorder, ledger_path, _dir) = seeded_parent_recorder();
+    sessions.set_semantic_edges(Some(recorder));
+    let (hook_tx, mut hook_rx) = mpsc::unbounded_channel();
+    sessions.set_settle_hook(Arc::new(move || {
+        let _ = hook_tx.send(());
+    }));
+    let handle = spawn_child(&sessions).await;
+    // The child committed one request before the cancel cut it short (the
+    // wrongly-recorded return would read this line).
+    std::fs::create_dir_all(&handle.session_dir).expect("child session dir");
+    let mut child_ledger = String::new();
+    child_ledger.push_str("{\"type\":\"session_registered\",\"session_id\":\"child-file\"}");
+    child_ledger.push('\n');
+    child_ledger.push_str("{\"type\":\"request_finished\",\"request_id\":\"child-request-1\"}");
+    child_ledger.push('\n');
+    std::fs::write(
+        Path::new(&handle.session_dir).join("semantic-edges.jsonl"),
+        child_ledger,
+    )
+    .expect("write the child ledger");
+    sessions.notify_turn_done();
+
+    assert!(
+        sessions.cancel_child_run(&handle.rlm_child_id).await,
+        "the confirmed cancel claims the running child"
+    );
+
+    // Hold the busy state through at least two post-cancel watcher slices
+    // (each wait_for_idle is one slice): every post-cancel slice observes
+    // the registry-set `cancelled` while the child still reads busy — the
+    // exact grace re-check window — so the buggy unconditional wipe fires
+    // here deterministically. Only then let the run read idle.
+    let slices_before_cancel = child_subagents.quiescent_waits.load(Ordering::SeqCst);
+    let cancelled_and_busy = Instant::now() + Duration::from_secs(15);
+    while child_subagents.quiescent_waits.load(Ordering::SeqCst) < slices_before_cancel + 2 {
+        assert!(
+            Instant::now() < cancelled_and_busy,
+            "the watcher never re-checked the cancelled row while busy"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    child_subagents.live_state.lock().unwrap().take();
+
+    // The cancel path fires the hook, the watcher's settle tail fires it
+    // again once the child reads idle; the second fire bounds the tail.
+    let mut hook_fires = 0;
+    while hook_fires < 2 {
+        tokio::time::timeout(Duration::from_secs(15), hook_rx.recv())
+            .await
+            .expect("the cancel and the watcher's tail each fire the hook")
+            .expect("hook channel open");
+        hook_fires += 1;
+    }
+
+    assert_eq!(
+        cancelled_lines(&ledger_path),
+        vec![(
+            "parent-lead".to_string(),
+            "child-file".to_string(),
+            "parent-request-1".to_string(),
+            ChildCancelledReason::UserCancel
+        )],
+        "the confirmed cancel records exactly one cancel line"
+    );
+    assert!(
+        returned_children(&ledger_path).is_empty(),
+        "a cancel-cut run never records a child_returned line: {:?}",
+        returned_children(&ledger_path)
+    );
+    let entries = sessions.list_subagents().await.expect("child roster");
+    assert_eq!(
+        entries[0].status, "cancelled",
+        "the cancelled row stays cancelled after the watcher's pass: {entries:?}"
+    );
+}
+
 #[tokio::test]
 async fn a_close_killed_child_never_records_a_clean_return() {
     let (follow_up_tx, _follow_up_rx) = mpsc::unbounded_channel();
@@ -1990,7 +2150,8 @@ async fn a_close_killed_child_never_records_a_clean_return() {
         vec![(
             "parent-lead".to_string(),
             "child-file".to_string(),
-            "parent-request-1".to_string()
+            "parent-request-1".to_string(),
+            ChildCancelledReason::CloseKilled
         )],
         "the close's kill records the cancel line"
     );

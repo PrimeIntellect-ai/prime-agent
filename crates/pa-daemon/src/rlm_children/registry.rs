@@ -9,6 +9,8 @@ use super::{
     DeletedChild, Map, Mutex, Result, SupervisorChildSessionsInner, KILL_TIMEOUT_MS,
 };
 
+use pa_core::session_engine::semantic_edges::ChildCancelledReason;
+
 /// The already-gone marker inside a close failure: a close walking a
 /// child that died earlier must not fail (a missing child session is a completed no-op).
 fn unknown_session(error: &anyhow::Error) -> Option<()> {
@@ -51,8 +53,11 @@ impl SupervisorChildSessionsInner {
     /// worker's in-flight turn (best-effort; the registry is the
     /// user-visible state). A refused abort is undone wholesale: the child
     /// never got the command, so the row stays live and un-settled, the
-    /// terminal notice stays owed, and a later confirmed cancel can still
-    /// record the edge.
+    /// terminal notice claim restores its pre-cancel value, a later
+    /// confirmed cancel can still record the edge — and the answer is
+    /// `false` (the `cancel_rlm_child` wire contract reports the
+    /// confirmed effect, so a user whose cancel never reached the child
+    /// can retry).
     pub(super) async fn cancel_child_run(&self, child_id: &str) -> bool {
         let children = self.children.lock().await.clone();
         for record in &children {
@@ -70,15 +75,17 @@ impl SupervisorChildSessionsInner {
             if !matched || !running {
                 continue;
             }
-            {
+            let notice_was_delivered = {
                 let mut record = record.lock().await;
                 // The no-reply terminal notice is suppressed for a
                 // cancelled run; a settle watcher that already claimed it
                 // keeps its claim.
+                let notice_was_delivered = record.notice_delivered;
                 record.notice_delivered = true;
                 record.settled_status = Some("cancelled");
                 record.error = Some("Cancelled by user".to_string());
-            }
+                notice_was_delivered
+            };
             self.emit_child_update(record).await;
             // Capture before the abort: the completed turns' usage (the
             // aborted turn's partial row folds nowhere) must not die with
@@ -106,7 +113,8 @@ impl SupervisorChildSessionsInner {
                     .err()
                     .is_some_and(|error| unknown_session(error).is_some());
             if cancelled_confirmed {
-                self.record_child_cancelled(record).await;
+                self.record_child_cancelled(record, ChildCancelledReason::UserCancel)
+                    .await;
             } else {
                 // The abort was refused for a real reason: the child never
                 // got the command, so undo the whole pre-abort claim — the
@@ -114,17 +122,23 @@ impl SupervisorChildSessionsInner {
                 // settle hook fires (a still-running child must not open
                 // the quiescence barrier or release an owed continuation).
                 // A later confirmed cancel (a retry, a close, a delete) can
-                // then still record the parent -> child edge.
+                // then still record the parent -> child edge. The notice
+                // claim restores its PRE-cancel value: a watcher that had
+                // already claimed the terminal notice keeps the claim, and
+                // an unclaimed one stays owed exactly once.
                 let mut row = record.lock().await;
                 row.settled_status = None;
                 row.error = None;
-                row.notice_delivered = false;
+                row.notice_delivered = notice_was_delivered;
                 drop(row);
                 // The pre-abort update published `cancelled`; publish the
                 // restored live row so subscribers do not keep showing a
                 // child that is still running as cancelled.
                 self.emit_child_update(record).await;
-                return true;
+                // The wire contract answers the confirmed effect: the
+                // child never got the command, so the cancel did not
+                // happen — the user sees `cancelled: false` and can retry.
+                return false;
             }
             // The settled/cancelled child releases an owed goal continuation.
             self.fire_settle_hook(record).await;
@@ -271,11 +285,18 @@ impl SupervisorChildSessionsInner {
                         continue;
                     }
                 }
-                // A close that kills a live run is the parent's cancel
-                // (nano-rlm #202's killed-child gap): a killed child
-                // leaves a cancel line, not a clean disappearance.
-                if was_running {
-                    self.record_child_cancelled(record).await;
+                // A session-kill close of a live run is the parent's
+                // cancel (nano-rlm #202's killed-child gap): a killed
+                // child leaves a cancel line, not a clean disappearance.
+                // Only the kill close records it — a daemon lifecycle
+                // close (Shutdown: the resume entry survives; Replaced:
+                // cron jobs survive) is NOT a parent action, so its line
+                // would mislabel every restart/upgrade with running
+                // children as a parent cancel anchored to a stale
+                // request (and the dedup would make it permanent).
+                if was_running && matches!(reason, ChildCloseReason::Killed) {
+                    self.record_child_cancelled(record, ChildCancelledReason::CloseKilled)
+                        .await;
                 }
                 self.retain_retired_usage(record, super::RetirementIntent::Close);
                 self.emit_child_usage(record).await;
@@ -335,7 +356,8 @@ impl SupervisorChildSessionsInner {
         // registry row is gone, so a deleted child never vanishes from the
         // semantic graph.
         if cancelled_by_delete {
-            self.record_child_cancelled(record).await;
+            self.record_child_cancelled(record, ChildCancelledReason::ParentDelete)
+                .await;
         }
         if deleted {
             let sink = self

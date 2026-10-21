@@ -50,6 +50,23 @@ pub enum CompactionStatus {
     Cancelled,
 }
 
+/// Which parent-side action cancelled a child (the `ChildCancelled`
+/// line's actor): a user-facing tool delete, a user cancel, or the
+/// session-kill close walk. Daemon lifecycle closes (Shutdown/Replaced)
+/// are NOT parent actions and never record the line.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ChildCancelledReason {
+    /// `rlm.delete_subagent` tore a live child down.
+    #[serde(rename = "parent_delete")]
+    ParentDelete,
+    /// The user cancelled the child's run (`cancel_rlm_child`).
+    #[serde(rename = "user_cancel")]
+    UserCancel,
+    /// The close walk killed the live child (a parent session kill).
+    #[serde(rename = "close:killed")]
+    CloseKilled,
+}
+
 /// One ledger line. Field order matches the TS object literals so the
 /// serialized bytes are identical (`JSON.stringify` insertion order).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -91,11 +108,17 @@ pub enum SemanticEdgeLedgerEvent {
     /// `subagent_cancel`): an action the PARENT took, so like a spawn
     /// it is parent -> child, anchored to the cancelling request (the
     /// parent's last turn); the child's cancelled state is derived from
-    /// this line, not carried on it.
+    /// this line, not carried on it. `reason` names which parent-side
+    /// action produced the line — one line covers three actors (`rlm.
+    /// delete_subagent`, the TUI user cancel, and the session-kill close
+    /// walk), and consumers filter on it; a daemon lifecycle close
+    /// (Shutdown/Replaced) records no line at all (it is not a parent
+    /// action, so an anchored cancel would be a training-data mislabel).
     ChildCancelled {
         session_id: String,
         child_session_id: String,
         request_id: String,
+        reason: ChildCancelledReason,
     },
     /// An event a newer writer appended (TS `JSON.parse` accepts any line
     /// and the replay ignores unknown types): forward-compatible resume.
@@ -354,12 +377,15 @@ impl SemanticEdgeRecorder {
     /// The parent cancelled a child mid-run (nano-rlm #202's
     /// `recordSubagentCancel`, the cancel twin of a spawn: an action the
     /// PARENT took): a parent -> child cancel line anchored to the
-    /// parent's last request (the cancelling turn), recorded at most
-    /// once per child across resumes. `None` anchors to nothing — a
-    /// recorder with no live request (no turn ever started, or the
-    /// ledger disabled) records nothing: an absent edge beats a wrong
-    /// one.
-    pub fn record_child_cancelled(&self, child_session_id: &str) {
+    /// parent's last request (the cancelling turn) and naming the
+    /// parent-side action in `reason` — a delete, a user cancel, or the
+    /// session-kill close walk; a daemon lifecycle close (Shutdown/
+    /// Replaced) never reaches here (it is not a parent action, so its
+    /// line would mislabel the run). Recorded at most once per child
+    /// across resumes. `None` anchors to nothing — a recorder with no
+    /// live request (no turn ever started, or the ledger disabled)
+    /// records nothing: an absent edge beats a wrong one.
+    pub fn record_child_cancelled(&self, child_session_id: &str, reason: ChildCancelledReason) {
         let mut state = self.state();
         let Some(request_id) = state.last_turn.as_ref().map(|turn| turn.request_id.clone()) else {
             return;
@@ -373,6 +399,7 @@ impl SemanticEdgeRecorder {
                 session_id: self.session_id.clone(),
                 child_session_id: child_session_id.to_string(),
                 request_id,
+                reason,
             },
         );
         if recorded {
@@ -452,6 +479,7 @@ fn replay_event(state: &mut RecorderState, session_id: &str, event: &SemanticEdg
             session_id: event_session_id,
             child_session_id,
             request_id: _,
+            reason: _,
         } if event_session_id == session_id => {
             state.cancelled_children.insert(child_session_id.clone());
         }

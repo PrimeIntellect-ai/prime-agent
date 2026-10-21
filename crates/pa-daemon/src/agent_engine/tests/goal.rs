@@ -778,9 +778,9 @@ fn running_children_owe_the_continuation_and_settle_delivers_it() {
         .block_on(async { handles.driver.lock().await.owes_continuation() }));
     // Settle the child through the settle funnel: a user cancel only settles
     // a child whose abort is confirmed, and this synthetic child has no live
-    // supervisor, so the cancel could never confirm (PR #3680 review). The
-    // continuation is owed until the child SETTLES, which is what this
-    // drives.
+    // supervisor, so the cancel could never confirm (PR #3680 review; the
+    // seam change that fires the funnel lives in #3715). The continuation is
+    // owed until the child SETTLES, which is what this drives.
     engine
         .runtime
         .block_on(async { children.settle_test_child("child-session").await });

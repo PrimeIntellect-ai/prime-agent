@@ -169,10 +169,11 @@ fn a_child_cancel_is_ledgered_once_anchored_to_the_cancelling_request() {
         session_id: "session-h".to_string(),
         child_session_id: "child-session".to_string(),
         request_id: request_id.clone(),
+        reason: super::ChildCancelledReason::UserCancel,
     };
     // The same child cancelled twice records one line.
-    recorder.record_child_cancelled("child-session");
-    recorder.record_child_cancelled("child-session");
+    recorder.record_child_cancelled("child-session", super::ChildCancelledReason::UserCancel);
+    recorder.record_child_cancelled("child-session", super::ChildCancelledReason::UserCancel);
     assert_eq!(
         read_ledger(&identity),
         vec![
@@ -185,9 +186,9 @@ fn a_child_cancel_is_ledgered_once_anchored_to_the_cancelling_request() {
     // child records nothing.
     drop(recorder);
     let reopened = SemanticEdgeRecorder::open(identity.clone());
-    reopened.record_child_cancelled("child-session");
+    reopened.record_child_cancelled("child-session", super::ChildCancelledReason::UserCancel);
     // A different child still records, anchored to the replayed last turn.
-    reopened.record_child_cancelled("child-other");
+    reopened.record_child_cancelled("child-other", super::ChildCancelledReason::ParentDelete);
     assert_eq!(
         read_ledger(&identity),
         vec![
@@ -198,6 +199,7 @@ fn a_child_cancel_is_ledgered_once_anchored_to_the_cancelling_request() {
                 session_id: "session-h".to_string(),
                 child_session_id: "child-other".to_string(),
                 request_id,
+                reason: super::ChildCancelledReason::ParentDelete,
             },
         ]
     );
@@ -211,7 +213,7 @@ fn a_child_cancel_without_a_live_request_records_nothing() {
     let (identity, _dir) = identity("session-i");
     let recorder = SemanticEdgeRecorder::open(identity.clone());
     // No turn ever started: nothing anchors the cancel.
-    recorder.record_child_cancelled("child-session");
+    recorder.record_child_cancelled("child-session", super::ChildCancelledReason::UserCancel);
     assert_eq!(
         read_ledger(&identity),
         vec![session_registered("session-i")]
@@ -225,11 +227,11 @@ fn a_child_cancel_without_a_live_request_records_nothing() {
     let path = identity.ledger_path.as_ref().unwrap();
     std::fs::remove_file(path).unwrap();
     std::fs::create_dir(path).unwrap();
-    recorder.record_child_cancelled("child-session");
+    recorder.record_child_cancelled("child-session", super::ChildCancelledReason::UserCancel);
     std::fs::remove_dir(path).unwrap();
     // The disabled recorder has no last turn: even a fresh child records
     // no cancel.
-    recorder.record_child_cancelled("child-other");
+    recorder.record_child_cancelled("child-other", super::ChildCancelledReason::UserCancel);
     assert_eq!(read_ledger(&identity), Vec::new());
 }
 
