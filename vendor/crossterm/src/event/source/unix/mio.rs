@@ -89,10 +89,7 @@ impl EventSource for UnixInternalEventSource {
                 return Ok(None);
             }
 
-            // Every readiness event of this poll is handled before returning: mio registers the
-            // sources edge-triggered, so a readiness left unhandled here is never reported again,
-            // and its input waits for the next unrelated edge. A SIGWINCH and a keystroke landing
-            // in the same poll must both arrive.
+            // mio registers edge-triggered: every token of this poll is handled before returning.
             #[cfg(feature = "event-stream")]
             let mut woken = false;
             for token in self.events.iter().map(|x| x.token()) {
@@ -148,8 +145,6 @@ impl EventSource for UnixInternalEventSource {
                 }
             }
 
-            // A wake still interrupts the poll; the input read beside it stays queued for the
-            // next read.
             #[cfg(feature = "event-stream")]
             if woken {
                 return Err(std::io::Error::new(
@@ -254,10 +249,7 @@ mod tests {
     use crate::event::{source::EventSource, Event, InternalEvent, KeyCode};
     use crate::terminal::sys::file_descriptor::FileDesc;
 
-    /// A resize and a keystroke that land in the same poll both arrive (typing while the window
-    /// resizes). The SIGWINCH is raised first, so its readiness comes first in the poll. The
-    /// resize reads the terminal size: run it on a tty, or with `TERM` set for the `tput`
-    /// fallback.
+    /// The resize reads the terminal size: run on a tty, or with `TERM` set for the tput fallback.
     #[test]
     fn a_keystroke_in_the_same_poll_as_a_resize_arrives() {
         let (input, mut keyboard) = UnixStream::pair().unwrap();
