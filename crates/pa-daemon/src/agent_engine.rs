@@ -145,10 +145,10 @@ pub struct AgentSessionEngine {
     /// The stale-row guard's DURABLE terminal row, deferred until after the
     /// context adoption; `Some` between the seed and the flush.
     pub(crate) stale_goal_terminal_pending: std::sync::Mutex<Option<pa_core::goals::GoalState>>,
-    /// The bash-completion queue seams: `bash.completed` admits through the
-    /// steering lane, `bash.consumed` withdraws its row. `None` outside a
-    /// daemon worker.
-    pub(crate) bash_completion_sink: std::sync::Mutex<Option<crate::engine::BashCompletionSink>>,
+    /// The kernel-notice queue seams: `bash.completed` and `factory.progress`
+    /// admit through the steering lane, `bash.consumed` withdraws a completion
+    /// row. `None` outside a daemon worker.
+    pub(crate) kernel_notice_sink: std::sync::Mutex<Option<crate::engine::KernelNoticeSink>>,
     pub(crate) bash_consumed_sink: std::sync::Mutex<Option<crate::engine::BashConsumedSink>>,
     /// The live agent handle: the eager turn-abort funnel's target, mirrored
     /// because a running turn holds the core session's mutex.

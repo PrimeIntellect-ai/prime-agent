@@ -84,10 +84,10 @@ pub struct SessionEngineConfig {
     /// Fires when the kernel's last live background `bash()` handle
     /// settles; `None` installs nothing.
     pub on_background_work_settled: Option<crate::kernel::shared::BackgroundWorkSettledCallback>,
-    /// The daemonless bash-completion wake (TS `resumeIfIdle`): with it
-    /// the engine registers the `bash.completed`/`bash.consumed`
-    /// handlers whose in-process sinks steer the `[bash-done]` row onto
-    /// the session's agent and fire the wake. `None` installs nothing —
+    /// The daemonless kernel-notice wake (TS `resumeIfIdle`): with it
+    /// the engine registers the `bash.completed`/`bash.consumed`/
+    /// `factory.progress` handlers whose in-process sinks steer the notice
+    /// row onto the session's agent and fire the wake. `None` installs nothing —
     /// the daemon keeps its worker-lane sinks via the extra handlers.
     pub bash_notice_wake: Option<super::bash_notices::BashNoticeWake>,
     /// An externally owned MCP manager: the engine adopts it instead of
@@ -452,7 +452,7 @@ pub async fn create_session(mut config: SessionEngineConfig) -> anyhow::Result<S
     // exists (the slot binds below).
     let bash_notice_agent = super::bash_notices::BashNoticeAgentSlot::default();
     if let Some(wake) = config.bash_notice_wake.clone() {
-        super::bash_notices::register_in_process_bash_notice_handlers(
+        super::bash_notices::register_in_process_kernel_notice_handlers(
             &wake,
             &bash_notice_agent,
             &mut handlers,

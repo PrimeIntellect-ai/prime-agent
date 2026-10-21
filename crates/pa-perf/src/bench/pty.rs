@@ -217,8 +217,24 @@ impl PtyChild {
         what: &str,
         deadline: Instant,
     ) -> anyhow::Result<Instant> {
+        self.wait_screen(what, deadline, |screen| screen.contains(needle))
+    }
+
+    /// Wait until `settled` accepts the decoded screen text, bounded by
+    /// `deadline`.
+    ///
+    /// # Errors
+    ///
+    /// Errors when the child exits first or the deadline passes (with the
+    /// decoded screen attached).
+    pub(crate) fn wait_screen(
+        &mut self,
+        what: &str,
+        deadline: Instant,
+        settled: impl Fn(&str) -> bool,
+    ) -> anyhow::Result<Instant> {
         loop {
-            if self.screen_text().contains(needle) {
+            if settled(&self.screen_text()) {
                 return Ok(Instant::now());
             }
             if let Some(status) = self.exited {
@@ -229,7 +245,7 @@ impl PtyChild {
             }
             if Instant::now() >= deadline {
                 anyhow::bail!(
-                    "timeout waiting for {what} (screen needle {needle:?}); screen:\n{}",
+                    "timeout waiting for {what}; screen:\n{}",
                     self.screen_text(),
                 );
             }
