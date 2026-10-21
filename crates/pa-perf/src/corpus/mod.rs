@@ -172,7 +172,8 @@ pub struct ManifestMarkers {
     pub huge: MarkerSession,
     pub switch_a: MarkerSession,
     pub switch_b: MarkerSession,
-    /// The agents view's expected `Inactive (N)` heading count.
+    /// The corpus sessions the agents view lists as inactive (loaded under
+    /// the `Inactive (N)` heading or counted in its not-yet-loaded footer).
     pub roster_inactive: usize,
     /// The session-switch search query (uniquely matches the switch-b row).
     pub switch_query: String,

@@ -9,7 +9,7 @@ use tokio::sync::oneshot;
 pub(super) struct ActivityRead {
     pub(super) active_session_id: String,
     pub(super) shells: Option<usize>,
-    pub(super) factory_runs: Option<usize>,
+    pub(super) factory_runs: Option<crate::factory_view::FactoryRunCounts>,
 }
 
 /// One fetch cycle over the live sessions, off the key loop: each session's kernel answers its
@@ -44,7 +44,7 @@ pub(super) fn spawn_session_activity_fetch(
                 };
                 let factory_runs = async {
                     if !factory_supported {
-                        return Some(0);
+                        return Some(crate::factory_view::FactoryRunCounts::default());
                     }
                     let reply = client
                         .request_ok(DaemonCommand::FactoryActivity {
@@ -58,8 +58,11 @@ pub(super) fn spawn_session_activity_fetch(
                         })
                         .await;
                     count(reply, |data| {
-                        crate::factory_view::factory_reply_lists_runs(data)
-                            .then(|| crate::factory_view::live_run_count(data))
+                        crate::factory_view::factory_reply_lists_runs(data).then(|| {
+                            crate::factory_view::FactoryRunCounts::of(
+                                &crate::factory_view::parse_factory_runs(data),
+                            )
+                        })
                     })
                 };
                 let (shells, factory_runs) = tokio::join!(shells, factory_runs);
@@ -77,10 +80,10 @@ pub(super) fn spawn_session_activity_fetch(
 }
 
 /// A session without a running kernel hosts nothing: zero, not a failed read.
-fn count(reply: Result<Value>, count: impl Fn(&Value) -> Option<usize>) -> Option<usize> {
+fn count<T: Default>(reply: Result<Value>, count: impl Fn(&Value) -> Option<T>) -> Option<T> {
     match reply {
         Ok(data) => count(&data),
-        Err(error) if crate::daemon_client::is_kernel_not_running(&error) => Some(0),
+        Err(error) if crate::daemon_client::is_kernel_not_running(&error) => Some(T::default()),
         Err(_) => None,
     }
 }
