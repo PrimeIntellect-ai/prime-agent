@@ -369,6 +369,15 @@ impl PromptParams {
 pub struct SteeringParams {
     pub session_id: String,
     pub prompt: Vec<Value>,
+    /// `_meta.steering.idleBehavior`: `promptRequired` (the default, the
+    /// nano-rlm receipt shape) or `queued` (the port's opt-in: an idle
+    /// steer runs as the session's next turn).
+    pub idle_behavior: Option<String>,
+    /// The optional `messageId` (nano-rlm #205 retry dedup). Accepted and
+    /// ignored — the declared divergence: the daemon steer lane has no
+    /// per-message identity surface. A non-empty string is valid; anything
+    /// else is the request's own invalid-params error.
+    pub message_id: Option<Value>,
 }
 
 impl SteeringParams {
@@ -387,6 +396,11 @@ impl SteeringParams {
                 .and_then(Value::as_array)
                 .cloned()
                 .unwrap_or_default(),
+            idle_behavior: params
+                .pointer("/_meta/steering/idleBehavior")
+                .and_then(Value::as_str)
+                .map(str::to_string),
+            message_id: params.get("messageId").cloned(),
         }
     }
 }
@@ -441,10 +455,7 @@ pub fn initialize_result(product_version: &str) -> InitializeResult {
             title: "Prime Agent".to_string(),
             version: product_version.to_string(),
         },
-        meta: super::meta::prime_agent_meta(&super::meta::PrimeAgentSessionMeta {
-            steering: Some(super::meta::PrimeAgentSteeringMeta { supported: true }),
-            ..Default::default()
-        }),
+        meta: super::meta::steering_advertisement_meta(),
     }
 }
 
@@ -468,7 +479,8 @@ mod tests {
                 },
                 "agentInfo": { "name": "prime-agent", "title": "Prime Agent", "version": "9.9.9" },
                 "_meta": {
-                    "ai.primeintellect.prime-agent": { "steering": { "supported": true } }
+                    "ai.primeintellect.prime-agent": { "steering": { "supported": true } },
+                    "steering": { "supported": true }
                 },
             })
         );
