@@ -404,6 +404,44 @@ async fn report_an_aborted_flow_once() {
     );
 }
 
+/// `tui live tool timer`: a live tool call's start reports the adoption
+/// event with the fixed tool-category vocabulary only — a custom tool's
+/// raw name never reaches the wire. Telemetry is on for this test (the
+/// repo's `cargo test` env opts out).
+#[test]
+fn live_tool_timer_reports_the_category_not_the_tool_name() {
+    crate::mode::tests::with_clean_telemetry_env(|| {
+        tokio::runtime::Runtime::new()
+            .expect("runtime")
+            .block_on(report_live_tool_timer_category());
+    });
+}
+
+async fn report_live_tool_timer_category() {
+    let dir = tempfile::TempDir::new().expect("temp dir");
+    let agent_dir = dir.path().join("agent");
+    std::fs::create_dir_all(&agent_dir).expect("agent dir");
+    let telemetry =
+        super::telemetry::CliInteractionTelemetry::new(dir.path().to_path_buf(), agent_dir.clone());
+    pa_tui::interactive::InteractionTelemetry::live_tool_timer_started(
+        &telemetry,
+        "mcp_weather_lookup".to_string(),
+    )
+    .await;
+    let mirror = std::fs::read_to_string(agent_dir.join("telemetry.jsonl"))
+        .expect("the live-timer adoption event landed");
+    let lines: Vec<&str> = mirror.lines().collect();
+    assert_eq!(lines.len(), 1, "one adoption event per live call start");
+    let event: serde_json::Value = serde_json::from_str(lines[0]).unwrap();
+    assert_eq!(event["name"], "tui live tool timer");
+    assert_eq!(event["properties"]["tool_category"], "mcp");
+    assert_eq!(event["properties"]["execution_mode"], "interactive");
+    assert!(
+        !mirror.contains("mcp_weather_lookup"),
+        "the raw tool name never reaches the wire: {mirror}"
+    );
+}
+
 /// A fresh home (no choice written) is the one home the question still
 /// mounts for — the opt-in moment: the flow's `Share` answer persists
 /// beside the completion flag, and both read back through the next
