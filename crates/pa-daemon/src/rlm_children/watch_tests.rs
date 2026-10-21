@@ -168,7 +168,17 @@ async fn spawn_fake_supervisor(
                                 "sessionName": "f20-worker",
                             })),
                         ),
-                        "prompt" => response_success(Some(&id), command_type, None),
+                        "prompt" => {
+                            if let Some(gate) = child_subagents
+                                .prompt_gate
+                                .as_ref()
+                                .filter(|gate| gate.armed.swap(false, Ordering::SeqCst))
+                            {
+                                gate.copied.notify_one();
+                                gate.release.notified().await;
+                            }
+                            response_success(Some(&id), command_type, None)
+                        }
                         "wait_for_idle" => {
                             tokio::time::sleep(std::time::Duration::from_millis(idle_delay_ms))
                                 .await;
@@ -323,6 +333,8 @@ struct FakeChildSubagents {
     abort_fails: AtomicBool,
     live_state: std::sync::Mutex<Option<Value>>,
     peer_gate: Option<Arc<FakePeerGate>>,
+    /// Holds the task `prompt` in flight: the worker has not accepted it yet.
+    prompt_gate: Option<Arc<FakePeerGate>>,
 }
 
 #[derive(Default)]
@@ -756,6 +768,58 @@ async fn a_settled_child_without_a_reply_delivers_the_terminal_notice() {
     assert!(extra.is_err(), "no second notice may arrive");
 }
 
+/// A `collect` that lands while the task prompt is still in flight reads
+/// the child's pre-prompt idle worker: the child is still running, never a
+/// `done` settle with no answer (the factory settled its verifier before
+/// the verifier's turn ran).
+#[tokio::test]
+async fn a_collect_while_the_task_prompt_is_in_flight_does_not_settle_the_child() {
+    let (follow_up_tx, mut follow_up_rx) = mpsc::unbounded_channel();
+    let gate = Arc::new(FakePeerGate {
+        armed: AtomicBool::new(true),
+        ..FakePeerGate::default()
+    });
+    let (sessions, _kill_rx) = sessions_with_fake_child_subagents(
+        follow_up_tx,
+        0,
+        FakeKill::Success,
+        FakeChild::Healthy,
+        Arc::new(FakeChildSubagents {
+            prompt_gate: Some(Arc::clone(&gate)),
+            ..FakeChildSubagents::default()
+        }),
+    )
+    .await;
+    let handle = spawn_child(&sessions).await;
+    sessions.notify_turn_done();
+    gate.copied.notified().await;
+
+    let in_flight = sessions
+        .collect(vec![handle.rlm_child_id.clone()], 0)
+        .await
+        .expect("collect while the prompt is in flight");
+    assert!(
+        !in_flight[0].settled,
+        "a child whose task prompt is not accepted yet must not settle: {:?}",
+        in_flight[0].status
+    );
+
+    gate.release.notify_one();
+    tokio::time::timeout(Duration::from_secs(10), follow_up_rx.recv())
+        .await
+        .expect("the run settles once the prompt lands")
+        .expect("follow_up channel open");
+    let settled = sessions
+        .collect(vec![handle.rlm_child_id.clone()], 0)
+        .await
+        .expect("collect after the settle");
+    assert_eq!(settled[0].status, "done");
+    assert_eq!(
+        settled[0].answer_text.as_deref(),
+        Some("the child final answer")
+    );
+}
+
 /// The settle grace re-marks only a BUSY child as running: a worker that
 /// leaves inside the grace (the idle passivation's stop, a crash) keeps
 /// the settled verdict, and the settle tail (notice, funnel) still runs.
@@ -888,7 +952,7 @@ fn assert_failure_row(follow_up: &Value, child_id: &str, error: &str) {
 #[tokio::test]
 async fn a_child_whose_task_prompt_cannot_be_routed_delivers_the_failure_notice() {
     let (follow_up_tx, mut follow_up_rx) = mpsc::unbounded_channel();
-    let (sessions, _kill_rx) =
+    let (sessions, mut kill_rx) =
         sessions_with_fake_supervisor(follow_up_tx, 0, FakeKill::Success, FakeChild::PromptFails)
             .await;
     let (hook_tx, mut hook_rx) = mpsc::unbounded_channel();
@@ -914,6 +978,12 @@ async fn a_child_whose_task_prompt_cannot_be_routed_delivers_the_failure_notice(
         .await
         .expect("the failed child releases the owed continuation")
         .expect("hook channel open");
+    assert!(
+        !sessions.any_running().await,
+        "the failed run must mark settled: an unsettled run parks the quiescence barrier"
+    );
+    let kill = kill_rx.try_recv().expect("the unadmitted child is killed");
+    assert_eq!(kill["activeSessionId"], "child-live");
     // Exactly one failure row lands: the claim admits one writer.
     let extra = tokio::time::timeout(Duration::from_millis(300), follow_up_rx.recv()).await;
     assert!(extra.is_err(), "no second notice may arrive");
@@ -997,70 +1067,6 @@ async fn a_verdict_landing_inside_the_unreachable_give_up_still_runs_the_settle_
         notice["customMessage"]["customType"],
         "rlm_child_terminal_notice"
     );
-}
-
-/// The review's C1 interleaving: a `collect` that lands inside the
-/// prompt-failure window (after the detached task flips
-/// `prompt_admitted`, before the retry verdict) reads the alive-but-idle
-/// worker as `done` — `refresh_record`'s admission-window misread, not a
-/// settle verdict. The prompt arm's failure claim must ignore it: the
-/// failure row still lands, the roster reports `error`, the hook fires,
-/// and the run marks settled (post-#3171 an unsettled failed run parks
-/// `waitForRlmQuiescence` forever).
-#[tokio::test]
-async fn a_collect_inside_the_prompt_failure_window_does_not_swallow_the_failure_row() {
-    let (follow_up_tx, mut follow_up_rx) = mpsc::unbounded_channel();
-    let (sessions, _kill_rx) =
-        sessions_with_fake_supervisor(follow_up_tx, 0, FakeKill::Success, FakeChild::PromptFails)
-            .await;
-    let (hook_tx, mut hook_rx) = mpsc::unbounded_channel();
-    sessions.set_settle_hook(Arc::new(move || {
-        let _ = hook_tx.send(());
-    }));
-    let handle = spawn_child(&sessions).await;
-    // The window's entry condition, set deterministically: the detached
-    // prompt task flips `prompt_admitted` BEFORE its first
-    // `prompt_child` (host.rs), and the collect below races that task in
-    // production. With the flag set and the worker alive-but-idle, the
-    // real collect path scores the misread.
-    sessions.inner.children.lock().await[0]
-        .lock()
-        .await
-        .prompt_admitted = true;
-    let misread = sessions
-        .collect(vec![handle.rlm_child_id.clone()], 0)
-        .await
-        .expect("collect inside the window");
-    assert_eq!(
-        misread[0].status, "done",
-        "the premise: the collect misreads the pre-prompt idle worker as done"
-    );
-
-    // The task prompt now runs and fails (prompt + retry) inside the
-    // window the collect already scored.
-    sessions.notify_turn_done();
-
-    let follow_up = tokio::time::timeout(Duration::from_secs(10), follow_up_rx.recv())
-        .await
-        .expect("the failure row must land despite the collect's misread")
-        .expect("follow_up channel open");
-    assert_failure_row(
-        &follow_up,
-        &handle.rlm_child_id,
-        "prompt RLM child session child-live: refused by the fake supervisor",
-    );
-    let entries = sessions.list_subagents().await.expect("child roster");
-    assert_eq!(entries[0].status, "error");
-    tokio::time::timeout(Duration::from_secs(10), hook_rx.recv())
-        .await
-        .expect("the settle funnel fires despite the misread")
-        .expect("hook channel open");
-    assert!(
-        !sessions.any_running().await,
-        "the failed run must mark settled: an unsettled run parks the quiescence barrier"
-    );
-    let extra = tokio::time::timeout(Duration::from_millis(300), follow_up_rx.recv()).await;
-    assert!(extra.is_err(), "no second notice may arrive");
 }
 
 /// A child that already replied still delivers the failure row when its
@@ -2350,21 +2356,21 @@ fn an_already_settled_child_never_re_scores_as_an_unreachable_error() {
         rename_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
     };
     // A running child that goes unreachable is the error class.
-    assert!(super::lifecycle::should_mark_unreachable_error(&base()));
+    assert!(super::lifecycle::should_mark_error(&base()));
     // A settled child keeps its positive verdict.
     let mut settled = base();
     settled.settled_status = Some("done");
     assert!(
-        !super::lifecycle::should_mark_unreachable_error(&settled),
+        !super::lifecycle::should_mark_error(&settled),
         "an idle-passivated (or post-settle crashed) child keeps its settled verdict"
     );
     // A parent-closed child and a noticed child never re-score.
     let mut closed = base();
     closed.closed_by_parent = true;
-    assert!(!super::lifecycle::should_mark_unreachable_error(&closed));
+    assert!(!super::lifecycle::should_mark_error(&closed));
     let mut noticed = base();
     noticed.notice_delivered = true;
-    assert!(!super::lifecycle::should_mark_unreachable_error(&noticed));
+    assert!(!super::lifecycle::should_mark_error(&noticed));
 }
 
 /// The unreachable give-up's exit capture is a wasted round trip when a
@@ -2432,11 +2438,7 @@ async fn the_unreachable_give_up_skips_the_exit_capture_when_a_capture_stands() 
     }));
     let claimed = sessions
         .inner
-        .settle_failed(
-            &record,
-            "Child worker unreachable".to_string(),
-            super::lifecycle::FailedArm::Unreachable,
-        )
+        .settle_failed(&record, "Child worker unreachable".to_string())
         .await;
     assert!(claimed, "the give-up claims the settle");
     assert_eq!(

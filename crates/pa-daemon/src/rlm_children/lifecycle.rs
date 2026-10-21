@@ -566,11 +566,7 @@ impl SupervisorChildSessionsInner {
                     // holds; capture them before the terminal notice.
                     self.emit_final_child_usage(record).await;
                     if self
-                        .settle_failed(
-                            record,
-                            "Child worker unreachable".to_string(),
-                            FailedArm::Unreachable,
-                        )
+                        .settle_failed(record, "Child worker unreachable".to_string())
                         .await
                     {
                         return;
@@ -689,24 +685,16 @@ impl SupervisorChildSessionsInner {
     /// settles `error` with its failure text and the parent receives the
     /// `rlm_child_failure` row — whether or not the child replied — then
     /// the settle funnel fires like TS's `finally` resume. Exactly-once:
-    /// the claim is split by arm. The unreachable arm keeps
-    /// `should_mark_unreachable_error` — an already-settled child keeps
-    /// its verdict (#3104's passivation semantics: a verdict a reader's
-    /// refresh lands inside the give-up keeps standing, and the claim
-    /// reports the loss so the watcher runs that verdict's settle tail).
-    /// The prompt arm bails only on a REAL terminal verdict:
-    /// a task turn that provably never started cannot have genuinely
-    /// completed, so a `done` visible inside the prompt-failure window is
-    /// `refresh_record`'s admission-window misread of an alive-but-idle
-    /// worker, not a settle verdict — the failure row must still land
-    /// (and, since #3171, the run must still mark settled, or the
-    /// quiescence barrier parks forever). Returns whether this call
-    /// claimed the settle.
+    /// a child that already holds a verdict keeps it
+    /// (`should_mark_error`; #3104's passivation semantics: a verdict a
+    /// reader's refresh lands inside the unreachable give-up keeps
+    /// standing, and the claim reports the loss so the watcher runs that
+    /// verdict's settle tail). Returns whether this call claimed the
+    /// settle.
     pub(super) async fn settle_failed(
         &self,
         record: &Arc<Mutex<ChildRecord>>,
         error: String,
-        arm: FailedArm,
     ) -> bool {
         // The exit capture (the M4 seam): a child that dies without
         // reporting still said something — the live worker's last
@@ -752,15 +740,7 @@ impl SupervisorChildSessionsInner {
         };
         let message = {
             let mut record = record.lock().await;
-            let keep_verdict = match arm {
-                FailedArm::Unreachable => !should_mark_unreachable_error(&record),
-                FailedArm::Prompt => {
-                    record.closed_by_parent
-                        || record.notice_delivered
-                        || matches!(record.settled_status, Some("error" | "cancelled"))
-                }
-            };
-            if keep_verdict {
+            if !should_mark_error(&record) {
                 return false;
             }
             record.settled_status = Some("error");
@@ -837,24 +817,14 @@ impl SupervisorChildSessionsInner {
     }
 }
 
-/// Which failure arm is claiming the settle: the two arms bail on
-/// different evidence (see `settle_failed`).
-pub(super) enum FailedArm {
-    /// The task-prompt admission failed and its retry failed.
-    Prompt,
-    /// The unreachable-poller's give-up (`WATCH_MAX_UNREACHABLE_POLLS`
-    /// consecutive dead polls).
-    Unreachable,
-}
-
-/// Whether a child may still settle as an error (the unreachable
-/// give-up's claim): a parent-closed child, a noticed child, or an
+/// Whether a child may still settle as an error (the failed task prompt's
+/// or the unreachable give-up's claim): a parent-closed child, a noticed child, or an
 /// ALREADY-SETTLED child keeps its POSITIVE verdict — its worker leaving
 /// afterward (the idle passivation's graceful stop, a crash after
 /// settle, or a give-up) is residency churn, not a settle verdict
 /// change. The settle state is durable and the passive roster row
 /// stays the representation.
-pub(super) fn should_mark_unreachable_error(state: &ChildRecord) -> bool {
+pub(super) fn should_mark_error(state: &ChildRecord) -> bool {
     !(state.closed_by_parent || state.notice_delivered || state.settled_status.is_some())
 }
 

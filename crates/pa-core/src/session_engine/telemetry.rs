@@ -927,7 +927,9 @@ fn handle_event(
         // Both are still run-scoped events: while the cached decision is
         // off they sever (a tool whose execution spans an opt-out observed
         // at a boundary never counts into a surviving run).
-        AgentEvent::TurnEnd { .. } | AgentEvent::ToolExecutionUpdate { .. } => {}
+        AgentEvent::TurnEnd { .. }
+        | AgentEvent::ToolExecutionUpdate { .. }
+        | AgentEvent::ToolExecutionProgress { .. } => {}
     }
 }
 

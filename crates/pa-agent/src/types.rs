@@ -483,6 +483,24 @@ impl AgentToolResult {
 /// Callback used by tools to publish partial execution updates.
 pub type AgentToolUpdateCallback = Arc<dyn Fn(AgentToolResult) + Send + Sync>;
 
+/// Heartbeat cadence for in-flight tool calls: quiet until `after_ms`
+/// elapses, then one [`AgentEvent::ToolExecutionProgress`] every
+/// `every_ms` while the call still runs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ToolProgressCadence {
+    pub after_ms: u64,
+    pub every_ms: u64,
+}
+
+impl Default for ToolProgressCadence {
+    fn default() -> Self {
+        ToolProgressCadence {
+            after_ms: 60_000,
+            every_ms: 60_000,
+        }
+    }
+}
+
 /// Tool definition used by the agent runtime.
 ///
 /// The schema is a plain JSON Schema `Value` (TS validates against a `TypeBox`
@@ -558,6 +576,14 @@ pub enum AgentEvent {
         tool_call_id: String,
         tool_name: String,
         args: serde_json::Value,
+    },
+    /// In-flight tool-call heartbeat: emitted on the
+    /// [`AgentLoopConfig::tool_progress`] cadence once a call outlives the
+    /// initial threshold, so a stalled call is visible while it runs.
+    ToolExecutionProgress {
+        tool_call_id: String,
+        tool_name: String,
+        elapsed_ms: u64,
     },
     ToolExecutionUpdate {
         tool_call_id: String,
