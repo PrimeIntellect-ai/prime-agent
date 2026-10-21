@@ -160,6 +160,17 @@ mod tests {
     }
 
     #[test]
+    fn an_http_408_is_a_provider_category_not_transport() {
+        // A 408 is an HTTP status answer over a live connection (#200:
+        // HTTP status errors retain the existing behavior): the `timeout`
+        // subtype must not leak into the transport family.
+        let data = error_data("408 Request Timeout");
+        assert_eq!(data["kind"], "timeout");
+        assert_eq!(data["category"], "timeout");
+        assert_eq!(data["retryable"], false);
+    }
+
+    #[test]
     fn unclassified_and_link_failures_are_classified_not_retryable() {
         // A host can tell "classified, not retryable" from an untyped
         // error: every failed-prompt arm carries the typed data.
@@ -167,6 +178,7 @@ mod tests {
             "Prompt cannot be empty",
             "the daemon connection closed mid-request",
             "an opaque harness crash",
+            "Failed to publish ACP completion",
         ] {
             let data = error_data(failure);
             assert_eq!(data["kind"], "other", "{failure}: {data}");

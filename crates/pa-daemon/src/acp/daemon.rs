@@ -1536,13 +1536,14 @@ async fn prompt_turn(
     }
     // The completion observation's roster read (TS `getRlmChildSnapshots`
     // throws): a failed read errors the prompt before the boundary, never
-    // publishes a wrong count.
+    // publishes a wrong count — with the same typed data as every other
+    // failed-prompt arm.
     let children = match fetch_rlm_children(link, &hosted_daemon_session_id).await {
         Ok(children) => children,
         Err(error) => {
             publish_error_boundary(&producer, turn_id).await;
             producer.finish_prompt(turn_id).await;
-            return super::internal_error(&id, &error.to_string());
+            return super::turn_failure_error(&id, &error.to_string(), &error.to_string());
         }
     };
     if turn_cancelled(&*state.lock().await, admission_id) {
@@ -1641,7 +1642,13 @@ async fn prompt_turn(
             )
             .await;
         if !published || !completion_published || !terminal_published {
-            return super::internal_error(&id, "Failed to publish ACP completion");
+            // The typed shape even for a publish failure: a host can tell
+            // "classified, not retryable" from an untyped error here too.
+            return super::turn_failure_error(
+                &id,
+                "Failed to publish ACP completion",
+                "Failed to publish ACP completion",
+            );
         }
         break status;
     };

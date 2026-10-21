@@ -246,7 +246,11 @@ impl ErrorClassification {
     /// boundary.
     #[must_use]
     pub fn is_model_transport(&self) -> bool {
+        // An HTTP-status classification (a 408 reads as `timeout`) is a
+        // provider answer over a live connection, not a model-connection
+        // failure: the status verdicts keep their provider categories.
         matches!(self.subtype, "network_error" | "stream_drop" | "timeout")
+            && self.http_status.is_none()
     }
 }
 
@@ -538,16 +542,22 @@ mod tests {
             assert!(classify(message).is_model_transport(), "{message}");
         }
         // HTTP status errors keep their provider categories (#200: they
-        // retain the existing behavior, so none is boundary-retryable).
+        // retain the existing behavior, so none is boundary-retryable) —
+        // including the 408, whose `timeout` subtype is a provider
+        // rejection over a live connection, not an exhausted connect.
         for message in [
             "API Error: 429 rate limit exceeded",
             "401 unauthorized",
             "402 insufficient credits",
             "500 Internal Server Error",
+            "408 Request Timeout",
             "context_length_exceeded",
         ] {
-            assert!(!classify(message).is_model_transport(), "{message}");
+            let classification = classify(message);
+            assert!(!classification.is_model_transport(), "{message}");
         }
+        // The SDK timeout disclosure (no status) is the transport family.
+        assert!(classify("Request timed out.").is_model_transport());
     }
 
     #[test]
