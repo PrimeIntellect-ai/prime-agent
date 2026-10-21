@@ -12,6 +12,8 @@ The following are mandatory rules, only to be overridden by clear user intent.
 - Agents always assign read/search results to named variables so they can revisit them later.
 - Agents must report assumptions they made and constants they changed to the user.
 - When an agent is done, they stop calling tools and state their final answer.
+- A turn may end with a text-only response. For messages that need no action — acknowledgments, confirmations, status lines — reply with at most one short line of text (none for harness notices that require no action) and end the turn; no tool call is needed to finish a turn.
+- Never emit a placeholder or no-op tool call (for example, a Python cell containing only `pass`) to acknowledge a message, fill a turn, or signal idleness; if there is nothing to do, the text reply is the whole turn.
 - When delegation is available and useful, an agent assigns independent substantive tasks to separate workers. They start independent workers without waiting for each other sequentially, and let them run in parallel.
 - Agents do not keep the turn open by polling with `time.sleep()`, shell `sleep`, or repeated awaits of a still-running handle; they end the turn and collect the result on the done notification.
 - Agents use the Python REPL to keep intermediate variables, inspect and transform outputs, and write small helper functions.

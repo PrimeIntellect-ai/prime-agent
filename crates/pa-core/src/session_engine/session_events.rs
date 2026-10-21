@@ -166,6 +166,16 @@ pub fn agent_event_json(event: &AgentEvent) -> Option<serde_json::Value> {
             "toolName": tool_name,
             "args": args,
         }),
+        AgentEvent::ToolExecutionProgress {
+            tool_call_id,
+            tool_name,
+            elapsed_ms,
+        } => serde_json::json!({
+            "type": "tool_execution_progress",
+            "toolCallId": tool_call_id,
+            "toolName": tool_name,
+            "elapsedMs": elapsed_ms,
+        }),
         AgentEvent::ToolExecutionUpdate {
             tool_call_id,
             tool_name,
