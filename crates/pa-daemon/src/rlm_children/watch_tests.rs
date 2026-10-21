@@ -162,7 +162,17 @@ async fn spawn_fake_supervisor(
                                 "sessionName": "f20-worker",
                             })),
                         ),
-                        "prompt" => response_success(Some(&id), command_type, None),
+                        "prompt" => {
+                            if let Some(gate) = child_subagents
+                                .prompt_gate
+                                .as_ref()
+                                .filter(|gate| gate.armed.swap(false, Ordering::SeqCst))
+                            {
+                                gate.copied.notify_one();
+                                gate.release.notified().await;
+                            }
+                            response_success(Some(&id), command_type, None)
+                        }
                         "wait_for_idle" => {
                             tokio::time::sleep(std::time::Duration::from_millis(idle_delay_ms))
                                 .await;
@@ -297,6 +307,8 @@ struct FakeChildSubagents {
     answer_reads: AtomicU32,
     live_state: std::sync::Mutex<Option<Value>>,
     peer_gate: Option<Arc<FakePeerGate>>,
+    /// Holds the task `prompt` in flight: the worker has not accepted it yet.
+    prompt_gate: Option<Arc<FakePeerGate>>,
 }
 
 #[derive(Default)]
@@ -728,6 +740,58 @@ async fn a_settled_child_without_a_reply_delivers_the_terminal_notice() {
     let extra =
         tokio::time::timeout(std::time::Duration::from_millis(300), follow_up_rx.recv()).await;
     assert!(extra.is_err(), "no second notice may arrive");
+}
+
+/// A `collect` that lands while the task prompt is still in flight reads
+/// the child's pre-prompt idle worker: the child is still running, never a
+/// `done` settle with no answer (the factory settled its verifier before
+/// the verifier's turn ran).
+#[tokio::test]
+async fn a_collect_while_the_task_prompt_is_in_flight_does_not_settle_the_child() {
+    let (follow_up_tx, mut follow_up_rx) = mpsc::unbounded_channel();
+    let gate = Arc::new(FakePeerGate {
+        armed: AtomicBool::new(true),
+        ..FakePeerGate::default()
+    });
+    let (sessions, _kill_rx) = sessions_with_fake_child_subagents(
+        follow_up_tx,
+        0,
+        FakeKill::Success,
+        FakeChild::Healthy,
+        Arc::new(FakeChildSubagents {
+            prompt_gate: Some(Arc::clone(&gate)),
+            ..FakeChildSubagents::default()
+        }),
+    )
+    .await;
+    let handle = spawn_child(&sessions).await;
+    sessions.notify_turn_done();
+    gate.copied.notified().await;
+
+    let in_flight = sessions
+        .collect(vec![handle.rlm_child_id.clone()], 0)
+        .await
+        .expect("collect while the prompt is in flight");
+    assert!(
+        !in_flight[0].settled,
+        "a child whose task prompt is not accepted yet must not settle: {:?}",
+        in_flight[0].status
+    );
+
+    gate.release.notify_one();
+    tokio::time::timeout(Duration::from_secs(10), follow_up_rx.recv())
+        .await
+        .expect("the run settles once the prompt lands")
+        .expect("follow_up channel open");
+    let settled = sessions
+        .collect(vec![handle.rlm_child_id.clone()], 0)
+        .await
+        .expect("collect after the settle");
+    assert_eq!(settled[0].status, "done");
+    assert_eq!(
+        settled[0].answer_text.as_deref(),
+        Some("the child final answer")
+    );
 }
 
 /// The settle grace re-marks only a BUSY child as running: a worker that
