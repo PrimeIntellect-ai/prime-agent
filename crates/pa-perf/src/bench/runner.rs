@@ -497,6 +497,10 @@ fn agents_view_populate(ctx: &RunCtx, child: &mut PtyChild) -> anyhow::Result<f6
     Ok(started.elapsed().as_secs_f64() * 1000.0)
 }
 
+fn roster_settled(screen: &str, expected: usize) -> bool {
+    screen.contains(&format!("Inactive ({expected})"))
+}
+
 /// From the opened session A: open the agents view, uniquely filter to
 /// switch-b, and time enter -> B's transcript marker. The `zq` token in
 /// switch-b's name matches no other row (no generated text carries the
@@ -1040,5 +1044,26 @@ mod tests {
             elapsed < Duration::from_secs(7),
             "hello blocked for {elapsed:?}"
         );
+    }
+
+    #[test]
+    fn roster_settled_accounts_for_unloaded_pages() {
+        let large = "   ▗█▛▐█▙   ▗▄█▀▗█▀       prime agent v0.10.0
+  ▗█▛ ▟██▙▄██▛ ▟▛         agents 0 running, 0 idle, 200 inactive
+
+ >   Search sessions
+
+Session                       Model                                 Cost  Age
+
+Inactive (200)
+• (no messages)               amazon.nova-2-lite-v1:0:medium       $0.00   4s
+• huge corpus session         gpt-5.4:high                     $71727.10  29d
+  ...
+801 older sessions not loaded · scroll to load
+↑/↓ navigate   Home/End first/last   Enter/→ open";
+        assert!(roster_settled(large, 1001));
+        assert!(!roster_settled(large, 1000));
+        assert!(roster_settled("Inactive (11)\n• a\n• b", 11));
+        assert!(!roster_settled("Inactive (7)\n• a\n• b", 11));
     }
 }
