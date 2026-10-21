@@ -68,6 +68,26 @@ pub(super) fn fold_child_usage_attributions(entries: &mut [SessionEntry]) {
     }
 }
 
+/// An entry's place on its parent chain, fixed when it joins the index: entries are
+/// append-only and parent links never change, so links need no invalidation.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct ChainLink {
+    /// A chain root links to itself.
+    parent: usize,
+    depth: usize,
+    jump: usize,
+}
+
+impl ChainLink {
+    pub(super) fn parent(self) -> Option<usize> {
+        (self.depth > 0).then_some(self.parent)
+    }
+
+    pub(super) fn depth(self) -> usize {
+        self.depth
+    }
+}
+
 impl SessionFile {
     pub(super) fn push_index(&mut self, entry: SessionEntry) {
         self.push_index_inner(entry, true);
@@ -84,9 +104,74 @@ impl SessionFile {
         if fold_live && entry.type_ == "child_usage_attributed" {
             self.fold_live_attribution(&entry);
         }
-        self.by_id.insert(entry.id.clone(), self.entries.len());
+        self.index_entry(entry);
+    }
+
+    /// The one place an entry joins the index: its `by_id` slot, its chain link, and the leaf.
+    /// The link resolves the parent at push time; a parent not indexed yet starts a new chain
+    /// (strict [`Self::branch`] stops at a missing parent too).
+    pub(crate) fn index_entry(&mut self, entry: SessionEntry) {
+        let position = self.entries.len();
+        let link = match entry
+            .parent_id
+            .as_deref()
+            .and_then(|id| self.by_id.get(id).copied())
+        {
+            Some(parent) => {
+                let up = self.chain[parent];
+                let jump = self.chain[up.jump];
+                // Skew-binary jump pointers (Myers 1983): O(1) to add, O(log N) ancestor lookup.
+                let jump = if up.depth - jump.depth == jump.depth - self.chain[jump.jump].depth {
+                    jump.jump
+                } else {
+                    parent
+                };
+                ChainLink {
+                    parent,
+                    depth: up.depth + 1,
+                    jump,
+                }
+            }
+            None => ChainLink {
+                parent: position,
+                depth: 0,
+                jump: position,
+            },
+        };
+        self.chain.push(link);
+        self.by_id.insert(entry.id.clone(), position);
         self.leaf_id = Some(entry.id.clone());
         self.entries.push(entry);
+    }
+
+    /// Undo the newest [`Self::index_entry`] (a failed rewrite-persist).
+    pub(super) fn unindex_last(&mut self) {
+        if let Some(entry) = self.entries.pop() {
+            self.by_id.remove(&entry.id);
+            self.chain.pop();
+        }
+    }
+
+    pub(crate) fn clear_index(&mut self) {
+        self.entries.clear();
+        self.by_id.clear();
+        self.chain.clear();
+        self.leaf_id = None;
+    }
+
+    /// The ancestor of `position` at chain depth `depth` (at most the position's own depth).
+    pub(super) fn ancestor_at(&self, mut position: usize, depth: usize) -> usize {
+        while self.chain[position].depth > depth {
+            #[cfg(test)]
+            super::view::CHAIN_STEPS.with(|steps| steps.set(steps.get() + 1));
+            let link = self.chain[position];
+            position = if self.chain[link.jump].depth >= depth {
+                link.jump
+            } else {
+                link.parent
+            };
+        }
+        position
     }
 
     /// Fold one already-indexed attribution entry's aggregate (the rewrite-persist path

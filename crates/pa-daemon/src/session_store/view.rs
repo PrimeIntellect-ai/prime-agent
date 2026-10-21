@@ -4,6 +4,19 @@
 use super::{json, MessageWindowScalars, SessionEntry, SessionFile, TranscriptPageRows, Value};
 use pa_types::daemon::TranscriptPage;
 
+/// One display-transcript row: its entry id and wire message.
+type DisplayRow<'a> = (&'a str, std::borrow::Cow<'a, Value>);
+
+#[cfg(test)]
+thread_local! {
+    /// Steps the branch walk and the ancestor lookup took on this thread (the page-cost pin).
+    pub(super) static CHAIN_STEPS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+#[path = "page_walk_tests.rs"]
+mod page_walk_tests;
+
 /// Entry types that represent user intent (vs daemon bookkeeping).
 const CONTENT_ENTRY_TYPES: &[&str] = &[
     "message",
@@ -86,28 +99,90 @@ impl SessionFile {
             .and_then(|depth| u32::try_from(depth).ok())
     }
 
-    /// Walk the leaf-to-root entry path (the active branch). A corrupt file can
-    /// hold a parent cycle; the walk must terminate anyway.
+    /// Walk the leaf-to-root entry path (the active branch), root first.
     #[must_use]
     pub fn branch(&self) -> Vec<&SessionEntry> {
-        let mut path = Vec::new();
-        let mut visited = std::collections::HashSet::new();
-        let mut current = self.leaf_id.as_deref().and_then(|id| self.entry(id));
-        while let Some(entry) = current {
-            if !visited.insert(entry.id.as_str()) {
-                break;
-            }
-            if let Some(window) = &self.window {
-                let index = self.by_id[&entry.id];
-                if index < window.loaded_entries && !window.retained_ids.contains(&entry.id) {
-                    break;
-                }
-            }
-            path.push(entry);
-            current = entry.parent_id.as_deref().and_then(|id| self.entry(id));
-        }
+        let mut path: Vec<&SessionEntry> = self
+            .walk_back(self.branch_leaf())
+            .map(|position| &self.entries[position])
+            .collect();
         path.reverse();
         path
+    }
+
+    /// Whether a windowed store's branch walk stops at `position`: a loaded row
+    /// outside the retained window.
+    fn window_excludes(&self, position: usize) -> bool {
+        self.window.as_ref().is_some_and(|window| {
+            position < window.loaded_entries
+                && !window.retained_ids.contains(&self.entries[position].id)
+        })
+    }
+
+    /// The active branch's newest position.
+    fn branch_leaf(&self) -> Option<usize> {
+        self.leaf_id
+            .as_deref()
+            .and_then(|id| self.by_id.get(id).copied())
+            .filter(|&position| !self.window_excludes(position))
+    }
+
+    /// The branch walk's one step: the parent, unless it starts a new chain or the window
+    /// excludes it.
+    fn branch_parent(&self, position: usize) -> Option<usize> {
+        #[cfg(test)]
+        CHAIN_STEPS.with(|steps| steps.set(steps.get() + 1));
+        self.chain[position]
+            .parent()
+            .filter(|&parent| !self.window_excludes(parent))
+    }
+
+    /// Branch positions from `from` back to the branch start, newest first.
+    fn walk_back(&self, from: Option<usize>) -> impl Iterator<Item = usize> + '_ {
+        std::iter::successors(from, move |&position| self.branch_parent(position))
+    }
+
+    /// Branch positions after `after` (exclusive; the branch start when `None`) through
+    /// `last`, oldest first. `after` must be an ancestor of `last`. Reads `last`'s
+    /// ancestors in chunks of doubling size, so the cost follows the rows consumed.
+    fn walk_forward(&self, after: Option<usize>, last: usize) -> impl Iterator<Item = usize> + '_ {
+        let top = self.chain[last].depth();
+        let mut low = after.map_or(0, |after| self.chain[after].depth() + 1);
+        let mut chunk = 64;
+        std::iter::from_fn(move || {
+            if low > top {
+                return None;
+            }
+            let high = top.min(low + chunk - 1);
+            let start = Some(self.ancestor_at(last, high))
+                .filter(|&position| !self.window_excludes(position));
+            let mut positions: Vec<usize> = self.walk_back(start).take(high + 1 - low).collect();
+            positions.reverse();
+            low = high + 1;
+            chunk *= 2;
+            Some(positions)
+        })
+        .flatten()
+    }
+
+    /// Whether `position` is on the active branch: the leaf's ancestor at its depth. A
+    /// window's excluded rows precede every row it keeps, and parents precede children,
+    /// so no excluded row sits between a kept row and the leaf.
+    fn on_branch(&self, position: usize) -> bool {
+        self.branch_leaf().is_some_and(|leaf| {
+            let depth = self.chain[position].depth();
+            depth <= self.chain[leaf].depth()
+                && self.ancestor_at(leaf, depth) == position
+                && !self.window_excludes(position)
+        })
+    }
+
+    /// Whether entry `id` is on the active branch.
+    #[must_use]
+    pub fn branch_contains(&self, id: &str) -> bool {
+        self.by_id
+            .get(id)
+            .is_some_and(|&position| self.on_branch(position))
     }
 
     /// The leaf-to-root walk with parent gaps bridged: a parent id minted but
@@ -372,80 +447,156 @@ impl SessionFile {
         }
     }
 
-    /// The display transcript: the whole branch in order, each row with its entry id.
-    /// A compaction is its summary row at its own position, so every entry shows once.
-    fn display_rows(&self) -> Vec<(&str, std::borrow::Cow<'_, Value>)> {
-        self.branch()
-            .into_iter()
-            .filter_map(|entry| {
-                let message = if entry.type_ == "compaction" {
-                    std::borrow::Cow::Owned(compaction_summary_message(entry, None))
-                } else {
-                    entry_message(entry)?
-                };
-                Some((entry.id.as_str(), message))
-            })
-            .collect()
+    /// One display-transcript row: a message-bearing entry, or a compaction as its summary
+    /// row in place, so every entry shows once.
+    fn display_row(&self, position: usize) -> Option<DisplayRow<'_>> {
+        let entry = &self.entries[position];
+        let message = if entry.type_ == "compaction" {
+            std::borrow::Cow::Owned(compaction_summary_message(entry, None))
+        } else {
+            entry_message(entry)?
+        };
+        Some((entry.id.as_str(), message))
+    }
+
+    /// The position of page anchor `id`: a display row on the active branch.
+    fn display_anchor(&self, id: &str) -> Option<usize> {
+        let position = *self.by_id.get(id)?;
+        let entry = &self.entries[position];
+        ((entry.type_ == "compaction" || entry_bears_message(entry)) && self.on_branch(position))
+            .then_some(position)
     }
 
     /// One page of the display transcript; `None` when an anchor row is not on the branch.
+    /// The page walks from its anchor, so its cost follows the page, not the session.
     #[must_use]
     pub fn transcript_page(&self, page: &TranscriptPage) -> Option<TranscriptPageRows> {
-        let mut rows = self.display_rows();
-        let position = |rows: &[(&str, std::borrow::Cow<'_, Value>)], id: &str| {
-            rows.iter().position(|(row_id, _)| *row_id == id)
-        };
-        let (start, end, more) = match page {
-            TranscriptPage::End { before, limit } => {
-                let end = match before {
-                    Some(id) => position(&rows, id)?,
-                    None => rows.len(),
-                };
-                let start = settle_cut(&rows, end.saturating_sub(*limit));
-                // A windowed store's unloaded prefix is older history too.
-                (start, end, start > 0 || self.window.is_some())
-            }
+        let (rows, more) = match page {
+            TranscriptPage::End { before, limit } => self.end_page(before.as_deref(), *limit)?,
             TranscriptPage::Start {
                 after,
                 until,
                 limit,
-            } => {
-                let until = match until {
-                    Some(id) => position(&rows, id)?,
-                    None => rows.len(),
-                };
-                let start = match after {
-                    Some(id) => position(&rows, id)? + 1,
-                    None => 0,
-                }
-                .min(until);
-                let end = match start.saturating_add(*limit) {
-                    end if end >= until => until,
-                    end if end == start => start,
-                    end => Some(settle_cut(&rows, end))
-                        .filter(|cut| *cut > start)
-                        .unwrap_or(until),
-                };
-                (start, end, end < until)
-            }
+            } => self.start_page(after.as_deref(), until.as_deref(), *limit)?,
         };
-        let last_user_prompt_ms = rows
-            .iter()
-            .rev()
-            .find(|(_, message)| message.get("role").and_then(Value::as_str) == Some("user"))
-            .and_then(|(_, message)| prompt_timestamp_ms(message));
-        rows.truncate(end);
-        let page_rows = rows.split_off(start);
         Some(TranscriptPageRows {
-            first_entry_id: page_rows.first().map(|(id, _)| (*id).to_string()),
-            last_entry_id: page_rows.last().map(|(id, _)| (*id).to_string()),
-            messages: page_rows
+            first_entry_id: rows.first().map(|(id, _)| (*id).to_string()),
+            last_entry_id: rows.last().map(|(id, _)| (*id).to_string()),
+            messages: rows
                 .into_iter()
                 .map(|(_, message)| message.into_owned())
                 .collect(),
             more,
-            last_user_prompt_ms,
         })
+    }
+
+    /// The newest `limit` rows before the `before` row (the tail without it).
+    fn end_page(&self, before: Option<&str>, limit: usize) -> Option<(Vec<DisplayRow<'_>>, bool)> {
+        let before = before.map_or(Some(None), |id| self.display_anchor(id).map(Some))?;
+        let from = match before {
+            Some(position) => self.branch_parent(position),
+            None => self.branch_leaf(),
+        };
+        let mut older = self
+            .walk_back(from)
+            .filter_map(|position| self.display_row(position));
+        // Newest first: the `before` row, the page, the run that moves its cut back,
+        // then the rows the cut's tool calls may pair with.
+        let mut slice: Vec<DisplayRow<'_>> = before
+            .and_then(|position| self.display_row(position))
+            .into_iter()
+            .collect();
+        slice.extend(older.by_ref().take(limit));
+        while slice
+            .last()
+            .is_some_and(|(_, message)| continues_run(message))
+        {
+            let Some(row) = older.next() else {
+                break;
+            };
+            slice.push(row);
+        }
+        let from_cut = slice.len();
+        slice.extend(older.by_ref().take(limit));
+        slice.reverse();
+        let end = slice.len() - usize::from(before.is_some());
+        let start = settle_cut(&slice, slice.len() - from_cut);
+        // A windowed store's unloaded prefix is older history too.
+        let more = start > 0 || self.window.is_some() || older.next().is_some();
+        slice.truncate(end);
+        slice.drain(..start);
+        Some((slice, more))
+    }
+
+    /// The oldest `limit` rows after the `after` row (the head without it), stopping
+    /// before the `until` row.
+    fn start_page(
+        &self,
+        after: Option<&str>,
+        until: Option<&str>,
+        limit: usize,
+    ) -> Option<(Vec<DisplayRow<'_>>, bool)> {
+        let until = until.map_or(Some(None), |id| self.display_anchor(id).map(Some))?;
+        let after = after.map_or(Some(None), |id| self.display_anchor(id).map(Some))?;
+        let Some(last) = until.or_else(|| self.branch_leaf()) else {
+            return Some((Vec::new(), false));
+        };
+        // The page, then up to `limit` rows past it (through the `until` row) for pairing.
+        let mut newer = self
+            .walk_forward(after, last)
+            .filter_map(|position| Some((position, self.display_row(position)?)));
+        let rows: Vec<(usize, DisplayRow<'_>)> = newer
+            .by_ref()
+            .take(limit.saturating_mul(2).saturating_add(1))
+            .collect();
+        let reached_until = rows
+            .last()
+            .is_some_and(|(position, _)| Some(*position) == until);
+        let available = rows.len() - usize::from(reached_until);
+        let mut rows: Vec<DisplayRow<'_>> = rows.into_iter().map(|(_, row)| row).collect();
+        if available <= limit {
+            rows.truncate(available);
+            return Some((rows, false));
+        }
+        if limit == 0 {
+            return Some((Vec::new(), true));
+        }
+        // The `limit` rows before the page, for calls whose results the cut would split.
+        let mut slice: Vec<DisplayRow<'_>> = self
+            .walk_back(after)
+            .filter_map(|position| self.display_row(position))
+            .take(limit)
+            .collect();
+        slice.reverse();
+        let page_start = slice.len();
+        slice.append(&mut rows);
+        let cut = settle_cut(&slice, page_start + limit);
+        let mut page = slice.split_off(page_start);
+        if cut > page_start {
+            page.truncate(cut - page_start);
+            return Some((page, true));
+        }
+        // The cut fell back to the page start: the page runs to the `until` row.
+        page.extend(newer.map(|(_, row)| row));
+        if until.is_some() {
+            page.pop();
+        }
+        Some((page, false))
+    }
+
+    /// The newest user prompt's time on the branch (the attach snapshot's marker); the walk
+    /// reaches back only as far as that prompt.
+    #[must_use]
+    pub fn last_user_prompt_ms(&self) -> Option<u64> {
+        self.walk_back(self.branch_leaf())
+            .find_map(|position| {
+                let entry = &self.entries[position];
+                (entry.type_ == "message")
+                    .then(|| entry.fields.get("message"))
+                    .flatten()
+                    .filter(|message| message_role(message) == Some("user"))
+            })
+            .and_then(prompt_timestamp_ms)
     }
 
     /// The durable entry id the compaction cut keeps: the engine's
@@ -591,11 +742,21 @@ fn prompt_timestamp_ms(message: &Value) -> Option<u64> {
     }
 }
 
+/// Whether a row continues the run before it: a page never starts at one.
+fn continues_run(message: &Value) -> bool {
+    matches!(message_role(message), Some("toolResult" | "custom"))
+}
+
 /// Move a page boundary earlier until the page below it starts at neither a tool
 /// result nor a custom row, and no tool call is split from its result.
-fn settle_cut(rows: &[(&str, std::borrow::Cow<'_, Value>)], mut cut: usize) -> usize {
-    let role = |index: usize| rows[index].1.get("role").and_then(Value::as_str);
-    while cut > 0 && cut < rows.len() && matches!(role(cut), Some("toolResult" | "custom")) {
+///
+/// `rows` is a local slice of the branch around the cut, not the whole branch: the
+/// page, the run before its first row, and up to `limit` rows past each side, the
+/// side toward the request's other anchor stopping at that anchor row. Calls pair
+/// with results only inside the slice, so a call more than a page from its result
+/// does not move the cut (else an orphan or aborted call drags every page to the root).
+fn settle_cut(rows: &[DisplayRow<'_>], mut cut: usize) -> usize {
+    while cut > 0 && cut < rows.len() && continues_run(&rows[cut].1) {
         cut -= 1;
     }
     // User bash and other message rows can land between a call and its
