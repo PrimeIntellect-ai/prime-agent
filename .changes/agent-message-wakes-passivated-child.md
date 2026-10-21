@@ -1,1 +1,0 @@
-- Messaging a subagent whose worker was idle-passivated now wakes it and delivers the message, instead of failing with "Unknown active session".

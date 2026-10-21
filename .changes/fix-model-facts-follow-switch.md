@@ -1,1 +1,0 @@
-- The kernel's `model.info` and `compact.status` context window now follow daemon model switches (set_model, cycle_model, and provider failover) instead of reporting the session-creation model.

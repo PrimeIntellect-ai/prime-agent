@@ -1,1 +1,0 @@
-- The chat title and the agents view now include the spend of deleted subagents, and both show the same number.

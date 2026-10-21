@@ -1,1 +1,0 @@
-- Print-mode goals consume eligible empty-turn backoff wakeups and report the no-progress continuation cap rather than silently losing further progress.

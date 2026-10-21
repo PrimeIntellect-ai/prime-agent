@@ -1,1 +1,0 @@
-- `/update` in the TUI no longer hangs on an installer prompt or swallows keystrokes: the installer now runs detached from the terminal.
