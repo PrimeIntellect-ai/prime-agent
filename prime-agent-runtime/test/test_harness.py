@@ -533,9 +533,13 @@ class HarnessStateTest(unittest.TestCase):
             env["PYTHONPATH"] = str(Path(__file__).resolve().parents[1] / "src")
             workers = []
             for worker in range(8):
+                # Unbounded lock retries: on a loaded runner eight contending writers can outlast the
+                # production ~1s acquire budget; this test proves no update is lost, not that budget.
                 code = (
                     "import time\n"
                     "from pathlib import Path\n"
+                    "import rlm.harness\n"
+                    "rlm.harness._LOCK_ATTEMPTS = 10**9\n"
                     "from rlm.harness import HarnessState\n"
                     f"while not Path({str(start)!r}).exists():\n"
                     "    time.sleep(0.005)\n"

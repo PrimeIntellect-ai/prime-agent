@@ -67,6 +67,17 @@ fn markers_land_on_the_final_user_message() {
         &manifest.markers.switch_b,
     ] {
         let text = std::fs::read_to_string(&marker.file).expect("read session");
+        // The reply under the marker is one short text line, so rows the
+        // product appends at attach cannot push the marker off screen.
+        let last: serde_json::Value =
+            serde_json::from_str(text.lines().last().expect("a last row")).expect("valid row");
+        let blocks = last["message"]["content"].as_array();
+        assert!(
+            last["message"]["role"] == "assistant"
+                && last["message"]["stopReason"] == "stop"
+                && blocks.is_some_and(|blocks| blocks.len() == 1 && blocks[0]["type"] == "text"),
+            "the marker reply is one text block: {last}"
+        );
         let last_user = text
             .lines()
             .rev()

@@ -1497,6 +1497,15 @@ fn the_dock_count_reads_one_liveness_rule_across_many_runs() {
         live, 13,
         "eight live + one stopping + two paused + two done-with-residents"
     );
+    // The dock and the agents view split those live runs on the ONE paused
+    // predicate: the two paused runs never count as running.
+    assert_eq!(
+        FactoryRunCounts::of(&runs),
+        FactoryRunCounts {
+            running: 11,
+            paused: 2
+        }
+    );
     let find = |id: &str| {
         runs.iter()
             .find(|run| run.run_id == id)

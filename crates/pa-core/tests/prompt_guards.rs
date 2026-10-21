@@ -152,6 +152,8 @@ const INTERNAL_HOST_REQUESTS: &[&str] = &[
     // fires them; the model never calls them).
     "bash.completed",
     "bash.consumed",
+    // The factory module reports run milestones; the model never calls it.
+    "factory.progress",
 ];
 
 /// Map one registered host-request type to the prompt token that documents
