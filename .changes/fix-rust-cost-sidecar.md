@@ -1,1 +1,0 @@
-- Large sessions reopen faster: the usage scan is saved when a session closes and reused on the next open.
