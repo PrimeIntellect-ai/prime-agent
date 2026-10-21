@@ -305,10 +305,20 @@ fn pop_superseded_attempts(chat: &mut Vec<ChatEntry>) {
     }
 }
 
-pub(crate) fn join_backfilled_entries(head: &mut Vec<ChatEntry>, seam: BackfillSeam) {
-    if matches!(seam, BackfillSeam::RetryOutcome) {
-        pop_superseded_attempts(head);
+/// How many rows at the end of `head` the rows after it supersede.
+pub(crate) fn superseded_by_seam(head: &[ChatEntry], seam: BackfillSeam) -> usize {
+    match seam {
+        BackfillSeam::Preserve => 0,
+        BackfillSeam::RetryOutcome => head
+            .iter()
+            .rev()
+            .take_while(|entry| is_superseded_attempt_row(entry))
+            .count(),
     }
+}
+
+pub(crate) fn join_backfilled_entries(head: &mut Vec<ChatEntry>, seam: BackfillSeam) {
+    head.truncate(head.len() - superseded_by_seam(head, seam));
 }
 
 pub fn reconstruct(attach: &AttachData) -> Reconstructed {

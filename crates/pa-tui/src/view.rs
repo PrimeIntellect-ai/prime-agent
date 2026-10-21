@@ -116,6 +116,8 @@ pub struct AgentView {
     /// The brand splash never renders while set (operator ruling 2026-09-26, zero layout
     /// shift): an opening non-empty transcript suppresses it.
     pub splash_suppressed: bool,
+    /// An older history page is on its way: a marker row stands above the first entry.
+    pub(crate) older_history_loading: bool,
     pub(crate) scroll_top: usize,
     following: bool,
     /// The transcript-tail offset of the last composed frame: scroll
@@ -314,6 +316,7 @@ impl AgentView {
             show_images: true,
             show_hardware_cursor: false,
             splash_suppressed: false,
+            older_history_loading: false,
             scroll_top: 0,
             following: true,
             last_max_scroll: 0,
@@ -597,6 +600,7 @@ impl AgentView {
         self.entry_heights.clear();
         self.md_caches.borrow_mut().clear();
         self.pending_bash.clear();
+        self.older_history_loading = false;
     }
 
     /// Prepare an in-place mutation of one entry: capture its current

@@ -1121,17 +1121,14 @@ fn wrap_quote(spans: &[Span], width: usize, style: &MarkdownStyle, out: &mut Vec
     }
 }
 
-/// Convert our Line type to ratatui text for rendering. OSC zone markers and OSC 8
-/// hyperlink sequences are stripped: ratatui has no escape-sequence support and would count
-/// their bytes as visible cells (the paint path re-emits them).
+/// Convert our Line type to ratatui text for rendering. Every painted line passes here, so
+/// no escape sequence or control character reaches a cell: ratatui counts their bytes as
+/// visible cells while the terminal executes them (OSC 8 links are re-emitted by the paint
+/// backend from the frame's link ranges).
 #[must_use]
 pub fn to_ratatui_line(line: &Line) -> rt::Line<'static> {
-    let mut stripped = line.clone();
-    crate::osc133::strip(&mut stripped);
-    crate::hyperlinks::strip_osc8(&mut stripped);
-    // TS `applyLineResets` normalizes every painted line right before the differential
-    // paint (Thai/Lao AM decomposition, tabs to three spaces).
-    let spans: Vec<rt::Span<'static>> = stripped
+    // TS `applyLineResets` normalizes every painted line right before the differential paint.
+    let spans: Vec<rt::Span<'static>> = line
         .iter()
         .map(|s| rt::Span::styled(crate::width::normalize_terminal_output(&s.content), s.style))
         .collect();
