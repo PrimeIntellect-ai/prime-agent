@@ -250,7 +250,6 @@ impl RlmSubagentHost for SupervisorChildSessions {
                 if watcher_record.lock().await.closed_by_parent {
                     return;
                 }
-                watcher_record.lock().await.prompt_admitted = true;
                 if let Err(error) = watcher_this
                     .prompt_child(
                         &child_active_session_id,
@@ -286,15 +285,14 @@ impl RlmSubagentHost for SupervisorChildSessions {
                             .kill_child(&child_active_session_id, ChildCloseReason::Killed)
                             .await;
                         watcher_this
-                            .settle_failed(
-                                &watcher_record,
-                                format!("{retry_error:#}"),
-                                super::lifecycle::FailedArm::Prompt,
-                            )
+                            .settle_failed(&watcher_record, format!("{retry_error:#}"))
                             .await;
                         return;
                     }
                 }
+                // The worker accepted the task: from here an idle read is a
+                // finished run, never the pre-prompt idle worker.
+                watcher_record.lock().await.prompt_admitted = true;
                 watcher_this.watch_child_settle(&watcher_record).await;
             });
             Ok(RlmSpawnHandle {
