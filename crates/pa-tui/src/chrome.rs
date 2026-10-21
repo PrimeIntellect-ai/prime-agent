@@ -151,6 +151,9 @@ pub struct ActivityDock {
     /// only): fully terminal runs never inflate the group, exactly like
     /// the shells group's running-only scoping.
     pub factory_runs: Vec<String>,
+    /// The same live runs counted running vs paused (the collapsed count
+    /// and its paused cluster).
+    pub factory_counts: crate::factory_view::FactoryRunCounts,
     /// Whether the factory group renders at all: the daemon's
     /// `factory_activity` advertisement (the factory's opt-in gate —
     /// `factory.enabled`, off by default). A daemon without the lane
@@ -742,7 +745,7 @@ pub fn render_activity_dock_segments(
         return (lines, segments);
     }
     // The status-dot vocabulary (`● running / ◐ idle / ○ inactive`): the half
-    // circle marks waiting work; only the heartbeat pause keeps a dot.
+    // circle marks waiting work; only the heartbeat and factory pauses keep a dot.
     let cluster = |text: &str, color: ThemeColor| {
         vec![
             theme.fg_span(ThemeColor::Dim, " · ".to_string()),
@@ -753,7 +756,7 @@ pub fn render_activity_dock_segments(
     // children and nested descendants together — ONE number.
     let running = dock.subagents_running_direct + dock.subagents_running_nested;
     let shells = dock.shells.len();
-    let factory_runs = dock.factory_runs.len();
+    let factory = dock.factory_counts;
     let mut line = vec![Span::raw(" ")];
     let mut segments: Vec<ActivityDockSegment> = Vec::new();
     for (index, group) in dock.groups().into_iter().enumerate() {
@@ -794,13 +797,21 @@ pub fn render_activity_dock_segments(
                 activity_color(shells),
                 format!("▸ {} shell{}", shells, if shells == 1 { "" } else { "s" }),
             )),
-            // The factory page's indicator counts live runs only
-            // (running, stopping, paused): done and failed runs stay as
-            // panels inside the factory page, never in the indicator.
-            ActivityGroup::Factory => line.push(theme.fg_span(
-                activity_color(factory_runs),
-                format!("⚙ {factory_runs} factory"),
-            )),
+            // The factory indicator counts the running runs, and the paused
+            // ones in their own amber cluster (the heartbeats' grammar): done
+            // and failed runs stay as panels inside the factory page.
+            ActivityGroup::Factory => {
+                line.push(theme.fg_span(
+                    activity_color(factory.running),
+                    format!("⚙ {} factory", factory.running),
+                ));
+                if factory.paused > 0 {
+                    line.extend(cluster(
+                        &format!("◐ {} paused", factory.paused),
+                        ThemeColor::Warning,
+                    ));
+                }
+            }
             ActivityGroup::Goal => line.push(goal_span(dock, theme)),
         }
         let end = line.iter().map(|s| str_width(&s.content)).sum();
@@ -904,7 +915,7 @@ fn render_expanded_dock_row(
             theme,
             width,
             ("⚙", "factory"),
-            dock.factory_runs.len(),
+            dock.factory_counts.running,
             &dock.factory_runs,
         ),
         ActivityGroup::Goal => vec![Span::raw(" "), goal_span(dock, theme)],

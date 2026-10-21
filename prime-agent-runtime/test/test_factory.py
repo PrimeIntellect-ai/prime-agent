@@ -42,8 +42,8 @@ races) plus the accepted review findings from both:
   finding: the name was dropped, so children always got the generated
   label);
 - milestone notices go to the host as validated "factory.progress"
-  payloads exactly once per kind per run, and a dead bridge leaves the
-  milestone in the ledger instead of wedging the run.
+  payloads once per kind per run (resume re-arms the pause notice), and a
+  dead bridge leaves the milestone in the ledger instead of wedging the run.
 """
 
 from __future__ import annotations
@@ -4345,12 +4345,12 @@ class FactoryExecutorTest(_ExecutorTestCase):
         self.assertEqual(self.sleeps.sleeps[sleep_mark:], [1.0])
 
     @async_test
-    async def test_repeated_pause_records_every_milestone_in_the_ledger(self) -> None:
-        # A run that pauses, resumes, and pauses again must record the second
-        # pause in the ledger even though the parent notice fires once per
-        # kind: status() is the only reader of the repeat.
+    async def test_a_pause_after_resume_notifies_the_parent_again(self) -> None:
+        # A run that pauses, resumes, and pauses again (the escalate retry
+        # flow) records both pauses in the ledger AND tells the parent about
+        # both: resume() re-arms the paused notice.
         # a fails once and its re-admitted retry succeeds, so the second
-        # pause is b's own failure -- the milestone the repeat must record.
+        # pause is b's own failure.
         self.host.child_outcomes["child-1"] = {"status": "error", "error": "a boom"}
         self.host.outcomes["b"] = {"status": "error", "error": "b boom"}
         self.store_machine(
@@ -4371,16 +4371,12 @@ class FactoryExecutorTest(_ExecutorTestCase):
         second = await self.settle(result)
         self.assertEqual(second["state"], "paused")
         self.assertEqual(self.executor._runs[result["run_id"]].pause_reason, "b boom")
-        # the second pause is in the ledger with its own event, notice-free
         milestones = [event for event in second["events"] if event["kind"] == "milestone"]
         self.assertEqual([event["milestone"] for event in milestones], ["paused", "paused"])
         self.assertIn("a boom", milestones[0]["detail"])
         self.assertIn("b boom", milestones[1]["detail"])
-        self.assertEqual(self.host.notice_kinds(), ["paused"])  # one notice per kind
-        # the announced pause keeps "shown"; the repeat (no second notice)
-        # was only ever read through status(), so it reads "delivered"
-        self.assertEqual(milestones[0]["stage"], "shown")
-        self.assertEqual(milestones[1]["stage"], "delivered")
+        self.assertEqual(self.host.notice_kinds(), ["paused", "paused"])
+        self.assertEqual([event["stage"] for event in milestones], ["shown", "shown"])
 
     # -- retries --------------------------------------------------------------------
 
