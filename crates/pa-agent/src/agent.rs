@@ -17,7 +17,7 @@ use crate::agent_loop::{
 use crate::stream::StreamFn;
 use crate::types::{
     AgentEvent, AgentMessage, AgentTool, ImageContent, Model, ThinkingLevel, ToolExecutionMode,
-    Usage,
+    ToolProgressCadence, Usage,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -102,6 +102,9 @@ pub struct AgentOptions {
     pub follow_up_mode: Option<QueueMode>,
     pub session_id: Option<String>,
     pub tool_execution: Option<ToolExecutionMode>,
+    /// Heartbeat cadence for in-flight tool calls; `None` keeps the 60s
+    /// default tick.
+    pub tool_progress: Option<ToolProgressCadence>,
 }
 
 struct MutableAgentState {
@@ -345,6 +348,7 @@ struct AgentInner {
     model_override: Mutex<Option<AgentModelOverride>>,
     session_id: Option<String>,
     tool_execution: ToolExecutionMode,
+    tool_progress: ToolProgressCadence,
 }
 
 impl AgentInner {
@@ -406,7 +410,8 @@ impl AgentInner {
             }
             AgentEvent::AgentStart
             | AgentEvent::TurnStart
-            | AgentEvent::ToolExecutionUpdate { .. } => {}
+            | AgentEvent::ToolExecutionUpdate { .. }
+            | AgentEvent::ToolExecutionProgress { .. } => {}
         }
 
         let Some(signal) = self.current_signal() else {
@@ -568,6 +573,7 @@ impl AgentInner {
         config.get_follow_up_messages = Some(follow_up);
         config.get_continuation_messages = continuation;
         config.tool_execution = self.tool_execution;
+        config.tool_progress = self.tool_progress;
         config.before_tool_call.clone_from(&self.before_tool_call);
         config.after_tool_call.clone_from(&self.after_tool_call);
         config
@@ -797,6 +803,7 @@ impl Agent {
             tool_execution: options
                 .tool_execution
                 .unwrap_or(ToolExecutionMode::Parallel),
+            tool_progress: options.tool_progress.unwrap_or_default(),
         });
         Agent { inner }
     }

@@ -225,6 +225,8 @@ fn entry_base_mut(entry: &mut FileEntry) -> Option<&mut EntryBase> {
     match entry {
         FileEntry::Header { .. } | FileEntry::Unknown { .. } => None,
         FileEntry::Message { base, .. }
+        | FileEntry::ToolStarted { base, .. }
+        | FileEntry::ToolProgress { base, .. }
         | FileEntry::ThinkingLevelChange { base, .. }
         | FileEntry::ServiceTierChange { base, .. }
         | FileEntry::ModelChange { base, .. }
