@@ -109,6 +109,9 @@ pub struct AgentLoopConfig {
     pub get_follow_up_messages: Option<PollMessagesFn>,
     pub get_continuation_messages: Option<GetContinuationMessagesFn>,
     pub tool_execution: ToolExecutionMode,
+    /// Heartbeat cadence for in-flight tool calls (start-side trace
+    /// visibility for long calls); defaults to a 60s tick.
+    pub tool_progress: crate::types::ToolProgressCadence,
     pub before_tool_call: Option<BeforeToolCallFn>,
     pub after_tool_call: Option<AfterToolCallFn>,
 }
@@ -135,6 +138,7 @@ impl AgentLoopConfig {
             get_follow_up_messages: None,
             get_continuation_messages: None,
             tool_execution: ToolExecutionMode::Parallel,
+            tool_progress: crate::types::ToolProgressCadence::default(),
             before_tool_call: None,
             after_tool_call: None,
         }

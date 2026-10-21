@@ -4,7 +4,7 @@ use serde_json::Value;
 
 use super::lineage::{depth_consistent_parent, is_subagent_descendant};
 use super::{
-    session_model, session_title, AgentsViewRow, AgentsViewScope, Rollup, RowKind,
+    session_model, session_title, AgentsViewRow, AgentsViewScope, Rollup, RowKind, SessionActivity,
     SUMMARY_ROW_PREFIX,
 };
 use crate::agents_view_state::{
@@ -27,6 +27,8 @@ struct BaseRow {
     descendant_cost: f64,
     descendant_count: usize,
     running_subagent_count: usize,
+    /// The session's own shells and factory runs (never subtree-aggregated).
+    activity: SessionActivity,
     record: usize,
     search_score: Option<f64>,
 }
@@ -40,6 +42,7 @@ pub(crate) fn build_rows<S: std::hash::BuildHasher + Default>(
     expanded: &HashSet<String, S>,
     program_shown: &HashSet<String, S>,
     rollups: &HashMap<String, Rollup, S>,
+    activity: &HashMap<String, SessionActivity, S>,
     anchor: Option<&str>,
 ) -> Vec<AgentsViewRow> {
     let now = now_ms();
@@ -96,6 +99,12 @@ pub(crate) fn build_rows<S: std::hash::BuildHasher + Default>(
         );
         let rollup = rollups.get(&record.identity).copied().unwrap_or_default();
         let model = session_model(&summary);
+        let activity = summary
+            .get("activeSessionId")
+            .and_then(Value::as_str)
+            .and_then(|active| activity.get(active))
+            .copied()
+            .unwrap_or_default();
         base.push(BaseRow {
             kind,
             section: record.section,
@@ -113,6 +122,7 @@ pub(crate) fn build_rows<S: std::hash::BuildHasher + Default>(
             descendant_cost: rollup.descendants,
             descendant_count: rollup.descendant_count,
             running_subagent_count: 0,
+            activity,
             summary,
             record: position,
         });
@@ -244,8 +254,8 @@ struct RowForest<'a, S: std::hash::BuildHasher + Default> {
 }
 
 impl<S: std::hash::BuildHasher + Default> RowForest<'_, S> {
-    /// Emit one row, then its ONE summary line, then its expanded children: the line expands to
-    /// the FULL roster in one group, the running children first.
+    /// Emit one row, then its subagents block, then its shells and factory-run lines (after the
+    /// block, so an expanded summary line stays directly above its children).
     fn emit(
         &self,
         index: usize,
@@ -255,9 +265,21 @@ impl<S: std::hash::BuildHasher + Default> RowForest<'_, S> {
     ) {
         let row = &self.base[index];
         rows.push(agents_row(row, depth, parent_identity));
-        let Some(children) = self.children_by_parent.get(&index) else {
-            return;
-        };
+        if let Some(children) = self.children_by_parent.get(&index) {
+            self.emit_subagents(row, children, depth, rows);
+        }
+        rows.extend(activity_rows(row, depth + 1));
+    }
+
+    /// The ONE summary line, then its expanded children: the line expands to the FULL roster in
+    /// one group, the running children first.
+    fn emit_subagents(
+        &self,
+        row: &BaseRow,
+        children: &[usize],
+        depth: usize,
+        rows: &mut Vec<AgentsViewRow>,
+    ) {
         if children.is_empty() {
             return;
         }
@@ -270,7 +292,7 @@ impl<S: std::hash::BuildHasher + Default> RowForest<'_, S> {
         if !is_expanded {
             return;
         }
-        let mut sorted = children.clone();
+        let mut sorted = children.to_vec();
         sorted.sort_by(|a, b| compare_base(&self.base[*a], &self.base[*b], self.anchor));
         // One group, one order (the operator's contract): the running rows first — the
         // partition is explicit rather than left to the comparator's section ordering.
@@ -328,7 +350,7 @@ fn agents_row(row: &BaseRow, depth: usize, parent_identity: Option<&str>) -> Age
 }
 
 /// The subagents line under one agent (the operator's 2026-09-28 one-dropdown directive):
-/// `"{total} subagents ({running} running)"` — `total` = the FULL descendant roster, `running` =
+/// `"{total} subagents · {running} running"` — `total` = the FULL descendant roster, `running` =
 /// the running subset — expanding to the whole roster in one group, the running rows first (a
 /// sanctioned divergence: TS titles one `"{n} subagents running"` line). The line reuses its
 /// parent's summary so the open action and selection keys resolve the parent; the `cost` cell is
@@ -342,7 +364,10 @@ fn merged_summary_row(parent: &BaseRow, depth: usize, expanded: bool) -> AgentsV
         identity: format!("{SUMMARY_ROW_PREFIX}{}", parent.identity),
         parent_identity: Some(parent.identity.clone()),
         summary: parent.summary.clone(),
-        title: format!("{total} subagents ({running} running)"),
+        title: format!(
+            "{total} subagent{} \u{b7} {running} running",
+            if total == 1 { "" } else { "s" }
+        ),
         model: String::new(),
         cost: parent.descendant_cost,
         age: String::new(),
@@ -352,6 +377,50 @@ fn merged_summary_row(parent: &BaseRow, depth: usize, expanded: bool) -> AgentsV
         expanded,
         has_spawn_code: false,
     }
+}
+
+/// The node's own `$ N shells` and `⚙ N factory runs` lines, each only when its count is nonzero.
+/// Like the summary line they reuse the parent's summary, so the open action resolves the parent.
+fn activity_rows(parent: &BaseRow, depth: usize) -> Vec<AgentsViewRow> {
+    let line = |kind: RowKind, prefix: &str, title: String| AgentsViewRow {
+        kind,
+        section: parent.section,
+        identity: format!("{prefix}{}", parent.identity),
+        parent_identity: Some(parent.identity.clone()),
+        summary: parent.summary.clone(),
+        title,
+        model: String::new(),
+        cost: 0.0,
+        age: String::new(),
+        depth,
+        descendant_count: 0,
+        running_subagent_count: 0,
+        expanded: false,
+        has_spawn_code: false,
+    };
+    let SessionActivity {
+        shells,
+        factory_runs,
+    } = parent.activity;
+    let mut rows = Vec::new();
+    if shells > 0 {
+        rows.push(line(
+            RowKind::Shells,
+            super::SHELLS_ROW_PREFIX,
+            format!("$ {shells} shell{}", if shells == 1 { "" } else { "s" }),
+        ));
+    }
+    if factory_runs > 0 {
+        rows.push(line(
+            RowKind::FactoryRuns,
+            super::FACTORY_ROW_PREFIX,
+            format!(
+                "\u{2699} {factory_runs} factory run{}",
+                if factory_runs == 1 { "" } else { "s" }
+            ),
+        ));
+    }
+    rows
 }
 
 /// The summary's `spawnCode` is a string with a non-blank trim — the ONE predicate and the

@@ -733,7 +733,7 @@ fn goal_event_push(seconds: u64) -> Value {
 fn a_roster_push_alone_remounts_the_dock_count_and_the_title_cost() {
     let steps = vec![
         HeadlessStep::WaitRender {
-            needle: "\u{25c6} 1 subagents".to_string(),
+            needle: "\u{25c6} 1 subagent".to_string(),
             timeout_ms: 5_000,
         },
         HeadlessStep::WaitRender {
@@ -748,7 +748,7 @@ fn a_roster_push_alone_remounts_the_dock_count_and_the_title_cost() {
     let outcome = run_plan_with_roster(steps, None, None, Vec::new(), pushes);
     let last = outcome.frames.last().cloned().unwrap_or_default();
     assert!(
-        last.contains("\u{25c6} 1 subagents") && last.contains("$0.42"),
+        last.contains("\u{25c6} 1 subagent") && last.contains("$0.42"),
         "the roster push repainted the dock's running count and the title's family cost:\n{}",
         outcome.frames.join("\n")
     );
@@ -805,7 +805,7 @@ fn d_the_attach_mounts_the_snapshot_counts_in_its_first_frame_and_a_switch_follo
         },
         HeadlessStep::Submit("/new".to_string()),
         HeadlessStep::WaitRender {
-            needle: "\u{25c6} 1 subagents".to_string(),
+            needle: "\u{25c6} 1 subagent".to_string(),
             timeout_ms: 5_000,
         },
     ];
@@ -821,7 +821,7 @@ fn d_the_attach_mounts_the_snapshot_counts_in_its_first_frame_and_a_switch_follo
     let first_count = outcome
         .frames
         .iter()
-        .position(|frame| frame.contains("\u{25c6} 1 subagents"));
+        .position(|frame| frame.contains("\u{25c6} 1 subagent"));
     let first_note = outcome
         .frames
         .iter()

@@ -15,6 +15,14 @@ impl AgentsViewMode {
     ) -> (Vec<Line>, Option<(usize, usize)>) {
         // The frame height feeds the page step (TS reads `ui.terminal.rows` live at key time).
         self.last_height = height;
+        if let Some(view) = self.shell_view.as_mut() {
+            view.set_viewport_rows(height);
+            self.click_rows.clear();
+            self.hover_row = None;
+            let mut lines = view.render(&self.theme, width, &self.keybindings);
+            lines.resize_with(height, Vec::new);
+            return (lines, None);
+        }
         let mut lines: Vec<Line> = Vec::new();
         // The splash counts agent-kind rows only — nested subagent and summary rows never
         // inflate the header.
@@ -275,6 +283,7 @@ impl AgentsViewMode {
         enum DisplayItem<'a> {
             Spacer,
             Heading(Section),
+            ShellsHeading(usize),
             Row(usize, &'a AgentsViewRow),
             /// One note line of the selected row's expansion; one item per
             /// line so the viewport clips at line granularity.
@@ -317,6 +326,20 @@ impl AgentsViewMode {
         // While a query is active the list is a ranked picker: one flat, relevance-ordered run
         // of hits (per-row icons carry the status), not status section blocks.
         if self.query.trim().is_empty() {
+            let shells: Vec<(usize, &AgentsViewRow)> = self
+                .rows
+                .iter()
+                .enumerate()
+                .filter(|(_, row)| row.kind == RowKind::PersistentShell)
+                .collect();
+            if !shells.is_empty() {
+                display.push(DisplayItem::ShellsHeading(shells.len()));
+                display.extend(
+                    shells
+                        .into_iter()
+                        .map(|(index, row)| DisplayItem::Row(index, row)),
+                );
+            }
             for (section, count) in &counts {
                 if *count == 0 {
                     continue;
@@ -423,6 +446,12 @@ impl AgentsViewMode {
                         truncate_text(&format!("{} ({count})", section_title(*section)), width),
                     )]);
                 }
+                DisplayItem::ShellsHeading(count) => {
+                    lines.push(vec![self.theme.fg(
+                        ThemeColor::Muted,
+                        truncate_text(&format!("Persistent shells ({count})"), width),
+                    )]);
+                }
                 DisplayItem::Row(index, row) => {
                     // The row's frame position carries the hover (operator directive
                     // 2026-09-29): the light band rides the row the mouse rests on.
@@ -489,7 +518,7 @@ impl AgentsViewMode {
         let theme = &self.theme;
         // A muted, truncated program line on the tool-panel background; never selection-painted.
         if row.kind == RowKind::Code {
-            let text = format!("{}  {}", "  ".repeat(row.depth), row.title);
+            let text = format!("{}  {}", depth_indent(row.depth), row.title);
             let line = pad_line(
                 vec![theme.fg(ThemeColor::Muted, truncate_text(&text, width))],
                 width,
@@ -498,14 +527,23 @@ impl AgentsViewMode {
         }
         let selected = Some(row.identity.as_str())
             == self.rows.get(self.selected).map(|r| r.identity.as_str());
+        // The activity lines' glyph sits in the summary line's marker slot; no cost cell.
+        if matches!(row.kind, RowKind::Shells | RowKind::FactoryRuns) {
+            let text = format!("{}{}", depth_indent(row.depth), row.title);
+            let line = pad_line(vec![crate::Span::raw(truncate_text(&text, width))], width);
+            return finish_session_row(theme, line, selected, hovered, width);
+        }
         if row.kind == RowKind::SubagentSummary {
-            let indent = "  ".repeat(row.depth);
+            let indent = depth_indent(row.depth);
             let marker = if row.expanded { "\u{25be}" } else { "\u{25b8}" };
             let text = format!("{indent}{marker} {}", row.title);
             // BOTH summary lines bill the descendant tree in the Cost column (operator directive
             // 2026-09-26: an all-done tree renders no running line, so the inactive line carries
             // the same aggregate; deliberate divergence from TS, which renders no cost there).
-            if crate::agents_view_forest::is_summary_row_identity(&row.identity) {
+            if row
+                .identity
+                .starts_with(crate::agents_view_forest::SUMMARY_ROW_PREFIX)
+            {
                 let zone = layout.name_width + 2 + layout.model_width;
                 let title = crate::agents_view_state::truncate_text(&text, zone);
                 let pad = zone.saturating_sub(str_width(&title));
@@ -533,6 +571,7 @@ impl AgentsViewMode {
             return finish_session_row(theme, line, selected, hovered, width);
         }
         let icon = match row.section {
+            _ if row.kind == RowKind::PersistentShell => "$",
             Section::Running => ["\u{25c7}", "\u{25c8}", "\u{25c6}", "\u{25c8}"][self.pulse % 4],
             _ => "\u{2022}",
         };
@@ -544,7 +583,12 @@ impl AgentsViewMode {
         let icon_style = theme
             .fg_style(icon_color)
             .add_modifier(ratatui::style::Modifier::BOLD);
-        let indent = "  ".repeat(row.depth);
+        // The indent clips to the name column after the icon prefix, so a deep row keeps the
+        // model and cost/age columns in place.
+        let indent = truncate_text(
+            &depth_indent(row.depth),
+            layout.name_width.saturating_sub(2),
+        );
         let indent_width = str_width(&indent);
         let mut line: Line = Vec::new();
         if indent_width > 0 {
@@ -645,11 +689,7 @@ impl AgentsViewMode {
             return Vec::new();
         };
         // Keep room for a wide character when nesting exceeds the pane.
-        let indent_width = row
-            .depth
-            .saturating_add(1)
-            .saturating_mul(2)
-            .min(width.saturating_sub(2));
+        let indent_width = (str_width(&depth_indent(row.depth)) + 2).min(width.saturating_sub(2));
         let indent = " ".repeat(indent_width);
         let dim = self.theme.fg_style(ThemeColor::Dim);
         let wrap_width = width.saturating_sub(str_width(&indent)).max(1);
@@ -853,6 +893,12 @@ pub(super) fn finish_session_row(
         theme.paint_hover_band(&mut line, 0..width);
     }
     line
+}
+
+/// Every row's leading indent: one step per nesting level, so a row's child lines sit a full
+/// step past its `• ` prefix.
+fn depth_indent(depth: usize) -> String {
+    " ".repeat(4 * depth)
 }
 
 pub(super) fn cell(value: &str, width: usize) -> String {

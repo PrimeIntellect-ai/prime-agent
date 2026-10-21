@@ -3,7 +3,7 @@
 //! structured-log poll, the dismissal, and the panel render).
 use super::{
     ancestor_session_ids, has_session_children, scope_ancestors, AgentsViewMode, AgentsViewRow,
-    Line, OpenedRow, PathBuf, RowKind, SessionSelection, Value, ANCHOR_LOADING_HINT,
+    Line, OpenedRow, PathBuf, RowKind, SessionPanel, SessionSelection, Value, ANCHOR_LOADING_HINT,
 };
 
 impl AgentsViewMode {
@@ -19,8 +19,13 @@ impl AgentsViewMode {
             RowKind::SubagentSummary => self.toggle_subagent_list(&row),
             RowKind::Subagent => self.open_subagent_row(&row),
             RowKind::Agent => self.open_row(&row, Vec::new()),
+            RowKind::PersistentShell => self.open_persistent_shell(&row),
             // A program row is read-only context: the open action never fires on it.
             RowKind::Code => {}
+            RowKind::Shells => {
+                self.open_activity_line(&row, SessionPanel::Shells { shell_id: None });
+            }
+            RowKind::FactoryRuns => self.open_activity_line(&row, SessionPanel::FactoryRuns),
         }
     }
 
@@ -30,10 +35,13 @@ impl AgentsViewMode {
         let row = self.rows.get(self.selected)?;
         let target = match row.kind {
             RowKind::Agent => row.identity.as_str(),
-            RowKind::SubagentSummary | RowKind::Subagent => row.parent_identity.as_deref()?,
+            RowKind::SubagentSummary
+            | RowKind::Subagent
+            | RowKind::Shells
+            | RowKind::FactoryRuns => row.parent_identity.as_deref()?,
             // Unreachable (code rows are not selectable), exhaustive by
-            // the match rule.
-            RowKind::Code => return None,
+            // the match rule; a shell row has no subagents.
+            RowKind::Code | RowKind::PersistentShell => return None,
         };
         self.rows.iter().find(|row| {
             row.kind == RowKind::SubagentSummary && row.parent_identity.as_deref() == Some(target)
@@ -108,6 +116,21 @@ impl AgentsViewMode {
             Some("Child session is unavailable; opened its parent instead".to_string()),
             Some(row.identity.clone()),
         );
+    }
+
+    /// Open an activity line's node with the line's panel requested: the node's ancestors
+    /// re-expand on return, and the selection restores onto the line.
+    fn open_activity_line(&mut self, row: &AgentsViewRow, panel: SessionPanel) {
+        let node_parent = self
+            .rows
+            .iter()
+            .find(|node| Some(node.identity.as_str()) == row.parent_identity.as_deref())
+            .and_then(|node| node.parent_identity.clone());
+        let ancestors = ancestor_session_ids(&self.rows, node_parent.as_deref());
+        self.open_row(row, ancestors);
+        if let Some(opened) = self.opened.as_mut() {
+            opened.panel = Some(panel);
+        }
     }
 
     /// The top-level ancestor row of a nested row.
@@ -207,6 +230,7 @@ impl AgentsViewMode {
                 .and_then(Value::as_str)
                 .filter(|cwd| !cwd.is_empty())
                 .map(str::to_string),
+            panel: None,
         });
         self.running = false;
     }
@@ -251,6 +275,7 @@ impl AgentsViewMode {
                 .and_then(Value::as_str)
                 .filter(|cwd| !cwd.is_empty())
                 .map(str::to_string),
+            panel: None,
         });
         self.running = false;
     }

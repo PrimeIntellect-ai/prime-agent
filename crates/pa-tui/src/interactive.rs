@@ -78,12 +78,27 @@ pub enum SessionSelection {
     Resume(PathBuf),
 }
 
+/// The session panel an agents-view activity line mounts when its session opens; the panel's close
+/// returns to the agents view.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SessionPanel {
+    /// The Bash panel, on `shell_id`'s row when a persistent shell row opened it.
+    Shells {
+        shell_id: Option<String>,
+    },
+    FactoryRuns,
+}
+
 /// Cap on the exit-path telemetry flush (the `tui exit` event's bound):
 /// the analytics sink alone allows up to 1.5s, so an exit-path event is
 /// dropped rather than awaited past the exit-within-1s contract. The
 /// interactive loop and the composition root's exit paths share this one
 /// bound.
 pub const TELEMETRY_EXIT_TIMEOUT_MS: u64 = 500;
+
+/// The kernel activity poll cadence: the session's shells/factory refresh and the agents view's
+/// activity-line counts and persistent shells list.
+pub(crate) const ACTIVITY_POLL_INTERVAL: Duration = Duration::from_secs(2);
 
 /// Explicit model selection carried into every `create` config: the CLI
 /// `--provider`/`--model`/`--api-key`/`--thinking` flags, authoritative end-to-end — the
