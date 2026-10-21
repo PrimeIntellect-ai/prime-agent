@@ -297,6 +297,18 @@ pub fn entry_display_text<S: std::hash::BuildHasher + Default>(
                 color(ThemeColor::Dim, "]".to_string()),
             ]
         }
+        FileEntry::ToolStarted { payload, .. } => vec![color(
+            ThemeColor::Dim,
+            format!("[tool started: {}]", payload.tool_name),
+        )],
+        FileEntry::ToolProgress { payload, .. } => vec![color(
+            ThemeColor::Dim,
+            format!(
+                "[tool running: {} ({}s)]",
+                payload.tool_name,
+                payload.elapsed_ms / 1000
+            ),
+        )],
         FileEntry::Header { .. }
         | FileEntry::SessionState { .. }
         | FileEntry::GitState { .. }
