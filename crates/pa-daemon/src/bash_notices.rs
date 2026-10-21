@@ -1,44 +1,43 @@
-//! The daemon worker's bash-notice seams: the notice types, the TS
-//! validation, and the handler registration live in pa-core
-//! (`session_engine::bash_notices`); the worker keeps its queue-lane
-//! sinks here.
+//! The daemon worker's kernel-notice seams (bash completions and factory
+//! progress): the notice types, the validation, and the handler
+//! registration live in pa-core (`session_engine::bash_notices`); the
+//! worker keeps its queue-lane sinks here.
 
 use pa_core::kernel::shared::HostRequestHandlers;
 
 use crate::agent_engine::AgentSessionEngine;
 
 impl AgentSessionEngine {
-    /// Wire the worker's bash-completion queue seams (called once at
+    /// Wire the worker's kernel-notice queue seams (called once at
     /// construction, before the first session build reads them).
     ///
     /// # Panics
     ///
     /// Panics when a sink mutex is poisoned (a holder panicked while
-    /// holding the completion or consumed-sink lock).
-    pub fn set_bash_notice_sinks(
+    /// holding the notice or consumed-sink lock).
+    pub fn set_kernel_notice_sinks(
         &self,
-        completion: crate::engine::BashCompletionSink,
+        notice: crate::engine::KernelNoticeSink,
         consumed: crate::engine::BashConsumedSink,
     ) {
         *self
-            .bash_completion_sink
+            .kernel_notice_sink
             .lock()
-            .expect("bash completion sink lock") = Some(completion);
+            .expect("kernel notice sink lock") = Some(notice);
         *self
             .bash_consumed_sink
             .lock()
             .expect("bash consumed sink lock") = Some(consumed);
     }
 
-    /// The `bash.completed`/`bash.consumed` kernel host handlers (TS
-    /// `createAsyncBashCompletionHostHandler`/`createAsyncBashConsumedHostHandler`).
-    /// Registered only when both seams are wired — no worker queue leaves the requests
-    /// honestly unavailable.
-    pub(crate) fn register_bash_notice_host_handlers(&self, handlers: &mut HostRequestHandlers) {
-        let Some(completion) = self
-            .bash_completion_sink
+    /// The `bash.completed`/`bash.consumed`/`factory.progress` kernel host
+    /// handlers. Registered only when both seams are wired — no worker queue
+    /// leaves the requests honestly unavailable.
+    pub(crate) fn register_kernel_notice_host_handlers(&self, handlers: &mut HostRequestHandlers) {
+        let Some(notice) = self
+            .kernel_notice_sink
             .lock()
-            .expect("bash completion sink lock")
+            .expect("kernel notice sink lock")
             .clone()
         else {
             return;
@@ -51,8 +50,8 @@ impl AgentSessionEngine {
         else {
             return;
         };
-        pa_core::session_engine::bash_notices::register_bash_notice_host_handlers(
-            completion, consumed, handlers,
+        pa_core::session_engine::bash_notices::register_kernel_notice_host_handlers(
+            notice, consumed, handlers,
         );
     }
 }

@@ -480,21 +480,43 @@ impl Drop for Launch {
     }
 }
 
-/// The left-arrow opens the agents view; the populate needle is the
-/// completed `Inactive (N)` roster heading in the decoded screen (the
-/// heading count repaints as cell diffs, so the byte stream cannot see it
-/// — the screen model does). The count includes the TUI's own fresh
-/// session (rendered as one more inactive row).
+/// The left-arrow opens the agents view; populate completes when the
+/// roster settles (see [`roster_settled`]; the heading count repaints as
+/// cell diffs, so the byte stream cannot see it — the screen model does).
+/// The count includes the TUI's own fresh session (rendered as one more
+/// inactive row).
 fn agents_view_populate(ctx: &RunCtx, child: &mut PtyChild) -> anyhow::Result<f64> {
-    let needle = format!("Inactive ({})", ctx.manifest.markers.roster_inactive + 1);
     let started = Instant::now();
     child.write(b"\x1b[D")?;
-    child.wait_screen_contains(
-        &needle,
+    wait_roster(ctx, child, ctx.manifest.markers.roster_inactive + 1)?;
+    Ok(started.elapsed().as_secs_f64() * 1000.0)
+}
+
+/// The agents view opens on its first catalog page: the `Inactive (N)`
+/// heading counts the loaded rows and the `M older sessions not loaded`
+/// footer the rest, so the page is settled once both account for every
+/// expected session. An unpaged roster has no footer.
+fn roster_settled(screen: &str, expected: usize) -> bool {
+    let loaded = screen
+        .split_once("Inactive (")
+        .and_then(|(_, rest)| rest.split_once(')'))
+        .and_then(|(number, _)| number.parse::<usize>().ok());
+    let unloaded = screen
+        .lines()
+        .find_map(|line| {
+            let (number, _) = line.trim_start().split_once(" older sessions not loaded")?;
+            number.parse::<usize>().ok()
+        })
+        .unwrap_or(0);
+    loaded.is_some_and(|loaded| loaded + unloaded == expected)
+}
+
+fn wait_roster(ctx: &RunCtx, child: &mut PtyChild, expected: usize) -> anyhow::Result<Instant> {
+    child.wait_screen(
         "the agents view roster",
         Instant::now() + ctx.liveness,
-    )?;
-    Ok(started.elapsed().as_secs_f64() * 1000.0)
+        |screen| roster_settled(screen, expected),
+    )
 }
 
 /// From the opened session A: open the agents view, uniquely filter to
@@ -503,15 +525,11 @@ fn agents_view_populate(ctx: &RunCtx, child: &mut PtyChild) -> anyhow::Result<f6
 /// letter z), so Enter always drills THE row.
 fn switch_to_target_b(ctx: &RunCtx, child: &mut PtyChild) -> anyhow::Result<f64> {
     child.write(b"\x1b[D")?;
-    // Wait the completed roster before typing: keys racing the scan flood
+    // Wait the settled roster before typing: keys racing the scan flood
     // were the CI-runner failure (the query echoed nothing). The resumed
-    // session A renders as one IDLE row, so the completed heading counts
-    // the remaining sessions.
-    child.wait_screen_contains(
-        &format!("Inactive ({})", ctx.manifest.markers.roster_inactive - 1),
-        "the agents view roster",
-        Instant::now() + ctx.liveness,
-    )?;
+    // session A renders as one IDLE row, so the settled roster counts the
+    // remaining sessions.
+    wait_roster(ctx, child, ctx.manifest.markers.roster_inactive - 1)?;
     child.write(ctx.manifest.markers.switch_query.as_bytes())?;
     // The echoed query does not contain the row's "switch" prefix, so this
     // needle is the picker's result row, not the echo.
@@ -762,7 +780,7 @@ fn needle_of(scenario: Scenario, ctx: &RunCtx) -> String {
             "the attach pill (the tray's session-usage row)".to_string()
         }
         Scenario::AgentsView | Scenario::AgentsViewWarm => format!(
-            "the completed roster heading (Inactive ({}))",
+            "the settled roster (Inactive + not-yet-loaded = {})",
             ctx.manifest.markers.roster_inactive + 1
         ),
         Scenario::OpenSession => {
@@ -1040,5 +1058,26 @@ mod tests {
             elapsed < Duration::from_secs(7),
             "hello blocked for {elapsed:?}"
         );
+    }
+
+    #[test]
+    fn roster_settled_accounts_for_unloaded_pages() {
+        let large = "   ▗█▛▐█▙   ▗▄█▀▗█▀       prime agent v0.10.0
+  ▗█▛ ▟██▙▄██▛ ▟▛         agents 0 running, 0 idle, 200 inactive
+
+ >   Search sessions
+
+Session                       Model                                 Cost  Age
+
+Inactive (200)
+• (no messages)               amazon.nova-2-lite-v1:0:medium       $0.00   4s
+• huge corpus session         gpt-5.4:high                     $71727.10  29d
+  ...
+801 older sessions not loaded · scroll to load
+↑/↓ navigate   Home/End first/last   Enter/→ open";
+        assert!(roster_settled(large, 1001));
+        assert!(!roster_settled(large, 1000));
+        assert!(roster_settled("Inactive (11)\n• a\n• b", 11));
+        assert!(!roster_settled("Inactive (7)\n• a\n• b", 11));
     }
 }
