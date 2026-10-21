@@ -779,6 +779,8 @@ WINDOWS="no"
 # CHANNEL_PLATFORM is the channel manifest's platform alias (the TS
 # NATIVE_PLATFORMS spelling pa-core::update::install::current_platform_alias
 # reads); TARGET stays the rust triple the payload names its targets by.
+# TARGET is read by the platform-map regression harness.
+# shellcheck disable=SC2034
 case "$OS:$ARCH" in
   Darwin:arm64) TARGET=aarch64-apple-darwin; CHANNEL_PLATFORM=darwin-arm64 ;;
   Darwin:x86_64) TARGET=x86_64-apple-darwin; CHANNEL_PLATFORM=darwin-x64 ;;
@@ -2982,9 +2984,7 @@ fi
 # list (the same whitespace ruling).
 rust_leftover="no"
 verify_stopped_socket() {
-  last_verify_leftover="no"
   if [ "$("$UVPY" "$probe_py" --listening "$1" 2>/dev/null)" = "up" ]; then
-    last_verify_leftover="yes"
     if [ "$2" = "yes" ]; then
       rust_leftover="yes"
     fi
