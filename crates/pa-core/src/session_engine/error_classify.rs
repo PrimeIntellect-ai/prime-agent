@@ -71,6 +71,30 @@ pub const ERROR_DIAGNOSTICS: &[(&str, &str)] = &[
     ),
 ];
 
+/// The fixed provider transport disclosures pa-ai emits when the turn's
+/// auto-retries exhaust (`ProviderConnectionError::message` and the
+/// AWS h2 failure texts, `crates/pa-ai/src/utils_inner/stream_failure.rs`):
+/// a recognized disclosure prefix is typed evidence, unlike a bare
+/// keyword. Prefix-matched because some families append a cause
+/// (`Request timed out: <cause>`) or the SDK's wrapper
+/// (`Unexpected HTTP client error: TypeError: <raw>`).
+const TRANSPORT_DISCLOSURES: &[(&str, &str)] = &[
+    ("Connection error.", "network_error"),
+    ("Request timed out", "timeout"),
+    (
+        "Unable to connect. Is the computer able to access the url?",
+        "network_error",
+    ),
+    (
+        "Unexpected HTTP client error: TypeError: Unable to connect",
+        "network_error",
+    ),
+    ("Protocol error", "network_error"),
+    ("Stream closed with error code", "network_error"),
+    ("Session closed with error code", "network_error"),
+    ("The pending stream has been canceled", "network_error"),
+];
+
 /// The reviewed fixed-string error messages (#2117
 /// `TELEMETRY_SAFE_ERROR_MESSAGES`): an exact match may ride as `error_message`.
 const REVIEWED_MESSAGES: &[(&str, &str)] = &[
@@ -212,6 +236,20 @@ pub struct ErrorClassification {
     pub retryable: bool,
 }
 
+impl ErrorClassification {
+    /// The nano-rlm #200 ACP-boundary view: only the exhausted model
+    /// connection family is `model_transport` (the one class a host may
+    /// re-prompt on). HTTP status errors keep their provider categories —
+    /// a host retry is a fresh prompt, not an idempotent replay, so
+    /// `retryable` verdicts from the auto-retry policy (rate limits,
+    /// quota, balance, malformed responses) do not transfer to the
+    /// boundary.
+    #[must_use]
+    pub fn is_model_transport(&self) -> bool {
+        matches!(self.subtype, "network_error" | "stream_drop" | "timeout")
+    }
+}
+
 /// Classify one failed call's error message. The message itself never
 /// uploads: only the fixed tuples, the diagnostic, and a reviewed string.
 #[must_use]
@@ -267,7 +305,26 @@ pub fn classify_error_message(message: &str) -> ErrorClassification {
             retryable: subtype_retryable(subtype),
         };
     }
-    // 3. A reviewed fixed-string message (exact match, the only text that
+    // 3. A fixed provider transport disclosure (prefix match): the
+    // exhausted-connection family pa-ai itself discloses, so the most
+    // common real connection failures classify instead of reading as
+    // `unknown`.
+    if let Some((_, subtype)) = TRANSPORT_DISCLOSURES
+        .iter()
+        .find(|(disclosure, _)| message.starts_with(disclosure))
+    {
+        return ErrorClassification {
+            diagnostic: diagnostic(subtype),
+            safe_message: None,
+            category: subtype_category(subtype),
+            subtype,
+            code: None,
+            http_status: None,
+            classification_source: "transport_disclosure",
+            retryable: subtype_retryable(subtype),
+        };
+    }
+    // 4. A reviewed fixed-string message (exact match, the only text that
     // may upload).
     if let Some((subtype, reviewed)) = REVIEWED_MESSAGES
         .iter()
@@ -284,7 +341,7 @@ pub fn classify_error_message(message: &str) -> ErrorClassification {
             retryable: subtype_retryable(subtype),
         };
     }
-    // 4. Unmatched: the generic diagnostic; the raw text never uploads.
+    // 5. Unmatched: the generic diagnostic; the raw text never uploads.
     ErrorClassification {
         diagnostic: diagnostic("unknown"),
         safe_message: None,
@@ -443,6 +500,54 @@ mod tests {
         assert_eq!(billing.subtype, "insufficient_balance");
         assert_eq!(billing.category, "other");
         assert_eq!(billing.http_status, Some(402));
+    }
+
+    #[test]
+    fn transport_disclosures_classify_the_exhausted_connection_family() {
+        // The fixed pa-ai disclosures (`ProviderConnectionError::message`):
+        // the most common real connection failures, all typed transport.
+        let cases = [
+            ("Connection error.", "network_error"),
+            ("Request timed out.", "timeout"),
+            ("Request timed out: fetch timed out", "timeout"),
+            ("Unable to connect. Is the computer able to access the url?", "network_error"),
+            (
+                "Unexpected HTTP client error: TypeError: Unable to connect. Is the computer able to access the url?",
+                "network_error",
+            ),
+            ("Protocol error", "network_error"),
+            ("Stream closed with error code 0x2", "network_error"),
+            ("The pending stream has been canceled", "network_error"),
+        ];
+        for (message, subtype) in cases {
+            let classification = classify(message);
+            assert_eq!(classification.subtype, subtype, "{message}");
+            assert_eq!(classification.classification_source, "transport_disclosure");
+            assert!(classification.is_model_transport(), "{message}");
+        }
+        // A disclosure embedded mid-message is not evidence: only the
+        // provider layer's own prefix form is a typed disclosure.
+        let embedded = classify("tool output: Request timed out mid-run");
+        assert_eq!(embedded.subtype, "unknown");
+        assert!(!embedded.is_model_transport());
+    }
+
+    #[test]
+    fn model_transport_covers_only_the_connection_family() {
+        for message in ["ECONNRESET mid-stream", "Provider dropped the response stream (stream_drop): the stream ended inside a thinking block before the stop signal"] {
+            assert!(classify(message).is_model_transport(), "{message}");
+        }
+        // HTTP status errors keep their provider categories (#200: they
+        // retain the existing behavior, so none is boundary-retryable).
+        for message in [
+            "API Error: 429 rate limit exceeded",
+            "401 unauthorized",
+            "402 insufficient credits",
+            "500 Internal Server Error",
+            "context_length_exceeded",
+        ] {
+            assert!(!classify(message).is_model_transport(), "{message}");
+        }
     }
 
     #[test]

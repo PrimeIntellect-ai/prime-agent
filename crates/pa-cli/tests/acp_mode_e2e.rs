@@ -1375,6 +1375,14 @@ fn acp_daemon_attached_failed_turn_publishes_only_the_error_boundary() {
             .contains("Prompt cannot be empty"),
         "the worker's failure is the error: {prompt_response}"
     );
+    assert_eq!(
+        prompt_response["error"]["data"]["kind"], "other",
+        "the harness failure is classified as the generic kind: {prompt_response}"
+    );
+    assert_eq!(
+        prompt_response["error"]["data"]["retryable"], false,
+        "a harness failure is never boundary-retryable: {prompt_response}"
+    );
     let mut boundaries = 0;
     for update in &updates {
         let body = &update["params"]["update"];
@@ -1401,12 +1409,13 @@ fn acp_daemon_attached_failed_turn_publishes_only_the_error_boundary() {
 #[test]
 fn acp_failed_prompt_error_data_classifies_the_transport_failure() {
     // A provider connection failure fails the turn: the ACP error data
-    // carries the #2117 classifier's category and retryable verdict (the
-    // nano-rlm #200 `kind`/`retryable` contract) so a host separates
-    // retryable model transport from harness bugs without parsing the
-    // details text. `repeatLastResponse` keeps every auto-retry attempt
-    // failing with the same connection-reset disclosure, so the settled
-    // turn error is the scripted transport failure.
+    // carries the nano-rlm #200 contract — `kind: "model_transport"` (the
+    // one retryable class), the fine #2117 `category` alongside — so a
+    // host separates retryable model transport from harness bugs without
+    // parsing the details text. `repeatLastResponse` keeps every
+    // auto-retry attempt failing with the same connection-reset
+    // disclosure, so the settled turn error is the scripted transport
+    // failure.
     let mut client = AcpChild::spawn(
         &["--mode", "acp", "--no-session"],
         &json!({
@@ -1435,18 +1444,77 @@ fn acp_failed_prompt_error_data_classifies_the_transport_failure() {
         "the failed turn errors the request: {prompt_response}"
     );
     assert_eq!(
-        prompt_response["error"]["data"]["kind"], "network",
-        "the connection reset classifies as the network category: {prompt_response}"
+        prompt_response["error"]["data"]["kind"], "model_transport",
+        "the connection reset reports the #200 model_transport kind: {prompt_response}"
+    );
+    assert_eq!(
+        prompt_response["error"]["data"]["category"], "network",
+        "the fine #2117 category rides separately: {prompt_response}"
     );
     assert_eq!(
         prompt_response["error"]["data"]["retryable"], true,
-        "the transport failure carries the classifier's retryable verdict: {prompt_response}"
+        "the exhausted connection family is the one retryable class: {prompt_response}"
     );
     assert!(
         prompt_response["error"]["data"]["details"]
             .as_str()
             .unwrap_or_default()
             .contains("ECONNRESET"),
+        "the raw failure still rides the details text: {prompt_response}"
+    );
+}
+
+#[test]
+fn acp_failed_prompt_error_data_marks_provider_failures_not_retryable() {
+    // The other half of the #200 contract: a 401 classifies as
+    // `authentication` and is never marked retryable — the boundary's
+    // `retryable` covers only the model connection family, not the
+    // auto-retry policy's verdicts (a host retry is a fresh prompt, not
+    // an idempotent replay).
+    let mut client = AcpChild::spawn(
+        &["--mode", "acp", "--no-session"],
+        &json!({
+            "engine": "faux",
+            "repeatLastResponse": true,
+            "responses": [
+                { "stopReason": "error", "errorMessage": "401 unauthorized" }
+            ]
+        }),
+    );
+    let init = client.request("initialize", &initialize_params());
+    let _ = client.wait_response(init, TIMEOUT);
+    let new = client.request("session/new", &json!({ "mcpServers": [] }));
+    let (new_response, _) = client.wait_response(new, TIMEOUT);
+    let session_id = new_response["result"]["sessionId"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let prompt = client.request(
+        "session/prompt",
+        &json!({ "sessionId": session_id, "prompt": [{ "type": "text", "text": "a question" }] }),
+    );
+    let (prompt_response, _) = client.wait_response(prompt, TIMEOUT);
+    assert_eq!(
+        prompt_response["error"]["code"], -32603,
+        "the failed turn errors the request: {prompt_response}"
+    );
+    assert_eq!(
+        prompt_response["error"]["data"]["kind"], "authentication",
+        "the 401 carries its provider category as the kind: {prompt_response}"
+    );
+    assert_eq!(
+        prompt_response["error"]["data"]["category"], "authentication",
+        "the fine #2117 category matches the kind off the transport family: {prompt_response}"
+    );
+    assert_eq!(
+        prompt_response["error"]["data"]["retryable"], false,
+        "an authentication failure is never boundary-retryable: {prompt_response}"
+    );
+    assert!(
+        prompt_response["error"]["data"]["details"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("401"),
         "the raw failure still rides the details text: {prompt_response}"
     );
 }
@@ -1506,7 +1574,17 @@ fn acp_daemon_attached_supervisor_loss_fails_the_prompt() {
         json!({
             "code": -32603,
             "message": "Internal error",
-            "data": { "details": "the daemon connection closed mid-request" }
+            "data": {
+                "details": "the daemon connection closed mid-request",
+                // The lost supervisor link is classified like every other
+                // failed-prompt arm: typed data a host can distinguish
+                // from an untyped error, and never retryable — the turn's
+                // outcome is unknown, so a host retry may re-run
+                // side-effecting tools.
+                "kind": "other",
+                "category": "other",
+                "retryable": false,
+            }
         }),
         "the in-flight prompt fails fast on supervisor loss: {prompt_response}"
     );

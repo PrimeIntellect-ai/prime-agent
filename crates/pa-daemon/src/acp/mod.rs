@@ -23,18 +23,43 @@ fn internal_error(id: &Value, details: &str) -> Value {
     )
 }
 
-/// The failed-turn reply: the #2117 classifier's category (`kind`) and
-/// retryable verdict ride as typed data alongside the details, so an
-/// ACP host can programmatically separate retryable model-transport
-/// failures from harness bugs instead of guessing from the text (the
-/// nano-rlm #200 `kind`/`retryable` contract; the retryable flag is
-/// advisory — the host's own retry policy decides).
-fn turn_failure_error(id: &Value, kind: &str, retryable: bool, details: &str) -> Value {
+/// The failed-prompt reply: the nano-rlm #200 `kind`/`retryable` contract.
+/// `kind` is `"model_transport"` for the exhausted model connection family
+/// (`network_error`/`stream_drop`/`timeout` — the one class a host may
+/// re-prompt on) or a context overflow (pa-ai's provider pattern table);
+/// every other failure carries the #2117 classifier's category. The fine
+/// #2117 category rides separately in `category`. `retryable` is true only
+/// for `model_transport`: the harness auto-retry is already exhausted by
+/// the time this reply exists, and a host retry is a fresh prompt, not an
+/// idempotent replay — `session/prompt` persists the user row and
+/// side-effecting tools may already have run, so a rate limit, an empty
+/// balance, or a lost supervisor link must not be marked retryable. The
+/// flag is advisory: the host's own retry policy decides.
+fn turn_failure_error(id: &Value, failure: &str, details: &str) -> Value {
+    let classification = pa_core::session_engine::error_classify::classify_error_message(failure);
+    let context_overflow = pa_ai::utils::overflow::error_message_has_overflow(failure);
+    let kind = if context_overflow {
+        "context_limit"
+    } else if classification.is_model_transport() {
+        "model_transport"
+    } else {
+        classification.category
+    };
+    let category = if context_overflow {
+        kind
+    } else {
+        classification.category
+    };
     jsonrpc::error_response(
         id,
         jsonrpc::INTERNAL_ERROR,
         "Internal error",
-        Some(&json!({ "details": details, "kind": kind, "retryable": retryable })),
+        Some(&json!({
+            "details": details,
+            "kind": kind,
+            "category": category,
+            "retryable": kind == "model_transport",
+        })),
     )
 }
 
@@ -65,4 +90,88 @@ fn same_cwd(requested: &Path, actual: &Path) -> bool {
         }
     }
     false
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The error-data view of one failed prompt arm, as the #200 host
+    /// contract reads it.
+    fn error_data(failure: &str) -> Value {
+        turn_failure_error(&json!(1), failure, "prime-agent turn failed")["error"]["data"].clone()
+    }
+
+    #[test]
+    fn transport_failures_carry_the_model_transport_contract() {
+        for failure in [
+            "ECONNRESET: model connection reset mid-stream",
+            "Connection error.",
+            "Request timed out.",
+        ] {
+            let data = error_data(failure);
+            assert_eq!(data["kind"], "model_transport", "{failure}: {data}");
+            assert_eq!(data["retryable"], true, "{failure}: {data}");
+            assert_eq!(data["details"], "prime-agent turn failed");
+        }
+        // The fine #2117 category rides separately.
+        let network = error_data("ECONNRESET: model connection reset mid-stream");
+        assert_eq!(network["category"], "network");
+        let timeout = error_data("Request timed out.");
+        assert_eq!(timeout["category"], "timeout");
+    }
+
+    #[test]
+    fn only_model_transport_is_retryable() {
+        // The auto-retry verdicts (rate limit, balance) do not transfer
+        // to the boundary: a host retry is a fresh prompt, not an
+        // idempotent replay (#200: 400/401 are never marked retryable).
+        for failure in [
+            "API Error: 429 rate limit exceeded",
+            "402 insufficient credits",
+            "401 unauthorized",
+            "Provider server error",
+        ] {
+            let data = error_data(failure);
+            assert_eq!(data["retryable"], false, "{failure}: {data}");
+            assert_ne!(data["kind"], "model_transport", "{failure}: {data}");
+        }
+        let rate_limited = error_data("API Error: 429 rate limit exceeded");
+        assert_eq!(rate_limited["kind"], "rate_limit");
+        assert_eq!(rate_limited["category"], "rate_limit");
+        let auth = error_data("401 unauthorized");
+        assert_eq!(auth["kind"], "authentication");
+        assert_eq!(auth["category"], "authentication");
+    }
+
+    #[test]
+    fn context_overflow_keeps_the_context_limit_kind() {
+        // The structured provider pattern table catches the Anthropic
+        // overflow the #2117 keyword set misses.
+        let data = error_data("prompt is too long: 213462 tokens > 200000 maximum");
+        assert_eq!(data["kind"], "context_limit");
+        assert_eq!(data["category"], "context_limit");
+        assert_eq!(data["retryable"], false);
+        // The OpenAI wire `code` reaches the same kind through the
+        // classifier.
+        let data = error_data("context_length_exceeded");
+        assert_eq!(data["kind"], "context_limit");
+        assert_eq!(data["retryable"], false);
+    }
+
+    #[test]
+    fn unclassified_and_link_failures_are_classified_not_retryable() {
+        // A host can tell "classified, not retryable" from an untyped
+        // error: every failed-prompt arm carries the typed data.
+        for failure in [
+            "Prompt cannot be empty",
+            "the daemon connection closed mid-request",
+            "an opaque harness crash",
+        ] {
+            let data = error_data(failure);
+            assert_eq!(data["kind"], "other", "{failure}: {data}");
+            assert_eq!(data["category"], "other", "{failure}: {data}");
+            assert_eq!(data["retryable"], false, "{failure}: {data}");
+        }
+    }
 }

@@ -1480,7 +1480,11 @@ async fn prompt_turn(
         Err(error) => {
             publish_error_boundary(&producer, turn_id).await;
             producer.finish_prompt(turn_id).await;
-            return super::internal_error(&id, &error.to_string());
+            // The lost supervisor link (route timeout, worker loss) is
+            // classified like every other failed-prompt arm: typed data,
+            // never retryable at the boundary — the turn's outcome is
+            // unknown, so a host retry may re-run side-effecting tools.
+            return super::turn_failure_error(&id, &error.to_string(), &error.to_string());
         }
     };
     // TS `abort.signal.aborted` after `promptAndWait`: every turn frame
@@ -1507,16 +1511,12 @@ async fn prompt_turn(
         eprintln!("pa-daemon: acp turn failed: {failure}");
         publish_error_boundary(&producer, turn_id).await;
         producer.finish_prompt(turn_id).await;
-        // The worker's failure text classifies through the #2117
-        // classifier (a fixed category + retryable verdict; the raw
-        // text still never rides past `details`), so the reply data is
-        // machine-readable at the transport boundary.
-        let classification =
-            pa_core::session_engine::error_classify::classify_error_message(&failure);
+        // The worker's failure text classifies into the #200 host
+        // contract (the raw text still never rides past `details`), so
+        // the reply data is machine-readable at the transport boundary.
         return super::turn_failure_error(
             &id,
-            classification.category,
-            classification.retryable,
+            &failure,
             &format!("prime-agent turn failed: {failure}"),
         );
     }
@@ -1592,8 +1592,9 @@ async fn prompt_turn(
             Ok(status) => status,
             Err(error) => {
                 producer.finish_prompt(turn_id).await;
-                return super::internal_error(
+                return super::turn_failure_error(
                     &id,
+                    &error.to_string(),
                     &format!("ACP lifecycle reconciliation failed: {error}"),
                 );
             }
@@ -1606,8 +1607,9 @@ async fn prompt_turn(
             Ok(children) => children,
             Err(error) => {
                 producer.finish_prompt(turn_id).await;
-                return super::internal_error(
+                return super::turn_failure_error(
                     &id,
+                    &error.to_string(),
                     &format!("ACP lifecycle reconciliation failed: {error}"),
                 );
             }
