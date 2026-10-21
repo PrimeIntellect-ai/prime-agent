@@ -1,1 +1,0 @@
-- The agent prompt now sanctions ending a turn with a text-only reply and forbids placeholder no-op tool calls (such as a `pass`-only cell) used to acknowledge a message or signal idleness.

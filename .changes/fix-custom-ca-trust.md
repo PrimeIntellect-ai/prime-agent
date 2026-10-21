@@ -1,1 +1,0 @@
-- HTTPS clients and Codex WebSockets now trust operating system certificate authorities alongside bundled roots, and honor custom CA bundles supplied through `NODE_EXTRA_CA_CERTS`, including the default proxy streaming path.

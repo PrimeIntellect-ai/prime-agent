@@ -1,1 +1,0 @@
-- Agents view and `/resume`: the newest 200 sessions load first, scrolling loads more, and a search loads the rest. A footer shows how many older sessions are not loaded yet.
