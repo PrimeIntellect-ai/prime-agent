@@ -275,8 +275,12 @@ pub(crate) struct HostedSession {
     /// The newest assistant stop reason observed on the event stream,
     /// cleared when a prompt turn is admitted so a turn never reads a
     /// previous turn's stop reason (read after the settlement for the
-    /// stop-reason response).
+    /// stop-reason response). The error message of that same `message_end`
+    /// rides beside it: TS `turnFailure` reports the transcript's
+    /// `errorMessage` for a settled model error, and the daemon stream
+    /// already carries it on the event.
     assistant_stop_reason: Option<pa_types::ai::StopReason>,
+    assistant_error_message: Option<String>,
     /// The event mapping state lives and dies with the session, like TS.
     mapping: WireMappingState,
     observed_children: std::collections::HashSet<String>,
@@ -357,6 +361,7 @@ pub async fn run_daemon_attached_acp_mode(options: DaemonAcpOptions) -> anyhow::
                             };
                             if let Some(stop) = wire_events::assistant_stop(&event) {
                                 current.assistant_stop_reason = stop.stop_reason;
+                                current.assistant_error_message = stop.error_message;
                             }
                             if event.get("type").and_then(Value::as_str) == Some("rlm_child_update")
                             {
@@ -740,6 +745,7 @@ async fn admit_prompt(
     // The stop reason is per-turn: a turn that runs no model call (a
     // slash command) must not inherit the previous turn's stop reason.
     hosted.assistant_stop_reason = None;
+    hosted.assistant_error_message = None;
     hosted.turn = Some(ActiveTurn {
         admission_id: admission_id.clone(),
         cancelled: false,
@@ -1164,6 +1170,7 @@ async fn handle_session_new(
         cancel_task: None,
         turn: None,
         assistant_stop_reason: None,
+        assistant_error_message: None,
         mapping: WireMappingState::default(),
         observed_children: std::collections::HashSet::new(),
     };
@@ -1379,6 +1386,26 @@ async fn release_turn_slot(state: &Arc<Mutex<DaemonAcpState>>, admission_id: &st
     }
 }
 
+/// TS `turnFailure`: the model error this turn settled with. The daemon
+/// wire fails the prompt response for a settled model error where TS reads
+/// the failure off the transcript, so this reads the stream-captured
+/// newest assistant `message_end` instead (cleared at admission, so
+/// pre-turn rows never report). Only an `error` stop reason reports, with
+/// the settled row's error text; an empty one falls back to the TS literal.
+fn turn_model_failure(state: &DaemonAcpState) -> Option<String> {
+    state
+        .session
+        .as_ref()
+        .filter(|hosted| hosted.assistant_stop_reason == Some(pa_types::ai::StopReason::Error))
+        .map(|hosted| {
+            hosted
+                .assistant_error_message
+                .clone()
+                .filter(|error| !error.is_empty())
+                .unwrap_or_else(|| "the model request failed".to_string())
+        })
+}
+
 /// Whether this prompt lost its turn: cancelled, or its session was closed
 /// (close, or close + new, takes the slot - like TS close aborting the turn).
 fn turn_cancelled(state: &DaemonAcpState, admission_id: &str) -> bool {
@@ -1497,7 +1524,12 @@ async fn prompt_turn(
         return cancelled_response(&id);
     }
     // TS settle catch: one error boundary, no terminal-quiescence update.
-    if !response.success {
+    // The catch arm covers the failed admission (the TS catch), not a
+    // settled model error: the daemon wire fails the prompt response for
+    // one, but TS still publishes the full completion envelope with an
+    // error outcome and only then fails the request (`turnFailure`), so
+    // a settled model error falls through to the envelope below.
+    if !response.success && turn_model_failure(&*state.lock().await).is_none() {
         let failure = response
             .error
             .unwrap_or_else(|| "unknown error".to_string());
@@ -1523,6 +1555,11 @@ async fn prompt_turn(
         producer.finish_prompt(turn_id).await;
         return cancelled_response(&id);
     }
+    // TS `turnFailure`, read after the completion observation and before
+    // the boundary: the turn's settled model error stamps the boundary
+    // with an error outcome (the frames themselves still publish; only
+    // the request response fails, after the terminal frame).
+    let turn_failure = turn_model_failure(&*state.lock().await);
     // The completion observation's roster read (TS `getRlmChildSnapshots`
     // throws): a failed read errors the prompt before the boundary, never
     // publishes a wrong count.
@@ -1543,7 +1580,14 @@ async fn prompt_turn(
         .filter(|status| status.enabled)
         .map(meta::autonomous_meta);
     // The boundary, completion, and terminal quiescence frames match the
-    // TS captures.
+    // TS captures; a settled model error carries the error outcome on the
+    // boundary and terminal frames (TS publishes the same envelope with
+    // `outcome: "error"` and fails only the request response).
+    let boundary_outcome = if turn_failure.is_some() {
+        PrimeAgentOutcome::Error
+    } else {
+        PrimeAgentOutcome::Result
+    };
     let boundary = types::AcpSessionUpdate::SessionInfoUpdate {
         meta: meta::prime_agent_meta(&PrimeAgentSessionMeta {
             terminal_quiescence_expected: Some(true),
@@ -1555,7 +1599,7 @@ async fn prompt_turn(
             &boundary,
             turn_id,
             PrimeAgentEventPhase::ResponseBoundary,
-            Some(PrimeAgentOutcome::Result),
+            Some(boundary_outcome),
         )
         .await;
     // The completion envelope: the turn's own observation, with the
@@ -1575,8 +1619,11 @@ async fn prompt_turn(
     // the event, no timer, and the roster re-read is the response-cut
     // telemetry (a child can publish a terminal status before its result
     // reaches the parent). A failed barrier or read errors the prompt; a
-    // degraded status would spin the loop.
-    let settled_status = loop {
+    // degraded status would spin the loop. Each barrier pass re-reads the
+    // turn's settled model error (TS `finalFailure`), so a continuation
+    // that errors inside the waits reports on the terminal frame and the
+    // request response; the pass that seals the terminal is the one kept.
+    let (settled_status, settled_failure) = loop {
         let status = match fetch_autonomous_status(link, &hosted_daemon_session_id, true).await {
             Ok(status) => status,
             Err(error) => {
@@ -1591,6 +1638,7 @@ async fn prompt_turn(
             producer.finish_prompt(turn_id).await;
             return cancelled_response(&id);
         }
+        let settled_failure = turn_model_failure(&*state.lock().await);
         let children = match fetch_rlm_children(link, &hosted_daemon_session_id).await {
             Ok(children) => children,
             Err(error) => {
@@ -1619,18 +1667,24 @@ async fn prompt_turn(
                 ..Default::default()
             }),
         };
+        // TS terminal publication: the post-settlement failure wins the
+        // terminal outcome, the pre-boundary one holds otherwise.
         let terminal_published = producer
             .publish(
                 &terminal,
                 turn_id,
                 PrimeAgentEventPhase::TerminalQuiescence,
-                Some(PrimeAgentOutcome::Result),
+                Some(if settled_failure.is_some() {
+                    PrimeAgentOutcome::Error
+                } else {
+                    boundary_outcome
+                }),
             )
             .await;
         if !published || !completion_published || !terminal_published {
             return super::internal_error(&id, "Failed to publish ACP completion");
         }
-        break status;
+        break (status, settled_failure);
     };
     // The stop reason follows the TS mapping (acp-stop-reason.ts) plus the
     // turn's final assistant stop reason (#3363): the abort flag read after
@@ -1650,6 +1704,21 @@ async fn prompt_turn(
                 .and_then(|hosted| hosted.assistant_stop_reason),
         )
     };
+    // TS: a settled model error fails the request only after the published
+    // envelope — the post-settlement read (`pending.turnFailure`) wins, the
+    // pre-boundary one covers a model error no continuation superseded —
+    // and never when the turn was cancelled (TS `terminalSettlementCancelled`
+    // answers the stop reason instead). The text is the settled row's own
+    // error message, not the daemon response's paraphrase.
+    if !cancelled {
+        if let Some(failure) = settled_failure.or(turn_failure) {
+            // The failure text rides the internal_error reply, where a test
+            // asserting only the stop reason loses it: echo it to stderr so
+            // every harness's child-stderr dump shows WHY the turn failed.
+            eprintln!("pa-daemon: acp turn failed: {failure}");
+            return super::internal_error(&id, &format!("prime-agent turn failed: {failure}"));
+        }
+    }
     let stop_reason =
         meta::acp_stop_reason_for_status(cancelled, Some(&settled_status), assistant_stop_reason);
     jsonrpc::response(
@@ -1964,6 +2033,7 @@ mod tests {
             cancel_task: None,
             turn: None,
             assistant_stop_reason: None,
+            assistant_error_message: None,
             mapping: WireMappingState::default(),
             observed_children: std::collections::HashSet::new(),
         }
@@ -1974,6 +2044,38 @@ mod tests {
             session,
             ..DaemonAcpState::default()
         }
+    }
+
+    #[test]
+    fn turn_model_failure_reports_only_a_settled_error_row() {
+        // TS `turnFailure` reports only a settled error stop reason, with
+        // the row's own error text and the TS literal as the fallback (the
+        // daemon faux seam cannot script a textless error row, so the
+        // fallback is pinned here rather than in the e2e).
+        let failure_of = |stop_reason: Option<pa_types::ai::StopReason>,
+                          error_message: Option<String>| {
+            let mut hosted = hosted_session();
+            hosted.assistant_stop_reason = stop_reason;
+            hosted.assistant_error_message = error_message;
+            turn_model_failure(&state(Some(hosted)))
+        };
+        assert_eq!(failure_of(None, None), None);
+        assert_eq!(failure_of(Some(pa_types::ai::StopReason::Stop), None), None);
+        assert_eq!(
+            failure_of(Some(pa_types::ai::StopReason::Error), None),
+            Some("the model request failed".to_string())
+        );
+        assert_eq!(
+            failure_of(Some(pa_types::ai::StopReason::Error), Some(String::new())),
+            Some("the model request failed".to_string())
+        );
+        assert_eq!(
+            failure_of(
+                Some(pa_types::ai::StopReason::Error),
+                Some("rate limited".to_string())
+            ),
+            Some("rate limited".to_string())
+        );
     }
 
     #[tokio::test]

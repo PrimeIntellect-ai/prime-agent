@@ -41,14 +41,16 @@ impl WireMappingState {
     }
 }
 
-/// The assistant stop reason carried by one `message_end` event: the
+/// The assistant stop state carried by one `message_end` event: the
 /// transport keeps the newest one and reads it after the turn for the
-/// stop-reason response.
+/// stop-reason response, with the model error text a settled `error`
+/// stop reason carries (TS `turnFailure` reads it off the transcript).
 pub struct AssistantStop {
     pub stop_reason: Option<pa_types::ai::StopReason>,
+    pub error_message: Option<String>,
 }
 
-/// Extract the assistant stop reason from one wire event, when the event
+/// Extract the assistant stop state from one wire event, when the event
 /// settles an assistant message.
 pub fn assistant_stop(event: &Value) -> Option<AssistantStop> {
     if event.get("type").and_then(Value::as_str) != Some("message_end") {
@@ -62,6 +64,10 @@ pub fn assistant_stop(event: &Value) -> Option<AssistantStop> {
         stop_reason: message
             .get("stopReason")
             .and_then(|value| pa_types::ai::StopReason::deserialize(value).ok()),
+        error_message: message
+            .get("errorMessage")
+            .and_then(Value::as_str)
+            .map(str::to_string),
     })
 }
 
@@ -652,6 +658,23 @@ mod tests {
             "message": { "role": "user" },
         }))
         .is_none());
+    }
+
+    #[test]
+    fn assistant_error_message_is_captured_from_message_end() {
+        let stop = assistant_stop(&json!({
+            "type": "message_end",
+            "message": { "role": "assistant", "stopReason": "error", "errorMessage": "rate limited" },
+        }))
+        .expect("assistant message_end");
+        assert_eq!(stop.stop_reason, Some(pa_types::ai::StopReason::Error));
+        assert_eq!(stop.error_message.as_deref(), Some("rate limited"));
+        let bare = assistant_stop(&json!({
+            "type": "message_end",
+            "message": { "role": "assistant", "stopReason": "stop" },
+        }))
+        .expect("assistant message_end");
+        assert_eq!(bare.error_message, None);
     }
 
     #[test]
