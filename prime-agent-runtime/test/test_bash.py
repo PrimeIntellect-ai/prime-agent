@@ -248,7 +248,7 @@ class BashTest(unittest.IsolatedAsyncioTestCase):
                 handle = bash('echo "$NO_COLOR $TERM"')
                 result = await handle
                 # The inactive record lands slightly after finalize, once the group exits.
-                records = await _poll_journal(journal, count=2)
+                records = await _poll_journal(journal, handle.pid, count=2)
             self.assertEqual(result.exit_code, 0)
             lines = result.output.splitlines()
             self.assertEqual(lines[0], "prefixed")
@@ -256,7 +256,6 @@ class BashTest(unittest.IsolatedAsyncioTestCase):
 
             self.assertEqual([r["active"] for r in records], [True, False])
             for record in records:
-                self.assertEqual(record["pid"], handle.pid)
                 self.assertEqual(record["ownerPid"], os.getpid())
                 self.assertEqual(record["kernelPid"], os.getpid())
             self.assertTrue(records[0]["processStartId"].startswith(("proc:", "ps:")))
@@ -277,10 +276,10 @@ class BashTest(unittest.IsolatedAsyncioTestCase):
                 self.assertIn("fg", result.output)
                 # The shell stays alive as group leader, anchoring its background job.
                 os.killpg(handle.pid, 0)
-                records = await _poll_journal(journal, count=1)
+                records = await _poll_journal(journal, handle.pid, count=1)
                 self.assertTrue(records[-1]["active"])
                 handle.kill(signal.SIGKILL)
-                records = await _poll_journal(journal, count=2)
+                records = await _poll_journal(journal, handle.pid, count=2)
             self.assertFalse(records[-1]["active"])
 
     async def test_early_shell_exit_returns_and_kills_group(self):
@@ -307,7 +306,7 @@ class BashTest(unittest.IsolatedAsyncioTestCase):
                         break
                     await asyncio.sleep(0.05)
                 handle.kill(signal.SIGTERM)
-                records = await _poll_journal(journal, count=2, timeout=10)
+                records = await _poll_journal(journal, handle.pid, count=2, timeout=10)
             self.assertFalse(records[-1]["active"])
             await _poll_group_dead(handle.pid)
 
@@ -792,7 +791,7 @@ class BashTest(unittest.IsolatedAsyncioTestCase):
                                         if handle._reaped:
                                             break
                                         await asyncio.sleep(0.05)
-            active = [r for r in await _poll_journal(journal, count=1) if r["active"]]
+            active = [r for r in await _poll_journal(journal, handle.pid, count=1) if r["active"]]
             self.assertEqual(len(active), 1)
             self.assertIn("processStartId", active[0])
 
@@ -1256,12 +1255,12 @@ class BashTest(unittest.IsolatedAsyncioTestCase):
             ):
                 handle = bash("sleep 30")
                 try:
-                    records = await _poll_journal(journal, count=1)
+                    records = await _poll_journal(journal, handle.pid, count=1)
                     self.assertTrue(records[-1]["active"])
                     with mock.patch.object(bash_module, "_signal_group", return_value=False):
                         bash_module._kill_live_handles()
                     await asyncio.sleep(0.2)  # give any (wrong) inactive write time to land
-                    records = await _poll_journal(journal, count=1)
+                    records = await _poll_journal(journal, handle.pid, count=1)
                     self.assertEqual(len(records), 1)
                     self.assertTrue(records[-1]["active"])
                 finally:
@@ -1479,12 +1478,14 @@ async def _poll_group_dead(pgid: int, timeout: float = 5.0) -> None:
     raise AssertionError(f"process group {pgid} still alive after {timeout}s")
 
 
-async def _poll_journal(path: str, count: int, timeout: float = 2.0) -> list[dict]:
+async def _poll_journal(path: str, pid: int, count: int, timeout: float = 2.0) -> list[dict]:
+    # Only this handle's records: an earlier test's watcher thread can journal its late
+    # inactive record into whichever journal the environment names at that moment.
     deadline = asyncio.get_running_loop().time() + timeout
     records: list[dict] = []
     while asyncio.get_running_loop().time() < deadline:
         with open(path) as f:
-            records = [json.loads(line) for line in f if line.strip()]
+            records = [r for line in f if line.strip() and (r := json.loads(line))["pid"] == pid]
         if len(records) >= count:
             return records
         await asyncio.sleep(0.05)

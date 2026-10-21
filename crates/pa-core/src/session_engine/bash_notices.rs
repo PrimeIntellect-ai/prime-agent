@@ -1,8 +1,10 @@
-//! The detached kernel bash completion notice (the TS async-bash-completion
-//! wake: `bash.completed`/`bash.consumed`): the shared notice types, the
-//! TS payload validation, and the host-handler registration, plus the
-//! in-process sinks a daemonless embedding uses — the completion row
-//! steers onto the session's own agent and the embedding's wake fires.
+//! The kernel notice seam (the TS async-bash-completion wake): the
+//! `bash.completed`/`bash.consumed` notices plus the `factory.progress`
+//! run-milestone notice that rides the same steering delivery. Here live
+//! the shared notice types, the TS payload validation, and the
+//! host-handler registration, plus the in-process sinks a daemonless
+//! embedding uses — the notice row steers onto the session's own agent
+//! and the embedding's wake fires.
 
 use std::sync::{Arc, Mutex, Weak};
 
@@ -10,23 +12,46 @@ use serde_json::Value;
 
 use crate::kernel::shared::{host_handler, HostRequestHandlers, BASH_COMPLETED_REQUEST_TYPE};
 use pa_agent::types::AgentMessage;
+use pa_types::session::CustomMessage;
 
-use super::messages::{self, ASYNC_BASH_COMPLETION_CUSTOM_TYPE};
+use super::messages::{
+    self, ASYNC_BASH_COMPLETION_CUSTOM_TYPE, ASYNC_BASH_COMPLETION_PREVIEW_LABEL,
+    FACTORY_PROGRESS_PREVIEW_LABEL,
+};
 use super::{session_message_to_loop, SessionAgentMessage};
 
-/// One detached kernel bash completion (the `bash.completed` host
-/// request): the finished command's identity and exit code.
+/// One kernel notice the host admits as a steering row (TS
+/// `_promptInjectedMessage` with `streamingBehavior: "steer"`,
+/// `queueIfBusy`, and `resumeIfIdle`): a detached bash completion
+/// (`bash.completed`) or a factory run milestone (`factory.progress`).
 #[derive(Debug, Clone)]
-pub struct BashCompletionNotice {
-    pub pid: u32,
-    pub command: String,
-    pub exit_code: i64,
+pub struct KernelNotice {
+    /// The durable custom row the woken or steered turn carries.
+    pub row: CustomMessage,
+    /// The queue strip's label for the row's preview.
+    pub preview_label: &'static str,
 }
 
-/// The queue-admission seam for one completion notice (the daemon
-/// worker's steering lane + runner wake + recovery busy-evidence; the
-/// in-process sinks below steer onto the session's own agent).
-pub type BashCompletionSink = Arc<dyn Fn(BashCompletionNotice) + Send + Sync>;
+impl KernelNotice {
+    /// The `[bash-done]` notice for one finished detached command.
+    #[must_use]
+    pub fn bash_completion(pid: u32, command: &str, exit_code: i64) -> Self {
+        Self {
+            row: messages::create_async_bash_completion_message(
+                pid,
+                command,
+                exit_code,
+                crate::autonomous::now_millis(),
+            ),
+            preview_label: ASYNC_BASH_COMPLETION_PREVIEW_LABEL,
+        }
+    }
+}
+
+/// The queue-admission seam for one kernel notice (the daemon worker's
+/// steering lane + runner wake + recovery busy-evidence; the in-process
+/// sinks below steer onto the session's own agent).
+pub type KernelNoticeSink = Arc<dyn Fn(KernelNotice) + Send + Sync>;
 
 /// The kernel read a finished command's result before its notice
 /// delivered (the `bash.consumed` host request): the queued notice is stale.
@@ -43,13 +68,15 @@ pub type BashConsumedSink = Arc<dyn Fn(BashConsumedNotice) + Send + Sync>;
 /// notice admits its row, so the embedding resumes the idle run.
 pub type BashNoticeWake = Arc<dyn Fn() + Send + Sync>;
 
-/// The `bash.completed`/`bash.consumed` kernel host handlers (TS
-/// `createAsyncBashCompletionHostHandler`/`createAsyncBashConsumedHostHandler`).
-pub fn register_bash_notice_host_handlers(
-    completion: BashCompletionSink,
+/// The `bash.completed`/`bash.consumed`/`factory.progress` kernel host
+/// handlers (TS `createAsyncBashCompletionHostHandler`,
+/// `createAsyncBashConsumedHostHandler`, `createFactoryProgressHostHandler`).
+pub fn register_kernel_notice_host_handlers(
+    notice: KernelNoticeSink,
     consumed: BashConsumedSink,
     handlers: &mut HostRequestHandlers,
 ) {
+    let completion = Arc::clone(&notice);
     handlers.register(
         BASH_COMPLETED_REQUEST_TYPE,
         host_handler(move |payload| {
@@ -75,21 +102,31 @@ pub fn register_bash_notice_host_handlers(
             })
         }),
     );
+    handlers.register(
+        "factory.progress",
+        host_handler(move |payload| {
+            let notice = notice.clone();
+            Box::pin(async move {
+                notice(validate_factory_progress(&payload.data)?);
+                Ok(serde_json::json!({}))
+            })
+        }),
+    );
 }
 
 /// TS `createAsyncBashCompletionHostHandler` validation: a positive
 /// integer pid, a non-empty string command, an integer exit code.
-fn validate_completion(data: &Value) -> anyhow::Result<BashCompletionNotice> {
+fn validate_completion(data: &Value) -> anyhow::Result<KernelNotice> {
     let consumed = validate_consumed(data)?;
     let exit_code = data
         .get("exitCode")
         .and_then(Value::as_i64)
         .ok_or_else(|| anyhow::anyhow!("bash.completed exitCode must be an integer"))?;
-    Ok(BashCompletionNotice {
-        pid: consumed.pid,
-        command: consumed.command,
+    Ok(KernelNotice::bash_completion(
+        consumed.pid,
+        &consumed.command,
         exit_code,
-    })
+    ))
 }
 
 /// TS `createAsyncBashConsumedHostHandler` validation: a positive integer pid and a
@@ -110,6 +147,33 @@ fn validate_consumed(data: &Value) -> anyhow::Result<BashConsumedNotice> {
     Ok(BashConsumedNotice { pid, command })
 }
 
+/// The kernel factory executor's milestone payload (`FactoryExecutor._milestone`
+/// in `rlm/factory.py`): non-empty `run_id`, `kind`, and `detail` strings, and
+/// an optional non-empty `node` string.
+fn validate_factory_progress(data: &Value) -> anyhow::Result<KernelNotice> {
+    let text = |key: &str| {
+        data.get(key)
+            .and_then(Value::as_str)
+            .filter(|text| !text.is_empty())
+            .ok_or_else(|| anyhow::anyhow!("factory.progress {key} must be a non-empty string"))
+    };
+    let node = data
+        .get("node")
+        .is_some()
+        .then(|| text("node"))
+        .transpose()?;
+    Ok(KernelNotice {
+        row: messages::create_factory_progress_message(
+            text("run_id")?,
+            text("kind")?,
+            node,
+            text("detail")?,
+            crate::autonomous::now_millis(),
+        ),
+        preview_label: FACTORY_PROGRESS_PREVIEW_LABEL,
+    })
+}
+
 /// The session's agent through which the in-process sinks steer and
 /// withdraw: late-bound because the handlers register before the agent
 /// exists, and weak so the handler -> agent -> kernel -> handler graph
@@ -117,33 +181,27 @@ fn validate_consumed(data: &Value) -> anyhow::Result<BashConsumedNotice> {
 pub type BashNoticeAgentSlot = Arc<Mutex<Option<Weak<pa_agent::agent::Agent>>>>;
 
 /// The in-process sinks over one session's own agent (the daemonless
-/// embeddings): a completion steers the `[bash-done]` row onto the
-/// agent's steering queue and fires the embedding's wake (TS
-/// `queueIfBusy: true` + `resumeIfIdle: true` — the row rides the
-/// steering lane and the embedding resumes the idle run); a consumed
-/// notice withdraws the queued row.
-pub fn register_in_process_bash_notice_handlers(
+/// embeddings): a notice steers its row (`[bash-done]` or
+/// `[factory-progress]`) onto the agent's steering queue and fires the
+/// embedding's wake (TS `queueIfBusy: true` + `resumeIfIdle: true` — the
+/// row rides the steering lane and the embedding resumes the idle run); a
+/// consumed notice withdraws the queued completion row.
+pub fn register_in_process_kernel_notice_handlers(
     wake: &BashNoticeWake,
     agent_slot: &BashNoticeAgentSlot,
     handlers: &mut HostRequestHandlers,
 ) {
-    let completion_wake = Arc::clone(wake);
-    let completion_slot = Arc::clone(agent_slot);
-    let completion: BashCompletionSink = Arc::new(move |notice| {
-        let Some(agent) = bound_agent(&completion_slot) else {
+    let notice_wake = Arc::clone(wake);
+    let notice_slot = Arc::clone(agent_slot);
+    let notice: KernelNoticeSink = Arc::new(move |notice| {
+        let Some(agent) = bound_agent(&notice_slot) else {
             return;
         };
-        let row = messages::create_async_bash_completion_message(
-            notice.pid,
-            &notice.command,
-            notice.exit_code,
-            crate::autonomous::now_millis(),
-        );
-        let Some(row) = session_message_to_loop(&SessionAgentMessage::Custom(row)) else {
+        let Some(row) = session_message_to_loop(&SessionAgentMessage::Custom(notice.row)) else {
             return;
         };
         agent.steer(row);
-        completion_wake();
+        notice_wake();
     });
     let consumed_slot = Arc::clone(agent_slot);
     let consumed: BashConsumedSink = Arc::new(move |notice| {
@@ -161,7 +219,7 @@ pub fn register_in_process_bash_notice_handlers(
             }
         });
     });
-    register_bash_notice_host_handlers(completion, consumed, handlers);
+    register_kernel_notice_host_handlers(notice, consumed, handlers);
 }
 
 /// The bound agent behind the late slot, when the session still lives.
@@ -229,7 +287,7 @@ mod tests {
             }) as BashNoticeWake
         };
         let mut handlers = HostRequestHandlers::default();
-        register_in_process_bash_notice_handlers(&wake, &slot, &mut handlers);
+        register_in_process_kernel_notice_handlers(&wake, &slot, &mut handlers);
         (agent, slot, wakes, handlers)
     }
 
@@ -322,6 +380,55 @@ mod tests {
             remaining.len(),
             1,
             "one read withdrew the front-most row; the second identical row stayed"
+        );
+    }
+
+    #[tokio::test]
+    async fn factory_progress_queues_the_milestone_row_and_fires_the_wake() {
+        let (agent, _slot, wakes, handlers) = wired_agent();
+        let handler = handlers
+            .get("factory.progress")
+            .expect("the factory progress handler registered")
+            .clone();
+        let missing_run = serde_json::json!({ "kind": "paused", "detail": "state a failed" });
+        assert!(
+            dispatch(&handler, missing_run).await.is_err(),
+            "a milestone without a run id is refused"
+        );
+        let milestone = serde_json::json!({
+            "run_id": "run-7",
+            "kind": "budget_exceeded",
+            "detail": "run budget_ms 2000 exceeded",
+        });
+        dispatch(&handler, milestone)
+            .await
+            .expect("the milestone is accepted");
+        assert_eq!(
+            wakes.load(Ordering::SeqCst),
+            1,
+            "the admission fired the wake"
+        );
+        let queued = agent.remove_queued_messages(|_| true);
+        let [AgentMessage::Custom(custom)] = queued.as_slice() else {
+            panic!("one custom notice row queued: {queued:?}");
+        };
+        assert_eq!(
+            (
+                custom.payload.get("customType"),
+                custom.payload.get("content"),
+                custom.payload.get("details"),
+            ),
+            (
+                Some(&serde_json::json!("factory_progress_notice")),
+                Some(&serde_json::json!(
+                    "[factory-progress run:run-7] budget-exceeded: run budget_ms 2000 exceeded"
+                )),
+                Some(&serde_json::json!({
+                    "runId": "run-7",
+                    "kind": "budget_exceeded",
+                    "detail": "run budget_ms 2000 exceeded",
+                })),
+            )
         );
     }
 

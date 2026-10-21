@@ -132,6 +132,38 @@ impl FactoryRunSnapshot {
             Some("running" | "stopping" | "paused")
         ) || self.children_in_flight()
     }
+
+    /// Whether the run is paused (an escalate, budget, or max-* pause
+    /// waiting for resume): live, but not running. Every count splits the
+    /// live runs on this one predicate.
+    #[must_use]
+    pub fn is_paused(&self) -> bool {
+        self.state.as_deref() == Some("paused")
+    }
+}
+
+/// The live runs split on [`FactoryRunSnapshot::is_paused`]: the dock and
+/// the agents view show the running runs apart from the paused ones.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct FactoryRunCounts {
+    pub running: usize,
+    pub paused: usize,
+}
+
+impl FactoryRunCounts {
+    /// Count the live runs of one parsed reply.
+    #[must_use]
+    pub fn of(runs: &[FactoryRunSnapshot]) -> Self {
+        let mut counts = Self::default();
+        for run in runs.iter().filter(|run| run.is_live()) {
+            if run.is_paused() {
+                counts.paused += 1;
+            } else {
+                counts.running += 1;
+            }
+        }
+        counts
+    }
 }
 
 /// The activity dock's factory row: the live runs (the dock count's own
@@ -139,7 +171,7 @@ impl FactoryRunSnapshot {
 #[must_use]
 pub fn dock_factory_items(runs: &[FactoryRunSnapshot]) -> Vec<String> {
     let mut live: Vec<&FactoryRunSnapshot> = runs.iter().filter(|run| run.is_live()).collect();
-    live.sort_by_key(|run| run.state.as_deref() != Some("paused"));
+    live.sort_by_key(|run| !run.is_paused());
     live.iter()
         .map(|run| match &run.state {
             Some(state) => format!("{} {state}", run.display_name()),
@@ -403,7 +435,7 @@ impl FactoryView {
         if run.run_id.is_empty() {
             return actions;
         }
-        if run.state.as_deref() == Some("paused") {
+        if run.is_paused() {
             actions.push(FactoryAction::Resume);
         }
         if run.is_live() {
