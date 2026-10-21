@@ -42,6 +42,11 @@ pub const SESSION_RENAMED_CUSTOM_TYPE: &str = "session_renamed";
 /// notice's queued row carries (the TUI renders it with its own label,
 /// no lane prefix).
 pub const ASYNC_BASH_COMPLETION_PREVIEW_LABEL: &str = "Background command finished";
+/// The durable row a factory run milestone (`factory.progress`) admits on
+/// the owning session's steering lane.
+pub const FACTORY_PROGRESS_NOTICE_CUSTOM_TYPE: &str = "factory_progress_notice";
+/// The queue-strip label the factory progress notice's queued row carries.
+pub const FACTORY_PROGRESS_PREVIEW_LABEL: &str = "Factory progress";
 /// The queue-strip preview label for a parked heartbeat fire; the queued row reads
 /// `Heartbeat prompt: <content>` instead of the lane-labeled preview.
 pub const HEARTBEAT_PROMPT_PREVIEW_LABEL: &str = "Heartbeat prompt";
@@ -227,6 +232,35 @@ pub fn create_async_bash_completion_message(
             "command": command,
             "exitCode": exit_code,
         })),
+        timestamp,
+        rest: serde_json::Map::default(),
+    }
+}
+
+/// The factory run milestone notice: `[factory-progress run:<id>] <kind>: <detail>`,
+/// the kernel's `snake_case` kind rendered with hyphens (`budget_exceeded` reads
+/// `budget-exceeded`). The details keep the kernel's raw values.
+#[must_use]
+pub fn create_factory_progress_message(
+    run_id: &str,
+    kind: &str,
+    node: Option<&str>,
+    detail: &str,
+    timestamp: u64,
+) -> pa_types::session::CustomMessage {
+    let header_run = sanitize_message_header_value(run_id);
+    let header_kind = sanitize_message_header_value(&kind.replace('_', "-"));
+    let mut details = serde_json::json!({ "runId": run_id, "kind": kind, "detail": detail });
+    if let Some(node) = node {
+        details["node"] = serde_json::json!(node);
+    }
+    pa_types::session::CustomMessage {
+        custom_type: FACTORY_PROGRESS_NOTICE_CUSTOM_TYPE.to_string(),
+        content: UserContent::Text(format!(
+            "[factory-progress run:{header_run}] {header_kind}: {detail}"
+        )),
+        display: true,
+        details: Some(details),
         timestamp,
         rest: serde_json::Map::default(),
     }

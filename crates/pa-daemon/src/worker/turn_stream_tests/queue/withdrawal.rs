@@ -59,15 +59,11 @@ async fn queue_withdrawals_clear_only_the_last_idle_notes() {
                 }
             }
             if command == "bash_consumed" {
-                admit_bash_completion_notice(
+                admit_kernel_notice(
                     &worker.recovery,
                     &worker.core,
                     &Arc::new(Notify::new()),
-                    &crate::engine::BashCompletionNotice {
-                        pid: 4321,
-                        command: "fixture command".to_string(),
-                        exit_code: 0,
-                    },
+                    crate::engine::KernelNotice::bash_completion(4321, "fixture command", 0),
                     || false,
                 );
                 withdraw_bash_completion_notice(
