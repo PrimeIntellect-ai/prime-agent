@@ -617,60 +617,19 @@ fn generic_mcp_skill_renders_in_the_prompt_inventory() {
 
 // Async turn discipline
 
-/// The async-turn contract is wake-based and session-scoped: background `bash()`
-/// completions wake the agent with a queued `[bash-done]` turn in daemon and daemonless
-/// sessions alike (main #3640), so every prompt's turn-end rule must name that wake, not
-/// an unscoped await. The static usage layer renders in every session, so any turn-end
-/// guidance it carries must mention the notification wake too.
+/// Since #3640 every session kind wakes on bash completion: daemonless runs
+/// get a queued `[bash-done]` turn, so the static usage layer must not carry
+/// the pre-#3640 rule to await commands before ending the turn — the
+/// no-polling rule right below it already ends turns on the done
+/// notification, and an unscoped await rule would contradict that wake.
 #[test]
-fn usage_layer_async_turn_contract_stays_session_scoped() {
-    let mut options = BuildSystemPromptOptions {
-        cwd: "/w".to_string(),
-        messages_path: Some("/log.jsonl".to_string()),
-        skills: sorted_bundled_skills(),
-        selected_tools: Some(vec!["python_repl"]),
-        ..Default::default()
-    };
-    let daemon = system_prompt_breakdown(&options);
+fn usage_layer_ends_turns_on_the_done_notification_not_an_await_rule() {
     assert!(
-        daemon
-            .assembled
-            .contains("end the turn and collect the final result on the `[bash-done]` notification"),
-        "the notification-session prompt must tell the agent to end the turn and collect on the notice"
+        !USAGE_LAYER.contains("await commands before ending the turn"),
+        "every session kind has completion notifications: the await-before-turn-end rule is stale"
     );
     assert!(
-        daemon
-            .assembled
-            .contains("they end the turn and collect the result on the done notification"),
-        "the usage layer must keep the no-polling, collect-on-notice rule"
+        USAGE_LAYER.contains("end the turn and collect the result on the done notification"),
+        "the no-polling rule keeps the collect-on-notice turn-end contract"
     );
-    options.daemonless = true;
-    let daemonless = system_prompt_breakdown(&options);
-    assert!(
-        daemonless
-            .assembled
-            .contains("background `bash()` completions wake you with a queued `[bash-done]` turn"),
-        "the daemonless role line must name the `[bash-done]` wake that ends the turn"
-    );
-    assert!(
-        daemonless.assembled.contains(
-            "end the turn and collect the final result on the `[bash-done]` notification"
-        ),
-        "the daemonless prompt must carry the same collect-on-notice turn-end contract"
-    );
-    assert!(
-        !daemonless
-            .assembled
-            .contains("await them before ending your turn"),
-        "turns end on the `[bash-done]` wake: the stale daemonless await rule must not come back"
-    );
-    for sentence in USAGE_LAYER.split(". ") {
-        if sentence.contains("end the turn") || sentence.contains("ending the turn") {
-            assert!(
-                sentence.contains("notification"),
-                "static turn-end guidance renders in every session, woken or not: scope every \
-                 turn-end sentence to the notification wake (sentence: {sentence})"
-            );
-        }
-    }
 }
