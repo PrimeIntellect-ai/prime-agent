@@ -10,7 +10,10 @@ fn with_activity(mode: &mut AgentsViewMode, active: &str, shells: usize, factory
         active.to_string(),
         SessionActivity {
             shells,
-            factory_runs,
+            factory_runs: crate::factory_view::FactoryRunCounts {
+                running: factory_runs,
+                paused: 0,
+            },
         },
     );
     mode.rebuild_rows();

@@ -84,15 +84,11 @@ async fn a_bash_completion_notice_admits_the_steering_lane_with_busy_evidence() 
     let worker = created_worker_with_journal().await;
     worker.dispatch("clear_queue", &json!({})).await;
     let notify = Arc::new(Notify::new());
-    admit_bash_completion_notice(
+    admit_kernel_notice(
         &worker.recovery,
         &worker.core,
         &notify,
-        &crate::engine::BashCompletionNotice {
-            pid: 4321,
-            command: "sleep 12; echo RW_WAKE_DONE".to_string(),
-            exit_code: 0,
-        },
+        crate::engine::KernelNotice::bash_completion(4321, "sleep 12; echo RW_WAKE_DONE", 0),
         || false,
     );
     let core = worker.core.lock().unwrap();
@@ -149,15 +145,11 @@ async fn a_bash_completion_notice_on_a_busy_session_queues_a_visible_steer_row()
     let worker = created_worker_with_journal().await;
     worker.core.lock().unwrap().busy = true;
     let notify = Arc::new(Notify::new());
-    admit_bash_completion_notice(
+    admit_kernel_notice(
         &worker.recovery,
         &worker.core,
         &notify,
-        &crate::engine::BashCompletionNotice {
-            pid: 99,
-            command: "make gates".to_string(),
-            exit_code: 2,
-        },
+        crate::engine::KernelNotice::bash_completion(99, "make gates", 2),
         || false,
     );
     let core = worker.core.lock().unwrap();
@@ -174,15 +166,11 @@ async fn bash_consumed_withdraws_the_undelivered_notice_and_settles() {
     let worker = created_worker_with_journal().await;
     worker.dispatch("clear_queue", &json!({})).await;
     let notify = Arc::new(Notify::new());
-    admit_bash_completion_notice(
+    admit_kernel_notice(
         &worker.recovery,
         &worker.core,
         &notify,
-        &crate::engine::BashCompletionNotice {
-            pid: 4321,
-            command: "sleep 12; echo RW_WAKE_DONE".to_string(),
-            exit_code: 0,
-        },
+        crate::engine::KernelNotice::bash_completion(4321, "sleep 12; echo RW_WAKE_DONE", 0),
         || false,
     );
     assert!(
