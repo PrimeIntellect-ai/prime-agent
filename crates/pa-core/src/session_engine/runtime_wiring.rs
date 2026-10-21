@@ -253,6 +253,7 @@ pub fn kernel_provisioner(
     command_prefix: Option<String>,
     serper_api_key: Option<String>,
     session_artifact_dir: Option<std::path::PathBuf>,
+    cell_timeout_ms: Option<u64>,
     on_restore: Option<crate::kernel::provisioner::RestoreCallback>,
     on_background_work_settled: Option<crate::kernel::shared::BackgroundWorkSettledCallback>,
     on_unavailable_skills: Option<crate::kernel::provisioner::UnavailableSkillsCallback>,
@@ -298,6 +299,9 @@ pub fn kernel_provisioner(
             // Only persistent sessions (which have an artifact dir) get
             // a revivable snapshot (TS `snapshotDir`).
             snapshot_dir: session_artifact_dir,
+            // The engine-resolved watchdog budget (`None`: daemonless or
+            // disabled; the runtime bootstrap and state ops never arm it).
+            cell_timeout_ms,
             ready_gate: None,
             on_restore,
             on_background_work_settled,
@@ -347,7 +351,11 @@ impl IpythonKernelProvisioner for KernelProvisioner {
             // wraps it in its own abort signal.
             let signal = signal.map(crate::kernel::cancellation::AbortSignal::from_token);
             let manager = this.ensure(on_progress, signal).await?;
-            Ok(Box::new(KernelManagerExecutor { manager }) as Box<dyn KernelExecutor>)
+            let cell_timeout_ms = this.cell_timeout_ms();
+            Ok(Box::new(KernelManagerExecutor {
+                manager,
+                cell_timeout_ms,
+            }) as Box<dyn KernelExecutor>)
         })
     }
 
@@ -362,6 +370,8 @@ impl IpythonKernelProvisioner for KernelProvisioner {
 /// Adapts the kernel manager to the ipython tool's executor contract.
 struct KernelManagerExecutor {
     manager: crate::kernel::manager::ReplKernelManager,
+    /// The provisioner-resolved per-cell watchdog budget (`None`: never armed).
+    cell_timeout_ms: Option<u64>,
 }
 
 impl KernelExecutor for KernelManagerExecutor {
@@ -379,7 +389,7 @@ impl KernelExecutor for KernelManagerExecutor {
         let code = code.to_string();
         let signal = options.signal;
         let on_late_sent_agent_message = options.on_late_sent_agent_message;
-        let cell_timeout_ms = Some(resolve_cell_watchdog_timeout_ms());
+        let cell_timeout_ms = self.cell_timeout_ms;
         Box::pin(async move {
             let result = manager
                 .execute(
@@ -398,22 +408,16 @@ impl KernelExecutor for KernelManagerExecutor {
     }
 }
 
-/// Default per-cell watchdog budget for user `python_repl` cells: 60 seconds.
-const DEFAULT_CELL_TIMEOUT_SECS: u64 = 60;
-/// Env var configuring the budget: whole seconds, `0` disables the watchdog.
-const CELL_TIMEOUT_ENV: &str = "PRIME_AGENT_PYTHON_CELL_TIMEOUT_S";
-
-/// The per-cell watchdog budget for user cells, in milliseconds. The bootstrap
-/// and the internal state ops never arm it, so only model-facing cells can be
-/// taught toward `bash()`.
-fn resolve_cell_watchdog_timeout_ms() -> u64 {
-    cell_timeout_secs(std::env::var(CELL_TIMEOUT_ENV).ok()).saturating_mul(1000)
-}
-
-/// Env text to whole seconds; unparsable or absent text falls back to the default.
-fn cell_timeout_secs(raw: Option<String>) -> u64 {
-    raw.and_then(|raw| raw.trim().parse::<u64>().ok())
-        .unwrap_or(DEFAULT_CELL_TIMEOUT_SECS)
+/// Whether the per-cell watchdog arms for this session. Daemonless sessions
+/// keep `await bash()` unbounded by design (#3523): every over-budget cell
+/// there would be a sanctioned long await with no background lane to move
+/// to, so the watchdog arms only in daemon-backed sessions.
+pub(crate) fn arm_cell_timeout_ms(daemonless: bool, settings_ms: u64) -> Option<u64> {
+    if daemonless {
+        None
+    } else {
+        Some(settings_ms)
+    }
 }
 
 fn convert_status(
@@ -565,17 +569,14 @@ mod tests {
     }
 
     #[test]
-    fn cell_timeout_env_falls_back_to_default() {
-        assert_eq!(cell_timeout_secs(None), 60);
-        assert_eq!(cell_timeout_secs(Some(String::new())), 60);
-        assert_eq!(cell_timeout_secs(Some("junk".to_string())), 60);
-        assert_eq!(cell_timeout_secs(Some("-5".to_string())), 60);
-    }
-
-    #[test]
-    fn cell_timeout_env_parses_whole_seconds() {
-        assert_eq!(cell_timeout_secs(Some("0".to_string())), 0);
-        assert_eq!(cell_timeout_secs(Some(" 25 ".to_string())), 25);
-        assert_eq!(cell_timeout_secs(Some("600".to_string())), 600);
+    fn cell_watchdog_arms_only_in_daemon_backed_sessions() {
+        // Daemonless sessions keep `await bash()` unbounded by design
+        // (#3523): their over-budget cells are sanctioned long awaits.
+        assert_eq!(arm_cell_timeout_ms(true, 60_000), None);
+        assert_eq!(arm_cell_timeout_ms(true, 0), None);
+        assert_eq!(arm_cell_timeout_ms(false, 60_000), Some(60_000));
+        // A zero setting is the explicit disable: it must reach the
+        // executor as an armed zero budget, not fall back to a default.
+        assert_eq!(arm_cell_timeout_ms(false, 0), Some(0));
     }
 }

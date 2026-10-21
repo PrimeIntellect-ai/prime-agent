@@ -298,6 +298,10 @@ pub enum McpServerConfig {
     },
 }
 
+/// The default per-cell watchdog budget for user `python_repl` cells: 60
+/// seconds.
+pub const DEFAULT_PYTHON_CELL_TIMEOUT_MS: u64 = 60_000;
+
 /// The settings document: every known field optional; unknown keys preserved.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
@@ -333,6 +337,10 @@ pub struct Settings {
     /// session model does not accept image input. Default: none - image turns on a text-only model
     /// fail with a configuration hint instead of silently dropping the images.
     pub image_model: Option<String>,
+    /// Per-cell watchdog budget for user `python_repl` cells, in milliseconds
+    /// (default [`DEFAULT_PYTHON_CELL_TIMEOUT_MS`]; `0` disables). Daemonless
+    /// sessions never arm it.
+    pub python_cell_timeout_ms: Option<u64>,
     pub autonomous: Option<AutonomousSettings>,
     /// Custom shell that runs every kernel `bash()` and user-bash command as
     /// `<shell> -c <command>`: an absolute path to an existing executable,

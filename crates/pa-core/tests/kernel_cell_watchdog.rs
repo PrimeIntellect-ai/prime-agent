@@ -10,9 +10,10 @@
 
 //! Per-cell watchdog integration tests: spawn a real `python -m rlm.repl`
 //! kernel and verify the watchdog teaches instead of killing. A cell that
-//! outlives its budget resolves as a `CellTimeout` error carrying the
-//! teaching text; sub-budget cells, disabled budgets, and the kernel itself
-//! (namespace intact, process alive) are untouched.
+//! outlives its budget still settles ok and keeps its own result, with the
+//! teaching note appended to stderr; sub-budget cells, disabled budgets,
+//! failed cells, and the kernel itself (namespace intact, process alive) are
+//! untouched.
 #![cfg(unix)]
 
 use std::collections::HashMap;
@@ -96,12 +97,12 @@ async fn execute(
 }
 
 #[tokio::test]
-async fn overage_cell_resolves_as_timeout_error_with_teaching_text() {
+async fn overage_cell_keeps_ok_with_the_watchdog_note_on_stderr() {
     let Some(manager) = started_manager().await else {
         return;
     };
 
-    // Sub-budget cell: returns normally, result untouched.
+    // Sub-budget cell: returns normally, result and stderr untouched.
     let quick = execute(
         &manager,
         "import time, sys\ntime.sleep(0.2)\n'quick'",
@@ -111,46 +112,49 @@ async fn overage_cell_resolves_as_timeout_error_with_teaching_text() {
     assert_eq!(quick.status, ExecuteStatus::Ok);
     assert_eq!(quick.result.as_deref(), Some("'quick'"));
     assert!(quick.error.is_none());
+    assert!(
+        !quick.stderr.contains("[watchdog]"),
+        "a sub-budget cell must carry no watchdog note"
+    );
 
-    // Staged ~5s cell under a 2s budget: the cell runs to completion, then
-    // the watchdog annotates its result as a CellTimeout teaching error.
+    // Staged ~5s cell under a 2s budget: the cell runs to completion and
+    // keeps its ok status; the watchdog note is appended to stderr.
     let slow = execute(&manager, "time.sleep(5)\n'slow'", Some(2000)).await;
     assert_eq!(
         slow.status,
-        ExecuteStatus::Error,
-        "an over-budget cell must not resolve as a quiet success"
+        ExecuteStatus::Ok,
+        "a completed over-budget cell must not resolve as a failure: a \
+         timeout-looking error invites a duplicate run of finished work"
     );
-    let error = slow.error.expect("overage cell carries the watchdog error");
-    assert_eq!(error.ename, "CellTimeout");
+    assert!(slow.error.is_none());
     assert!(
-        error.evalue.contains("Cell exceeded 2s"),
+        slow.stderr.contains("[watchdog]"),
+        "the teaching note rides stderr: {}",
+        slow.stderr
+    );
+    assert!(
+        slow.stderr
+            .contains("Cell exceeded the 2s python_repl budget"),
         "teaching text names the budget: {}",
-        error.evalue
+        slow.stderr
     );
     assert!(
-        error.evalue.contains("kernel state is preserved"),
-        "teaching text preserves the kernel claim: {}",
-        error.evalue
+        slow.stderr.contains("Move long shell work to bash()"),
+        "teaching text points at the real mechanism: {}",
+        slow.stderr
     );
-    assert!(
-        error
-            .evalue
-            .contains("Run long work via bash() so it can auto-background."),
-        "teaching text points at bash(): {}",
-        error.evalue
-    );
-    // The cell's own outcome survives alongside the annotation.
+    // The cell's own outcome survives alongside the note.
     assert_eq!(slow.result.as_deref(), Some("'slow'"));
     assert!(
         slow.duration_ms >= 5000,
         "the cell itself ran to completion"
     );
 
-    // A zero budget disables the watchdog: the same ~5s cell stays ok.
+    // A zero budget disables the watchdog: the same ~5s cell carries no note.
     let disabled = execute(&manager, "time.sleep(5)\n'disabled'", Some(0)).await;
     assert_eq!(disabled.status, ExecuteStatus::Ok);
     assert_eq!(disabled.result.as_deref(), Some("'disabled'"));
-    assert!(disabled.error.is_none());
+    assert!(!disabled.stderr.contains("[watchdog]"));
 
     // The kernel was never killed: the namespace from the first cells is intact.
     let alive = execute(&manager, "time is not None and sys.executable", None).await;
@@ -164,7 +168,7 @@ async fn overage_cell_resolves_as_timeout_error_with_teaching_text() {
 }
 
 #[tokio::test]
-async fn watchdog_flipped_cell_still_schedules_the_snapshot() {
+async fn watchdog_noted_cell_still_schedules_the_snapshot() {
     let Some(python) = kernel_python() else {
         return;
     };
@@ -194,17 +198,16 @@ async fn watchdog_flipped_cell_still_schedules_the_snapshot() {
         .expect("kernel must start");
 
     // The cell commits a variable but outruns a 500ms budget: the watchdog
-    // flips the status to a CellTimeout error, yet the cell completed ok in
-    // the kernel, so the debounced namespace snapshot must still fire.
+    // appends its note, yet the cell completed ok in the kernel, so the
+    // debounced namespace snapshot must still fire.
     let overage = execute(
         &manager,
         "import time\ntime.sleep(2)\nwatch_var = 'committed'",
         Some(500),
     )
     .await;
-    assert_eq!(overage.status, ExecuteStatus::Error);
-    let error = overage.error.expect("watchdog error present");
-    assert_eq!(error.ename, "CellTimeout");
+    assert_eq!(overage.status, ExecuteStatus::Ok);
+    assert!(overage.stderr.contains("[watchdog]"));
 
     let snapshot = snapshot_path_in(dir.path());
     let mut flushed = false;
@@ -221,6 +224,66 @@ async fn watchdog_flipped_cell_still_schedules_the_snapshot() {
         flushed,
         "the watchdog-flipped cell must still schedule the namespace snapshot"
     );
+
+    manager
+        .shutdown(pa_core::kernel::shared::KernelShutdownOptions::default())
+        .await
+        .expect("shutdown");
+}
+
+#[tokio::test]
+async fn overage_error_cell_keeps_its_own_error() {
+    let Some(manager) = started_manager().await else {
+        return;
+    };
+
+    // A cell that FAILS after outrunning the budget keeps its own error:
+    // the watchdog never fabricates a timeout over a real traceback, and
+    // the failed cell carries no teaching note.
+    let failed = execute(&manager, "import time\ntime.sleep(2.5)\n1/0", Some(1000)).await;
+    assert_eq!(failed.status, ExecuteStatus::Error);
+    let error = failed.error.expect("the cell's own error survives");
+    assert_eq!(
+        error.ename, "ZeroDivisionError",
+        "the cell's own error wins"
+    );
+    assert!(
+        !failed.stderr.contains("[watchdog]"),
+        "a failed cell gets no watchdog note: {}",
+        failed.stderr
+    );
+
+    manager
+        .shutdown(pa_core::kernel::shared::KernelShutdownOptions::default())
+        .await
+        .expect("shutdown");
+}
+
+#[tokio::test]
+async fn queue_wait_is_excluded_from_the_cell_budget() {
+    let Some(manager) = started_manager().await else {
+        return;
+    };
+
+    // A ~3s cell holds the serial execution queue; a fast cell enqueued
+    // behind it measures its budget from its own wire write, not from its
+    // enqueue, so its queue wait must not trip the watchdog.
+    let slow_manager = manager.clone();
+    let slow = tokio::spawn(async move {
+        execute(&slow_manager, "import time\ntime.sleep(3)\n'slow'", Some(0)).await
+    });
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let queued = execute(&manager, "'fast'", Some(2000)).await;
+    // The queue wait (~2.8s) exceeds the 2s budget; the fast cell's own
+    // run is instant, so it must resolve clean with no note.
+    assert_eq!(queued.status, ExecuteStatus::Ok);
+    assert!(
+        !queued.stderr.contains("[watchdog]"),
+        "queue wait must not trip the watchdog: {}",
+        queued.stderr
+    );
+    let slow = slow.await.expect("slow cell join");
+    assert_eq!(slow.status, ExecuteStatus::Ok);
 
     manager
         .shutdown(pa_core::kernel::shared::KernelShutdownOptions::default())

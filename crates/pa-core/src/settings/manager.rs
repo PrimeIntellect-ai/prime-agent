@@ -648,6 +648,16 @@ impl SettingsManager {
         self.merged.recent_models.clone().unwrap_or_default()
     }
 
+    /// The per-cell watchdog budget for user `python_repl` cells, in
+    /// milliseconds (`0` disables; the default is 60s). Daemonless
+    /// sessions never arm the watchdog.
+    #[must_use]
+    pub fn get_python_cell_timeout_ms(&self) -> u64 {
+        self.merged
+            .python_cell_timeout_ms
+            .unwrap_or(crate::settings::types::DEFAULT_PYTHON_CELL_TIMEOUT_MS)
+    }
+
     /// The steering queue's delivery mode: `all` co-delivers every queued message at
     /// the next turn boundary; `one-at-a-time` delivers one per turn.
     #[must_use]
@@ -1013,7 +1023,7 @@ fn load_scope(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::settings::types::MarkdownSettings;
+    use crate::settings::types::{MarkdownSettings, DEFAULT_PYTHON_CELL_TIMEOUT_MS};
 
     #[test]
     fn in_memory_loads_merges_and_saves() {
@@ -1223,6 +1233,26 @@ mod tests {
         assert!(!manager.get_compaction_enabled());
         manager.reload().unwrap();
         assert!(!manager.get_compaction_enabled());
+    }
+
+    #[test]
+    fn python_cell_timeout_reads_setting_or_default() {
+        let manager = SettingsManager::in_memory(&Settings::default());
+        assert_eq!(
+            manager.get_python_cell_timeout_ms(),
+            DEFAULT_PYTHON_CELL_TIMEOUT_MS
+        );
+        let manager = SettingsManager::in_memory(&Settings {
+            python_cell_timeout_ms: Some(90_000),
+            ..Settings::default()
+        });
+        assert_eq!(manager.get_python_cell_timeout_ms(), 90_000);
+        // Zero is the explicit disable, not the default.
+        let manager = SettingsManager::in_memory(&Settings {
+            python_cell_timeout_ms: Some(0),
+            ..Settings::default()
+        });
+        assert_eq!(manager.get_python_cell_timeout_ms(), 0);
     }
 
     #[test]
