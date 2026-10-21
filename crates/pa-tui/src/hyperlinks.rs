@@ -377,7 +377,6 @@ impl<W: Write> HyperlinkWriter<W> {
     /// Emit the buffered printable run and advance the tracked column.
     fn flush_text(&mut self) -> io::Result<()> {
         use unicode_segmentation::UnicodeSegmentation;
-        use unicode_width::UnicodeWidthChar;
         if self.text.is_empty() {
             return Ok(());
         }
@@ -399,17 +398,6 @@ impl<W: Write> HyperlinkWriter<W> {
             self.inner.write_all(grapheme.as_bytes())?;
             if let Some((_, col)) = self.pos.as_mut() {
                 *col = col.saturating_add(width);
-                // An East Asian Ambiguous character is one column here and one or two in the
-                // terminal (iTerm2's "ambiguous characters are double-width"): move to the next
-                // cell's column (the row never changes inside a run), so the rest of the row
-                // never drifts.
-                if grapheme
-                    .chars()
-                    .next()
-                    .is_some_and(|base| base.width_cjk() != base.width())
-                {
-                    write!(self.inner, "\x1b[{}G", *col + 1)?;
-                }
             }
         }
         Ok(())
@@ -716,7 +704,7 @@ mod tests {
     }
 
     /// A minimal terminal that measures graphemes with `columns` (the width choice vt100 cannot
-    /// model): it follows column moves, skips the other escape sequences, and records the first
+    /// model): it follows cursor moves, skips the other escape sequences, and records the first
     /// row's cells.
     fn screen_row(bytes: &[u8], width: usize, columns: impl Fn(&str) -> usize) -> Vec<String> {
         use unicode_segmentation::UnicodeSegmentation;
@@ -727,15 +715,16 @@ mod tests {
         while !rest.is_empty() {
             if let Some(len) = crate::width::escape_len(rest) {
                 let sequence = &rest[..len];
-                let params = sequence.strip_prefix("\x1b[").unwrap_or_default();
-                // Cursor position (CUP) and cursor horizontal absolute (CHA) set the column.
-                let column = if let Some(position) = params.strip_suffix('H') {
-                    position.split(';').nth(1)
-                } else {
-                    params.strip_suffix('G')
-                };
-                if let Some(column) = column {
-                    col = column.parse::<usize>().unwrap_or(1) - 1;
+                if let Some(position) = sequence
+                    .strip_prefix("\x1b[")
+                    .and_then(|s| s.strip_suffix('H'))
+                {
+                    col = position
+                        .split(';')
+                        .nth(1)
+                        .and_then(|c| c.parse::<usize>().ok())
+                        .unwrap_or(1)
+                        - 1;
                 }
                 rest = &rest[len..];
                 continue;
@@ -767,29 +756,6 @@ mod tests {
             ["a", "b"],
             "the row a one-column soft hyphen terminal paints"
         );
-    }
-
-    /// With iTerm2's "ambiguous characters are double-width", an em dash takes two columns: the
-    /// cell after it still lands in its own column instead of drifting right.
-    #[test]
-    fn the_cell_after_an_ambiguous_character_lands_in_its_column_on_a_double_width_terminal() {
-        use unicode_width::UnicodeWidthStr;
-        let bytes = paint_frames(&["abc", "x\u{2014}y"], 4);
-        let row = screen_row(&bytes, 4, UnicodeWidthStr::width_cjk);
-        assert_eq!(row[0], "x");
-        assert_eq!(
-            row[2], "y",
-            "the row an ambiguous-double terminal paints: {row:?}"
-        );
-    }
-
-    /// A terminal that keeps ambiguous characters one column wide (vt100) paints the same row.
-    #[test]
-    fn an_ambiguous_character_paints_unchanged_on_a_single_width_terminal() {
-        let bytes = paint_frames(&["abc", "x\u{2014}y"], 4);
-        let mut parser = vt100::Parser::new(1, 4, 0);
-        parser.process(&bytes);
-        assert_eq!(parser.screen().contents(), "x\u{2014}y");
     }
 
     /// A terminal that measures a VS16 emoji one column wide (vt100, like iTerm2) keeps no stale
