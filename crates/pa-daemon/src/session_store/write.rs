@@ -294,8 +294,7 @@ impl SessionFile {
                 Ok(())
             });
             if let Err(error) = rewritten {
-                self.by_id.remove(&id);
-                self.entries.pop();
+                self.unindex_last();
                 self.leaf_id = previous_leaf;
                 return Err(error);
             }

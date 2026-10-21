@@ -846,10 +846,13 @@ impl Worker {
                     limit: ATTACH_TAIL_MESSAGE_BUDGET,
                 })
                 .map_or((Vec::new(), None, None), |page| {
+                    // The resume marker only rides a snapshot with older history.
+                    let last_user_prompt_ms =
+                        page.more.then(|| store.last_user_prompt_ms()).flatten();
                     (
                         page.messages,
                         page.first_entry_id.filter(|_| page.more),
-                        page.last_user_prompt_ms,
+                        last_user_prompt_ms,
                     )
                 }),
             Some(store) => (store.messages(), None, None),
