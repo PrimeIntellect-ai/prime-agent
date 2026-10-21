@@ -89,6 +89,12 @@ impl EventSource for UnixInternalEventSource {
                 return Ok(None);
             }
 
+            // Every readiness event of this poll is handled before returning: mio registers the
+            // sources edge-triggered, so a readiness left unhandled here is never reported again,
+            // and its input waits for the next unrelated edge. A SIGWINCH and a keystroke landing
+            // in the same poll must both arrive.
+            #[cfg(feature = "event-stream")]
+            let mut woken = false;
             for token in self.events.iter().map(|x| x.token()) {
                 match token {
                     TTY_TOKEN => {
@@ -114,8 +120,8 @@ impl EventSource for UnixInternalEventSource {
                                 }
                             };
 
-                            if let Some(event) = self.parser.next() {
-                                return Ok(Some(event));
+                            if !self.parser.internal_events.is_empty() {
+                                break;
                             }
                         }
                     }
@@ -129,20 +135,30 @@ impl EventSource for UnixInternalEventSource {
                             // it's a really long time from the mio, async-std/tokio executor, ...
                             // point of view.
                             let new_size = crate::terminal::size()?;
-                            return Ok(Some(InternalEvent::Event(Event::Resize(
-                                new_size.0, new_size.1,
-                            ))));
+                            self.parser
+                                .internal_events
+                                .push_back(InternalEvent::Event(Event::Resize(
+                                    new_size.0, new_size.1,
+                                )));
                         }
                     }
                     #[cfg(feature = "event-stream")]
-                    WAKE_TOKEN => {
-                        return Err(std::io::Error::new(
-                            std::io::ErrorKind::Interrupted,
-                            "Poll operation was woken up by `Waker::wake`",
-                        ));
-                    }
+                    WAKE_TOKEN => woken = true,
                     _ => unreachable!("Synchronize Evented handle registration & token handling"),
                 }
+            }
+
+            // A wake still interrupts the poll; the input read beside it stays queued for the
+            // next read.
+            #[cfg(feature = "event-stream")]
+            if woken {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::Interrupted,
+                    "Poll operation was woken up by `Waker::wake`",
+                ));
+            }
+            if let Some(event) = self.parser.next() {
+                return Ok(Some(event));
             }
 
             // Processing above can take some time, check if timeout expired
@@ -225,5 +241,45 @@ impl Iterator for Parser {
 
     fn next(&mut self) -> Option<Self::Item> {
         self.internal_events.pop_front()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io::Write;
+    use std::os::unix::net::UnixStream;
+    use std::time::Duration;
+
+    use super::UnixInternalEventSource;
+    use crate::event::{source::EventSource, Event, InternalEvent, KeyCode};
+    use crate::terminal::sys::file_descriptor::FileDesc;
+
+    /// A resize and a keystroke that land in the same poll both arrive (typing while the window
+    /// resizes). The SIGWINCH is raised first, so its readiness comes first in the poll. The
+    /// resize reads the terminal size: run it on a tty, or with `TERM` set for the `tput`
+    /// fallback.
+    #[test]
+    fn a_keystroke_in_the_same_poll_as_a_resize_arrives() {
+        let (input, mut keyboard) = UnixStream::pair().unwrap();
+        let mut source =
+            UnixInternalEventSource::from_file_descriptor(FileDesc::Owned(input.into())).unwrap();
+        signal_hook::low_level::raise(signal_hook::consts::SIGWINCH).unwrap();
+        keyboard.write_all(b"ab").unwrap();
+
+        let mut events = Vec::new();
+        while let Some(event) = source.try_read(Some(Duration::from_millis(200))).unwrap() {
+            if let InternalEvent::Event(event) = event {
+                events.push(event);
+            }
+        }
+        assert!(matches!(events.first(), Some(Event::Resize(..))), "{events:?}");
+        let keys: Vec<KeyCode> = events
+            .iter()
+            .filter_map(|event| match event {
+                Event::Key(key) => Some(key.code),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(keys, [KeyCode::Char('a'), KeyCode::Char('b')], "{events:?}");
     }
 }

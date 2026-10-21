@@ -61,3 +61,20 @@ the enhancement for the RTT>50ms class (the product's primary remote-SSH
 deployment shape) while buying only the silent class's raced-transition
 stall, which no user rides. The timed contract is locked by
 `crates/pa-cli/tests/kitty_verdict_time_e2e.rs`.
+
+# Every readiness event of a poll is handled (2026-10-21)
+
+`src/event/source/unix/mio.rs` `try_read` returned on the first readiness token that produced an
+event and dropped the rest of that poll's tokens. mio registers the tty, the SIGWINCH pipe and the
+waker edge-triggered, so a dropped readiness is never reported again. When a resize and a
+keystroke landed in the same poll, the keys stayed unread in the tty until the next keystroke, or
+the resize was lost. CI saw it as `scripts/check_private_default_frames.py` flakes: the `_NARROW`
+bytes typed right after the resize never echoed. Now every token of the poll is handled first.
+Tty input and the resize queue in the parser in token order. A wake still returns `Interrupted`,
+and the input read beside it stays queued. The tty read is unchanged: the fd is blocking, so it
+still stops at the first read that yields an event. Upstream crossterm has the same code.
+
+The unit test `a_keystroke_in_the_same_poll_as_a_resize_arrives` pins it. The crate is not a
+workspace member, so cargo cannot test it in place: run it from a copy of `vendor/crossterm` with
+the `[[example]]` entries removed from its `Cargo.toml` (the examples are not vendored):
+`TERM=xterm-256color cargo test --features event-stream --lib -- a_keystroke_in_the_same_poll`.
