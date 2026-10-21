@@ -3426,7 +3426,12 @@ fn acp_idle_cancel_after_a_completed_steer_is_a_noop() {
                   "arguments": { "code": sleep_cell } },
             ] },
             { "content": [{ "type": "text", "text": "STEERED-ACK" }] },
-            { "content": [{ "type": "text", "text": "AFTER-CANCEL-REPLY" }] },
+            // Two spare replies: the steer either joins the busy turn
+            // (one reply left for the post-cancel prompt) or lands in the
+            // turn's trailing window and runs as its own turn (the first
+            // spare, leaving the second for the post-cancel prompt).
+            { "content": [{ "type": "text", "text": "AFTER-CANCEL-REPLY-A" }] },
+            { "content": [{ "type": "text", "text": "AFTER-CANCEL-REPLY-B" }] },
         ],
     });
     let child = json!({ "responses": ["unused"] });
@@ -3481,7 +3486,7 @@ fn acp_idle_cancel_after_a_completed_steer_is_a_noop() {
             frame["params"]["update"]["sessionUpdate"] == "agent_message_chunk"
                 && text(frame).contains("AFTER-CANCEL-REPLY")
         }),
-        "the fresh prompt ran its own turn: {updates:?}"
+        "the fresh prompt ran its own turn on a spare reply: {updates:?}"
     );
     drop(client);
 }

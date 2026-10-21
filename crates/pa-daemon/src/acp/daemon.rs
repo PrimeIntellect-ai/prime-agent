@@ -1894,12 +1894,32 @@ async fn handle_session_steering(
             .unwrap_or_else(|| "unknown error".to_string());
         // A refused steer provably never landed (the queue command
         // rejects before it enqueues), so this admission unwinds its own
-        // in-flight registration: a later idle `session/cancel` no-ops
-        // again instead of arming a full stop for work that does not
-        // exist. The unwind is epoch-guarded: an admission whose round
-        // trip spans a stop reset unwinds nothing (the reset already
-        // retired its unit, and the count now tracks newer admissions
-        // whose units a bare subtraction would eat).
+        // registration: the in-flight count releases its unit (a later
+        // idle `session/cancel` no-ops again instead of arming a full
+        // stop for work that does not exist), and the run id leaves the
+        // tracking - the worker never saw it, so the prompt settlement
+        // must not wait an unknown run and the idle cancel must not
+        // probe it. The in-flight unwind is epoch-guarded: an admission
+        // whose round trip spans a stop reset unwinds nothing (the reset
+        // already retired its unit, and the count now tracks newer
+        // admissions whose units a bare subtraction would eat). The run
+        // id is unique, so its removal needs no epoch.
+        {
+            let mut guard = state.lock().await;
+            if let Some(hosted) = guard
+                .session
+                .as_mut()
+                .filter(|hosted| hosted.acp_session_id == params.session_id)
+            {
+                if let Some(turn) = hosted.turn.as_mut() {
+                    turn.steered_runs
+                        .retain(|run_id| run_id != &admission.run_id);
+                }
+                hosted
+                    .steer_runs
+                    .retain(|run_id| run_id != &admission.run_id);
+            }
+        }
         settle_steer_admission(state, &params.session_id, admission.admitted_epoch).await;
         let _ = tx.send(super::internal_error(
             &id,
@@ -2086,8 +2106,11 @@ async fn wait_steer_run(
     daemon_session_id: &str,
     run_id: &str,
 ) -> anyhow::Result<Option<String>> {
+    // Turn-long: a steered run's turn may run for minutes, so the wait
+    // has no fixed cap (the link close is the liveness bound, like
+    // `prompt_and_wait` and `wait_for_idle`).
     let response = link
-        .request(DaemonCommand::WaitForSteerRun {
+        .request_until_close(DaemonCommand::WaitForSteerRun {
             id: None,
             active_session_id: daemon_session_id.to_string(),
             run_id: run_id.to_string(),
@@ -2348,36 +2371,76 @@ async fn prompt_turn(
     // text was the host's message to THIS turn, and answering success
     // while its continuation failed on the model would lose the failure
     // entirely (#3684 review).
-    let steered_runs = {
-        let guard = state.lock().await;
-        guard
-            .session
-            .as_ref()
-            .filter(|hosted| hosted.acp_session_id == params.session_id)
-            .and_then(|hosted| hosted.turn.as_ref())
-            .filter(|turn| turn.admission_id == admission_id)
-            .map(|turn| turn.steered_runs.clone())
-            .unwrap_or_default()
-    };
-    for run_id in &steered_runs {
-        match wait_steer_run(link, &hosted_daemon_session_id, run_id).await {
-            Ok(None) => {}
-            Ok(Some(failure)) => {
-                eprintln!("pa-daemon: acp steered run failed: {failure}");
-                publish_error_boundary(&producer, turn_id).await;
-                producer.finish_prompt(turn_id).await;
-                return super::internal_error(
-                    &id,
-                    &format!("prime-agent steered run failed: {failure}"),
-                );
+    //
+    // The drain is a fixpoint, because a steer registers its run id
+    // BEFORE its worker round trip: the wait first drains the in-flight
+    // admissions (so their runs are registered at the worker before any
+    // run is waited), then waits the runs admitted so far, and repeats
+    // until a pass admits nothing new and nothing is in flight. Steers
+    // can still be admitted into this turn while the slot is held.
+    let mut waited_steered_runs: Vec<String> = Vec::new();
+    loop {
+        wait_for_steer_admissions(state, &params.session_id).await;
+        let (new_runs, in_flight) = {
+            let guard = state.lock().await;
+            let hosted = guard
+                .session
+                .as_ref()
+                .filter(|hosted| hosted.acp_session_id == params.session_id);
+            let new_runs = hosted
+                .and_then(|hosted| hosted.turn.as_ref())
+                .filter(|turn| turn.admission_id == admission_id)
+                .map(|turn| {
+                    turn.steered_runs
+                        .iter()
+                        .filter(|run_id| !waited_steered_runs.contains(run_id))
+                        .cloned()
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            let in_flight = hosted.map_or(0, |hosted| hosted.steer_in_flight);
+            (new_runs, in_flight)
+        };
+        if new_runs.is_empty() && in_flight == 0 {
+            break;
+        }
+        for run_id in &new_runs {
+            match wait_steer_run(link, &hosted_daemon_session_id, run_id).await {
+                Ok(None) => {}
+                Ok(Some(failure)) => {
+                    eprintln!("pa-daemon: acp steered run failed: {failure}");
+                    publish_error_boundary(&producer, turn_id).await;
+                    producer.finish_prompt(turn_id).await;
+                    return super::internal_error(
+                        &id,
+                        &format!("prime-agent steered run failed: {failure}"),
+                    );
+                }
+                Err(error) => {
+                    publish_error_boundary(&producer, turn_id).await;
+                    producer.finish_prompt(turn_id).await;
+                    return super::internal_error(
+                        &id,
+                        &format!("prime-agent steered run wait failed: {error}"),
+                    );
+                }
             }
-            Err(error) => {
-                publish_error_boundary(&producer, turn_id).await;
-                producer.finish_prompt(turn_id).await;
-                return super::internal_error(
-                    &id,
-                    &format!("prime-agent steered run wait failed: {error}"),
-                );
+        }
+        waited_steered_runs.extend(new_runs);
+    }
+    // The resolved runs leave the turn's tracking: they are done, and
+    // the slot release must not migrate already-settled runs into the
+    // session list for idle-cancel probes.
+    {
+        let mut guard = state.lock().await;
+        if let Some(hosted) = guard
+            .session
+            .as_mut()
+            .filter(|hosted| hosted.acp_session_id == params.session_id)
+        {
+            if let Some(turn) = hosted.turn.as_mut() {
+                turn.steered_runs
+                    .retain(|run_id| !waited_steered_runs.contains(run_id));
             }
         }
     }
@@ -3477,17 +3540,25 @@ mod tests {
         }
 
         let settled = refused_steer_reply(0).await;
+        let settled_hosted = settled.session.as_ref().unwrap();
         assert_eq!(
-            settled.session.as_ref().unwrap().steer_in_flight,
-            0,
+            settled_hosted.steer_in_flight, 0,
             "the refused steer settled its registration: a later idle cancel no-ops again"
+        );
+        assert!(
+            settled_hosted.steer_runs.is_empty(),
+            "the refused steer leaves no ghost run to wait or probe"
         );
 
         let kept = refused_steer_reply(2).await;
+        let kept_hosted = kept.session.as_ref().unwrap();
         assert_eq!(
-            kept.session.as_ref().unwrap().steer_in_flight,
-            2,
+            kept_hosted.steer_in_flight, 2,
             "the refusal settled only its own unit, never another in-flight admission"
+        );
+        assert!(
+            kept_hosted.steer_runs.is_empty(),
+            "the refused steer leaves no ghost run over live steered work"
         );
     }
 

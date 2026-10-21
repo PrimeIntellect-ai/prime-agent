@@ -65,12 +65,15 @@ impl SteerRunTable {
                 SteerRunSlot::Pending(receiver) => receiver.take(),
             };
             let Some(receiver) = receiver else {
-                // Another waiter owns the settle: park until it stores it.
+                // Another waiter owns the settle: park until it stores
+                // it. Only an already-stored settle re-checks without
+                // parking - a taken-but-unsettled slot must wait on the
+                // notify, never spin on the lock.
                 let notified = self.settles.notified();
                 if self
                     .lock()
                     .get(run_id)
-                    .is_some_and(|slot| !matches!(slot, SteerRunSlot::Pending(Some(_))))
+                    .is_some_and(|slot| matches!(slot, SteerRunSlot::Settled(_)))
                 {
                     continue;
                 }
@@ -157,17 +160,55 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_second_wait_answers_the_stored_settle() {
-        let table = SteerRunTable::new();
+    async fn a_second_wait_parks_until_the_owning_wait_stores_the_settle() {
+        let table = std::sync::Arc::new(SteerRunTable::new());
         let sender = table.register("run-3");
-        drop(sender);
         let first = {
-            let table = &table;
+            let table = std::sync::Arc::clone(&table);
             async move { table.wait("run-3").await }
         };
         let second = {
-            let table = &table;
+            let table = std::sync::Arc::clone(&table);
             async move { table.wait("run-3").await }
+        };
+        let first = tokio::spawn(first);
+        let second = tokio::spawn(second);
+        // Both waits park on the unsettled run (the owning one on the
+        // receiver, the second on the settle notify), and neither
+        // resolves before the settle fires.
+        tokio::task::yield_now().await;
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        assert!(
+            !second.is_finished(),
+            "the second wait parks on the notify, it does not spin or resolve early"
+        );
+        sender
+            .send(TurnSettle::Failed("boom".to_string()))
+            .expect("the settle lands");
+        assert_eq!(
+            first.await.unwrap(),
+            Some(Some(TurnSettle::Failed("boom".to_string()))),
+            "the owning wait resolves the settle"
+        );
+        assert_eq!(
+            second.await.unwrap(),
+            Some(Some(TurnSettle::Failed("boom".to_string()))),
+            "the parked second wait answers the stored settle"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_second_wait_answers_an_already_stored_settle() {
+        let table = SteerRunTable::new();
+        let sender = table.register("run-4");
+        drop(sender);
+        let first = {
+            let table = &table;
+            async move { table.wait("run-4").await }
+        };
+        let second = {
+            let table = &table;
+            async move { table.wait("run-4").await }
         };
         let (a, b) = tokio::join!(first, second);
         assert_eq!(
@@ -178,7 +219,7 @@ mod tests {
         assert_eq!(
             b,
             Some(None),
-            "the parked second wait answers the stored settle, never hangs"
+            "the second wait answers the stored withdrawal, never hangs"
         );
     }
 
