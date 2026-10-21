@@ -497,9 +497,7 @@ impl Worker {
         // Validate ancestry atomically with the page read. Appends keep the
         // attached leaf on this branch; navigation to another branch does not.
         let history_leaf = match payload.get("historyLeafId").map(Value::as_str) {
-            Some(Some(leaf)) if store.branch().iter().any(|entry| entry.id == leaf) => {
-                leaf.to_string()
-            }
+            Some(Some(leaf)) if store.branch_contains(leaf) => leaf.to_string(),
             Some(_) => {
                 return response_failure(None, "get_messages", "History branch changed", None);
             }
