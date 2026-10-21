@@ -2,7 +2,8 @@
 """Hosted real-daemon factory recovery receipt.
 
 The kernel runs a real factory child, fails its declared JSON output,
-resumes the same entry, and binds the second child's valid output.
+resumes the same entry, and binds the second child's valid output. The
+owning (parent) session receives the paused and finished notices.
 """
 import argparse
 import http.server
@@ -161,12 +162,25 @@ def observe(binary, root, observed):
                 threading.Event().wait(0.025)
             observed.setdefault('timed_out_snapshots', []).extend(snapshots)
             raise AssertionError('factory did not leave running after parent turn completed')
+        def parent_notice(kind):
+            notice = f'[factory-progress run:{run_id}] {kind}:'
+            deadline = time.monotonic() + 60
+            while time.monotonic() < deadline:
+                seen = [text for body in list(server.parent_requests)
+                        for m in body.get('messages', []) if m.get('role') == 'user'
+                        for text in texts(m.get('content')) if notice in text]
+                if seen:
+                    return seen[0]
+                threading.Event().wait(0.025)
+            raise AssertionError(f'parent session never received {notice!r}')
         paused = settled()
         assert paused['state'] == 'paused', paused
+        observed['paused_notice'] = parent_notice('paused')
         observed['resume_response'] = control.call('factory_activity', activeSessionId=active,
             action='resume', runId=run_id)
         observed['probe'] = {'paused': paused, 'done': settled()}
         validate(observed['probe'])
+        observed['finished_notice'] = parent_notice('finished')
         assert len(server.child_requests) == 3, 'not two producer attempts plus one guarded verifier'
         observed['behavior_verified'] = True
     finally:

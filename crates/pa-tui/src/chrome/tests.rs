@@ -258,6 +258,57 @@ fn activity_dock_frames_one_row_with_running_paused_and_goal_counts() {
     assert!(text.contains("Pursuing goal (12m 05s)"));
 }
 
+/// A paused factory run never reads as running: the collapsed count holds only the running
+/// run (green), and the paused one sits in its own amber cluster, like a paused heartbeat.
+#[test]
+fn the_collapsed_dock_counts_paused_factory_runs_apart_from_running_ones() {
+    let theme = Theme::builtin("prime", ColorMode::TrueColor);
+    let colored = |dock: &ActivityDock| {
+        render_activity_dock(dock, &theme, 120)[1]
+            .iter()
+            .skip_while(|span| !span.content.starts_with('⚙'))
+            .map(|span| (span.content.clone(), span.style.fg))
+            .collect::<Vec<_>>()
+    };
+    let paused_only = ActivityDock {
+        factory_runs: vec!["nightly paused".to_string()],
+        factory_counts: crate::factory_view::FactoryRunCounts {
+            running: 0,
+            paused: 1,
+        },
+        factory_group: true,
+        ..ActivityDock::default()
+    };
+    let muted = theme.fg_style(ThemeColor::Muted).fg;
+    let success = theme.fg_style(ThemeColor::Success).fg;
+    let warning = theme.fg_style(ThemeColor::Warning).fg;
+    let dim = theme.fg_style(ThemeColor::Dim).fg;
+    assert_eq!(
+        colored(&paused_only),
+        vec![
+            ("⚙ 0 factory".to_string(), muted),
+            (" · ".to_string(), dim),
+            ("◐ 1 paused".to_string(), warning),
+        ]
+    );
+    let mixed = ActivityDock {
+        factory_runs: vec!["nightly paused".to_string(), "lint running".to_string()],
+        factory_counts: crate::factory_view::FactoryRunCounts {
+            running: 1,
+            paused: 1,
+        },
+        ..paused_only
+    };
+    assert_eq!(
+        colored(&mixed),
+        vec![
+            ("⚙ 1 factory".to_string(), success),
+            (" · ".to_string(), dim),
+            ("◐ 1 paused".to_string(), warning),
+        ]
+    );
+}
+
 /// ONE number: direct children and nested descendants summed, never a `direct, nested` pair.
 #[test]
 fn prompt_bar_subagent_segment_is_the_running_count_only() {
@@ -342,6 +393,10 @@ fn the_focused_dock_expands_into_one_row_per_group() {
         heartbeats_paused: 1,
         shells: vec!["cargo test · 12.0s".to_string()],
         factory_runs: vec!["nightly paused".to_string()],
+        factory_counts: crate::factory_view::FactoryRunCounts {
+            running: 0,
+            paused: 1,
+        },
         factory_group: true,
         goal_label: Some("Pursuing goal (0s)".to_string()),
         selected: ActivityGroup::Subagents,
@@ -376,7 +431,7 @@ fn the_focused_dock_expands_into_one_row_per_group() {
     let texts = line_texts(&render_activity_dock(&collapsed, &theme, 120));
     assert_eq!(
         texts[1..],
-        [" ◆ 3 subagents  ·  ◷ 2 heartbeats · ◐ 1 paused  ·  ▸ 1 shell  ·  ⚙ 1 factory  ·  Pursuing goal (0s)"]
+        [" ◆ 3 subagents  ·  ◷ 2 heartbeats · ◐ 1 paused  ·  ▸ 1 shell  ·  ⚙ 0 factory · ◐ 1 paused  ·  Pursuing goal (0s)"]
     );
 }
 

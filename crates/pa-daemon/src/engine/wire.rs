@@ -241,11 +241,11 @@ pub enum GoalTurnEndWork {
 /// held suspension owns the next turn boundary, so the goal mint defers.
 pub type SessionInputProbe = std::sync::Arc<dyn Fn() -> bool + Send + Sync>;
 
-// The bash-notice plumbing lives in pa-core
+// The kernel-notice plumbing lives in pa-core
 // (`session_engine::bash_notices`); the re-export keeps the
 // `crate::engine::*` paths the worker's queue lanes compile against.
 pub use pa_core::session_engine::bash_notices::{
-    BashCompletionNotice, BashCompletionSink, BashConsumedNotice, BashConsumedSink,
+    BashConsumedNotice, BashConsumedSink, KernelNotice, KernelNoticeSink,
 };
 
 /// The worker's goal admission sink: the queue lanes admit a minted goal

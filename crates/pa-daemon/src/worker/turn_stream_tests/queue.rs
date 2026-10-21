@@ -852,7 +852,7 @@ impl SessionEngine for NoteWitnessEngine {
 async fn the_async_completion_notice_delivery_keeps_the_live_note() {
     let engine = Arc::new(NoteWitnessEngine::default());
     let runner = burst_runner(engine.clone());
-    // The busy-session row `admit_bash_completion_notice` queues.
+    // The busy-session row `admit_kernel_notice` queues.
     runner
         .core
         .lock()

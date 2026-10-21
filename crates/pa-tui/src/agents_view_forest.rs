@@ -126,7 +126,7 @@ pub struct SelectionKey {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct SessionActivity {
     pub shells: usize,
-    pub factory_runs: usize,
+    pub factory_runs: crate::factory_view::FactoryRunCounts,
 }
 
 /// One recursive rollup over the record hierarchy (TS

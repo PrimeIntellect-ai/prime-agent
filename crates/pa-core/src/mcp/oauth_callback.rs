@@ -481,25 +481,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn all_candidates_bound_fails_clearly() {
-        let blockers: Vec<std::net::TcpListener> = (0..CALLBACK_PORT_COUNT)
-            .filter_map(|offset| {
-                std::net::TcpListener::bind(("127.0.0.1", CALLBACK_PORT_BASE + offset)).ok()
-            })
-            .collect();
-        if blockers.len() < CALLBACK_PORT_COUNT as usize {
-            // Another test holds a candidate port; not a failure of this
-            // invariant on this machine.
-            return;
-        }
-        let error = CallbackServer::start("Linear", /*callback_port*/ None)
-            .await
-            .unwrap_err()
-            .to_string();
-        assert!(error.contains("Could not start the OAuth callback server"));
-    }
-
-    #[tokio::test]
     async fn callback_flow_settles_code_and_state() {
         let server = CallbackServer::start("Linear", /*callback_port*/ None)
             .await

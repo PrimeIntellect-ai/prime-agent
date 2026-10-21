@@ -1737,6 +1737,10 @@ class FactoryExecutor:
         run.loop_generation += 1
         run.state = "running"
         run.pause_reason = None
+        # Re-arm the pause notice: the escalate -> resume -> fail-again
+        # retry flow must tell the parent about every pause, not only the
+        # first. The budget and max_* notices stay one per run.
+        run.milestones.discard("paused")
         self._touch(run)
         self._event(run, "resumed", detail="resumed by caller")
         # An escalate pause holds its failed entry unsettled: re-admit it
@@ -2367,9 +2371,9 @@ class FactoryExecutor:
     async def _milestone(self, run: FactoryRun, kind: str, detail: str, *, node: str | None = None) -> None:
         """Record a run milestone and inject one quiet notice (one per kind).
 
-        Every milestone lands in the ledger, repeats included: a run that
-        pauses twice must still show the second pause to the parent reading
-        ``status()``. Only the parent-visible notice is deduped per kind.
+        Every milestone lands in the ledger, repeats included. Only the
+        parent-visible notice is deduped per kind; ``resume()`` re-arms the
+        ``paused`` notice, so each pause after a resume notifies again.
         """
         event = self._event(run, "milestone", milestone=kind, detail=detail, node=node)
         if kind in run.milestones:
@@ -5222,8 +5226,9 @@ watched = await rlm.factory.watch(result["run_id"], 30)
   failure; `name=` labels the run in status and the TUI.
 - Pause and failure notices (escalate, budget, max_transitions,
   max_children, failed, finished) arrive as quiet notices in the
-  conversation once per kind per run, the pause notices with the resume
-  call spelled out — a paused run does not need polling to be noticed.
+  conversation once per kind per run (an escalate pause notifies again
+  after each resume), the pause notices with the resume call spelled
+  out — a paused run does not need polling to be noticed.
 - `stop(run_id)` cancels every running child of the run (idempotent);
   `resume(run_id)` continues a paused run and raises on a non-paused one;
   after an escalate pause it first re-admits the failed entry.
