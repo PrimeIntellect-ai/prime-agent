@@ -897,7 +897,8 @@ mod tests {
                 && received
                     .iter()
                     .all(|key| key.as_deref() == Some("fixture-key")),
-            "the registry-resolved key reaches the provider on every call: {received:?}"
+            "the registry-resolved key reaches the provider on every call: {} calls",
+            received.len()
         );
     }
 
