@@ -151,8 +151,13 @@ impl Worker {
         // no edge.
         let (rlm_child_id, parent_active_session_id, parent_session_id, semantic_spawn) =
             match payload.get("runtimeMetadata") {
+                // A decision child keeps its subagent identity: the same
+                // parent edge routes its decision replies to the parent.
                 Some(metadata)
-                    if metadata.get("kind").and_then(Value::as_str) == Some("subagent") =>
+                    if matches!(
+                        metadata.get("kind").and_then(Value::as_str),
+                        Some("subagent" | "decision")
+                    ) =>
                 {
                     let parent_session_id = metadata
                         .get("parentSessionId")

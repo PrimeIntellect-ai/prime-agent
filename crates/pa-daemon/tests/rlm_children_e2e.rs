@@ -707,6 +707,10 @@ async fn a_decision_child_spawn_runs_the_decision_engine_end_to_end() {
         })
     });
     assert_eq!(roster_summary["rlmDepth"], 1);
+    // The decision child keeps its subagent parent edge: the create arm
+    // extracts the runtime identity for the decision kind too, so the
+    // child's summary (and every reply route off it) reaches the parent.
+    assert_eq!(roster_summary["parentActiveSessionId"], "parent-active-id");
 }
 
 #[tokio::test]
