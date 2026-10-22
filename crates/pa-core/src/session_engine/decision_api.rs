@@ -368,9 +368,14 @@ async fn serve_decision(
         return serve_systemone(resolved, request).await;
     }
     let context = build_decision_context(request);
+    // The token cancels the provider's detached task when the bound drops
+    // this reader, so the orphaned request releases its response and its
+    // connection instead of running on.
+    let signal = tokio_util::sync::CancellationToken::new();
     let options = pa_ai::types::SimpleStreamOptions::from_base(pa_ai::types::StreamOptions {
         max_tokens: Some(DECISION_MAX_TOKENS),
         timeout_ms: Some(DECISION_TIMEOUT_MS),
+        signal: Some(signal.clone()),
         api_key: resolved.api_key.clone(),
         headers: resolved
             .headers
@@ -381,13 +386,20 @@ async fn serve_decision(
     // `timeout_ms` bounds only the request send; the wrap bounds the whole
     // completion, so a stalled body stream is dropped and answered with the
     // timeout error instead of holding the decision forever.
-    let response = tokio::time::timeout(
+    let response = if let Ok(result) = tokio::time::timeout(
         std::time::Duration::from_millis(DECISION_TIMEOUT_MS),
         pa_ai::complete_simple(&resolved.model, &context, Some(options)),
     )
     .await
-    .map_err(|_| anyhow!("the decision model request timed out"))?
-    .map_err(|error| anyhow!("the decision model request failed: {error:?}"))?;
+    {
+        result.map_err(|error| anyhow!("the decision model request failed: {error:?}"))?
+    } else {
+        // Dropping the completion future drops only this reader; the
+        // token tells the detached provider task to stop and release
+        // the response and its connection.
+        signal.cancel();
+        bail!("the decision model request timed out");
+    };
     match response.stop_reason {
         StopReason::Error => bail!(
             "the decision model call failed: {}",
@@ -842,6 +854,85 @@ mod tests {
         } } });
         let error = decide(request, dir.path()).await.unwrap_err().to_string();
         assert_eq!(error, "the decision model request timed out");
+    }
+
+    /// The timeout cancels the in-flight provider request, not just this
+    /// reader: the request carries a cancellation token (the factory step
+    /// captures it), and the timeout that drops the completion future
+    /// cancels it, so the detached provider task stops instead of holding
+    /// the response and its connection.
+    #[tokio::test(start_paused = true)]
+    async fn decision_timeouts_cancel_the_in_flight_provider_request() {
+        // A private api name: the faux provider registry is global, so a
+        // shared name would race the other decision tests' response queues.
+        let registration =
+            pa_ai::faux::register_faux_provider(pa_ai::faux::RegisterFauxProviderOptions {
+                api: Some("faux-decision-cancel".to_string()),
+                provider: Some("fixture-decisions".to_string()),
+                models: Some(vec![pa_ai::faux::FauxModelDefinition {
+                    id: "decision-model".to_string(),
+                    input: Some(vec![ModelInput::Text]),
+                    ..Default::default()
+                }]),
+                // The paced answer streams for far longer than the decision
+                // bound, the way a slow body stream does.
+                tokens_per_second: Some(0.1),
+                ..Default::default()
+            });
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("settings.json"),
+            json!({ "decisionApi": { "systemOneModel": "decision-model" } }).to_string(),
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("models.json"),
+            r#"{ "providers": { "fixture-decisions": {
+                "baseUrl": "https://fixture.example", "apiKey": "fixture-key",
+                "api": "faux-decision-cancel", "models": [
+                    { "id": "decision-model", "input": ["text"] }
+                ]
+            } } }"#,
+        )
+        .unwrap();
+        // The factory captures the request's cancellation token and returns
+        // an answer whose pacing holds the stream past the bound.
+        let captured = std::sync::Arc::new(std::sync::Mutex::new(
+            Option::<tokio_util::sync::CancellationToken>::None,
+        ));
+        let capture_writer = std::sync::Arc::clone(&captured);
+        registration.set_responses(vec![pa_ai::faux::FauxResponseStep::Factory(
+            std::sync::Arc::new(
+                move |_context: &pa_ai::types::Context,
+                      options: Option<&pa_ai::types::StreamOptions>,
+                      _call: u64,
+                      _model: &pa_types::ai::Model| {
+                    *capture_writer.lock().unwrap() =
+                        options.and_then(|options| options.signal.clone());
+                    Ok(pa_ai::faux::faux_assistant_text_message(
+                        r#"{"action": {"choice": "left"}}"#,
+                        pa_ai::faux::FauxAssistantMessageOptions::default(),
+                    ))
+                },
+            ),
+        )]);
+        let request = json!({ "state": {}, "questions": { "action": {
+            "type": "choice", "criteria": { "left": "go left" }
+        } } });
+        let error = decide(request, dir.path()).await.unwrap_err().to_string();
+        assert_eq!(error, "the decision model request timed out");
+        // The completion future is dropped; the token is the only cancellation
+        // the detached provider task ever sees, so the timeout must have
+        // cancelled it.
+        let signal = captured
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("the decision request carries a cancellation token");
+        assert!(
+            signal.is_cancelled(),
+            "the decision timeout must cancel the in-flight provider request"
+        );
     }
 
     /// One decision round trip through the registry resolution and the
