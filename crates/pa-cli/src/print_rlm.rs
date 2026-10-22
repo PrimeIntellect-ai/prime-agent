@@ -1295,7 +1295,7 @@ mod tests {
             name: Some("late".to_string()),
             model: None,
             thinking: None,
-            cwd: None,
+            decision_child: false,
             spawned_by_request_id: None,
             factory: None,
         });

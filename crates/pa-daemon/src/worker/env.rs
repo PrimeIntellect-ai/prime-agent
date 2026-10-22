@@ -57,6 +57,9 @@ pub const WORKER_SUPERVISOR_SOCKET_ENV: &str = "PRIME_AGENT_INTERNAL_DAEMON_SUPE
 pub const WORKER_RECOVERY_JOURNAL_ENV: &str = "PRIME_AGENT_INTERNAL_DAEMON_WORKER_RECOVERY_JOURNAL";
 /// Scripted-engine script file for faux sessions (integration harness).
 pub const WORKER_SCRIPT_ENV: &str = "PRIME_AGENT_INTERNAL_DAEMON_WORKER_SCRIPT";
+/// The Decision API child flag (`rlm.spawn kind="decision"`): the worker
+/// builds the decision engine instead of the agent engine.
+pub const WORKER_DECISION_CHILD_ENV: &str = "PRIME_AGENT_INTERNAL_DAEMON_WORKER_DECISION_CHILD";
 /// Worker socket path (supervisor passes it explicitly).
 pub const WORKER_SOCKET_ENV: &str = "PRIME_AGENT_INTERNAL_DAEMON_WORKER_SOCKET";
 /// Telemetry opt-out (supervisor passes the create's `telemetryDisabled`, TS parity).
@@ -85,6 +88,7 @@ const INHERITED_WORKER_ENV: &[&str] = &[
     WORKER_SOCKET_ENV,
     WORKER_RECOVERY_JOURNAL_ENV,
     WORKER_SCRIPT_ENV,
+    WORKER_DECISION_CHILD_ENV,
     WORKER_TELEMETRY_DISABLED_ENV,
     crate::lease::SESSION_LEASE_OWNER_ID_ENV,
     pa_core::kernel::orphan_journal::ORPHAN_PROCESS_JOURNAL_ENV,
