@@ -467,7 +467,7 @@ async fn serve_systemone(
         "{}/systemone",
         resolved.model.base_url.trim_end_matches('/')
     );
-    let client = reqwest::Client::builder()
+    let client = pa_ai::utils::tls::http_client_builder()
         .timeout(std::time::Duration::from_millis(DECISION_TIMEOUT_MS))
         .default_headers(headers)
         .build()
