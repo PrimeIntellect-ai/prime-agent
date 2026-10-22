@@ -113,6 +113,9 @@ pub(crate) struct ActiveExecution {
     restores_namespace: bool,
     buffers: Mutex<ExecBuffers>,
     result_tx: Mutex<Option<oneshot::Sender<anyhow::Result<InternalExecuteResult>>>>,
+    /// When the request frame went on the wire: the cell's own wall-clock start,
+    /// excluding queue wait and kernel boot. `None` until the write begins.
+    cell_started: Mutex<Option<Instant>>,
 }
 
 /// `ExecuteResult` plus the raw fields of the request's `done` event (state ops).
@@ -600,6 +603,9 @@ impl ReplKernelManager {
         let result = self
             .enqueue_execute(code, opts, execution_timeout_ms)
             .await?;
+        // A watchdog-noted cell stayed ok in the kernel and committed its
+        // namespace changes: the auto-snapshot applies exactly as for any ok
+        // cell, or a crash would revive a namespace missing the cell.
         if result.result.status == ExecuteStatus::Ok {
             self.schedule_snapshot();
         }

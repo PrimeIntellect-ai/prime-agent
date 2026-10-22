@@ -228,6 +228,14 @@ pub struct ExecuteOptions {
     pub internal: bool,
     /// The protocol repair's own request; exempt from waiting on the repair it belongs to.
     pub protocol_repair: bool,
+    /// Per-cell watchdog budget in milliseconds. When non-zero, a cell whose own
+    /// run (request on the wire -> done event) outlives the budget still settles
+    /// ok and keeps its own result; a teaching note is appended to its stderr
+    /// instead of a quiet over-budget success. The kernel is never killed: the
+    /// note lands only after the cell settles, so the serial execution queue and
+    /// the namespace are untouched. `None` and zero disable the watchdog; the
+    /// runtime bootstrap never arms it.
+    pub cell_timeout_ms: Option<u64>,
 }
 
 /// The error raised when a new cell cannot start because the previously

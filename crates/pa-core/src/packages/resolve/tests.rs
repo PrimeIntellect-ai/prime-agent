@@ -894,6 +894,7 @@ fn bundled_skills_collect_with_websearch_excluded_until_enabled() {
     skill_md(&bundled, "websearch", "Search the web");
     skill_md(&bundled, "other-skill", "Other");
     let settings_path = fixture.agent_dir.join("settings.json");
+    let auth_path = fixture.agent_dir.join("auth.json");
     std::fs::create_dir_all(&fixture.agent_dir).unwrap();
 
     std::fs::write(&settings_path, serde_json::json!({}).to_string()).unwrap();
@@ -910,7 +911,13 @@ fn bundled_skills_collect_with_websearch_excluded_until_enabled() {
         .iter()
         .find(|r| r.path.to_string_lossy().contains("websearch"))
         .expect("websearch collected");
-    assert!(websearch.enabled, "websearch enabled by default");
+    // Unset settings ride with the credential: a keyless machine stays off,
+    // a machine carrying an ambient key rides with it.
+    let ambient_key = std::env::var("SERPER_API_KEY").is_ok_and(|value| !value.trim().is_empty());
+    assert_eq!(
+        websearch.enabled, ambient_key,
+        "unset settings ride with the serper credential"
+    );
     assert_eq!(websearch.metadata.source, MetadataSource::Builtin);
     let other = result
         .skills
@@ -918,7 +925,55 @@ fn bundled_skills_collect_with_websearch_excluded_until_enabled() {
         .find(|r| r.path.to_string_lossy().contains("other-skill"))
         .expect("other collected");
     assert!(!other.enabled, "extra builtin overrides apply");
+    if !ambient_key {
+        assert!(
+            !result
+                .skills
+                .iter()
+                .filter(|r| r.enabled)
+                .any(|r| r.path.to_string_lossy().contains("websearch")),
+            "websearch is absent from the enabled skill list on a keyless install"
+        );
 
+        // A stored Serper key enables the skill with no settings entry: the
+        // upgrade path for users who already have a key.
+        std::fs::write(
+            &auth_path,
+            r#"{ "serper": { "type": "api_key", "key": "stored" } }"#,
+        )
+        .unwrap();
+        let result = manager.resolve().unwrap();
+        let websearch = result
+            .skills
+            .iter()
+            .find(|r| r.path.to_string_lossy().contains("websearch"))
+            .expect("websearch still collected");
+        assert!(
+            websearch.enabled,
+            "a stored serper key enables the skill with no settings entry"
+        );
+    }
+
+    std::fs::write(
+        &settings_path,
+        serde_json::json!({"bundledSkills": {"websearch": true}}).to_string(),
+    )
+    .unwrap();
+    manager.reload_settings().unwrap();
+    let result = manager.resolve().unwrap();
+    let websearch = result
+        .skills
+        .iter()
+        .find(|r| r.path.to_string_lossy().contains("websearch"))
+        .expect("websearch still collected");
+    assert!(
+        websearch.enabled,
+        "websearch resolves when explicitly enabled"
+    );
+    assert_eq!(websearch.metadata.source, MetadataSource::Builtin);
+
+    // The explicit override beats the credential: a stored key stays silent
+    // under `bundledSkills.websearch: false`.
     std::fs::write(
         &settings_path,
         serde_json::json!({"bundledSkills": {"websearch": false}}).to_string(),
@@ -931,7 +986,10 @@ fn bundled_skills_collect_with_websearch_excluded_until_enabled() {
         .iter()
         .find(|r| r.path.to_string_lossy().contains("websearch"))
         .expect("websearch still collected");
-    assert!(!websearch.enabled, "websearch excluded until enabled");
+    assert!(
+        !websearch.enabled,
+        "explicit false overrides a stored credential"
+    );
 }
 
 #[test]

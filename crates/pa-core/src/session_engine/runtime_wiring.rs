@@ -253,6 +253,7 @@ pub fn kernel_provisioner(
     command_prefix: Option<String>,
     serper_api_key: Option<String>,
     session_artifact_dir: Option<std::path::PathBuf>,
+    cell_timeout_ms: Option<u64>,
     on_restore: Option<crate::kernel::provisioner::RestoreCallback>,
     on_background_work_settled: Option<crate::kernel::shared::BackgroundWorkSettledCallback>,
     on_unavailable_skills: Option<crate::kernel::provisioner::UnavailableSkillsCallback>,
@@ -298,6 +299,9 @@ pub fn kernel_provisioner(
             // Only persistent sessions (which have an artifact dir) get
             // a revivable snapshot (TS `snapshotDir`).
             snapshot_dir: session_artifact_dir,
+            // The engine-resolved watchdog budget (`None`: daemonless or
+            // disabled; the runtime bootstrap and state ops never arm it).
+            cell_timeout_ms,
             ready_gate: None,
             on_restore,
             on_background_work_settled,
@@ -347,7 +351,11 @@ impl IpythonKernelProvisioner for KernelProvisioner {
             // wraps it in its own abort signal.
             let signal = signal.map(crate::kernel::cancellation::AbortSignal::from_token);
             let manager = this.ensure(on_progress, signal).await?;
-            Ok(Box::new(KernelManagerExecutor { manager }) as Box<dyn KernelExecutor>)
+            let cell_timeout_ms = this.cell_timeout_ms();
+            Ok(Box::new(KernelManagerExecutor {
+                manager,
+                cell_timeout_ms,
+            }) as Box<dyn KernelExecutor>)
         })
     }
 
@@ -362,6 +370,8 @@ impl IpythonKernelProvisioner for KernelProvisioner {
 /// Adapts the kernel manager to the ipython tool's executor contract.
 struct KernelManagerExecutor {
     manager: crate::kernel::manager::ReplKernelManager,
+    /// The provisioner-resolved per-cell watchdog budget (`None`: never armed).
+    cell_timeout_ms: Option<u64>,
 }
 
 impl KernelExecutor for KernelManagerExecutor {
@@ -379,6 +389,7 @@ impl KernelExecutor for KernelManagerExecutor {
         let code = code.to_string();
         let signal = options.signal;
         let on_late_sent_agent_message = options.on_late_sent_agent_message;
+        let cell_timeout_ms = self.cell_timeout_ms;
         Box::pin(async move {
             let result = manager
                 .execute(
@@ -386,6 +397,7 @@ impl KernelExecutor for KernelManagerExecutor {
                     crate::kernel::shared::ExecuteOptions {
                         signal: signal.map(crate::kernel::cancellation::AbortSignal::from_token),
                         on_late_sent_agent_message,
+                        cell_timeout_ms,
                         ..Default::default()
                     },
                 )
@@ -393,6 +405,18 @@ impl KernelExecutor for KernelManagerExecutor {
                 .map_err(KernelExecError::Other)?;
             Ok(convert_execute_result(result))
         })
+    }
+}
+
+/// Whether the per-cell watchdog arms for this session. Daemonless sessions
+/// keep `await bash()` unbounded by design (#3523): every over-budget cell
+/// there would be a sanctioned long await with no background lane to move
+/// to, so the watchdog arms only in daemon-backed sessions.
+pub(crate) fn arm_cell_timeout_ms(daemonless: bool, settings_ms: u64) -> Option<u64> {
+    if daemonless {
+        None
+    } else {
+        Some(settings_ms)
     }
 }
 
@@ -542,5 +566,17 @@ mod tests {
             &handlers,
         );
         assert_eq!(visible.len(), 3);
+    }
+
+    #[test]
+    fn cell_watchdog_arms_only_in_daemon_backed_sessions() {
+        // Daemonless sessions keep `await bash()` unbounded by design
+        // (#3523): their over-budget cells are sanctioned long awaits.
+        assert_eq!(arm_cell_timeout_ms(true, 60_000), None);
+        assert_eq!(arm_cell_timeout_ms(true, 0), None);
+        assert_eq!(arm_cell_timeout_ms(false, 60_000), Some(60_000));
+        // A zero setting is the explicit disable: it must reach the
+        // executor as an armed zero budget, not fall back to a default.
+        assert_eq!(arm_cell_timeout_ms(false, 0), Some(0));
     }
 }

@@ -362,10 +362,21 @@ fn auth_gated_bundled_skills() -> BTreeSet<String> {
         .collect()
 }
 
+/// Conditionally-available bundled skills: the websearch skill rides with its
+/// credential (an unset `bundledSkills.websearch` resolves with the stored or
+/// ambient Serper key), so keyless installs exclude it — it must never be
+/// documented as static core-tool surface; the dynamic skills inventory
+/// renders it only on installs where it resolves enabled.
+fn settings_gated_bundled_skills() -> BTreeSet<String> {
+    ["websearch".to_string()].into_iter().collect()
+}
+
 /// (import name, public functions) for every bundled Python skill that is
-/// always available (auth-gated integrations excluded).
+/// always available (auth-gated integrations and the conditionally-available
+/// websearch skill excluded).
 fn bundled_python_skills() -> Vec<(String, Vec<String>)> {
     let gated = auth_gated_bundled_skills();
+    let settings_gated = settings_gated_bundled_skills();
     sorted_bundled_skills()
         .into_iter()
         .filter(|skill| {
@@ -374,6 +385,7 @@ fn bundled_python_skills() -> Vec<(String, Vec<String>)> {
                 .as_ref()
                 .is_none_or(|python| !gated.contains(&python.import_name))
         })
+        .filter(|skill| !settings_gated.contains(&skill.name))
         .filter_map(|skill| {
             let python = skill.python?;
             let mut functions = python_skill_functions(&python.package_path)
@@ -613,4 +625,23 @@ fn generic_mcp_skill_renders_in_the_prompt_inventory() {
     assert!(second
         .assembled
         .contains("await mcp.list_tools(\"notion\")"));
+}
+
+// Async turn discipline
+
+/// Since #3580 every session kind wakes on bash completion: daemonless runs
+/// get a queued `[bash-done]` turn, so the static usage layer must not carry
+/// the pre-#3580 rule to await commands before ending the turn — the
+/// no-polling rule right below it already ends turns on the done
+/// notification, and an unscoped await rule would contradict that wake.
+#[test]
+fn usage_layer_ends_turns_on_the_done_notification_not_an_await_rule() {
+    assert!(
+        !USAGE_LAYER.contains("await commands before ending the turn"),
+        "every session kind has completion notifications: the await-before-turn-end rule is stale"
+    );
+    assert!(
+        USAGE_LAYER.contains("end the turn and collect the result on the done notification"),
+        "the no-polling rule keeps the collect-on-notice turn-end contract"
+    );
 }
