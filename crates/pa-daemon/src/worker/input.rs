@@ -2,7 +2,7 @@
 //! operations, and agent-message delivery.
 use super::{
     enqueue_priority, json, oneshot, parse_custom_message, parse_prompt_images, response_success,
-    sender_is_child_of, AgentFamilyRelationship, AgentMessagePromptPayload, Lane, QueueCheckpoint,
+    sender_relationship, AgentFamilyRelationship, AgentMessagePromptPayload, Lane, QueueCheckpoint,
     QueuePriority, QueuedItem, TurnPolicy, Worker, AGENT_MESSAGE_SOURCE,
     DEFAULT_AGENT_MESSAGE_MAX_PENDING_PER_SESSION, QUEUED_INPUT_SUSPENDED,
 };
@@ -293,23 +293,31 @@ impl Worker {
             .find_map(|key| sender.get(*key).and_then(Value::as_str))
             .unwrap_or("unknown")
             .to_string();
-        // The relationship label derives from the sender's durable parent edge,
-        // never the runtime kind alone: a subagent spawned by a DIFFERENT parent
-        // is not this session's child.
-        let from_relationship = {
+        // The sender's resolved family edge derives from the durable edges
+        // alone, never the runtime kind: a subagent spawned by a DIFFERENT
+        // parent is not this session's child, the parent matches this
+        // session's own parent edge, and a sibling shares it.
+        let sender_relationship = {
             let core = self
                 .core
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            sender_is_child_of(&sender, &core).then_some(AgentFamilyRelationship::Child)
+            sender_relationship(&sender, &core)
         };
+        // The rendered label keeps its contract: only this session's
+        // children carry the `child:` prefix; every other edge renders by
+        // name.
+        let from_relationship = (sender_relationship == Some(AgentFamilyRelationship::Child))
+            .then_some(AgentFamilyRelationship::Child);
         // The Decision API routing seam: a tagged decision message the
         // engine consumes starts no turn (the parent's `decision_api.goal`
-        // messages land in the decision child's goal input).
-        if from_relationship != Some(AgentFamilyRelationship::Sibling)
-            && self
-                .engine
-                .route_decision_api_event(from_relationship, &sender_name, message)
+        // messages land in the decision child's goal input). The engine
+        // authorizes the sender by the resolved edge, so a sibling's or an
+        // unaffiliated sender's goal tags route as ordinary messages
+        // instead of into the goal input.
+        if self
+            .engine
+            .route_decision_api_event(sender_relationship, &sender_name, message)
         {
             let (core, inputs) = self.summary_inputs();
             let summary = self.summary_locked(&core, inputs);
