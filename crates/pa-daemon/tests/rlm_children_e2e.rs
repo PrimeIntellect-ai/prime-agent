@@ -912,8 +912,23 @@ async fn a_decision_child_pushes_roster_deltas_to_subscribers() {
             assert_eq!(line["success"], true, "the routed prompt failed: {line}");
             continue;
         }
+        // A mid-turn busy delta (the accepted prompt row, isStreaming
+        // true) can arrive first with the bumped count: keep reading until
+        // the turn's settle push — the row this test pins — lands.
         if let Some(count) = child_row_count(&line) {
-            if count > baseline {
+            let settled = line["changed"]
+                .as_array()
+                .and_then(|entries| {
+                    entries
+                        .iter()
+                        .find(|entry| entry["summary"]["activeSessionId"] == json!(child_active_id))
+                        .cloned()
+                })
+                .is_some_and(|entry| {
+                    entry["summary"]["isStreaming"] == false
+                        && entry["summary"]["activity"] == "idle"
+                });
+            if count > baseline && settled {
                 break line;
             }
         }
