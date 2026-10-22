@@ -345,7 +345,15 @@ impl SessionEngine for DecisionEngine {
             || ("decision".to_string(), "system-1".to_string()),
             |(provider, model)| (provider.to_string(), model.to_string()),
         );
-        match self.serve(body) {
+        let result = self.serve(body);
+        // Cancellation can arrive while the bounded decision call runs:
+        // either reply - the decision or its failure - must not reach the
+        // parent once the turn is cancelled.
+        if aborted() {
+            emit(cancelled());
+            return;
+        }
+        match result {
             Ok(envelope) => {
                 let reply = json!({
                     "type": "decision_api.decision",
@@ -539,5 +547,52 @@ mod tests {
             &goal(3, "turn left")
         ));
         assert_eq!(engine.latest_goal().as_deref(), Some("turn left"));
+    }
+
+    /// The cancellation recheck, pinned: the decision call is bounded
+    /// (7c42a30), so `run_prompt` regains control when it returns and must
+    /// recheck `aborted()` before either reply reaches the parent — the
+    /// pre-fix code checked cancellation only before the call, so a turn
+    /// cancelled mid-serve still sent the tagged `decision_api.decision`
+    /// reply (a stale decision or its failure) to the parent.
+    #[test]
+    fn a_cancellation_during_the_decision_call_sends_no_reply() {
+        let dir = tempfile::tempdir().unwrap();
+        let engine = engine(dir.path());
+        let body = json!({
+            "seq": 7,
+            "state": {"observation": 1},
+            "questions": {"action": {
+                "type": "choice", "criteria": {"left": "go left", "right": "go right"}
+            }}
+        });
+        let request = PromptRequest {
+            message: body.to_string(),
+            images: Vec::new(),
+            source: "user".to_string(),
+            agent_message_id: None,
+            custom_message: None,
+            batch: Vec::new(),
+        };
+        // Cancellation arrives while the decision call runs: the check
+        // before the call passes, the flag flips for every later one.
+        let checks = std::cell::Cell::new(0u32);
+        let aborted = || {
+            let seen = checks.get();
+            checks.set(seen + 1);
+            seen > 0
+        };
+        let mut events: Vec<EngineEvent> = Vec::new();
+        engine.run_prompt(0, request, &aborted, &mut |event| {
+            events.push(event);
+            true
+        });
+        // The cancelled turn settles cancelled — not with the decision's
+        // failure, which the unconfigured fixture dir makes deterministic.
+        assert_eq!(
+            events.last(),
+            Some(&EngineEvent::Done(Err("prompt cancelled".to_string()))),
+            "the cancelled turn must not settle with a decision outcome: {events:?}"
+        );
     }
 }
