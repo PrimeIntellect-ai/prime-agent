@@ -424,6 +424,7 @@ async fn parent_child_agent_message_round_trip_end_to_end() {
             model: None,
             thinking: None,
             cwd: None,
+            decision_child: false,
             spawned_by_request_id: None,
             factory: None,
         })
@@ -755,6 +756,7 @@ async fn family_edges_never_cross_families_end_to_end() {
                 model: None,
                 thinking: None,
                 cwd: None,
+                decision_child: false,
                 spawned_by_request_id: None,
                 factory: None,
             })
@@ -897,6 +899,7 @@ async fn family_edges_never_cross_families_end_to_end() {
             model: None,
             thinking: None,
             cwd: None,
+            decision_child: false,
             spawned_by_request_id: None,
             factory: None,
         })
@@ -1217,6 +1220,7 @@ async fn parent_renames_a_child_end_to_end() {
             model: None,
             thinking: None,
             cwd: None,
+            decision_child: false,
             spawned_by_request_id: None,
             factory: None,
         })

@@ -546,6 +546,7 @@ async fn an_rlm_spawn_child_inherits_the_parent_worker_env() {
             model: None,
             thinking: None,
             cwd: None,
+            decision_child: false,
             spawned_by_request_id: None,
             factory: None,
         })

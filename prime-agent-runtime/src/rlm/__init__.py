@@ -183,6 +183,7 @@ async def spawn(
     model: str | None = None,
     thinking: str | None = None,
     cwd: str | None = None,
+    kind: str | None = None,
 ) -> RLMSpawnHandle:
     """Spawn a recursive Prime Agent child and return once its task is admitted.
 
@@ -192,8 +193,10 @@ async def spawn(
     defaults to the parent level; levels invalid for the resolved model fail the spawn.
     ``cwd`` starts the child in that directory (relative to the session cwd); defaults
     to the session cwd.
+    ``kind`` selects a dedicated child kind; ``"decision"`` spawns the Decision API
+    child (the model comes from the decisionApi.systemOneModel setting).
     """
-    return await _spawn(prompt, name=name, model=model, thinking=thinking, cwd=cwd)
+    return await _spawn(prompt, name=name, model=model, thinking=thinking, cwd=cwd, kind=kind)
 
 
 async def _spawn(
@@ -204,11 +207,14 @@ async def _spawn(
     thinking: str | None = None,
     cwd: str | None = None,
     factory: dict[str, str] | None = None,
+    kind: str | None = None,
 ) -> RLMSpawnHandle:
     """``spawn`` plus the factory executor's run tag (``{runId, specId,
     stateId}``), which the host records on the child's ledger spawn edge."""
     if not isinstance(prompt, str):
         raise TypeError(f"prompt must be str, got {type(prompt).__name__}")
+    if kind is not None and kind != "decision":
+        raise TypeError(f"kind must be 'decision' or None, got {kind!r}")
     kwargs: dict[str, Any] = {"name": name}
     if model is not None:
         kwargs["model"] = model
@@ -218,6 +224,8 @@ async def _spawn(
         kwargs["cwd"] = cwd
     if factory is not None:
         kwargs["factory"] = factory
+    if kind is not None:
+        kwargs["kind"] = kind
     # Wire type stays "rlm.run" so kernels and hosts of different versions stay compatible.
     payload = await host_request("rlm.run", {"prompt": prompt, "kwargs": kwargs})
     return _spawn_handle_from_payload(payload)
@@ -664,8 +672,9 @@ class _RLMNamespace:
         model: str | None = None,
         thinking: str | None = None,
         cwd: str | None = None,
+        kind: str | None = None,
     ) -> RLMSpawnHandle:
-        return await spawn(prompt, name=name, model=model, thinking=thinking, cwd=cwd)
+        return await spawn(prompt, name=name, model=model, thinking=thinking, cwd=cwd, kind=kind)
 
     async def create_session(
         self,

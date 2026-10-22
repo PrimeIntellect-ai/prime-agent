@@ -303,6 +303,42 @@ impl Worker {
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             sender_is_child_of(&sender, &core).then_some(AgentFamilyRelationship::Child)
         };
+        // The Decision API routing seam: a tagged decision message the
+        // engine consumes starts no turn (the parent's `decision_api.goal`
+        // messages land in the decision child's goal input).
+        if from_relationship != Some(AgentFamilyRelationship::Sibling)
+            && self
+                .engine
+                .route_decision_api_event(from_relationship, &sender_name, message)
+        {
+            let (core, inputs) = self.summary_inputs();
+            let summary = self.summary_locked(&core, inputs);
+            let mut target = json!({
+                "activeSessionId": summary.active_session_id.clone().unwrap_or_default(),
+                "sessionId": summary.session_id,
+                "runtimeKind": summary
+                    .runtime_kind
+                    .clone()
+                    .unwrap_or_else(|| "top-level".to_string()),
+            });
+            if let Some(name) = summary.session_name.filter(|name| !name.is_empty()) {
+                target["sessionName"] = json!(name);
+            }
+            return response_success(
+                None,
+                "worker_deliver_message",
+                Some(json!({
+                    "id": pa_core::session_engine::agent_messaging::create_agent_session_message_id(),
+                    "source": AGENT_MESSAGE_SOURCE,
+                    "target": target,
+                    "from": sender,
+                    "message": message,
+                    "deliveryMode": "steer",
+                    "deliveryStatus": "delivered",
+                    "deliveredAt": crate::util::now_iso(),
+                })),
+            );
+        }
         let prompt = pa_core::session_engine::agent_messaging::create_agent_session_message_prompt(
             &AgentMessagePromptPayload {
                 message: message.to_string(),

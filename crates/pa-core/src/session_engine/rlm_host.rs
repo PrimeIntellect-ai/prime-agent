@@ -143,6 +143,10 @@ pub struct RlmSpawnRequest {
     pub model: Option<String>,
     /// Validated thinking level; the host checks model support.
     pub thinking: Option<String>,
+    /// The decision-child spawn kind: `true` spawns the Decision API child
+    /// (the model comes from `decisionApi.systemOneModel`, and the child's
+    /// intake answers every message with one decision).
+    pub decision_child: bool,
     /// Working directory; the host resolves relative paths against the session cwd.
     pub cwd: Option<String>,
     /// The parent's in-flight turn request the spawn anchors to (TS
@@ -662,8 +666,18 @@ fn spawn_request_from_payload(prompt: &str, data: &Value) -> anyhow::Result<RlmS
     reject_unsupported_kwargs(
         &kwargs,
         OPERATION,
-        &["name", "model", "thinking", "cwd", "factory"],
+        &["name", "model", "thinking", "cwd", "factory", "kind"],
     )?;
+    let decision_child = match optional_string_kwarg(&kwargs, "kind", OPERATION)? {
+        None => false,
+        Some("decision") => true,
+        Some(other) => {
+            anyhow::bail!(
+                "rlm.spawn kind must be \"decision\" when given, not {other:?}. Only the Decision \
+                 API child has a kind."
+            )
+        }
+    };
     let name = optional_string_kwarg(&kwargs, "name", OPERATION)?;
     let name = normalize_requested_rlm_subagent_session_name(name, OPERATION)?;
     if let Some(name) = &name {
@@ -688,6 +702,7 @@ fn spawn_request_from_payload(prompt: &str, data: &Value) -> anyhow::Result<RlmS
         name,
         model,
         thinking,
+        decision_child,
         cwd,
         spawned_by_request_id: None,
         factory,
@@ -1355,6 +1370,7 @@ mod tests {
         assert_eq!(requests[0].name.as_deref(), Some("worker"));
         assert_eq!(requests[0].model.as_deref(), Some("p/m"));
         assert_eq!(requests[0].thinking.as_deref(), Some("high"));
+        assert!(!requests[0].decision_child);
         assert_eq!(requests[0].cwd.as_deref(), Some("lanes/a"));
         assert_eq!(
             requests[0].factory,
@@ -1365,6 +1381,32 @@ mod tests {
             })
         );
         drop(requests);
+
+        // The decision-child kind parses into the spawn request; unknown
+        // kinds refuse.
+        let handle = call(
+            &wiring,
+            "rlm.run",
+            json!({ "prompt": "p", "kwargs": { "name": "w", "kind": "decision" } }),
+        )
+        .await
+        .unwrap();
+        let requests = spawn_requests.lock().await;
+        assert_eq!(requests.len(), 2);
+        assert!(requests[1].decision_child);
+        drop(requests);
+        let error = call(
+            &wiring,
+            "rlm.run",
+            json!({ "prompt": "p", "kwargs": { "name": "w", "kind": "oracle" } }),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "rlm.spawn kind must be \"decision\" when given, not \"oracle\". Only the Decision API \
+             child has a kind."
+        );
 
         // Validation: prompt type, unsupported kwargs, name rules.
         let error = call(&wiring, "rlm.run", json!({ "kwargs": {} }))
