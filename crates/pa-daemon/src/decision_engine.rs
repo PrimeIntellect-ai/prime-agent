@@ -216,13 +216,19 @@ impl DecisionEngine {
 }
 
 impl SessionEngine for DecisionEngine {
-    /// Consume the parent's tagged goal messages: no turn, newest seq wins.
+    /// Consume the parent's tagged goal messages: no turn, newest seq
+    /// wins. The goal input is parent-authoritative: a sibling's, a
+    /// child's, or an unaffiliated sender's goal tags never reach it —
+    /// they route as ordinary messages instead.
     fn route_decision_api_event(
         &self,
-        _relationship: Option<AgentFamilyRelationship>,
+        relationship: Option<AgentFamilyRelationship>,
         _sender_name: &str,
         message: &str,
     ) -> bool {
+        if relationship != Some(AgentFamilyRelationship::Parent) {
+            return false;
+        }
         self.accept_goal(message)
     }
 
@@ -486,5 +492,52 @@ mod tests {
         let mut request = json!({ "questions": { "action": {} } });
         DecisionEngine::inject_goal(&mut request, "follow the target");
         assert_eq!(request, json!({ "questions": { "action": {} } }));
+    }
+
+    /// The goal-sender authorization, pinned: only the parent's goal
+    /// messages reach the goal input — a sibling's ceiling goal can never
+    /// poison the seq against the parent's later goals.
+    #[test]
+    fn only_the_parent_updates_the_goal_input() {
+        let dir = tempfile::tempdir().unwrap();
+        let engine = engine(dir.path());
+        let goal = |seq: i64, text: &str| {
+            json!({"type":"decision_api.goal","seq":seq,"goal":text}).to_string()
+        };
+        // The parent's goal is consumed into the input.
+        assert!(engine.route_decision_api_event(
+            Some(AgentFamilyRelationship::Parent),
+            "parent",
+            &goal(2, "follow the target")
+        ));
+        assert_eq!(engine.latest_goal().as_deref(), Some("follow the target"));
+        // Every other sender's goal is rejected — not consumed, so it
+        // routes as an ordinary message and starts a visible turn instead.
+        for (relationship, sender) in [
+            (Some(AgentFamilyRelationship::Sibling), "sibling"),
+            (Some(AgentFamilyRelationship::Child), "child"),
+            (None, "stranger"),
+        ] {
+            assert!(
+                !engine.route_decision_api_event(
+                    relationship,
+                    sender,
+                    &goal(i64::MAX, "steal the decision")
+                ),
+                "{sender}'s goal must be rejected"
+            );
+        }
+        assert_eq!(
+            engine.latest_goal().as_deref(),
+            Some("follow the target"),
+            "no rejected sender moved the goal"
+        );
+        // The parent's later goal still lands after the ceiling attempt.
+        assert!(engine.route_decision_api_event(
+            Some(AgentFamilyRelationship::Parent),
+            "parent",
+            &goal(3, "turn left")
+        ));
+        assert_eq!(engine.latest_goal().as_deref(), Some("turn left"));
     }
 }

@@ -33,9 +33,9 @@ pub trait SessionEngine: Send + Sync {
     /// Consume one tagged Decision API message without starting a turn:
     /// the decision child consumes the parent's `decision_api.goal`
     /// messages into its goal input. Engines without a decision loop use
-    /// normal message routing. `relationship` is the sender's edge to this
-    /// session (`None` for a parent or an unaffiliated sender — the deliver
-    /// path computes child edges only).
+    /// normal message routing. `relationship` is the sender's fully
+    /// resolved edge to this session (`None` for an unaffiliated sender):
+    /// the consuming engine authorizes the sender by it.
     fn route_decision_api_event(
         &self,
         _relationship: Option<AgentFamilyRelationship>,
