@@ -1384,13 +1384,14 @@ mod tests {
 
         // The decision-child kind parses into the spawn request; unknown
         // kinds refuse.
-        let handle = call(
+        let response = call(
             &wiring,
             "rlm.run",
             json!({ "prompt": "p", "kwargs": { "name": "w", "kind": "decision" } }),
         )
         .await
         .unwrap();
+        assert_eq!(response["name"], "worker");
         let requests = spawn_requests.lock().await;
         assert_eq!(requests.len(), 2);
         assert!(requests[1].decision_child);
