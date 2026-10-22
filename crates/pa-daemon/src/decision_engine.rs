@@ -155,14 +155,29 @@ impl DecisionEngine {
         })
     }
 
+    /// Inject the parent's goal into the request's state: the state is the
+    /// only goal channel the model sees, so every valid state shape must
+    /// carry it. A non-object state (any JSON the request's `"state"` field
+    /// holds — the shared path accepts it verbatim) is wrapped under an
+    /// `"observation"` key, the shape a decision state is documented in;
+    /// an object state keeps its shape and only gains a `goal` key.
+    fn inject_goal(request: &mut Value, goal: &str) {
+        if let Some(state) = request.get_mut("state") {
+            if !state.is_object() {
+                *state = json!({ "observation": state.clone() });
+            }
+            if let Some(map) = state.as_object_mut() {
+                map.insert("goal".to_string(), json!(goal));
+            }
+        }
+    }
+
     /// Serve one decision request message: inject the latest goal into the
     /// state, then run the shared decision path (the registry resolution
     /// and one provider completion).
     fn serve(&self, mut request: Value) -> anyhow::Result<Value> {
         if let Some(goal) = self.latest_goal() {
-            if let Some(state) = request.get_mut("state").and_then(Value::as_object_mut) {
-                state.insert("goal".to_string(), json!(goal));
-            }
+            Self::inject_goal(&mut request, &goal);
         }
         let cwd = self.cwd.clone();
         let agent_dir = self.agent_dir.clone();
@@ -446,5 +461,30 @@ mod tests {
         // request itself stays untouched until the serve call.
         assert_eq!(engine.latest_goal().as_deref(), Some("follow the target"));
         assert_eq!(request["seq"], json!(7));
+    }
+
+    /// The goal channel, pinned: a non-object state is wrapped so the goal
+    /// still reaches the model — the pre-fix code only injected into an
+    /// object state and silently dropped the goal for every other shape
+    /// the shared path accepts (a request with no state passes through).
+    #[test]
+    fn a_non_object_state_is_wrapped_so_the_goal_reaches_the_model() {
+        let mut request = json!({ "state": "the target moved left" });
+        DecisionEngine::inject_goal(&mut request, "follow the target");
+        assert_eq!(
+            request["state"],
+            json!({ "observation": "the target moved left", "goal": "follow the target" })
+        );
+        // An object state keeps its shape and only gains the goal key.
+        let mut request = json!({ "state": { "observation": 1, "note": "hot" } });
+        DecisionEngine::inject_goal(&mut request, "follow the target");
+        assert_eq!(
+            request["state"],
+            json!({ "observation": 1, "note": "hot", "goal": "follow the target" })
+        );
+        // A request without a state is left alone: nothing to carry the goal.
+        let mut request = json!({ "questions": { "action": {} } });
+        DecisionEngine::inject_goal(&mut request, "follow the target");
+        assert_eq!(request, json!({ "questions": { "action": {} } }));
     }
 }
