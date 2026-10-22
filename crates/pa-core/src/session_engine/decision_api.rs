@@ -1043,13 +1043,15 @@ mod tests {
         assert!(seen.contains("\"x\""), "{seen}");
         assert!(seen.contains("<image>"), "{seen}");
         let received = registration.received_api_keys();
+        // The failure message carries nothing derived from the keys
+        // (CodeQL: no key material, not even a count of it, in a log).
+        let keys_reached_the_provider = received.len() >= 2
+            && received
+                .iter()
+                .all(|key| key.as_deref() == Some("fixture-key"));
         assert!(
-            received.len() >= 2
-                && received
-                    .iter()
-                    .all(|key| key.as_deref() == Some("fixture-key")),
-            "the registry-resolved key reaches the provider on every call: {} calls",
-            received.len()
+            keys_reached_the_provider,
+            "the registry-resolved key reaches the provider on every call"
         );
     }
 
