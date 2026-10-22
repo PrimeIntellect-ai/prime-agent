@@ -33,6 +33,7 @@ const BUILT_IN_PROVIDER_DISPLAY_NAMES: &[(&str, &str)] = &[
     ("cloudflare-workers-ai", "Cloudflare Workers AI"),
     ("deepseek", "DeepSeek"),
     ("fireworks", "Fireworks"),
+    ("friendli", "FriendliAI"),
     ("google", "Google Gemini"),
     ("google-vertex", "Google Vertex AI"),
     ("groq", "Groq"),

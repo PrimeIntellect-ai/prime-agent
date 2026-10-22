@@ -27,6 +27,7 @@ pub fn default_model_per_provider(provider: &str) -> Option<&'static str> {
         "moonshotai" | "moonshotai-cn" | "opencode" | "opencode-go" => "kimi-k2.6",
         "huggingface" => "moonshotai/Kimi-K2.6",
         "fireworks" => "accounts/fireworks/models/kimi-k2p6",
+        "friendli" => "zai-org/GLM-5.3",
         "kimi-coding" => "kimi-for-coding",
         "cloudflare-workers-ai" => "@cf/moonshotai/kimi-k2.6",
         "cloudflare-ai-gateway" => "claude-sonnet-4.5",

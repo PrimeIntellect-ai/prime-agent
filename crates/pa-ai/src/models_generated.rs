@@ -289,6 +289,40 @@ compat: Some(RawCompat {
         compat: None,
     },
     RawModel {
+        provider: "friendli",
+        id: "zai-org/GLM-5.3",
+        name: "zai-org/GLM-5.3",
+        api: "openai-completions",
+        base_url: "https://api.friendli.ai/serverless/v1",
+        reasoning: true,
+        thinking_levels: &[
+                (crate::types::ModelThinkingLevel::Off, None),
+                (crate::types::ModelThinkingLevel::Minimal, None),
+                (crate::types::ModelThinkingLevel::Low, Some("low")),
+                (crate::types::ModelThinkingLevel::Medium, None),
+                (crate::types::ModelThinkingLevel::High, Some("high")),
+                (crate::types::ModelThinkingLevel::Xhigh, None),
+                (crate::types::ModelThinkingLevel::Max, Some("max")),
+        ],
+        input: &[crate::types::ModelInput::Text],
+        cost: (1.26, 3.96, 0.234, 0.0),
+        context_window: 1_048_576,
+        max_tokens: 1_048_576,
+        featured: None,
+        headers: &[],
+compat: Some(RawCompat {
+            supports_store: None,
+            supports_developer_role: None,
+            supports_reasoning_effort: None,
+            max_tokens_field: None,
+            requires_reasoning_content_on_assistant_messages: None,
+            thinking_format: Some(crate::types::ThinkingFormat::Openai),
+            zai_tool_stream: None,
+            send_session_affinity_headers: None,
+            supports_strict_mode: None,
+        }),
+    },
+    RawModel {
         provider: "github-copilot",
         id: "claude-fable-5",
         name: "Claude Fable 5",
@@ -4481,12 +4515,12 @@ mod tests {
     #[test]
     fn catalog_loads_at_the_ts_fallback_scale() {
         let providers = get_providers();
-        assert_eq!(providers.len(), 32, "the TS fallback provider list");
+        assert_eq!(providers.len(), 33, "the TS fallback provider list");
         let total: usize = providers
             .iter()
             .map(|provider| get_models(provider).len())
             .sum();
-        assert_eq!(total, 152, "the TS fallback model list");
+        assert_eq!(total, 153, "the TS fallback model list");
         assert_eq!(
             get_models("prime-inference").len(),
             110,
@@ -4509,8 +4543,8 @@ mod tests {
         }
         assert_eq!(
             tuples.len(),
-            43,
-            "42 public transport tuples + Prime Inference"
+            44,
+            "43 public transport tuples + Prime Inference"
         );
     }
 

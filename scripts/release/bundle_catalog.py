@@ -395,8 +395,8 @@ def validate_bundled_catalog_dir(directory, allow_small_fixture: bool = False) -
 # Fixture: a synthetic snapshot that passes the FULL gates (offline builds)
 # --------------------------------------------------------------------------
 
-# The compiled transport tuples of the shipped registry (43 distinct
-# (provider, api, baseUrl) triples across 32 providers, from the compiled
+# The compiled transport tuples of the shipped registry (44 distinct
+# (provider, api, baseUrl) triples across 33 providers, from the compiled
 # model catalog, now the hand-maintained fallback table
 # crates/pa-ai/src/models_generated.rs). Fixture models use real tuples so
 # they survive runtime transport pinning; nothing here can introduce a
@@ -414,6 +414,7 @@ FIXTURE_TRANSPORT_TUPLES = [
     ("cloudflare-workers-ai", "openai-completions", "https://api.cloudflare.com/client/v4/accounts/{CLOUDFLARE_ACCOUNT_ID}/ai/v1"),
     ("deepseek", "openai-completions", "https://api.deepseek.com"),
     ("fireworks", "anthropic-messages", "https://api.fireworks.ai/inference"),
+    ("friendli", "openai-completions", "https://api.friendli.ai/serverless/v1"),
     ("github-copilot", "anthropic-messages", "https://api.individual.githubcopilot.com"),
     ("github-copilot", "openai-completions", "https://api.individual.githubcopilot.com"),
     ("github-copilot", "openai-responses", "https://api.individual.githubcopilot.com"),

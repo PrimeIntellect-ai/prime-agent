@@ -130,6 +130,11 @@ pub fn detect_compat(model: &Model) -> ResolvedCompat {
         provider == "cloudflare-ai-gateway" || base_url.contains("gateway.ai.cloudflare.com");
     let is_prime_inference =
         provider == "prime-inference" || base_url.contains("api.pinference.ai");
+    // FriendliAI serves open-weight chat templates behind a strict request schema: unknown
+    // top-level fields (`enable_thinking`, `thinking`, `reasoning`) and `reasoning_effort: "none"`
+    // are rejected with a 422, so the on/off switch rides the chat template kwargs and only
+    // documented fields are sent (no `store`, `developer` role, tool `strict`, or prompt-cache keys).
+    let is_friendli = provider == "friendli" || base_url.contains("api.friendli.ai");
 
     let is_non_standard = provider == "cerebras"
         || base_url.contains("cerebras.ai")
@@ -143,12 +148,14 @@ pub fn detect_compat(model: &Model) -> ResolvedCompat {
         || base_url.contains("opencode.ai")
         || is_cloudflare_workers_ai
         || is_cloudflare_ai_gateway
-        || is_prime_inference;
+        || is_prime_inference
+        || is_friendli;
 
     let use_max_tokens = base_url.contains("chutes.ai")
         || is_moonshot
         || is_cloudflare_ai_gateway
-        || is_prime_inference;
+        || is_prime_inference
+        || is_friendli;
 
     let is_grok = provider == "xai" || base_url.contains("api.x.ai");
     let is_deep_seek = provider == "deepseek" || base_url.contains("deepseek.com");
@@ -180,16 +187,23 @@ pub fn detect_compat(model: &Model) -> ResolvedCompat {
             crate::types::ThinkingFormat::Zai
         } else if provider == "openrouter" || base_url.contains("openrouter.ai") {
             crate::types::ThinkingFormat::Openrouter
+        } else if is_friendli {
+            crate::types::ThinkingFormat::QwenChatTemplate
         } else {
             crate::types::ThinkingFormat::Openai
         },
         open_router_routing: None,
         vercel_gateway_routing: None,
         zai_tool_stream: false,
-        supports_strict_mode: !is_moonshot && !is_cloudflare_ai_gateway && !is_prime_inference,
+        supports_strict_mode: !is_moonshot
+            && !is_cloudflare_ai_gateway
+            && !is_prime_inference
+            && !is_friendli,
         cache_control_format,
         send_session_affinity_headers: false,
-        supports_long_cache_retention: !(is_cloudflare_workers_ai || is_cloudflare_ai_gateway),
+        supports_long_cache_retention: !(is_cloudflare_workers_ai
+            || is_cloudflare_ai_gateway
+            || is_friendli),
     }
 }
 

@@ -13,7 +13,7 @@ Port of the TS catalog client (branch `feat/catalog-client`:
   8 MiB cap (content-length AND streaming), redirects refused, ETag
   `If-None-Match` with 304 snapshot reuse; `PI_OFFLINE` disables the network.
 - No-cold-start chain: validated last-good disk cache -> build-time bundled
-  snapshot -> compiled fallback (42 transport tuples + 110 offline Prime
+  snapshot -> compiled fallback (43 transport tuples + 110 offline Prime
   Inference entries).
 - Strict schemas: serde `deny_unknown_fields`, version gates (models
   `schemaVersion == 1`), skip-invalid for remote model refresh, compat

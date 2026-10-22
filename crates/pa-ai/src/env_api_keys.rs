@@ -8,6 +8,8 @@ pub fn get_api_key_env_vars(provider: &str) -> Option<Vec<&'static str>> {
         "github-copilot" => Some(vec!["COPILOT_GITHUB_TOKEN", "GH_TOKEN", "GITHUB_TOKEN"]),
         // ANTHROPIC_OAUTH_TOKEN takes precedence over ANTHROPIC_API_KEY.
         "anthropic" => Some(vec!["ANTHROPIC_OAUTH_TOKEN", "ANTHROPIC_API_KEY"]),
+        // FRIENDLIAI_API_KEY is the name FriendliAI documents; FRIENDLI_TOKEN is the older SDK name.
+        "friendli" => Some(vec!["FRIENDLIAI_API_KEY", "FRIENDLI_TOKEN"]),
         other => {
             let env_var = match other {
                 "openai" => "OPENAI_API_KEY",

@@ -89,6 +89,7 @@ pub enum KnownProvider {
     XiaomiTokenPlanAms,
     #[serde(rename = "xiaomi-token-plan-sgp")]
     XiaomiTokenPlanSgp,
+    Friendli,
 }
 
 /// TS `Provider = KnownProvider | string`.

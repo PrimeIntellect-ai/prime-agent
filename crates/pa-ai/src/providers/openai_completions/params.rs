@@ -625,4 +625,119 @@ mod tests {
         let params = reasoning_params_for(&model, ModelThinkingLevel::Max);
         assert_eq!(params.get("reasoning"), Some(&json!({ "effort": "xhigh" })));
     }
+
+    /// A `FriendliAI` request at a requested level: system prompt, one user turn, one tool, an
+    /// explicit output cap, and long cache retention for a session.
+    fn friendli_params(model: &Model, level: ModelThinkingLevel) -> Value {
+        let context = Context {
+            system_prompt: Some("Be terse.".into()),
+            messages: vec![Message::User(UserMessage {
+                content: UserMessageContent::Text("Hi".into()),
+                timestamp: 1,
+                rest: Map::default(),
+            })],
+            tools: Some(vec![crate::types::Tool {
+                name: "bash".into(),
+                description: "Run a command".into(),
+                parameters: json!({ "type": "object", "properties": {} }),
+            }]),
+        };
+        let clamped = clamp_thinking_level(model, level);
+        let mut options = OpenAICompletionsOptions::from_base(StreamOptions {
+            api_key: Some("test".into()),
+            max_tokens: Some(1024),
+            session_id: Some("session-1".into()),
+            ..Default::default()
+        });
+        options.reasoning_effort = (clamped != ModelThinkingLevel::Off).then_some(clamped);
+        options.reasoning_enabled = Some(clamped != ModelThinkingLevel::Off);
+        build_params(
+            model,
+            &context,
+            Some(&options),
+            &crate::providers::openai_completions::get_compat(model),
+            CacheRetention::Long,
+            None,
+        )
+    }
+
+    /// The documented `FriendliAI` request fields every request shares: `system` role, no
+    /// `store`, `max_tokens`, tools without `strict`, and no prompt-cache keys.
+    fn friendli_base_request(model_id: &str) -> Map<String, Value> {
+        let Value::Object(map) = json!({
+            "model": model_id,
+            "messages": [
+                { "role": "system", "content": "Be terse." },
+                { "role": "user", "content": "Hi" },
+            ],
+            "stream": true,
+            "stream_options": { "include_usage": true },
+            "max_tokens": 1024,
+            "tools": [{
+                "type": "function",
+                "function": {
+                    "name": "bash",
+                    "description": "Run a command",
+                    "parameters": { "type": "object", "properties": {} },
+                },
+            }],
+        }) else {
+            unreachable!("a JSON object literal")
+        };
+        map
+    }
+
+    /// `FriendliAI` 422s unknown top-level fields and `reasoning_effort: "none"`: an
+    /// effort-declared route sends the declared effort and clamps `off` to its weakest level
+    /// instead of disabling.
+    #[test]
+    fn friendli_effort_routes_send_the_declared_effort_and_never_none() {
+        let model = models_generated::get_model("friendli", "zai-org/GLM-5.3")
+            .expect("compiled friendli template");
+        let expected = |effort: &str| {
+            let mut request = friendli_base_request("zai-org/GLM-5.3");
+            request.insert("reasoning_effort".into(), json!(effort));
+            Value::Object(request)
+        };
+        assert_eq!(
+            friendli_params(model, ModelThinkingLevel::Max),
+            expected("max")
+        );
+        assert_eq!(
+            friendli_params(model, ModelThinkingLevel::Off),
+            expected("low")
+        );
+    }
+
+    /// A `FriendliAI` route without declared efforts (a toggle-only model, or a custom
+    /// `models.json` entry on the `FriendliAI` host) switches thinking through the chat template
+    /// kwargs.
+    #[test]
+    fn friendli_host_toggles_thinking_through_chat_template_kwargs() {
+        let model = serde_json::from_value::<Model>(json!({
+            "id": "zai-org/GLM-5.1", "name": "zai-org/GLM-5.1",
+            "api": "openai-completions", "provider": "my-friendli",
+            "baseUrl": "https://api.friendli.ai/serverless/v1", "reasoning": true,
+            "input": ["text"],
+            "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0 },
+            "contextWindow": 202_752, "maxTokens": 202_752
+        }))
+        .unwrap();
+        let expected = |enable_thinking: bool| {
+            let mut request = friendli_base_request("zai-org/GLM-5.1");
+            request.insert(
+                "chat_template_kwargs".into(),
+                json!({ "enable_thinking": enable_thinking, "preserve_thinking": true }),
+            );
+            Value::Object(request)
+        };
+        assert_eq!(
+            friendli_params(&model, ModelThinkingLevel::High),
+            expected(true)
+        );
+        assert_eq!(
+            friendli_params(&model, ModelThinkingLevel::Off),
+            expected(false)
+        );
+    }
 }
