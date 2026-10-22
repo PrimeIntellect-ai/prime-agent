@@ -617,9 +617,9 @@ fn generic_mcp_skill_renders_in_the_prompt_inventory() {
 
 // Async turn discipline
 
-/// Since #3640 every session kind wakes on bash completion: daemonless runs
+/// Since #3580 every session kind wakes on bash completion: daemonless runs
 /// get a queued `[bash-done]` turn, so the static usage layer must not carry
-/// the pre-#3640 rule to await commands before ending the turn — the
+/// the pre-#3580 rule to await commands before ending the turn — the
 /// no-polling rule right below it already ends turns on the done
 /// notification, and an unscoped await rule would contradict that wake.
 #[test]
