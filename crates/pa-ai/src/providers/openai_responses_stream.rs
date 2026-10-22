@@ -352,6 +352,38 @@ impl<'a> ResponsesStreamProcessor<'a> {
                     if self.block_kind(content_index) == Some("text") {
                         let mut append = false;
                         if let Some(slot) = self.current_slot(output_index) {
+                            // Some providers (gateways in front of the Responses API) never send
+                            // `response.content_part.added`; without a part here every delta was
+                            // dropped and the turn ended with empty text.
+                            if let Some(parts) = slot
+                                .item
+                                .as_object_mut()
+                                .map(|item| {
+                                    let content = item
+                                        .entry("content".to_string())
+                                        .or_insert_with(|| json!([]));
+                                    // `content: null` shows up in the wild; a null entry
+                                    // would swallow the part push below.
+                                    if !content.is_array() {
+                                        *content = json!([]);
+                                    }
+                                    content
+                                })
+                                .and_then(|content| content.as_array_mut())
+                            {
+                                let has_text_part = parts
+                                    .last()
+                                    .and_then(|part| part.get("type"))
+                                    .and_then(|value| value.as_str())
+                                    == Some("output_text");
+                                if !has_text_part {
+                                    parts.push(json!({
+                                        "type": "output_text",
+                                        "text": "",
+                                        "annotations": [],
+                                    }));
+                                }
+                            }
                             let last_part = slot
                                 .item
                                 .get_mut("content")
@@ -565,7 +597,7 @@ impl<'a> ResponsesStreamProcessor<'a> {
                     "message" => {
                         if let Some(content_index) = content_index {
                             if self.block_kind(content_index) == Some("text") {
-                                let text = item
+                                let mut text = item
                                     .get("content")
                                     .and_then(|content| content.as_array())
                                     .map(|parts| {
@@ -604,7 +636,14 @@ impl<'a> ResponsesStreamProcessor<'a> {
                                 if let Some(AssistantContent::Text(block)) =
                                     self.output.content.get_mut(content_index)
                                 {
-                                    block.text.clone_from(&text);
+                                    // The wire item may carry `content: null` (seen on gateways
+                                    // proxying the Responses API); keep what the deltas built
+                                    // instead of blanking the turn.
+                                    if !text.is_empty() {
+                                        block.text.clone_from(&text);
+                                    } else {
+                                        text.clone_from(&block.text);
+                                    }
                                     block.text_signature = Some(signature);
                                 }
                                 self.writer.push(AssistantMessageEvent::TextEnd {
@@ -938,5 +977,85 @@ fn map_responses_stop_reason(status: Option<&str>) -> StopReason {
         None | Some("completed" | "in_progress" | "queued") => StopReason::Stop,
         Some("incomplete") => StopReason::Length,
         Some(_) => StopReason::Error,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::event_stream::AssistantMessageEventStream;
+    use serde_json::json;
+
+    fn test_model() -> Model {
+        serde_json::from_value(json!({
+            "id": "m", "name": "m", "api": "openai-responses", "provider": "custom",
+            "baseUrl": "https://example.invalid/v1", "reasoning": false,
+            "input": ["text"],
+            "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0 },
+            "contextWindow": 8000, "maxTokens": 1024
+        }))
+        .unwrap()
+    }
+
+    fn empty_output() -> AssistantMessage {
+        serde_json::from_value(json!({
+            "content": [],
+            "api": "openai-responses",
+            "provider": "custom",
+            "model": "m",
+            "timestamp": 0,
+            "usage": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0,
+                       "totalTokens": 0,
+                       "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0,
+                                 "total": 0 } },
+            "stopReason": "stop"
+        }))
+        .unwrap()
+    }
+
+    /// Gateways proxying the Responses API may skip `response.content_part.added` and send
+    /// `response.output_item.done` with `content: null`. Text deltas must still land.
+    #[test]
+    fn text_deltas_survive_without_content_part_added() {
+        let model = test_model();
+        let (writer, _stream) = AssistantMessageEventStream::new();
+        let mut output = empty_output();
+        let mut processor = ResponsesStreamProcessor::new(
+            &model,
+            &mut output,
+            &writer,
+            ResponsesStreamHooks::default(),
+        );
+
+        processor
+            .handle_event(&json!({
+                "type": "response.output_item.added", "output_index": 0,
+                "item": { "type": "message", "id": "msg_1", "role": "assistant",
+                          "status": "completed", "content": null }
+            }))
+            .unwrap();
+        processor
+            .handle_event(&json!({
+                "type": "response.output_text.delta", "output_index": 0,
+                "content_index": 0, "item_id": "msg_1", "delta": "ок"
+            }))
+            .unwrap();
+        processor
+            .handle_event(&json!({
+                "type": "response.output_item.done", "output_index": 0,
+                "item": { "type": "message", "id": "msg_1", "role": "assistant",
+                          "status": "completed", "content": null }
+            }))
+            .unwrap();
+
+        let text = output
+            .content
+            .iter()
+            .find_map(|block| match block {
+                AssistantContent::Text(text) => Some(text.text.clone()),
+                _ => None,
+            })
+            .unwrap_or_default();
+        assert_eq!(text, "ок");
     }
 }
