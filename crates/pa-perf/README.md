@@ -38,7 +38,6 @@ DIR/
   agent/                           # point PRIME_AGENT_CODING_AGENT_DIR here
     settings.json                  # onboarding pre-answered, traces off
     sessions/<uuid>.jsonl          # current-format session files (flat)
-    sessions-archive/<uuid>.jsonl
     rlm-ledger/<hash16>.jsonl      # written through pa-daemon's RlmSpawnLedger
     session-artifacts/...          # kernel-state stubs, harness/, sub-<id>/ trees
 ```
@@ -63,7 +62,6 @@ collide around ~22K rows and silently break branch reconstruction.
 | `--depth` | subagent tree depth | 2 | 2 | 3 | 2 |
 | `--tree-parents` | sessions growing a tree | 2 | 5 | 8 | 10 |
 | `--wide-children` | one parent's direct children (the operator's ~110-wide real parent) | 0 | 0 | 110 | 0 |
-| `--archive` | sessions in sessions-archive/ | 3 | 20 | 200 | 500 |
 | `--cwd-files` | files in the project tree | 200 | 2,000 | 4,000 | 2,000 |
 | `--artifacts` | per-session artifact partitions (on/off) | on | on | on | on |
 | `--cache` | cold/warm (see below) | cold | cold | cold | cold |
@@ -114,11 +112,13 @@ the liveness deadline only fails broken runs):
 | `cold-ready` | cold | the same launch, exec -> the tray's session-usage pill, the first attach-only content (daemon spawn + session create + attach included) |
 | `warm-start` | warm | exec -> first paint, daemon pre-started |
 | `warm-ready` | warm | the same launch, exec -> the attach pill |
-| `agents-view` | cold | left-arrow -> the settled first catalog page (`Inactive (N)` plus the `M older sessions not loaded` footer account for every session) in the screen model |
+| `agents-view` | cold | left-arrow -> the settled first catalog page in the screen model |
 | `agents-view-warm` | cold | the same daemon's second populate (its in-process scan cache warm) |
-| `open-session` | cold | `--resume <huge session>` -> the huge session's tail marker (the final user row; its reply is one line) |
-| `session-switch` | cold | enter on the uniquely-filtered switch-b row -> B's transcript marker (the final user row; its reply is one line) |
+| `open-session` | cold | `--resume <huge session>` -> the huge session's tail marker (followed by a one-line reply) |
+| `session-switch` | cold | enter on the uniquely-filtered switch-b row -> B's transcript marker (followed by a one-line reply) |
 | `at-completion` | cold | the `@` keystroke -> the first completion menu row |
+| `editor-ready` | cold | ten typed characters -> full editor echo; clear verified untimed |
+| `concurrent-session` | cold | exec -> huge history marker while another TUI holds switch-a |
 
 Mechanics (the repo's pty-e2e discipline): the TUI child runs in its own
 session with NO controlling tty (`setsid` pre-exec; vendored crossterm
@@ -128,6 +128,13 @@ env is rebuilt from scratch (no ambient credentials leak in). Between runs
 the harness restores the corpus to the manifest's file set (the product's
 new session files, sidecars, logs, and leases are deleted) so every run
 measures identical state. A discarded warm-up run precedes the samples.
+
+Each result also records immediate Linux process-tree RSS after its action and
+before teardown, rooted only at the owned TUI(s) and pre-started daemon. Cold
+daemons are TUI children; workers and kernels follow their descendant trees.
+This is RSS, not PSS or settled memory. Non-Linux results use null, not zero.
+The shared cold/warm paint-and-ready launch pairs share an RSS sample. New
+scenarios have no fabricated baselines; the report shows them as uncalibrated.
 
 Teardown signals only the harness's own child pids; the daemon stops by the
 shutdown protocol and the run FAILS if it keeps accepting — never a

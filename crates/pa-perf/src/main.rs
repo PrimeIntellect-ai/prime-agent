@@ -62,9 +62,6 @@ struct CorpusArgs {
     /// One parent grows this many direct children (0 disables).
     #[arg(long)]
     wide_children: Option<usize>,
-    /// Sessions in sessions-archive/.
-    #[arg(long)]
-    archive: Option<usize>,
     /// Files in the generated project dir.
     #[arg(long)]
     cwd_files: Option<usize>,
@@ -172,9 +169,6 @@ fn corpus_command(args: CorpusArgs) -> anyhow::Result<()> {
     if let Some(value) = args.wide_children {
         options.wide_children = value;
     }
-    if let Some(value) = args.archive {
-        options.archive = value;
-    }
     if let Some(value) = args.cwd_files {
         options.cwd_files = value;
     }
@@ -182,13 +176,12 @@ fn corpus_command(args: CorpusArgs) -> anyhow::Result<()> {
     options.cache = args.cache;
     let manifest = corpus::generate(&options)?;
     println!(
-        "corpus: profile={} sessions={} rows={} total_rows={} child_sessions={} archive={} cache={}",
+        "corpus: profile={} sessions={} rows={} total_rows={} child_sessions={} cache={}",
         report::profile_key(options.profile),
         manifest.counts.sessions,
         options.rows,
         manifest.counts.total_rows,
         manifest.counts.child_sessions,
-        manifest.counts.archive,
         report::profile_key_cache(options.cache),
     );
     println!("huge needle: {}", manifest.markers.huge.needle);

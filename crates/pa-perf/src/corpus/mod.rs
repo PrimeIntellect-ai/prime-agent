@@ -30,13 +30,13 @@ impl Profile {
     /// The profile's knob defaults.
     #[must_use]
     pub fn defaults(self) -> CorpusOptions {
-        let (sessions, rows, child_rows, fanout, depth, tree_parents, wide, archive, cwd_files) =
-            match self {
-                Self::Small => (10, 100, 40, 2, 2, 2, 0, 3, 200),
-                Self::Medium => (100, 2_000, 100, 3, 2, 5, 0, 20, 2_000),
-                Self::Large => (1_000, 10_000, 150, 3, 3, 8, 110, 200, 4_000),
-                Self::Xl => (2_500, 400, 80, 2, 2, 10, 0, 500, 2_000),
-            };
+        let (sessions, rows, child_rows, fanout, depth, tree_parents, wide, cwd_files) = match self
+        {
+            Self::Small => (10, 100, 40, 2, 2, 2, 0, 200),
+            Self::Medium => (100, 2_000, 100, 3, 2, 5, 0, 2_000),
+            Self::Large => (1_000, 10_000, 150, 3, 3, 8, 110, 4_000),
+            Self::Xl => (2_500, 400, 80, 2, 2, 10, 0, 2_000),
+        };
         CorpusOptions {
             profile: self,
             out: PathBuf::new(),
@@ -49,7 +49,6 @@ impl Profile {
             depth,
             tree_parents,
             wide_children: wide,
-            archive,
             cwd_files,
             artifacts: true,
             cache: CacheMode::Cold,
@@ -89,8 +88,6 @@ pub struct CorpusOptions {
     /// One parent grows this many direct children (the operator's ~110-wide
     /// real parent); 0 disables.
     pub wide_children: usize,
-    /// Sessions in sessions-archive/.
-    pub archive: usize,
     /// Files in the generated project dir (the sessions' cwd, the
     /// @-completion walk's tree).
     pub cwd_files: usize,
@@ -112,7 +109,7 @@ const TASKS: [&str; 16] = [
     "split the scan fold",
     "measure first paint",
     "repair the lease release",
-    "seed the archive sweep",
+    "seed the roster sweep",
     "draft the README",
     "run the regression gates",
     "bisect the paint delay",
@@ -127,8 +124,6 @@ const BASE_MS: u64 = 1_790_000_000_000;
 /// The mtime step between sessions (roster order is mtime-desc; the
 /// spread is realism only).
 const MTIME_STEP_MS: u64 = 720_000;
-/// The header-timestamp hour step (a session's rows spread over an hour).
-const HOUR_MS: u64 = 3_600_000;
 
 /// The corpus manifest: what the bench reads (needles are DATA, never
 /// layout-position), and the file-set baseline the per-run restore uses.
@@ -150,7 +145,6 @@ pub struct Manifest {
 pub struct ManifestPaths {
     pub agent_dir: PathBuf,
     pub sessions_dir: PathBuf,
-    pub archive_dir: PathBuf,
     pub project_dir: PathBuf,
     pub manifest_file: PathBuf,
 }
@@ -158,7 +152,6 @@ pub struct ManifestPaths {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ManifestCounts {
     pub sessions: usize,
-    pub archive: usize,
     pub child_sessions: usize,
     pub total_rows: usize,
     pub subagent_edges: usize,
@@ -172,8 +165,7 @@ pub struct ManifestMarkers {
     pub huge: MarkerSession,
     pub switch_a: MarkerSession,
     pub switch_b: MarkerSession,
-    /// The corpus sessions the agents view lists as inactive (loaded under
-    /// the `Inactive (N)` heading or counted in its not-yet-loaded footer).
+    /// The agents view's expected `Inactive (N)` heading count.
     pub roster_inactive: usize,
     /// The session-switch search query (uniquely matches the switch-b row).
     pub switch_query: String,
@@ -226,9 +218,8 @@ pub fn generate(options: &CorpusOptions) -> anyhow::Result<Manifest> {
     );
     let agent_dir = out.join("agent");
     let sessions_dir = agent_dir.join("sessions");
-    let archive_dir = agent_dir.join("sessions-archive");
     let project_dir = out.join("project");
-    for dir in [&agent_dir, &sessions_dir, &archive_dir, &project_dir] {
+    for dir in [&agent_dir, &sessions_dir, &project_dir] {
         std::fs::create_dir_all(dir).with_context(|| format!("create {}", dir.display()))?;
     }
     let cwd = project_dir.display().to_string();
@@ -362,35 +353,12 @@ pub fn generate(options: &CorpusOptions) -> anyhow::Result<Manifest> {
         }
     }
 
-    // Archived sessions: plain files in the archive dir (older mtimes).
-    for index in 0..options.archive {
-        let start = BASE_MS / 2 - index as u64 * HOUR_MS;
-        let id = rows::session_id(&mut rng, start);
-        let file = archive_dir.join(format!("{id}.jsonl"));
-        let written = rows::write_session_file(
-            &file,
-            &SessionSpec {
-                id: id.clone(),
-                start_ms: start,
-                cwd: cwd.clone(),
-                rows: options.rows,
-                name: None,
-                marker: None,
-                parent_session: None,
-                rlm_depth: Some(0),
-            },
-            &mut rng,
-        )?;
-        total_rows += written.rows;
-        set_mtime(&file, start + HOUR_MS)?;
-    }
-
     // The warm-up pass: the product's own window-store open writes the
     // window-cache sidecars (the info-cache sidecar has no product writer
     // outside a worker lease release; the bench measures that warmth via
     // the daemon's own process cache — see README).
     if options.cache == CacheMode::Warm {
-        warm_sidecars(&sessions_dir, &archive_dir)?;
+        warm_sidecars(&sessions_dir)?;
     }
 
     let manifest = Manifest {
@@ -400,13 +368,11 @@ pub fn generate(options: &CorpusOptions) -> anyhow::Result<Manifest> {
         paths: ManifestPaths {
             agent_dir,
             sessions_dir,
-            archive_dir,
             project_dir,
             manifest_file: out.join("corpus.json"),
         },
         counts: ManifestCounts {
             sessions: options.sessions,
-            archive: options.archive,
             child_sessions,
             total_rows,
             subagent_edges: child_sessions,
@@ -537,13 +503,11 @@ fn count_rows(path: &Path) -> usize {
         .unwrap_or(0)
 }
 
-fn warm_sidecars(sessions_dir: &Path, archive_dir: &Path) -> anyhow::Result<()> {
-    for dir in [sessions_dir, archive_dir] {
-        for entry in std::fs::read_dir(dir)? {
-            let path = entry?.path();
-            if path.extension().is_some_and(|ext| ext == "jsonl") {
-                let _ = pa_core::session::window::WindowedSessionStore::open(&path)?;
-            }
+fn warm_sidecars(sessions_dir: &Path) -> anyhow::Result<()> {
+    for entry in std::fs::read_dir(sessions_dir)? {
+        let path = entry?.path();
+        if path.extension().is_some_and(|ext| ext == "jsonl") {
+            let _ = pa_core::session::window::WindowedSessionStore::open(&path)?;
         }
     }
     Ok(())
@@ -586,7 +550,6 @@ mod tests {
         options.rows = 8;
         options.huge_rows = 8;
         options.child_rows = 8;
-        options.archive = 0;
         options.cwd_files = 0;
         options.tree_parents = 1;
         options.wide_children = 0;

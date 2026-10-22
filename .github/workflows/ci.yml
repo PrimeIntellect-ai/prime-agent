@@ -344,6 +344,10 @@ jobs:
       - name: Bootstrap the kernel venv (ready before the kernel e2e units)
         if: steps.selection.outputs.units != '0'
         run: ./target/debug/prime-agent --prime-agent-bootstrap
+      # Run the kernel contract once against the product-bootstrapped venv.
+      - name: Run the kernel benchmark contract tests (the bootstrapped runtime)
+        if: matrix.shard == 1 && steps.selection.outputs.units != '0'
+        run: PRIME_BENCH_TEST_RUNTIME="$HOME/.prime/agent/kernel-venv/bin/python" python3 -m unittest discover -s scripts/performance/tests -p 'test_kernel.py' -v
       # The real-binary lifecycle checks drive the debug binary through owned
       # daemons, PTYs and loopback providers only. One leg is enough.
       - name: Run the rust lifecycle checks
@@ -408,6 +412,9 @@ jobs:
           pattern: shard-manifest-*
           merge-multiple: true
           path: manifests
+      # Discover all performance unit tests; shard 1 covers the live kernel.
+      - name: Run the performance tooling unit tests
+        run: python3 -m unittest discover -s scripts/performance/tests -p 'test_*.py' -v
       - name: Audit the shards and merge their failure reports
         run: |
           python3 scripts/test_ci_test_shard.py

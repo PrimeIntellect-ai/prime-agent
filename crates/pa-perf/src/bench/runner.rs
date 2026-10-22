@@ -11,7 +11,7 @@ use anyhow::Context;
 use crate::bench::{BenchCorpus, BenchOptions, BenchResult, RunOptions, Scenario};
 use crate::corpus::{self, CacheMode, CorpusOptions, Manifest};
 
-use super::pty::PtyChild;
+use super::pty::{kitty_keystrokes, PtyChild};
 
 /// The first paint's needle: the brand splash is the empty chat's header
 /// (the corpus settings keep the TUI out of the first-run flow). Pinned
@@ -23,6 +23,9 @@ const FIRST_PAINT_NEEDLE: &[u8] = "▗▄▄█▀".as_bytes();
 /// the daemon session is attached. A fresh session's usage is always
 /// "0 (0%)".
 const READY_NEEDLE: &str = "0 (0%)";
+
+/// Repeated z characters distinguish editor input from corpus and chrome.
+const EDITOR_PAYLOAD: &str = "zzzzzzzzzz";
 
 /// One bench run's anchored paths.
 struct RunCtx {
@@ -71,10 +74,15 @@ fn child_env(ctx: &RunCtx) -> Vec<(String, String)> {
         ("TERM".to_string(), "xterm-ghostty".to_string()),
         ("TERM_PROGRAM".to_string(), "ghostty".to_string()),
     ];
-    // PI_PACKAGE_DIR carries the packaged runtime dir to the binary and its
-    // workers (a release binary resolves prime-agent-runtime/ beside the
-    // executable or through it); PATH/HOME/TMPDIR are the ambient basics.
-    for carry in ["PATH", "HOME", "TMPDIR", "PI_PACKAGE_DIR"] {
+    // Preserve the staged product runtime and offline policy in child processes.
+    for carry in [
+        "PATH",
+        "HOME",
+        "TMPDIR",
+        "PI_PACKAGE_DIR",
+        "PRIME_AGENT_KERNEL_PYTHON",
+        "UV_OFFLINE",
+    ] {
         if let Some(value) = std::env::var_os(carry) {
             env.push((carry.to_string(), value.to_string_lossy().to_string()));
         }
@@ -101,7 +109,10 @@ pub(super) fn run(options: &BenchOptions) -> anyhow::Result<BenchResult> {
     let samples = sample_runs(&ctx, options.runs, |index| {
         scenario_once(&ctx, options.scenario, index)
     })?;
-    let result = build_result(&ctx, options.scenario, samples);
+    // All-or-nothing: every run sampled, or the platform refused.
+    let samples_rss_bytes: Option<Vec<u64>> = samples.iter().map(|&(_, rss)| rss).collect();
+    let samples_ms: Vec<f64> = samples.into_iter().map(|(ms, _)| ms).collect();
+    let result = build_result(&ctx, options.scenario, samples_ms, samples_rss_bytes);
     write_result(&result, &options.json)?;
     Ok(result)
 }
@@ -112,8 +123,8 @@ pub(super) fn run(options: &BenchOptions) -> anyhow::Result<BenchResult> {
 fn sample_runs(
     ctx: &RunCtx,
     runs: usize,
-    mut scenario: impl FnMut(usize) -> anyhow::Result<f64>,
-) -> anyhow::Result<Vec<f64>> {
+    mut scenario: impl FnMut(usize) -> anyhow::Result<(f64, Option<u64>)>,
+) -> anyhow::Result<Vec<(f64, Option<u64>)>> {
     let mut samples = Vec::with_capacity(runs + 1);
     let total = runs + 1;
     for index in 0..total {
@@ -124,8 +135,8 @@ fn sample_runs(
             outcome?;
             continue;
         }
-        let sample = outcome.context("a sampled run failed")?;
-        samples.push(sample);
+        let (sample, rss) = outcome.context("a sampled run failed")?;
+        samples.push((sample, rss));
         println!(
             "run {index}/{runs}: {sample:.1}ms (wall {:.1}s)",
             started.elapsed().as_secs_f32()
@@ -134,17 +145,25 @@ fn sample_runs(
     Ok(samples)
 }
 
-/// One scenario pass; returns the sample in ms.
-fn scenario_once(ctx: &RunCtx, scenario: Scenario, run: usize) -> anyhow::Result<f64> {
-    let (sample, _) = launch(ctx, scenario, run)?;
-    Ok(sample)
+/// Return latency and owned-tree RSS for one scenario.
+fn scenario_once(
+    ctx: &RunCtx,
+    scenario: Scenario,
+    run: usize,
+) -> anyhow::Result<(f64, Option<u64>)> {
+    let (sample, rss, _) = launch(ctx, scenario, run)?;
+    Ok((sample, rss))
 }
 
 /// The ONE launch path: the pre-started daemon for warm-* scenarios, the
 /// scenario's own resume target + first needle, the post-launch mechanics,
 /// and the daemon teardown on every path. Both `run()` (single scenario)
 /// and `run_suite()` call this.
-fn launch(ctx: &RunCtx, scenario: Scenario, run: usize) -> anyhow::Result<(f64, Launch)> {
+fn launch(
+    ctx: &RunCtx,
+    scenario: Scenario,
+    run: usize,
+) -> anyhow::Result<(f64, Option<u64>, Launch)> {
     let socket = run_socket(ctx, run);
     std::fs::create_dir_all(socket.parent().expect("a socket dir"))?;
     let mut daemon = if matches!(
@@ -159,14 +178,22 @@ fn launch(ctx: &RunCtx, scenario: Scenario, run: usize) -> anyhow::Result<(f64, 
     } else {
         None
     };
-    let outcome: anyhow::Result<(f64, Launch)> = (|| {
-        let mut launched = spawn_for_scenario(ctx, &socket, scenario, run)?;
-        let sample = launch_scenario(ctx, &mut launched, scenario)?;
-        // The measured client must disconnect before daemon shutdown.
-        // Keeping it alive while waiting for daemon exit can hold server
-        // connection draining open or start the client's reconnect path.
+    let outcome: anyhow::Result<(f64, Option<u64>, Launch)> = (|| {
+        let (mut launched, held) = spawn_for_scenario(ctx, &socket, scenario, run)?;
+        let (sample, extra) = launch_scenario(ctx, &mut launched, scenario, held)?;
+        // Sample owned processes before any client or daemon teardown.
+        let rss = sample_rss(
+            launched.child.pid(),
+            extra.as_ref().map(|extra| extra.child.pid()),
+            daemon.as_ref().map(|owned| owned.child.id() as i32),
+        )?;
+        // Disconnect clients before waiting for daemon shutdown.
+        if let Some(mut extra) = extra {
+            extra.completed = true;
+            extra.child.finish();
+        }
         launched.child.finish();
-        Ok((sample, launched))
+        Ok((sample, rss, launched))
     })();
     let stopped = stop_daemon(&socket);
     // Socket closure alone does not reap a daemon we directly spawned.
@@ -196,6 +223,26 @@ fn launch(ctx: &RunCtx, scenario: Scenario, run: usize) -> anyhow::Result<(f64, 
     stopped?;
     exited.with_context(|| format!("{scenario:?} run {run} daemon cleanup"))?;
     Ok(result)
+}
+
+/// Sample owned process-tree RSS from Linux procfs.
+#[cfg(target_os = "linux")]
+fn sample_rss(
+    tui_pid: i32,
+    held_pid: Option<i32>,
+    daemon_pid: Option<i32>,
+) -> anyhow::Result<Option<u64>> {
+    super::rss::sample(tui_pid, held_pid, daemon_pid)
+}
+
+/// RSS is unavailable without Linux procfs.
+#[cfg(not(target_os = "linux"))]
+fn sample_rss(
+    _tui_pid: i32,
+    _held_pid: Option<i32>,
+    _daemon_pid: Option<i32>,
+) -> anyhow::Result<Option<u64>> {
+    Ok(None)
 }
 
 // The whole-suite driver (`pa-perf run`): generates the cold and warm
@@ -230,38 +277,69 @@ pub(super) fn run_suite(options: &RunOptions) -> anyhow::Result<Vec<BenchResult>
     let warm_ctx = RunCtx::load(&options.binary, &options.out.join("corpus-warm"), liveness)?;
 
     let mut samples: BTreeMap<Scenario, Vec<f64>> = BTreeMap::new();
+    let mut rss_samples: BTreeMap<Scenario, Vec<Option<u64>>> = BTreeMap::new();
     let total = options.runs + 1;
     for index in 0..total {
         let started = Instant::now();
         // The schedule: cold scenarios on the cold corpus, warm-* on the
         // warm corpus. `launch_cold`/`launch_warm` below run one scenario
         // per launch; the cold-start/cold-ready (and warm-*) pairs share
-        // one launch each.
+        // one launch each (and therefore its single RSS sample).
         restore(&cold_ctx)?;
-        let (start_sample, launched) = launch(&cold_ctx, Scenario::ColdStart, index)?;
+        let (start_sample, start_rss, launched) = launch(&cold_ctx, Scenario::ColdStart, index)?;
         let ready_sample = launched
             .ready_ms
             .context("the cold launch never attached")?;
-        push(&mut samples, index, Scenario::ColdStart, start_sample);
-        push(&mut samples, index, Scenario::ColdReady, ready_sample);
+        push(
+            &mut samples,
+            &mut rss_samples,
+            index,
+            Scenario::ColdStart,
+            start_sample,
+            start_rss,
+        );
+        push(
+            &mut samples,
+            &mut rss_samples,
+            index,
+            Scenario::ColdReady,
+            ready_sample,
+            start_rss,
+        );
         for scenario in [
             Scenario::AgentsView,
             Scenario::AgentsViewWarm,
             Scenario::OpenSession,
             Scenario::SessionSwitch,
             Scenario::AtCompletion,
+            Scenario::EditorReady,
+            Scenario::ConcurrentSession,
         ] {
             restore(&cold_ctx)?;
-            let (sample, _) = launch(&cold_ctx, scenario, index)?;
-            push(&mut samples, index, scenario, sample);
+            let (sample, rss, _) = launch(&cold_ctx, scenario, index)?;
+            push(&mut samples, &mut rss_samples, index, scenario, sample, rss);
         }
         restore(&warm_ctx)?;
-        let (start_sample, launched) = launch(&warm_ctx, Scenario::WarmStart, index)?;
+        let (start_sample, start_rss, launched) = launch(&warm_ctx, Scenario::WarmStart, index)?;
         let ready_sample = launched
             .ready_ms
             .context("the warm launch never attached")?;
-        push(&mut samples, index, Scenario::WarmStart, start_sample);
-        push(&mut samples, index, Scenario::WarmReady, ready_sample);
+        push(
+            &mut samples,
+            &mut rss_samples,
+            index,
+            Scenario::WarmStart,
+            start_sample,
+            start_rss,
+        );
+        push(
+            &mut samples,
+            &mut rss_samples,
+            index,
+            Scenario::WarmReady,
+            ready_sample,
+            start_rss,
+        );
         println!(
             "run {index}/{} complete ({:.1}s)",
             options.runs,
@@ -272,8 +350,7 @@ pub(super) fn run_suite(options: &RunOptions) -> anyhow::Result<Vec<BenchResult>
     let results_dir = options.out.join("results");
     std::fs::create_dir_all(&results_dir)?;
     let mut results = Vec::new();
-    for (scenario, mut samples) in samples {
-        samples.sort_by(f64::total_cmp);
+    for (scenario, samples) in samples {
         if samples.len() != options.runs {
             anyhow::bail!(
                 "{scenario:?} collected {} samples, expected {}",
@@ -282,7 +359,13 @@ pub(super) fn run_suite(options: &RunOptions) -> anyhow::Result<Vec<BenchResult>
             );
         }
         let ctx = corpus_for(scenario, &cold_ctx, &warm_ctx);
-        let result = build_result(ctx, scenario, samples);
+        // Every sample pushed its RSS twin; all-or-nothing across the runs.
+        let samples_rss_bytes: Option<Vec<u64>> = rss_samples
+            .remove(&scenario)
+            .expect("every sample carries its RSS twin")
+            .into_iter()
+            .collect();
+        let result = build_result(ctx, scenario, samples, samples_rss_bytes);
         let name = crate::report::key_of(scenario);
         // Per-profile unique names: the CI legs merge their artifacts into
         // one results dir, and same-named files would overwrite each other.
@@ -309,26 +392,36 @@ fn corpus_for<'a>(scenario: Scenario, cold: &'a RunCtx, warm: &'a RunCtx) -> &'a
         | Scenario::AgentsViewWarm
         | Scenario::OpenSession
         | Scenario::SessionSwitch
-        | Scenario::AtCompletion => cold,
+        | Scenario::AtCompletion
+        | Scenario::EditorReady
+        | Scenario::ConcurrentSession => cold,
     }
 }
 
-/// Push a sample unless this is the discarded warm-up run.
-fn push(samples: &mut BTreeMap<Scenario, Vec<f64>>, index: usize, scenario: Scenario, sample: f64) {
+/// Push a sample and its RSS twin unless this is the discarded warm-up run.
+fn push(
+    samples: &mut BTreeMap<Scenario, Vec<f64>>,
+    rss_samples: &mut BTreeMap<Scenario, Vec<Option<u64>>>,
+    index: usize,
+    scenario: Scenario,
+    sample: f64,
+    rss: Option<u64>,
+) {
     if index > 0 {
         samples.entry(scenario).or_default().push(sample);
+        rss_samples.entry(scenario).or_default().push(rss);
     }
 }
 
-/// The resume target + first needle per scenario, then the spawn.
+/// Spawn the measured TUI and any concurrently held peer.
 fn spawn_for_scenario(
     ctx: &RunCtx,
     socket: &Path,
     scenario: Scenario,
     run: usize,
-) -> anyhow::Result<Launch> {
+) -> anyhow::Result<(Launch, Option<Launch>)> {
     let (resume, first_needle) = match scenario {
-        Scenario::OpenSession => (
+        Scenario::OpenSession | Scenario::ConcurrentSession => (
             Some(ctx.manifest.markers.huge.file.clone()),
             ctx.manifest.markers.huge.needle.as_bytes().to_vec(),
         ),
@@ -336,35 +429,82 @@ fn spawn_for_scenario(
             Some(ctx.manifest.markers.switch_a.file.clone()),
             ctx.manifest.markers.switch_a.needle.as_bytes().to_vec(),
         ),
-        _ => (None, FIRST_PAINT_NEEDLE.to_vec()),
+        Scenario::ColdStart
+        | Scenario::ColdReady
+        | Scenario::WarmStart
+        | Scenario::WarmReady
+        | Scenario::AgentsView
+        | Scenario::AgentsViewWarm
+        | Scenario::AtCompletion
+        | Scenario::EditorReady => (None, FIRST_PAINT_NEEDLE.to_vec()),
     };
     let dump = ctx
         .corpus_root
         .join("failed-streams")
         .join(format!("{}-run{run}.bin", crate::report::key_of(scenario)));
-    let mut launch = Launch::spawn(ctx, socket, resume.as_deref(), &first_needle, dump)?;
+    if scenario == Scenario::ConcurrentSession {
+        // Keep the existing client drained while timing the shared-daemon open.
+        let held_dump = ctx.corpus_root.join("failed-streams").join(format!(
+            "{}-held-run{run}.bin",
+            crate::report::key_of(scenario)
+        ));
+        let mut held = Launch::spawn(
+            ctx,
+            socket,
+            Some(&ctx.manifest.markers.switch_a.file),
+            ctx.manifest.markers.switch_a.needle.as_bytes(),
+            held_dump,
+            None,
+        )?;
+        let launch = Launch::spawn(
+            ctx,
+            socket,
+            resume.as_deref(),
+            &first_needle,
+            dump,
+            Some(&mut held),
+        )?;
+        return Ok((launch, Some(held)));
+    }
+    let mut launch = Launch::spawn(ctx, socket, resume.as_deref(), &first_needle, dump, None)?;
     if matches!(
         scenario,
         Scenario::ColdStart | Scenario::WarmStart | Scenario::ColdReady | Scenario::WarmReady
     ) {
         launch.wait_ready()?;
     }
-    Ok(launch)
+    Ok((launch, None))
 }
 
-/// The scenario mechanics after the launch needle; a completed launch
-/// never dumps its stream.
-fn launch_scenario(ctx: &RunCtx, launch: &mut Launch, scenario: Scenario) -> anyhow::Result<f64> {
-    let sample = post_launch(ctx, launch, scenario)?;
+/// Run the action and retain extra clients until RSS is sampled.
+fn launch_scenario(
+    ctx: &RunCtx,
+    launch: &mut Launch,
+    scenario: Scenario,
+    held: Option<Launch>,
+) -> anyhow::Result<(f64, Option<Launch>)> {
+    let outcome = post_launch(ctx, launch, scenario, held)?;
     launch.completed = true;
-    Ok(sample)
+    Ok(outcome)
 }
 
 /// The scenario mechanics after the launch needle.
-fn post_launch(ctx: &RunCtx, launch: &mut Launch, scenario: Scenario) -> anyhow::Result<f64> {
+fn post_launch(
+    ctx: &RunCtx,
+    launch: &mut Launch,
+    scenario: Scenario,
+    held: Option<Launch>,
+) -> anyhow::Result<(f64, Option<Launch>)> {
     match scenario {
-        Scenario::ColdStart | Scenario::WarmStart | Scenario::OpenSession => Ok(launch.first_ms),
-        Scenario::AgentsView => agents_view_populate(ctx, &mut launch.child),
+        Scenario::ColdStart
+        | Scenario::WarmStart
+        | Scenario::OpenSession
+        | Scenario::ConcurrentSession => Ok((launch.first_ms, held)),
+        Scenario::EditorReady => {
+            launch.wait_ready()?;
+            Ok((editor_echo_ack(ctx, &mut launch.child)?, held))
+        }
+        Scenario::AgentsView => Ok((agents_view_populate(ctx, &mut launch.child)?, None)),
         Scenario::AgentsViewWarm => {
             // The first populate warms the daemon's in-process scan cache;
             // the second TUI measures the warm path on the same daemon.
@@ -374,14 +514,15 @@ fn post_launch(ctx: &RunCtx, launch: &mut Launch, scenario: Scenario) -> anyhow:
                 .corpus_root
                 .join("failed-streams")
                 .join("agents-view-warm-second.bin");
-            let mut second = Launch::spawn(ctx, &socket, None, FIRST_PAINT_NEEDLE, dump)?;
+            let mut second = Launch::spawn(ctx, &socket, None, FIRST_PAINT_NEEDLE, dump, None)?;
             let sample = agents_view_populate(ctx, &mut second.child)?;
-            second.completed = true;
-            Ok(sample)
+            Ok((sample, Some(second)))
         }
-        Scenario::SessionSwitch => switch_to_target_b(ctx, &mut launch.child),
-        Scenario::AtCompletion => at_completion(ctx, &mut launch.child),
-        Scenario::ColdReady | Scenario::WarmReady => Ok(launch.ready_ms.unwrap_or(launch.first_ms)),
+        Scenario::SessionSwitch => Ok((switch_to_target_b(ctx, &mut launch.child)?, None)),
+        Scenario::AtCompletion => Ok((at_completion(ctx, &mut launch.child)?, None)),
+        Scenario::ColdReady | Scenario::WarmReady => {
+            Ok((launch.ready_ms.unwrap_or(launch.first_ms), None))
+        }
     }
 }
 
@@ -401,15 +542,14 @@ struct Launch {
 }
 
 impl Launch {
-    /// Spawn the TUI (fresh daemon when none listens on `socket`), wait the
-    /// first needle (the brand-splash paint, or the resumed transcript's
-    /// marker), and record exec -> needle.
+    /// Spawn the TUI and measure its first paint while draining any held peer.
     fn spawn(
         ctx: &RunCtx,
         socket: &Path,
         resume: Option<&Path>,
         first_needle: &[u8],
         stream_dump: PathBuf,
+        held: Option<&mut Launch>,
     ) -> anyhow::Result<Self> {
         let mut args = vec![
             "--daemon-socket".into(),
@@ -443,12 +583,22 @@ impl Launch {
             stream_dump: Some(stream_dump),
             completed: false,
         };
-        launch.child.wait_from(
-            launch.child.mark(),
-            first_needle,
-            what,
-            started + ctx.liveness,
-        )?;
+        if let Some(held) = held {
+            launch.child.wait_from_pumping(
+                launch.child.mark(),
+                first_needle,
+                what,
+                started + ctx.liveness,
+                Some(&mut held.child),
+            )?;
+        } else {
+            launch.child.wait_from(
+                launch.child.mark(),
+                first_needle,
+                what,
+                started + ctx.liveness,
+            )?;
+        }
         launch.first_ms = started.elapsed().as_secs_f64() * 1000.0;
         Ok(launch)
     }
@@ -525,10 +675,7 @@ fn wait_roster(ctx: &RunCtx, child: &mut PtyChild, expected: usize) -> anyhow::R
 /// letter z), so Enter always drills THE row.
 fn switch_to_target_b(ctx: &RunCtx, child: &mut PtyChild) -> anyhow::Result<f64> {
     child.write(b"\x1b[D")?;
-    // Wait the settled roster before typing: keys racing the scan flood
-    // were the CI-runner failure (the query echoed nothing). The resumed
-    // session A renders as one IDLE row, so the settled roster counts the
-    // remaining sessions.
+    // Wait for the settled roster before typing so the scan cannot swallow the query.
     wait_roster(ctx, child, ctx.manifest.markers.roster_inactive - 1)?;
     child.write(ctx.manifest.markers.switch_query.as_bytes())?;
     // The echoed query does not contain the row's "switch" prefix, so this
@@ -567,6 +714,29 @@ fn at_completion(ctx: &RunCtx, child: &mut PtyChild) -> anyhow::Result<f64> {
         Instant::now() + ctx.liveness,
     )?;
     Ok(started.elapsed().as_secs_f64() * 1000.0)
+}
+
+/// Time the ten-character echo; verify its complete clear afterward.
+fn editor_echo_ack(ctx: &RunCtx, child: &mut PtyChild) -> anyhow::Result<f64> {
+    let started = Instant::now();
+    // Plain repeated bytes are deduplicated under the advertised Kitty mode.
+    child.write(&kitty_keystrokes('z' as u32, EDITOR_PAYLOAD.len()))?;
+    child.wait_screen_contains(
+        EDITOR_PAYLOAD,
+        "the editor echo",
+        Instant::now() + ctx.liveness,
+    )?;
+    let sample = started.elapsed().as_secs_f64() * 1000.0;
+    // A missing full substring can still leave payload characters behind.
+    let editor_rows = child.rows_containing(EDITOR_PAYLOAD)?;
+    child.write(&kitty_keystrokes(0x7f, EDITOR_PAYLOAD.len()))?;
+    child.wait_rows_lack(
+        &editor_rows,
+        "z",
+        "the cleared editor",
+        Instant::now() + ctx.liveness,
+    )?;
+    Ok(sample)
 }
 
 /// The per-run isolated socket path.
@@ -736,7 +906,12 @@ fn restore(ctx: &RunCtx) -> anyhow::Result<()> {
 }
 
 /// The result object for one scenario's samples.
-fn build_result(ctx: &RunCtx, scenario: Scenario, samples: Vec<f64>) -> BenchResult {
+fn build_result(
+    ctx: &RunCtx,
+    scenario: Scenario,
+    samples: Vec<f64>,
+    samples_rss_bytes: Option<Vec<u64>>,
+) -> BenchResult {
     let (median_ms, p95_ms) = stats(&samples);
     BenchResult {
         schema: 1,
@@ -746,6 +921,7 @@ fn build_result(ctx: &RunCtx, scenario: Scenario, samples: Vec<f64>) -> BenchRes
         median_ms,
         p95_ms,
         samples_ms: samples,
+        samples_rss_bytes,
         needle: needle_of(scenario, ctx),
         binary: ctx.binary.display().to_string(),
         corpus: BenchCorpus {
@@ -753,7 +929,6 @@ fn build_result(ctx: &RunCtx, scenario: Scenario, samples: Vec<f64>) -> BenchRes
             sessions: ctx.manifest.counts.sessions,
             total_rows: ctx.manifest.counts.total_rows,
             child_sessions: ctx.manifest.counts.child_sessions,
-            archive: ctx.manifest.counts.archive,
         },
     }
 }
@@ -783,17 +958,22 @@ fn needle_of(scenario: Scenario, ctx: &RunCtx) -> String {
             "the settled roster (Inactive + not-yet-loaded = {})",
             ctx.manifest.markers.roster_inactive + 1
         ),
-        Scenario::OpenSession => {
-            format!(
-                "the huge session marker {}",
-                ctx.manifest.markers.huge.needle
-            )
-        }
+        Scenario::OpenSession => format!(
+            "the huge session marker {}",
+            ctx.manifest.markers.huge.needle
+        ),
         Scenario::SessionSwitch => format!(
             "the enter drill-in to switch-b (its transcript marker {})",
             ctx.manifest.markers.switch_b.needle
         ),
         Scenario::AtCompletion => "the first @ completion menu row".to_string(),
+        Scenario::EditorReady => {
+            "the editor echo of ten typed characters (then backspace clears it)".to_string()
+        }
+        Scenario::ConcurrentSession => format!(
+            "the huge session marker {} (opened while a second TUI holds switch-a)",
+            ctx.manifest.markers.huge.needle
+        ),
     }
 }
 
@@ -813,7 +993,6 @@ mod tests {
             rows: 100,
             huge_rows: 100,
             tree_parents: 0,
-            archive: 0,
             cwd_files: 1,
             ..crate::corpus::Profile::Small.defaults()
         })
@@ -863,7 +1042,7 @@ mod tests {
             Scenario::ColdStart,
         ] {
             let measured = corpus_for(scenario, &cold, &warm);
-            let result = build_result(measured, scenario, vec![1.0, 2.0]);
+            let result = build_result(measured, scenario, vec![1.0, 2.0], None);
             let expected = if scenario == Scenario::ColdStart {
                 &cold
             } else {
@@ -927,6 +1106,7 @@ mod tests {
             None,
             b"absent paint",
             dump.clone(),
+            None,
         );
         assert!(
             launched.is_err(),
@@ -982,10 +1162,13 @@ mod tests {
             }
             std::fs::write(&sidecar, "written by the mock scenario")?;
             launches.push(index);
-            Ok(index as f64)
+            Ok((index as f64, Some(index as u64)))
         })
         .expect("sample the mock scenario");
-        assert_eq!((launches, samples), (vec![0, 1, 2], vec![1.0, 2.0]));
+        assert_eq!(
+            (launches, samples),
+            (vec![0, 1, 2], vec![(1.0, Some(1)), (2.0, Some(2))],)
+        );
     }
 
     #[test]
@@ -1020,9 +1203,14 @@ mod tests {
             .expect("make the mock executable");
         ctx.binary = binary;
         ctx.liveness = Duration::from_secs(10);
-        let (sample, launched) = launch(&ctx, Scenario::WarmStart, 0)
+        let (sample, rss, launched) = launch(&ctx, Scenario::WarmStart, 0)
             .expect("the daemon must drain its measured UI connection before exit");
         assert!(sample >= 0.0);
+        // Missing procfs must not become a zero RSS sample.
+        #[cfg(target_os = "linux")]
+        assert!(rss.is_some());
+        #[cfg(not(target_os = "linux"))]
+        assert!(rss.is_none());
         assert!(
             launched.ready_ms.is_some(),
             "the actual mock paint/attach ran"
@@ -1059,7 +1247,6 @@ mod tests {
             "hello blocked for {elapsed:?}"
         );
     }
-
     #[test]
     fn roster_settled_accounts_for_unloaded_pages() {
         let large = "   ▗█▛▐█▙   ▗▄█▀▗█▀       prime agent v0.10.0
@@ -1079,5 +1266,9 @@ Inactive (200)
         assert!(!roster_settled(large, 1000));
         assert!(roster_settled("Inactive (11)\n• a\n• b", 11));
         assert!(!roster_settled("Inactive (7)\n• a\n• b", 11));
+        assert!(roster_settled(
+            "Inactive (199)\n2302 older sessions not loaded · scroll to load",
+            2501,
+        ));
     }
 }

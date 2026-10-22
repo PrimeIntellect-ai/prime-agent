@@ -18,6 +18,12 @@ use nix::pty::{openpty, Winsize};
 pub(crate) const KITTY_QUERY: &[u8] = b"\x1b[?u";
 pub(crate) const KITTY_ANSWER: &[u8] = b"\x1b[?7u\x1b[?62;c";
 
+/// Emit press/release pairs so enhanced-key dedup preserves repeated keys.
+pub(crate) fn kitty_keystrokes(codepoint: u32, count: usize) -> Vec<u8> {
+    let one = format!("\x1b[{codepoint};1:1u\x1b[{codepoint};1:3u");
+    one.repeat(count).into_bytes()
+}
+
 /// The idle poll slice between empty reads (poll(2) drives the wakeups).
 const IDLE_POLL: Duration = Duration::from_millis(25);
 
@@ -121,12 +127,36 @@ impl PtyChild {
         what: &str,
         deadline: Instant,
     ) -> anyhow::Result<Instant> {
+        self.wait_from_pumping(mark, needle, what, deadline, None)
+    }
+
+    /// Drain the shared daemon's held peer without delaying the measured wait.
+    pub(crate) fn wait_from_pumping(
+        &mut self,
+        mark: usize,
+        needle: &[u8],
+        what: &str,
+        deadline: Instant,
+        held: Option<&mut PtyChild>,
+    ) -> anyhow::Result<Instant> {
         // Search only the bytes that arrived since the last check (plus the
         // needle overlap, never reaching before the mark): a fresh
         // full-stream scan per read is quadratic, and the harness must
         // never out-CPU the product it measures.
+        let mut held = held;
         let mut scanned = mark;
         loop {
+            if let Some(held) = held.as_deref_mut() {
+                held.pump(Some(Instant::now()))?;
+                if let Some(status) = held.child.try_wait()? {
+                    anyhow::bail!(
+                        "the held client exited with {status} before {what}; held pty tail:\n{}",
+                        String::from_utf8_lossy(
+                            &held.output[held.output.len().saturating_sub(4000)..]
+                        )
+                    );
+                }
+            }
             let from = scanned
                 .saturating_sub(needle.len().saturating_sub(1))
                 .max(mark);
@@ -149,7 +179,19 @@ impl PtyChild {
                     String::from_utf8_lossy(tail),
                 );
             }
-            self.pump(Some(deadline))?;
+            if let Some(held) = held.as_deref_mut() {
+                let timeout = deadline
+                    .saturating_duration_since(Instant::now())
+                    .min(IDLE_POLL);
+                let mut poller = [
+                    PollFd::new(self.master.as_fd(), PollFlags::POLLIN),
+                    PollFd::new(held.master.as_fd(), PollFlags::POLLIN),
+                ];
+                poll(&mut poller, timeout.as_millis() as u16)?;
+                self.pump(Some(Instant::now()))?;
+            } else {
+                self.pump(Some(deadline))?;
+            }
         }
     }
 
@@ -251,6 +293,60 @@ impl PtyChild {
             }
             self.pump(Some(deadline))?;
         }
+    }
+
+    /// Scope clearing to the editor rows, not unrelated chrome.
+    pub(crate) fn rows_containing(&self, needle: &str) -> anyhow::Result<Vec<usize>> {
+        let rows: Vec<usize> = self
+            .screen
+            .screen()
+            .contents()
+            .split('\n')
+            .enumerate()
+            .filter(|(_, text)| text.contains(needle))
+            .map(|(row, _)| row)
+            .collect();
+        anyhow::ensure!(!rows.is_empty(), "the screen no longer holds {needle:?}");
+        Ok(rows)
+    }
+
+    /// Wait until the editor rows contain no payload characters.
+    pub(crate) fn wait_rows_lack(
+        &mut self,
+        rows: &[usize],
+        needle: &str,
+        what: &str,
+        deadline: Instant,
+    ) -> anyhow::Result<Instant> {
+        loop {
+            if self.rows_cleared(rows, needle) {
+                return Ok(Instant::now());
+            }
+            if let Some(status) = self.exited {
+                anyhow::bail!(
+                    "child exited with {status} before {what}; pty tail:\n{}",
+                    String::from_utf8_lossy(&self.output[self.output.len().saturating_sub(4000)..])
+                );
+            }
+            if Instant::now() >= deadline {
+                anyhow::bail!(
+                    "timeout waiting for {what} (rows {rows:?} still hold {needle:?}); screen:\n{}",
+                    self.screen_text(),
+                );
+            }
+            self.pump(Some(deadline))?;
+        }
+    }
+
+    /// Whether every row in `rows` no longer holds `needle`.
+    fn rows_cleared(&self, rows: &[usize], needle: &str) -> bool {
+        self.screen
+            .screen()
+            .contents()
+            .split('\n')
+            .enumerate()
+            .filter(|(row, _)| rows.contains(row))
+            .all(|(_, text)| !text.contains(needle))
     }
 
     /// The decoded screen's text (rows joined; trailing blanks trimmed).
@@ -398,6 +494,188 @@ mod tests {
                 Instant::now() + Duration::from_secs(5),
             )
             .expect("final screen survives child exit");
+    }
+
+    #[test]
+    fn the_clear_observable_waits_for_the_paint_to_leave_the_screen() {
+        let directory = tempfile::tempdir().expect("mock directory");
+        let mut child = PtyChild::spawn(
+            std::path::Path::new("/bin/sh"),
+            &[
+                "-c".into(),
+                "stty -icanon -echo; printf 'zzzzzzzzzz'; head -c 1 >/dev/null; printf '\\033[2J\\033[Hcleared'".into(),
+            ],
+            &[],
+            directory.path(),
+            120,
+            36,
+        )
+        .expect("spawn the clearing mock");
+        let deadline = Instant::now() + Duration::from_secs(5);
+        child
+            .wait_screen_contains("zzzzzzzzzz", "the painted payload", deadline)
+            .expect("the payload paints first");
+        let rows = child
+            .rows_containing("zzzzzzzzzz")
+            .expect("the payload paints its own rows");
+        child.write(b"c").expect("release the mock's clear");
+        child
+            .wait_rows_lack(&rows, "z", "the cleared screen", deadline)
+            .expect("the clear removes every payload character");
+        child
+            .wait_screen_contains("cleared", "the post-clear paint", deadline)
+            .expect("the screen after the clear paints");
+    }
+
+    #[test]
+    fn the_clear_observable_rejects_a_partial_clear() {
+        let directory = tempfile::tempdir().expect("mock directory");
+        let mut child = PtyChild::spawn(
+            std::path::Path::new("/bin/sh"),
+            &[
+                "-c".into(),
+                // Keep the mock alive until the clear deadline.
+                "stty -icanon -echo; printf 'zzzzzzzzz'; head -c 1 >/dev/null; printf 'z\\033[1D\\033[1P'; head -c 1 >/dev/null".into(),
+            ],
+            &[],
+            directory.path(),
+            120,
+            36,
+        )
+        .expect("spawn the partial-clear mock");
+        let deadline = Instant::now() + Duration::from_secs(5);
+        child
+            .wait_screen_contains("zzzzzzzzz", "the painted payload", deadline)
+            .expect("the payload paints first");
+        let rows = child
+            .rows_containing("zzzzzzzzz")
+            .expect("the payload paints its own rows");
+        child.write(b"c").expect("release the mock's delete");
+        // A partial clear must not acknowledge completion.
+        let error = child
+            .wait_rows_lack(
+                &rows,
+                "z",
+                "the cleared screen",
+                Instant::now() + Duration::from_millis(500),
+            )
+            .expect_err("the partial clear keeps a payload character");
+        assert!(error.to_string().contains("still hold"), "{}", error);
+    }
+
+    #[test]
+    fn a_flooding_held_peer_never_backpressures_the_measured_wait() {
+        let directory = tempfile::tempdir().expect("mock directory");
+        // Gate the measured paint on draining more than the PTY buffer.
+        let mut held = PtyChild::spawn(
+            std::path::Path::new("/bin/sh"),
+            &[
+                "-c".into(),
+                "head -c 8388608 /dev/zero; touch done; head -c 1 >/dev/null".into(),
+            ],
+            &[],
+            directory.path(),
+            120,
+            36,
+        )
+        .expect("spawn the flooding held peer");
+        let mut measured = PtyChild::spawn(
+            std::path::Path::new("/bin/sh"),
+            &[
+                "-c".into(),
+                "until [ -f done ]; do :; done; printf 'measured needle'".into(),
+            ],
+            &[],
+            directory.path(),
+            120,
+            36,
+        )
+        .expect("spawn the gated measured peer");
+        measured
+            .wait_from_pumping(
+                measured.mark(),
+                b"measured needle",
+                "the gated needle",
+                Instant::now() + Duration::from_secs(5),
+                Some(&mut held),
+            )
+            .expect("the held peer's flood drains through the measured wait");
+    }
+
+    #[test]
+    fn a_held_peer_dying_mid_wait_fails_the_measured_wait() {
+        let directory = tempfile::tempdir().expect("mock directory");
+        let mut held = PtyChild::spawn(
+            std::path::Path::new("/bin/sh"),
+            &["-c".into(), "printf 'held diagnostic'; exit 3".into()],
+            &[],
+            directory.path(),
+            120,
+            36,
+        )
+        .expect("spawn the dying held peer");
+        let mut measured = PtyChild::spawn(
+            std::path::Path::new("/bin/cat"),
+            &[],
+            &[],
+            directory.path(),
+            120,
+            36,
+        )
+        .expect("spawn the never-painting measured peer");
+        let started = Instant::now();
+        let error = measured
+            .wait_from_pumping(
+                measured.mark(),
+                b"absent needle",
+                "the missing paint",
+                started + Duration::from_secs(5),
+                Some(&mut held),
+            )
+            .expect_err("a dead held peer cannot back a concurrent sample");
+        let message = error.to_string();
+        assert!(message.contains("the held client exited"), "{message}");
+        assert!(message.contains("held diagnostic"), "{message}");
+        assert!(started.elapsed() < Duration::from_secs(5));
+    }
+
+    #[test]
+    fn a_dead_held_peer_rejects_an_already_buffered_needle() {
+        let directory = tempfile::tempdir().expect("mock directory");
+        let mut held = PtyChild::spawn(
+            std::path::Path::new("/bin/sh"),
+            &["-c".into(), "printf 'final held bytes'; exit 3".into()],
+            &[],
+            directory.path(),
+            120,
+            36,
+        )
+        .expect("spawn the held peer");
+        held.child.wait().expect("held peer has exited");
+        let mut measured = PtyChild::spawn(
+            std::path::Path::new("/bin/cat"),
+            &[],
+            &[],
+            directory.path(),
+            120,
+            36,
+        )
+        .expect("spawn the measured peer");
+        measured
+            .receive(b"painted needle")
+            .expect("buffer the paint");
+        let error = measured
+            .wait_from_pumping(
+                0,
+                b"painted needle",
+                "the painted needle",
+                Instant::now() + Duration::from_secs(5),
+                Some(&mut held),
+            )
+            .expect_err("buffered paint cannot validate a dead held peer");
+        let message = error.to_string();
+        assert!(message.contains("the held client exited"), "{message}");
+        assert!(message.contains("final held bytes"), "{message}");
     }
 
     #[test]

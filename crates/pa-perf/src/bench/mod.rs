@@ -22,10 +22,11 @@ pub enum Scenario {
     WarmStart,
     /// The warm launch timed to the attach pill.
     WarmReady,
-    /// Fresh daemon+TUI: left-arrow -> the settled first catalog page.
+    /// Fresh daemon+TUI: left-arrow -> the roster scan delivered the oldest
+    /// session (its unique search-result row paints).
     AgentsView,
     /// The same daemon's second populate (its in-process scan cache warm):
-    /// a second TUI's left-arrow -> the settled first catalog page.
+    /// a second TUI's left-arrow -> the completed roster.
     AgentsViewWarm,
     /// Fresh daemon: `--resume <huge session>` -> the huge marker paints.
     OpenSession,
@@ -34,6 +35,10 @@ pub enum Scenario {
     SessionSwitch,
     /// The `@` keystroke -> the first completion menu row.
     AtCompletion,
+    /// Type ten characters, observe the echo, then verify clearing.
+    EditorReady,
+    /// Open the huge session while another TUI holds a session on the daemon.
+    ConcurrentSession,
 }
 
 /// Every bench knob for one scenario over one corpus.
@@ -81,6 +86,9 @@ pub struct BenchResult {
     pub profile: String,
     pub runs: usize,
     pub samples_ms: Vec<f64>,
+    /// Immediate owned process-tree RSS after each action; unavailable off Linux.
+    #[serde(default)]
+    pub samples_rss_bytes: Option<Vec<u64>>,
     pub median_ms: f64,
     pub p95_ms: f64,
     pub needle: String,
@@ -95,7 +103,6 @@ pub struct BenchCorpus {
     pub sessions: usize,
     pub total_rows: usize,
     pub child_sessions: usize,
-    pub archive: usize,
 }
 
 /// Run one scenario over one corpus (`options.runs` sampled runs plus one
@@ -133,6 +140,9 @@ pub fn run_suite(_options: &RunOptions) -> anyhow::Result<Vec<BenchResult>> {
 
 #[cfg(unix)]
 mod pty;
+/// Linux RSS rooted at the harness-owned clients and daemon.
+#[cfg(target_os = "linux")]
+mod rss;
 /// The unix-only harness (pty, daemon lifecycle, scenario runners).
 #[cfg(unix)]
 mod runner;

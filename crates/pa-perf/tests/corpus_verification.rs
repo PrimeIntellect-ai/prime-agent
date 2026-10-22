@@ -230,7 +230,6 @@ fn entry_ids_stay_unique_past_the_uuid_prefix_collision_cliff() {
         depth: 0,
         tree_parents: 0,
         wide_children: 0,
-        archive: 0,
         cwd_files: 5,
         ..tiny(Profile::Small, dir.path())
     };
@@ -269,8 +268,7 @@ fn the_warm_pass_writes_product_sidecars() {
         .filter(|file| file.ends_with("window-cache.json"))
         .count();
     assert_eq!(
-        sidecars,
-        options.sessions + options.archive,
+        sidecars, options.sessions,
         "every openable session gained a window-cache sidecar"
     );
 }
@@ -313,7 +311,7 @@ fn the_switch_query_can_only_match_switch_b() {
 }
 
 /// The corpus manifest records the generated file set (the bench's
-/// per-run restore baseline) and the archive dir holds the archived files.
+/// per-run restore baseline).
 #[test]
 fn the_manifest_is_the_file_set_baseline() {
     let dir = tempfile::tempdir().expect("temp dir");
@@ -325,11 +323,6 @@ fn the_manifest_is_the_file_set_baseline() {
         on_disk.len(),
         "the manifest lists every generated file"
     );
-    let archived = on_disk
-        .iter()
-        .filter(|file| file.starts_with("agent/sessions-archive/"))
-        .count();
-    assert_eq!(archived, options.archive);
 }
 
 /// The one ledger file under a corpus root (its name is the sessions-dir
