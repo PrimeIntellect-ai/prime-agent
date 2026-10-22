@@ -446,7 +446,8 @@ impl Worker {
             Arc::clone(&recovery),
         ));
         // The turn runner's passivation context: shared by both engine
-        // branches below (each moves the worker token into its engine).
+        // branches below (the roster context after them moves the worker
+        // token into its queue; the decision engine takes a clone).
         let passivation = crate::worker::turn::PassivationContext {
             agent_dir: config.agent_dir.clone(),
             link: Arc::clone(&roster_link),
@@ -457,10 +458,9 @@ impl Worker {
         // decision engine instead of the agent engine.
         let decision_child =
             std::env::var_os(WORKER_DECISION_CHILD_ENV).is_some_and(|value| value == "1");
-        let (engine, agent_engine, roster_pushes): (
+        let (engine, agent_engine): (
             std::sync::Arc<dyn SessionEngine>,
             Option<std::sync::Arc<crate::agent_engine::AgentSessionEngine>>,
-            crate::roster_activity::RosterPushQueue,
         ) = if decision_child {
             // The Decision API child runs the decision engine; every other
             // session (scripted or not) runs the agent engine family.
@@ -470,13 +470,9 @@ impl Worker {
                     config.agent_dir.clone(),
                     std::sync::Arc::clone(&roster_link),
                     config.active_session_id.clone(),
-                    worker_token,
+                    worker_token.clone(),
                 ));
-            (
-                engine,
-                None,
-                crate::roster_activity::RosterPushQueue::disabled(),
-            )
+            (engine, None)
         } else {
             // Scripted sessions serve the integration harness; sessions
             // without a script run the real agent engine.
@@ -761,31 +757,30 @@ impl Worker {
                     });
                 concrete.set_progress_note_emit(note_emit);
             }
-            // The live roster activity feed (TS `observeRosterEvent`): busy
-            // flips and trigger events coalesce into `worker_roster_delta`
-            // pushes.
-            let roster_pushes =
-                crate::roster_activity::RosterPushQueue::spawn(crate::worker::RosterPushContext {
-                    core: Arc::clone(&core),
-                    engine: std::sync::Arc::clone(&engine),
-                    user_bash: std::sync::Arc::clone(&user_bash),
-                    roster_link: Arc::clone(&roster_link),
-                    worker_token,
-                    worker_instance_id: config.worker_instance_id.clone(),
-                    roster_delta_sequence: std::sync::Arc::clone(&roster_delta_sequence),
-                });
-            crate::roster_activity::spawn_roster_activity_watch(&events, roster_pushes.clone());
-            if let Some(children) = agent_engine
-                .as_ref()
-                .and_then(|engine| engine.children.as_ref())
-            {
-                crate::roster_activity::spawn_running_children_watch(
-                    children,
-                    roster_pushes.clone(),
-                );
-            }
-            (engine, agent_engine, roster_pushes)
+            (engine, agent_engine)
         };
+        // The live roster activity feed (TS `observeRosterEvent`): busy
+        // flips and trigger events coalesce into `worker_roster_delta`
+        // pushes. Every engine family runs it — a decision child's busy
+        // and completion transitions publish to roster subscribers like
+        // any other session's.
+        let roster_pushes =
+            crate::roster_activity::RosterPushQueue::spawn(crate::worker::RosterPushContext {
+                core: Arc::clone(&core),
+                engine: std::sync::Arc::clone(&engine),
+                user_bash: std::sync::Arc::clone(&user_bash),
+                roster_link: Arc::clone(&roster_link),
+                worker_token,
+                worker_instance_id: config.worker_instance_id.clone(),
+                roster_delta_sequence: std::sync::Arc::clone(&roster_delta_sequence),
+            });
+        crate::roster_activity::spawn_roster_activity_watch(&events, roster_pushes.clone());
+        if let Some(children) = agent_engine
+            .as_ref()
+            .and_then(|engine| engine.children.as_ref())
+        {
+            crate::roster_activity::spawn_running_children_watch(children, roster_pushes.clone());
+        }
         // The turn runner drives the engine's queued prompts; every engine
         // needs it — a decision child without a runner never dequeues its
         // first prompt.
