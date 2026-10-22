@@ -212,6 +212,10 @@ fn resolve_decision_model(cwd: &Path, agent_dir: &Path) -> Result<ResolvedDecisi
         .ok_or_else(unconfigured_message)?;
     let auth = crate::auth::AuthStorage::create(agent_dir);
     let mut registry = ModelRegistry::create(auth, agent_dir.join("models.json"));
+    // A fresh registry has not adopted the on-disk private Prime Inference
+    // authorization yet; without it, `get_available()` filters the cached
+    // authorized private models out before the reference match.
+    registry.load_private_authorization_from_cache();
     let available = registry.get_available();
     let available: Vec<pa_types::ai::Model> = available.into_iter().cloned().collect();
     let model = find_exact_model_reference_match(&reference, &available)
@@ -638,6 +642,62 @@ mod tests {
         assert!(
             error(request).await.contains("could not be resolved"),
             "an unauthenticated reference must refuse, not call a provider"
+        );
+    }
+
+    /// The cached-authorization regression: a private Prime Inference model
+    /// whose team authorization lives in the on-disk cache must resolve —
+    /// the fresh registry adopts the cache before `get_available()` gates
+    /// unauthorized private models out of the reference match.
+    #[test]
+    fn decision_resolution_uses_the_cached_private_authorization() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("settings.json"),
+            json!({ "decisionApi": { "systemOneModel": "prime-inference/internal/glm-5.2-fast" } })
+                .to_string(),
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("auth.json"),
+            json!({
+                "prime-inference": {
+                    "type": "api_key",
+                    "key": "sk-decision",
+                    "primeTeam": { "teamId": "team-decision", "name": "Decision Team" }
+                }
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let fingerprint =
+            crate::models::private_prime_authorization_fingerprint("sk-decision", "team-decision");
+        std::fs::write(
+            dir.path().join("prime-inference-private-models.json"),
+            json!({
+                "fingerprint": fingerprint,
+                "refreshedAt": 1,
+                "data": [{
+                    "id": "internal/glm-5.2-fast",
+                    "display_name": "GLM 5.2 Fast (internal)",
+                    "pricing": {
+                        "input_usd_per_mtok": 0.0, "output_usd_per_mtok": 0.0,
+                        "cache_read_usd_per_mtok": 0.0, "cache_write_usd_per_mtok": 0.0,
+                    },
+                    "specs": {
+                        "context_window": 1_048_576, "max_output_tokens": 131_072,
+                        "supports_reasoning": true,
+                        "modalities": { "input": ["text"], "output": ["text"] },
+                    },
+                }],
+            })
+            .to_string(),
+        )
+        .unwrap();
+        assert_eq!(
+            decision_model_selector(dir.path(), dir.path()).unwrap(),
+            "prime-inference/internal/glm-5.2-fast",
+            "a cached-authorized private model must resolve as the decision model"
         );
     }
 
