@@ -303,6 +303,7 @@ async fn a_settled_child_passivates_stays_listable_and_revives_by_agent_message(
             model: None,
             thinking: None,
             cwd: None,
+            decision_child: false,
             spawned_by_request_id: None,
             factory: None,
         })
@@ -622,6 +623,7 @@ async fn a_parent_rename_after_a_revival_and_second_passivation_reaches_the_chil
             model: None,
             thinking: None,
             cwd: None,
+            decision_child: false,
             spawned_by_request_id: None,
             factory: None,
         })
