@@ -162,8 +162,13 @@ impl DecisionEngine {
     /// `"observation"` key, the shape a decision state is documented in;
     /// an object state keeps its shape and only gains a `goal` key.
     fn inject_goal(request: &mut Value, goal: &str) {
-        if let Some(state) = request.get_mut("state").and_then(Value::as_object_mut) {
-            state.insert("goal".to_string(), json!(goal));
+        if let Some(state) = request.get_mut("state") {
+            if !state.is_object() {
+                *state = json!({ "observation": state.clone() });
+            }
+            if let Some(map) = state.as_object_mut() {
+                map.insert("goal".to_string(), json!(goal));
+            }
         }
     }
 
