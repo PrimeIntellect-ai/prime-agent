@@ -429,6 +429,7 @@ async fn spawn_child(sessions: &SupervisorChildSessions) -> RlmSpawnHandle {
             model: None,
             thinking: None,
             cwd: None,
+            decision_child: false,
             spawned_by_request_id: None,
             factory: None,
         })

@@ -111,13 +111,34 @@ impl RlmSubagentHost for SupervisorChildSessions {
             let admission = async {
                 this.assert_name_available(&name, identity.rlm_depth + 1)
                     .await?;
-                let model = resolve_child_model_allowlisted(
-                    &this,
-                    request.model.as_deref(),
-                    "spawn",
-                    "subagent",
-                )
-                .await?;
+                // A decision child runs the settings decision model: the
+                // spawn refuses with the same actionable message the
+                // decision path serves while the setting is unset or
+                // unresolvable, then resolves through the ordinary
+                // child-model path so the allowlist still gates the selector.
+                let model = if request.decision_child {
+                    let selector = pa_core::session_engine::decision_api::decision_model_selector(
+                        std::path::Path::new(identity.cwd.as_deref().unwrap_or("/")),
+                        &this.agent_dir,
+                    )
+                    .map_err(anyhow::Error::msg)?;
+                    let selector = resolve_child_model_allowlisted(
+                        &this,
+                        Some(&selector),
+                        "spawn",
+                        "subagent",
+                    )
+                    .await?;
+                    selector
+                } else {
+                    resolve_child_model_allowlisted(
+                        &this,
+                        request.model.as_deref(),
+                        "spawn",
+                        "subagent",
+                    )
+                    .await?
+                };
                 assert_thinking_supported(&this.agent_dir, request.thinking.as_deref(), &model)?;
                 let thinking = request.thinking.as_deref().or(identity.thinking.as_deref());
                 let child_dir = this.child_session_dir(&child_id, &identity)?;
@@ -127,7 +148,7 @@ impl RlmSubagentHost for SupervisorChildSessions {
                     "rlm.spawn",
                 )?;
                 let mut runtime_metadata = json!({
-                    "kind": "subagent",
+                    "kind": if request.decision_child { "decision" } else { "subagent" },
                     "rlmChildId": child_id,
                     "parentActiveSessionId": this.parent_active_session_id,
                     "rlmDepth": identity.rlm_depth + 1,
