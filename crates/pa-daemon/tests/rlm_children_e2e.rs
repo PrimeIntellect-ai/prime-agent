@@ -742,6 +742,204 @@ async fn a_decision_child_spawn_runs_the_decision_engine_end_to_end() {
     assert_eq!(edge.name, "system-1", "the edge carries the spawn name");
 }
 
+/// A bounded read of one supervisor line: `None` means no line arrived
+/// before the deadline (the roster pushes the pin below waits on are
+/// optional traffic, so the wait must expire instead of blocking).
+fn try_read_supervisor_line(client: &mut Client, deadline: Instant) -> Option<Value> {
+    client
+        .reader
+        .get_mut()
+        .set_read_timeout(Some(Duration::from_millis(100)))
+        .expect("set read timeout");
+    let mut line = String::new();
+    loop {
+        match client.reader.read_line(&mut line) {
+            Ok(0) => panic!("supervisor closed the connection"),
+            Ok(_) if line.trim().is_empty() => line.clear(),
+            Ok(_) => return serde_json::from_str(line.trim()).expect("parse line"),
+            Err(_) if Instant::now() < deadline => {}
+            Err(_) => return None,
+        }
+    }
+}
+
+/// A decision child publishes its live roster activity: its worker runs
+/// the roster push queue and the activity watch like any other engine
+/// family, so a roster subscriber sees the child's turn transitions
+/// without a separate summary pull (regression: the decision branch
+/// built `RosterPushQueue::disabled()`, so a decision child's roster row
+/// stayed stale until the next pull refreshed it).
+#[tokio::test]
+async fn a_decision_child_pushes_roster_deltas_to_subscribers() {
+    let dir = tempfile::TempDir::new().expect("temp dir");
+    let socket = dir.path().join("daemon.sock");
+    let agent_dir = dir.path().join("agent");
+    std::fs::create_dir_all(&agent_dir).expect("agent dir");
+    // The settings gate, the registry recipe, and the stored login, on an
+    // unreachable endpoint: the protocol prompt makes no model call.
+    std::fs::write(
+        agent_dir.join("settings.json"),
+        json!({ "decisionApi": { "systemOneModel": "decision-fixture/clef" } }).to_string(),
+    )
+    .expect("write settings");
+    std::fs::write(
+        agent_dir.join("models.json"),
+        json!({ "providers": { "decision-fixture": {
+            "baseUrl": "http://127.0.0.1:1/api/v1",
+            "apiKey": "DECISION_FIXTURE_KEY",
+            "api": "systemone",
+            "models": [ { "id": "clef", "input": ["text"] } ],
+        } } })
+        .to_string(),
+    )
+    .expect("write models");
+    std::fs::write(
+        agent_dir.join("auth.json"),
+        json!({ "decision-fixture": { "type": "api_key", "key": "fixture-key" } }).to_string(),
+    )
+    .expect("write auth");
+    // The fabricated parent identity names a session file the ledger's
+    // liveness pass stats, so the parent file must exist.
+    std::fs::write(agent_dir.join("parent.jsonl"), "").expect("write the parent session file");
+    let _daemon = spawn_daemon(&socket, &agent_dir);
+    // The subscriber connects BEFORE the spawn: every roster write the
+    // spawn flow and the child's own turns produce reaches this reader.
+    let (mut client, hello) = Client::connect(&socket);
+    assert_eq!(hello["type"], "daemon_hello");
+    client.send_command("rs", &json!({ "type": "roster_subscribe" }));
+    let subscribed = client.read_response("rs");
+    assert_eq!(
+        subscribed["success"], true,
+        "roster_subscribe failed: {subscribed}"
+    );
+    let children = {
+        let sessions = SupervisorChildSessions::new(
+            Arc::new(SupervisorLink::new(socket.clone())),
+            agent_dir.clone(),
+            "parent-active-id".to_string(),
+            std::sync::Arc::new(pa_daemon::model_allowlist::ModelRefusalTelemetry::new(
+                agent_dir.clone(),
+                /*telemetry_disabled*/ true,
+            )),
+            String::new(),
+        );
+        sessions.set_identity(ParentIdentity {
+            rlm_depth: 0,
+            rlm_max_depth: 2,
+            model: Some("scripted/faux-1".to_string()),
+            cwd: Some(agent_dir.to_string_lossy().to_string()),
+            session_id: Some("parent-session-uuid".to_string()),
+            session_file: Some(agent_dir.join("parent.jsonl").to_string_lossy().to_string()),
+            thinking: None,
+            child_script: None,
+        });
+        sessions
+    };
+    let handle = children
+        .spawn(RlmSpawnRequest {
+            prompt: "You are System 1, the decision child of a roster probe.".to_string(),
+            name: Some("system-1".to_string()),
+            model: None,
+            thinking: None,
+            decision_child: true,
+            spawned_by_request_id: None,
+        })
+        .await
+        .expect("spawn the decision child");
+    children.notify_turn_done();
+    // The spawn seam resolves the settings decision model, not the parent's.
+    assert_eq!(handle.model, "decision-fixture/clef", "{handle:?}");
+    let child_active_id = {
+        let deadline = Instant::now() + Duration::from_secs(20);
+        loop {
+            let entries = children.list_subagents().await.expect("list subagents");
+            if let Some(active_id) = entries
+                .iter()
+                .find(|entry| entry.answer_preview.as_deref() == Some("Decision child ready."))
+                .and_then(|entry| entry.active_session_id.clone())
+            {
+                break active_id;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "decision child never settled ready: {entries:?}"
+            );
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    };
+    // The child row's message count in one roster_update frame, when the
+    // frame carries it (matched by the active session id the routed prompt
+    // below addresses).
+    let child_row_count = |frame: &Value| {
+        frame["changed"].as_array().and_then(|entries| {
+            entries
+                .iter()
+                .find(|entry| entry["summary"]["activeSessionId"] == json!(child_active_id))
+                .and_then(|entry| entry["summary"]["messageCount"].as_u64())
+        })
+    };
+    // Drain the spawn flow's roster writes (the registration and admission
+    // pulls, the first protocol turn's own pushes) into the baseline: the
+    // fresh turn below must advance past whatever the pull surfaces saw.
+    let mut baseline = 0_u64;
+    let drain_deadline = Instant::now() + Duration::from_secs(2);
+    while let Some(line) = try_read_supervisor_line(&mut client, drain_deadline) {
+        if let Some(count) = child_row_count(&line) {
+            baseline = baseline.max(count);
+        }
+    }
+    // One fresh protocol turn after the spawn flow went quiet: nothing
+    // pulls in this window, so only the child's own roster pushes can
+    // report the turn to the subscriber.
+    client.send_command(
+        "p2",
+        &json!({
+            "type": "prompt",
+            "activeSessionId": child_active_id,
+            "message": "one more protocol probe",
+        }),
+    );
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let fresh_row = loop {
+        assert!(
+            Instant::now() < deadline,
+            "the decision child never pushed its turn's roster delta (baseline messageCount {baseline})"
+        );
+        let Some(line) = try_read_supervisor_line(&mut client, deadline) else {
+            continue;
+        };
+        if line.get("id").and_then(Value::as_str) == Some("p2") {
+            assert_eq!(line["success"], true, "the routed prompt failed: {line}");
+            continue;
+        }
+        if let Some(count) = child_row_count(&line) {
+            if count > baseline {
+                break line;
+            }
+        }
+    };
+    // The pushed row reports the turn that produced it: the child went
+    // busy, ran its protocol answer, and settled idle with the fresh
+    // rows persisted.
+    let summary = &fresh_row["changed"]
+        .as_array()
+        .and_then(|entries| {
+            entries
+                .iter()
+                .find(|entry| entry["summary"]["activeSessionId"] == json!(child_active_id))
+                .cloned()
+        })
+        .expect("the child's changed roster entry")["summary"];
+    assert!(
+        summary["messageCount"]
+            .as_u64()
+            .is_some_and(|count| count > baseline),
+        "the pushed row carries the fresh turn's message count: {summary}"
+    );
+    assert_eq!(summary["isStreaming"], false, "the pushed row is settled");
+    assert_eq!(summary["activity"], "idle", "the pushed row is idle");
+}
+
 #[tokio::test]
 async fn rlm_create_session_spawns_a_prompted_depth_zero_session() {
     let dir = tempfile::TempDir::new().expect("temp dir");
