@@ -274,6 +274,73 @@ fn sender_parent_edge_is(
     false
 }
 
+/// Whether a delivery's sender is THIS session's parent: the sender's
+/// live or persisted identity matches the durable parent edge this
+/// session recorded at its create (the endpoint carries no session file
+/// of its own, so the ids decide).
+fn sender_is_parent_of(sender: &Value, core: &SessionCore) -> bool {
+    let sender_id = |key: &str| {
+        sender
+            .get(key)
+            .and_then(Value::as_str)
+            .filter(|value| !value.is_empty())
+    };
+    for (key, edge) in [
+        ("activeSessionId", core.parent_active_session_id.as_deref()),
+        ("sessionId", core.parent_session_id.as_deref()),
+    ] {
+        if edge
+            .filter(|value| !value.is_empty())
+            .is_some_and(|parent| sender_id(key) == Some(parent))
+        {
+            return true;
+        }
+    }
+    false
+}
+
+/// Whether a delivery's sender is a sibling of THIS session: the sender's
+/// durable parent edge points at the same parent this session's own
+/// parent edge names (the other subagents of the same parent). The edge
+/// test is the child test run against the parent's identity; a top-level
+/// session has no parent edge to share, so no sender resolves as its
+/// sibling here.
+fn sender_is_sibling_of(sender: &Value, core: &SessionCore) -> bool {
+    let store = core.store.as_ref();
+    sender_parent_edge_is(
+        sender,
+        core.parent_session_id
+            .as_deref()
+            .filter(|value| !value.is_empty()),
+        core.parent_active_session_id
+            .as_deref()
+            .filter(|value| !value.is_empty())
+            .unwrap_or_default(),
+        store
+            .and_then(|store| store.header.parent_session.as_deref())
+            .filter(|path| !path.is_empty())
+            .map(std::path::Path::new),
+    )
+}
+
+/// The delivery sender's resolved family edge to this session: the
+/// durable edges decide, never the runtime kind alone — a child's
+/// parent edge points back here, the parent's identity matches this
+/// session's own parent edge, and a sibling's parent edge names the same
+/// parent. `None` covers every other sender.
+fn sender_relationship(sender: &Value, core: &SessionCore) -> Option<AgentFamilyRelationship> {
+    if sender_is_child_of(sender, core) {
+        return Some(AgentFamilyRelationship::Child);
+    }
+    if sender_is_parent_of(sender, core) {
+        return Some(AgentFamilyRelationship::Parent);
+    }
+    if sender_is_sibling_of(sender, core) {
+        return Some(AgentFamilyRelationship::Sibling);
+    }
+    None
+}
+
 impl Worker {
     /// Build the worker: core, engine, and the sink/hook wiring between them.
     ///
