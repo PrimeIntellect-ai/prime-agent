@@ -65,6 +65,10 @@ pub enum ChildCancelledReason {
     /// The close walk killed the live child (a parent session kill).
     #[serde(rename = "close:killed")]
     CloseKilled,
+    /// A reason value this build does not know. The catch-all keeps a future
+    /// reason from failing the whole ledger read and disabling the recorder.
+    #[serde(other, rename = "unknown")]
+    Unknown,
 }
 
 /// One ledger line. Field order matches the TS object literals so the
