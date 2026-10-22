@@ -631,6 +631,10 @@ async fn a_decision_child_spawn_runs_the_decision_engine_end_to_end() {
         json!({ "decision-fixture": { "type": "api_key", "key": "fixture-key" } }).to_string(),
     )
     .expect("write auth");
+    // The fabricated parent identity names a session file: the ledger's
+    // liveness pass stats the recorded endpoints, so the parent file must
+    // exist for the spawn edge to read back live.
+    std::fs::write(agent_dir.join("parent.jsonl"), "").expect("write the parent session file");
     let _daemon = spawn_daemon(&socket, &agent_dir);
     let (mut client, hello) = Client::connect(&socket);
     assert_eq!(hello["type"], "daemon_hello");
@@ -711,6 +715,31 @@ async fn a_decision_child_spawn_runs_the_decision_engine_end_to_end() {
     // extracts the runtime identity for the decision kind too, so the
     // child's summary (and every reply route off it) reaches the parent.
     assert_eq!(roster_summary["parentActiveSessionId"], "parent-active-id");
+    // The spawn admission recorded the durable ledger edge: recovery
+    // after parent replacement and the nonresident wake resolve the
+    // decision child through it (regression: the admission gate used to
+    // admit only subagent-kind children, so a decision child's edge
+    // never reached the ledger).
+    let ledger =
+        pa_daemon::rlm_ledger::RlmSpawnLedger::new(&agent_dir, &agent_dir.join("sessions"), |_| {});
+    let edge = ledger
+        .edges(true)
+        .expect("ledger edges")
+        .into_iter()
+        .find(|edge| edge.child_id == handle.rlm_child_id)
+        .expect("the decision child's ledger edge");
+    // The ledger records the parent file's canonical path: recovery
+    // resolves the edge through it after the parent worker is replaced.
+    let parent_file = agent_dir
+        .join("parent.jsonl")
+        .canonicalize()
+        .expect("the parent session file exists");
+    assert_eq!(
+        Path::new(&edge.parent),
+        parent_file,
+        "the edge names the parent session file for recovery"
+    );
+    assert_eq!(edge.name, "system-1", "the edge carries the spawn name");
 }
 
 #[tokio::test]
