@@ -151,6 +151,15 @@ pub struct AnthropicOptions {
 pub struct ResolvedAnthropicCompat {
     pub supports_eager_tool_input_streaming: bool,
     pub supports_long_cache_retention: bool,
+    /// Unsigned thinking is dropped from replayed history instead of replayed as a `thinking`
+    /// block. Claude rejects a thinking block without a valid signature; Anthropic-compatible
+    /// endpoints that never sign (`MiMo`, Kimi, `DeepSeek`) expect their reasoning passed back.
+    pub requires_thinking_signature: bool,
+}
+
+/// Whether `model` is a Claude model, whichever provider routes it.
+fn is_claude_model(model: &Model) -> bool {
+    model.provider == "anthropic" || model.id.to_ascii_lowercase().contains("claude")
 }
 
 pub fn get_anthropic_compat(model: &Model) -> ResolvedAnthropicCompat {
@@ -167,6 +176,10 @@ pub fn get_anthropic_compat(model: &Model) -> ResolvedAnthropicCompat {
             .as_ref()
             .and_then(|c| c.supports_long_cache_retention)
             .unwrap_or(true),
+        requires_thinking_signature: compat
+            .as_ref()
+            .and_then(|c| c.requires_thinking_signature)
+            .unwrap_or_else(|| is_claude_model(model)),
     }
 }
 
