@@ -461,9 +461,9 @@ impl SupervisorChildSessionsInner {
             .ok()
             .flatten();
         // How the run's final turn ended (#3366): a run whose last model
-        // call failed (a provider error after its retries, an aborted
-        // turn) settles `error` with that text instead of a `done` with
-        // no answer. The worker persists every row before it reads idle,
+        // call failed (a provider error, after its retries if it had any)
+        // settles `error` with that text instead of a `done` with no
+        // answer. The worker persists every row before it reads idle,
         // so its durable file holds the final turn; the read stays off
         // the async workers.
         let final_turn_error = match unsettled_session_file {
@@ -472,7 +472,10 @@ impl SupervisorChildSessionsInner {
                 .ok()
                 .flatten(),
             None => None,
-        };
+        }
+        // A provider error can carry a whole raw response body (a gateway's
+        // HTML error page); the text reaches the parent's context.
+        .map(|error| compact_rlm_text(&error));
         let answer = raw_answer.as_deref().map(compact_rlm_text);
         let answer_text = raw_answer
             .as_deref()
@@ -504,7 +507,8 @@ impl SupervisorChildSessionsInner {
     }
 
     /// Watch one admitted child until its run settles, then deliver the parent's terminal notice
-    /// when the child never replied; the watcher stops as soon as the record is removed.
+    /// (the failure row or the no-reply notice) when the child has not replied since its task;
+    /// the watcher stops as soon as the record is removed.
     pub(super) async fn watch_child_settle(&self, record: &Arc<Mutex<ChildRecord>>) {
         let mut unreachable_polls: u32 = 0;
         loop {
@@ -731,25 +735,25 @@ impl SupervisorChildSessionsInner {
         recorder.record_child_cancelled(&child_session_id, reason);
     }
 
-    /// Deliver the settled child's terminal notice: the failure row for a
-    /// run whose final turn ended in an error (whether or not the child
-    /// replied, as [`Self::settle_failed`] does), else the no-reply notice
-    /// for a child that never sent an agent message to the parent.
-    /// Exactly-once: the record's notice claim collapses the races between
+    /// Deliver the settled child's terminal notice when it has not replied
+    /// since its task: the failure row for a run whose final turn ended in
+    /// an error, else the no-reply notice. A child that already replied
+    /// gets neither (its answer is the parent's notice; the roster and
+    /// collect still report the error). Exactly-once: the record's notice claim collapses the races between
     /// the watcher, a natural settle during `delete_subagent`, and the
     /// delete path itself.
     async fn deliver_settle_notice(&self, record: &Arc<Mutex<ChildRecord>>) {
         let message = {
             let mut record = record.lock().await;
-            if record.notice_delivered {
+            if record.notice_delivered || record.replied_since_task {
                 return;
             }
+            record.notice_delivered = true;
             let failure = match (record.settled_status, &record.error) {
                 (Some("error"), Some(error)) => Some(error.clone()),
                 _ => None,
             };
             if let Some(error) = failure {
-                record.notice_delivered = true;
                 create_rlm_child_failure_message(
                     &record.rlm_child_id,
                     &record.session_name,
@@ -757,10 +761,6 @@ impl SupervisorChildSessionsInner {
                     now_ms(),
                 )
             } else {
-                if record.replied_since_task {
-                    return;
-                }
-                record.notice_delivered = true;
                 let notice = RlmChildTerminalNotice::CompletedWithoutReply {
                     child_id: record.rlm_child_id.clone(),
                     session_name: record.session_name.clone(),
@@ -951,13 +951,15 @@ pub(super) fn last_assistant_text_from_file(session_file: &str) -> Option<String
 }
 
 /// The error a child's final turn ended in, read from its durable session
-/// file (#3366): the newest turn-deciding row wins. A failed
+/// file (#3366), scanning back from the newest row. A failed
 /// `provider_retry_outcome` row (the retry episode's one durable outcome)
-/// or an assistant row that stopped on `error` / `aborted` answers its
-/// text; any other message row (a successful assistant reply, the task or
-/// a later user/custom row whose turn has not ended in a failure) answers
-/// `None`, as does a missing file. Non-message entries and other custom
-/// rows (notices, a recovered retry's outcome) are skipped.
+/// answers its text, and an assistant row that stopped on `error` answers
+/// its error message. The scan answers `None` at the first other row that
+/// bounds the final turn: any other message row (a successful or aborted
+/// assistant reply, a tool result, a user prompt) or an `agent_message`
+/// row (a task delivered after an older failure). A missing file answers
+/// `None`. Non-message entries and other custom rows (notices, a recovered
+/// retry's outcome) are skipped.
 pub(super) fn final_turn_error_from_file(session_file: &str) -> Option<String> {
     use pa_types::session::{AgentMessage, FileEntry};
     let content = std::fs::read_to_string(session_file).ok()?;
@@ -968,43 +970,40 @@ pub(super) fn final_turn_error_from_file(session_file: &str) -> Option<String> {
         match entry {
             FileEntry::CustomMessage { payload, .. } => {
                 if payload.custom_type
+                    == pa_core::session_engine::agent_messaging::AGENT_MESSAGE_CUSTOM_TYPE
+                {
+                    return None;
+                }
+                if payload.custom_type
                     != pa_core::session_engine::messages::PROVIDER_RETRY_OUTCOME_CUSTOM_TYPE
                 {
                     continue;
                 }
-                let details = payload.details.unwrap_or(Value::Null);
-                if details.get("success").and_then(Value::as_bool) != Some(false) {
+                let failed = payload
+                    .details
+                    .as_ref()
+                    .and_then(|details| details.get("success"))
+                    .and_then(Value::as_bool)
+                    == Some(false);
+                if !failed {
                     continue;
                 }
-                let text = match payload.content {
-                    pa_types::ai::UserContent::Text(text) => text,
-                    pa_types::ai::UserContent::Blocks(_) => String::new(),
-                };
-                let text = text.trim_start_matches('\u{26a0}').trim().to_string();
-                if !text.is_empty() {
+                // The outcome row always carries the exhausted-retry text.
+                if let pa_types::ai::UserContent::Text(text) = payload.content {
                     return Some(text);
                 }
-                let final_error = details
-                    .get("finalError")
-                    .and_then(Value::as_str)
-                    .unwrap_or("Unknown error");
-                return Some(format!("Error: {final_error}"));
             }
             FileEntry::Message {
                 message: AgentMessage::Assistant(assistant),
                 ..
             } => {
-                let fallback = match assistant.stop_reason {
-                    pa_types::ai::StopReason::Error => "The final model call failed",
-                    pa_types::ai::StopReason::Aborted => "The final turn was aborted",
-                    pa_types::ai::StopReason::Stop
-                    | pa_types::ai::StopReason::Length
-                    | pa_types::ai::StopReason::ToolUse => return None,
-                };
+                if assistant.stop_reason != pa_types::ai::StopReason::Error {
+                    return None;
+                }
                 let error = assistant
                     .error_message
                     .filter(|message| !message.trim().is_empty())
-                    .unwrap_or_else(|| fallback.to_string());
+                    .unwrap_or_else(|| "The final model call failed".to_string());
                 return Some(format!("Error: {error}"));
             }
             FileEntry::Message { .. } => return None,
@@ -1146,13 +1145,43 @@ pub(super) mod exit_capture_tests {
         .to_string()
     }
 
+    /// A stored row of `kind` (`message` or `custom_message`) with `fields`,
+    /// in the shape the session file holds.
+    fn stored_row(kind: &str, fields: &Value) -> String {
+        let mut row = json!({"type": kind, "id": "row-0", "parentId": null});
+        row.as_object_mut()
+            .expect("row object")
+            .extend(fields.as_object().expect("fields object").clone());
+        row.to_string()
+    }
+
+    /// A user prompt row.
+    fn user_row(text: &str) -> String {
+        stored_row(
+            "message",
+            &json!({"message": {"role": "user", "content": text, "timestamp": 1}}),
+        )
+    }
+
+    /// An `rlm.spawn` task row: an `agent_message` custom row.
+    fn task_row() -> String {
+        stored_row(
+            "custom_message",
+            &json!({
+                "customType": pa_core::session_engine::agent_messaging::AGENT_MESSAGE_CUSTOM_TYPE,
+                "content": "the task",
+                "display": true,
+                "details": {},
+            }),
+        )
+    }
+
     fn final_turn_error_of(rows: &[String]) -> Option<String> {
         let file = std::env::temp_dir().join(format!(
             "pa-rlm-final-turn-{}.jsonl",
             uuid::Uuid::new_v4().simple()
         ));
-        let user_row = r#"{"type":"message","role":"user","content":"the task"}"#;
-        std::fs::write(&file, format!("{user_row}\n{}\n", rows.join("\n")))
+        std::fs::write(&file, format!("{}\n{}\n", task_row(), rows.join("\n")))
             .expect("write the session file");
         let error = final_turn_error_from_file(&file.to_string_lossy());
         let _ = std::fs::remove_file(&file);
@@ -1160,15 +1189,22 @@ pub(super) mod exit_capture_tests {
     }
 
     /// #3366: a run whose model calls all failed reads as failed, with the
-    /// provider error text; a run whose last turn answered reads clean.
+    /// provider error text; a run whose last turn answered reads clean, and
+    /// a failure older than a later turn-bounding row does not stand.
     #[test]
     fn the_final_turn_reader_reports_how_the_run_ended() {
         use pa_types::ai::StopReason;
         let failed_call =
             assistant_row_ending("", StopReason::Error, Some("429 Provider returned error"));
+        let failed_run = [failed_call.clone(), retry_outcome_row(false)];
+        let with_later = |later: String| {
+            let mut rows = failed_run.to_vec();
+            rows.push(later);
+            final_turn_error_of(&rows)
+        };
         assert_eq!(
             [
-                final_turn_error_of(&[failed_call.clone(), retry_outcome_row(false)]),
+                final_turn_error_of(&failed_run),
                 final_turn_error_of(std::slice::from_ref(&failed_call)),
                 final_turn_error_of(&[assistant_row_ending("", StopReason::Aborted, None)]),
                 // An earlier failure the run recovered from does not stand.
@@ -1179,13 +1215,21 @@ pub(super) mod exit_capture_tests {
                 ]),
                 final_turn_error_of(&[assistant_row("the final say"), retry_outcome_row(true)]),
                 final_turn_error_of(&[]),
+                // An older failure, then a later row that bounds the turn.
+                with_later(user_row("try again")),
+                with_later(task_row()),
+                with_later(assistant_row("the final say")),
             ],
             [
                 Some(
-                    "Error: Retry failed after 3 attempts: 429 Provider returned error".to_string()
+                    "\u{26a0} Error: Retry failed after 3 attempts: 429 Provider returned error"
+                        .to_string()
                 ),
                 Some("Error: 429 Provider returned error".to_string()),
-                Some("Error: The final turn was aborted".to_string()),
+                None,
+                None,
+                None,
+                None,
                 None,
                 None,
                 None,

@@ -1039,7 +1039,7 @@ async fn a_child_whose_final_turn_failed_settles_as_an_error() {
         .await
         .expect("the failed child must deliver its failure notice")
         .expect("the follow_up channel stays open");
-    let error = "Error: Retry failed after 3 attempts: 429 Provider returned error";
+    let error = "\u{26a0} Error: Retry failed after 3 attempts: 429 Provider returned error";
     assert_failure_row(&follow_up, &handle.rlm_child_id, error);
     let entries = sessions.list_subagents().await.expect("child roster");
     assert_eq!(entries[0].status, "error");
@@ -1054,6 +1054,29 @@ async fn a_child_whose_final_turn_failed_settles_as_an_error() {
     // Exactly one notice lands: the watcher delivers once.
     let extra = tokio::time::timeout(Duration::from_millis(300), follow_up_rx.recv()).await;
     assert!(extra.is_err(), "no second notice may arrive");
+}
+
+/// A child that replied before its final model call failed (the cleanup
+/// call after the reply, #3366) sends the parent no failure row on top of
+/// its answer; the roster still reports the error.
+#[tokio::test]
+async fn a_replied_child_whose_final_turn_failed_sends_no_failure_row() {
+    let (follow_up_tx, mut follow_up_rx) = mpsc::unbounded_channel();
+    let (sessions, _kill_rx) = sessions_with_fake_supervisor(
+        follow_up_tx,
+        250,
+        FakeKill::Success,
+        FakeChild::FinalTurnFails,
+    )
+    .await;
+    spawn_child(&sessions).await;
+    sessions.mark_replied("child-live").await;
+    sessions.notify_turn_done();
+
+    let extra = tokio::time::timeout(Duration::from_secs(2), follow_up_rx.recv()).await;
+    assert!(extra.is_err(), "a replied child must not deliver a notice");
+    let entries = sessions.list_subagents().await.expect("child roster");
+    assert_eq!(entries[0].status, "error");
 }
 
 /// An unreachable child delivers the failure row, not the no-reply notice.
