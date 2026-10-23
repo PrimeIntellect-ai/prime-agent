@@ -81,7 +81,11 @@ async fn a_continuation_delta_without_index_or_id_extends_the_open_call() {
     .await;
     assert_eq!(
         message.content,
-        vec![tool_call("call_1", "python_repl", &json!({"code": "import os"}))]
+        vec![tool_call(
+            "call_1",
+            "python_repl",
+            &json!({"code": "import os"})
+        )]
     );
     assert_eq!(message.stop_reason, StopReason::ToolUse);
 }
