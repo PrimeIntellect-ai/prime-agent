@@ -1536,4 +1536,64 @@ mod tests {
             "the retry sends the full context: {bodies:?}"
         );
     }
+
+    /// A reused session WebSocket serves each request under that request's own abort signal
+    /// (#3618). The first request's token fires when its stream is dropped; the follow-up turn on
+    /// the same connection must still complete, chain onto the first response, and carry the same
+    /// session cache key.
+    #[tokio::test]
+    async fn reused_connection_follow_up_ignores_the_first_requests_cancelled_signal() {
+        let server = spawn_scripted_codex_server(vec![vec![
+            codex_response_events("resp_1", "msg_1", "Hello"),
+            codex_response_events("resp_2", "msg_2", "Done"),
+        ]])
+        .await;
+        let model = codex_test_model(server.port);
+        let session_id = format!("session-reuse-own-signal-{}", std::process::id());
+        let first_signal = tokio_util::sync::CancellationToken::new();
+        let mut first_options = codex_test_options(&server, &session_id);
+        first_options.base.signal = Some(first_signal.clone());
+        let first = stream_openai_codex_responses(
+            &model,
+            &codex_test_context("Say hello"),
+            Some(&first_options),
+        )
+        .result()
+        .await;
+        assert_eq!(codex_message_text(&first).as_deref(), Some("Hello"));
+        // The session layer cancels a finished request's token when its stream is dropped.
+        first_signal.cancel();
+
+        let mut second_options = codex_test_options(&server, &session_id);
+        second_options.base.signal = Some(tokio_util::sync::CancellationToken::new());
+        let second = stream_openai_codex_responses(
+            &model,
+            &codex_followup_context(&first, "Now finish"),
+            Some(&second_options),
+        )
+        .result()
+        .await;
+        assert_eq!(
+            (second.stop_reason, codex_message_text(&second).as_deref()),
+            (StopReason::Stop, Some("Done")),
+            "the follow-up completes: {:?}",
+            second.error_message
+        );
+
+        let bodies = server.sent_bodies.lock().expect("bodies").clone();
+        assert_eq!(
+            bodies.len(),
+            2,
+            "both requests ride one connection: {bodies:?}"
+        );
+        assert_eq!(
+            bodies[1].get("previous_response_id"),
+            Some(&json!("resp_1"))
+        );
+        let cache_keys: Vec<_> = bodies
+            .iter()
+            .map(|body| body.get("prompt_cache_key").cloned())
+            .collect();
+        assert_eq!(cache_keys, vec![Some(json!(session_id)); 2]);
+    }
 }
