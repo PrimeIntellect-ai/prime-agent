@@ -1067,27 +1067,46 @@ def _revive_with_live_globals(
     return rebound
 
 
-def _snapshot_unpickler(dill: Any) -> type:
-    """Unpickler that refuses to reopen a pickled raw fd number in this kernel.
+class _RestoredFileStub(io.IOBase):
+    """Closed placeholder for a file handle that a snapshot restore revived.
 
-    dill serializes a pipe/socket-backed file as its fd NUMBER; restoring a
-    saved closed one reopens that number here and closes it again, killing
-    whatever owns the fd now (e.g. the event loop's self-pipe). The refusal
-    fails just that record; every other name still restores.
+    Keeps the saved name and mode for inspection; every I/O call raises like
+    any closed file. It never touches the path it names.
+    """
+
+    def __init__(self, name: Any, mode: Any) -> None:
+        super().__init__()
+        self.name = name
+        self.mode = mode
+        self.close()
+
+    def __repr__(self) -> str:
+        return f"<closed file {self.name!r} mode={self.mode!r} (restored from snapshot)>"
+
+
+def _snapshot_unpickler(dill: Any) -> type:
+    """Unpickler that never reopens a pickled file handle in this kernel.
+
+    dill saves a file object as _create_filehandle(name, mode, ...), and its
+    revival reopens name with the saved mode: "w"/"x" truncate the user's file
+    (even for a handle that was closed when saved), and a pipe/socket-backed
+    file comes back as its raw fd NUMBER, which reopening and closing kills
+    for whatever owns that fd now (e.g. the event loop's self-pipe). Raw fd
+    records fail just that name; path records revive as a closed stub.
     """
     create_filehandle = dill._dill._create_filehandle
 
-    def refuse_raw_fd(name: Any, *args: Any) -> Any:
+    def stub_filehandle(name: Any, mode: Any, *args: Any) -> Any:
         if isinstance(name, int):
             raise pickle.UnpicklingError(
                 f"refusing to reopen raw file descriptor {name} from a snapshot"
             )
-        return create_filehandle(name, *args)
+        return _RestoredFileStub(name, mode)
 
     class GuardedUnpickler(dill.Unpickler):
         def find_class(self, module: str, name: str) -> Any:
             target = super().find_class(module, name)
-            return refuse_raw_fd if target is create_filehandle else target
+            return stub_filehandle if target is create_filehandle else target
 
     return GuardedUnpickler
 

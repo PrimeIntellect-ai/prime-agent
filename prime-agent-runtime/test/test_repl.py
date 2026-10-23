@@ -820,6 +820,65 @@ class ReplTest(unittest.TestCase):
             self.assertEqual(one(events, "done")["status"], "ok")
             self.assertEqual(one(events, "result")["text"], "'woken'")
 
+    def test_restore_never_reopens_pickled_file_handles(self):
+        # dill saves a file object as (name, mode) and its revival reopens the
+        # path with that mode: "w" truncated the user's file on every restore
+        # even when the handle was closed (discussion #3085).
+        sys.path.insert(0, SRC)
+        self.addCleanup(sys.path.remove, SRC)
+        from rlm import repl as repl_module
+
+        modes = ["w", "w+", "a", "a+", "x", "r+", "wb", "w+b", "ab", "xb"]
+        with tempfile.TemporaryDirectory() as tmp:
+            ns = {}
+            for index, mode in enumerate(modes):
+                for state in ("open", "closed"):
+                    target = os.path.join(tmp, f"{state}-{index}.txt")
+                    if "r" in mode:
+                        open(target, "w").close()
+                    handle = open(target, mode)
+                    if state == "closed":
+                        handle.close()
+                    ns[f"{state}_{index}"] = handle
+            # A handle nested in a container takes the same reconstructor.
+            ns["nested"] = {"inner": [ns["closed_0"]]}
+            precious = {}
+            for name in os.listdir(tmp):
+                target = os.path.join(tmp, name)
+                with open(target, "w") as fh:
+                    fh.write(f"precious contents of {name}")
+                precious[target] = f"precious contents of {name}"
+            path = os.path.join(tmp, "state", "kernel-state.dill")
+            manifest_path = os.path.join(tmp, "state", "kernel-state.json")
+            result = repl_module._snapshot_state(
+                ns,
+                path,
+                manifest_path,
+                repl_module.DEFAULT_SNAPSHOT_MAX_BYTES,
+                repl_module.DEFAULT_SNAPSHOT_MAX_VARIABLE_BYTES,
+                False,
+            )
+            self.assertEqual(result["saved"], sorted(ns))
+            for handle in ns.values():
+                if not isinstance(handle, dict):
+                    handle.close()
+
+            restored_ns = {}
+            result = repl_module._restore_state(restored_ns, path)
+            self.assertEqual((result["restored"], result["failed"]), (sorted(ns), []))
+            contents = {}
+            for target in precious:
+                with open(target) as fh:
+                    contents[target] = fh.read()
+            self.assertEqual(contents, precious)
+            self.assertEqual(
+                {name: (value.name, value.mode, value.closed) for name, value in restored_ns.items() if name != "nested"},
+                {name: (value.name, value.mode, True) for name, value in ns.items() if name != "nested"},
+            )
+            self.assertIsInstance(restored_ns["nested"]["inner"][0], repl_module._RestoredFileStub)
+            with self.assertRaises(ValueError):
+                restored_ns["closed_0"].fileno()
+
     def test_stdin_eof_flushes_final_snapshot(self):
         # Host death (EOF, no shutdown request) must persist the namespace
         # tail that postdates the last explicit snapshot.

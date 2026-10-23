@@ -176,7 +176,10 @@ snapshot (and nothing is pruned).
 `restore` loads the payload and revives each name independently; a missing
 file yields an ok empty restore with `reason:"snapshot not found"`, a corrupt
 file fails with a `reason`, and per-name failures are listed in `failed`.
-Names `In`, `Out`, and `get_ipython` in a payload are never restored. `dill` is imported lazily; when unavailable, snapshot and restore
+Names `In`, `Out`, and `get_ipython` in a payload are never restored. A pickled file
+handle is never reopened: one saved by path revives as a closed stub that
+keeps its `name` and `mode` (reopening with `"w"`/`"x"` would truncate the
+file), and one saved as a raw fd number fails that name. `dill` is imported lazily; when unavailable, snapshot and restore
 fail with `status:"error"` and a `reason`.
 
 `list_names` replies with `done` carrying `names`: the sorted user-defined
