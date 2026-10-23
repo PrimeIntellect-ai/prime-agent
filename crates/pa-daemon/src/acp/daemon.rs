@@ -2454,16 +2454,24 @@ async fn prompt_turn(
                             eprintln!("pa-daemon: acp steered run failed: {failure}");
                             publish_error_boundary(&producer, turn_id).await;
                             producer.finish_prompt(turn_id).await;
-                            return super::internal_error(
+                            // The steered text was the host's message to
+                            // THIS turn: its failure classifies into the
+                            // #200 host contract like every other
+                            // failed-prompt arm.
+                            return super::turn_failure_error(
                                 &id,
+                                &failure,
                                 &format!("prime-agent steered run failed: {failure}"),
                             );
                         }
                         Err(error) => {
                             publish_error_boundary(&producer, turn_id).await;
                             producer.finish_prompt(turn_id).await;
-                            return super::internal_error(
+                            // The wait's own failure carries the typed data
+                            // too, never a bare `details` arm.
+                            return super::turn_failure_error(
                                 &id,
+                                &error.to_string(),
                                 &format!("prime-agent steered run wait failed: {error}"),
                             );
                         }
@@ -3570,6 +3578,108 @@ mod tests {
             ),
             "an in-flight admission without new runs still drains before done"
         );
+    }
+
+    /// A steered run's failure and its wait's error are failed-prompt
+    /// arms too: the prompt reply carries the #200 `kind`/`category`/
+    /// `retryable` contract (`turn_failure_error`), never a bare
+    /// `internal_error` `details` a host cannot classify (#3684 review).
+    #[tokio::test]
+    async fn steered_run_failure_arms_carry_the_failed_prompt_contract() {
+        for failed_run in [true, false] {
+            let mut fake = fake_link();
+            let mut with_turn = state(Some(hosted_session()));
+            with_turn.session.as_mut().unwrap().turn = Some(ActiveTurn {
+                admission_id: "prompt-admission:1".to_string(),
+                cancelled: false,
+                steered_runs: vec!["steer-run:1".to_string()],
+            });
+            let state = Arc::new(Mutex::new(with_turn));
+            let link = Arc::clone(&fake.link);
+            let prompt_state = Arc::clone(&state);
+            let handler = tokio::spawn(async move {
+                prompt_turn(
+                    json!(1),
+                    json!({
+                        "sessionId": "acp-1",
+                        "prompt": [{ "type": "text", "text": "hi" }],
+                    }),
+                    "prompt-admission:1",
+                    &link,
+                    &prompt_state,
+                )
+                .await
+            });
+            // The turn itself succeeds; the steered run settles after it.
+            let prompt = fake
+                .expect(|_| Some(daemon_response("prompt_and_wait", None)))
+                .await;
+            assert!(
+                matches!(prompt, DaemonCommand::PromptAndWait { .. }),
+                "the turn ran: {prompt:?}"
+            );
+            let settle = fake
+                .expect(|_| {
+                    Some(if failed_run {
+                        daemon_response(
+                            "wait_for_steer_run",
+                            Some(json!({
+                                "status": "failed",
+                                "error": "API Error: 429 rate limit exceeded",
+                            })),
+                        )
+                    } else {
+                        DaemonResponse {
+                            id: None,
+                            command: "wait_for_steer_run".to_string(),
+                            success: false,
+                            data: None,
+                            error: Some("the daemon connection closed mid-request".to_string()),
+                            error_info: None,
+                        }
+                    })
+                })
+                .await;
+            assert!(
+                matches!(
+                    settle,
+                    DaemonCommand::WaitForSteerRun { ref run_id, .. }
+                        if run_id == "steer-run:1"
+                ),
+                "the settlement waits its run: {settle:?}"
+            );
+            let reply = tokio::time::timeout(std::time::Duration::from_secs(2), handler)
+                .await
+                .expect("the prompt settles")
+                .expect("the handler settles");
+            let (details, kind, category, retryable) = if failed_run {
+                (
+                    "prime-agent steered run failed",
+                    "rate_limit",
+                    "rate_limit",
+                    false,
+                )
+            } else {
+                (
+                    "prime-agent steered run wait failed",
+                    "other",
+                    "other",
+                    false,
+                )
+            };
+            let data = &reply["error"]["data"];
+            assert_eq!(reply["id"], json!(1), "{failed_run}: {reply}");
+            assert!(
+                data["details"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .contains(details),
+                "{failed_run}: {reply}"
+            );
+            assert_eq!(data["kind"], json!(kind), "{failed_run}: {reply}");
+            assert_eq!(data["category"], json!(category), "{failed_run}: {reply}");
+            assert_eq!(data["retryable"], json!(retryable), "{failed_run}: {reply}");
+        }
     }
 
     /// A steer the worker refused never landed, so its admission settles
