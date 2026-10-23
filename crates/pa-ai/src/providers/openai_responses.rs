@@ -538,11 +538,17 @@ mod tests {
         let mut model = compat_model(serde_json::json!({}));
         assert_eq!(
             authorizations(&model, None),
-            vec![("Authorization".to_string(), "Bearer default-key".to_string())]
+            vec![(
+                "Authorization".to_string(),
+                "Bearer default-key".to_string()
+            )]
         );
         assert_eq!(
             authorizations(&model, Some("caller-token")),
-            vec![("authorization".to_string(), "Bearer caller-token".to_string())]
+            vec![(
+                "authorization".to_string(),
+                "Bearer caller-token".to_string()
+            )]
         );
         model.headers = Some(std::collections::BTreeMap::from([(
             "AUTHORIZATION".to_string(),
@@ -550,7 +556,10 @@ mod tests {
         )]));
         assert_eq!(
             authorizations(&model, None),
-            vec![("AUTHORIZATION".to_string(), "Bearer model-token".to_string())]
+            vec![(
+                "AUTHORIZATION".to_string(),
+                "Bearer model-token".to_string()
+            )]
         );
     }
 
