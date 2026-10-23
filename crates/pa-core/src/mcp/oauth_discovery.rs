@@ -727,7 +727,10 @@ mod tests {
         for (advertised, published) in [
             ("https://ticktick.com/", "https://ticktick.com"),
             ("https://ticktick.com", "https://ticktick.com/"),
-            ("https://login.example/tenant/", "https://login.example/tenant"),
+            (
+                "https://login.example/tenant/",
+                "https://login.example/tenant",
+            ),
         ] {
             let metadata = authorization_server_metadata(&document(published), advertised, true)
                 .unwrap_or_else(|error| panic!("{advertised} vs {published}: {error}"));
@@ -736,9 +739,15 @@ mod tests {
         for (advertised, published) in [
             ("https://ticktick.com/", "https://evil.example"),
             ("https://ticktick.com/", "https://ticktick.com//"),
-            ("https://login.example/tenant", "https://login.example/tenant/other"),
+            (
+                "https://login.example/tenant",
+                "https://login.example/tenant/other",
+            ),
             ("https://login.example/tenant", "https://login.example"),
-            ("https://login.example/tenant/", "https://login.example/tenant?x=/"),
+            (
+                "https://login.example/tenant/",
+                "https://login.example/tenant?x=/",
+            ),
         ] {
             let error = authorization_server_metadata(&document(published), advertised, true)
                 .unwrap_err()
