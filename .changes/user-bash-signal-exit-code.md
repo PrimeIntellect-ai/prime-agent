@@ -1,0 +1,1 @@
+- A `!` command whose shell dies from a signal (for example a crash or `kill`) now records 128 + the signal number as its exit code, so the model is told it failed, like the TypeScript version.
