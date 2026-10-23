@@ -8,18 +8,16 @@ use crate::event_stream::{
     create_assistant_message_event_stream, AssistantMessageEvent, AssistantMessageEventStream,
     AssistantMessageEventWriter,
 };
-use crate::models::clamp_thinking_level;
-use crate::providers::google::GoogleOptions;
+use crate::providers::google::{resolve_simple_thinking, GoogleOptions};
 use crate::providers::google_shared::{
-    budget_effort, convert_messages, convert_tools, get_disabled_thinking_config,
-    get_google_thinking_budget, get_thinking_level, API_GOOGLE_VERTEX,
+    convert_messages, convert_tools, get_disabled_thinking_config, API_GOOGLE_VERTEX,
 };
 use crate::providers::google_stream::GoogleStreamState;
 use crate::providers::simple_options::build_base_options;
 use crate::registry::Provider;
 use crate::types::{
-    done_reason, error_reason, AssistantMessage, Context, Model, ModelThinkingLevel,
-    SimpleStreamOptions, StopReason, StreamOptions, Usage,
+    done_reason, error_reason, AssistantMessage, Context, Model, SimpleStreamOptions, StopReason,
+    StreamOptions, Usage,
 };
 use crate::utils_inner::diagnostics::now_ms;
 use crate::utils_inner::http::{send, HttpResponse, RequestOptions};
@@ -221,10 +219,7 @@ fn build_params(model: &Model, context: &Context, options: &GoogleVertexOptions)
             }
             generation_config.insert("thinkingConfig".into(), Value::Object(thinking_config));
         } else if model.reasoning && !thinking.enabled {
-            generation_config.insert(
-                "thinkingConfig".into(),
-                get_disabled_thinking_config(&model.id),
-            );
+            generation_config.insert("thinkingConfig".into(), get_disabled_thinking_config(model));
         }
     }
 
@@ -441,45 +436,6 @@ pub fn stream_simple_google_vertex(
     stream_google_vertex(model, context, Some(&stream_options))
 }
 
-/// The thinking arm `stream_simple_google_vertex` picks for a model + reasoning level: disabled,
-/// level-based, or budget-based. Level-based covers Gemini 3 Pro/Flash and Gemma 4 (the Gemini API
-/// rejects `thinkingBudget` with a 400 for Gemma 4, so it must ride `thinkingLevel`).
-fn resolve_simple_thinking(
-    model: &Model,
-    options: Option<&SimpleStreamOptions>,
-) -> crate::providers::google::GoogleThinking {
-    let reasoning = options.and_then(|options| options.reasoning);
-    if reasoning.is_none() || reasoning == Some(ModelThinkingLevel::Off) {
-        return crate::providers::google::GoogleThinking {
-            enabled: false,
-            budget_tokens: None,
-            level: None,
-        };
-    }
-
-    let clamped = reasoning.map(|reasoning| clamp_thinking_level(model, reasoning));
-    let effort = clamped.unwrap_or(ModelThinkingLevel::High);
-
-    if crate::providers::google_shared::is_gemini3_pro_model(&model.id)
-        || crate::providers::google_shared::is_gemini3_flash_model(&model.id)
-        || crate::providers::google_shared::is_gemma4_model(&model.id)
-    {
-        return crate::providers::google::GoogleThinking {
-            enabled: true,
-            budget_tokens: None,
-            level: Some(get_thinking_level(effort, &model.id)),
-        };
-    }
-
-    let budgets = options.and_then(|options| options.thinking_budgets.as_ref());
-    let budget = get_google_thinking_budget(&model.id, budget_effort(effort), budgets);
-    crate::providers::google::GoogleThinking {
-        enabled: true,
-        budget_tokens: Some(budget),
-        level: None,
-    }
-}
-
 /// Registry provider for the `google-vertex` API.
 pub struct GoogleVertexProvider;
 
@@ -517,6 +473,7 @@ fn _options_marker() -> Option<GoogleOptions> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::ModelThinkingLevel;
 
     fn gemma4_model() -> Model {
         serde_json::from_value::<Model>(json!({
@@ -575,6 +532,46 @@ mod tests {
         assert_eq!(
             params["generationConfig"]["thinkingConfig"],
             json!({ "includeThoughts": true, "thinkingLevel": "HIGH" })
+        );
+    }
+
+    /// Vertex shares the catalog-driven level routing: a level-mapped model outside the id
+    /// patterns sends its mapped `thinkingLevel`, and off sends the lowest level, not a budget.
+    #[test]
+    fn level_mapped_models_use_thinking_levels_on_vertex() {
+        let model = serde_json::from_value::<Model>(json!({
+            "id": "gemini-4-argon", "name": "Gemini 4 Argon",
+            "api": "google-vertex", "provider": "google-vertex",
+            "baseUrl": "https://{location}-aiplatform.googleapis.com",
+            "reasoning": true,
+            "thinkingLevelMap": {
+                "off": null, "minimal": null, "low": "low", "medium": "medium",
+                "high": "high", "xhigh": null, "max": null
+            },
+            "input": ["text"],
+            "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0 },
+            "contextWindow": 1_048_576, "maxTokens": 32_768
+        }))
+        .unwrap();
+        let configs = [ModelThinkingLevel::Off, ModelThinkingLevel::Medium].map(|reasoning| {
+            let simple = SimpleStreamOptions {
+                reasoning: Some(reasoning),
+                ..SimpleStreamOptions::default()
+            };
+            let opts = GoogleVertexOptions {
+                thinking: Some(resolve_simple_thinking(&model, Some(&simple))),
+                base: build_base_options(&model, Some(&simple), None),
+                ..GoogleVertexOptions::default()
+            };
+            build_params(&model, &Context::default(), &opts)["generationConfig"]["thinkingConfig"]
+                .clone()
+        });
+        assert_eq!(
+            configs,
+            [
+                json!({ "thinkingLevel": "LOW" }),
+                json!({ "includeThoughts": true, "thinkingLevel": "MEDIUM" }),
+            ]
         );
     }
 

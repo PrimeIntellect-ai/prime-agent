@@ -509,30 +509,77 @@ fn regex_is_match(model_id: &str, pattern: &str) -> bool {
     regex.is_match(&model_id.to_lowercase())
 }
 
+/// The Gemini thinking level a catalog `thinkingLevelMap` declares for `level`, when the map
+/// carries a non-null value naming a Gemini level (case-insensitive: catalogs spell it `low` or
+/// `LOW`).
+fn mapped_thinking_level(
+    model: &Model,
+    level: crate::types::ModelThinkingLevel,
+) -> Option<GoogleThinkingLevel> {
+    let value = model.thinking_level_map_value(level).flatten()?;
+    match value.to_ascii_uppercase().as_str() {
+        "MINIMAL" => Some(GoogleThinkingLevel::Minimal),
+        "LOW" => Some(GoogleThinkingLevel::Low),
+        "MEDIUM" => Some(GoogleThinkingLevel::Medium),
+        "HIGH" => Some(GoogleThinkingLevel::High),
+        _ => None,
+    }
+}
+
+/// Whether reasoning for `model` rides `thinkingConfig.thinkingLevel` rather than
+/// `thinkingBudget`. The catalog is the source of truth: a `thinkingLevelMap` with a Gemini level
+/// for low, medium or high marks a level-based model (Gemini 3+, Gemini 4, `gemini-flash-latest`).
+/// The id patterns cover models whose metadata carries no map.
+pub fn uses_thinking_levels(model: &Model) -> bool {
+    use crate::types::ModelThinkingLevel;
+    [
+        ModelThinkingLevel::Low,
+        ModelThinkingLevel::Medium,
+        ModelThinkingLevel::High,
+    ]
+    .into_iter()
+    .any(|level| mapped_thinking_level(model, level).is_some())
+        || is_gemini3_pro_model(&model.id)
+        || is_gemini3_flash_model(&model.id)
+        || is_gemma4_model(&model.id)
+}
+
 /// Thinking config for disabled reasoning, per model family.
-pub fn get_disabled_thinking_config(model_id: &str) -> Value {
-    // Gemini 3.1 Pro cannot disable thinking, and Gemini 3 Flash / Flash-Lite do not support full
-    // thinking-off: use the lowest supported level without includeThoughts so hidden thinking
-    // remains invisible.
-    if is_gemini3_pro_model(model_id) {
+pub fn get_disabled_thinking_config(model: &Model) -> Value {
+    // A level-based model whose catalog map cannot turn thinking off (`off: null`) gets its
+    // lowest supported level without includeThoughts, so hidden thinking remains invisible; the
+    // Gemini API keeps thinking on for Gemini 3+ and may reject `thinkingBudget: 0`.
+    if let Some(minimum) = pa_types::ai::minimum_reasoning(model) {
+        if let Some(level) = mapped_thinking_level(model, minimum) {
+            return json!({ "thinkingLevel": level.as_str() });
+        }
+    }
+    // Models without catalog metadata, by id: Gemini 3.1 Pro cannot disable thinking, and Gemini
+    // 3 Flash / Flash-Lite do not support full thinking-off.
+    if is_gemini3_pro_model(&model.id) {
         return json!({ "thinkingLevel": "LOW" });
     }
-    if is_gemini3_flash_model(model_id) {
+    if is_gemini3_flash_model(&model.id) {
         return json!({ "thinkingLevel": "MINIMAL" });
     }
-    if is_gemma4_model(model_id) {
+    if is_gemma4_model(&model.id) {
         return json!({ "thinkingLevel": "MINIMAL" });
     }
     // Gemini 2.x supports disabling via thinkingBudget = 0.
     json!({ "thinkingBudget": 0 })
 }
 
-/// Map a Prime Agent thinking level to a Gemini 3 thinking level.
+/// Map a Prime Agent thinking level to a Gemini thinking level: the catalog map's value when it
+/// names one, else the per-family default.
 pub fn get_thinking_level(
     effort: crate::types::ModelThinkingLevel,
-    model_id: &str,
+    model: &Model,
 ) -> GoogleThinkingLevel {
     use crate::types::ModelThinkingLevel;
+    if let Some(level) = mapped_thinking_level(model, effort) {
+        return level;
+    }
+    let model_id = model.id.as_str();
     if is_gemini3_pro_model(model_id) {
         return match effort {
             ModelThinkingLevel::Minimal | ModelThinkingLevel::Low => GoogleThinkingLevel::Low,
