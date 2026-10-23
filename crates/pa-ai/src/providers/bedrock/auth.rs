@@ -3,6 +3,7 @@
 //! endpoint / credential resolution rules from the TS provider.
 
 use std::fmt::Write as _;
+use std::path::Path;
 
 use hmac::{Hmac, Mac};
 use sha2::{Digest, Sha256};
@@ -66,10 +67,32 @@ fn parse_ini_credentials(text: &str, section: &str) -> Option<AwsCredentials> {
     })
 }
 
+/// Where the shared credentials and config files live.
+#[derive(Debug, PartialEq)]
+struct AwsFilePaths {
+    credentials: Option<std::path::PathBuf>,
+    config: Option<std::path::PathBuf>,
+}
+
+/// `AWS_SHARED_CREDENTIALS_FILE` / `AWS_CONFIG_FILE` from `lookup` when set, else the defaults under
+/// `home`; an override needs no home directory.
+fn aws_file_paths(lookup: impl Fn(&str) -> Option<String>, home: Option<&Path>) -> AwsFilePaths {
+    let path = |var: &str, default: &str| {
+        lookup(var)
+            .map(std::path::PathBuf::from)
+            .or_else(|| home.map(|home| home.join(default)))
+    };
+    AwsFilePaths {
+        credentials: path("AWS_SHARED_CREDENTIALS_FILE", ".aws/credentials"),
+        config: path("AWS_CONFIG_FILE", ".aws/config"),
+    }
+}
+
 /// The SDK credential chain used by the TS provider: SigV4-skip dummy keys, static env credentials,
-/// the shared credentials file (default or `AWS_PROFILE` / `options.profile`), then the profile's
-/// `credential_process` in the AWS config file (`AWS_CONFIG_FILE` or `~/.aws/config`). May run the
-/// credential process; dropping the future kills it.
+/// the shared credentials file (`AWS_SHARED_CREDENTIALS_FILE` or `~/.aws/credentials`; default or
+/// `AWS_PROFILE` / `options.profile`), then the profile's `credential_process` in the AWS config
+/// file (`AWS_CONFIG_FILE` or `~/.aws/config`). May run the credential process; dropping the future
+/// kills it.
 pub async fn resolve_credentials(profile: Option<&str>) -> Option<AwsCredentials> {
     if std::env::var("AWS_BEDROCK_SKIP_AUTH").as_deref() == Ok("1") {
         return Some(AwsCredentials {
@@ -91,16 +114,17 @@ pub async fn resolve_credentials(profile: Option<&str>) -> Option<AwsCredentials
         .map(std::string::ToString::to_string)
         .or_else(|| env("AWS_PROFILE"))
         .unwrap_or_else(|| "default".to_string());
-    let home = pa_types::platform::home_dir()?;
-    let shared = tokio::fs::read_to_string(home.join(".aws/credentials"))
-        .await
-        .ok()
-        .and_then(|text| parse_ini_credentials(&text, &profile));
-    if shared.is_some() {
-        return shared;
+    let paths = aws_file_paths(env, pa_types::platform::home_dir().as_deref());
+    if let Some(credentials_path) = &paths.credentials {
+        let shared = tokio::fs::read_to_string(credentials_path)
+            .await
+            .ok()
+            .and_then(|text| parse_ini_credentials(&text, &profile));
+        if shared.is_some() {
+            return shared;
+        }
     }
-    let config_path = env("AWS_CONFIG_FILE").map_or_else(|| home.join(".aws/config"), Into::into);
-    let config = tokio::fs::read_to_string(config_path).await.ok()?;
+    let config = tokio::fs::read_to_string(paths.config?).await.ok()?;
     crate::providers::bedrock::credential_process::credentials_from_process(&profile, &config).await
 }
 
@@ -483,6 +507,50 @@ mod sigv4_tests {
         assert_eq!(
             canonical_request("GET", "/x?b=2&a=1&a=0", "", "", "h"),
             "GET\n/x\na=0&a=1&b=2\n\n\nh"
+        );
+    }
+}
+
+#[cfg(test)]
+mod file_path_tests {
+    use super::*;
+
+    #[test]
+    fn file_overrides_apply_with_or_without_a_home_directory() {
+        let overrides = |var: &str| match var {
+            "AWS_SHARED_CREDENTIALS_FILE" => Some("/etc/aws/credentials".to_string()),
+            "AWS_CONFIG_FILE" => Some("/etc/aws/config".to_string()),
+            _ => None,
+        };
+        let unset = |_: &str| None;
+        let home = Path::new("/home/user");
+        let overridden = AwsFilePaths {
+            credentials: Some("/etc/aws/credentials".into()),
+            config: Some("/etc/aws/config".into()),
+        };
+
+        assert_eq!(
+            [
+                aws_file_paths(overrides, None),
+                aws_file_paths(overrides, Some(home)),
+                aws_file_paths(unset, Some(home)),
+                aws_file_paths(unset, None),
+            ],
+            [
+                overridden,
+                AwsFilePaths {
+                    credentials: Some("/etc/aws/credentials".into()),
+                    config: Some("/etc/aws/config".into()),
+                },
+                AwsFilePaths {
+                    credentials: Some("/home/user/.aws/credentials".into()),
+                    config: Some("/home/user/.aws/config".into()),
+                },
+                AwsFilePaths {
+                    credentials: None,
+                    config: None,
+                },
+            ]
         );
     }
 }
