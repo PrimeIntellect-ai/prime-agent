@@ -1022,7 +1022,7 @@ pub(super) fn final_turn_error_from_file(session_file: &str) -> Option<String> {
             | FileEntry::SessionInfo { .. }
             | FileEntry::SessionState { .. }
             | FileEntry::GitState { .. }
-            | FileEntry::Unknown { .. } => continue,
+            | FileEntry::Unknown { .. } => {}
         }
     }
     None
