@@ -17,6 +17,8 @@ use crate::types::{
 };
 
 mod convert;
+#[cfg(test)]
+pub(super) use convert::convert_messages;
 mod errors;
 mod params;
 mod stream;
@@ -26,7 +28,7 @@ pub use stream::stream_openai_completions;
 pub const API_OPENAI_COMPLETIONS: &str = "openai-completions";
 
 const REASONING_DETAILS_SIGNATURE_TYPE: &str = "openai-completions.reasoning_details.v1";
-pub(crate) const REASONING_FIELDS: [&str; 3] = ["reasoning_content", "reasoning", "reasoning_text"];
+pub(crate) use pa_types::ai::PLAINTEXT_REASONING_FIELDS as REASONING_FIELDS;
 
 /// Tool selection passed to the API.
 #[derive(Clone, Debug, PartialEq)]
@@ -104,6 +106,7 @@ pub struct ResolvedCompat {
     pub requires_assistant_after_tool_result: bool,
     pub requires_thinking_as_text: bool,
     pub requires_reasoning_content_on_assistant_messages: bool,
+    pub reasoning_replay_field: Option<String>,
     pub thinking_format: crate::types::ThinkingFormat,
     pub supports_strict_mode: bool,
     pub cache_control_format: Option<crate::types::CacheControlFormat>,
@@ -174,6 +177,10 @@ pub fn detect_compat(model: &Model) -> ResolvedCompat {
         requires_assistant_after_tool_result: false,
         requires_thinking_as_text: false,
         requires_reasoning_content_on_assistant_messages: is_deep_seek,
+        // These destination adapters use reasoning_content in their assistant input schema.
+        // This is independent of the source provider and of whether the field is mandatory.
+        reasoning_replay_field: (is_deep_seek || is_zai || is_prime_inference && model.reasoning)
+            .then(|| "reasoning_content".to_string()),
         thinking_format: if is_deep_seek {
             crate::types::ThinkingFormat::Deepseek
         } else if is_zai {
@@ -227,6 +234,13 @@ pub fn get_compat(model: &Model) -> ResolvedCompat {
         requires_reasoning_content_on_assistant_messages: compat
             .requires_reasoning_content_on_assistant_messages
             .unwrap_or(detected.requires_reasoning_content_on_assistant_messages),
+        reasoning_replay_field: compat.reasoning_replay_field.clone().or_else(|| {
+            if compat.requires_reasoning_content_on_assistant_messages == Some(true) {
+                Some("reasoning_content".to_string())
+            } else {
+                detected.reasoning_replay_field
+            }
+        }),
         thinking_format: compat.thinking_format.unwrap_or(detected.thinking_format),
         open_router_routing: compat
             .open_router_routing

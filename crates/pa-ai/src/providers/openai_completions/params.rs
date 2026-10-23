@@ -21,9 +21,9 @@ pub(crate) fn build_params(
     compat: &ResolvedCompat,
     cache_retention: CacheRetention,
     cache_control: Option<&OpenAICompatCacheControl>,
-) -> Value {
+) -> Result<Value, String> {
     let options = options.cloned().unwrap_or_default();
-    let messages = convert_messages(model, context, compat);
+    let messages = convert_messages(model, context, compat)?;
     let mut params = Map::new();
     params.insert("model".into(), json!(model.id));
     params.insert("messages".into(), json!(messages));
@@ -233,7 +233,7 @@ pub(crate) fn build_params(
         }
     }
 
-    Value::Object(params)
+    Ok(Value::Object(params))
 }
 
 fn apply_anthropic_cache_control(
@@ -419,7 +419,7 @@ mod tests {
             CacheRetention::None,
             None,
         );
-        match params {
+        match params.unwrap() {
             Value::Object(map) => map,
             _ => panic!("build_params returns a JSON object"),
         }
@@ -456,7 +456,7 @@ mod tests {
             CacheRetention::None,
             None,
         );
-        match params {
+        match params.unwrap() {
             Value::Object(map) => map,
             _ => panic!("build_params returns a JSON object"),
         }

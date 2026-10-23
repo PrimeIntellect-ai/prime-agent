@@ -161,22 +161,15 @@ pub fn convert_messages(
                                 }));
                                 continue;
                             }
-                            if thinking.thinking.trim().is_empty() {
+                            let signature = thinking.thinking_signature.as_deref().unwrap_or("");
+                            if thinking.thinking.trim().is_empty() && signature.trim().is_empty() {
                                 continue;
                             }
-                            let signature = thinking.thinking_signature.as_deref().unwrap_or("");
-                            if signature.trim().is_empty() {
-                                blocks.push(json!({
-                                    "type": "text",
-                                    "text": sanitize_surrogates(&thinking.thinking),
-                                }));
-                            } else {
-                                blocks.push(json!({
-                                    "type": "thinking",
-                                    "thinking": sanitize_surrogates(&thinking.thinking),
-                                    "signature": signature,
-                                }));
-                            }
+                            blocks.push(json!({
+                                "type": "thinking",
+                                "thinking": sanitize_surrogates(&thinking.thinking),
+                                "signature": signature,
+                            }));
                         }
                         AssistantContent::ToolCall(tool_call) => {
                             blocks.push(json!({

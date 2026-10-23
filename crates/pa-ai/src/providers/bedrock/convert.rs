@@ -84,10 +84,6 @@ pub fn supports_prompt_caching(model: &Model) -> bool {
     })
 }
 
-pub fn supports_thinking_signature(model: &Model) -> bool {
-    is_anthropic_claude_model(model)
-}
-
 /// Bedrock tool-use IDs are `[a-zA-Z0-9_-]{1,64}`.
 pub fn normalize_tool_call_id(id: &str) -> String {
     let sanitized: String = id
@@ -158,6 +154,8 @@ pub fn convert_messages(
     cache_retention: CacheRetention,
 ) -> Vec<Value> {
     let mut result: Vec<Value> = Vec::new();
+    let native_claude_replay =
+        crate::providers::reasoning_replay::is_claude_replay_destination(model, context);
     let transformed = transform_messages_with_normalizer(&context.messages, model, &|id, _, _| {
         Some(normalize_tool_call_id(id))
     });
@@ -213,38 +211,37 @@ pub fn convert_messages(
                             }));
                         }
                         AssistantContent::Thinking(thinking) => {
-                            if thinking.thinking.trim().is_empty() {
+                            if thinking.redacted.unwrap_or(false) {
+                                // AWS JSON encodes blob members as base64, matching the stored
+                                // Anthropic redacted payload. Keep its bytes and block position.
+                                content_blocks.push(json!({
+                                    "reasoningContent": {
+                                        "redactedContent": thinking.thinking_signature.as_deref().unwrap_or_default(),
+                                    }
+                                }));
                                 continue;
                             }
-                            // Only Anthropic models support the signature field in reasoningText.
-                            // For other models we omit it to avoid: "This model doesn't support the
-                            // reasoningContent.reasoningText.signature field".
-                            if supports_thinking_signature(model) {
-                                // Signatures arrive after thinking deltas. If a partial or
-                                // externally persisted message lacks a signature, Bedrock rejects
-                                // the replayed reasoning block. Fall back to plain text, matching
-                                // Anthropic.
-                                let signature = thinking
-                                    .thinking_signature
-                                    .as_deref()
-                                    .filter(|signature| !signature.trim().is_empty());
-                                match signature {
-                                    None => {
-                                        content_blocks.push(json!({
-                                            "text": sanitize_surrogates(&thinking.thinking)
-                                        }));
-                                    }
-                                    Some(signature) => {
-                                        content_blocks.push(json!({
+                            let signature = thinking
+                                .thinking_signature
+                                .as_deref()
+                                .filter(|signature| !signature.trim().is_empty());
+                            if thinking.thinking.trim().is_empty() && signature.is_none() {
+                                continue;
+                            }
+                            // Known Claude models and this destination's own native history
+                            // retain signatures, including opaque profile identifiers. Preflight
+                            // rejects foreign signatures with no supported native representation.
+                            if native_claude_replay {
+                                // Preflight reports missing signatures; never lower unsigned
+                                // reasoning into answer text even for direct serializer callers.
+                                content_blocks.push(json!({
                                             "reasoningContent": {
                                                 "reasoningText": {
                                                     "text": sanitize_surrogates(&thinking.thinking),
-                                                    "signature": signature,
+                                                    "signature": signature.unwrap_or_default(),
                                                 }
                                             }
-                                        }));
-                                    }
-                                }
+                                }));
                             } else {
                                 content_blocks.push(json!({
                                     "reasoningContent": {

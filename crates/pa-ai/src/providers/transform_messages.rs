@@ -107,36 +107,11 @@ pub fn transform_messages_with_normalizer(
                     .content
                     .iter()
                     .flat_map(|block| match block {
-                        AssistantContent::Thinking(thinking) => {
-                            let redacted = thinking.redacted.unwrap_or(false);
-                            if redacted {
-                                return if is_same_model {
-                                    vec![block.clone()]
-                                } else {
-                                    vec![]
-                                };
-                            }
-                            if is_same_model && thinking.thinking_signature.is_some() {
-                                return vec![block.clone()];
-                            }
-                            if thinking.thinking.trim().is_empty() {
-                                return vec![];
-                            }
-                            if is_same_model {
-                                return vec![block.clone()];
-                            }
-                            vec![AssistantContent::Text(TextContent {
-                                text: thinking.thinking.clone(),
-                                text_signature: None,
-                                rest: Map::default(),
-                            })]
+                        AssistantContent::Thinking(_) | AssistantContent::Text(_) => {
+                            vec![block.clone()]
                         }
-                        AssistantContent::Text(_) => vec![block.clone()],
                         AssistantContent::ToolCall(tool_call) => {
                             let mut normalized: ToolCall = tool_call.clone();
-                            if !is_same_model && tool_call.thought_signature.is_some() {
-                                normalized.thought_signature = None;
-                            }
                             if !is_same_model {
                                 if let Some(normalizer) =
                                     normalize_tool_call_id(&tool_call.id, model, assistant)
@@ -373,5 +348,73 @@ mod tests {
         let transformed =
             transform_messages_with_normalizer(&messages, &test_model(), &|_, _, _| None);
         assert_eq!(transformed.len(), 2);
+    }
+
+    #[test]
+    fn model_switch_keeps_reasoning_answer_and_tool_exchange() {
+        let Message::Assistant(mut assistant) = assistant_with_tool_call("call-1") else {
+            unreachable!()
+        };
+        assistant.content.insert(
+            0,
+            AssistantContent::Text(TextContent {
+                text: "Synthetic answer.".into(),
+                text_signature: None,
+                rest: Map::default(),
+            }),
+        );
+        let tool_result = Message::ToolResult(ToolResultMessage {
+            tool_call_id: "call-1".into(),
+            tool_name: "echo".into(),
+            content: vec![],
+            details: None,
+            is_error: false,
+            timestamp: 1,
+            rest: Map::default(),
+        });
+        for (thinking, signature, redacted) in [
+            ("SYNTHETIC_PRIVATE_MARKER", None, None),
+            ("SYNTHETIC_PRIVATE_MARKER", Some("reasoning_content"), None),
+            ("", Some("foreign-signature"), None),
+            (
+                "SYNTHETIC_PRIVATE_MARKER",
+                Some("foreign-signature"),
+                Some(true),
+            ),
+        ] {
+            let mut source = assistant.clone();
+            source.content.insert(
+                0,
+                AssistantContent::Thinking(crate::types::ThinkingContent {
+                    thinking: thinking.into(),
+                    thinking_signature: signature.map(str::to_string),
+                    redacted,
+                    rest: Map::default(),
+                }),
+            );
+            let messages = vec![Message::Assistant(source), tool_result.clone()];
+            for target in [
+                Model {
+                    id: "new-model".into(),
+                    ..test_model()
+                },
+                Model {
+                    provider: "new-provider".into(),
+                    ..test_model()
+                },
+                Model {
+                    api: "new-api".into(),
+                    ..test_model()
+                },
+            ] {
+                let transformed =
+                    transform_messages_with_normalizer(&messages, &target, &|_, _, _| None);
+                assert_eq!(transformed, messages);
+            }
+            assert_eq!(
+                transform_messages_with_normalizer(&messages, &test_model(), &|_, _, _| None),
+                messages
+            );
+        }
     }
 }

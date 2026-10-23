@@ -1,0 +1,1 @@
+- Prime Agent keeps prior reasoning in supported native reasoning fields when switching models. Unsupported signature or reasoning representations now report an explicit error instead of becoming answer text or disappearing. Switch back to a compatible provider/model/account or start a new session; compacting can retain recent blockers.

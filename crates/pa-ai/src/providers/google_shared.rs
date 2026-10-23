@@ -115,7 +115,7 @@ pub fn retain_thought_signature(existing: Option<&str>, incoming: Option<&str>) 
 }
 
 // Thought signatures must be base64 for Google APIs (TYPE_BYTES).
-fn is_valid_thought_signature(signature: Option<&str>) -> bool {
+pub(super) fn is_valid_thought_signature(signature: Option<&str>) -> bool {
     let Some(signature) = signature else {
         return false;
     };
@@ -232,7 +232,7 @@ pub fn convert_messages(model: &Model, context: &Context) -> Vec<Value> {
                 for block in &assistant.content {
                     match block {
                         AssistantContent::Text(text) => {
-                            if text.text.trim().is_empty() {
+                            if text.text.trim().is_empty() && text.text_signature.is_none() {
                                 continue;
                             }
                             let mut part = Map::new();
@@ -246,20 +246,20 @@ pub fn convert_messages(model: &Model, context: &Context) -> Vec<Value> {
                             parts.push(Value::Object(part));
                         }
                         AssistantContent::Thinking(thinking) => {
-                            if thinking.thinking.trim().is_empty() {
+                            if thinking.thinking.trim().is_empty()
+                                && thinking.thinking_signature.is_none()
+                            {
                                 continue;
                             }
-                            // Only keep as thinking block if same provider AND same model;
-                            // otherwise convert to plain text.
+                            // Registry preflight rejects unsupported cross-model replay. Never
+                            // lower reasoning into answer text, including signature-only parts.
                             let mut part = Map::new();
-                            if is_same_provider_and_model {
-                                part.insert("thought".into(), json!(true));
-                                if let Some(signature) = resolve_thought_signature(
-                                    is_same_provider_and_model,
-                                    thinking.thinking_signature.as_deref(),
-                                ) {
-                                    part.insert("thoughtSignature".into(), json!(signature));
-                                }
+                            part.insert("thought".into(), json!(true));
+                            if let Some(signature) = resolve_thought_signature(
+                                is_same_provider_and_model,
+                                thinking.thinking_signature.as_deref(),
+                            ) {
+                                part.insert("thoughtSignature".into(), json!(signature));
                             }
                             part.insert(
                                 "text".into(),

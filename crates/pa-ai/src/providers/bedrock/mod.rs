@@ -14,6 +14,7 @@ mod events;
 mod eventstream;
 mod goaway;
 mod h2;
+pub(super) use convert::convert_messages;
 
 use crate::env_api_keys::get_env_api_key;
 use crate::event_stream::{
@@ -22,7 +23,7 @@ use crate::event_stream::{
 };
 use crate::providers::bedrock::auth::{resolve_credentials, resolve_endpoint, sigv4_headers};
 use crate::providers::bedrock::convert::{
-    convert_messages, convert_tool_config, map_stop_reason, map_thinking_level_to_effort,
+    convert_tool_config, map_stop_reason, map_thinking_level_to_effort,
     supports_always_on_adaptive_thinking, BedrockToolChoice,
 };
 pub(crate) use crate::providers::bedrock::convert::{
@@ -474,6 +475,24 @@ async fn run_stream(
     if let Some(fields) = build_additional_model_request_fields(model, &options) {
         command_input.insert("additionalModelRequestFields".into(), fields);
     }
+    if crate::providers::reasoning_replay::has_claude_reasoning_replay(model, context) {
+        let beta = crate::providers::reasoning_replay::CLAUDE_BINDING_DIAGNOSTICS_BETA;
+        let fields = command_input
+            .entry("additionalModelRequestFields")
+            .or_insert_with(|| json!({}));
+        if let Some(fields) = fields.as_object_mut() {
+            let betas = fields.entry("anthropic_beta").or_insert_with(|| json!([]));
+            if let Some(betas) = betas.as_array_mut() {
+                if !betas.iter().any(|value| value.as_str() == Some(beta)) {
+                    betas.push(json!(beta));
+                }
+            }
+        }
+        command_input.insert(
+            "additionalModelResponseFieldPaths".into(),
+            json!(["/input_transformations"]),
+        );
+    }
     if let Some(metadata) = &options.request_metadata {
         command_input.insert("requestMetadata".into(), json!(metadata));
     }
@@ -694,10 +713,8 @@ async fn run_stream(
     }
     .await;
 
-    if let Err(error) = stream_result {
-        state.settle_partial_tool_calls(output);
-        return Err(error);
-    }
+    state.settle_partial_blocks(output);
+    stream_result?;
 
     Ok(())
 }
