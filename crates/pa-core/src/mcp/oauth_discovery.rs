@@ -89,7 +89,12 @@ fn authorization_server_metadata(
         bail!("Authorization server metadata for {issuer} is missing its issuer");
     };
     if require_exact_issuer {
-        if metadata_issuer != issuer {
+        // One trailing slash is the only tolerated difference: some servers advertise
+        // `https://host/` and publish `"issuer": "https://host"` (both forms fetch the
+        // same metadata URL). Origin, path, and query still match exactly.
+        if metadata_issuer.strip_suffix('/').unwrap_or(metadata_issuer)
+            != issuer.strip_suffix('/').unwrap_or(issuer)
+        {
             bail!("Authorization server metadata issuer does not exactly match {issuer}");
         }
     } else {
@@ -708,6 +713,42 @@ mod tests {
                 scopes_supported: Some(vec!["read".to_string(), "write".to_string()]),
             }
         );
+    }
+
+    #[test]
+    fn exact_issuer_match_tolerates_only_a_trailing_slash() {
+        let document = |issuer: &str| {
+            serde_json::json!({
+                "issuer": issuer,
+                "authorization_endpoint": "https://ticktick.com/oauth/authorize",
+                "token_endpoint": "https://ticktick.com/oauth/token",
+            })
+        };
+        for (advertised, published) in [
+            ("https://ticktick.com/", "https://ticktick.com"),
+            ("https://ticktick.com", "https://ticktick.com/"),
+            ("https://login.example/tenant/", "https://login.example/tenant"),
+        ] {
+            let metadata = authorization_server_metadata(&document(published), advertised, true)
+                .unwrap_or_else(|error| panic!("{advertised} vs {published}: {error}"));
+            assert_eq!(metadata.issuer, published);
+        }
+        for (advertised, published) in [
+            ("https://ticktick.com/", "https://evil.example"),
+            ("https://ticktick.com/", "https://ticktick.com//"),
+            ("https://login.example/tenant", "https://login.example/tenant/other"),
+            ("https://login.example/tenant", "https://login.example"),
+            ("https://login.example/tenant/", "https://login.example/tenant?x=/"),
+        ] {
+            let error = authorization_server_metadata(&document(published), advertised, true)
+                .unwrap_err()
+                .to_string();
+            assert_eq!(
+                error,
+                format!("Authorization server metadata issuer does not exactly match {advertised}"),
+                "{advertised} vs {published}"
+            );
+        }
     }
 
     #[test]
