@@ -1,6 +1,6 @@
 //! AWS `credential_process` support: a profile in the AWS config file names a command that prints
 //! version 1 credential JSON (`AccessKeyId`, `SecretAccessKey`, `SessionToken`, `Expiration`). The
-//! result is cached per profile until shortly before it expires.
+//! result is cached per profile and command until shortly before it expires.
 
 use std::collections::HashMap;
 use std::sync::{LazyLock, Mutex};
@@ -18,7 +18,8 @@ struct CachedCredentials {
     expires_at: Option<u64>,
 }
 
-/// Keyed by profile name.
+/// Keyed by profile name and command, so an edited `credential_process` never serves the old
+/// command's credentials.
 static CACHE: LazyLock<Mutex<HashMap<String, CachedCredentials>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
@@ -110,13 +111,16 @@ fn parse_output(stdout: &[u8]) -> Option<(AwsCredentials, Expiry)> {
     Some((credentials, expiry))
 }
 
-fn run(command: &str) -> Option<Vec<u8>> {
+/// Dropping the returned future kills the spawned shell (and the command, when the shell runs it
+/// in place), so a caller that stops waiting (cancellation, timeout) is not tied to a stalled
+/// `credential_process`.
+async fn run(command: &str) -> Option<Vec<u8>> {
     let mut process = if cfg!(windows) {
-        let mut process = std::process::Command::new("cmd");
+        let mut process = tokio::process::Command::new("cmd");
         process.args(["/C", command]);
         process
     } else {
-        let mut process = std::process::Command::new("sh");
+        let mut process = tokio::process::Command::new("sh");
         process.args(["-c", command]);
         process
     };
@@ -124,7 +128,9 @@ fn run(command: &str) -> Option<Vec<u8>> {
     let output = process
         .stdin(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
+        .kill_on_drop(true)
         .output()
+        .await
         .ok()?;
     if !output.status.success() {
         tracing::warn!(status = %output.status, "AWS credential_process exited unsuccessfully");
@@ -141,10 +147,15 @@ fn unix_now() -> u64 {
 
 /// Credentials from `profile`'s `credential_process` in the AWS config file text, served from the
 /// cache while they stay valid for more than `REFRESH_MARGIN_SECS`.
-pub(crate) fn credentials_from_process(profile: &str, config: &str) -> Option<AwsCredentials> {
+pub(crate) async fn credentials_from_process(
+    profile: &str,
+    config: &str,
+) -> Option<AwsCredentials> {
     let now = unix_now();
+    let command = find_command(config, profile)?;
+    let cache_key = format!("{profile}\0{command}");
     if let Ok(cache) = CACHE.lock() {
-        if let Some(entry) = cache.get(profile) {
+        if let Some(entry) = cache.get(&cache_key) {
             if entry
                 .expires_at
                 .is_none_or(|expires_at| expires_at > now + REFRESH_MARGIN_SECS)
@@ -153,8 +164,7 @@ pub(crate) fn credentials_from_process(profile: &str, config: &str) -> Option<Aw
             }
         }
     }
-    let command = find_command(config, profile)?;
-    let Some((credentials, expiry)) = run(&command).as_deref().and_then(parse_output) else {
+    let Some((credentials, expiry)) = run(&command).await.as_deref().and_then(parse_output) else {
         tracing::warn!("AWS credential_process printed no usable credentials");
         return None;
     };
@@ -165,7 +175,7 @@ pub(crate) fn credentials_from_process(profile: &str, config: &str) -> Option<Aw
     };
     if let Ok(mut cache) = CACHE.lock() {
         cache.insert(
-            profile.to_string(),
+            cache_key,
             CachedCredentials {
                 credentials: credentials.clone(),
                 expires_at,
@@ -220,8 +230,8 @@ mod tests {
     /// A profile whose only credential source is a `credential_process` stub script resolves to
     /// the script's credentials, and a second request is served from the cache.
     #[cfg(unix)]
-    #[test]
-    fn a_credential_process_profile_runs_its_stub_script_once() {
+    #[tokio::test]
+    async fn a_credential_process_profile_runs_its_stub_script_once() {
         let dir = tempfile::tempdir().expect("tempdir");
         let runs = dir.path().join("runs");
         let script = stub_script(
@@ -236,8 +246,12 @@ mod tests {
             script.display()
         );
 
-        let first = credentials_from_process("cp-stub-cached", &config).expect("process runs");
-        let second = credentials_from_process("cp-stub-cached", &config).expect("cached");
+        let first = credentials_from_process("cp-stub-cached", &config)
+            .await
+            .expect("process runs");
+        let second = credentials_from_process("cp-stub-cached", &config)
+            .await
+            .expect("cached");
 
         let expected = AwsCredentials {
             access_key_id: "AKIDSTUB".into(),
@@ -251,8 +265,8 @@ mod tests {
 
     /// Credentials inside the refresh margin are fetched again rather than reused.
     #[cfg(unix)]
-    #[test]
-    fn expiring_process_credentials_are_refreshed() {
+    #[tokio::test]
+    async fn expiring_process_credentials_are_refreshed() {
         let dir = tempfile::tempdir().expect("tempdir");
         let runs = dir.path().join("runs");
         let script = stub_script(
@@ -267,22 +281,116 @@ mod tests {
             script.display()
         );
 
-        assert!(credentials_from_process("cp-stub-expiring", &config).is_some());
-        assert!(credentials_from_process("cp-stub-expiring", &config).is_some());
+        assert!(credentials_from_process("cp-stub-expiring", &config)
+            .await
+            .is_some());
+        assert!(credentials_from_process("cp-stub-expiring", &config)
+            .await
+            .is_some());
         let runs = std::fs::read_to_string(runs).expect("runs log");
         assert_eq!(runs.lines().count(), 2);
     }
 
+    /// Editing a profile's `credential_process` runs the new command instead of serving the old
+    /// command's cached credentials.
     #[cfg(unix)]
-    #[test]
-    fn a_failing_or_malformed_process_yields_no_credentials() {
+    #[tokio::test]
+    async fn a_changed_command_does_not_reuse_the_old_commands_credentials() {
+        let credential_json = |key: &str| {
+            format!(
+                "printf '%s' '{{\"Version\":1,\"AccessKeyId\":\"{key}\",\"SecretAccessKey\":\"s\"}}'"
+            )
+        };
+        let (old_dir, new_dir) = (
+            tempfile::tempdir().expect("tempdir"),
+            tempfile::tempdir().expect("tempdir"),
+        );
+        let old = stub_script(old_dir.path(), &credential_json("AKIDOLD"));
+        let new = stub_script(new_dir.path(), &credential_json("AKIDNEW"));
+        let config_for = |script: &std::path::Path| {
+            format!(
+                "[profile cp-stub-edited]\ncredential_process = {}\n",
+                script.display()
+            )
+        };
+
+        let before = credentials_from_process("cp-stub-edited", &config_for(&old))
+            .await
+            .expect("old command runs");
+        let after = credentials_from_process("cp-stub-edited", &config_for(&new))
+            .await
+            .expect("new command runs");
+
+        assert_eq!(
+            (before.access_key_id, after.access_key_id),
+            ("AKIDOLD".to_string(), "AKIDNEW".to_string())
+        );
+    }
+
+    /// A caller that stops waiting on a stalled process (cancellation or timeout drops the future)
+    /// kills it rather than leaving it running.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn dropping_a_stalled_resolution_kills_the_process() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let pid_file = dir.path().join("pid");
+        // The shell records its own pid, then becomes the stalled command in place.
+        let config = format!(
+            "[profile cp-stub-stalled]\ncredential_process = echo $$ > '{}'; exec sleep 600\n",
+            pid_file.display()
+        );
+
+        let resolution = credentials_from_process("cp-stub-stalled", &config);
+        let pid = tokio::select! {
+            credentials = resolution => panic!("a stalled process resolved: {credentials:?}"),
+            pid = async {
+                loop {
+                    if let Some(pid) = std::fs::read_to_string(&pid_file)
+                        .ok()
+                        .and_then(|text| text.trim().parse::<u32>().ok())
+                    {
+                        break pid;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                }
+            } => pid,
+        };
+
+        // The resolution future is dropped once the select returns; its process must exit.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            let state = std::process::Command::new("ps")
+                .args(["-o", "stat=", "-p", &pid.to_string()])
+                .output()
+                .expect("ps runs");
+            let state = String::from_utf8_lossy(&state.stdout);
+            if state.trim().is_empty() || state.trim_start().starts_with('Z') {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "credential_process {pid} still running: {state}"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_failing_or_malformed_process_yields_no_credentials() {
         let dir = tempfile::tempdir().expect("tempdir");
         let failing = stub_script(dir.path(), "exit 1");
         let config = format!(
             "[profile cp-stub-failing]\ncredential_process = {}\n[profile cp-stub-malformed]\ncredential_process = echo '{{\"AccessKeyId\":\"x\"}}'\n",
             failing.display()
         );
-        assert_eq!(credentials_from_process("cp-stub-failing", &config), None);
-        assert_eq!(credentials_from_process("cp-stub-malformed", &config), None);
+        assert_eq!(
+            credentials_from_process("cp-stub-failing", &config).await,
+            None
+        );
+        assert_eq!(
+            credentials_from_process("cp-stub-malformed", &config).await,
+            None
+        );
     }
 }

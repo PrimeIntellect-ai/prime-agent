@@ -69,8 +69,8 @@ fn parse_ini_credentials(text: &str, section: &str) -> Option<AwsCredentials> {
 /// The SDK credential chain used by the TS provider: SigV4-skip dummy keys, static env credentials,
 /// the shared credentials file (default or `AWS_PROFILE` / `options.profile`), then the profile's
 /// `credential_process` in the AWS config file (`AWS_CONFIG_FILE` or `~/.aws/config`). May run the
-/// credential process, so async callers should call it off the runtime threads.
-pub fn resolve_credentials(profile: Option<&str>) -> Option<AwsCredentials> {
+/// credential process; dropping the future kills it.
+pub async fn resolve_credentials(profile: Option<&str>) -> Option<AwsCredentials> {
     if std::env::var("AWS_BEDROCK_SKIP_AUTH").as_deref() == Ok("1") {
         return Some(AwsCredentials {
             access_key_id: "dummy-access-key".to_string(),
@@ -92,15 +92,16 @@ pub fn resolve_credentials(profile: Option<&str>) -> Option<AwsCredentials> {
         .or_else(|| env("AWS_PROFILE"))
         .unwrap_or_else(|| "default".to_string());
     let home = pa_types::platform::home_dir()?;
-    let shared = std::fs::read_to_string(home.join(".aws/credentials"))
+    let shared = tokio::fs::read_to_string(home.join(".aws/credentials"))
+        .await
         .ok()
         .and_then(|text| parse_ini_credentials(&text, &profile));
     if shared.is_some() {
         return shared;
     }
     let config_path = env("AWS_CONFIG_FILE").map_or_else(|| home.join(".aws/config"), Into::into);
-    let config = std::fs::read_to_string(config_path).ok()?;
-    crate::providers::bedrock::credential_process::credentials_from_process(&profile, &config)
+    let config = tokio::fs::read_to_string(config_path).await.ok()?;
+    crate::providers::bedrock::credential_process::credentials_from_process(&profile, &config).await
 }
 
 fn sha256_hex(bytes: &[u8]) -> String {
