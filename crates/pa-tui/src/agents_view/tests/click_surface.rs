@@ -258,6 +258,22 @@ fn long_session_names_clip_to_the_name_column() {
     assert!(text.ends_with("$0.00   1s"));
 }
 
+/// A nesting deeper than the name column clips its indent there: the row keeps the pane width
+/// and its model cell stays under the legend's Model heading.
+#[test]
+fn deep_rows_clip_their_indent_to_the_name_column() {
+    let (mut mode, index) = mode_with_row("deep", "mock-1");
+    mode.rows[index].depth = 10;
+    mode.selected = index;
+    let layout = build_layout(&mode.rows, 120);
+    assert!(4 * 10 + 2 > layout.name_width);
+    let text = flat(&mode.render_row(&mode.rows[index], &layout, 120, false));
+    assert_eq!(str_width(&text), 120);
+    let model_at = str_width(&text[..text.find("mock-1").expect("model cell")]);
+    let heading_at = str_width(&layout.legend[..layout.legend.find("Model").expect("heading")]);
+    assert_eq!(model_at, heading_at);
+}
+
 #[test]
 fn short_session_names_pad_to_the_name_column() {
     let (mode, index) = mode_with_row("short name", "mock-1");
@@ -267,4 +283,242 @@ fn short_session_names_pad_to_the_name_column() {
     let text = flat(&line);
     let name_cell = format!("short name{}", " ".repeat(28 - 2 - 10));
     assert_eq!(text, expected_row(&name_cell, &layout));
+}
+
+#[test]
+fn an_orphans_bash_list_consumes_hidden_row_clicks_and_scrolls_its_output() {
+    let _guard = crate::mouse_tracking::STATE_TEST_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    crate::mouse_tracking::enable(&mut std::io::stdout()).expect("enable");
+    let (mut mode, index) = mode_with_row("hidden session", "mock-1");
+    let mut bindings = crate::keybindings::KeybindingsConfig::new();
+    bindings.insert("tui.select.up".to_string(), vec!["alt+k".to_string()]);
+    bindings.insert("tui.select.down".to_string(), vec!["alt+j".to_string()]);
+    mode.keybindings = crate::keybindings::KeybindingsManager::with_user_bindings(bindings);
+    mode.render_frame(100, 24);
+    let (hidden_row, _) = mode
+        .click_rows
+        .iter()
+        .find(|(_, row_index)| *row_index == index)
+        .copied()
+        .expect("session row");
+    mode.saved_catalog_loaded = true;
+    mode.apply_persistent_shells(serde_json::json!({ "activities": [{
+        "id": "shell-a", "command": "watch build", "status": "running", "persistent": true
+    }]}));
+    let row = mode
+        .rows
+        .iter()
+        .find(|row| row.kind == RowKind::PersistentShell)
+        .cloned()
+        .expect("shell row");
+    mode.open_persistent_shell(&row);
+    mode.handle_shell_view_key("enter");
+    let crate::bash_view::BashViewAction::OpenDetail { generation, .. } =
+        mode.pending_shell_action.take().expect("tail action")
+    else {
+        panic!("open detail")
+    };
+    let output = (0..50)
+        .map(|n| format!("output line {n}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    mode.shell_view
+        .as_mut()
+        .unwrap()
+        .set_output("shell-a", &output, generation);
+    let before = mode.render_frame(100, 24);
+    let selected = mode.selected;
+    mode.handle_mouse(&mouse_report(hidden_row, true, false));
+    mode.handle_mouse(&mouse_report(hidden_row, false, false));
+    assert_eq!(mode.selected, selected);
+    assert!(mode.running && mode.opened.is_none() && mode.shell_view.is_some());
+    let wheel = crate::mouse::parse_sgr_mouse_event("\x1b[<64;3;3M").unwrap();
+    mode.handle_mouse(&wheel);
+    let after = mode.render_frame(100, 24);
+    assert_ne!(before, after, "the wheel scrolls the shell's output");
+    assert_eq!(mode.selected, selected);
+    crate::mouse_tracking::disable(&mut std::io::stdout()).expect("disable");
+}
+
+#[test]
+fn unverified_persistent_group_stays_visible_without_an_unsafe_cancel() {
+    let (mut mode, _) = mode_with_row("holder", "mock-1");
+    mode.saved_catalog_loaded = true;
+    mode.apply_persistent_shells(serde_json::json!({ "activities": [{
+        "id": "orphan", "command": "sleep 60", "sessionId": "deleted",
+        "status": "unverified", "durationMs": 4_000, "persistent": true,
+    }]}));
+    let row = mode.persistent_shell_rows(&[]).remove(0);
+    let layout = build_layout(std::slice::from_ref(&row), 100);
+    assert_eq!(
+        flat(&mode.render_row(&row, &layout, 100, false))
+            .split_whitespace()
+            .collect::<Vec<_>>(),
+        ["$", "sleep", "60", "-", "-", "4.0s"]
+    );
+    mode.open_persistent_shell(&row);
+    mode.handle_shell_view_key("enter");
+    mode.pending_shell_action.take();
+    mode.handle_shell_view_key("enter");
+    assert!(mode.pending_shell_action.is_none());
+}
+
+#[test]
+fn shell_rows_render_in_the_session_table_columns() {
+    let mut mode = fresh_mode(vec![roster_entry("i", "idle", &parent_summary("i"))]);
+    mode.rebuild_rows();
+    let command = "python train.py --epochs 40 --config configs/sweep-large.yaml";
+    mode.apply_persistent_shells(serde_json::json!({ "activities": [
+        { "id": "s1", "command": command, "sessionId": "i", "status": "running", "durationMs": 754_000 },
+    ]}));
+    let (lines, _) = mode.render_frame(100, 30);
+    let texts: Vec<String> = lines
+        .iter()
+        .map(|line| flat(line).trim_end().to_string())
+        .collect();
+    let find = |prefix: &str| {
+        texts
+            .iter()
+            .find(|text| text.starts_with(prefix))
+            .unwrap_or_else(|| panic!("{prefix:?} in:\n{}", texts.join("\n")))
+    };
+    let (legend, shell, session) = (find("Session"), find("$ python"), find("\u{2022} i name"));
+    let layout = build_layout(&mode.rows, 100);
+    let model_at = layout.name_width + 2;
+    let column = |text: &str, at: usize| text.chars().skip(at).collect::<String>();
+    assert_eq!(
+        shell.chars().take(model_at).collect::<String>(),
+        format!(
+            "$ {}  ",
+            crate::agents_view_state::truncate_text(command, layout.name_width - 2)
+        ),
+        "the command clips to the Session column:\n{}",
+        texts.join("\n")
+    );
+    assert!(column(legend, model_at).starts_with("Model"));
+    assert!(
+        column(session, model_at - 2).starts_with("  ")
+            && !column(session, model_at).starts_with(' ')
+    );
+    assert_eq!(
+        column(shell, model_at)
+            .split_whitespace()
+            .collect::<Vec<_>>(),
+        ["-", "-", "12m", "34s"],
+        "Model, Cost, and Age, then nothing"
+    );
+    assert_eq!(
+        str_width(shell),
+        str_width(legend),
+        "the elapsed ends under Age"
+    );
+}
+
+#[test]
+fn finished_persistent_shells_never_show_the_persistent_shells_heading() {
+    let mut mode = fresh_mode(vec![roster_entry("i", "idle", &parent_summary("i"))]);
+    mode.rebuild_rows();
+    mode.apply_persistent_shells(serde_json::json!({ "activities": [
+        { "id": "s1", "command": "cargo build", "sessionId": "i", "status": "finished", "exitCode": 0 },
+        { "id": "s2", "command": "sleep 600", "sessionId": "gone", "status": "finished", "exitCode": 143 },
+    ]}));
+    let (lines, _) = mode.render_frame(100, 30);
+    let text = lines.iter().map(flat).collect::<Vec<_>>().join("\n");
+    assert!(
+        !text.contains("Persistent shells")
+            && !text.contains("cargo build")
+            && !text.contains("sleep 600"),
+        "{text}"
+    );
+}
+
+#[test]
+fn the_persistent_shells_heading_and_the_orphans_bash_list_show_only_live_shells() {
+    let mut mode = fresh_mode(vec![roster_entry("i", "idle", &parent_summary("i"))]);
+    mode.apply_saved_loaded(Vec::new());
+    mode.apply_persistent_shells(serde_json::json!({ "activities": [
+        { "id": "s1", "command": "cargo build", "sessionId": "gone", "status": "finished", "exitCode": 0 },
+        { "id": "s2", "command": "cargo watch", "sessionId": "gone", "status": "running" },
+        { "id": "s3", "command": "sleep 600", "sessionId": "gone", "status": "finished", "exitCode": 143 },
+    ]}));
+    let render = |mode: &mut AgentsViewMode| {
+        let (lines, _) = mode.render_frame(100, 30);
+        lines.iter().map(flat).collect::<Vec<_>>()
+    };
+    let texts = render(&mut mode);
+    let heading = texts
+        .iter()
+        .position(|text| text.contains("Persistent shells (1)"))
+        .unwrap_or_else(|| panic!("the heading in:\n{}", texts.join("\n")));
+    assert!(
+        texts[heading + 1].contains("$ cargo watch") && texts[heading + 2].trim().is_empty(),
+        "exactly the running row under the heading:\n{}",
+        texts.join("\n")
+    );
+    let row = mode
+        .rows
+        .iter()
+        .find(|row| row.kind == RowKind::PersistentShell)
+        .cloned()
+        .expect("shell row");
+    mode.open_persistent_shell(&row);
+    let bash_list = render(&mut mode).join("\n");
+    assert!(
+        bash_list.contains("cargo watch")
+            && !bash_list.contains("cargo build")
+            && !bash_list.contains("sleep 600"),
+        "the Bash list keeps only the live shell:\n{bash_list}"
+    );
+}
+
+#[test]
+fn persistent_shells_head_the_list_above_every_section() {
+    let mut mode = fresh_mode(vec![
+        roster_entry("r", "running", &parent_summary("r")),
+        roster_entry("i", "idle", &parent_summary("i")),
+    ]);
+    mode.apply_saved_loaded(vec![
+        saved_catalog_row("/x/old-a.jsonl", "old-a", "old session a"),
+        saved_catalog_row("/x/old-b.jsonl", "old-b", "old session b"),
+    ]);
+    mode.rebuild_rows();
+    mode.selected = mode
+        .rows
+        .iter()
+        .position(|row| row.summary.get("sessionId").and_then(Value::as_str) == Some("i"))
+        .expect("idle row");
+    mode.sync_selected_row_state();
+    mode.apply_persistent_shells(serde_json::json!({ "activities": [
+        { "id": "s1", "command": "cargo watch", "sessionId": "i", "status": "running" },
+        { "id": "s2", "command": "sleep 600", "sessionId": "gone", "status": "running" },
+    ]}));
+
+    assert_eq!(
+        mode.rows[mode.selected].summary["sessionId"], "i",
+        "the late shells keep the selection on its session"
+    );
+    let (lines, _) = mode.render_frame(100, 40);
+    let texts: Vec<String> = lines.iter().map(flat).collect();
+    let position = |needle: &str| {
+        texts
+            .iter()
+            .position(|text| text.contains(needle))
+            .unwrap_or_else(|| panic!("{needle:?} in:\n{}", texts.join("\n")))
+    };
+    let shells = position("Persistent shells (2)");
+    assert!(
+        texts[shells + 1].contains("$ cargo watch") && texts[shells + 2].contains("$ sleep 600"),
+        "the shell rows sit under their heading:\n{}",
+        texts.join("\n")
+    );
+    assert_eq!(texts[shells + 3].trim(), "");
+    assert_eq!(position("Running (1)"), shells + 4);
+    assert!(position("Running (1)") < position("Idle (1)"));
+    assert!(position("Idle (1)") < position("Inactive (2)"));
+    assert!(
+        mode.click_rows.windows(2).all(|pair| pair[0].1 < pair[1].1),
+        "the row order is the display order"
+    );
 }

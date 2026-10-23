@@ -99,6 +99,9 @@ impl MockSupervisor {
         });
         write_json(&mut writer, &hello);
 
+        // A page stop also stops the mock's session: the daemon's `session_closed` follows the
+        // stop's reply, and the closed session's graph lane answers a refusal from then on.
+        let mut session_closed = false;
         let mut line = String::new();
         loop {
             line.clear();
@@ -169,8 +172,35 @@ impl MockSupervisor {
                     // kernel-not-running wire shape) or the configured
                     // runs reply; every other action answers empty data
                     // (the guard reads the graph list only).
+                    if command.get("action").and_then(Value::as_str) == Some("stop") {
+                        write_json(
+                            &mut writer,
+                            &json!({
+                                "type": "response",
+                                "id": id,
+                                "command": "factory_activity",
+                                "success": true,
+                                "data": { "state": "stopping" },
+                            }),
+                        );
+                        write_json(
+                            &mut writer,
+                            &json!({
+                                "type": "session_closed",
+                                "activeSessionId": "s1",
+                                "reason": "killed",
+                            }),
+                        );
+                        session_closed = true;
+                        continue;
+                    }
                     if command.get("action").and_then(Value::as_str) == Some("graph") {
-                        if let Some(error) = factory_graph_error.as_ref() {
+                        let error = if session_closed {
+                            Some("Unknown active session: s1".to_string())
+                        } else {
+                            factory_graph_error.clone()
+                        };
+                        if let Some(error) = error.as_ref() {
                             write_json(
                                 &mut writer,
                                 &json!({
@@ -269,6 +299,13 @@ struct RecordingSettings {
 }
 
 impl pa_tui::client_settings::ClientSettings for RecordingSettings {
+    fn compaction_threshold_percent(&self) -> f64 {
+        95.0
+    }
+    fn set_compaction_threshold_percent(&self, _percent: f64) -> Result<()> {
+        Ok(())
+    }
+
     fn theme(&self) -> Option<String> {
         None
     }
@@ -808,12 +845,7 @@ fn alt_a() -> KeyEvent {
     KeyEvent::new(KeyCode::Char('a'), KeyModifiers::ALT)
 }
 
-/// One right-arrow key event (the dock's next-section step).
-fn dock_right() -> KeyEvent {
-    KeyEvent::new(KeyCode::Right, KeyModifiers::NONE)
-}
-
-/// One down-arrow key event (the page's `tui.select.down`).
+/// One down-arrow key event (`tui.select.down`: the dock's next row, the page's next run).
 fn down() -> KeyEvent {
     KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)
 }
@@ -831,7 +863,7 @@ fn escape() -> KeyEvent {
 /// The page's picker keys repaint on the key itself, never waiting for
 /// the 2-second refresh poll (the input loop's render contract: every
 /// dispatched input paints — the same TS `handleInput` parity that
-/// carries the dock's arrows and every other picker key). The pin closes
+/// carries the dock's keys and every other picker key). The pin closes
 /// the page on the input right after the arrow, so no poll window can
 /// sit between the move and the paint: the moved selection marker must
 /// land in a captured frame on the arrow's own repaint — and the poll
@@ -850,12 +882,12 @@ fn factory_page_picker_keys_paint_the_moved_selection_on_the_key() {
         ]
     });
     let steps = vec![
-        // Focus the dock and step to the factory group (subagents ->
-        // heartbeats -> shells -> factory); Enter opens the page.
+        // Focus the dock and step down to the factory row (subagents ->
+        // heartbeats -> shells -> factory rows); Enter opens the page.
         HeadlessStep::Key(alt_a()),
-        HeadlessStep::Key(dock_right()),
-        HeadlessStep::Key(dock_right()),
-        HeadlessStep::Key(dock_right()),
+        HeadlessStep::Key(down()),
+        HeadlessStep::Key(down()),
+        HeadlessStep::Key(down()),
         HeadlessStep::Key(enter()),
         // The page opens on the feed's live head: the newest run.
         HeadlessStep::WaitRender {
@@ -879,5 +911,38 @@ fn factory_page_picker_keys_paint_the_moved_selection_on_the_key() {
     assert!(
         all.contains("\u{25b8} factory: first-run"),
         "the arrow's own repaint painted the moved selection before the page closed:\n{all}"
+    );
+}
+
+/// A session the daemon stops while its factory page is open leaves no stale run cards: the
+/// close clears the dock's run cache and the mounted page with it.
+#[test]
+fn a_closed_session_clears_the_open_factory_page() {
+    let graph = json!({ "runs": [factory_page_run("run-1", "only-run")] });
+    let steps = vec![
+        HeadlessStep::Key(alt_a()),
+        HeadlessStep::Key(down()),
+        HeadlessStep::Key(down()),
+        HeadlessStep::Key(down()),
+        HeadlessStep::Key(enter()),
+        HeadlessStep::WaitRender {
+            needle: "factory: only-run".to_string(),
+            timeout_ms: 5_000,
+        },
+        // Enter opens the run's action rows, the second Enter stops it; the mock's daemon then
+        // closes the session.
+        HeadlessStep::Key(enter()),
+        HeadlessStep::Key(enter()),
+        HeadlessStep::WaitRender {
+            needle: "No live factory runs.".to_string(),
+            timeout_ms: 5_000,
+        },
+        HeadlessStep::WaitMs(200),
+    ];
+    let frames = run_plan_config(vec!["factory_activity".to_string()], Some(graph), steps);
+    let last = flat_text(&frames[frames.len() - 1..]);
+    assert!(
+        last.contains("No live factory runs.") && !last.contains("only-run"),
+        "the closed session's page drops its run cards:\n{last}"
     );
 }

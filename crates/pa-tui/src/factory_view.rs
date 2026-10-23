@@ -132,6 +132,52 @@ impl FactoryRunSnapshot {
             Some("running" | "stopping" | "paused")
         ) || self.children_in_flight()
     }
+
+    /// Whether the run is paused (an escalate, budget, or max-* pause
+    /// waiting for resume): live, but not running. Every count splits the
+    /// live runs on this one predicate.
+    #[must_use]
+    pub fn is_paused(&self) -> bool {
+        self.state.as_deref() == Some("paused")
+    }
+}
+
+/// The live runs split on [`FactoryRunSnapshot::is_paused`]: the dock and
+/// the agents view show the running runs apart from the paused ones.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct FactoryRunCounts {
+    pub running: usize,
+    pub paused: usize,
+}
+
+impl FactoryRunCounts {
+    /// Count the live runs of one parsed reply.
+    #[must_use]
+    pub fn of(runs: &[FactoryRunSnapshot]) -> Self {
+        let mut counts = Self::default();
+        for run in runs.iter().filter(|run| run.is_live()) {
+            if run.is_paused() {
+                counts.paused += 1;
+            } else {
+                counts.running += 1;
+            }
+        }
+        counts
+    }
+}
+
+/// The activity dock's factory row: the live runs (the dock count's own
+/// set), paused first, each `<name> <state>`.
+#[must_use]
+pub fn dock_factory_items(runs: &[FactoryRunSnapshot]) -> Vec<String> {
+    let mut live: Vec<&FactoryRunSnapshot> = runs.iter().filter(|run| run.is_live()).collect();
+    live.sort_by_key(|run| !run.is_paused());
+    live.iter()
+        .map(|run| match &run.state {
+            Some(state) => format!("{} {state}", run.display_name()),
+            None => run.display_name(),
+        })
+        .collect()
 }
 
 /// One run-level action the page offers on a live run (the heartbeats
@@ -187,6 +233,15 @@ pub fn parse_factory_runs(data: &Value) -> Vec<FactoryRunSnapshot> {
 #[must_use]
 pub fn factory_reply_lists_runs(data: &Value) -> bool {
     data.get("runs").is_some_and(Value::is_array)
+}
+
+/// The live runs in a graph reply ([`FactoryRunSnapshot::is_live`]).
+#[must_use]
+pub fn live_run_count(data: &Value) -> usize {
+    parse_factory_runs(data)
+        .iter()
+        .filter(|run| run.is_live())
+        .count()
 }
 
 /// The malformed-lane error line (one message for the mount and the
@@ -380,7 +435,7 @@ impl FactoryView {
         if run.run_id.is_empty() {
             return actions;
         }
-        if run.state.as_deref() == Some("paused") {
+        if run.is_paused() {
             actions.push(FactoryAction::Resume);
         }
         if run.is_live() {
@@ -496,8 +551,7 @@ impl FactoryView {
     pub fn handle_key(&mut self, key: &str, kb: &KeybindingsManager) -> FactoryViewAction {
         if key == "ctrl+c" || kb.matches(key, "tui.select.cancel") {
             // Esc backs out of the open action rows before it closes
-            // the page — the drill-in's back, on the one close key the
-            // page carries (the keyset stays arrows + Enter + Esc).
+            // the page — the drill-in's back.
             if self.mode != Mode::Feed {
                 self.mode = Mode::Feed;
                 return FactoryViewAction::None;
@@ -514,6 +568,19 @@ impl FactoryView {
             return FactoryViewAction::None;
         }
         if kb.matches(key, "tui.select.confirm") {
+            return self.confirm_selection();
+        }
+        // The horizontal arrows mirror back/confirm — as fallbacks only,
+        // after the configured bindings, so a rebound Left/Right keeps
+        // its configured action.
+        if key == "left" {
+            if self.mode != Mode::Feed {
+                self.mode = Mode::Feed;
+                return FactoryViewAction::None;
+            }
+            return FactoryViewAction::Close;
+        }
+        if key == "right" {
             return self.confirm_selection();
         }
         FactoryViewAction::None

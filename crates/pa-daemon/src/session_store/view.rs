@@ -1,7 +1,21 @@
 //! The loaded-session view: the branch walks, the window/settings reads, the
 //! compacted message fold and its scalars, and the wire-shape message helpers.
 
-use super::{json, MessageWindowScalars, SessionEntry, SessionFile, Value, WindowedTranscript};
+use super::{json, MessageWindowScalars, SessionEntry, SessionFile, TranscriptPageRows, Value};
+use pa_types::daemon::TranscriptPage;
+
+/// One display-transcript row: its entry id and wire message.
+type DisplayRow<'a> = (&'a str, std::borrow::Cow<'a, Value>);
+
+#[cfg(test)]
+thread_local! {
+    /// Steps the branch walk and the ancestor lookup took on this thread (the page-cost pin).
+    pub(super) static CHAIN_STEPS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+#[path = "page_walk_tests.rs"]
+mod page_walk_tests;
 
 /// Entry types that represent user intent (vs daemon bookkeeping).
 const CONTENT_ENTRY_TYPES: &[&str] = &[
@@ -85,28 +99,90 @@ impl SessionFile {
             .and_then(|depth| u32::try_from(depth).ok())
     }
 
-    /// Walk the leaf-to-root entry path (the active branch). A corrupt file can
-    /// hold a parent cycle; the walk must terminate anyway.
+    /// Walk the leaf-to-root entry path (the active branch), root first.
     #[must_use]
     pub fn branch(&self) -> Vec<&SessionEntry> {
-        let mut path = Vec::new();
-        let mut visited = std::collections::HashSet::new();
-        let mut current = self.leaf_id.as_deref().and_then(|id| self.entry(id));
-        while let Some(entry) = current {
-            if !visited.insert(entry.id.as_str()) {
-                break;
-            }
-            if let Some(window) = &self.window {
-                let index = self.by_id[&entry.id];
-                if index < window.loaded_entries && !window.retained_ids.contains(&entry.id) {
-                    break;
-                }
-            }
-            path.push(entry);
-            current = entry.parent_id.as_deref().and_then(|id| self.entry(id));
-        }
+        let mut path: Vec<&SessionEntry> = self
+            .walk_back(self.branch_leaf())
+            .map(|position| &self.entries[position])
+            .collect();
         path.reverse();
         path
+    }
+
+    /// Whether a windowed store's branch walk stops at `position`: a loaded row
+    /// outside the retained window.
+    fn window_excludes(&self, position: usize) -> bool {
+        self.window.as_ref().is_some_and(|window| {
+            position < window.loaded_entries
+                && !window.retained_ids.contains(&self.entries[position].id)
+        })
+    }
+
+    /// The active branch's newest position.
+    fn branch_leaf(&self) -> Option<usize> {
+        self.leaf_id
+            .as_deref()
+            .and_then(|id| self.by_id.get(id).copied())
+            .filter(|&position| !self.window_excludes(position))
+    }
+
+    /// The branch walk's one step: the parent, unless it starts a new chain or the window
+    /// excludes it.
+    fn branch_parent(&self, position: usize) -> Option<usize> {
+        #[cfg(test)]
+        CHAIN_STEPS.with(|steps| steps.set(steps.get() + 1));
+        self.chain[position]
+            .parent()
+            .filter(|&parent| !self.window_excludes(parent))
+    }
+
+    /// Branch positions from `from` back to the branch start, newest first.
+    fn walk_back(&self, from: Option<usize>) -> impl Iterator<Item = usize> + '_ {
+        std::iter::successors(from, move |&position| self.branch_parent(position))
+    }
+
+    /// Branch positions after `after` (exclusive; the branch start when `None`) through
+    /// `last`, oldest first. `after` must be an ancestor of `last`. Reads `last`'s
+    /// ancestors in chunks of doubling size, so the cost follows the rows consumed.
+    fn walk_forward(&self, after: Option<usize>, last: usize) -> impl Iterator<Item = usize> + '_ {
+        let top = self.chain[last].depth();
+        let mut low = after.map_or(0, |after| self.chain[after].depth() + 1);
+        let mut chunk = 64;
+        std::iter::from_fn(move || {
+            if low > top {
+                return None;
+            }
+            let high = top.min(low + chunk - 1);
+            let start = Some(self.ancestor_at(last, high))
+                .filter(|&position| !self.window_excludes(position));
+            let mut positions: Vec<usize> = self.walk_back(start).take(high + 1 - low).collect();
+            positions.reverse();
+            low = high + 1;
+            chunk *= 2;
+            Some(positions)
+        })
+        .flatten()
+    }
+
+    /// Whether `position` is on the active branch: the leaf's ancestor at its depth. A
+    /// window's excluded rows precede every row it keeps, and parents precede children,
+    /// so no excluded row sits between a kept row and the leaf.
+    fn on_branch(&self, position: usize) -> bool {
+        self.branch_leaf().is_some_and(|leaf| {
+            let depth = self.chain[position].depth();
+            depth <= self.chain[leaf].depth()
+                && self.ancestor_at(leaf, depth) == position
+                && !self.window_excludes(position)
+        })
+    }
+
+    /// Whether entry `id` is on the active branch.
+    #[must_use]
+    pub fn branch_contains(&self, id: &str) -> bool {
+        self.by_id
+            .get(id)
+            .is_some_and(|&position| self.on_branch(position))
     }
 
     /// The leaf-to-root walk with parent gaps bridged: a parent id minted but
@@ -279,20 +355,7 @@ impl SessionFile {
     #[must_use]
     pub fn messages(&self) -> Vec<Value> {
         let mut messages = Vec::new();
-        self.walk_message_values(|_, message| {
-            messages.push(message.into_owned());
-            true
-        });
-        messages
-    }
-
-    #[must_use]
-    pub fn messages_before(&self, before: usize) -> Vec<Value> {
-        let mut messages = Vec::new();
-        self.walk_message_values(|index, message| {
-            if index >= before {
-                return false;
-            }
+        self.walk_message_values(|message| {
             messages.push(message.into_owned());
             true
         });
@@ -304,7 +367,7 @@ impl SessionFile {
     #[must_use]
     pub fn scan_message_scalars(&self) -> MessageWindowScalars {
         let mut scalars = MessageWindowScalars::default();
-        self.walk_message_values(|_, message| {
+        self.walk_message_values(|message| {
             scalars.message_count += 1;
             if let Some(timestamp) = crate::types::message_timestamp_ms(&message) {
                 scalars.last_timestamp_ms = Some(timestamp);
@@ -314,41 +377,22 @@ impl SessionFile {
         scalars
     }
 
-    /// The windowed message sequence behind [`Self::messages`] (`custom_message`
+    /// The model-context message sequence behind [`Self::messages`] (`custom_message`
     /// rows rejoin as their wire form, `role: "custom"`; a compaction window
-    /// prepends its summary message). Every consumer derives from this one walk.
+    /// prepends its summary message).
     fn walk_message_values<'a>(
         &'a self,
-        mut visit: impl FnMut(usize, std::borrow::Cow<'a, Value>) -> bool,
+        mut visit: impl FnMut(std::borrow::Cow<'a, Value>) -> bool,
     ) {
-        let entry_message = |entry: &'a SessionEntry| -> Option<std::borrow::Cow<'a, Value>> {
-            match entry.type_.as_str() {
-                "message" => entry.fields.get("message").map(std::borrow::Cow::Borrowed),
-                "custom_message" => {
-                    let mut message = entry.fields.clone();
-                    if let Some(object) = message.as_object_mut() {
-                        object.insert("role".to_string(), Value::String("custom".to_string()));
-                        object.insert(
-                            "timestamp".to_string(),
-                            Value::String(entry.timestamp.clone()),
-                        );
-                    }
-                    Some(std::borrow::Cow::Owned(message))
-                }
-                _ => None,
-            }
-        };
         let branch = self.branch();
-        let mut index = 0usize;
         let Some(compaction_position) =
             branch.iter().rposition(|entry| entry.type_ == "compaction")
         else {
             for entry in &branch {
                 if let Some(message) = entry_message(entry) {
-                    if !visit(index, message) {
+                    if !visit(message) {
                         return;
                     }
-                    index += 1;
                 }
             }
             return;
@@ -376,133 +420,183 @@ impl SessionFile {
             }
         }
         let summary =
-            std::borrow::Cow::Owned(compaction_summary_message(compaction, retained_count));
-        if !visit(index, summary) {
+            std::borrow::Cow::Owned(compaction_summary_message(compaction, Some(retained_count)));
+        if !visit(summary) {
             return;
         }
-        index += 1;
         let mut keeping = false;
         for entry in &branch[..compaction_position] {
             // The durable cut can name bookkeeping, not just a message row.
             if !keeping && entry.id == first_kept_entry_id {
                 keeping = true;
             }
-            if !entry_bears_message(entry) {
-                continue;
-            }
             if keeping {
                 if let Some(message) = entry_message(entry) {
-                    if !visit(index, message) {
+                    if !visit(message) {
                         return;
                     }
-                    index += 1;
                 }
             }
         }
         for entry in &branch[compaction_position + 1..] {
             if let Some(message) = entry_message(entry) {
-                if !visit(index, message) {
+                if !visit(message) {
                     return;
                 }
-                index += 1;
             }
         }
     }
 
+    /// One display-transcript row: a message-bearing entry, or a compaction as its summary
+    /// row in place, so every entry shows once.
+    fn display_row(&self, position: usize) -> Option<DisplayRow<'_>> {
+        let entry = &self.entries[position];
+        let message = if entry.type_ == "compaction" {
+            std::borrow::Cow::Owned(compaction_summary_message(entry, None))
+        } else {
+            entry_message(entry)?
+        };
+        Some((entry.id.as_str(), message))
+    }
+
+    /// The position of page anchor `id`: a display row on the active branch.
+    fn display_anchor(&self, id: &str) -> Option<usize> {
+        let position = *self.by_id.get(id)?;
+        let entry = &self.entries[position];
+        ((entry.type_ == "compaction" || entry_bears_message(entry)) && self.on_branch(position))
+            .then_some(position)
+    }
+
+    /// One page of the display transcript; `None` when an anchor row is not on the branch.
+    /// The page walks from its anchor, so its cost follows the page, not the session.
     #[must_use]
-    pub fn windowed_messages(&self, tail_budget: usize) -> WindowedTranscript {
-        let mut visited: Vec<std::borrow::Cow<'_, Value>> = Vec::new();
-        let mut last_user_prompt_ms = None;
-        self.walk_message_values(|_, message| {
-            if message.get("role").and_then(Value::as_str) == Some("user") {
-                // The prompt scalar mirrors the TUI's numeric/ISO timestamp
-                // contract without changing the roster's activity-time fold.
-                let prompt_timestamp_ms = match message.get("timestamp") {
-                    Some(Value::Number(number)) => number.as_u64().or_else(|| {
-                        number
-                            .as_f64()
-                            .filter(|value| value.is_finite())
-                            .map(|value| value.max(0.0) as u64)
-                    }),
-                    Some(Value::String(iso)) => pa_types::incident::timestamp_to_ms(iso)
-                        .filter(|ms| *ms > 0)
-                        .map(|ms| ms as u64),
-                    _ => None,
-                };
-                if let Some(timestamp) = prompt_timestamp_ms {
-                    last_user_prompt_ms = Some(timestamp);
-                }
-            }
-            visited.push(message);
-            true
-        });
-        let mut cut = visited.len().saturating_sub(tail_budget);
-        while cut > 0
-            && matches!(
-                visited[cut].get("role").and_then(Value::as_str),
-                Some("toolResult" | "custom")
-            )
-        {
-            cut -= 1;
-        }
-        // User bash and other message rows can land between a call and its
-        // result. Match the same last-pending call as transcript replay, then
-        // move only across pairs intersecting the cut. Reverse result order
-        // also catches an earlier pair exposed by moving the boundary back.
-        let mut pending: std::collections::HashMap<&str, Vec<usize>> =
-            std::collections::HashMap::new();
-        let mut pairs = Vec::new();
-        for (index, message) in visited.iter().enumerate() {
-            match message.get("role").and_then(Value::as_str) {
-                Some("assistant") => {
-                    if let Some(content) = message.get("content").and_then(Value::as_array) {
-                        for block in content {
-                            if let Some(id) = block.get("id").and_then(Value::as_str).filter(|_| {
-                                block.get("type").and_then(Value::as_str) == Some("toolCall")
-                            }) {
-                                pending.entry(id).or_default().push(index);
-                            }
-                        }
-                    }
-                }
-                Some("toolResult") => {
-                    if let Some(call) = message
-                        .get("toolCallId")
-                        .and_then(Value::as_str)
-                        .and_then(|id| pending.get_mut(id))
-                        .and_then(Vec::pop)
-                    {
-                        pairs.push((call, index));
-                    }
-                }
-                _ => {}
-            }
-        }
-        for (call, result) in pairs.into_iter().rev() {
-            if call < cut && result >= cut {
-                cut = call;
-            }
-        }
-        if let Some(retained) = visited
-            .first()
-            .filter(|first| first.get("role").and_then(Value::as_str) == Some("compactionSummary"))
-            .and_then(|first| first.get("retainedMessageCount"))
-            .and_then(Value::as_u64)
-            .and_then(|retained| usize::try_from(retained).ok())
-        {
-            if cut > 0 && cut <= retained {
-                cut = 0;
-            }
-        }
-        let messages = visited.split_off(cut);
-        WindowedTranscript {
-            messages: messages
+    pub fn transcript_page(&self, page: &TranscriptPage) -> Option<TranscriptPageRows> {
+        let (rows, more) = match page {
+            TranscriptPage::End { before, limit } => self.end_page(before.as_deref(), *limit)?,
+            TranscriptPage::Start {
+                after,
+                until,
+                limit,
+            } => self.start_page(after.as_deref(), until.as_deref(), *limit)?,
+        };
+        Some(TranscriptPageRows {
+            first_entry_id: rows.first().map(|(id, _)| (*id).to_string()),
+            last_entry_id: rows.last().map(|(id, _)| (*id).to_string()),
+            messages: rows
                 .into_iter()
-                .map(std::borrow::Cow::into_owned)
+                .map(|(_, message)| message.into_owned())
                 .collect(),
-            omitted: cut,
-            last_user_prompt_ms,
+            more,
+        })
+    }
+
+    /// The newest `limit` rows before the `before` row (the tail without it).
+    fn end_page(&self, before: Option<&str>, limit: usize) -> Option<(Vec<DisplayRow<'_>>, bool)> {
+        let before = before.map_or(Some(None), |id| self.display_anchor(id).map(Some))?;
+        let from = match before {
+            Some(position) => self.branch_parent(position),
+            None => self.branch_leaf(),
+        };
+        let mut older = self
+            .walk_back(from)
+            .filter_map(|position| self.display_row(position));
+        // Newest first: the `before` row, the page, the run that moves its cut back,
+        // then the rows the cut's tool calls may pair with.
+        let mut slice: Vec<DisplayRow<'_>> = before
+            .and_then(|position| self.display_row(position))
+            .into_iter()
+            .collect();
+        slice.extend(older.by_ref().take(limit));
+        while slice
+            .last()
+            .is_some_and(|(_, message)| continues_run(message))
+        {
+            let Some(row) = older.next() else {
+                break;
+            };
+            slice.push(row);
         }
+        let from_cut = slice.len();
+        slice.extend(older.by_ref().take(limit));
+        slice.reverse();
+        let end = slice.len() - usize::from(before.is_some());
+        let start = settle_cut(&slice, slice.len() - from_cut);
+        // A windowed store's unloaded prefix is older history too.
+        let more = start > 0 || self.window.is_some() || older.next().is_some();
+        slice.truncate(end);
+        slice.drain(..start);
+        Some((slice, more))
+    }
+
+    /// The oldest `limit` rows after the `after` row (the head without it), stopping
+    /// before the `until` row.
+    fn start_page(
+        &self,
+        after: Option<&str>,
+        until: Option<&str>,
+        limit: usize,
+    ) -> Option<(Vec<DisplayRow<'_>>, bool)> {
+        let until = until.map_or(Some(None), |id| self.display_anchor(id).map(Some))?;
+        let after = after.map_or(Some(None), |id| self.display_anchor(id).map(Some))?;
+        let Some(last) = until.or_else(|| self.branch_leaf()) else {
+            return Some((Vec::new(), false));
+        };
+        // The page, then up to `limit` rows past it (through the `until` row) for pairing.
+        let mut newer = self
+            .walk_forward(after, last)
+            .filter_map(|position| Some((position, self.display_row(position)?)));
+        let rows: Vec<(usize, DisplayRow<'_>)> = newer
+            .by_ref()
+            .take(limit.saturating_mul(2).saturating_add(1))
+            .collect();
+        let reached_until = rows
+            .last()
+            .is_some_and(|(position, _)| Some(*position) == until);
+        let available = rows.len() - usize::from(reached_until);
+        let mut rows: Vec<DisplayRow<'_>> = rows.into_iter().map(|(_, row)| row).collect();
+        if available <= limit {
+            rows.truncate(available);
+            return Some((rows, false));
+        }
+        if limit == 0 {
+            return Some((Vec::new(), true));
+        }
+        // The `limit` rows before the page, for calls whose results the cut would split.
+        let mut slice: Vec<DisplayRow<'_>> = self
+            .walk_back(after)
+            .filter_map(|position| self.display_row(position))
+            .take(limit)
+            .collect();
+        slice.reverse();
+        let page_start = slice.len();
+        slice.append(&mut rows);
+        let cut = settle_cut(&slice, page_start + limit);
+        let mut page = slice.split_off(page_start);
+        if cut > page_start {
+            page.truncate(cut - page_start);
+            return Some((page, true));
+        }
+        // The cut fell back to the page start: the page runs to the `until` row.
+        page.extend(newer.map(|(_, row)| row));
+        if until.is_some() {
+            page.pop();
+        }
+        Some((page, false))
+    }
+
+    /// The newest user prompt's time on the branch (the attach snapshot's marker); the walk
+    /// reaches back only as far as that prompt.
+    #[must_use]
+    pub fn last_user_prompt_ms(&self) -> Option<u64> {
+        self.walk_back(self.branch_leaf())
+            .find_map(|position| {
+                let entry = &self.entries[position];
+                (entry.type_ == "message")
+                    .then(|| entry.fields.get("message"))
+                    .flatten()
+                    .filter(|message| message_role(message) == Some("user"))
+            })
+            .and_then(prompt_timestamp_ms)
     }
 
     /// The durable entry id the compaction cut keeps: the engine's
@@ -551,6 +645,28 @@ impl SessionFile {
         }
     }
 
+    /// The session's persisted tool calls on the ACTIVE BRANCH (gap-bridged,
+    /// the same chain the usage accounting walks): `toolCall` blocks on
+    /// assistant messages, the window's folded prefix included (the
+    /// summary's `toolUseCount` seed; TS counts a child's assistant tool
+    /// calls over the active chain).
+    #[must_use]
+    pub fn tool_call_count(&self) -> u64 {
+        let older = self
+            .window
+            .as_ref()
+            .map_or(0, |window| window.older_path_stats.tool_calls);
+        older
+            + self
+                .branch_bridged()
+                .iter()
+                .filter(|entry| entry.type_ == "message")
+                .filter_map(|entry| entry.fields.get("message"))
+                .filter(|message| message_role(message) == Some("assistant"))
+                .map(crate::session_stats::tool_call_count)
+                .sum::<u64>()
+    }
+
     pub fn first_message(&self) -> Option<String> {
         if let Some(window) = &self.window {
             return window.first_message.clone();
@@ -591,6 +707,98 @@ pub(super) fn message_role(message: &Value) -> Option<&str> {
     message.get("role").and_then(Value::as_str)
 }
 
+/// A row's wire message (`custom_message` rows rejoin as `role: "custom"`).
+fn entry_message(entry: &SessionEntry) -> Option<std::borrow::Cow<'_, Value>> {
+    match entry.type_.as_str() {
+        "message" => entry.fields.get("message").map(std::borrow::Cow::Borrowed),
+        "custom_message" => {
+            let mut message = entry.fields.clone();
+            if let Some(object) = message.as_object_mut() {
+                object.insert("role".to_string(), Value::String("custom".to_string()));
+                object.insert(
+                    "timestamp".to_string(),
+                    Value::String(entry.timestamp.clone()),
+                );
+            }
+            Some(std::borrow::Cow::Owned(message))
+        }
+        _ => None,
+    }
+}
+
+/// A user prompt's wall-clock time, mirroring the TUI's numeric/ISO timestamp contract.
+fn prompt_timestamp_ms(message: &Value) -> Option<u64> {
+    match message.get("timestamp") {
+        Some(Value::Number(number)) => number.as_u64().or_else(|| {
+            number
+                .as_f64()
+                .filter(|value| value.is_finite())
+                .map(|value| value.max(0.0) as u64)
+        }),
+        Some(Value::String(iso)) => pa_types::incident::timestamp_to_ms(iso)
+            .filter(|ms| *ms > 0)
+            .map(|ms| ms as u64),
+        _ => None,
+    }
+}
+
+/// Whether a row continues the run before it: a page never starts at one.
+fn continues_run(message: &Value) -> bool {
+    matches!(message_role(message), Some("toolResult" | "custom"))
+}
+
+/// Move a page boundary earlier until the page below it starts at neither a tool
+/// result nor a custom row, and no tool call is split from its result.
+///
+/// `rows` is a local slice of the branch around the cut, not the whole branch: the
+/// page, the run before its first row, and up to `limit` rows past each side, the
+/// side toward the request's other anchor stopping at that anchor row. Calls pair
+/// with results only inside the slice, so a call more than a page from its result
+/// does not move the cut (else an orphan or aborted call drags every page to the root).
+fn settle_cut(rows: &[DisplayRow<'_>], mut cut: usize) -> usize {
+    while cut > 0 && cut < rows.len() && continues_run(&rows[cut].1) {
+        cut -= 1;
+    }
+    // User bash and other message rows can land between a call and its
+    // result. Match the same last-pending call as transcript replay, then
+    // move only across pairs intersecting the cut. Reverse result order
+    // also catches an earlier pair exposed by moving the boundary back.
+    let mut pending: std::collections::HashMap<&str, Vec<usize>> = std::collections::HashMap::new();
+    let mut pairs = Vec::new();
+    for (index, (_, message)) in rows.iter().enumerate() {
+        match message.get("role").and_then(Value::as_str) {
+            Some("assistant") => {
+                if let Some(content) = message.get("content").and_then(Value::as_array) {
+                    for block in content {
+                        if let Some(id) = block.get("id").and_then(Value::as_str).filter(|_| {
+                            block.get("type").and_then(Value::as_str) == Some("toolCall")
+                        }) {
+                            pending.entry(id).or_default().push(index);
+                        }
+                    }
+                }
+            }
+            Some("toolResult") => {
+                if let Some(call) = message
+                    .get("toolCallId")
+                    .and_then(Value::as_str)
+                    .and_then(|id| pending.get_mut(id))
+                    .and_then(Vec::pop)
+                {
+                    pairs.push((call, index));
+                }
+            }
+            _ => {}
+        }
+    }
+    for (call, result) in pairs.into_iter().rev() {
+        if call < cut && result >= cut {
+            cut = call;
+        }
+    }
+    cut
+}
+
 /// Whether one entry contributes a message to the fold: `message` rows need
 /// their persisted message; `custom_message` rows rejoin as their wire form.
 /// The borrowing twin of the `entry_message` Some-ness.
@@ -602,8 +810,9 @@ fn entry_bears_message(entry: &SessionEntry) -> bool {
     }
 }
 
-/// The `compactionSummary` message a compaction fold starts with.
-fn compaction_summary_message(entry: &SessionEntry, retained_count: usize) -> Value {
+/// The `compactionSummary` message of a compaction entry; the context walk's
+/// copy carries its retained count.
+fn compaction_summary_message(entry: &SessionEntry, retained_count: Option<usize>) -> Value {
     let timestamp = crate::util::iso_to_unix_ms(&entry.timestamp).unwrap_or(0);
     // The TS `compactionSummary` key order: role, summary, tokensBefore,
     // retainedMessageCount, customInstructions?, harnessDigest?, timestamp —
@@ -612,8 +821,10 @@ fn compaction_summary_message(entry: &SessionEntry, retained_count: usize) -> Va
         "role": "compactionSummary",
         "summary": entry.fields.get("summary").cloned().unwrap_or_default(),
         "tokensBefore": entry.fields.get("tokensBefore").cloned().unwrap_or(json!(0)),
-        "retainedMessageCount": retained_count as u64,
     });
+    if let Some(retained_count) = retained_count {
+        message["retainedMessageCount"] = json!(retained_count as u64);
+    }
     if let Some(custom_instructions) = entry.fields.get("customInstructions") {
         message["customInstructions"] = custom_instructions.clone();
     }

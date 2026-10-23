@@ -1,0 +1,1 @@
+- The static usage layer no longer tells agents to await commands before ending the turn: since #3580 daemonless sessions also wake on a queued `[bash-done]` turn, every session kind has completion notifications, and the no-polling rule (end the turn and collect the result on the done notification) is the one turn-end contract.

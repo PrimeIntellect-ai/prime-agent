@@ -47,11 +47,15 @@ const receipt = path.join(receiptDir, metadata.version);
 const failedReceipt = `${receipt}.failed`;
 const legacySocketMarker = path.join(receiptDir, "legacy-daemon-socket");
 const legacySocket = path.join(os.tmpdir(), `prime-agent-${process.getuid()}`, "daemon.sock");
+const rustSocket = path.join(process.env.TMPDIR || "/tmp", `prime-agent-rust-${process.getuid()}`, "daemon.sock");
+// Same rule as pa-daemon socket_dir(): non-Linux sun_path caps a unix
+// socket at 103 bytes, so a too-deep TMPDIR pins /tmp/prime-agent-rust-<uid>.
+const pinnedRustSocket = process.platform !== "linux" && Buffer.byteLength(rustSocket) > 103
+  ? path.join("/tmp", `prime-agent-rust-${process.getuid()}`, "daemon.sock") : rustSocket;
 const nativeEnvironment = { ...process.env,
   PRIME_AGENT_CODING_AGENT_DIR: process.env.PRIME_AGENT_CODING_AGENT_DIR || path.join(os.homedir(), ".prime/agent"),
   PRIME_AGENT_DAEMON_SOCKET: process.env.PRIME_AGENT_DAEMON_SOCKET ||
-    (coordinator || fs.existsSync(legacySocketMarker) ? legacySocket :
-      path.join(process.env.TMPDIR || "/tmp", `prime-agent-rust-${process.getuid()}`, "daemon.sock")),
+    (coordinator || fs.existsSync(legacySocketMarker) ? legacySocket : pinnedRustSocket),
 };
 delete nativeEnvironment.PI_PACKAGE_DIR;
 const signals = ["SIGINT", "SIGTERM", "SIGHUP"];

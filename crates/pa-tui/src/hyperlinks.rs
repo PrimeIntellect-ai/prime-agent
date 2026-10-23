@@ -1,6 +1,8 @@
-//! Terminal hyperlinks (OSC 8), gated on terminal capabilities: a
-//! positively-capable terminal wraps the link text in an OSC 8 pair; the
-//! legacy form prints the URL after the text. The renderer embeds the
+//! Terminal hyperlinks (OSC 8). Markdown retains label metadata even when
+//! the capability decision selects a visible URL fallback, matching TS's
+//! fullscreen backend and keeping in-app hit testing available. Other UI
+//! surfaces may gate their link presentation on terminal capabilities.
+//! The renderer embeds the
 //! zero-width sequences in span content; `width` skips them, the ratatui
 //! paint path strips them (`to_ratatui_line`), and [`HyperlinkWriter`]
 //! re-emits them around the painted link cells (the sequences must ride
@@ -46,19 +48,23 @@ pub fn rewrite_drive_path(url: &str) -> String {
 }
 
 /// TS `case "link"` href resolution: drive-path rewrite, then a WHATWG
-/// `new URL(target, baseUrl)` pass (the deployed renderer always sets
-/// `options.baseUrl`). Relative targets pass through raw — the one
-/// documented gap (they need cwd plumbing the markdown pipeline does not
-/// carry).
+/// `new URL(target, baseUrl)` pass. Standalone callers have no base; the
+/// session view supplies its own base through the crate-private Markdown context.
 #[must_use]
 pub fn resolve_link_href(token_href: &str) -> String {
+    resolve_link_href_with_base(token_href, None)
+}
+
+pub(crate) fn resolve_link_href_with_base(token_href: &str, base: Option<&url::Url>) -> String {
     let target = rewrite_drive_path(token_href);
     if target.starts_with('#') {
         return sanitize_control_bytes(target);
     }
     match url::Url::parse(&target) {
         Ok(parsed) => parsed.to_string(),
-        Err(_) => sanitize_control_bytes(target),
+        Err(_) => base
+            .and_then(|base| base.join(&target).ok())
+            .map_or_else(|| sanitize_control_bytes(target), |url| url.to_string()),
     }
 }
 
@@ -370,14 +376,28 @@ impl<W: Write> HyperlinkWriter<W> {
 
     /// Emit the buffered printable run and advance the tracked column.
     fn flush_text(&mut self) -> io::Result<()> {
+        use unicode_segmentation::UnicodeSegmentation;
         if self.text.is_empty() {
             return Ok(());
         }
         let chunk = std::mem::take(&mut self.text);
-        self.inner.write_all(&chunk)?;
-        if let Ok(text) = std::str::from_utf8(&chunk) {
+        let Ok(text) = std::str::from_utf8(&chunk) else {
+            return self.inner.write_all(&chunk);
+        };
+        for grapheme in text.graphemes(true) {
+            let width = crate::width::str_width(grapheme) as u16;
+            // Terminals disagree on the width of a multi-codepoint two-column cluster (a VS16
+            // emoji, a ZWJ sequence, a flag): blank both of its cells first, so a terminal that
+            // advances one column keeps no stale cell beside the glyph.
+            if let Some((row, col)) = self
+                .pos
+                .filter(|_| width == 2 && grapheme.chars().nth(1).is_some())
+            {
+                write!(self.inner, "  \x1b[{};{}H", row + 1, col + 1)?;
+            }
+            self.inner.write_all(grapheme.as_bytes())?;
             if let Some((_, col)) = self.pos.as_mut() {
-                *col = col.saturating_add(crate::width::str_width(text) as u16);
+                *col = col.saturating_add(width);
             }
         }
         Ok(())
@@ -650,6 +670,110 @@ mod tests {
         String::from_utf8(writer.into_inner()).expect("utf-8")
     }
 
+    /// The bytes the chat paint writes for consecutive frames of one row each: every frame
+    /// passes `to_ratatui_line` and the [`HyperlinkWriter`], as `app::draw` does.
+    fn paint_frames(frames: &[&str], width: u16) -> Vec<u8> {
+        #[derive(Clone, Default)]
+        struct Sink(std::rc::Rc<RefCell<Vec<u8>>>);
+        impl Write for Sink {
+            fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+                self.0.borrow_mut().extend_from_slice(buf);
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+        let sink = Sink::default();
+        let area = ratatui::layout::Rect::new(0, 0, width, 1);
+        let mut terminal = ratatui::Terminal::with_options(
+            ratatui::backend::CrosstermBackend::new(HyperlinkWriter::new(sink.clone())),
+            ratatui::TerminalOptions {
+                viewport: ratatui::Viewport::Fixed(area),
+            },
+        )
+        .unwrap();
+        for text in frames {
+            let line = crate::markdown::to_ratatui_line(&vec![crate::Span::raw(*text)]);
+            terminal
+                .draw(|frame| frame.render_widget(line, area))
+                .unwrap();
+        }
+        let bytes = sink.0.borrow().clone();
+        bytes
+    }
+
+    /// A minimal terminal that measures graphemes with `columns` (the width choice vt100 cannot
+    /// model): it follows cursor moves, skips the other escape sequences, and records the first
+    /// row's cells.
+    fn screen_row(bytes: &[u8], width: usize, columns: impl Fn(&str) -> usize) -> Vec<String> {
+        use unicode_segmentation::UnicodeSegmentation;
+        let text = std::str::from_utf8(bytes).unwrap();
+        let mut row = vec![" ".to_string(); width];
+        let mut col = 0;
+        let mut rest = text;
+        while !rest.is_empty() {
+            if let Some(len) = crate::width::escape_len(rest) {
+                let sequence = &rest[..len];
+                if let Some(position) = sequence
+                    .strip_prefix("\x1b[")
+                    .and_then(|s| s.strip_suffix('H'))
+                {
+                    col = position
+                        .split(';')
+                        .nth(1)
+                        .and_then(|c| c.parse::<usize>().ok())
+                        .unwrap_or(1)
+                        - 1;
+                }
+                rest = &rest[len..];
+                continue;
+            }
+            let grapheme = rest.graphemes(true).next().unwrap();
+            let advance = columns(grapheme);
+            if advance > 0 && col < width {
+                row[col] = grapheme.to_string();
+                for cell in row.iter_mut().skip(col + 1).take(advance - 1) {
+                    cell.clear();
+                }
+            }
+            col += advance;
+            rest = &rest[grapheme.len()..];
+        }
+        row
+    }
+
+    /// A terminal that gives the soft hyphen a column (glibc `wcwidth`, pyte) and one that gives
+    /// it none (iTerm2) paint the same row: the hyphen never reaches the terminal.
+    #[test]
+    fn a_soft_hyphen_never_shifts_the_cells_after_it() {
+        let bytes = paint_frames(&["a\u{ad}b"], 4);
+        let row = screen_row(&bytes, 4, |grapheme| {
+            usize::from(grapheme == "\u{ad}") + crate::width::str_width(grapheme)
+        });
+        assert_eq!(
+            row[..2],
+            ["a", "b"],
+            "the row a one-column soft hyphen terminal paints"
+        );
+    }
+
+    /// A terminal that measures a VS16 emoji one column wide (vt100, like iTerm2) keeps no stale
+    /// character in the second cell the paint assigns it.
+    #[test]
+    fn a_two_column_cluster_leaves_no_stale_cell_on_a_narrow_measuring_terminal() {
+        let bytes = paint_frames(&["abcd", "\u{26a0}\u{fe0f}cd"], 4);
+        let mut parser = vt100::Parser::new(1, 4, 0);
+        parser.process(&bytes);
+        let screen = parser.screen();
+        assert_eq!(screen.cell(0, 0).unwrap().contents(), "\u{26a0}\u{fe0f}");
+        let second = screen.cell(0, 1).unwrap().contents();
+        assert!(
+            second.trim().is_empty(),
+            "the second cell still shows the previous frame's {second:?}"
+        );
+    }
+
     #[test]
     fn writer_injects_open_close_around_link_cells() {
         // Link covers the `cd` label at columns 4..6 of row 0.
@@ -664,6 +788,34 @@ mod tests {
             out,
             "\x1b[1;3Hab\x1b[1;5H\x1b]8;;https://z\x1b\\cd\x1b]8;;\x1b\\\x1b[1;8Hxy"
         );
+    }
+
+    #[test]
+    fn fallback_capability_keeps_markdown_label_metadata_and_hit_testing() {
+        set_hyperlinks_override(Some(false));
+        let style = crate::markdown::MarkdownStyle::default();
+        let frame = vec![crate::markdown::render_inline(
+            "[docs](https://example.com)",
+            &style,
+        )];
+        let ranges = frame_link_ranges(&frame);
+        assert_eq!(link_at(&ranges, 0, 0), Some("https://example.com/"));
+        assert_eq!(
+            link_at(&ranges, 0, 4),
+            None,
+            "fallback URL is outside the label's region"
+        );
+        // The actual render has separate label/body and dim fallback spans.
+        // Pin that boundary; this is not a test of splitting a homogeneous
+        // writer chunk across a link range in the middle of its bytes.
+        let out = paint(&frame, &[b"\x1b[1;1Hdocs", b" (https://example.com)"]);
+        assert!(out.contains(&format!(
+            "{}docs{}",
+            osc8_open("https://example.com/"),
+            OSC8_CLOSE
+        )));
+        assert!(out.ends_with(" (https://example.com)"));
+        set_hyperlinks_override(None);
     }
 
     #[test]

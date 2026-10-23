@@ -317,6 +317,8 @@ def _validate_state_fields(
 
     if "retries" in state and not (_is_int(state.get("retries")) and 0 <= state.get("retries") <= MAX_RETRIES):
         errors.append(f"{noun} {ref} retries must be an integer between 0 and {MAX_RETRIES}")
+    elif is_resident and state.get("retries", NODE_RETRIES_DEFAULT) > 0:
+        errors.append(f"resident {noun} {ref} cannot declare retries")
 
     if "failure_policy" in state and state.get("failure_policy") not in FAILURE_POLICIES:
         errors.append(
@@ -491,7 +493,7 @@ def validate_factory_machine(machine: Any) -> list[str]:
     the machine is valid. Rules: states are 1..1024 with unique slug ids and
     at least one entry state; every state requires a subagent and entry
     states declare no inputs; resident states declare no outputs, foreach,
-    or outgoing transitions; wait blocks are rejected (the watch host
+    retries, or outgoing transitions; wait blocks are rejected (the watch host
     handlers arrive with the communication series); transitions reference
     existing states (self-loops are legal re-entry) and may carry one guard
     over the from-state's latest settle output; a transition with a LIST of
@@ -1084,6 +1086,17 @@ _RATE_LIMIT_MARKERS = (
     "usage limit",
 )
 
+INFRA_VERIFY_QUIET_SECONDS = POLL_TIMEOUT_MS / 1000
+"""Quiet period before the executor re-reads a worker that settled with an
+infra error (one collect-poll slice): the re-check must not race the very
+probe streak that reported the death. The sleep is injected, so tests see
+no wall-clock wait."""
+
+_INFRA_ERROR_MARKERS = (
+    "child worker unreachable",
+    "supervisor link",
+)
+
 _FENCED_JSON_RE = re.compile(r"```json\s*(.*?)\s*```", re.DOTALL)
 TERMINAL_ENTRY_STATUSES = ("done", "error", "cancelled")
 
@@ -1092,6 +1105,15 @@ def _is_rate_limit_error(message: str) -> bool:
     """Heuristic: the host reports admission failures as error strings."""
     lowered = message.lower()
     return any(marker in lowered for marker in _RATE_LIMIT_MARKERS)
+
+
+def _is_infra_error(message: str) -> bool:
+    """Heuristic: the supervisor reports worker deaths and lost supervisor
+    links as one-shot error settles (``Child worker unreachable`` after the
+    daemon's unreachable-probe streak, or a ``supervisor link ...`` error
+    from a failed kickoff). Infra, not the task's failure."""
+    lowered = message.lower()
+    return any(marker in lowered for marker in _INFRA_ERROR_MARKERS)
 
 
 def _child_name(run_id: str, state_id: str, instance_index: int, attempt: int) -> str:
@@ -1340,8 +1362,18 @@ class _NodeInstance:
     prompt: str  # fully rendered; re-spawns reuse it verbatim
     status: str = "pending"  # pending | running | done | error | cancelled
     attempt: int = 0  # spawn admissions tried for this instance; a rate-limit
-    # deferral counts here too, and ``retries`` compares against this same
-    # counter, so one transient 429 admission consumes one declared retry.
+    # deferral counts here too, and charged retries compare against
+    # ``attempt - retry_base``, so one transient 429 admission consumes one
+    # declared retry.
+    retry_base: int = 0  # the attempt count at the last retry-budget reset:
+    # an infra respawn or a resume's re-admission grants fresh ``retries``
+    # by moving this base instead of zeroing ``attempt`` (spawn labels
+    # count on it staying monotonic).
+    infra_respawned: bool = False  # the instance's one free worker-death
+    # respawn is spent; a resume's re-admission grants a fresh one.
+    capture_failed: bool = False  # this settle completed its entry but a
+    # declared output never bound; the preserved answer stays provisional
+    # until the capture is redone or the entry fails permanently.
     rate_limit_streak: int = 0  # consecutive rate-limited admissions in the
     # control loop's backoff path; a successful spawn resets it, and
     # BACKOFF_MAX_ATTEMPTS in a row fails the node. An admission-phase
@@ -1634,8 +1666,9 @@ class FactoryExecutor:
             "usage": self._usage_report(run),
         }
         # The M4 oversight signal: every state whose latest terminal entry
-        # carried a provisional answer (a child exit) needs verification —
-        # root-visible without ledger archaeology.
+        # carried a provisional answer (a child exit, or a settle whose
+        # declared output never bound) needs verification — root-visible
+        # without ledger archaeology.
         needs_verify = [
             state_id
             for state_id in run.order
@@ -1651,9 +1684,10 @@ class FactoryExecutor:
             if run.last_error is not None:
                 payload["last_error"] = run.last_error
                 payload["remedy"] = (
-                    f"resume with await rlm.factory.resume('{run.run_id}') to continue the "
-                    "remaining states; the failed state stays error - fix its subagent and "
-                    "start a fresh run to redo it"
+                    f"resume with await rlm.factory.resume('{run.run_id}') to re-admit the "
+                    "failed state's entry as a fresh attempt (same rendered prompt, no extra "
+                    "max_entries); author the state with failure_policy 'continue' to run its "
+                    "dependents past a failure instead"
                 )
         return payload
 
@@ -1683,9 +1717,14 @@ class FactoryExecutor:
     async def resume(self, run_id: str) -> dict[str, Any]:
         """Resume a paused run (escalate, budget, or max_transitions pause).
 
-        A budget or max_transitions pause is reported once per run:
-        resuming after it is an explicit operator decision and no further
-        budget pauses fire. Raises ``ValueError`` when the run is not paused.
+        An escalate pause holds its failed entry unsettled, so resume
+        re-admits that entry first: a fresh attempt of the same rendered
+        prompt in the same entry slot -- no extra ``max_entries`` spend,
+        fresh ``retries``. The failure only ever propagates to dependents
+        under ``failure_policy: "continue"``. A budget or max_transitions
+        pause is reported once per run: resuming after it is an explicit
+        operator decision and no further budget pauses fire. Raises
+        ``ValueError`` when the run is not paused.
         """
         run = self._require_run(run_id)
         if run.state != "paused":
@@ -1698,10 +1737,18 @@ class FactoryExecutor:
         run.loop_generation += 1
         run.state = "running"
         run.pause_reason = None
+        # Re-arm the pause notice: the escalate -> resume -> fail-again
+        # retry flow must tell the parent about every pause, not only the
+        # first. The budget and max_* notices stay one per run.
+        run.milestones.discard("paused")
         self._touch(run)
         self._event(run, "resumed", detail="resumed by caller")
-        # Evaluate settles first: paused runs may still carry transitions to
-        # fire (escalate) before anything can be admitted.
+        # An escalate pause holds its failed entry unsettled: re-admit it
+        # BEFORE anything evaluates or admits, so the retry -- not the
+        # failure's propagation -- is what resume runs.
+        self._readmit_held_entries(run)
+        # Evaluate settles next: a max_transitions pause left transitions
+        # mid-settle, and resume continues after the ones that fired.
         await self._evaluate_settles(run)
         # allow_backoff=False: like run(), resume() must never sleep inside
         # the calling model turn; rate-limited admissions defer to the loop.
@@ -1716,6 +1763,49 @@ class FactoryExecutor:
             "started": started,
             "pending": self._pending_state_ids(run),
         }
+
+    def _readmit_held_entries(self, run: FactoryRun) -> None:
+        """Re-admit every entry an escalate pause holds unsettled.
+
+        An escalate failure never queues its settle (the pause lands before
+        the failure propagates), so a held entry is exactly ``error`` with
+        ``is_settle`` unset -- that predicate is the one held-entry
+        definition. Resume turns each held entry back into a fresh attempt
+        of the SAME entry slot: the errored and cancelled instances re-run
+        their rendered prompt (``attempt`` keeps counting, so spawn labels
+        stay unique), ``max_entries`` is not spent again, and the
+        ``retries`` budget restarts (``retry_base`` moves to the current
+        attempt count). A binding-failure entry has no instances: it
+        re-binds through the readiness pass, and a still-broken upstream
+        settles it into the same pause again.
+        """
+        for state_id in run.order:
+            state = run.states[state_id]
+            for entry in state.entries:
+                if entry.status != "error" or entry.is_settle:
+                    continue
+                entry.status = "running" if entry.instances else "pending"
+                entry.error = None
+                entry.needs_verify = False
+                state.error = None
+                for instance in entry.instances:
+                    if instance.status not in ("error", "cancelled"):
+                        continue  # running and done siblings keep their state
+                    instance.status = "pending"
+                    instance.error = None
+                    instance.answer = None
+                    instance.provisional = False
+                    instance.capture_failed = False
+                    instance.rate_limit_streak = 0
+                    instance.retry_base = instance.attempt
+                    instance.infra_respawned = False
+                self._event(
+                    run,
+                    "readmitted",
+                    node=state_id,
+                    entry=entry.index,
+                    detail="resume re-admits the failed entry (same rendered prompt)",
+                )
 
     # -- graph, watch, host activity ------------------------------------------
 
@@ -2281,9 +2371,9 @@ class FactoryExecutor:
     async def _milestone(self, run: FactoryRun, kind: str, detail: str, *, node: str | None = None) -> None:
         """Record a run milestone and inject one quiet notice (one per kind).
 
-        Every milestone lands in the ledger, repeats included: a run that
-        pauses twice must still show the second pause to the parent reading
-        ``status()``. Only the parent-visible notice is deduped per kind.
+        Every milestone lands in the ledger, repeats included. Only the
+        parent-visible notice is deduped per kind; ``resume()`` re-arms the
+        ``paused`` notice, so each pause after a resume notifies again.
         """
         event = self._event(run, "milestone", milestone=kind, detail=detail, node=node)
         if kind in run.milestones:
@@ -2787,6 +2877,26 @@ class FactoryExecutor:
     ) -> None:
         if instance.status != "running":
             return  # cancelled (stop/fail_fast) while the collect was in flight
+        if result.status == "error" and _is_infra_error(result.error or ""):
+            # A worker death or a lost supervisor link is infra, not the
+            # task's failure: the executor verifies it itself (a short
+            # quiet period, then one re-read through the supervisor)
+            # instead of failing the entry on the first error row and
+            # flagging the parent to do the verifying.
+            fresh = await self._recheck_infra_death(instance, result)
+            if fresh is None:
+                return  # a stop/fail_fast pass claimed it, or the worker answered
+            result = fresh
+            if (
+                entry.status == "running"
+                and not instance.infra_respawned
+                and result.status == "error"
+                and _is_infra_error(result.error or "")
+            ):
+                await self._respawn_infra_dead(run, state, entry, instance, result)
+                return
+            # otherwise: a second verified death (or an entry a sibling
+            # failed first) takes the normal retries/policy path below
         instance.duration_ms = result.duration_ms
         instance.tool_uses = result.tool_use_count or 0
         run.settle_count += 1
@@ -2811,6 +2921,7 @@ class FactoryExecutor:
             if exit_answer:
                 instance.answer = exit_answer
                 instance.provisional = True
+                instance.capture_failed = False  # the preserved text is an exit now
             # Child failures retry (same rendered prompt, attempts+1) while
             # attempts remain; then the entry failure_policy applies.
             await self._apply_instance_failure(run, state, entry, instance, child_reason, retry=True)
@@ -2839,6 +2950,7 @@ class FactoryExecutor:
             (result.answer_text or result.answer_preview or "")[:ANSWER_BINDING_CAP] or None
         )
         instance.provisional = False  # a real settle supersedes any exit capture
+        instance.capture_failed = False
         self._event(
             run,
             "settled",
@@ -2859,10 +2971,121 @@ class FactoryExecutor:
                 stage="arrived",
             )
         if entry.status == "running" and entry.instances and all(i.status == "done" for i in entry.instances):
-            entry.status = "done"
             entry.answer = self._entry_answer(entry)
-            await self._capture_outputs(run, state, entry)
+            capture_failure = await self._capture_outputs(run, state, entry)
+            if entry.status != "running":
+                return  # a stop()/fail_fast pass claimed the entry mid-capture
+            if capture_failure is not None:
+                # A declared output that never bound after the capture
+                # retry is the producing entry's task failure, not a silent
+                # valueless settle: no settle is queued (a dependent never
+                # enters on an unbound required input), retries then
+                # failure_policy apply, and the answer stays provisional
+                # for needs_verify if the entry fails permanently.
+                instance.provisional = True
+                instance.capture_failed = True
+                await self._apply_instance_failure(
+                    run, state, entry, instance, capture_failure, retry=True
+                )
+                return
+            entry.status = "done"
             self._queue_settle(run, state, entry)
+
+    async def _recheck_infra_death(self, instance: _NodeInstance, result: Any) -> Any:
+        """Liveness-verify one infra-flavoured error settle before it is
+        applied.
+
+        The supervisor reports a dead worker as a one-shot error settle, so
+        the executor re-reads the worker after a short quiet period instead
+        of trusting the first row. Returns the fresh result to apply -- a
+        settle that landed meanwhile supersedes the error, and the same
+        error read back means the death is verified -- or ``None`` when a
+        concurrent pass (stop(), fail_fast) claimed the instance or the
+        worker answered alive (the loop keeps collecting it).
+        """
+        from . import collect
+
+        child_id = instance.child_id
+        await self._sleep_fn(INFRA_VERIFY_QUIET_SECONDS)
+        if instance.status != "running" or instance.child_id != child_id:
+            return None  # a stop, fail_fast, or resumed lane claimed the instance
+        results = await collect([child_id], timeout_ms=0)
+        if instance.status != "running" or instance.child_id != child_id:
+            return None
+        row = next((r for r in results if r.rlm_child_id == child_id), None)
+        if row is not None and not row.settled:
+            return None  # the worker answered: alive, keep collecting it
+        # No fresh row at all means the child vanished from the supervisor
+        # (a hand delete): as dead as the error said, so the original
+        # settle applies through the normal failure path.
+        return row or result
+
+    async def _respawn_infra_dead(
+        self, run: FactoryRun, state: _StateRun, entry: _StateEntry, instance: _NodeInstance, result: Any
+    ) -> None:
+        """Re-spawn one worker the executor verified dead, free of charge.
+
+        Infra is not the task's failure: the dead attempt counts as a
+        settle (its ledger row keeps the error), but the instance is
+        re-queued with the same rendered prompt -- spending neither a
+        ``retries`` slot nor a fresh ``max_entries`` entry -- and the dead
+        attempt's exit text is dropped, so no needs-verify mark is raised
+        for work the respawn redoes. ``infra_respawned`` keeps this to ONE
+        free respawn; a second verified death falls through to the normal
+        retries/failure_policy path.
+        """
+        from . import delete_subagent
+
+        old_child = instance.child_id or ""
+        # The worker may be alive-but-unreachable rather than dead: retire
+        # it so the respawn cannot run beside its zombie in the same
+        # worktree. Best-effort and bounded — the host's delete kills under
+        # the daemon's own timeout, the rest is registry bookkeeping — so
+        # an already-gone child or a dead bridge must not wedge the
+        # respawn; the supervisor-side zombie sweep this pairs with lands
+        # in PR 2 of the [factory] group.
+        try:
+            await delete_subagent(old_child)
+        except Exception:
+            pass
+        if instance.status != "running" or run.state not in ("running", "paused"):
+            return  # a stop()/fail_fast pass claimed the instance mid-delete
+        # A sibling may have paused the run in this same collect batch.
+        # Preserve the verified death as pending; resume admits it for free
+        # instead of collecting the deleted child again.
+        instance.duration_ms = result.duration_ms
+        instance.tool_uses = result.tool_use_count or 0
+        run.settle_count += 1
+        run.tool_use_total += instance.tool_uses
+        instance.infra_respawned = True
+        instance.retry_base += 1
+        instance.status = "pending"
+        instance.error = None
+        instance.answer = None
+        instance.provisional = False
+        instance.capture_failed = False
+        reason = result.error or "child worker unreachable"
+        self._event(
+            run,
+            "settled",
+            node=state.state_id,
+            entry=entry.index,
+            instance=instance.index,
+            status="error",
+            error=reason,
+            duration_ms=instance.duration_ms,
+        )
+        self._event(
+            run,
+            "infra_respawn",
+            node=state.state_id,
+            entry=entry.index,
+            instance=instance.index,
+            detail=(
+                f"worker verified dead ({reason}); re-spawning the same rendered prompt "
+                "once (no retry, no max_entries)"
+            ),
+        )
 
     def _entry_answer(self, entry: _StateEntry) -> str | None:
         """Captured answer for binding: one preview, or all instances joined."""
@@ -2901,7 +3124,7 @@ class FactoryExecutor:
         entry.outputs = outputs
         entry.output_errors = errors
 
-    async def _capture_outputs(self, run: FactoryRun, state: _StateRun, entry: _StateEntry) -> None:
+    async def _capture_outputs(self, run: FactoryRun, state: _StateRun, entry: _StateEntry) -> str | None:
         """Capture the settle's outputs, retrying the capture once.
 
         A settle can race the child's answer capture on the host side (a
@@ -2909,10 +3132,13 @@ class FactoryExecutor:
         that binds no value from the first capture is exactly the M2
         silent-failure class: the downstream would run on nothing. When a
         declared output binds no value, the settled children are
-        re-collected ONCE (a settled child keeps its result until deleted)
+        refreshed in one bounded capture window (a settled child keeps its
+        result until deleted; missing text waits for the worker hand-off),
         and the capture re-runs over the refreshed answers; a port that
         still binds nothing records a deterministic capture failure in the
-        ledger (``output_capture_failed``) instead of passing silently.
+        ledger (``output_capture_failed``) and fails the entry -- its
+        joined port errors return as the task-failure reason, ``None``
+        when every declared port bound a value.
         """
         self._capture_ports(state, entry)
         declared = state.spec.get("outputs") or []
@@ -2923,10 +3149,11 @@ class FactoryExecutor:
         if not declared or not any(
             out.get("name") not in (entry.outputs or {}) for out in declared
         ):
-            return  # every declared port bound a value
+            return None  # every declared port bound a value
         refreshed = await self._refresh_entry_answers(run, state, entry)
         if refreshed:
             self._capture_ports(state, entry)
+        failures = []
         for out in declared:
             name = out.get("name")
             error = (entry.output_errors or {}).get(name)
@@ -2942,10 +3169,12 @@ class FactoryExecutor:
                     error=error,
                     detail=f"output {name!r} did not bind after one capture retry",
                 )
+                failures.append(error)
+        return "; ".join(failures) or None
 
     async def _refresh_entry_answers(self, run: FactoryRun, state: _StateRun, entry: _StateEntry) -> bool:
-        """Re-collect the entry's settled children once; refresh any longer
-        captured answer. Returns whether any answer changed."""
+        """Refresh settled answers, waiting one bounded poll window for a
+        missing hand-off. Returns whether any answer changed."""
         from . import collect
 
         child_ids = [
@@ -2955,30 +3184,45 @@ class FactoryExecutor:
         ]
         if not child_ids:
             return False
-        try:
-            results = await collect(child_ids, timeout_ms=0)
-        except Exception as exc:
-            self._event(
-                run,
-                "output_capture_failed",
-                node=state.state_id,
-                entry=entry.index,
-                error=f"capture retry could not re-collect the settled children: {exc}",
-                detail="the first capture stands",
-            )
-            return False
-        by_child = {result.rlm_child_id: result for result in results}
+        # An idle worker may expose its settle before handing off its final
+        # assistant text. Give that missing capture one bounded poll window;
+        # existing nonempty (but invalid) output still gets only one refresh.
+        deadline = self._now_fn() + POLL_TIMEOUT_MS / 1000
         changed = False
-        for instance in entry.instances:
-            result = by_child.get(instance.child_id or "")
-            if result is None:
-                continue
-            answer = (result.answer_text or result.answer_preview or "")[:ANSWER_BINDING_CAP] or None
-            if answer and (instance.answer is None or len(answer) > len(instance.answer)):
-                instance.answer = answer
-                changed = True
-        if changed:
-            entry.answer = self._entry_answer(entry)
+        while entry.status == "running":
+            try:
+                results = await collect(child_ids, timeout_ms=0)
+            except Exception as exc:
+                self._event(
+                    run,
+                    "output_capture_failed",
+                    node=state.state_id,
+                    entry=entry.index,
+                    error=f"capture retry could not re-collect the settled children: {exc}",
+                    detail="the first capture stands",
+                )
+                return changed
+            if entry.status != "running":
+                return changed  # stop/fail_fast claimed the entry during collect
+            by_child = {result.rlm_child_id: result for result in results}
+            for instance in entry.instances:
+                result = by_child.get(instance.child_id or "")
+                if result is None:
+                    continue
+                answer = (result.answer_text or result.answer_preview or "")[:ANSWER_BINDING_CAP] or None
+                if answer and (instance.answer is None or len(answer) > len(instance.answer)):
+                    instance.answer = answer
+                    changed = True
+            if changed:
+                entry.answer = self._entry_answer(entry)
+            missing = any(
+                instance.status == "done" and instance.child_id is not None and not instance.answer
+                for instance in entry.instances
+            )
+            remaining = deadline - self._now_fn()
+            if not missing or remaining <= 0:
+                return changed
+            await self._sleep_fn(min(0.05, remaining))
         return changed
 
     async def _apply_instance_failure(
@@ -3005,8 +3249,15 @@ class FactoryExecutor:
         # count the pending instance as in-flight, so the control loop
         # would never finish the run. The failed instance settles as an
         # error instead; the policy call below is a no-op on a terminal
-        # entry.
-        if retry and instance.attempt <= retries and entry.status == "running":
+        # entry. ``attempt - retry_base`` charges only the admissions
+        # since the last budget reset: an infra respawn and a resume's
+        # re-admission restart the declared retries without zeroing the
+        # spawn counter the labels count on.
+        if (
+            retry
+            and instance.attempt - instance.retry_base <= retries
+            and entry.status == "running"
+        ):
             instance.status = "pending"
             instance.error = None
             self._event(
@@ -3045,13 +3296,27 @@ class FactoryExecutor:
             # status-level needs_verify signal hand the operator the
             # revival-race decision instead of a silent drop.
             entry.needs_verify = True
-            self._event(
-                run,
-                "needs_verify",
-                node=state.state_id,
-                entry=entry.index,
-                detail="child exit captured a provisional answer - verify the remote state",
-            )
+            # The detail names what the mark preserves: a settle whose
+            # declared output never bound, a respawned worker's last words
+            # after its own death, or a plain child exit. The capture mark
+            # is checked first: ``infra_respawned`` outlives its respawn,
+            # so a respawned attempt that later settles and fails capture
+            # preserves the capture's provenance, not the old death's.
+            respawned = any(instance.infra_respawned for instance in entry.instances)
+            capture_failed = any(instance.capture_failed for instance in entry.instances)
+            if capture_failed:
+                detail = (
+                    "output capture failed; the settled answer is preserved as a "
+                    "provisional answer - fix the declared output or verify by hand"
+                )
+            elif respawned:
+                detail = (
+                    "worker verified dead by the executor after its automatic respawn; "
+                    "last assistant text preserved as a provisional answer"
+                )
+            else:
+                detail = "child exit captured a provisional answer - verify the remote state"
+            self._event(run, "needs_verify", node=state.state_id, entry=entry.index, detail=detail)
         if entry.status in TERMINAL_ENTRY_STATUSES:
             return  # the policy already ran for this entry
         policy = state.spec.get("failure_policy", RUN_FAILURE_POLICY_DEFAULT)
@@ -3075,9 +3340,14 @@ class FactoryExecutor:
                     instance=instance.index,
                     detail="entry failed before admission",
                 )
-        # The failed entry settles too: guard-less transitions (the compiled
-        # dag's depends_on edges) fire from error settles so dependents run.
-        self._queue_settle(run, state, entry)
+        if policy != "escalate":
+            # The failed entry settles: guard-less transitions (the compiled
+            # dag's depends_on edges) fire from error settles so dependents
+            # run. Escalate instead HOLDS the failed entry unsettled -- the
+            # pause lands before the failure propagates, no downstream entry
+            # budget is spent on it, and resume() re-admits the entry as a
+            # fresh attempt.
+            self._queue_settle(run, state, entry)
         if run.state != "running":
             # stop() (or another transition) owns the run state now; keep the
             # entry's error but do not overwrite the final state.
@@ -3108,7 +3378,8 @@ class FactoryExecutor:
             await self._milestone(
                 run,
                 "paused",
-                f"state {state.state_id} failed: {reason}; resume with await rlm.factory.resume('{run.run_id}')",
+                f"state {state.state_id} failed: {reason}; resume with await rlm.factory.resume('{run.run_id}') "
+                "to re-admit the failed entry as a fresh attempt",
                 node=state.state_id,
             )
 
@@ -3595,7 +3866,11 @@ async def stop_factory(run_id: str) -> dict[str, Any]:
 
 
 async def resume_factory(run_id: str) -> dict[str, Any]:
-    """Resume a paused run (escalate, budget, or max_transitions pause)."""
+    """Resume a paused run (escalate, budget, or max_transitions pause).
+
+    An escalate pause re-admits the failed entry as a fresh attempt of the
+    same rendered prompt first; see ``FactoryExecutor.resume``.
+    """
     require_factory_enabled()
     return await default_factory_executor().resume(run_id)
 
@@ -4683,9 +4958,10 @@ rlm.harness.create_factory(
             {
                 "id": "fixing",
                 "subagent": {"prompt": (
-                    "Address the review findings in the verdict below. Make the "
-                    "smallest targeted fixes, run the relevant tests, and return a "
-                    "fenced json block of the form "
+                    "Address the review findings in the verdict below. First "
+                    "reconcile any changes an earlier attempt left in the working "
+                    "tree. Make the smallest targeted fixes, run the relevant "
+                    "tests, and return a fenced json block of the form "
                     '{"fix_report": {"fixed": ["finding that was addressed"], '
                     '"skipped": ["finding left alone and why"]}}. '
                     "Output only the json block.\n\n{verdict}")},
@@ -4723,7 +4999,8 @@ parent session after the run ends. Both worked examples bound their
 emitted payloads in the prompt — a capped findings list here, a capped
 file list in the review-sweep example — because the executor's capture
 cap still bounds very large payloads: an unbounded payload truncates at
-the cap and fails to bind.
+the cap, fails to capture, and fails the producing state through its
+`retries` and `failure_policy` instead of settling valueless.
 
 ## Authoring reference
 
@@ -4750,11 +5027,17 @@ the cap and fails to bind.
   `{input_name}` placeholders (one pass; inputs without a placeholder are
   appended in a trailing `## Inputs` section). A required input whose source
   has not settled yet keeps the entry pending; over a settled source that
-  offers no value (an errored settle, a port the settle captured no value
-  for, or a JSON capture failure) it fails the dependent entry, while
+  offers no value (an errored settle, or a settle that captured nothing for
+  the port) it fails the dependent entry, while
   `"optional": true` binds a null sentinel in every no-value case (a
   source that offers no value is not a value, so the dependent that
-  declared the input optional proceeds). A required self-input is
+  declared the input optional proceeds). A state's own declared outputs
+  capture from its settle's full answer: a declared port that binds no
+  value — no parseable fenced JSON for it, or a payload past the
+  executor's capture cap — is retried once and then FAILS the producing
+  entry as a task failure (`retries`, then `failure_policy`, apply, and
+  the answer stays preserved under `needs_verify`), so a valueless
+  settle never reaches a dependent's bind. A required self-input is
   rejected at validation —
   `state X input 'name' cannot require itself: mark the self-input optional
   - a required one can never bind on the state's first entry` — while an
@@ -4771,11 +5054,12 @@ the cap and fails to bind.
   dotted path into a `json` output; `eq`/`ne` compare JSON-strictly (a
   boolean never equals a number), comparison ops need a numeric value,
   `contains` a non-empty list, `exists` no value, and a missing or
-  unparseable port fails every op except `exists`. A failed settle still
-  fires guard-less transitions, so dependents under `continue` run; their
-  required input over the failed source then fails the dependent entry,
-  while an optional input over the failed source binds the null sentinel
-  and the dependent proceeds.
+  unparseable port fails every op except `exists`. Under `continue` a
+  failed settle still fires guard-less transitions, so dependents run;
+  their required input over the failed source then fails the dependent
+  entry, while an optional input over the failed source binds the null
+  sentinel and the dependent proceeds. Under the default `escalate` the
+  failure never propagates that far (see bounds and policies).
 - **Cycles are legal**: there is no acyclicity requirement — self-loops and
   back edges validate. The one rule is an entry state somewhere; a dag
   whose every node depends on another compiles to no entry states and is
@@ -4785,9 +5069,9 @@ the cap and fails to bind.
   child rendered with its item bound as that input; an empty list settles
   the entry with no children.
 - **Residents**: `"lifecycle": "resident"` states declare no outputs, no
-  foreach, and no outgoing transitions, nothing reads from them, and their
-  instance stays alive under the parent session after the run completes
-  (stop the run to retire it).
+  foreach, no retries, and no outgoing transitions, nothing reads from
+  them, and their instance stays alive under the parent session after the
+  run completes (stop the run to retire it).
 - **Bounds and policies**: `run.max_parallel` (1..64, default 8) is the
   run's global budget of simultaneously running instances — not a
   per-node limit. `run.max_children` (default 10,000, capped at
@@ -4803,9 +5087,28 @@ the cap and fails to bind.
   (0..10, same rendered prompt), `budget_ms` (admission to settlement;
   exceeding it fails the attempt without a retry), and `failure_policy` —
   `fail_fast` (cancel every child, run failed), `continue` (entry stays
-  errored; the run finishes and reports failed if any state errored), or
-  `escalate` (the default: pause the run; resuming is the operator's
-  decision).
+  errored; the run finishes and reports failed if any state errored; its
+  failed settle fires guard-less transitions so dependents run), or
+  `escalate` (the default: pause the run BEFORE the failed settle
+  propagates — no transition fires and no downstream entry is spent — and
+  `resume` re-admits the failed entry as a fresh attempt: same rendered
+  prompt, same entry slot, fresh `retries`; a binding failure over a
+  broken upstream re-binds and pauses again, so stop and fix the upstream
+  or author the dependent's state with `continue`). A child whose worker
+  died or whose supervisor link was lost is infra, not the task's
+  failure: the executor re-checks it after a short quiet period, then
+  re-spawns the same prompt once without spending `retries` or
+  `max_entries`; a second death fails through `retries`/`failure_policy`
+  like any task failure.
+- **Retry re-renders the same prompt into a changed world**: a retry runs
+  the same prompt after an earlier attempt already changed the external
+  state it works on, so a prompt that mutates external state — a fixing
+  state's worktree, a tracker, a remote API — states its recovery posture:
+  reconcile (start from what the earlier attempt left with `git status`
+  and `git diff`, keep the changes that already serve the task, revert
+  half-finished edits) or reset to a clean baseline, never fail on the
+  old state or duplicate finished work. Retries with no recovery note
+  still validate: validation cannot judge prose.
 - **Dead configurations fail loudly, never wedge**: a pending entry whose
   input source never settled, a `max_parallel` cap held entirely by
   never-settling residents with work queued, or nothing in flight and
@@ -4878,9 +5181,12 @@ status["events"]   # trailing ledger: spawned, settled, answer_captured,
                    # transition_fired, node_error, milestone, ...
 status["usage"]    # spawns, settled, tool_uses, max_parallel, max_children, running,
                     # transitions_fired
-status["needs_verify"]  # (when set) states whose child EXITED carrying a
-                        # provisional answer - verify the remote state; the
-                        # entry row carries the provisional_answer preview
+status["needs_verify"]  # (when set) states whose entry keeps a
+                        # provisional answer: a child exit with text, or a
+                        # settled answer whose declared output failed to
+                        # capture (worker deaths are liveness-checked and
+                        # re-spawned by the executor first) - the entry row
+                        # carries the provisional_answer preview
 status["pause_reason"]  # (paused) why the run paused; with "last_error" (the
 status["last_error"]    # last admission/bind failure) and a one-line "remedy"
 ```
@@ -4920,10 +5226,12 @@ watched = await rlm.factory.watch(result["run_id"], 30)
   failure; `name=` labels the run in status and the TUI.
 - Pause and failure notices (escalate, budget, max_transitions,
   max_children, failed, finished) arrive as quiet notices in the
-  conversation once per kind per run, the pause notices with the resume
-  call spelled out — a paused run does not need polling to be noticed.
+  conversation once per kind per run (an escalate pause notifies again
+  after each resume), the pause notices with the resume call spelled
+  out — a paused run does not need polling to be noticed.
 - `stop(run_id)` cancels every running child of the run (idempotent);
-  `resume(run_id)` continues a paused run and raises on a non-paused one.
+  `resume(run_id)` continues a paused run and raises on a non-paused one;
+  after an escalate pause it first re-admits the failed entry.
 - The activity lane the daemon and TUI speak is camelCase on the wire
   (`runId`, `specId`, `timeoutMs`); the kernel API here
   (`rlm.factory.*`) is snake_case.

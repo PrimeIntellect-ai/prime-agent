@@ -97,6 +97,7 @@ pub mod agent_roster;
 mod command;
 pub mod framing;
 pub mod herdr_env;
+pub mod launch_env;
 mod outbound;
 mod plane;
 pub mod update_flow;
@@ -105,6 +106,7 @@ mod worker;
 pub use command::{
     CycleDirection, DaemonCommand, DaemonCommandEnvelope, DaemonCommandFrameType,
     DaemonCommandWire, DaemonSessionLifecycle, ForkPosition, PromptInput, StreamingBehavior,
+    TranscriptPage,
 };
 pub use outbound::{
     DaemonClosingReason, DaemonErrorInfo, DaemonEventEnvelope, DaemonOutbound,

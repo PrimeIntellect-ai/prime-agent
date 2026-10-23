@@ -42,8 +42,8 @@ races) plus the accepted review findings from both:
   finding: the name was dropped, so children always got the generated
   label);
 - milestone notices go to the host as validated "factory.progress"
-  payloads exactly once per kind per run, and a dead bridge leaves the
-  milestone in the ledger instead of wedging the run.
+  payloads once per kind per run (resume re-arms the pause notice), and a
+  dead bridge leaves the milestone in the ledger instead of wedging the run.
 """
 
 from __future__ import annotations
@@ -643,6 +643,14 @@ class ValidateFactorySpecTest(unittest.TestCase):
         }
         errors = validate_factory_spec(uses_foreach)
         self.assertEqual(errors, ["resident node watcher cannot use foreach"])
+
+        declares_retries = {"nodes": [node("watcher", lifecycle="resident", retries=2)]}
+        errors = validate_factory_spec(declares_retries)
+        self.assertEqual(errors, ["resident node watcher cannot declare retries"])
+
+        # Retries 0 is the canonical default, so nothing is declared.
+        zero_retries = {"nodes": [node("watcher", lifecycle="resident", retries=0)]}
+        self.assertEqual(validate_factory_spec(zero_retries), [])
 
         # Empty outputs list on a resident node is fine: nothing is declared.
         empty_outputs = {"nodes": [node("watcher", lifecycle="resident", outputs=[])]}
@@ -1400,6 +1408,14 @@ class ValidateFactoryMachineTest(unittest.TestCase):
             "transitions": [{"from": "src", "to": "watcher"}],
         }
         self.assertEqual(validate_factory_machine(uses_foreach), ["resident state watcher cannot use foreach"])
+        declares_retries = {
+            "states": [state("watcher", entry=True, lifecycle="resident", retries=1)],
+            "transitions": [],
+        }
+        self.assertEqual(
+            validate_factory_machine(declares_retries),
+            ["resident state watcher cannot declare retries"],
+        )
         leaves_resident = {
             "states": [
                 {"id": "entry", "entry": True, "subagent": "w"},
@@ -2477,10 +2493,18 @@ class FactoryHelpTest(unittest.TestCase):
 
         # The worked examples bound their emitted payloads — captured answers
         # are capped previews (~160-200 chars), so an unbounded json payload
-        # would truncate at the cap and fail to bind.
+        # would truncate at the cap, fail to capture, and fail its state.
         self.assertIn('findings": ["at most three one-line findings"]', doc)
         self.assertIn("capped at the eight most relevant", doc)
-        self.assertIn("an unbounded payload truncates at the cap and fails to bind", flat)
+        self.assertIn(
+            "an unbounded payload truncates at the cap, fails to capture, "
+            "and fails the producing state",
+            flat,
+        )
+        # The output-capture contract: a declared port that never binds
+        # fails the producing entry as a task failure.
+        self.assertIn("is retried once and then FAILS the producing", flat)
+        self.assertIn("the answer stays preserved under `needs_verify`", flat)
 
         # The Discovery section ships the machine library as present (this
         # branch merges it): the bundled location, the seed names, the CLI
@@ -3562,7 +3586,12 @@ class FactoryExecutorTest(_ExecutorTestCase):
         self.assertEqual([call["prompt"] for call in self.host.spawn_calls("b")], ["Process 7."])
 
     @async_test
-    async def test_bad_json_input_fails_node_without_spawning(self) -> None:
+    async def test_unparseable_output_fails_the_producer_and_never_spawns_the_dependent(self) -> None:
+        # a's declared json output never parses: the capture failure fails a
+        # itself (defect C) instead of settling it valueless, so b's required
+        # input over the errored source fails at binding without ever
+        # spawning; c still ran and finished, so the run completes but
+        # reports failed.
         self.host.outcomes["a"] = {"status": "done", "answer": "not json at all"}
         self.store_factory(
             {
@@ -3581,12 +3610,13 @@ class FactoryExecutorTest(_ExecutorTestCase):
         )
         result = await self.start()
         status = await self.settle(result)
-        # b failed at binding (continue policy): never spawned, marked error;
-        # c still ran and finished, so the run completes but reports failed.
         self.assertEqual(self.host.spawn_calls("b"), [])
+        a = self.node_status(status, "a")
+        self.assertEqual(a["status"], "error")
+        self.assertIn("no JSON object containing output 'result'", a["error"])
         b = self.node_status(status, "b")
         self.assertEqual(b["status"], "error")
-        self.assertIn("no JSON object containing output", b["error"])
+        self.assertIn("is unavailable (latest settle status 'error')", b["error"])
         self.assertEqual(self.node_status(status, "c")["status"], "done")
         self.assertEqual(status["state"], "failed")
 
@@ -3802,6 +3832,61 @@ class FactoryExecutorTest(_ExecutorTestCase):
         # The null was captured and bound: the dependent renders the JSON
         # null, not the no-value sentinel path.
         self.assertIn("- data: null", self.host.spawn_calls("dep")[0]["prompt"])
+
+    @async_test
+    async def test_uncaptured_output_fails_the_producing_entry_instead_of_the_dependent(self) -> None:
+        # Defect C: a done settle whose declared output never bound (no
+        # parseable value after the one capture retry) used to settle the
+        # entry done and queue the settle -- the dependent's required input
+        # then failed over the valueless source, spending its entry budget
+        # on the producer's failure. The capture failure now fails the
+        # PRODUCING entry as a task failure at the origin: retries, then
+        # failure_policy, apply; no settle is queued, so escalate pauses at
+        # the producer and the dependent never enters.
+        self.host.outcomes["setup"] = {"status": "done", "answer": "no json here"}
+        self.store_machine(
+            {
+                "states": [
+                    {
+                        "id": "setup",
+                        "entry": True,
+                        "subagent": "worker",
+                        "outputs": [{"name": "config", "type": "json"}],
+                        "retries": 1,
+                    },
+                    {
+                        "id": "build",
+                        "subagent": "worker",
+                        "inputs": [{"name": "config", "type": "json", "from": "setup.config"}],
+                        "max_entries": 4,
+                    },
+                ],
+                "transitions": [{"from": "setup", "to": "build"}],
+            }
+        )
+        result = await self.start()
+        paused = await self.settle(result)
+        self.assertEqual(paused["state"], "paused")
+        setup = self.state_report(paused, "setup")
+        self.assertEqual(setup["status"], "error")
+        self.assertIn("config", setup["error"])
+        # the failed capture spent the one retry re-spawning the same
+        # prompt; the second capture failure is permanent
+        self.assertEqual(len(self.host.spawn_calls("setup")), 2)
+        self.assertEqual(len(self.all_events_of(result, "retry")), 1)
+        self.assertEqual(len(self.all_events_of(result, "output_capture_failed")), 2)
+        # the dependent never entered on the unbound required input
+        self.assertEqual(self.state_report(paused, "build")["entries_used"], 0)
+        self.assertEqual(self.host.spawn_calls("build"), [])
+        self.assertEqual(self.all_events_of(result, "transition_fired"), [])
+        # the settled answer is preserved as provisional, so the permanent
+        # failure surfaces needs_verify with the answer for review
+        self.assertEqual(paused["needs_verify"], ["setup"])
+        self.assertIn("no json here", setup["entries"][0]["provisional_answer"])
+        # the paused milestone tells the operator resume re-admits the entry
+        paused_notice = next(n for n in self.host.notices if n["kind"] == "paused")
+        self.assertIn("state setup failed", paused_notice["detail"])
+        self.assertIn("re-admit", paused_notice["detail"])
 
     @async_test
     async def test_capture_failure_names_the_binding_cap_and_records_the_event(self) -> None:
@@ -4131,38 +4216,103 @@ class FactoryExecutorTest(_ExecutorTestCase):
         self.assertEqual(self.host.notice_kinds(), ["failed"])
 
     @async_test
-    async def test_escalate_pauses_notifies_and_resume_continues(self) -> None:
-        self.host.outcomes["a"] = {"status": "error", "error": "boom"}
-        self.store_factory(
+    async def test_escalate_resume_readmits_the_failed_entry(self) -> None:
+        # Defect A (live run fa1a8f1c): resume after an escalate pause fired
+        # the ERRORED settle forward -- the guard-less transition entered the
+        # dependent, its required input failed to bind over the errored
+        # source, and it spent one of its max_entries entries on nothing.
+        # The escalate pause now lands BEFORE the failure propagates, and
+        # resume re-admits the failed entry as a fresh attempt of the same
+        # rendered prompt in the same entry slot.
+        self.host.child_outcomes["child-1"] = {"status": "error", "error": "boom"}
+        self.host.child_outcomes["child-2"] = {"status": "done", "answer": "impl-done"}
+        self.store_machine(
             {
-                "nodes": [
-                    {"id": "a", "subagent": "worker"},
-                    {"id": "b", "subagent": "worker", "depends_on": ["a"]},
+                "states": [
+                    {
+                        "id": "implement",
+                        "entry": True,
+                        "subagent": "worker",
+                        "outputs": [{"name": "result", "type": "text"}],
+                    },
+                    {
+                        "id": "review",
+                        "subagent": "worker",
+                        "inputs": [{"name": "result", "type": "text", "from": "implement.result"}],
+                        "max_entries": 4,
+                    },
                 ],
+                "transitions": [{"from": "implement", "to": "review"}],
             }
         )
         result = await self.start()
         paused = await self.settle(result)
         self.assertEqual(paused["state"], "paused")
-        self.assertEqual(self.node_status(paused, "a")["status"], "error")
-        self.assertEqual(self.node_status(paused, "b")["status"], "pending")
-        self.assertEqual(self.host.spawn_calls("b"), [])
+        self.assertEqual(self.node_status(paused, "implement")["status"], "error")
+        self.assertEqual(self.node_status(paused, "review")["entries_used"], 0)
         self.assertIn("paused", self.host.notice_kinds())
-        # resume() restarts the run: b is ready (a is terminal) and finishes.
+        # resume re-admits the failed entry: a fresh attempt of the same
+        # rendered prompt, the same entry slot -- no extra max_entries.
         resumed = await rlm_module.rlm.factory.resume(result["run_id"])
         self.assertEqual(resumed["state"], "running")
         final = await self.settle(result)
-        self.assertEqual(final["state"], "failed")  # a errored, b done
-        self.assertEqual(self.node_status(final, "b")["status"], "done")
-        self.assertEqual(self.host.notice_kinds(), ["paused", "failed"])
+        self.assertEqual(final["state"], "done")
+        implement = self.node_status(final, "implement")
+        self.assertEqual(implement["status"], "done")
+        self.assertEqual(implement["entries_used"], 1)
+        self.assertEqual([entry["status"] for entry in implement["entries"]], ["done"])
+        self.assertEqual(len(self.host.spawn_calls("implement")), 2)
+        review = self.node_status(final, "review")
+        self.assertEqual(review["status"], "done")
+        self.assertEqual(review["entries_used"], 1)
+        self.assertIn("impl-done", self.host.spawn_calls("review")[0]["prompt"])
+        self.assertEqual(self.host.notice_kinds(), ["paused", "finished"])
         # a second resume on the finished run must refuse
         with self.assertRaisesRegex(ValueError, "not paused"):
             await rlm_module.rlm.factory.resume(result["run_id"])
 
     @async_test
+    async def test_escalate_pause_spends_no_downstream_entry(self) -> None:
+        # The pre-propagation pause: the errored settle never fires the
+        # guard-less transition, so the dependent's entry budget is never
+        # spent on the failure. Resume re-admits the failed entry, and its
+        # own failure re-pauses the run with the same reason.
+        self.host.outcomes["implement"] = {"status": "error", "error": "boom"}
+        self.store_machine(
+            {
+                "states": [
+                    {
+                        "id": "implement",
+                        "entry": True,
+                        "subagent": "worker",
+                        "outputs": [{"name": "result", "type": "text"}],
+                    },
+                    {
+                        "id": "review",
+                        "subagent": "worker",
+                        "inputs": [{"name": "result", "type": "text", "from": "implement.result"}],
+                        "max_entries": 4,
+                    },
+                ],
+                "transitions": [{"from": "implement", "to": "review"}],
+            }
+        )
+        result = await self.start()
+        paused = await self.settle(result)
+        self.assertEqual(paused["state"], "paused")
+        await rlm_module.rlm.factory.resume(result["run_id"])
+        second = await self.settle(result)
+        self.assertEqual(second["state"], "paused")
+        self.assertEqual(second["pause_reason"], "boom")
+        self.assertEqual(self.node_status(second, "review")["entries_used"], 0)
+        self.assertEqual(self.all_events_of(result, "transition_fired"), [])
+        implement = self.node_status(second, "implement")
+        self.assertEqual(implement["entries_used"], 1)
+        self.assertEqual(len(self.host.spawn_calls("implement")), 2)
+
+    @async_test
     async def test_resume_defers_rate_limited_admissions(self) -> None:
-        self.host.outcomes["a"] = {"status": "error", "error": "boom"}
-        self.host.rate_limit_first["b"] = 2
+        self.host.child_outcomes["child-1"] = {"status": "error", "error": "boom"}
         self.store_factory(
             {
                 "nodes": [
@@ -4174,6 +4324,9 @@ class FactoryExecutorTest(_ExecutorTestCase):
         result = await self.start()
         paused = await self.settle(result)
         self.assertEqual(paused["state"], "paused")
+        # The rate limit hits a's re-admission, not b: escalate holds the
+        # failed entry unsettled and resume() re-admits it first.
+        self.host.rate_limit_first["a"] = 3
         sleep_mark = len(self.sleeps.sleeps)
         resumed = await rlm_module.rlm.factory.resume(result["run_id"])
         # resume() must not sleep in the calling turn: the rate-limited
@@ -4181,19 +4334,24 @@ class FactoryExecutorTest(_ExecutorTestCase):
         self.assertEqual(resumed["started"], [])
         self.assertEqual(self.sleeps.sleeps[sleep_mark:], [])
         final = await self.settle(result)
-        self.assertEqual(final["state"], "failed")  # a errored, b done
+        self.assertEqual(final["state"], "done")  # a redone, b done
+        self.assertEqual(self.node_status(final, "a")["status"], "done")
         self.assertEqual(self.node_status(final, "b")["status"], "done")
-        # b needed 3 admissions total: one deferred at resume, then one
-        # rate-limited retry inside the loop's backoff, then the success.
-        self.assertEqual(len(self.host.spawn_calls("b")), 3)
+        # a needed 4 admissions total: the failed first, one deferred at
+        # resume, one rate-limited retry inside the loop's backoff, then
+        # the success; b then runs once.
+        self.assertEqual(len(self.host.spawn_calls("a")), 4)
+        self.assertEqual(len(self.host.spawn_calls("b")), 1)
         self.assertEqual(self.sleeps.sleeps[sleep_mark:], [1.0])
 
     @async_test
-    async def test_repeated_pause_records_every_milestone_in_the_ledger(self) -> None:
-        # A run that pauses, resumes, and pauses again must record the second
-        # pause in the ledger even though the parent notice fires once per
-        # kind: status() is the only reader of the repeat.
-        self.host.outcomes["a"] = {"status": "error", "error": "a boom"}
+    async def test_a_pause_after_resume_notifies_the_parent_again(self) -> None:
+        # A run that pauses, resumes, and pauses again (the escalate retry
+        # flow) records both pauses in the ledger AND tells the parent about
+        # both: resume() re-arms the paused notice.
+        # a fails once and its re-admitted retry succeeds, so the second
+        # pause is b's own failure.
+        self.host.child_outcomes["child-1"] = {"status": "error", "error": "a boom"}
         self.host.outcomes["b"] = {"status": "error", "error": "b boom"}
         self.store_machine(
             {
@@ -4213,16 +4371,12 @@ class FactoryExecutorTest(_ExecutorTestCase):
         second = await self.settle(result)
         self.assertEqual(second["state"], "paused")
         self.assertEqual(self.executor._runs[result["run_id"]].pause_reason, "b boom")
-        # the second pause is in the ledger with its own event, notice-free
         milestones = [event for event in second["events"] if event["kind"] == "milestone"]
         self.assertEqual([event["milestone"] for event in milestones], ["paused", "paused"])
         self.assertIn("a boom", milestones[0]["detail"])
         self.assertIn("b boom", milestones[1]["detail"])
-        self.assertEqual(self.host.notice_kinds(), ["paused"])  # one notice per kind
-        # the announced pause keeps "shown"; the repeat (no second notice)
-        # was only ever read through status(), so it reads "delivered"
-        self.assertEqual(milestones[0]["stage"], "shown")
-        self.assertEqual(milestones[1]["stage"], "delivered")
+        self.assertEqual(self.host.notice_kinds(), ["paused", "paused"])
+        self.assertEqual([event["stage"] for event in milestones], ["shown", "shown"])
 
     # -- retries --------------------------------------------------------------------
 
@@ -4242,6 +4396,168 @@ class FactoryExecutorTest(_ExecutorTestCase):
         self.assertEqual(self.node_status(status, "a")["attempts"], 3)
         self.assertEqual(self.node_status(status, "a")["status"], "error")
         self.assertEqual(status["state"], "failed")
+
+    # -- worker deaths (infra) --------------------------------------------------------
+
+    @async_test
+    async def test_worker_death_respawns_once_without_spending_retries_or_max_entries(self) -> None:
+        # Defect B (live run fa1a8f1c): "Child worker unreachable" consumed
+        # the entry and, with default retries=0, escalated into a pause --
+        # twenty minutes of child work discarded on an infra hiccup. A
+        # verified worker death is infra, not the task's failure: the
+        # executor liveness-verifies it itself (a short quiet period, then
+        # one re-collect) and re-spawns the same rendered prompt once,
+        # spending neither retries nor a fresh max_entries slot.
+        self.host.child_outcomes["child-1"] = {
+            "status": "error",
+            "error": "Child worker unreachable",
+            "answer": "partial work",
+        }
+        self.store_factory({"nodes": [{"id": "work", "subagent": "worker"}]})
+        result = await self.start()
+        status = await self.settle(result)
+        self.assertEqual(status["state"], "done")
+        self.assertEqual(self.host.notice_kinds(), ["finished"])
+        work = self.node_status(status, "work")
+        self.assertEqual(work["status"], "done")
+        self.assertEqual(work["entries_used"], 1)
+        self.assertEqual(len(self.host.spawn_calls("work")), 2)
+        # the dead attempt's exit text was dropped, not marked for verify:
+        # the respawn redid the work and the entry settled for real
+        self.assertNotIn("needs_verify", status)
+        self.assertNotIn("needs_verify", work)
+        # the executor verified the death itself before re-spawning
+        self.assertIn(factory_module.INFRA_VERIFY_QUIET_SECONDS, self.sleeps.sleeps)
+
+    @async_test
+    async def test_second_worker_death_falls_through_retries_and_policy(self) -> None:
+        # Only ONE free respawn: a second verified death charges the normal
+        # retries budget (the free respawn consumed none) and then the
+        # failure_policy applies like any task failure.
+        self.host.outcomes["work"] = {"status": "error", "error": "Child worker unreachable"}
+        self.store_factory(
+            {
+                "run": {"failure_policy": "continue"},
+                "nodes": [{"id": "work", "subagent": "worker", "retries": 1}],
+            }
+        )
+        result = await self.start()
+        status = await self.settle(result)
+        self.assertEqual(status["state"], "failed")
+        work = self.node_status(status, "work")
+        self.assertEqual(work["status"], "error")
+        # initial spawn, free respawn, one charged retry: three admissions
+        self.assertEqual(len(self.host.spawn_calls("work")), 3)
+        self.assertEqual(work["attempts"], 3)
+        self.assertEqual(len(self.all_events_of(result, "infra_respawn")), 1)
+        self.assertEqual(len(self.all_events_of(result, "retry")), 1)
+
+    @async_test
+    async def test_paused_collect_batch_preserves_the_free_infra_respawn(self) -> None:
+        self.host.child_outcomes["child-1"] = {"status": "error", "error": "task failed"}
+        self.host.child_outcomes["child-2"] = {
+            "status": "error", "error": "Child worker unreachable"
+        }
+        self.store_factory({"nodes": [
+            {"id": "a", "subagent": "worker"},
+            {"id": "b", "subagent": "worker"},
+        ]})
+        result = await self.start()
+        run = self.executor._runs[result["run_id"]]
+        await run.task  # finish the whole batch, including b after a pauses it
+        self.assertEqual(run.state, "paused")
+        instance = run.states["b"].entries[0].instances[0]
+        self.assertEqual(instance.status, "pending")
+        self.assertTrue(instance.infra_respawned)
+        self.assertEqual(self.host.deleted_targets(), ["child-2"])
+        await rlm_module.rlm.factory.resume(result["run_id"])
+        status = await self.settle(result, max_polls=1000)
+        self.assertEqual(status["state"], "done")
+        self.assertEqual(len(self.host.spawn_calls("b")), 2)
+        self.assertEqual(self.node_status(status, "b")["entries_used"], 1)
+        self.assertEqual(self.all_events_of(result, "retry"), [])
+        self.assertEqual(len(self.all_events_of(result, "infra_respawn")), 1)
+
+    @async_test
+    async def test_stop_during_output_capture_preserves_cancelled_entry(self) -> None:
+        self.host.outcomes["work"] = {"status": "done", "answer": "no JSON"}
+        capture_gate = self.host.gate("rlm.collect", 2)
+        capture_entered = self.host.gate_entered("rlm.collect", 2)
+        self.store_factory({"nodes": [{
+            "id": "work", "subagent": "worker",
+            "outputs": [{"name": "data", "type": "json"}],
+        }]})
+        result = await self.start()
+        run = self.executor._runs[result["run_id"]]
+        await capture_entered.wait()
+        await rlm_module.rlm.factory.stop(result["run_id"])
+        entry = run.states["work"].entries[0]
+        self.assertEqual(entry.status, "cancelled")
+        capture_gate.set()
+        await run.task
+        self.assertEqual(run.state, "stopped")
+        self.assertEqual(entry.status, "cancelled")
+        self.assertFalse(entry.instances[0].provisional)
+        self.assertEqual(self.all_events_of(result, "retry"), [])
+
+    @async_test
+    async def test_worker_death_recheck_adopts_a_live_settle(self) -> None:
+        # The liveness re-check is not a rubber stamp: when the worker
+        # answers again during the quiet period, its fresh settle supersedes
+        # the error row and nothing is re-spawned.
+        self.host.child_outcomes["child-1"] = {
+            "status": "error",
+            "error": "Child worker unreachable",
+        }
+        host = self.host
+
+        class ReviveSleep(ClockSleep):
+            """The executor's quiet-period sleep revives child-1: the
+            worker was never dead, and the re-read must see it settled."""
+
+            async def __call__(self, seconds: float) -> None:
+                await super().__call__(seconds)
+                host.child_outcomes["child-1"] = {"status": "done", "answer": "late done"}
+
+        self.executor._sleep_fn = ReviveSleep(self.clock)
+        self.store_factory({"nodes": [{"id": "work", "subagent": "worker"}]})
+        result = await self.start()
+        status = await self.settle(result)
+        self.assertEqual(status["state"], "done")
+        self.assertEqual(len(self.host.spawn_calls("work")), 1)
+        self.assertEqual(self.all_events_of(result, "infra_respawn"), [])
+        self.assertEqual(self.node_status(status, "work")["answer_preview"], "late done")
+
+    @async_test
+    async def test_resume_grants_fresh_retries_and_a_fresh_respawn(self) -> None:
+        # The approved resume semantics: a re-admitted entry restarts both
+        # budgets. The charged retry after the free respawn must be granted
+        # again, and an infra death of the re-admitted attempt must get its
+        # own free respawn instead of failing through a spent one.
+        self.host.child_outcomes["child-1"] = {"status": "error", "error": "Child worker unreachable"}
+        self.host.child_outcomes["child-2"] = {"status": "error", "error": "boom"}
+        self.host.child_outcomes["child-3"] = {"status": "error", "error": "boom"}
+        self.host.child_outcomes["child-4"] = {"status": "error", "error": "Child worker unreachable"}
+        self.store_factory({"nodes": [{"id": "work", "subagent": "worker", "retries": 1}]})
+        result = await self.start()
+        paused = await self.settle(result)
+        # infra death -> free respawn; the respawn's own task failure spent
+        # the one charged retry; the retry failed too -> escalate pause.
+        self.assertEqual(paused["state"], "paused")
+        self.assertEqual(len(self.host.spawn_calls("work")), 3)
+        self.assertEqual(len(self.all_events_of(result, "infra_respawn")), 1)
+        self.assertEqual(len(self.all_events_of(result, "retry")), 1)
+        # resume re-admits the entry with fresh budgets: the re-admitted
+        # attempt's infra death respawns free again, and this time it
+        # settles done.
+        await rlm_module.rlm.factory.resume(result["run_id"])
+        final = await self.settle(result)
+        self.assertEqual(final["state"], "done")
+        self.assertEqual(self.node_status(final, "work")["entries_used"], 1)
+        self.assertEqual(len(self.host.spawn_calls("work")), 5)
+        self.assertEqual(len(self.all_events_of(result, "infra_respawn")), 2)
+        self.assertEqual(len(self.all_events_of(result, "retry")), 1)
+        self.assertEqual(self.host.notice_kinds(), ["paused", "finished"])
 
     # -- budgets ----------------------------------------------------------------------
 
@@ -4903,7 +5219,7 @@ class FactoryExecutorTest(_ExecutorTestCase):
         # contract it validated is pinned here: run-level milestones send
         # {run_id, kind, detail} (no node), node-level ones add "node", and
         # every notice goes through one "factory.progress" host request.
-        self.host.outcomes["a"] = {"status": "error", "error": "boom"}
+        self.host.child_outcomes["child-1"] = {"status": "error", "error": "boom"}
         self.store_factory(
             {
                 "nodes": [
@@ -4917,20 +5233,20 @@ class FactoryExecutorTest(_ExecutorTestCase):
         self.assertEqual(paused["state"], "paused")
         resume = await rlm_module.rlm.factory.resume(result["run_id"])
         final = await self.settle(result)
-        self.assertEqual(final["state"], "failed")
+        self.assertEqual(final["state"], "done")
         kinds = self.host.notice_kinds()
-        self.assertEqual(kinds, ["paused", "failed"])
-        paused_notice, failed_notice = self.host.notices
+        self.assertEqual(kinds, ["paused", "finished"])
+        paused_notice, finished_notice = self.host.notices
         self.assertEqual(paused_notice["kind"], "paused")
         self.assertEqual(paused_notice["run_id"], result["run_id"])
         self.assertIn("state a failed", paused_notice["detail"])
         self.assertIn("resume", paused_notice["detail"])
         self.assertEqual(paused_notice.get("node"), "a")  # node-level milestone
-        self.assertEqual(failed_notice["kind"], "failed")
-        self.assertEqual(failed_notice["run_id"], result["run_id"])
-        self.assertIsNone(failed_notice.get("node"))  # run-level milestone
+        self.assertEqual(finished_notice["kind"], "finished")
+        self.assertEqual(finished_notice["run_id"], result["run_id"])
+        self.assertIsNone(finished_notice.get("node"))  # run-level milestone
         self.assertEqual(set(paused_notice.keys()), {"run_id", "kind", "detail", "node"})
-        self.assertEqual(set(failed_notice.keys()), {"run_id", "kind", "detail"})
+        self.assertEqual(set(finished_notice.keys()), {"run_id", "kind", "detail"})
         # one host request per notice, typed factory.progress
         self.assertEqual(len(self.host.calls_of("factory.progress")), 2)
 
@@ -4942,7 +5258,7 @@ class FactoryExecutorTest(_ExecutorTestCase):
         patcher = patch.object(rlm_module, "host_request", failing)
         patcher.start()
         self.addCleanup(patcher.stop)
-        failing.outcomes["a"] = {"status": "error", "error": "boom"}
+        failing.child_outcomes["child-1"] = {"status": "error", "error": "boom"}
         self.store_factory(
             {
                 "nodes": [
@@ -4973,7 +5289,7 @@ class FactoryExecutorTest(_ExecutorTestCase):
         # the run is not wedged: resume still works end to end.
         await rlm_module.rlm.factory.resume(result["run_id"])
         final = await self.settle(result)
-        self.assertEqual(final["state"], "failed")
+        self.assertEqual(final["state"], "done")
         self.assertEqual(self.node_status(final, "b")["status"], "done")
 
 
@@ -5798,6 +6114,88 @@ class FactoryExecutorTest(_ExecutorTestCase):
         self.assertEqual(self.all_events_of(result, "output_capture_failed"), [])
 
     @async_test
+    async def test_missing_answer_capture_has_a_bounded_poll_window(self) -> None:
+        self.host.outcomes["work"] = {"status": "done"}
+        self.store_factory({"nodes": [{"id": "work", "subagent": "worker",
+                                      "outputs": [{"name": "data", "type": "json"}]}]})
+        before = self.clock()
+        result = await self.start()
+        status = await self.settle(result)
+        elapsed = self.clock() - before
+        self.assertEqual(status["state"], "paused")
+        self.assertGreater(elapsed, 0)
+        self.assertLessEqual(elapsed, factory_module.POLL_TIMEOUT_MS / 1000 + 1e-9)
+        self.assertEqual(len(self.host.spawn_calls("work")), 1)
+        self.assertIn("captured no value", self.node_status(status, "work")["error"])
+
+    @async_test
+    async def test_stop_during_missing_answer_poll_preserves_cancellation(self) -> None:
+        self.host.outcomes["work"] = {"status": "done"}
+        sleeps = GatedSleep()
+        self.executor._sleep_fn = sleeps
+        self.store_factory({"nodes": [{"id": "work", "subagent": "worker",
+                                      "outputs": [{"name": "data", "type": "json"}]}]})
+        result = await self.start()
+        run = self.executor._runs[result["run_id"]]
+        await self.wait_until(sleeps.entered.is_set)
+        await rlm_module.rlm.factory.stop(result["run_id"])
+        sleeps.release.set()
+        await run.task
+        entry = run.states["work"].entries[0]
+        self.assertEqual(run.state, "stopped")
+        self.assertEqual(entry.status, "cancelled")
+        self.assertFalse(entry.instances[0].provisional)
+        self.assertEqual(self.all_events_of(result, "retry"), [])
+        self.assertEqual(len(self.host.spawn_calls("work")), 1)
+
+    @async_test
+    async def test_capture_waits_for_the_settled_workers_answer_handoff(self) -> None:
+        handoff_requested = asyncio.Event()
+        answer_ready = asyncio.Event()
+
+        class HandoffHost(FakeHost):
+            empty_reads = 0
+
+            async def __call__(self, request_type, payload=None):
+                response = await super().__call__(request_type, payload)
+                if request_type == "rlm.collect" and not answer_ready.is_set():
+                    for row in response["results"]:
+                        if row["rlm_child_id"] == "child-1":
+                            row.pop("answer_text", None)
+                            row.pop("answer_preview", None)
+                            self.empty_reads += 1
+                            if self.empty_reads >= 2:
+                                handoff_requested.set()
+                return response
+
+        class YieldingSleep(ClockSleep):
+            async def __call__(self, seconds):
+                await super().__call__(seconds)
+                await yield_loop_turn()
+
+        self.host = HandoffHost(clock=self.clock)
+        self.host.outcomes["work"] = {"status": "done", "answer": '{"data": {"ok": true}}'}
+        repatch = patch.object(rlm_module, "host_request", self.host)
+        repatch.start()
+        self.addCleanup(repatch.stop)
+        self.executor._sleep_fn = YieldingSleep(self.clock)
+
+        async def finish_handoff():
+            await handoff_requested.wait()
+            answer_ready.set()
+
+        handoff = asyncio.create_task(finish_handoff())
+        self.store_factory({"nodes": [{"id": "work", "subagent": "worker",
+                                      "outputs": [{"name": "data", "type": "json"}]}]})
+        result = await self.start()
+        status = await self.settle(result)
+        await handoff
+        self.assertEqual(status["state"], "done")
+        self.assertEqual(self.node_status(status, "work")["entries_used"], 1)
+        self.assertEqual(len(self.host.spawn_calls("work")), 1)
+        self.assertEqual(self.all_events_of(result, "output_capture_failed"), [])
+
+    @async_test
     async def test_child_exit_captures_a_provisional_answer_and_marks_needs_verify(self) -> None:
         # M4: a child that dies without reporting is distinguishable from
         # completed work. The exit envelope's last assistant text is
@@ -5903,7 +6301,9 @@ class FactoryExecutorTest(_ExecutorTestCase):
     async def test_paused_run_status_carries_the_last_error_and_remedy(self) -> None:
         # M6: a paused run carries the LAST failed admission/bind error and
         # a one-line remedy in its status payload — no root-side
-        # archaeology over pending-state lists to learn what failed.
+        # archaeology over pending-state lists to learn what failed. The
+        # pause here is src's own failed output capture (defect C): the
+        # failure lands at the producer, before the dependent's bind.
         self.host.outcomes["src"] = {"status": "done", "answer": "no json here"}
         self.store_machine(
             {
@@ -5929,11 +6329,12 @@ class FactoryExecutorTest(_ExecutorTestCase):
         self.assertEqual(status["state"], "paused")
         self.assertEqual(
             status["pause_reason"],
-            "input 'data': no JSON object containing output 'data' in the upstream answer",
+            "no JSON object containing output 'data' in the upstream answer",
         )
-        self.assertIn("state 'dep' failed", status["last_error"])
+        self.assertIn("state 'src' failed", status["last_error"])
         self.assertIn("no JSON object containing output 'data'", status["last_error"])
         self.assertIn(f"rlm.factory.resume('{result['run_id']}')", status["remedy"])
+        self.assertEqual(status["needs_verify"], ["src"])
 
     @async_test
     async def test_machine_required_input_over_an_errored_source_fails_the_dependent_entry(self) -> None:
@@ -5982,10 +6383,10 @@ class FactoryExecutorTest(_ExecutorTestCase):
     @async_test
     async def test_machine_optional_input_over_a_settled_source_with_no_captured_value_binds_the_null_sentinel(self) -> None:
         # Review finding (PR #3199), second no-value condition: the source
-        # settled done but captured no value for the declared port (an
-        # empty answer). The optional dependent proceeds on the null
-        # sentinel; only the required dependent over the same valueless
-        # settle fails its entry.
+        # settled but captured no value for the declared port (an empty
+        # answer). The optional dependent proceeds on the null sentinel;
+        # only the required dependent over the same valueless settle fails
+        # its entry.
         self.host.outcomes["src"] = {"status": "done", "answer": ""}
         self.store_machine(
             {
@@ -6021,6 +6422,12 @@ class FactoryExecutorTest(_ExecutorTestCase):
         result = await self.start()
         status = await self.settle(result)
         self.assertEqual(status["state"], "failed")
+        # the empty answer never captured the text port, so the capture
+        # failure failed the source entry itself (defect C) instead of
+        # settling it valueless
+        src = self.state_report(status, "src")
+        self.assertEqual([entry["status"] for entry in src["entries"]], ["error"])
+        self.assertIn("captured no value", src["entries"][0]["error"])
         opt = self.state_report(status, "opt")
         self.assertEqual(opt["entries_used"], 1)
         self.assertEqual([entry["status"] for entry in opt["entries"]], ["done"])
@@ -6029,7 +6436,7 @@ class FactoryExecutorTest(_ExecutorTestCase):
         self.assertEqual(req["entries_used"], 1)
         self.assertEqual([entry["status"] for entry in req["entries"]], ["error"])
         self.assertIn(
-            "input 'go' from state 'src' has no captured output 'go'",
+            "input 'go' from state 'src' is unavailable (latest settle status 'error')",
             req["entries"][0]["error"],
         )
         self.assertEqual(self.host.spawn_calls("req"), [])
@@ -6037,10 +6444,10 @@ class FactoryExecutorTest(_ExecutorTestCase):
     @async_test
     async def test_machine_optional_input_over_a_failed_json_capture_binds_the_null_sentinel(self) -> None:
         # Review finding (PR #3199), third no-value condition: the source
-        # settled done, declared a json port, but its answer never parsed
-        # for that port (a JSON capture failure recorded on the settle).
-        # The optional dependent proceeds on the null sentinel; only the
-        # required dependent over the same failed capture fails its entry.
+        # settled, declared a json port, but its answer never parsed for
+        # that port (a JSON capture failure). The optional dependent
+        # proceeds on the null sentinel; only the required dependent over
+        # the same failed capture fails its entry.
         self.host.outcomes["src"] = {"status": "done", "answer": "no json here"}
         self.store_machine(
             {
@@ -6076,6 +6483,13 @@ class FactoryExecutorTest(_ExecutorTestCase):
         result = await self.start()
         status = await self.settle(result)
         self.assertEqual(status["state"], "failed")
+        # the failed json capture failed the source entry itself (defect C),
+        # and its settled answer stays preserved for review
+        src = self.state_report(status, "src")
+        self.assertEqual([entry["status"] for entry in src["entries"]], ["error"])
+        self.assertIn("no JSON object containing output 'data'", src["entries"][0]["error"])
+        self.assertEqual(status["needs_verify"], ["src"])
+        self.assertIn("no json here", src["entries"][0]["provisional_answer"])
         opt = self.state_report(status, "opt")
         self.assertEqual(opt["entries_used"], 1)
         self.assertEqual([entry["status"] for entry in opt["entries"]], ["done"])
@@ -6084,7 +6498,7 @@ class FactoryExecutorTest(_ExecutorTestCase):
         self.assertEqual(req["entries_used"], 1)
         self.assertEqual([entry["status"] for entry in req["entries"]], ["error"])
         self.assertIn(
-            "input 'data': no JSON object containing output 'data' in the upstream answer",
+            "input 'data' from state 'src' is unavailable (latest settle status 'error')",
             req["entries"][0]["error"],
         )
         self.assertEqual(self.host.spawn_calls("req"), [])
@@ -6247,14 +6661,9 @@ class FactoryExecutorTest(_ExecutorTestCase):
         # The admission below is gated mid-spawn so a stale loop that wrongly
         # continued would re-admit the SAME pending instance (a duplicate
         # child) while the new loop's admission is still in flight.
-        self.host.outcomes["a"] = {"status": "error", "error": "boom"}
-        self.host.rate_limit_first["b"] = 1  # resume()'s admission defers once
+        self.host.child_outcomes["child-1"] = {"status": "error", "error": "boom"}
         progress_gate = self.host.gate("factory.progress", 1)
         progress_entered = self.host.gate_entered("factory.progress", 1)
-        # rlm.run call #1 is a's admission at run(); #2 is b's first admission
-        # at resume() (rate limited, deferred nonblockingly); the gate holds
-        # call #3 -- the NEW loop's retry admission -- mid-spawn.
-        spawn_gate = self.host.gate("rlm.run", 3)
         self.store_factory(
             {
                 "nodes": [
@@ -6272,26 +6681,35 @@ class FactoryExecutorTest(_ExecutorTestCase):
         old_task = run.task
         self.assertIsNotNone(old_task)
         self.assertFalse(old_task.done())
-        # resume() bumps the generation, fires a->b, defers b's first
-        # admission (rate limited, nonblocking), and starts the new loop.
+        # The rate limit hits a's re-admission: resume()'s admission defers
+        # once, and the new loop's retry is the gated mid-spawn.
+        self.host.rate_limit_first["a"] = 2
+        # rlm.run call #1 is a's admission at run(); #2 is a's re-admission
+        # at resume() (rate limited, deferred nonblockingly); the gate holds
+        # call #3 -- the NEW loop's retry admission -- mid-spawn.
+        spawn_gate = self.host.gate("rlm.run", 3)
+        # resume() bumps the generation, re-admits a's failed entry (the
+        # admission defers, rate limited, nonblocking), and starts the new
+        # loop.
         resumed = await rlm_module.rlm.factory.resume(result["run_id"])
         self.assertEqual(resumed["state"], "running")
         self.assertEqual(resumed["started"], [])
         self.assertIsNot(run.task, old_task)
         # Releasing the milestone lets the old loop continue: with the
         # generation bump it must exit without admitting anything (the new
-        # loop owns b, suspended mid-admission at the spawn gate).
+        # loop owns a's retry, suspended mid-admission at the spawn gate).
         progress_gate.set()
         await old_task
         self.assertTrue(old_task.done())
         spawn_gate.set()
         final = await self.settle(result)
-        self.assertEqual(final["state"], "failed")
+        self.assertEqual(final["state"], "done")
         self.assertEqual(self.node_status(final, "b")["status"], "done")
-        # b has exactly two admissions: the deferred one at resume() and
-        # the new loop's successful retry. A stale second loop would admit
-        # it once more while the gated spawn was in flight.
-        self.assertEqual(len(self.host.spawn_calls("b")), 2)
+        # a has exactly three admissions: the failed first, the deferred
+        # one at resume() and the new loop's successful retry. A stale
+        # second loop would admit it once more while the gated spawn was
+        # in flight.
+        self.assertEqual(len(self.host.spawn_calls("a")), 3)
         self.assertEqual(self.all_events_of(result, "executor_error"), [])
         self.assertEqual(
             len([e for e in self.all_events_of(result, "state_entry") if e.get("node") == "b"]), 1

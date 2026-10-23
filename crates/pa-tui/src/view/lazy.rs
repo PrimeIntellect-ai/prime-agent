@@ -7,7 +7,6 @@ use crate::chat::Detail;
 /// immediately; only a resumed session's pad-scale row sets cross this.
 const HUGE_PACKED_ROWS: usize = 8192;
 
-use crate::chrome::render_splash;
 use crate::Line;
 
 #[cfg(test)]
@@ -186,9 +185,6 @@ impl AgentView {
         if self.layout_width == 0 {
             return;
         }
-        if let Some((index, rows)) = self.sparse_mutation {
-            self.sparse_mutation = Some((index + count, rows));
-        }
         let cursor_spacing_after = self.prepend_cursor_spacing(count);
         let Some(mut window) = self.sparse_window.take() else {
             return;
@@ -218,6 +214,40 @@ impl AgentView {
             None => None,
         };
         self.sparse_window = Some(window);
+    }
+
+    /// The chat entry and its row at the top of a paused viewport; `None` while following or
+    /// when the top is the splash or the tail section.
+    pub(crate) fn reader_position(&self) -> Option<(usize, usize)> {
+        if self.following {
+            return None;
+        }
+        let (section, row) = self.sparse_window?.cursor?;
+        (1..=self.chat.len())
+            .contains(&section)
+            .then(|| (section - 1, row))
+    }
+
+    /// Pause the viewport with row `row` of entry `index` at its top.
+    pub(crate) fn scroll_to_entry(&mut self, index: usize, row: usize) {
+        if self.layout_width == 0 {
+            return;
+        }
+        let sparse = self.sparse_enabled;
+        let offset = self.layout_pass(self.layout_width).entry_start(index) + row;
+        self.sparse_enabled = sparse;
+        self.sparse_window = None;
+        self.scroll_top = offset;
+        self.following = false;
+    }
+
+    /// `count` leading entries above the window dropped: the cursor's entry moved up.
+    pub(super) fn note_dropped_entries(&mut self, count: usize) {
+        if let Some(window) = &mut self.sparse_window {
+            window.cursor = window.cursor.and_then(|(section, row)| {
+                Some((section.checked_sub(count).filter(|s| *s > 0)?, row))
+            });
+        }
     }
 
     /// The delta of a just-appended entry, countable because the push
@@ -271,13 +301,9 @@ impl AgentView {
                 let splash = splash.get_or_insert_with(|| {
                     #[cfg(test)]
                     SPLASH_RENDERS.with(|count| count.set(count.get() + 1));
-                    // The suppressed splash is an empty section: the sparse walker skips
-                    // zero-row sections like an empty tail.
-                    if view.splash_suppressed {
-                        std::sync::Arc::new(Vec::new())
-                    } else {
-                        std::sync::Arc::new(render_splash(&view.chrome, &view.theme, window.width))
-                    }
+                    // An empty top section: the sparse walker skips zero-row sections like an
+                    // empty tail.
+                    std::sync::Arc::new(view.top_section_rows(window.width))
                 });
                 EntryRows::Fresh(splash.clone())
             } else if section == last {
@@ -455,13 +481,9 @@ impl AgentView {
                 let splash = splash.get_or_insert_with(|| {
                     #[cfg(test)]
                     SPLASH_RENDERS.with(|count| count.set(count.get() + 1));
-                    // The suppressed splash is an empty section: the sparse walker skips
-                    // zero-row sections like an empty tail.
-                    if view.splash_suppressed {
-                        std::sync::Arc::new(Vec::new())
-                    } else {
-                        std::sync::Arc::new(render_splash(&view.chrome, &view.theme, width))
-                    }
+                    // An empty top section: the sparse walker skips zero-row sections like an
+                    // empty tail.
+                    std::sync::Arc::new(view.top_section_rows(width))
                 });
                 return EntryRows::Fresh(splash.clone());
             }

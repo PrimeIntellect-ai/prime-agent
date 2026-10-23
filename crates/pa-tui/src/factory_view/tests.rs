@@ -686,6 +686,34 @@ fn the_key_loop_resolves_the_orchestration_actions() {
             run_id: "run-def67890".to_string()
         }
     );
+    // Right mirrors Enter and Left mirrors Esc: Right opens the action
+    // rows, Left backs out to the feed, then Left closes the page.
+    assert_eq!(view.handle_key("right", &kb()), FactoryViewAction::None);
+    assert!(
+        frame_text(&mut view)
+            .join("\n")
+            .contains("actions: second-run"),
+        "right did not open the action rows"
+    );
+    assert_eq!(view.handle_key("left", &kb()), FactoryViewAction::None);
+    assert!(
+        !frame_text(&mut view)
+            .join("\n")
+            .contains("actions: second-run"),
+        "left did not back out of the action rows"
+    );
+    assert_eq!(view.handle_key("left", &kb()), FactoryViewAction::Close);
+    // A rebound horizontal arrow keeps its configured action: with Left
+    // bound to tui.select.up, Left walks the feed instead of closing
+    // (the fallback runs only when no configured binding matches).
+    let rebound: KeybindingsManager = KeybindingsManager::with_user_bindings(
+        serde_json::from_value(json!({"tui.select.up": ["left"]})).unwrap(),
+    );
+    let _ = view.handle_key("down", &rebound);
+    assert_eq!(view.selected, 1);
+    assert_eq!(view.handle_key("left", &rebound), FactoryViewAction::None);
+    assert_eq!(view.selected, 0, "rebound Left walks the feed, not Close");
+    let _ = view.handle_key("down", &kb());
     // Esc backs out of the action rows to the feed, then closes.
     let _ = view.handle_key("enter", &kb());
     assert_eq!(view.handle_key("escape", &kb()), FactoryViewAction::None);
@@ -1469,6 +1497,15 @@ fn the_dock_count_reads_one_liveness_rule_across_many_runs() {
         live, 13,
         "eight live + one stopping + two paused + two done-with-residents"
     );
+    // The dock and the agents view split those live runs on the ONE paused
+    // predicate: the two paused runs never count as running.
+    assert_eq!(
+        FactoryRunCounts::of(&runs),
+        FactoryRunCounts {
+            running: 11,
+            paused: 2
+        }
+    );
     let find = |id: &str| {
         runs.iter()
             .find(|run| run.run_id == id)
@@ -1949,5 +1986,28 @@ fn rapid_churn_keeps_the_folded_page_coherent() {
         view.selected_run().map(|run| run.run_id.clone()),
         Some("run-w16".to_string()),
         "every keypress resolved against the folded batch"
+    );
+}
+
+/// The dock's factory row lists the live runs (the dock count's own set), paused runs first.
+#[test]
+fn the_dock_factory_items_list_live_runs_paused_first() {
+    let mut response = three_run_response();
+    response["runs"][0]["state"] = json!("done");
+    response["runs"][0]["usage"]["running"] = json!(0);
+    response["runs"][1]["state"] = json!("running");
+    response["runs"][2]["state"] = json!("paused");
+    let mut fourth = scripted_snapshot();
+    fourth["runId"] = json!("run-jkl24680");
+    fourth["name"] = json!("fourth-run");
+    fourth["state"] = json!("paused");
+    response["runs"].as_array_mut().unwrap().push(fourth);
+    assert_eq!(
+        dock_factory_items(&parse_factory_runs(&response)),
+        vec![
+            "fourth-run paused",
+            "third-run paused",
+            "second-run running"
+        ]
     );
 }

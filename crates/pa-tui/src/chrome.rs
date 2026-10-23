@@ -107,7 +107,7 @@ pub enum ActivityGroup {
     Goal,
 }
 
-/// Which way an arrow key steps along the dock's rendered groups.
+/// Which way an Up/Down press steps along the dock's rendered groups.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ActivityDirection {
     /// The previous group, wrapping past the first.
@@ -118,7 +118,9 @@ pub enum ActivityDirection {
 
 /// The bottom activity dock: it renders in every session, all-zero
 /// included (TS `SubagentSummaryLine` renders nothing at zero — a
-/// sanctioned divergence).
+/// sanctioned divergence). Unfocused it is one line of group counts;
+/// focused it expands into one row per group with each group's details
+/// (the operator's 2026-10-16 spec).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ActivityDock {
     /// The directly-running children right now (one addend of the dock's
@@ -127,20 +129,31 @@ pub struct ActivityDock {
     /// The further running descendants below them: the total's other
     /// addend. Idle and dead rows never count.
     pub subagents_running_nested: usize,
+    /// The idle descendants (the expanded subagents row's breakdown).
+    pub subagents_idle: usize,
+    /// The inactive descendants (the expanded subagents row's breakdown).
+    pub subagents_inactive: usize,
     /// The current session's heartbeats (nested sessions' jobs never
     /// surface here).
     pub heartbeats: usize,
+    /// The current session's active heartbeats, soonest next fire first,
+    /// each `<countdown> <label>` (the expanded row).
+    pub heartbeats_active: Vec<String>,
     /// How many of the scoped heartbeats are paused.
     pub heartbeats_paused: usize,
-    /// Bash processes actively running right now (the current session's
-    /// kernel registry only): finished runs stay rows inside the bash view.
-    pub bash_running: usize,
-    /// Factory runs actively live right now (a live state — running,
-    /// stopping, or paused — or a terminal run whose children are still
-    /// in flight, the residents teardown; the current session's kernel
-    /// registry only): fully terminal runs never inflate the indicator,
-    /// exactly like the bash group's running-only count.
-    pub factory_runs: usize,
+    /// The bash processes actively running right now, one item each (the
+    /// current session's kernel registry only): finished runs stay rows
+    /// inside the bash view.
+    pub shells: Vec<String>,
+    /// The live factory runs, paused first, each `<name> <state>` (a live
+    /// state — running, stopping, or paused — or a terminal run whose
+    /// children are still in flight; the current session's kernel registry
+    /// only): fully terminal runs never inflate the group, exactly like
+    /// the shells group's running-only scoping.
+    pub factory_runs: Vec<String>,
+    /// The same live runs counted running vs paused (the collapsed count
+    /// and its paused cluster).
+    pub factory_counts: crate::factory_view::FactoryRunCounts,
     /// Whether the factory group renders at all: the daemon's
     /// `factory_activity` advertisement (the factory's opt-in gate —
     /// `factory.enabled`, off by default). A daemon without the lane
@@ -158,12 +171,13 @@ pub struct ActivityDock {
 }
 
 impl ActivityDock {
-    /// The groups this dock renders, left to right — the arrow
-    /// traversal order. The subagents, heartbeats, and shells groups
-    /// always render (an empty one reads its zero count and stays
-    /// traversable); the factory group renders exactly while the daemon
-    /// advertises the `factory_activity` lane (the opt-in gate), and the
-    /// goal group exactly while a live goal keeps its row mounted.
+    /// The groups this dock renders — left to right collapsed, top to
+    /// bottom expanded — and the Up/Down traversal order. The subagents,
+    /// heartbeats, and shells groups always render (an empty one reads its
+    /// zero count or its dimmed row and stays traversable); the factory
+    /// group renders exactly while the daemon advertises the
+    /// `factory_activity` lane (the opt-in gate), and the goal group
+    /// exactly while a live goal keeps its row mounted.
     #[must_use]
     pub fn groups(&self) -> Vec<ActivityGroup> {
         let mut groups = vec![
@@ -180,8 +194,8 @@ impl ActivityDock {
         groups
     }
 
-    /// One arrow step: the neighbor in `direction`, wrapping at the row's
-    /// ends; a `current` that no longer renders steps from the row's start.
+    /// One step: the neighbor in `direction`, wrapping at the ends; a
+    /// `current` that no longer renders steps from the first group.
     #[must_use]
     pub fn step(&self, current: ActivityGroup, direction: ActivityDirection) -> ActivityGroup {
         let groups = self.groups();
@@ -675,14 +689,15 @@ fn land_marker(out: &mut Vec<crate::Span>, width: usize) {
     }
 }
 
-/// The framed activity dock: a muted separator rule above one row of
-/// the actionable groups — the row renders in every session, all-zero
+/// The framed activity dock: a muted separator rule above the
+/// actionable groups — one line of counts while unfocused, one row per
+/// group while focused. The dock renders in every session, all-zero
 /// included. The TS summary line wraps its content in an
 /// accent-colored box (`╭─ subagents ─╮`); the inline design language
 /// keeps the separation with the same muted `─` rule that frames the
 /// pickers' search fields, not an accent box.
 ///
-/// The row color-codes live activity (the operator's 2026-09-24
+/// The collapsed line color-codes live activity (the operator's 2026-09-24
 /// directive): every count-holding segment goes green while its count
 /// is above zero (subagents, heartbeats, shells, factory, the active
 /// goal) and stays neutral at zero. The subagents segment is one
@@ -693,26 +708,44 @@ pub fn render_activity_dock(dock: &ActivityDock, theme: &Theme, width: usize) ->
     render_activity_dock_segments(dock, theme, width).0
 }
 
-/// One rendered group segment's column span: a plain click on the
-/// group's own cells opens that group's view (the dock's Enter route).
+/// One rendered group's click surface: a plain click on the group's own
+/// cells opens that group's view (the dock's Enter route).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ActivityDockSegment {
     pub group: ActivityGroup,
+    /// The index of the group's line in the rendered frame (the rule is
+    /// line 0).
+    pub row: usize,
     /// The row columns the group's spans occupy.
     pub cols: std::ops::Range<usize>,
 }
 
-/// The framed activity dock plus its groups' column segments (see
-/// [`render_activity_dock`]): the segments cover exactly the cells each
-/// group renders, clamped to the row the truncation kept.
+/// The framed activity dock plus its groups' click segments (see
+/// [`render_activity_dock`]): collapsed, the segments cover exactly the
+/// cells each group renders, clamped to the row the truncation kept;
+/// expanded, each group's whole row.
 #[must_use]
 pub fn render_activity_dock_segments(
     dock: &ActivityDock,
     theme: &Theme,
     width: usize,
 ) -> (Vec<Line>, Vec<ActivityDockSegment>) {
+    let rule = vec![theme.fg_span(ThemeColor::BorderMuted, "─".repeat(width))];
+    if dock.focused {
+        let mut lines = vec![rule];
+        let mut segments = Vec::new();
+        for group in dock.groups() {
+            segments.push(ActivityDockSegment {
+                group,
+                row: lines.len(),
+                cols: 0..width,
+            });
+            lines.push(render_expanded_dock_row(dock, group, theme, width));
+        }
+        return (lines, segments);
+    }
     // The status-dot vocabulary (`● running / ◐ idle / ○ inactive`): the half
-    // circle marks waiting work; only the heartbeat pause keeps a dot.
+    // circle marks waiting work; only the heartbeat and factory pauses keep a dot.
     let cluster = |text: &str, color: ThemeColor| {
         vec![
             theme.fg_span(ThemeColor::Dim, " · ".to_string()),
@@ -721,93 +754,70 @@ pub fn render_activity_dock_segments(
     };
     // The live-only number: actively-running subagents right now, direct
     // children and nested descendants together — ONE number.
-    let running_color = |count: usize| {
-        if count > 0 {
-            ThemeColor::Success
-        } else {
-            ThemeColor::Muted
-        }
-    };
     let running = dock.subagents_running_direct + dock.subagents_running_nested;
-    // The row and the arrows share one group order (`groups()`): the
-    // focused selection never binds to a hidden segment.
-    let groups = dock.groups();
+    let shells = dock.shells.len();
+    let factory = dock.factory_counts;
     let mut line = vec![Span::raw(" ")];
     let mut segments: Vec<ActivityDockSegment> = Vec::new();
-    for (index, group) in groups.iter().copied().enumerate() {
+    for (index, group) in dock.groups().into_iter().enumerate() {
         if index > 0 {
             line.push(theme.fg_span(ThemeColor::Dim, "  ·  "));
         }
         // The segment's column span is what the terminal paints (the
         // truncation below clamps its end).
         let start = line.iter().map(|s| str_width(&s.content)).sum();
-        let spans = match group {
+        match group {
             ActivityGroup::Subagents => {
-                vec![theme.fg_span(running_color(running), format!("◆ {running} subagents"))]
+                line.push(theme.fg_span(
+                    activity_color(running),
+                    format!(
+                        "◆ {running} subagent{}",
+                        if running == 1 { "" } else { "s" }
+                    ),
+                ));
             }
             ActivityGroup::Heartbeats => {
-                let mut heartbeats = vec![theme.fg_span(
-                    running_color(dock.heartbeats),
+                line.push(theme.fg_span(
+                    activity_color(dock.heartbeats),
                     format!(
                         "◷ {} heartbeat{}",
                         dock.heartbeats,
                         if dock.heartbeats == 1 { "" } else { "s" }
                     ),
-                )];
+                ));
                 if dock.heartbeats_paused > 0 {
-                    heartbeats.extend(cluster(
+                    line.extend(cluster(
                         &format!("◐ {} paused", dock.heartbeats_paused),
                         ThemeColor::Warning,
                     ));
                 }
-                heartbeats
             }
             // The label reads "shell(s)": the tool name stays bash() everywhere else.
-            ActivityGroup::Bash => vec![theme.fg_span(
-                running_color(dock.bash_running),
-                format!(
-                    "▸ {} shell{}",
-                    dock.bash_running,
-                    if dock.bash_running == 1 { "" } else { "s" }
-                ),
-            )],
-            // The factory page's indicator counts live runs only
-            // (running, stopping, paused): done and failed runs stay as
-            // panels inside the factory page, never in the indicator.
-            ActivityGroup::Factory => vec![theme.fg_span(
-                running_color(dock.factory_runs),
-                format!("⚙ {} factory", dock.factory_runs),
-            )],
-            // The goal row carries the dock's activity convention: an
-            // actively pursued goal reads green, and the paused and
-            // budget-limited states read amber (the paused heartbeat
-            // cluster's own warning color) — the dock is the goal's one
-            // chrome surface, so every live state stays visible.
-            ActivityGroup::Goal => {
-                let goal = dock.goal_label.as_deref().unwrap_or_default();
-                let goal_color = if goal.starts_with("Pursuing goal") {
-                    ThemeColor::Success
-                } else {
-                    ThemeColor::Warning
-                };
-                vec![theme.fg_span(goal_color, goal.to_string())]
+            ActivityGroup::Bash => line.push(theme.fg_span(
+                activity_color(shells),
+                format!("▸ {} shell{}", shells, if shells == 1 { "" } else { "s" }),
+            )),
+            // The factory indicator counts the running runs, and the paused
+            // ones in their own amber cluster (the heartbeats' grammar): done
+            // and failed runs stay as panels inside the factory page.
+            ActivityGroup::Factory => {
+                line.push(theme.fg_span(
+                    activity_color(factory.running),
+                    format!("⚙ {} factory", factory.running),
+                ));
+                if factory.paused > 0 {
+                    line.extend(cluster(
+                        &format!("◐ {} paused", factory.paused),
+                        ThemeColor::Warning,
+                    ));
+                }
             }
-        };
-        if dock.focused && dock.selected == group {
-            // The focused group reads as one unit behind the ONE shared
-            // selection band; each span keeps its own status color.
-            let band = theme.selection_row_style();
-            for span in spans {
-                line.push(Span::styled(span.content.clone(), span.style.patch(band)));
-            }
-        } else {
-            for span in spans {
-                line.push(span);
-            }
+            ActivityGroup::Goal => line.push(goal_span(dock, theme)),
         }
         let end = line.iter().map(|s| str_width(&s.content)).sum();
         segments.push(ActivityDockSegment {
             group,
+            row: 1,
             cols: start..end,
         });
     }
@@ -827,13 +837,169 @@ pub fn render_activity_dock_segments(
             segment
         })
         .collect();
-    (
-        vec![
-            vec![theme.fg_span(ThemeColor::BorderMuted, "─".repeat(width))],
-            row,
-        ],
-        segments,
-    )
+    (vec![rule, row], segments)
+}
+
+/// A count-holding segment's color: green while its count is above
+/// zero, neutral at zero.
+fn activity_color(count: usize) -> ThemeColor {
+    if count > 0 {
+        ThemeColor::Success
+    } else {
+        ThemeColor::Muted
+    }
+}
+
+/// The goal group's label: an actively pursued goal reads green, and the
+/// paused and budget-limited states read amber (the paused heartbeat
+/// cluster's own warning color) — the dock is the goal's one chrome
+/// surface, so every live state stays visible.
+fn goal_span(dock: &ActivityDock, theme: &Theme) -> Span {
+    let goal = dock.goal_label.as_deref().unwrap_or_default();
+    let color = if goal.starts_with("Pursuing goal") {
+        ThemeColor::Success
+    } else {
+        ThemeColor::Warning
+    };
+    theme.fg_span(color, goal.to_string())
+}
+
+/// The widest group name in the expanded dock (`heartbeats`): every
+/// row's details start in the same column.
+const EXPANDED_NAME_CELLS: usize = 10;
+
+/// The separator between two items of one expanded row.
+const EXPANDED_ITEM_SEPARATOR: &str = "  ·  ";
+
+/// One expanded dock row; the selected row carries the shared selection
+/// band across the full width.
+fn render_expanded_dock_row(
+    dock: &ActivityDock,
+    group: ActivityGroup,
+    theme: &Theme,
+    width: usize,
+) -> Line {
+    let row = match group {
+        ActivityGroup::Subagents => {
+            let running = dock.subagents_running_direct + dock.subagents_running_nested;
+            let breakdown =
+                (running + dock.subagents_idle + dock.subagents_inactive > 0).then(|| {
+                    format!(
+                        "{running} running · {} idle · {} inactive",
+                        dock.subagents_idle, dock.subagents_inactive
+                    )
+                });
+            expanded_group_row(
+                theme,
+                width,
+                ("◆", "subagents"),
+                running,
+                breakdown.as_slice(),
+            )
+        }
+        ActivityGroup::Heartbeats => expanded_group_row(
+            theme,
+            width,
+            ("◷", "heartbeats"),
+            dock.heartbeats_active.len(),
+            &dock.heartbeats_active,
+        ),
+        ActivityGroup::Bash => expanded_group_row(
+            theme,
+            width,
+            ("▸", "shells"),
+            dock.shells.len(),
+            &dock.shells,
+        ),
+        ActivityGroup::Factory => expanded_group_row(
+            theme,
+            width,
+            ("⚙", "factory"),
+            dock.factory_counts.running,
+            &dock.factory_runs,
+        ),
+        ActivityGroup::Goal => vec![Span::raw(" "), goal_span(dock, theme)],
+    };
+    let mut row = truncate_spans_to_width(&row, width);
+    if dock.selected == group {
+        let filled: usize = row.iter().map(|s| str_width(&s.content)).sum();
+        row.push(Span::raw(" ".repeat(width.saturating_sub(filled))));
+        let band = theme.selection_row_style();
+        for span in &mut row {
+            span.style = span.style.patch(band);
+        }
+    }
+    row
+}
+
+/// A group row: the glyph and name, then the details (as many items as
+/// fit, `+N` for the rest). An empty group renders its glyph and name
+/// dimmed with no details.
+fn expanded_group_row(
+    theme: &Theme,
+    width: usize,
+    (glyph, name): (&str, &str),
+    count: usize,
+    items: &[String],
+) -> Line {
+    let title = format!("{glyph} {name}");
+    if items.is_empty() {
+        return vec![Span::raw(" "), theme.fg_span(ThemeColor::Dim, title)];
+    }
+    let mut row = vec![
+        Span::raw(" "),
+        theme.fg_span(activity_color(count), title),
+        Span::raw(" ".repeat(EXPANDED_NAME_CELLS - str_width(name) + 2)),
+    ];
+    let used: usize = row.iter().map(|s| str_width(&s.content)).sum();
+    let available = width.saturating_sub(used);
+    let shown = fitting_items(items, available);
+    let overflow = (shown < items.len()).then(|| format!("  +{}", items.len() - shown));
+    let marker = overflow.as_deref().map_or(0, str_width);
+    for (index, item) in items[..shown].iter().enumerate() {
+        if index > 0 {
+            row.push(theme.fg_span(ThemeColor::Dim, EXPANDED_ITEM_SEPARATOR));
+        }
+        // Only an oversized first item gets clipped here, to leave the `+N` marker its room.
+        let item = if index == 0 {
+            crate::width::truncate_to_width(item, available.saturating_sub(marker), "\u{2026}")
+        } else {
+            item.clone()
+        };
+        row.push(theme.fg_span(ThemeColor::Muted, item));
+    }
+    if let Some(overflow) = overflow {
+        row.push(theme.fg_span(ThemeColor::Dim, overflow));
+    }
+    row
+}
+
+/// How many leading items fit `available` columns together with the
+/// `+N` overflow marker for the rest; the first item always shows (the
+/// caller clips an oversized one beside the marker).
+fn fitting_items(items: &[String], available: usize) -> usize {
+    let separator = str_width(EXPANDED_ITEM_SEPARATOR);
+    let mut listed = 0;
+    let mut fitting = 1;
+    for (index, item) in items.iter().enumerate() {
+        if index > 0 {
+            listed += separator;
+        }
+        listed += str_width(item);
+        if listed > available {
+            break;
+        }
+        let shown = index + 1;
+        let overflow = if shown < items.len() {
+            str_width(&format!("  +{}", items.len() - shown))
+        } else {
+            0
+        };
+        if listed + overflow <= available {
+            fitting = shown;
+        }
+    }
+    fitting
 }
 
 /// The footer's tok/sec row: one dim line — the dock's last row —

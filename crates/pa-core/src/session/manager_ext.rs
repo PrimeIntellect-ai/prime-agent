@@ -269,6 +269,8 @@ fn entry_type(entry: &FileEntry) -> &'static str {
     match entry {
         FileEntry::Header { .. } => "session",
         FileEntry::Message { .. } => "message",
+        FileEntry::ToolStarted { .. } => "tool_started",
+        FileEntry::ToolProgress { .. } => "tool_progress",
         FileEntry::ThinkingLevelChange { .. } => "thinking_level_change",
         FileEntry::ServiceTierChange { .. } => "service_tier_change",
         FileEntry::ModelChange { .. } => "model_change",

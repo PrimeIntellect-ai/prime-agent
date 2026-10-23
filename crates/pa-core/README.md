@@ -9,7 +9,9 @@ seam, and the `mcp.*` host-request handlers the kernel's generic MCP
 client reaches through (`mcp.config`, `mcp.refresh`, optional
 `mcp.begin_login`). The OAuth flow lives behind it (`oauth*` submodules:
 RFC 9728 discovery, dynamic registration, PKCE, the local callback
-server, token refresh; `login.rs`: login execution that persists the
+server, token refresh; `McpOAuthConfig::callback_port` selects an exact registered
+desktop callback port, while dynamic clients retain the candidate range.
+Slack's endpoint selects its documented public desktop client; `login.rs`: login execution that persists the
 endpoint-bound credential into the shared auth store and the
 `wire_begin_login`/`McpOAuth` refresh integration hosts wire). The MCP
 protocol itself runs kernel-side (Python

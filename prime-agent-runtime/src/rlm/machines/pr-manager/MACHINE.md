@@ -85,7 +85,7 @@ state's `max_entries`; the run pauses (escalates) instead of spinning.
     {
       "id": "fixing",
       "subagent": {
-        "prompt": "Address the review findings in the verdict below. Make the smallest targeted fixes in the working tree, run the relevant tests, and reply with a fenced json block of the form {\\\"fix_report\\\": {\\\"fixed\\\": [\\\"finding that was addressed\\\"], \\\"skipped\\\": [\\\"finding left alone and why\\\"]}}. Output only the json block.\\n\\n{verdict}",
+        "prompt": "Address the review findings in the verdict below. This state can run again (a retry or a later review round) over a working tree an earlier attempt already changed: start from `git status` and `git diff`, keep the changes that already address a finding, and revert half-finished edits before making new ones. Make the smallest targeted fixes in the working tree, run the relevant tests, and reply with a fenced json block of the form {\\\"fix_report\\\": {\\\"fixed\\\": [\\\"finding that was addressed\\\"], \\\"skipped\\\": [\\\"finding left alone and why\\\"]}}. Output only the json block.\\n\\n{verdict}",
         "name": "pr-fixing"
       },
       "inputs": [

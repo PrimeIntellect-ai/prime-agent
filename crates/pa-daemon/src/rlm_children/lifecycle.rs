@@ -1,15 +1,17 @@
 //! The child-lifecycle concern: session creation (create/launch), the
 //! prompt/kill/close routing, settle watching with its notices, and the
 //! spawn-admission outbox types (`CreatedSessionIds`, `CreatedChild`).
+use pa_core::session_engine::semantic_edges::ChildCancelledReason;
+
 use super::{
     anyhow, cap_text, compact_rlm_text, create_rlm_child_failure_message,
-    create_rlm_child_terminal_notice, json, now_ms, Arc, ChildCloseReason, ChildRecord, Context,
-    CustomMessage, DaemonCommand, DaemonSessionLifecycle, Duration, Map, Mutex, ParentIdentity,
-    Path, PromptInput, Result, RlmChildTerminalNotice, SupervisorChildSessionsInner, Value,
-    ANSWER_TEXT_MAX_CHARS, CREATE_TIMEOUT_MS, IDLE_WAIT_GRACE_MS, KILL_TIMEOUT_MS,
-    NOTICE_DELIVERY_TIMEOUT_MS, PROMPT_TIMEOUT_MS, RUNTIME_METADATA_PROMPT_MAX, STATE_TIMEOUT_MS,
-    WATCH_MAX_UNREACHABLE_POLLS, WATCH_POLL_INTERVAL_MS, WATCH_SETTLE_GRACE_MS,
-    WATCH_WAIT_SLICE_MS,
+    create_rlm_child_terminal_notice, json, now_ms, Arc, ChildCloseReason, ChildObservationSource,
+    ChildRecord, Context, CustomMessage, DaemonCommand, DaemonSessionLifecycle, Duration, Map,
+    Mutex, ParentIdentity, Path, PromptInput, Result, RlmChildTerminalNotice,
+    SupervisorChildSessionsInner, Value, ANSWER_TEXT_MAX_CHARS, CREATE_TIMEOUT_MS,
+    IDLE_WAIT_GRACE_MS, KILL_TIMEOUT_MS, NOTICE_DELIVERY_TIMEOUT_MS, PROMPT_TIMEOUT_MS,
+    RUNTIME_METADATA_PROMPT_MAX, STATE_TIMEOUT_MS, WATCH_MAX_UNREACHABLE_POLLS,
+    WATCH_POLL_INTERVAL_MS, WATCH_SETTLE_GRACE_MS, WATCH_WAIT_SLICE_MS,
 };
 
 /// Parsed ids of one created child session.
@@ -55,6 +57,12 @@ fn custom_message_text(message: &CustomMessage) -> Option<String> {
 impl SupervisorChildSessionsInner {
     /// Create one child session over the supervisor link (no prompt yet);
     /// `model` is the resolved `provider/id` selector.
+    ///
+    /// `launch_env` is the environment the child's worker process runs
+    /// in: the parent worker's own env (filtered) for an `rlm.spawn`
+    /// child — TS runs those in-process inside the parent worker, so
+    /// parity means the child inherits the parent's environment — or
+    /// the minimal TS set for a depth-0 `create_session` root.
     #[allow(clippy::too_many_arguments)]
     pub(super) async fn create_child(
         &self,
@@ -74,6 +82,7 @@ impl SupervisorChildSessionsInner {
         spawned_by_request_id: Option<&str>,
         runtime_metadata: Option<Value>,
         identity: &ParentIdentity,
+        launch_env: Option<std::collections::BTreeMap<String, String>>,
     ) -> Result<CreatedChild> {
         let mut config = json!({
             "cwd": cwd,
@@ -136,7 +145,7 @@ impl SupervisorChildSessionsInner {
             runtime_metadata,
             lifecycle: Some(DaemonSessionLifecycle::Resident),
             env: None,
-            launch_env: None,
+            launch_env,
             rest: Map::default(),
         };
         let summary = self
@@ -162,6 +171,7 @@ impl SupervisorChildSessionsInner {
         session_dir: &Path,
         runtime_metadata: Option<Value>,
         identity: &ParentIdentity,
+        launch_env: Option<std::collections::BTreeMap<String, String>>,
     ) -> Result<CreatedChild> {
         let created = self
             .create_child(
@@ -176,6 +186,7 @@ impl SupervisorChildSessionsInner {
                 /*spawned_by_request_id*/ None,
                 runtime_metadata,
                 identity,
+                launch_env,
             )
             .await?;
         // A failed prompt tears the just-created session down (TS kills the
@@ -335,26 +346,24 @@ impl SupervisorChildSessionsInner {
         Ok(())
     }
 
-    /// Whether the child worker still has work in flight (streaming,
-    /// queued, or its own children still running - so a child stays
-    /// running while any descendant does). `Err` means the child cannot be
-    /// reached right now.
-    pub(super) async fn child_busy(&self, active_session_id: &str) -> Result<bool> {
+    /// The child's live session summary (`get_state`): the busy verdict,
+    /// the note, and the tool count read one round trip.
+    pub(super) async fn child_state(&self, active_session_id: &str) -> Result<Value> {
         let command = DaemonCommand::GetState {
             id: None,
             active_session_id: active_session_id.to_string(),
             rest: Map::default(),
         };
-        let state = self.command(&command, STATE_TIMEOUT_MS).await?;
-        let flag = |name: &str| state.get(name).and_then(Value::as_bool).unwrap_or(false);
-        Ok(flag("isStreaming")
-            || flag("hasRunningSubagents")
-            || state
-                .get("sessionActions")
-                .and_then(|actions| actions.get("queuedCount"))
-                .and_then(Value::as_u64)
-                .unwrap_or(0)
-                > 0)
+        self.command(&command, STATE_TIMEOUT_MS).await
+    }
+
+    /// Whether the child worker still has work in flight (streaming,
+    /// queued, or its own children still running - so a child stays
+    /// running while any descendant does). `Err` means the child cannot be
+    /// reached right now.
+    pub(super) async fn child_busy(&self, active_session_id: &str) -> Result<bool> {
+        let state = self.child_state(active_session_id).await?;
+        Ok(child_busy_flags(&state))
     }
 
     /// One `GetLastAssistantText` round trip: the raw text the roster
@@ -399,7 +408,8 @@ impl SupervisorChildSessionsInner {
     }
 
     /// Refresh one record against its worker: settle a child whose worker ran out of work and
-    /// capture its answer once; an unreachable child keeps its last known state.
+    /// capture its answer once; an unreachable child keeps its last known state. The same
+    /// round trip observes the child's live note and tool count onto the record.
     pub(super) async fn refresh_record(&self, record: &Arc<Mutex<ChildRecord>>) {
         {
             let record = record.lock().await;
@@ -407,9 +417,32 @@ impl SupervisorChildSessionsInner {
                 return;
             }
         }
-        let active_session_id = record.lock().await.active_session_id.clone();
-        let busy = self.child_busy(&active_session_id).await;
-        if !matches!(busy, Ok(false)) {
+        let (active_session_id, direct_observation) = {
+            let record = record.lock().await;
+            (
+                record.active_session_id.clone(),
+                Arc::clone(&record.direct_observation),
+            )
+        };
+        let state = {
+            let _direct = direct_observation.lock().await;
+            let request_order = self
+                .observation_requests
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let state = self.child_state(&active_session_id).await;
+            if let Ok(state) = &state {
+                self.observe_live_state(
+                    record,
+                    state,
+                    request_order,
+                    ChildObservationSource::Direct,
+                )
+                .await;
+            }
+            state
+        };
+        let idle = matches!(&state, Ok(state) if !child_busy_flags(state));
+        if !idle {
             return;
         }
         // Capture the answer before taking the record lock (the capture is
@@ -469,6 +502,22 @@ impl SupervisorChildSessionsInner {
             self.refresh_record(record).await;
             let settled = record.lock().await.settled_status.is_some();
             if settled {
+                // A delete in flight (`retiring`) owns this run's terminal
+                // edge: the watcher must not run the settle tail into the
+                // delete's kill window. The tail would record nothing
+                // (`record_child_return` holds the mark), deliver the
+                // terminal notice and exit, so a failed kill would strand
+                // a settled row with no watcher and no ledger line, and a
+                // confirmed kill would race its cancel line with the
+                // notice, the goal hook and the display flip. Park
+                // instead: a failed kill clears the mark and the loop
+                // settles the run normally, and a confirmed kill closes
+                // the record (`closed_by_parent` ends the watch at the
+                // loop top).
+                if record.lock().await.retiring {
+                    tokio::time::sleep(Duration::from_millis(WATCH_POLL_INTERVAL_MS)).await;
+                    continue;
+                }
                 // Stability re-check: a prompt admitted to an idle worker
                 // can read idle once between the admission and the turn
                 // pop (the queue snapshot and the busy flag change under
@@ -477,9 +526,24 @@ impl SupervisorChildSessionsInner {
                 // (a queued continuation) keeps watching. An unreachable
                 // worker (an idle passivation, a crash) leaves the settled
                 // verdict standing, as in `refresh_record`.
+                //
+                // The re-check wipes only a WATCHER-set settle (the
+                // premature `done` of the admission race): a
+                // registry-set `cancelled` (a user abort or a parent kill
+                // in flight, `cancel_child_run`/`close_children_inner`)
+                // stands — wiping it would let this watcher refresh the
+                // still-live run back to `done` and record a clean
+                // `child_returned` beside the cancel line, so the row
+                // keeps its registry settle and this loop keeps watching
+                // until the abort lands (the cancel path owns the
+                // terminal handling).
                 tokio::time::sleep(Duration::from_millis(WATCH_SETTLE_GRACE_MS)).await;
                 if matches!(self.child_busy(&active_session_id).await, Ok(true)) {
-                    record.lock().await.settled_status = None;
+                    let mut record = record.lock().await;
+                    if matches!(record.settled_status, Some("done")) {
+                        record.settled_status = None;
+                    }
+                    drop(record);
                     continue;
                 }
                 self.refresh_record(record).await;
@@ -535,11 +599,7 @@ impl SupervisorChildSessionsInner {
                     // holds; capture them before the terminal notice.
                     self.emit_final_child_usage(record).await;
                     if self
-                        .settle_failed(
-                            record,
-                            "Child worker unreachable".to_string(),
-                            FailedArm::Unreachable,
-                        )
+                        .settle_failed(record, "Child worker unreachable".to_string())
                         .await
                     {
                         return;
@@ -566,10 +626,12 @@ impl SupervisorChildSessionsInner {
     /// committed request, read from the child's own ledger file (the
     /// cross-process form of TS's in-process
     /// `child.semanticEdges.lastCommittedRequestId`). Only a `done` or
-    /// `error` settle returns — TS never records a cancelled run (its done
-    /// arm throws on `run.error` and the record gates on `status ===
-    /// "error"`). A child without a durable session id, or a parent
-    /// without a recorder, records nothing.
+    /// `error` settle returns — a cancelled run never returns (it is the
+    /// parent's action, so it records through
+    /// [`Self::record_child_cancelled`] instead, nano-rlm #202) — and a
+    /// delete in flight ([`ChildRecord::retiring`]) returns nothing either.
+    /// A child without a durable session id, or a parent without a
+    /// recorder, records nothing.
     async fn record_child_return(&self, record: &Arc<Mutex<ChildRecord>>) {
         let recorder = self
             .semantic_edges
@@ -581,7 +643,10 @@ impl SupervisorChildSessionsInner {
         };
         let (child_session_id, child_dir) = {
             let record = record.lock().await;
-            if !matches!(record.settled_status, Some("done" | "error")) {
+            // A delete in flight owns this child's terminal edge: the
+            // delete records a cancel line, so a watcher that wakes inside
+            // the kill window must not append a clean return beside it.
+            if record.retiring || !matches!(record.settled_status, Some("done" | "error")) {
                 return;
             }
             (record.session_id.clone(), record.session_dir.clone())
@@ -604,6 +669,34 @@ impl SupervisorChildSessionsInner {
         .ok()
         .flatten();
         recorder.record_child_returned(&child_session_id, last_committed);
+    }
+
+    /// Record a parent-cancelled child in the parent's semantic-edge
+    /// ledger (nano-rlm #202's `recordSubagentCancel`): the cancel twin
+    /// of a spawn — an action the PARENT took, anchored to the parent's
+    /// in-flight (cancelling) request, never a passive child return.
+    /// `reason` names the parent-side action (a delete, a user cancel,
+    /// the session-kill close walk) on the line; a daemon lifecycle
+    /// close never reaches here. A child without a durable session id,
+    /// or a parent without a recorder, records nothing.
+    pub(super) async fn record_child_cancelled(
+        &self,
+        record: &Arc<Mutex<ChildRecord>>,
+        reason: ChildCancelledReason,
+    ) {
+        let recorder = self
+            .semantic_edges
+            .lock()
+            .expect("semantic edges lock")
+            .clone();
+        let Some(recorder) = recorder else {
+            return;
+        };
+        let child_session_id = record.lock().await.session_id.clone();
+        let Some(child_session_id) = child_session_id else {
+            return;
+        };
+        recorder.record_child_cancelled(&child_session_id, reason);
     }
 
     /// Deliver the no-reply terminal notice for a settled child that never
@@ -631,24 +724,16 @@ impl SupervisorChildSessionsInner {
     /// settles `error` with its failure text and the parent receives the
     /// `rlm_child_failure` row — whether or not the child replied — then
     /// the settle funnel fires like TS's `finally` resume. Exactly-once:
-    /// the claim is split by arm. The unreachable arm keeps
-    /// `should_mark_unreachable_error` — an already-settled child keeps
-    /// its verdict (#3104's passivation semantics: a verdict a reader's
-    /// refresh lands inside the give-up keeps standing, and the claim
-    /// reports the loss so the watcher runs that verdict's settle tail).
-    /// The prompt arm bails only on a REAL terminal verdict:
-    /// a task turn that provably never started cannot have genuinely
-    /// completed, so a `done` visible inside the prompt-failure window is
-    /// `refresh_record`'s admission-window misread of an alive-but-idle
-    /// worker, not a settle verdict — the failure row must still land
-    /// (and, since #3171, the run must still mark settled, or the
-    /// quiescence barrier parks forever). Returns whether this call
-    /// claimed the settle.
+    /// a child that already holds a verdict keeps it
+    /// (`should_mark_error`; #3104's passivation semantics: a verdict a
+    /// reader's refresh lands inside the unreachable give-up keeps
+    /// standing, and the claim reports the loss so the watcher runs that
+    /// verdict's settle tail). Returns whether this call claimed the
+    /// settle.
     pub(super) async fn settle_failed(
         &self,
         record: &Arc<Mutex<ChildRecord>>,
         error: String,
-        arm: FailedArm,
     ) -> bool {
         // The exit capture (the M4 seam): a child that dies without
         // reporting still said something — the live worker's last
@@ -694,15 +779,7 @@ impl SupervisorChildSessionsInner {
         };
         let message = {
             let mut record = record.lock().await;
-            let keep_verdict = match arm {
-                FailedArm::Unreachable => !should_mark_unreachable_error(&record),
-                FailedArm::Prompt => {
-                    record.closed_by_parent
-                        || record.notice_delivered
-                        || matches!(record.settled_status, Some("error" | "cancelled"))
-                }
-            };
-            if keep_verdict {
+            if !should_mark_error(&record) {
                 return false;
             }
             record.settled_status = Some("error");
@@ -779,24 +856,14 @@ impl SupervisorChildSessionsInner {
     }
 }
 
-/// Which failure arm is claiming the settle: the two arms bail on
-/// different evidence (see `settle_failed`).
-pub(super) enum FailedArm {
-    /// The task-prompt admission failed and its retry failed.
-    Prompt,
-    /// The unreachable-poller's give-up (`WATCH_MAX_UNREACHABLE_POLLS`
-    /// consecutive dead polls).
-    Unreachable,
-}
-
-/// Whether a child may still settle as an error (the unreachable
-/// give-up's claim): a parent-closed child, a noticed child, or an
+/// Whether a child may still settle as an error (the failed task prompt's
+/// or the unreachable give-up's claim): a parent-closed child, a noticed child, or an
 /// ALREADY-SETTLED child keeps its POSITIVE verdict — its worker leaving
 /// afterward (the idle passivation's graceful stop, a crash after
 /// settle, or a give-up) is residency churn, not a settle verdict
 /// change. The settle state is durable and the passive roster row
 /// stays the representation.
-pub(super) fn should_mark_unreachable_error(state: &ChildRecord) -> bool {
+pub(super) fn should_mark_error(state: &ChildRecord) -> bool {
     !(state.closed_by_parent || state.notice_delivered || state.settled_status.is_some())
 }
 
@@ -829,6 +896,20 @@ pub(super) fn last_assistant_text_from_file(session_file: &str) -> Option<String
         }
     }
     None
+}
+
+/// The busy flags of one child `get_state` summary (streaming, its own
+/// descendants, or queued work in flight).
+fn child_busy_flags(state: &Value) -> bool {
+    let flag = |name: &str| state.get(name).and_then(Value::as_bool).unwrap_or(false);
+    flag("isStreaming")
+        || flag("hasRunningSubagents")
+        || state
+            .get("sessionActions")
+            .and_then(|actions| actions.get("queuedCount"))
+            .and_then(Value::as_u64)
+            .unwrap_or(0)
+            > 0
 }
 
 #[cfg(test)]

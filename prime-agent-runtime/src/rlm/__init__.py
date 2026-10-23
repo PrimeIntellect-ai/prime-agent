@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from .bash import BashHandle, BashResult, bash
+from .bash import BashHandle, BashResult, BashSnapshot, bash, persistent_shells, _set_completion_notices_wired
 from .factory import (
     FACTORY_HELP,
     graph_factory,
@@ -723,6 +723,7 @@ __all__ = [
     "harness",
     "host_request",
     "list_subagents",
+    "persistent_shells",
     "progress_note",
     "rename",
     "rlm",

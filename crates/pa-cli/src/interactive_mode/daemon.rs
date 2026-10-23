@@ -174,25 +174,12 @@ fn spawn_supervisor_detached(socket_path: &Path, spawn_cwd: &Path, exe: &Path) -
         .current_dir(spawn_cwd)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        // Strip inherited worker/supervisor role env vars so the spawned
-        // supervisor never starts in worker mode (a CLI inside a worker would
-        // otherwise launch a supervisor that listens but never handshakes) —
-        // the TS launcher deletes the same set.
-        .env_remove(pa_daemon::worker::WORKER_ROLE_ENV)
-        .env_remove(pa_daemon::worker::WORKER_TOKEN_ENV)
-        .env_remove(pa_daemon::worker::WORKER_ACTIVE_SESSION_ID_ENV)
-        .env_remove(pa_daemon::worker::WORKER_RECOVERY_JOURNAL_ENV)
-        .env_remove(pa_daemon::worker::WORKER_SUPERVISOR_SOCKET_ENV)
-        .env_remove(pa_daemon::worker::WORKER_SOCKET_ENV)
-        .env_remove(pa_daemon::worker::WORKER_INSTANCE_ID_ENV)
-        .env_remove(pa_daemon::worker::WORKER_SCRIPT_ENV)
-        // A lease owner id inherited from an ancestor would name a stale session in every
-        // lease this daemon's workers write — TS deletes the same var before spawning.
-        .env_remove(pa_daemon::lease::SESSION_LEASE_OWNER_ID_ENV);
-    // A daemon must not share the launching TUI's terminal session: a
-    // session-wide terminal cleanup could hang it up after the TUI exits.
-    // On Unix, setsid also creates its own process group.
+        .stderr(Stdio::null());
+    // The binary entry strips any inherited worker handshake env, so the
+    // spawned supervisor never starts in worker mode. A daemon must also not
+    // share the launching TUI's terminal session: a session-wide terminal
+    // cleanup could hang it up after the TUI exits; on Unix, setsid also
+    // creates its own process group.
     #[cfg(unix)]
     pa_core::platform::process::set_new_session(&mut command);
     #[cfg(not(unix))]

@@ -81,6 +81,15 @@ pub enum TransportSetting {
     WebSocketCached,
 }
 
+fn deserialize_threshold_percent<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<f64>, D::Error> {
+    let value = serde_json::Value::deserialize(deserializer)?;
+    Ok(value
+        .as_f64()
+        .filter(|percent| pa_types::compaction::is_valid_threshold_percent(*percent)))
+}
+
 /// `number | "unlimited"` autonomous limit.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(untagged)]
@@ -93,6 +102,9 @@ pub enum AutonomousLimitSetting {
 #[serde(rename_all = "camelCase")]
 pub struct CompactionSettings {
     pub enabled: Option<bool>,
+    /// Percentage ceiling for automatic compaction; invalid values behave as unset.
+    #[serde(default, deserialize_with = "deserialize_threshold_percent")]
+    pub threshold_percent: Option<f64>,
     pub reserve_tokens: Option<u64>,
     pub keep_recent_tokens: Option<u64>,
     pub agent_callable: Option<bool>,
@@ -286,6 +298,10 @@ pub enum McpServerConfig {
     },
 }
 
+/// The default per-cell watchdog budget for user `python_repl` cells: 60
+/// seconds.
+pub const DEFAULT_PYTHON_CELL_TIMEOUT_MS: u64 = 60_000;
+
 /// The settings document: every known field optional; unknown keys preserved.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
@@ -303,19 +319,14 @@ pub struct Settings {
     pub rlm_max_depth: Option<u64>,
     /// `number | "off" | "none"`; raw JSON because the TS getter validates at access time.
     pub idle_eviction_minutes: Option<serde_json::Value>,
-    /// Session archiving age rule: sessions untouched for this many days are
-    /// moved to the daemon's archive directory. `number | "off" | "none"`; raw
-    /// JSON validated at access time (same grammar as `idleEvictionMinutes`).
-    pub session_archive_max_age_days: Option<serde_json::Value>,
-    /// Session archiving count rule: keep at most this many unarchived sessions (newest by mtime
-    /// win); `0 | "off" | "none"` disables. Raw JSON validated at access time.
-    pub session_archive_max_sessions: Option<serde_json::Value>,
     pub transport: Option<TransportSetting>,
     pub steering_mode: Option<QueueModeSetting>,
     pub follow_up_mode: Option<QueueModeSetting>,
     pub theme: Option<String>,
     pub compaction: Option<CompactionSettings>,
     pub auto_refine: Option<AutoRefineSettings>,
+    /// Master switch for harness creation and context loading; unset preserves enabled behavior.
+    pub harness_refinements: Option<bool>,
     pub agent_traces: Option<AgentTracesSettings>,
     pub factory: Option<FactorySettings>,
     pub telemetry: Option<TelemetrySettings>,
@@ -326,7 +337,18 @@ pub struct Settings {
     /// session model does not accept image input. Default: none - image turns on a text-only model
     /// fail with a configuration hint instead of silently dropping the images.
     pub image_model: Option<String>,
+    /// Per-cell watchdog budget for user `python_repl` cells, in milliseconds
+    /// (default [`DEFAULT_PYTHON_CELL_TIMEOUT_MS`]; `0` disables). Daemonless
+    /// sessions never arm it.
+    pub python_cell_timeout_ms: Option<u64>,
     pub autonomous: Option<AutonomousSettings>,
+    /// Custom shell that runs every kernel `bash()` and user-bash command as
+    /// `<shell> -c <command>`: an absolute path to an existing executable,
+    /// validated once at session start (a bad value fails session creation
+    /// naming this setting). Project `.prime/agent/settings.json` overrides
+    /// the global value (TS parity), so opening an untrusted repo lets it
+    /// choose the binary that wraps every agent shell command - review
+    /// project settings before running the agent there.
     pub shell_path: Option<String>,
     pub quiet_startup: Option<bool>,
     pub shell_command_prefix: Option<String>,

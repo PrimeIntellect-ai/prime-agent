@@ -1,0 +1,185 @@
+{
+  "schema": 1,
+  "entries": {
+    "session-switch/large": {
+      "median_ms": 1034.4,
+      "report_only": true,
+      "source": "https://github.com/PrimeIntellect-ai/prime-agent/actions/runs/38630077435 (attempts 1-3)"
+    },
+    "agents-view/large": {
+      "median_ms": 13458.7,
+      "report_only": true,
+      "source": "https://github.com/PrimeIntellect-ai/prime-agent/actions/runs/38630077435 (attempts 1-3)"
+    },
+    "at-completion/large": {
+      "median_ms": 222.3,
+      "report_only": false,
+      "source": "https://github.com/PrimeIntellect-ai/prime-agent/actions/runs/38630077435 (attempts 1-3)"
+    },
+    "cold-start/large": {
+      "median_ms": 22.2,
+      "report_only": false,
+      "source": "https://github.com/PrimeIntellect-ai/prime-agent/actions/runs/38630077435 (attempts 1-3)"
+    },
+    "warm-ready/large": {
+      "median_ms": 130.5,
+      "report_only": true,
+      "source": "https://github.com/PrimeIntellect-ai/prime-agent/actions/runs/38630077435 (attempts 1-3)"
+    },
+    "agents-view-warm/large": {
+      "median_ms": 11333.6,
+      "report_only": true,
+      "source": "https://github.com/PrimeIntellect-ai/prime-agent/actions/runs/38630077435 (attempts 1-3)"
+    },
+    "cold-ready/large": {
+      "median_ms": 147.4,
+      "report_only": true,
+      "source": "https://github.com/PrimeIntellect-ai/prime-agent/actions/runs/38630077435 (attempts 1-3)"
+    },
+    "warm-start/large": {
+      "median_ms": 12.7,
+      "report_only": true,
+      "source": "https://github.com/PrimeIntellect-ai/prime-agent/actions/runs/38630077435 (attempts 1-3)"
+    },
+    "open-session/large": {
+      "median_ms": 2485.8,
+      "report_only": false,
+      "source": "https://github.com/PrimeIntellect-ai/prime-agent/actions/runs/38630077435 (attempts 1-3)"
+    },
+    "at-completion/medium": {
+      "median_ms": 158.4,
+      "report_only": false,
+      "source": "https://github.com/PrimeIntellect-ai/prime-agent/actions/runs/38630077435 (attempts 1-3)"
+    },
+    "open-session/medium": {
+      "median_ms": 314.4,
+      "report_only": true,
+      "source": "https://github.com/PrimeIntellect-ai/prime-agent/actions/runs/38630077435 (attempts 1-3)"
+    },
+    "cold-ready/medium": {
+      "median_ms": 56.3,
+      "report_only": false,
+      "source": "https://github.com/PrimeIntellect-ai/prime-agent/actions/runs/38630077435 (attempts 1-3)"
+    },
+    "agents-view-warm/medium": {
+      "median_ms": 186.6,
+      "report_only": false,
+      "source": "https://github.com/PrimeIntellect-ai/prime-agent/actions/runs/38630077435 (attempts 1-3)"
+    },
+    "warm-start/medium": {
+      "median_ms": 10.9,
+      "report_only": true,
+      "source": "https://github.com/PrimeIntellect-ai/prime-agent/actions/runs/38630077435 (attempts 1-3)"
+    },
+    "cold-start/medium": {
+      "median_ms": 19.2,
+      "report_only": true,
+      "source": "https://github.com/PrimeIntellect-ai/prime-agent/actions/runs/38630077435 (attempts 1-3)"
+    },
+    "session-switch/medium": {
+      "median_ms": 244.9,
+      "report_only": true,
+      "source": "https://github.com/PrimeIntellect-ai/prime-agent/actions/runs/38630077435 (attempts 1-3)"
+    },
+    "agents-view/medium": {
+      "median_ms": 551.9,
+      "report_only": true,
+      "source": "https://github.com/PrimeIntellect-ai/prime-agent/actions/runs/38630077435 (attempts 1-3)"
+    },
+    "warm-ready/medium": {
+      "median_ms": 56.6,
+      "report_only": true,
+      "source": "https://github.com/PrimeIntellect-ai/prime-agent/actions/runs/38630077435 (attempts 1-3)"
+    },
+    "at-completion/small": {
+      "median_ms": 132.3,
+      "report_only": true,
+      "source": "https://github.com/PrimeIntellect-ai/prime-agent/actions/runs/38630077435 (attempts 1-3)"
+    },
+    "agents-view-warm/small": {
+      "median_ms": 109.0,
+      "report_only": true,
+      "source": "https://github.com/PrimeIntellect-ai/prime-agent/actions/runs/38630077435 (attempts 1-3)"
+    },
+    "cold-start/small": {
+      "median_ms": 19.5,
+      "report_only": true,
+      "source": "https://github.com/PrimeIntellect-ai/prime-agent/actions/runs/38630077435 (attempts 1-3)"
+    },
+    "session-switch/small": {
+      "median_ms": 121.6,
+      "report_only": true,
+      "source": "https://github.com/PrimeIntellect-ai/prime-agent/actions/runs/38630077435 (attempts 1-3)"
+    },
+    "warm-ready/small": {
+      "median_ms": 40.6,
+      "report_only": true,
+      "source": "https://github.com/PrimeIntellect-ai/prime-agent/actions/runs/38630077435 (attempts 1-3)"
+    },
+    "cold-ready/small": {
+      "median_ms": 49.4,
+      "report_only": true,
+      "source": "https://github.com/PrimeIntellect-ai/prime-agent/actions/runs/38630077435 (attempts 1-3)"
+    },
+    "open-session/small": {
+      "median_ms": 165.3,
+      "report_only": false,
+      "source": "https://github.com/PrimeIntellect-ai/prime-agent/actions/runs/38630077435 (attempts 1-3)"
+    },
+    "agents-view/small": {
+      "median_ms": 64.7,
+      "report_only": true,
+      "source": "https://github.com/PrimeIntellect-ai/prime-agent/actions/runs/38630077435 (attempts 1-3)"
+    },
+    "warm-start/small": {
+      "median_ms": 11.2,
+      "report_only": true,
+      "source": "https://github.com/PrimeIntellect-ai/prime-agent/actions/runs/38630077435 (attempts 1-3)"
+    },
+    "cold-start/xl": {
+      "median_ms": 22.3,
+      "report_only": true,
+      "source": "https://github.com/PrimeIntellect-ai/prime-agent/actions/runs/38630077435 (attempts 1-3)"
+    },
+    "warm-ready/xl": {
+      "median_ms": 83.8,
+      "report_only": true,
+      "source": "https://github.com/PrimeIntellect-ai/prime-agent/actions/runs/38630077435 (attempts 1-3)"
+    },
+    "cold-ready/xl": {
+      "median_ms": 95.0,
+      "report_only": true,
+      "source": "https://github.com/PrimeIntellect-ai/prime-agent/actions/runs/38630077435 (attempts 1-3)"
+    },
+    "agents-view/xl": {
+      "median_ms": 3562.7,
+      "report_only": true,
+      "source": "https://github.com/PrimeIntellect-ai/prime-agent/actions/runs/38630077435 (attempts 1-3)"
+    },
+    "warm-start/xl": {
+      "median_ms": 16.0,
+      "report_only": true,
+      "source": "https://github.com/PrimeIntellect-ai/prime-agent/actions/runs/38630077435 (attempts 1-3)"
+    },
+    "open-session/xl": {
+      "median_ms": 279.6,
+      "report_only": true,
+      "source": "https://github.com/PrimeIntellect-ai/prime-agent/actions/runs/38630077435 (attempts 1-3)"
+    },
+    "at-completion/xl": {
+      "median_ms": 200.2,
+      "report_only": false,
+      "source": "https://github.com/PrimeIntellect-ai/prime-agent/actions/runs/38630077435 (attempts 1-3)"
+    },
+    "agents-view-warm/xl": {
+      "median_ms": 3492.8,
+      "report_only": true,
+      "source": "https://github.com/PrimeIntellect-ai/prime-agent/actions/runs/38630077435 (attempts 1-3)"
+    },
+    "session-switch/xl": {
+      "median_ms": 2435.4,
+      "report_only": true,
+      "source": "https://github.com/PrimeIntellect-ai/prime-agent/actions/runs/38630077435 (attempts 1-3)"
+    }
+  }
+}

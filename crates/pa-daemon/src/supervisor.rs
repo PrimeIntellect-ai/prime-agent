@@ -24,6 +24,8 @@ use launch_budget::WORKER_AUTH_FLOOR_MS;
 use signals_shutdown::daemon_closing_shutdown_event;
 mod supervision;
 
+#[cfg(all(test, unix))]
+mod dead_child_delete_tests;
 #[cfg(test)]
 mod handshake_tests;
 #[cfg(test)]
@@ -462,16 +464,6 @@ impl Supervisor {
             tokio::spawn(async move {
                 Supervisor::wait_for_adoption_signal(&mut adopted).await;
                 supervisor.spawn_passive_catalog_warmup();
-            });
-        }
-
-        // Session-archive sweep (roadmap: the sessions directory must not
-        // grow forever): boot sweep, then the periodic re-sweep at the TS
-        // idle-eviction cadence. Housekeeping only — it never gates serving.
-        {
-            let supervisor = Arc::clone(&self);
-            tokio::spawn(async move {
-                crate::session_archive::archive_sweep_loop(&supervisor).await;
             });
         }
 

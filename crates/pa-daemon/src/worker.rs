@@ -24,7 +24,7 @@ mod queue;
 pub use queue::Lane;
 pub use queue::QueuePriority;
 pub(crate) use queue::{
-    admit_autonomous_follow_up, admit_bash_completion_notice, admit_goal_follow_up,
+    admit_autonomous_follow_up, admit_goal_follow_up, admit_kernel_notice,
     checkpoint_queue_recovery, clear_withdrawn_progress_note, enqueue_priority,
     gather_delivery_batch, parse_custom_message, parse_prompt_images, queue_lanes,
     restore_queue_snapshot, restored_turn_policy, withdraw_bash_completion_notice, QueueCheckpoint,
@@ -48,9 +48,9 @@ use turn::TurnRunner;
 mod commands;
 
 pub use env::{
-    WORKER_ACTIVE_SESSION_ID_ENV, WORKER_CWD_ENV, WORKER_INSTANCE_ID_ENV,
-    WORKER_RECOVERY_JOURNAL_ENV, WORKER_ROLE_ENV, WORKER_SCRIPT_ENV, WORKER_SOCKET_ENV,
-    WORKER_SUPERVISOR_LOST_EXIT_MS_ENV, WORKER_SUPERVISOR_SOCKET_ENV,
+    strip_inherited_worker_env, WORKER_ACTIVE_SESSION_ID_ENV, WORKER_CWD_ENV,
+    WORKER_INSTANCE_ID_ENV, WORKER_RECOVERY_JOURNAL_ENV, WORKER_ROLE_ENV, WORKER_SCRIPT_ENV,
+    WORKER_SOCKET_ENV, WORKER_SUPERVISOR_LOST_EXIT_MS_ENV, WORKER_SUPERVISOR_SOCKET_ENV,
     WORKER_TELEMETRY_DISABLED_ENV, WORKER_TOKEN_ENV,
 };
 use serde_json::Map;
@@ -128,6 +128,8 @@ pub struct Worker {
     /// The concrete agent engine behind `engine` for the create command's
     /// eager session build (the kernel prewarm).
     pub(crate) agent_engine: Option<std::sync::Arc<crate::agent_engine::AgentSessionEngine>>,
+    /// The worker's supervisor link (roster pushes, passivation asks, bounces).
+    pub(crate) roster_link: std::sync::Arc<crate::supervisor_link::SupervisorLink>,
     /// The monotonic roster-delta counter the roster pushes stamp and the
     /// authoritative pulls embed: a push can race a fresher pull, so the
     /// supervisor's gate drops the stale snapshot.
@@ -277,6 +279,7 @@ impl Worker {
     /// # Panics
     ///
     /// The wired closures panic on a poisoned session-core mutex.
+    #[must_use]
     pub fn new(config: WorkerConfig, registration: Option<RegistrationHandle>) -> Self {
         let events = Arc::new(EventPump::new());
         let supervisor_claims = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -318,6 +321,7 @@ impl Worker {
             active_action: None,
             running_tool_calls: std::collections::HashSet::new(),
             running_admission_ids: std::collections::HashSet::new(),
+            tool_use_count: 0,
         };
         let active_session_id = config.active_session_id.clone();
         let script = config.script.clone();
@@ -341,11 +345,10 @@ impl Worker {
         let idle_notify = Arc::new(Notify::new());
         // The supervisor link and worker token for roster pushes: one
         // construction shared by the turn runner and the command arms
-        // (identical dial path).
+        // (identical dial path). The config field is the one supervisor-
+        // socket source.
         let roster_link = std::sync::Arc::new(crate::supervisor_link::SupervisorLink::new(
-            std::env::var_os(WORKER_SUPERVISOR_SOCKET_ENV)
-                .map(std::path::PathBuf::from)
-                .unwrap_or_default(),
+            config.supervisor_socket_path.clone(),
         ));
         let worker_token = std::env::var(WORKER_TOKEN_ENV).unwrap_or_default();
         let roster_delta_sequence = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
@@ -606,25 +609,25 @@ impl Worker {
                         );
                     });
                 concrete.set_compaction_summary_sink(summary_sink);
-                // The bash-completion wake seam (TS `_promptInjectedMessage`
-                // for `bash.completed`): the handler validates, the sink
-                // admits/withdraws through the queue lanes.
+                // The kernel-notice wake seam (TS `_promptInjectedMessage`
+                // for `bash.completed` and `factory.progress`): the handlers
+                // validate, the sinks admit/withdraw through the queue lanes.
                 let notice_engine = std::sync::Arc::downgrade(concrete);
                 let notice_core = Arc::clone(&core);
                 let notice_notify = Arc::clone(&work_notify);
                 let notice_recovery = Arc::clone(&recovery);
-                let completion: crate::engine::BashCompletionSink = Arc::new(move |notice| {
+                let notice_sink: crate::engine::KernelNoticeSink = Arc::new(move |notice| {
                     let Some(engine) = notice_engine.upgrade() else {
                         return;
                     };
                     if engine.session_is_closed() {
                         return;
                     }
-                    admit_bash_completion_notice(
+                    admit_kernel_notice(
                         &notice_recovery,
                         &notice_core,
                         &notice_notify,
-                        &notice,
+                        notice,
                         // Revalidated inside the admission's lock section: the
                         // close paths mark the session BEFORE clearing the lanes.
                         || engine.session_is_closed(),
@@ -642,7 +645,7 @@ impl Worker {
                         engine.as_deref().map(|engine| engine as &dyn SessionEngine),
                     );
                 });
-                concrete.set_bash_notice_sinks(completion, consumed);
+                concrete.set_kernel_notice_sinks(notice_sink, consumed);
                 // The accepted note frames as a session event on the pump.
                 let note_core = Arc::clone(&core);
                 let note_events = events.clone();
@@ -755,6 +758,7 @@ impl Worker {
             core,
             engine,
             agent_engine,
+            roster_link: Arc::clone(&roster_link),
             roster_delta_sequence,
             work_notify,
             idle_notify,

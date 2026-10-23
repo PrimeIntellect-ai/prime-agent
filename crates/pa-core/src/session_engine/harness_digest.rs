@@ -456,8 +456,13 @@ impl super::AgentSession {
     }
 
     /// The deferred first-turn digest as the prompt row that rides the turn's
-    /// admission; the pending flag is consumed either way.
+    /// admission; disabled sessions defer the pending flag until enabled.
     pub(crate) async fn pending_digest_prompt_row(&self) -> anyhow::Result<Option<AgentMessage>> {
+        // Preserve the pending flag while disabled; a consumed delivery must
+        // never be re-armed merely by toggling the setting off and on.
+        if !self.harness_refinements_enabled() {
+            return Ok(None);
+        }
         if !self
             .digest_pending
             .swap(false, std::sync::atomic::Ordering::SeqCst)
@@ -477,6 +482,9 @@ impl super::AgentSession {
     /// relevance terms. `None` when the session carries no harness state; the
     /// disk read stays deferred to render time, so a snapshot reads fresh state.
     pub(crate) async fn harness_digest_inputs(&self) -> Option<HarnessDigestInputs> {
+        if !self.harness_refinements_enabled() {
+            return None;
+        }
         let context = self.harness_digest.clone()?;
         let recent_texts = self.recent_message_texts_newest_first().await;
         let goal = {

@@ -149,6 +149,14 @@ fn get_message_from_entry(entry: &FileEntry) -> Option<AgentMessage> {
 /// is hit. File ops are collected from ALL entries (cumulative tracking).
 #[must_use]
 pub fn prepare_branch_entries(entries: &[FileEntry], token_budget: u64) -> BranchPreparation {
+    prepare_branch_entries_with_refinements(entries, token_budget, /*enabled*/ true)
+}
+
+fn prepare_branch_entries_with_refinements(
+    entries: &[FileEntry],
+    token_budget: u64,
+    enabled: bool,
+) -> BranchPreparation {
     let mut file_ops = FileOperations::default();
     // Cumulative tracking from prior branch summaries (never hooked ones).
     for entry in entries {
@@ -167,6 +175,17 @@ pub fn prepare_branch_entries(entries: &[FileEntry], token_budget: u64) -> Branc
     let mut total_tokens = 0u64;
     for entry in entries.iter().rev() {
         let Some(message) = get_message_from_entry(entry) else {
+            continue;
+        };
+        // Disabled harness content must not consume budget or terminate selection.
+        let message = if enabled {
+            Some(message)
+        } else {
+            super::refinement_gate::without_refinements(vec![message])
+                .into_iter()
+                .next()
+        };
+        let Some(message) = message else {
             continue;
         };
         extract_file_ops_from_message(&message, &mut file_ops);
@@ -195,7 +214,7 @@ pub fn prepare_branch_entries(entries: &[FileEntry], token_budget: u64) -> Branc
 
 const BRANCH_SUMMARY_PREAMBLE: &str = "The user explored a different conversation branch before returning here.\nSummary of that exploration:\n\n";
 
-const BRANCH_SUMMARY_PROMPT: &str = "Create a structured summary of this conversation branch for context when returning later.\n\nUse this EXACT format:\n\n## Goal\n[What was the user trying to accomplish in this branch?]\n\n## Constraints & Preferences\n- [Any constraints, preferences, or requirements mentioned]\n- [Or \"(none)\" if none were mentioned]\n\n## Progress\n### Done\n- [x] [Completed tasks/changes]\n\n### In Progress\n- [ ] [Work that was started but not finished]\n\n### Blocked\n- [Issues preventing progress, if any]\n\n## Key Decisions\n- **[Decision]**: [Brief rationale]\n\n## Next Steps\n1. [What should happen next to continue this work]\n\nKeep each section concise. Preserve exact file paths, function names, and error messages.";
+const BRANCH_SUMMARY_PROMPT: &str = "Create a structured summary of this conversation branch for context when returning later.\n\nUse this EXACT format:\n\n## Goal\n[What was the user trying to accomplish in this branch?]\n\n## Constraints & Preferences\n- [Any constraints, preferences, or requirements mentioned]\n- [Or \"(none)\" if none were mentioned]\n\n## Progress\n### Done\n- [x] [Completed tasks/changes]\n\n### In Progress\n- [ ] [Work that was started but not finished]\n\n### Blocked\n- [Issues preventing progress, if any]\n\n## Outstanding Work\n- [Running subagents: name / task / status (recovery pointer: rlm.list_subagents())]\n- [Background bash handles: command / status (recovery: the [bash-done] notification; a lost handle cannot be re-awaited)]\n- [Active heartbeats and the goal: schedule / objective (recovery pointers: rlm_heartbeat.list() and goal.get())]\n- [Or \"(none)\" if nothing is in flight]\n\n## Key Decisions\n- **[Decision]**: [Brief rationale]\n\n## Next Steps\n1. [What should happen next to continue this work]\n\nKeep each section concise. Preserve exact file paths, function names, and error messages.";
 
 /// Build the branch-summary request messages for the model.
 #[must_use]
@@ -205,7 +224,23 @@ pub fn build_branch_summary_request(
     custom_instructions: Option<&str>,
     replace_instructions: bool,
 ) -> (Vec<AgentMessage>, BranchPreparation) {
-    let preparation = prepare_branch_entries(entries, token_budget);
+    build_branch_summary_request_with_refinements(
+        entries,
+        token_budget,
+        custom_instructions,
+        replace_instructions,
+        /*enabled*/ true,
+    )
+}
+
+fn build_branch_summary_request_with_refinements(
+    entries: &[FileEntry],
+    token_budget: u64,
+    custom_instructions: Option<&str>,
+    replace_instructions: bool,
+    enabled: bool,
+) -> (Vec<AgentMessage>, BranchPreparation) {
+    let preparation = prepare_branch_entries_with_refinements(entries, token_budget, enabled);
     let messages = if preparation.messages.is_empty() {
         Vec::new()
     } else {
@@ -371,11 +406,25 @@ pub async fn generate_branch_summary(
         128_000
     };
     let token_budget = context_window.saturating_sub(reserve_tokens);
-    let (request_messages, preparation) = build_branch_summary_request(
+    let enabled = match auxiliary {
+        Some(context) => {
+            let context = context.clone();
+            tokio::task::spawn_blocking(move || {
+                let settings =
+                    crate::settings::SettingsManager::create(&context.cwd, &context.agent_dir);
+                super::refinement_gate::enabled(Some(&settings))
+            })
+            .await
+            .unwrap_or(false)
+        }
+        None => true,
+    };
+    let (request_messages, preparation) = build_branch_summary_request_with_refinements(
         entries,
         token_budget,
         custom_instructions,
         replace_instructions,
+        enabled,
     );
     if request_messages.is_empty() {
         let (read_files, modified_files) = compute_file_lists(&preparation.file_ops);
@@ -403,20 +452,21 @@ pub async fn generate_branch_summary(
             .collect(),
         tools: None,
     };
-    let stream_options =
+    let mut stream_options =
         pa_ai::types::SimpleStreamOptions::from_base(pa_ai::types::StreamOptions {
             max_tokens: Some(BRANCH_SUMMARY_MAX_TOKENS),
             api_key,
             headers: summary_headers.map(|headers| headers.into_iter().collect()),
             ..Default::default()
         });
+    stream_options.reasoning = pa_types::ai::minimum_reasoning(model);
     let response = match pa_ai::complete_simple(model, &context, Some(stream_options)).await {
         Ok(response) => response,
         Err(error) => {
             return BranchSummaryResult {
                 error: Some(format!("{error:#}")),
                 ..Default::default()
-            }
+            };
         }
     };
     if response.stop_reason == pa_types::ai::StopReason::Aborted {
@@ -482,6 +532,42 @@ mod tests {
     }
 
     #[test]
+    fn disabled_refinement_notices_cannot_exhaust_the_branch_summary_budget() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut session = crate::session::manager::SessionManager::in_memory(tmp.path());
+        let conversation = user("Earlier conversation about the task");
+        session.append_message(conversation.clone()).unwrap();
+        session
+            .append_custom_message(
+                "refinement_notice",
+                pa_types::ai::UserContent::Text("saved refinement ".repeat(500)),
+                /*display*/ false,
+                None,
+            )
+            .unwrap();
+        let (request, preparation) = build_branch_summary_request_with_refinements(
+            session.retained_entries(),
+            50,
+            None,
+            /*replace_instructions*/ false,
+            /*enabled*/ false,
+        );
+        assert_eq!(preparation.messages, vec![conversation]);
+        assert!(!request.is_empty());
+        let (enabled_request, _) = build_branch_summary_request_with_refinements(
+            session.retained_entries(),
+            50,
+            None,
+            /*replace_instructions*/ false,
+            /*enabled*/ true,
+        );
+        assert!(
+            enabled_request.is_empty(),
+            "the enabled legacy budget path selects no older rows"
+        );
+    }
+
+    #[test]
     fn collects_old_branch_to_common_ancestor() {
         // root -> u1 -> a1 -> u2 (old leaf)
         //        \\-> u3 (target)
@@ -537,6 +623,21 @@ mod tests {
         assert!(summary.contains("The user explored a different conversation branch"));
         assert!(summary.contains("## Goal"));
         assert!(branch_summary_presentation("s").contains("[branch-summary]"));
+    }
+
+    #[test]
+    fn branch_summary_request_carries_outstanding_work() {
+        let entries = vec![entry("e0", None, user("explore the widget"))];
+        let (messages, _) = build_branch_summary_request(&entries, 0, None, false);
+        assert_eq!(messages.len(), 1);
+        let text = match &messages[0] {
+            AgentMessage::User(user) => user.content.text(),
+            _ => panic!("expected a user message"),
+        };
+        assert!(text.contains("## Outstanding Work"));
+        assert!(text.contains("rlm.list_subagents()"));
+        assert!(text.contains("the [bash-done] notification"));
+        assert!(text.contains("rlm_heartbeat.list()"));
     }
 
     #[test]

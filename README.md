@@ -66,6 +66,12 @@ Prime Agent combines a persistent Python control environment with durable harnes
 - **Agents communicate directly:** running agents can exchange messages and orchestrate one another without routing everything through the user.
 - **Long tasks keep moving:** automatic compaction, persistent goals, heartbeats, schedules, autonomous mode, and retained subagents preserve progress across turns and terminal sessions.
 
+## Slack
+
+Connect Slack from `/mcp` or run `/mcp login slack` inside Prime Agent to search
+your workspace and use Slack tools. See the [Slack connector guide](docs/slack-mcp.md)
+for OAuth setup and troubleshooting.
+
 ## Clipboard over SSH and tmux
 
 Prime Agent uses the local clipboard tool (such as `pbcopy`) when available. In tmux it asks the attached tmux client to forward a clipboard buffer if that client advertises the `Ms` capability. This works with tmux's default `set-clipboard external`, unlike application-origin OSC 52. Without tmux, remote copies request delivery using OSC 52. Terminal requests cannot confirm that your local clipboard changed, so Prime Agent reports them as unconfirmed.
@@ -140,3 +146,30 @@ If you use this codebase in your research, please cite Prime Agent:
 ```
 
 Available at [https://arxiv.org/abs/2608.23552](https://arxiv.org/abs/2608.23552).
+
+### Automatic compaction settings
+
+`/settings` exposes the global automatic compaction percentage in five-point steps,
+with a 95% default. A saved off-grid percentage stays selectable. The effective
+trigger also reserves room for retained history and summaries; the model's input
+and requested-output ceiling always takes priority. Manual compaction budgets are
+unchanged. The underlying `compaction.thresholdPercent` setting accepts 1–100,
+including fractional values; project settings can override the global setting.
+
+For per-model early compaction, use the existing provider-scoped
+`modelOverrides.<id>.contextWindow` option in `models.json`, for example:
+
+```json
+{
+  "providers": {
+    "prime-inference": {
+      "modelOverrides": {
+        "your-model-id": { "contextWindow": 524288 }
+      }
+    }
+  }
+}
+```
+
+Use the actual model ID for your provider. This sets that model's effective context
+window; it does not change every model's global compaction percentage.

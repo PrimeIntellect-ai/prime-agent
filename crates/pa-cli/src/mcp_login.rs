@@ -193,7 +193,14 @@ impl TerminalMcpAuth {
         if let Some(error) = auth.drain_errors().pop() {
             return Err(anyhow!(error)).context("could not save the API key");
         }
-        Ok(format!("Saved API key for {label}. Web search is ready."))
+        // The skill gate follows this credential (unset
+        // `bundledSkills.websearch` resolves with the key), but the skill
+        // list resolves at session build — the same moment the key reaches
+        // the kernel — so the message carries the activation state like the
+        // MCP login flow's wording.
+        Ok(format!(
+            "Saved API key for {label}. Its skill activates in new sessions (/new)."
+        ))
     }
 
     fn logout_inner(&self, server: &str) -> Result<String> {
@@ -515,7 +522,7 @@ mod tests {
             .expect("the reply lands");
         assert_eq!(
             flow.await.expect("the flow ran")?,
-            "Saved API key for Serper (web search). Web search is ready."
+            "Saved API key for Serper (web search). Its skill activates in new sessions (/new)."
         );
 
         // The stored credential is the EXACT contract the websearch runtime

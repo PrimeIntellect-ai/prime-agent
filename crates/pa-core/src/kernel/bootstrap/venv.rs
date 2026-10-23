@@ -38,8 +38,8 @@ pub(crate) use probe::{
     has_prime_agent_runtime, missing_python_skill_import_labels, missing_rlm_extra_import_labels,
 };
 use probe::{has_prime_agent_runtime_memoized, installed_runtime_identity};
-pub use runtime_source::resolve_runtime_identity;
-use runtime_source::{collect_python_files, resolve_runtime_source_dir};
+use runtime_source::collect_python_files;
+pub(super) use runtime_source::{hash_runtime_source, require_runtime_source_dir};
 pub(super) use runtime_source::{package_dir, packaged_runtime_dir};
 #[cfg(test)]
 use skills::{
@@ -58,7 +58,6 @@ use version::{
 use version::{recorded_skills_cover, BOOTSTRAP_SCHEMA};
 
 const PYTHON_VERSION: &str = "3.11";
-const RUNTIME_REQUIREMENT: &str = "prime-agent-runtime";
 pub(crate) const BOOTSTRAP_LOCK_NAME: &str = ".bootstrap.lock";
 pub(crate) const BOOTSTRAP_LOCK_RETRY_MS: u64 = 100;
 pub(crate) const BOOTSTRAP_LOCK_STALE_WITHOUT_PID_MS: u64 = 30_000;
@@ -84,6 +83,11 @@ async fn run_async(command: &str, args: &[String]) -> anyhow::Result<()> {
         child.args(&args).stdin(Stdio::null());
         // Hidden window on Windows (TS `spawnHidden`).
         crate::platform::process::set_no_window(&mut child);
+        // CPython must read UTF-8 .pth files even under a Windows legacy
+        // code page (TS bootstrap.ts:429).
+        if cfg!(windows) {
+            child.env("PYTHONUTF8", "1");
+        }
         let status = child
             .status()
             .with_context(|| format!("failed to spawn {command}"))?;
@@ -104,18 +108,14 @@ async fn run_async(command: &str, args: &[String]) -> anyhow::Result<()> {
 
 pub(crate) async fn bootstrap_venv(
     venv: &Path,
+    source_dir: &Path,
+    runtime_identity: &str,
     python_skills: &[BootstrapPythonSkill],
     options: &EnsureKernelPythonOptions,
 ) -> anyhow::Result<()> {
     std::fs::create_dir_all(venv.parent().unwrap_or(Path::new("/")))?;
     let uv = ensure_uv()?;
     let python = kernel_venv_python(venv);
-    let source_dir = resolve_runtime_source_dir();
-    let runtime_requirement = source_dir.as_ref().map_or_else(
-        || RUNTIME_REQUIREMENT.to_string(),
-        |p| p.to_string_lossy().to_string(),
-    );
-    let runtime_identity = resolve_runtime_identity();
 
     let venv_str = venv.to_string_lossy().to_string();
     let python_str = python.to_string_lossy().to_string();
@@ -124,7 +124,7 @@ pub(crate) async fn bootstrap_venv(
         "install".to_string(),
         "--python".to_string(),
         python_str,
-        runtime_requirement,
+        source_dir.to_string_lossy().to_string(),
     ];
     install_args.push(STATE_SNAPSHOT_REQUIREMENT.to_string());
     for uv_arg in default_rlm_extra_uv_args() {
@@ -156,7 +156,8 @@ pub(crate) async fn bootstrap_venv(
         &uv,
         venv,
         &python,
-        &runtime_identity,
+        source_dir,
+        runtime_identity,
         python_skills,
         options,
     )
@@ -169,6 +170,7 @@ pub(crate) async fn sync_python_skills(
     uv: &str,
     venv: &Path,
     python: &Path,
+    source_dir: &Path,
     runtime_identity: &str,
     python_skills: &[BootstrapPythonSkill],
     options: &EnsureKernelPythonOptions,
@@ -206,6 +208,9 @@ pub(crate) async fn sync_python_skills(
             "install".to_string(),
             "--python".to_string(),
             python_str.clone(),
+            // Skills may depend on the runtime too. Keep their resolver
+            // pinned to the same local source, including per-skill retries.
+            source_dir.to_string_lossy().to_string(),
         ];
         for skill in &missing {
             install_args.push("--editable".to_string());
@@ -225,6 +230,7 @@ pub(crate) async fn sync_python_skills(
                         "install".to_string(),
                         "--python".to_string(),
                         python_str.clone(),
+                        source_dir.to_string_lossy().to_string(),
                         "--editable".to_string(),
                         skill.package_path.clone(),
                     ],

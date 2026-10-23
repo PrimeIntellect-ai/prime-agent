@@ -100,14 +100,16 @@ fn mutate_global_settings(
     let mut failure: Option<anyhow::Error> = None;
     storage
         .with_lock(pa_core::settings::SettingsScope::Global, &mut |current| {
-            let mut settings = current
-                .and_then(|content| serde_json::from_str::<serde_json::Value>(&content).ok())
-                .unwrap_or_else(|| serde_json::json!({}));
-            match mutate(&mut settings).and_then(|changed| {
+            let result = (|| -> Result<Option<String>> {
+                let mut settings =
+                    serde_json::from_str::<serde_json::Value>(current.as_deref().unwrap_or("{}"))
+                        .context("parsing settings.json; settings not saved")?;
+                let changed = mutate(&mut settings)?;
                 changed
                     .then(|| serde_json::to_string_pretty(&settings).map_err(Into::into))
                     .transpose()
-            }) {
+            })();
+            match result {
                 Ok(next) => next,
                 Err(error) => {
                     failure = Some(error);
@@ -138,6 +140,10 @@ fn set_global_mcp_server(name: &str, config: &McpServerConfig) -> Result<()> {
             .ok_or_else(|| anyhow!("settings.json must contain a JSON object"))?
             .entry("mcpServers".to_string())
             .or_insert_with(|| serde_json::json!({}));
+        // Older settings saves emitted null for an absent optional map.
+        if servers.is_null() {
+            *servers = serde_json::json!({});
+        }
         if !servers.is_object() {
             bail!("the mcpServers setting must be a JSON object");
         }

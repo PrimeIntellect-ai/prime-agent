@@ -5,11 +5,13 @@
 
 use super::*;
 
+mod activity_lines;
 mod click_surface;
 mod cost_aggregates;
 mod delete_stop;
 mod drill_down;
 mod edge_jumps;
+mod empty_sessions;
 mod entry_anchor;
 mod heartbeat_badge;
 mod hints_render;
@@ -21,8 +23,10 @@ mod render_pulse;
 mod reply;
 mod running_lines;
 mod saved_catalog;
+mod saved_pages;
 mod search_selection;
 mod selection_churn;
+mod shell_enter;
 
 /// One idle row under test plus a holder row that keeps the selection, with the given title
 /// and one model id. The cost/age stay fixed so the expected rows are exact.

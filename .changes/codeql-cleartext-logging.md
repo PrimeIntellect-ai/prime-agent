@@ -1,1 +1,0 @@
-- Internal: daemon log, panic, and test assertion messages no longer print session ids or fixture API keys (CodeQL `rust/cleartext-logging` cleanup).

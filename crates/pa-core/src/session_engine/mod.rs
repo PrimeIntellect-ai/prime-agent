@@ -6,6 +6,7 @@ pub mod agent_messaging;
 pub mod auto_refine_trigger;
 pub mod auto_retry;
 pub mod auxiliary_model;
+pub mod bash_notices;
 pub mod branch_summarization;
 pub mod compact_session;
 pub mod compaction;
@@ -22,12 +23,14 @@ pub mod headless;
 pub mod host_requests;
 pub mod image_model_routing;
 pub mod ipython_state;
+pub mod late_sent_messages;
 pub mod messages;
 pub mod provider_adapter;
 pub mod provider_failover;
 pub mod provider_park;
 pub mod provider_retry;
 pub mod refine;
+mod refinement_gate;
 pub mod request_timing;
 pub mod rlm_host;
 pub mod rlm_notices;
@@ -135,6 +138,7 @@ pub struct AgentSession {
     /// Whether this session may auto-refine; defaults off until the
     /// engine wiring resolves it.
     auto_refine_allowed: bool,
+    refinement_settings: Option<crate::settings::SettingsManager>,
     /// The resolved auto-refine gates; the compact trigger reads them.
     auto_refine: refine::AutoRefineGates,
     /// Session-side auto-refine state the transport surfaces arm and
@@ -237,6 +241,7 @@ impl AgentSession {
             compaction: std::sync::RwLock::new(compaction::CompactionSettings::default()),
             auxiliary_model: None,
             auto_refine_allowed: false,
+            refinement_settings: None,
             auto_refine: refine::AutoRefineGates::default(),
             compact_auto_refine: std::sync::Mutex::default(),
             kernel_state: None,
@@ -400,6 +405,36 @@ async fn persist_event(
             };
             if let Some(error) = write_error {
                 eprintln!("pa-core: message row not persisted: {error}");
+            }
+        }
+        // Tool-call lifecycle rows: the start and running sides of the
+        // trace (the completion side is the toolResult message row). Like
+        // the message arm, a failed durable write never fails the run.
+        AgentEvent::ToolExecutionStart {
+            tool_call_id,
+            tool_name,
+            args,
+        } => {
+            let result = session
+                .lock()
+                .await
+                .append_tool_started(&tool_call_id, &tool_name, args);
+            if let Err(error) = result {
+                eprintln!("pa-core: tool_started row not persisted: {error}");
+            }
+        }
+        AgentEvent::ToolExecutionProgress {
+            tool_call_id,
+            tool_name,
+            elapsed_ms,
+        } => {
+            let result =
+                session
+                    .lock()
+                    .await
+                    .append_tool_progress(&tool_call_id, &tool_name, elapsed_ms);
+            if let Err(error) = result {
+                eprintln!("pa-core: tool_progress row not persisted: {error}");
             }
         }
         // Git state is captured at both run boundaries, exactly like the

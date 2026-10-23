@@ -6,7 +6,7 @@ fn the_dock_segments_cover_each_groups_own_cells() {
         subagents_running_direct: 2,
         heartbeats: 3,
         heartbeats_paused: 1,
-        bash_running: 1,
+        shells: items(1),
         factory_group: true,
         ..ActivityDock::default()
     };
@@ -123,7 +123,7 @@ fn activity_dock_frames_one_row_with_running_paused_and_goal_counts() {
         subagents_running_nested: 1,
         heartbeats: 3,
         heartbeats_paused: 1,
-        bash_running: 1,
+        shells: items(1),
         factory_group: true,
         goal_label: Some("Pursuing goal (0s)".to_string()),
         ..ActivityDock::default()
@@ -223,7 +223,7 @@ fn activity_dock_frames_one_row_with_running_paused_and_goal_counts() {
         subagents_running_nested: 2,
         heartbeats: 4,
         heartbeats_paused: 2,
-        bash_running: 2,
+        shells: items(2),
         goal_label: Some("Pursuing goal (12m 05s)".to_string()),
         ..ActivityDock::default()
     };
@@ -256,6 +256,57 @@ fn activity_dock_frames_one_row_with_running_paused_and_goal_counts() {
         "the untruncated row keeps its characters: {text:?}"
     );
     assert!(text.contains("Pursuing goal (12m 05s)"));
+}
+
+/// A paused factory run never reads as running: the collapsed count holds only the running
+/// run (green), and the paused one sits in its own amber cluster, like a paused heartbeat.
+#[test]
+fn the_collapsed_dock_counts_paused_factory_runs_apart_from_running_ones() {
+    let theme = Theme::builtin("prime", ColorMode::TrueColor);
+    let colored = |dock: &ActivityDock| {
+        render_activity_dock(dock, &theme, 120)[1]
+            .iter()
+            .skip_while(|span| !span.content.starts_with('⚙'))
+            .map(|span| (span.content.clone(), span.style.fg))
+            .collect::<Vec<_>>()
+    };
+    let paused_only = ActivityDock {
+        factory_runs: vec!["nightly paused".to_string()],
+        factory_counts: crate::factory_view::FactoryRunCounts {
+            running: 0,
+            paused: 1,
+        },
+        factory_group: true,
+        ..ActivityDock::default()
+    };
+    let muted = theme.fg_style(ThemeColor::Muted).fg;
+    let success = theme.fg_style(ThemeColor::Success).fg;
+    let warning = theme.fg_style(ThemeColor::Warning).fg;
+    let dim = theme.fg_style(ThemeColor::Dim).fg;
+    assert_eq!(
+        colored(&paused_only),
+        vec![
+            ("⚙ 0 factory".to_string(), muted),
+            (" · ".to_string(), dim),
+            ("◐ 1 paused".to_string(), warning),
+        ]
+    );
+    let mixed = ActivityDock {
+        factory_runs: vec!["nightly paused".to_string(), "lint running".to_string()],
+        factory_counts: crate::factory_view::FactoryRunCounts {
+            running: 1,
+            paused: 1,
+        },
+        ..paused_only
+    };
+    assert_eq!(
+        colored(&mixed),
+        vec![
+            ("⚙ 1 factory".to_string(), success),
+            (" · ".to_string(), dim),
+            ("◐ 1 paused".to_string(), warning),
+        ]
+    );
 }
 
 /// ONE number: direct children and nested descendants summed, never a `direct, nested` pair.
@@ -315,69 +366,162 @@ fn prompt_bar_subagent_segment_is_the_running_count_only() {
         .collect::<String>();
     assert_eq!(
         text,
-        " ◆ 1 subagents  ·  ◷ 0 heartbeats  ·  ▸ 0 shells  ·  ⚙ 0 factory"
+        " ◆ 1 subagent  ·  ◷ 0 heartbeats  ·  ▸ 0 shells  ·  ⚙ 0 factory"
     );
 }
 
-/// The hover band's own light color — the same ONE color every activity surface paints,
-/// never the accent; each span keeps its own status color.
+/// The plain text of each rendered line.
+fn line_texts(frame: &[Line]) -> Vec<String> {
+    frame
+        .iter()
+        .map(|line| line.iter().map(|span| span.content.as_str()).collect())
+        .collect()
+}
+
+/// Focus expands the dock into one row per group in `groups()` order, each with its details;
+/// the unfocused dock is the single collapsed line.
 #[test]
-fn activity_dock_selection_is_the_hover_colored_band() {
+fn the_focused_dock_expands_into_one_row_per_group() {
     let theme = Theme::builtin("prime", ColorMode::TrueColor);
     let dock = ActivityDock {
-        subagents_running_direct: 1,
+        subagents_running_direct: 2,
         subagents_running_nested: 1,
-        heartbeats: 3,
+        subagents_idle: 1,
+        subagents_inactive: 2,
+        heartbeats: 2,
+        heartbeats_active: vec!["5m lane canary".to_string()],
         heartbeats_paused: 1,
-        bash_running: 1,
-        factory_runs: 1,
+        shells: vec!["cargo test · 12.0s".to_string()],
+        factory_runs: vec!["nightly paused".to_string()],
+        factory_counts: crate::factory_view::FactoryRunCounts {
+            running: 0,
+            paused: 1,
+        },
         factory_group: true,
         goal_label: Some("Pursuing goal (0s)".to_string()),
-        selected: ActivityGroup::Heartbeats,
+        selected: ActivityGroup::Subagents,
         focused: true,
     };
-    let frame = render_activity_dock(&dock, &theme, 120);
-    let row = &frame[1];
-    // The band is the theme's hover color (`Theme::hover_row_style`) with no extra
-    // modifiers — the ONE style every activity surface's selected row paints, never the accent.
-    let band = theme.selection_row_style();
-    assert_eq!(band.bg, theme.hover_row_style().bg);
-    assert_ne!(band.bg, theme.fg_style(ThemeColor::Accent).fg);
-    assert!(band.add_modifier.is_empty());
-    let span = |text: &str| {
-        row.iter()
-            .find(|span| span.content == text)
-            .unwrap_or_else(|| panic!("missing span {text:?}"))
-    };
-    // The selected group keeps its own status colors under the band.
-    let success = theme.fg_style(ThemeColor::Success).fg;
-    let warning = theme.fg_style(ThemeColor::Warning).fg;
-    let dim = theme.fg_style(ThemeColor::Dim).fg;
-    assert_eq!(span("\u{25f7} 3 heartbeats").style.bg, band.bg);
-    assert_eq!(span("\u{25f7} 3 heartbeats").style.fg, success);
-    assert_eq!(span(" \u{b7} ").style.bg, band.bg);
-    assert_eq!(span(" \u{b7} ").style.fg, dim);
-    assert_eq!(span("\u{25d0} 1 paused").style.bg, band.bg);
-    assert_eq!(span("\u{25d0} 1 paused").style.fg, warning);
-    let selected = ["\u{25f7} 3 heartbeats", " \u{b7} ", "\u{25d0} 1 paused"];
-    for span in row {
-        assert_eq!(
-            span.style.bg == band.bg,
-            selected.contains(&span.content.as_str()),
-            "the band rides exactly the selected group: {:?}",
-            span.content
-        );
-    }
-    let accent = theme.fg_style(ThemeColor::Accent).fg;
-    assert!(row.iter().all(|span| span.style.bg != accent));
-    // The band is a focus-owned signal: the same dock without focus
-    // renders no band at all.
-    let unfocused = ActivityDock {
+    let (frame, segments) = render_activity_dock_segments(&dock, &theme, 80);
+    let texts = line_texts(&frame);
+    assert_eq!(texts[0], "─".repeat(80), "the rule stays on top");
+    let rows: Vec<&str> = texts[1..].iter().map(|row| row.trim_end()).collect();
+    assert_eq!(
+        rows,
+        vec![
+            " ◆ subagents   3 running · 1 idle · 2 inactive",
+            " ◷ heartbeats  5m lane canary",
+            " ▸ shells      cargo test · 12.0s",
+            " ⚙ factory     nightly paused",
+            " Pursuing goal (0s)",
+        ]
+    );
+    assert_eq!(
+        segments
+            .iter()
+            .map(|segment| (segment.group, segment.row))
+            .collect::<Vec<_>>(),
+        dock.groups().into_iter().zip(1..).collect::<Vec<_>>(),
+        "every row is its group's click surface"
+    );
+    let collapsed = ActivityDock {
         focused: false,
         ..dock
     };
-    let frame = render_activity_dock(&unfocused, &theme, 120);
+    let texts = line_texts(&render_activity_dock(&collapsed, &theme, 120));
+    assert_eq!(
+        texts[1..],
+        [" ◆ 3 subagents  ·  ◷ 2 heartbeats · ◐ 1 paused  ·  ▸ 1 shell  ·  ⚙ 0 factory · ◐ 1 paused  ·  Pursuing goal (0s)"]
+    );
+}
+
+/// The selected row carries the ONE shared selection band across the full width (the hover's
+/// own color, never the accent) while its spans keep their own colors; no other row is banded,
+/// and the collapsed line never is.
+#[test]
+fn the_expanded_dock_bands_exactly_the_selected_row() {
+    let theme = Theme::builtin("prime", ColorMode::TrueColor);
+    let dock = ActivityDock {
+        heartbeats_active: items(2),
+        shells: items(1),
+        selected: ActivityGroup::Heartbeats,
+        focused: true,
+        ..ActivityDock::default()
+    };
+    let frame = render_activity_dock(&dock, &theme, 60);
+    let band = theme.selection_row_style();
+    assert_eq!(band.bg, theme.hover_row_style().bg);
+    assert_ne!(band.bg, theme.fg_style(ThemeColor::Accent).fg);
+    let heartbeats = &frame[2];
+    assert_eq!(
+        crate::width::spans_width(heartbeats),
+        60,
+        "the band spans the row"
+    );
+    assert!(heartbeats.iter().all(|span| span.style.bg == band.bg));
+    let title = heartbeats
+        .iter()
+        .find(|span| span.content == "◷ heartbeats")
+        .expect("the heartbeats title renders");
+    assert_eq!(title.style.fg, theme.fg_style(ThemeColor::Success).fg);
+    for row in [&frame[1], &frame[3]] {
+        assert!(row.iter().all(|span| span.style.bg != band.bg));
+    }
+    let collapsed = ActivityDock {
+        focused: false,
+        ..dock
+    };
+    let frame = render_activity_dock(&collapsed, &theme, 60);
     assert!(frame[1].iter().all(|span| span.style.bg.is_none()));
+}
+
+/// A row lists as many items as fit and counts the rest as `+N`.
+#[test]
+fn an_overflowing_expanded_row_counts_the_rest() {
+    let theme = Theme::builtin("prime", ColorMode::TrueColor);
+    let dock = ActivityDock {
+        shells: items(9),
+        selected: ActivityGroup::Subagents,
+        focused: true,
+        ..ActivityDock::default()
+    };
+    let texts = line_texts(&render_activity_dock(&dock, &theme, 50));
+    assert_eq!(texts[3], " ▸ shells      item 1  ·  item 2  ·  item 3  +6");
+}
+
+/// A large activity list fits by terminal cells, including a multi-digit omitted count.
+#[test]
+fn a_large_expanded_row_fits_wide_items_and_counts_the_omitted_items() {
+    let theme = Theme::builtin("prime", ColorMode::TrueColor);
+    let dock = ActivityDock {
+        heartbeats_active: vec!["界界".to_string(); 4096],
+        focused: true,
+        ..ActivityDock::default()
+    };
+    let texts = line_texts(&render_activity_dock(&dock, &theme, 60));
+    assert_eq!(
+        texts[2],
+        " ◷ heartbeats  界界  ·  界界  ·  界界  ·  界界  +4092"
+    );
+    assert_eq!(fitting_items(&dock.heartbeats_active, 4096 * 9 - 5), 4096);
+}
+
+/// A first item too long to sit beside the `+N` marker is ellipsized, so the omitted count still
+/// renders.
+#[test]
+fn an_oversized_first_item_keeps_the_overflow_marker() {
+    let theme = Theme::builtin("prime", ColorMode::TrueColor);
+    let dock = ActivityDock {
+        heartbeats_active: vec![
+            format!("5m {}", "check the deploy queue ".repeat(4)),
+            "9m lane canary".to_string(),
+        ],
+        selected: ActivityGroup::Subagents,
+        focused: true,
+        ..ActivityDock::default()
+    };
+    let texts = line_texts(&render_activity_dock(&dock, &theme, 40));
+    assert_eq!(texts[2], " ◷ heartbeats  5m check the deploy …  +1");
 }
 
 /// One press steps to the neighboring rendered group and wraps; N groups take exactly N presses.
@@ -416,7 +560,7 @@ fn dock_arrows_visit_every_group_even_when_empty() {
         ActivityGroup::Subagents,
         "the cycle wraps past the last group"
     );
-    // Left: the same groups in reverse, wrapping past the first.
+    // Up: the same groups in reverse, wrapping past the first.
     assert_eq!(
         dock.step(ActivityGroup::Subagents, ActivityDirection::Prev),
         ActivityGroup::Factory,
@@ -459,7 +603,7 @@ fn dock_arrows_visit_the_same_groups_with_items() {
         subagents_running_nested: 2,
         heartbeats: 2,
         heartbeats_paused: 1,
-        bash_running: 1,
+        shells: items(1),
         factory_group: true,
         goal_label: Some("Pursuing goal (0s)".to_string()),
         ..ActivityDock::default()
@@ -572,40 +716,38 @@ fn an_unadvertised_factory_lane_mounts_no_factory_group() {
     );
 }
 
-/// Entering an empty group still renders it: the focused selection's
-/// band — the ONE shared selection style — rides the group's
-/// zero-count segment on the row — the dock-level empty state is
-/// the zero readout itself (the view the group opens carries the
-/// pane's own empty-state row).
+/// An empty group keeps its expanded row: its glyph and name render dimmed with no details,
+/// and the row stays selectable.
 #[test]
-fn dock_renders_the_focused_empty_group() {
+fn an_empty_group_renders_a_dimmed_row_and_stays_selectable() {
     let theme = Theme::builtin("prime", ColorMode::TrueColor);
     let dock = ActivityDock {
+        heartbeats_paused: 2,
         selected: ActivityGroup::Heartbeats,
         focused: true,
         factory_group: true,
         ..ActivityDock::default()
     };
-    let frame = render_activity_dock(&dock, &theme, 100);
-    let text = frame[1]
-        .iter()
-        .map(|span| span.content.as_str())
-        .collect::<String>();
-    assert_eq!(
-        text,
-        " ◆ 0 subagents  ·  ◷ 0 heartbeats  ·  ▸ 0 shells  ·  ⚙ 0 factory"
-    );
-    // The selection's band rides exactly the entered empty group's
-    // zero readout, which keeps its own muted color (the selection
-    // never repaints the text).
+    let frame = render_activity_dock(&dock, &theme, 60);
+    let dim = theme.fg_style(ThemeColor::Dim).fg;
     let band = theme.selection_row_style();
-    let muted = theme.fg_style(ThemeColor::Muted).fg;
-    let heartbeat = frame[1]
-        .iter()
-        .find(|span| span.content == "◷ 0 heartbeats")
-        .unwrap_or_else(|| panic!("the empty heartbeats readout renders: {text}"));
-    assert_eq!(heartbeat.style.bg, band.bg);
-    assert_eq!(heartbeat.style.fg, muted);
+    for (row, title) in
+        frame[1..]
+            .iter()
+            .zip(["◆ subagents", "◷ heartbeats", "▸ shells", "⚙ factory"])
+    {
+        let text: String = row.iter().map(|span| span.content.as_str()).collect();
+        assert_eq!(text.trim_end(), format!(" {title}"), "no details: {text:?}");
+        let span = row
+            .iter()
+            .find(|span| span.content == title)
+            .unwrap_or_else(|| panic!("the {title} row renders: {text:?}"));
+        assert_eq!(span.style.fg, dim, "the empty {title} row reads dimmed");
+    }
+    assert!(
+        frame[2].iter().all(|span| span.style.bg == band.bg),
+        "the empty heartbeats row (paused heartbeats only) carries the selection"
+    );
 }
 
 #[test]
@@ -630,6 +772,11 @@ fn speed_footer_is_one_dim_row_truncated_to_width() {
 use super::*;
 use crate::theme::{ColorMode, Theme};
 use serde_json::json;
+
+/// `count` placeholder detail items for one dock group.
+fn items(count: usize) -> Vec<String> {
+    (1..=count).map(|item| format!("item {item}")).collect()
+}
 
 fn theme() -> Theme {
     Theme::builtin("prime", ColorMode::TrueColor)

@@ -384,6 +384,11 @@ impl Worker {
                 );
             }
         };
+        // The worker owns the session file; the engine reads it for the
+        // system prompt's conversation-log path and the local harness dir.
+        if !store.path.as_os_str().is_empty() {
+            self.engine.set_session_file(store.path.clone());
+        }
 
         // The `models` patterns (else settings `enabledModels`) resolve once into
         // the scoped list, AFTER the store open (the saved-model restore's wait
@@ -394,21 +399,29 @@ impl Worker {
                 .filter_map(Value::as_str)
                 .map(str::to_string)
                 .collect::<Vec<String>>(),
-            None => pa_core::settings::SettingsManager::create(&cwd, &self.config.agent_dir)
-                .get_enabled_models()
-                .unwrap_or_default(),
+            None => settings.get_enabled_models().unwrap_or_default(),
         };
+        let is_continuing = opened_existing_session;
         let scoped_models = if model_patterns.is_empty() {
             Vec::new()
         } else {
-            let registry = crate::state_getters::worker_model_registry(&self.config.agent_dir);
-            let available: Vec<pa_types::ai::Model> =
-                registry.get_available().into_iter().cloned().collect();
-            pa_core::models::resolve_model_scope_from_models(&model_patterns, &available)
+            let mut registry = crate::state_getters::worker_model_registry(&self.config.agent_dir);
+            pa_core::models::resolve_model_scope_from_models_with_readiness(
+                &mut registry,
+                &model_patterns,
+                settings
+                    .get_default_provider()
+                    .zip(settings.get_default_model()),
+                is_continuing,
+                pa_core::models::SESSION_MODEL_RESTORE_READINESS_TIMEOUT_MS,
+            )
+            .await
         };
-        let is_continuing = opened_existing_session;
-        self.engine
-            .configure_startup_scope(scoped_models.clone(), is_continuing);
+        self.engine.configure_startup_scope(
+            scoped_models.clone(),
+            model_patterns.clone(),
+            is_continuing,
+        );
         // The fresh arms' deferred creation prefix runs here, against the
         // registered scope; the continuing arm wrote its own prefix above, so
         // the scope never changes a continuing file's pinned model and thinking.
@@ -476,11 +489,6 @@ impl Worker {
                 None => (VecDeque::new(), VecDeque::new()),
             }
         };
-        // The worker owns the session file; the engine reads it for the
-        // system prompt's conversation-log path and the local harness dir.
-        if !store.path.as_os_str().is_empty() {
-            self.engine.set_session_file(store.path.clone());
-        }
         // The session's settings-seeded switches: a restarted session re-seeds
         // its auto-compaction flag from the persisted `compaction.enabled`.
         let (service_tier, steering_mode, follow_up_mode, auto_compaction_enabled) = {
@@ -519,6 +527,9 @@ impl Worker {
             core.cwd = cwd;
             core.steering = steering;
             core.follow_up = follow_up;
+            // A resumed session's tool counter re-seeds from its file: a
+            // revived worker keeps the count its roster rows carried.
+            core.tool_use_count = store.tool_call_count();
             core.store = Some(store);
             if let Some(disclosure) = &interrupted_compaction {
                 if let Some(store) = core.store.as_mut() {

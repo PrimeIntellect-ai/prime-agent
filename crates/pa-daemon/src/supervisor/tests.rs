@@ -823,14 +823,14 @@ fn saved_session_rows_publish_deleted_descendant_usage() {
         output_tokens: 110,
         cost: 0.5,
     });
-    let row = saved_session_row(&info);
+    let row = saved_session_row(&info, &std::collections::HashMap::new());
     assert_eq!(
         row["deletedDescendantUsage"],
         json!({ "inputTokens": 1_100, "outputTokens": 110, "cost": 0.5 })
     );
     // Absent again: the field never rides as a null.
     info.deleted_descendant_usage = None;
-    let row = saved_session_row(&info);
+    let row = saved_session_row(&info, &std::collections::HashMap::new());
     assert!(row.get("deletedDescendantUsage").is_none());
 }
 
@@ -850,7 +850,7 @@ fn saved_session_rows_carry_the_persisted_thinking_level() {
     let summary = saved_session_summary(&info);
     assert_eq!(summary["thinkingLevel"], json!("high"));
     assert!(summary["model"].is_null(), "saved rows carry no model");
-    let row = saved_session_row(&info);
+    let row = saved_session_row(&info, &std::collections::HashMap::new());
     assert_eq!(row["thinkingLevel"], json!("high"));
     assert_eq!(row["model"], json!({ "provider": "p", "modelId": "m" }));
     // A session file without a persisted level stays bare (a fresh
@@ -864,9 +864,11 @@ fn saved_session_rows_carry_the_persisted_thinking_level() {
     assert!(saved_session_summary(&draft_info)
         .get("thinkingLevel")
         .is_none());
-    assert!(saved_session_row(&draft_info)
-        .get("thinkingLevel")
-        .is_none());
+    assert!(
+        saved_session_row(&draft_info, &std::collections::HashMap::new())
+            .get("thinkingLevel")
+            .is_none()
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -889,7 +891,7 @@ fn saved_session_rows_publish_the_own_usage_summary() {
     }));
     session.rewrite().unwrap();
     let info = crate::session_store::read_session_info(&path).unwrap();
-    let row = saved_session_row(&info);
+    let row = saved_session_row(&info, &std::collections::HashMap::new());
     assert_eq!(
         row["usage"],
         json!({ "inputTokens": 105, "outputTokens": 10, "cost": 0.25 })
@@ -905,8 +907,72 @@ fn saved_session_rows_publish_the_own_usage_summary() {
     draft.set_path(draft_path.clone());
     draft.rewrite().unwrap();
     let draft_info = crate::session_store::read_session_info(&draft_path).unwrap();
-    assert!(saved_session_row(&draft_info).get("usage").is_none());
+    assert!(
+        saved_session_row(&draft_info, &std::collections::HashMap::new())
+            .get("usage")
+            .is_none()
+    );
     assert!(saved_session_summary(&draft_info).get("usage").is_none());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The whole catalog row on one fixture that exercises every optional key
+/// (name, state, model, thinking level, parent binding, usage): one literal
+/// comparison, so any wire change — a key added, renamed, or dropped — fails
+/// here first, before any client depends on the new shape.
+#[test]
+fn saved_session_rows_match_the_catalog_row_golden() {
+    let dir = std::env::temp_dir().join(format!("pa-saved-golden-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let mut session =
+        crate::session_store::SessionFile::create("/repo", Some("/s/parent.jsonl"), 1);
+    // The row's id and created timestamp read from the session header: pin
+    // both, so the golden stays one literal.
+    session.header.id = "golden-session".to_string();
+    session.header.timestamp = "2026-09-21T00:00:00.000Z".to_string();
+    let path = dir.join("golden-session.jsonl");
+    session.set_path(path.clone());
+    session.append_session_info("golden name");
+    // An assistant message with provider/model later overrides the change,
+    // pinning the fold's last-write-wins row.
+    session.append_model_change("prime", "superb");
+    session.append_thinking_level_change("high");
+    session.append_session_state("active");
+    session.append_message(&json!({
+        "role": "user", "content": "fix the login bug", "timestamp": 1_790_000_000_000_u64
+    }));
+    session.append_message(&json!({
+        "role": "assistant",
+        "content": [{ "type": "text", "text": "fixed in auth.rs" }],
+        "provider": "p", "model": "m", "timestamp": 1_790_000_060_000_u64,
+        "usage": {
+            "input": 100, "output": 10, "cacheRead": 5, "cacheWrite": 0,
+            "totalTokens": 115,
+            "cost": { "input": 0.0, "output": 0.25, "cacheRead": 0.0, "cacheWrite": 0.0, "total": 0.25 }
+        }
+    }));
+    session.rewrite().unwrap();
+
+    let info = crate::session_store::read_session_info(&path).unwrap();
+    assert_eq!(
+        saved_session_row(&info, &std::collections::HashMap::new()),
+        json!({
+            "path": path.to_string_lossy(),
+            "id": "golden-session",
+            "cwd": "/repo",
+            "rlmDepth": 1,
+            "created": "2026-09-21T00:00:00.000Z",
+            "modified": "2026-09-21T14:14:20.000Z",
+            "messageCount": 2,
+            "firstMessage": "fix the login bug",
+            "state": { "status": "active" },
+            "name": "golden name",
+            "parentSessionPath": "/s/parent.jsonl",
+            "model": { "provider": "p", "modelId": "m" },
+            "usage": { "inputTokens": 105, "outputTokens": 10, "cost": 0.25 },
+            "thinkingLevel": "high"
+        })
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }
 

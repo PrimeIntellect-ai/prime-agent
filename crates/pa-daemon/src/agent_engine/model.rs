@@ -3,7 +3,10 @@
 //! session's live-model and thinking-level surfaces, and the request
 //! API-key seam.
 
-use super::{AgentSessionEngine, EngineModelSelection, Model, RestoredSessionModel, SessionEngine};
+use super::{
+    AgentSessionEngine, EngineModelSelection, Model, RestoredSessionModel, SessionEngine,
+    StartupScope,
+};
 
 impl AgentSessionEngine {
     /// The startup chain: the saved settings default, then the featured
@@ -13,28 +16,84 @@ impl AgentSessionEngine {
         let all: Vec<Model> = registry.get_all().to_vec();
         let settings =
             pa_core::settings::SettingsManager::create(self.cwd(), &self.config.agent_dir);
+        let default = settings
+            .get_default_provider()
+            .zip(settings.get_default_model())
+            .map(|(provider, model)| (provider.to_string(), model.to_string()));
         // The create-time `--models` scope: a fresh session starts on the
         // saved default when in scope, else the first scoped model.
-        let (scoped_models, is_continuing) = match self
+        let scope = self
             .startup_scope
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone()
-        {
-            Some(scope) => (scope.scoped_models, scope.is_continuing),
-            None => (Vec::new(), false),
-        };
-        pa_core::models::find_initial_model(&pa_core::models::InitialModelOptions {
+            .unwrap_or_default();
+        let resolved = pa_core::models::find_initial_model(&pa_core::models::InitialModelOptions {
             cli_provider: None,
             cli_model: None,
-            scoped_models: &scoped_models,
-            is_continuing,
-            default_provider: settings.get_default_provider(),
-            default_model_id: settings.get_default_model(),
+            scoped_models: &scope.scoped_models,
+            is_continuing: scope.is_continuing,
+            default_provider: default.as_ref().map(|(provider, _)| provider.as_str()),
+            default_model_id: default.as_ref().map(|(_, model)| model.as_str()),
             all_models: &all,
             available_models: &available,
         })
-        .or_else(|| all.first().cloned())
+        .or_else(|| all.first().cloned());
+        if let (Some(model), Some(default)) = (&resolved, &default) {
+            self.record_startup_default_fallback(model, default, &scope, &available, &all);
+        }
+        resolved
+    }
+
+    fn record_startup_default_fallback(
+        &self,
+        model: &Model,
+        default: &(String, String),
+        scope: &StartupScope,
+        available_models: &[Model],
+        all_models: &[Model],
+    ) {
+        let (provider, model_id) = default;
+        if scope.is_continuing || (model.provider == *provider && model.id == *model_id) {
+            return;
+        }
+        let session_file = self
+            .session_file
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+            .unwrap_or_default();
+        let mut decision = self
+            .restored_model
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if decision
+            .as_ref()
+            .is_some_and(|decision| decision.session_file == session_file)
+        {
+            return;
+        }
+        let wanted = scope.patterns.is_empty()
+            || pa_core::models::scope_patterns_select_reference(
+                &scope.patterns,
+                provider,
+                model_id,
+                available_models,
+                all_models,
+            );
+        if !wanted {
+            return;
+        }
+        let message = format!(
+            "Default model {provider}/{model_id} is not available. Using {}/{}",
+            model.provider, model.id
+        );
+        eprintln!("{message}");
+        *decision = Some(RestoredSessionModel {
+            session_file,
+            model: None,
+            fallback_message: Some(message),
+        });
     }
 
     /// The runtime-config reset at every session restore: the create's own
@@ -372,17 +431,52 @@ impl AgentSessionEngine {
         Option<String>,
         Option<std::collections::BTreeMap<String, String>>,
     ) {
+        let (api_key, headers, _store_healthy) =
+            self.resolve_request_key_and_headers_and_store_health(model);
+        (api_key, headers)
+    }
+
+    /// [`Self::resolve_request_key_and_headers`] plus whether the
+    /// resolution serves a live credential for the model's provider on a
+    /// healthy read — stored, or the ambient environment/runtime override
+    /// (a logout that empties the store leaves the session on the env
+    /// key, exactly like a fresh resolution). `false` means the resolved
+    /// key is the configured `models.json` fallback — served when the
+    /// store is unreadable OR resolves no credential from any live
+    /// source — which is not a credential and must never replace a
+    /// serving pair (the create-config override is source-independent;
+    /// callers apply it themselves).
+    pub(crate) fn resolve_request_key_and_headers_and_store_health(
+        &self,
+        model: &Model,
+    ) -> (
+        Option<String>,
+        Option<std::collections::BTreeMap<String, String>>,
+        bool,
+    ) {
         let auth = pa_core::auth::AuthStorage::create(&self.config.agent_dir);
+        let store_healthy = auth.load_error().is_none();
         let mut registry =
             pa_core::models::ModelRegistry::create(auth, self.config.agent_dir.join("models.json"));
         let resolved = registry.get_api_key_and_headers(model, model.headers.as_ref());
+        // The credential check runs AFTER the resolution: the registry's
+        // lookup may OAuth-refresh and store a fresh token, so a check
+        // before it would read the stale one and discard the fresh pair.
+        let stored_credential = registry
+            .auth
+            .get_api_key_with_source_token(&model.provider, false)
+            .api_key
+            .is_some();
+        let store_auth = store_healthy && stored_credential;
         if let Some(api_key) = &self.current_selection().api_key {
             // The create-config key override pins the key, never the headers:
             // the registry's merged headers still ship, exactly like the TS
-            // `getApiKeyAndHeaders` override path.
-            return (Some(api_key.clone()), resolved.headers);
+            // `getApiKeyAndHeaders` override path. The flag stays the
+            // store's: a caller pairing the override key with headers
+            // keeps its last-good headers when the store cannot serve.
+            return (Some(api_key.clone()), resolved.headers, store_auth);
         }
-        (resolved.api_key, resolved.headers)
+        (resolved.api_key, resolved.headers, store_auth)
     }
 
     pub(crate) fn resolve_request_api_key(&self, model: &Model) -> Option<String> {
@@ -395,6 +489,45 @@ impl AgentSessionEngine {
         registry
             .get_api_key_and_headers(model, model.headers.as_ref())
             .api_key
+    }
+
+    /// The primary target a failover episode restores: the captured model
+    /// with the request auth RE-RESOLVED from the store. The captured
+    /// pair only backs the restore when the store cannot serve a live
+    /// credential; the create-config key override stands in memory
+    /// regardless, keeping the captured headers off a failed read.
+    pub(crate) fn restored_primary_target(
+        &self,
+        primary: &Model,
+        captured_api_key: Option<String>,
+        captured_headers: Option<std::collections::BTreeMap<String, String>>,
+    ) -> pa_core::session_engine::provider_adapter::ProviderTarget {
+        let override_key = self.current_selection().api_key;
+        let (api_key, headers, store_auth) =
+            self.resolve_request_key_and_headers_and_store_health(primary);
+        // The capture backs the restore whenever the store cannot serve a
+        // live credential (a failed read, or a healthy store with nothing
+        // stored — both resolve the configured `models.json` fallback key,
+        // which is not a credential); a live stored credential REPLACES
+        // the pair, headers included.
+        let (api_key, headers) = if let Some(override_key) = override_key {
+            if store_auth {
+                (Some(override_key), headers)
+            } else {
+                (Some(override_key), captured_headers.or(headers))
+            }
+        } else {
+            match api_key {
+                Some(api_key) if store_auth => (Some(api_key), headers),
+                _ => (captured_api_key, captured_headers),
+            }
+        };
+        pa_core::session_engine::provider_adapter::ProviderTarget {
+            service_tier: *self.service_tier.read().expect("service tier lock"),
+            api_key,
+            model: primary.clone(),
+            headers,
+        }
     }
 }
 

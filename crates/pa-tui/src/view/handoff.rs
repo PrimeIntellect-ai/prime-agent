@@ -5,12 +5,11 @@
 
 use super::layout::EntryLayout;
 use super::AgentView;
-use crate::theme::Theme;
 use std::sync::{Mutex, OnceLock};
 
 /// The render-shape inputs a packed layout's rows depend on: the width
 /// plus the view's `layout_options` tuple.
-pub(super) type LayoutShape = (usize, (Theme, String, bool, bool));
+pub(super) type LayoutShape = (usize, super::layout::LayoutOptions);
 
 /// One visible-window entry's held layouts, per detail slot (a pack is
 /// valid for the slot it was built under).

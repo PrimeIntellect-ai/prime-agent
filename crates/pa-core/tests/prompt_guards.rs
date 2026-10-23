@@ -53,7 +53,6 @@ const DYNAMIC_ONLY_MARKERS: &[&str] = &[
     "<available_skills>",
     "Enabled generic MCP servers:",
     "# Project Context",
-    "# Additional Guidance",
     "Pre-installed Python packages:",
     "You are a child agent spawned by",
 ];
@@ -94,7 +93,6 @@ fn cached_prefix_is_stable_across_sessions() {
     options.rlm_parent_agent = Some("orchestrator");
     options.generic_mcp_servers = vec!["slack".into(), "github".into()];
     options.context_files = vec![("AGENTS.md".into(), "Never commit main.".into())];
-    options.prompt_guidelines = Some(vec!["prefer tabs".into()]);
     options.append_system_prompt = Some("And one more thing.".into());
     let second = system_prompt_breakdown(&options);
 
@@ -125,7 +123,6 @@ fn cached_prefix_is_stable_across_sessions() {
     assert!(second_tail.contains("Recursive agent depth: 3 (not root)"));
     assert!(second_tail.contains("You are a child agent spawned by orchestrator."));
     assert!(second_tail.contains("# Project Context"));
-    assert!(second_tail.contains("# Additional Guidance"));
     assert!(second_tail.ends_with("And one more thing."));
 
     for segment in &first.segments {
@@ -146,8 +143,18 @@ fn cached_prefix_is_stable_across_sessions() {
 
 /// Host-request types that are host-internal plumbing, not model-facing
 /// programmatic tools (the prompt must not document them).
-const INTERNAL_HOST_REQUESTS: &[&str] =
-    &["model.info", "mcp.config", "mcp.refresh", "mcp.begin_login"];
+const INTERNAL_HOST_REQUESTS: &[&str] = &[
+    "model.info",
+    "mcp.config",
+    "mcp.refresh",
+    "mcp.begin_login",
+    // The runtime's detached-bash notice pair (the kernel's bash module
+    // fires them; the model never calls them).
+    "bash.completed",
+    "bash.consumed",
+    // The factory module reports run milestones; the model never calls it.
+    "factory.progress",
+];
 
 /// Map one registered host-request type to the prompt token that documents
 /// it. `None` when the request is host-internal.
@@ -233,12 +240,17 @@ fn registered_host_requests() -> BTreeSet<String> {
                 continue;
             }
             let source = std::fs::read_to_string(&path).expect("read source");
-            // Direct registrations: the first string literal after each
-            // `.register(` (the request type comes first in the call).
+            // Direct registrations: the request type is the FIRST
+            // argument of each `.register(` — a literal right at the
+            // call's head counts; anything after a non-literal first
+            // argument is not the request type.
             for remainder in source.split(".register(").skip(1) {
-                if let Some(literal) = first_string_literal(remainder) {
-                    if is_request_type_literal(&literal) {
-                        found.insert(literal);
+                let rest = remainder.trim_start();
+                if rest.starts_with('"') {
+                    if let Some(literal) = first_string_literal(rest) {
+                        if is_request_type_literal(&literal) {
+                            found.insert(literal);
+                        }
                     }
                 }
             }
@@ -287,7 +299,7 @@ fn all_string_literals(text: &str) -> Vec<String> {
 /// Kernel-bound REPL names from the real bootstrap code (`rlm`, `bash`,
 /// `mcp`), derived from `build_rlm_bootstrap_code`.
 fn kernel_bound_names() -> BTreeSet<String> {
-    let code = pa_core::kernel::bootstrap::build_rlm_bootstrap_code(&[]);
+    let code = pa_core::kernel::bootstrap::build_rlm_bootstrap_code(&[], false);
     let mut names = BTreeSet::new();
     for line in code.lines() {
         let line = line.trim_start();
@@ -350,10 +362,21 @@ fn auth_gated_bundled_skills() -> BTreeSet<String> {
         .collect()
 }
 
+/// Conditionally-available bundled skills: the websearch skill rides with its
+/// credential (an unset `bundledSkills.websearch` resolves with the stored or
+/// ambient Serper key), so keyless installs exclude it — it must never be
+/// documented as static core-tool surface; the dynamic skills inventory
+/// renders it only on installs where it resolves enabled.
+fn settings_gated_bundled_skills() -> BTreeSet<String> {
+    ["websearch".to_string()].into_iter().collect()
+}
+
 /// (import name, public functions) for every bundled Python skill that is
-/// always available (auth-gated integrations excluded).
+/// always available (auth-gated integrations and the conditionally-available
+/// websearch skill excluded).
 fn bundled_python_skills() -> Vec<(String, Vec<String>)> {
     let gated = auth_gated_bundled_skills();
+    let settings_gated = settings_gated_bundled_skills();
     sorted_bundled_skills()
         .into_iter()
         .filter(|skill| {
@@ -362,6 +385,7 @@ fn bundled_python_skills() -> Vec<(String, Vec<String>)> {
                 .as_ref()
                 .is_none_or(|python| !gated.contains(&python.import_name))
         })
+        .filter(|skill| !settings_gated.contains(&skill.name))
         .filter_map(|skill| {
             let python = skill.python?;
             let mut functions = python_skill_functions(&python.package_path)
@@ -538,6 +562,29 @@ fn bundled_skills_match_the_ts_packaged_set() {
     );
 }
 
+/// The bounded-await contract renders wherever the Python REPL does: every session kind, daemon
+/// or daemonless, registers the bash completion notice the degrade relies on.
+#[test]
+fn bounded_await_contract_renders_in_daemon_and_daemonless_sessions() {
+    let mut options = BuildSystemPromptOptions {
+        cwd: "/w".to_string(),
+        messages_path: Some("/log.jsonl".to_string()),
+        skills: sorted_bundled_skills(),
+        selected_tools: Some(vec!["python_repl"]),
+        ..Default::default()
+    };
+    for daemonless in [false, true] {
+        options.daemonless = daemonless;
+        let prompt = system_prompt_breakdown(&options).assembled;
+        assert!(
+            prompt.contains("yield_after")
+                && prompt.contains("`r.running` is True")
+                && prompt.contains("`r.exit_code` is None"),
+            "daemonless={daemonless}: the prompt must carry the bounded-await result contract: {prompt}"
+        );
+    }
+}
+
 /// The generic mcp skill loads through the normal markdown discovery and renders in the
 /// `<available_skills>` inventory exactly like any other markdown skill: the `[skill name
 /// location]`-style XML the TS `formatSkillsForPrompt` emits, without a `python_import` line.
@@ -578,4 +625,23 @@ fn generic_mcp_skill_renders_in_the_prompt_inventory() {
     assert!(second
         .assembled
         .contains("await mcp.list_tools(\"notion\")"));
+}
+
+// Async turn discipline
+
+/// Since #3580 every session kind wakes on bash completion: daemonless runs
+/// get a queued `[bash-done]` turn, so the static usage layer must not carry
+/// the pre-#3580 rule to await commands before ending the turn — the
+/// no-polling rule right below it already ends turns on the done
+/// notification, and an unscoped await rule would contradict that wake.
+#[test]
+fn usage_layer_ends_turns_on_the_done_notification_not_an_await_rule() {
+    assert!(
+        !USAGE_LAYER.contains("await commands before ending the turn"),
+        "every session kind has completion notifications: the await-before-turn-end rule is stale"
+    );
+    assert!(
+        USAGE_LAYER.contains("end the turn and collect the result on the done notification"),
+        "the no-polling rule keeps the collect-on-notice turn-end contract"
+    );
 }

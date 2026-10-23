@@ -145,7 +145,7 @@ fn write_fixture(
     );
     let _ = writeln!(
         content,
-        "{{\"type\":\"message\",\"id\":\"{id}-mu\",\"timestamp\":\"2024-01-01T00:00:00.000Z\",\"message\":{{\"role\":\"user\",\"content\":\"run the drill\",\"timestamp\":0}}}}"
+        "{{\"type\":\"message\",\"id\":\"{id}-mu\",\"timestamp\":\"2024-01-01T00:00:00.000Z\",\"message\":{{\"role\":\"user\",\"content\":\"run the drill\",\"timestamp\":1}}}}"
     );
     for index in 0..grown_lines {
         let _ = writeln!(
@@ -293,4 +293,97 @@ fn the_saved_catalog_streams_per_file_during_the_scan() {
         first_item.as_millis() * 3 < response_at.as_millis().max(1),
         "the first streamed row landed at {first_item:?} but the response at {response_at:?}: the catalog streamed after the whole scan, not per file"
     );
+}
+
+/// Read the stream up to the terminal response and return its `data`.
+fn list_saved(client: &mut Client, id: &str, command: &serde_json::Value) -> serde_json::Value {
+    client.send_command(id, command);
+    loop {
+        let line = client.read_line();
+        if line.get("type").and_then(serde_json::Value::as_str) == Some("response") {
+            assert_eq!(line["success"], true, "list failed: {line}");
+            return line["data"].clone();
+        }
+    }
+}
+
+fn sidecar_count(dir: &Path) -> usize {
+    std::fs::read_dir(dir)
+        .expect("read sessions dir")
+        .flatten()
+        .filter(|entry| {
+            entry
+                .file_name()
+                .to_string_lossy()
+                .ends_with(".info-cache.json")
+        })
+        .count()
+}
+
+/// A paged catalog folds only the newest `limit` files (each fold backfills its sidecar), and the
+/// cursor walks the rest of the store down to the oldest session.
+#[test]
+fn a_paged_catalog_folds_the_newest_page_and_the_cursor_reaches_the_oldest() {
+    const FILES: usize = 400;
+    const PAGE: usize = 200;
+    let dir = tempfile::TempDir::new().expect("temp dir");
+    let agent_dir = dir.path().join("agent");
+    let sessions_dir = agent_dir.join("sessions");
+    std::fs::create_dir_all(&sessions_dir).expect("sessions dir");
+    let base = SystemTime::now() - Duration::from_hours(24);
+    for index in 0..FILES {
+        write_fixture(
+            &sessions_dir,
+            &format!("paged-{index:03}"),
+            &format!("row {index:03}"),
+            1,
+            base + Duration::from_secs(index as u64),
+        );
+    }
+    let socket = dir.path().join("daemon.sock");
+    let _daemon = spawn_daemon(&socket, &agent_dir);
+    let mut client = Client::connect(&socket);
+
+    let page = list_saved(
+        &mut client,
+        "p1",
+        &serde_json::json!({ "type": "list_saved_sessions", "cwd": "/tmp", "limit": PAGE }),
+    );
+    let rows = page["sessions"].as_array().expect("sessions");
+    assert_eq!(
+        rows.len(),
+        PAGE,
+        "the first page carries the newest files only"
+    );
+    assert_eq!(rows[0]["name"], "row 399");
+    assert_eq!(page["remaining"], FILES - PAGE);
+    assert_eq!(
+        sidecar_count(&sessions_dir),
+        PAGE,
+        "only the page's files were folded (and backfilled)"
+    );
+
+    let rest = list_saved(
+        &mut client,
+        "p2",
+        &serde_json::json!({
+            "type": "list_saved_sessions",
+            "cwd": "/tmp",
+            "cursor": page["nextCursor"],
+        }),
+    );
+    let rows = rest["sessions"].as_array().expect("sessions");
+    assert_eq!(
+        rows.len(),
+        FILES - PAGE,
+        "the cursor walks the rest of the store"
+    );
+    assert_eq!(rows[0]["name"], "row 199");
+    assert_eq!(rows[rows.len() - 1]["name"], "row 000");
+    assert_eq!(rest["remaining"], 0);
+    assert!(
+        rest.get("nextCursor").is_none(),
+        "a finished walk has no cursor: {rest}"
+    );
+    assert_eq!(sidecar_count(&sessions_dir), FILES);
 }

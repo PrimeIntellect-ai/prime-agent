@@ -330,6 +330,20 @@ pub struct SessionLease {
 }
 
 impl SessionLease {
+    /// Write both sidecars while the lease is still held: the window
+    /// snapshot (current by construction) and the info sidecar, whose scan
+    /// state this folds current — rows appended since the last read (the
+    /// close's own final rows) fold here instead of at the next open.
+    /// Best-effort like the window flush: only the lease holder writes,
+    /// and a failed write costs the next open its warm resume, nothing
+    /// more. `release` runs this before the reclaim; the orphan exit,
+    /// which keeps its lease through process death, runs it alone.
+    pub(crate) fn write_sidecars(&self) {
+        let _ = pa_core::session::window::flush_cache(&self.opened_path);
+        let _ = crate::session_store::read_session_info(&self.opened_path);
+        crate::session_store::persist_info_sidecar(&self.opened_path);
+    }
+
     pub fn release(&self) {
         if self
             .released
@@ -352,12 +366,7 @@ impl SessionLease {
         {
             std::thread::yield_now();
         }
-        let _ = pa_core::session::window::flush_cache(&self.opened_path);
-        // The usage-scan sidecar persists beside the window snapshot, in
-        // the same lease-keyed, best-effort shape: only the lease holder
-        // writes, and a failed write costs the next open its warm resume,
-        // nothing more.
-        crate::session_store::persist_info_sidecar(&self.opened_path);
+        self.write_sidecars();
         let _ = with_lease_guard(&self.directory, GuardWait::Fast, || {
             if let Ok(Some(owner)) = read_owner(&self.directory) {
                 if owner.token == self.token {

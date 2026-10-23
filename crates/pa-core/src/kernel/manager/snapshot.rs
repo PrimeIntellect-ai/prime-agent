@@ -52,7 +52,6 @@ impl Inner {
         let result = self
             .enqueue_request(
                 request,
-                "",
                 ExecuteOptions {
                     internal: true,
                     ..ExecuteOptions::default()
@@ -228,7 +227,6 @@ impl Inner {
         let result = self
             .enqueue_request(
                 request,
-                "",
                 ExecuteOptions {
                     internal: true,
                     protocol_repair,

@@ -9,6 +9,8 @@ use serde_json::Value;
 
 use crate::kernel::bootstrap::KernelPythonSkill;
 
+/// Per-cell stdout/stderr cap. `HeadTailBuffer` splits it between head and
+/// tail, so a long failing run keeps its printed verdict.
 pub const DEFAULT_MAX_OUTPUT_CHARS: usize = 65_536;
 pub const HOST_REQUEST_SHUTDOWN_TIMEOUT_MS: u64 = 5_000;
 pub const KERNEL_SHUTDOWN_TIMEOUT_MS: u64 = 5_000;
@@ -65,6 +67,11 @@ pub const AGENT_MESSAGE_DISPLAY_MIME: &str = "application/vnd.prime-agent.agent-
 pub const BASH_ACTIVITY_DISPLAY_MIME: &str = "application/vnd.prime-agent.bash-activity+json";
 /// One `bash()` call's command text (capped) and non-blank line count.
 pub const BASH_COMMAND_DISPLAY_MIME: &str = "application/vnd.prime-agent.bash-command+json";
+/// The kernel host request that reports a background bash completion
+/// (the `[bash-done]` lane). The daemon registers the handler
+/// (`bash_notices`), and the provisioner keys the bounded-await bootstrap
+/// default on its presence.
+pub const BASH_COMPLETED_REQUEST_TYPE: &str = "bash.completed";
 
 pub const EXECUTE_STATUS_OK: &str = "ok";
 pub const EXECUTE_STATUS_ERROR: &str = "error";
@@ -221,6 +228,14 @@ pub struct ExecuteOptions {
     pub internal: bool,
     /// The protocol repair's own request; exempt from waiting on the repair it belongs to.
     pub protocol_repair: bool,
+    /// Per-cell watchdog budget in milliseconds. When non-zero, a cell whose own
+    /// run (request on the wire -> done event) outlives the budget still settles
+    /// ok and keeps its own result; a teaching note is appended to its stderr
+    /// instead of a quiet over-budget success. The kernel is never killed: the
+    /// note lands only after the cell settles, so the serial execution queue and
+    /// the namespace are untouched. `None` and zero disable the watchdog; the
+    /// runtime bootstrap never arms it.
+    pub cell_timeout_ms: Option<u64>,
 }
 
 /// The error raised when a new cell cannot start because the previously
@@ -232,10 +247,8 @@ pub struct KernelBusyAfterInterruptError;
 /// A typed request from Python code running in the kernel to the host.
 #[derive(Debug, Clone)]
 pub struct HostRequestPayload {
-    /// The request payload with `cellSourceCode` merged in when known.
+    /// The request payload.
     pub data: Value,
-    /// Source of the cell that triggered the request, when attributable.
-    pub cell_source_code: Option<String>,
 }
 
 pub type HostHandlerFuture = Pin<Box<dyn Future<Output = anyhow::Result<Value>> + Send>>;

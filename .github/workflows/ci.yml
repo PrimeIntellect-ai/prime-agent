@@ -344,52 +344,42 @@ jobs:
       - name: Bootstrap the kernel venv (ready before the kernel e2e units)
         if: steps.selection.outputs.units != '0'
         run: ./target/debug/prime-agent --prime-agent-bootstrap
-      # The targeted lifecycle comparisons use the recognized, pinned TS release
-      # and only synthetic loopback providers/state. One leg avoids 8 downloads.
-      - name: Compare the lifecycle binaries (pinned TS reference)
-        id: lifecycle_parity
-        if: matrix.shard == 1 && steps.selection.outputs.units != '0' && (hashFiles('scripts/review_graceful_shutdown_parity.py') != '' || hashFiles('scripts/review_goal_backoff_parity.py') != '' || hashFiles('scripts/review_draft_disconnect_parity.py') != '' || hashFiles('scripts/review_restore_notice_parity.py') != '')
-        env:
-          GH_TOKEN: ${{ github.token }}
+      # The real-binary lifecycle checks drive the debug binary through owned
+      # daemons, PTYs and loopback providers only. One leg is enough.
+      - name: Run the rust lifecycle checks
+        id: lifecycle_checks
+        if: matrix.shard == 1 && steps.selection.outputs.units != '0' && hashFiles('scripts/check_*.py') != ''
         run: |
           set -euo pipefail
-          reference="${RUNNER_TEMP}/lifecycle-ts-reference"
-          mkdir -p "${reference}"
-          gh release download v0.9.8 --repo "${GITHUB_REPOSITORY}" \
-            --pattern prime-agent-0.9.8-linux-x64.tar.gz --dir "${reference}"
-          archive="${reference}/prime-agent-0.9.8-linux-x64.tar.gz"
-          echo "83fb09129bf78e3e60268212cd70932166591b15188caa70c1b0efbcc76235e2  ${archive}" | sha256sum --check
-          mkdir -p "${reference}/package"
-          tar -xzf "${archive}" -C "${reference}/package"
-          export PA_TS_ARCHIVE="${archive}"
-          export PA_TS_BINARY="${reference}/package/prime-agent"
+          mkdir -p "${RUNNER_TEMP}/lifecycle-check-receipts"
           export PA_RUST_BINARY="${GITHUB_WORKSPACE}/target/debug/prime-agent"
-          export PI_PACKAGE_DIR="${reference}/package"
           export PRIME_AGENT_KERNEL_PYTHON="${HOME}/.prime/agent/kernel-venv/bin/python"
           export PA_E2E_KERNEL_PYTHON="${PRIME_AGENT_KERNEL_PYTHON}"
-          export PYTHONPATH="${reference}/package/skills/goal/src"
           test -x "${PRIME_AGENT_KERNEL_PYTHON}"
-          mkdir -p "${RUNNER_TEMP}/lifecycle-parity-receipts"
-          comparison_status=0
-          for scenario in graceful_shutdown goal_backoff draft_disconnect restore_notice; do
-            verifier="scripts/review_${scenario}_parity.py"
-            if [ -f "${verifier}" ]; then
-              if [ "${scenario}" = "draft_disconnect" ]; then
-                python3 scripts/test_review_draft_disconnect_parity.py || comparison_status=1
-              fi
-              python3 "${verifier}" --receipt "${RUNNER_TEMP}/lifecycle-parity-receipts/${scenario}.json" || comparison_status=1
+          check_status=0
+          python3 scripts/test_lifecycle_lib.py || check_status=1
+          # Discover independently added checks so feature PRs do not
+          # overwrite or conflict with each other's selection.
+          for check in scripts/check_*.py; do
+            [ -f "${check}" ] || continue
+            scenario="${check#scripts/check_}"
+            scenario="${scenario%.py}"
+            check_test="scripts/test_check_${scenario}.py"
+            if [ -f "${check_test}" ]; then
+              python3 "${check_test}" || check_status=1
             fi
+            python3 "${check}" --receipt "${RUNNER_TEMP}/lifecycle-check-receipts/${scenario}.json" || check_status=1
           done
-          exit "${comparison_status}"
-      - name: Upload the binary comparison receipts
-        if: always() && matrix.shard == 1 && steps.selection.outputs.units != '0' && (hashFiles('scripts/review_graceful_shutdown_parity.py') != '' || hashFiles('scripts/review_goal_backoff_parity.py') != '' || hashFiles('scripts/review_draft_disconnect_parity.py') != '' || hashFiles('scripts/review_restore_notice_parity.py') != '')
+          exit "${check_status}"
+      - name: Upload the lifecycle check receipts
+        if: always() && matrix.shard == 1 && steps.selection.outputs.units != '0' && hashFiles('scripts/check_*.py') != ''
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: lifecycle-parity-receipts-attempt-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/lifecycle-parity-receipts/*.json
+          name: lifecycle-check-receipts-attempt-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/lifecycle-check-receipts/
           if-no-files-found: error
       - name: Run this shard's test subset
-        if: ${{ !cancelled() && (success() || steps.lifecycle_parity.outcome == 'failure') }}
+        if: ${{ !cancelled() && (success() || steps.lifecycle_checks.outcome == 'failure') }}
         run: |
           python3 scripts/ci_test_shard.py --shard ${{ matrix.shard }} --total ${{ env.SHARD_COUNT }}             --crates "${{ needs.changes.outputs.crates }}"             --manifest "$RUNNER_TEMP/shard-manifest-${{ matrix.shard }}-attempt-${{ github.run_attempt }}.json"
       - name: Upload the shard manifest (always — the summary audits it)
@@ -424,6 +414,29 @@ jobs:
           python3 scripts/test_ci_pr_crates.py
           python3 scripts/test_ci_test_shard_summary.py
           python3 scripts/ci_test_shard_summary.py --total ${{ env.SHARD_COUNT }} --dir manifests
+
+  # The vendored runtime suite (prime-agent-runtime): the kernel-side Python
+  # (`bash()`, the repl protocol, the bounded-await contract) has no Rust test,
+  # so this is its only CI gate — CPython 3.11, the minimum the runtime
+  # supports and the version the kernel venv pins.
+  runtime:
+    name: runtime suite (python 3.11)
+    needs: trust
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    if: needs.trust.result == 'success' && needs.trust.outputs.allowed == 'true' && (github.event_name != 'pull_request' || !github.event.pull_request.draft)
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Install uv
+        run: |
+          python3 -m pip install --user uv
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+      - name: Run the runtime suite (CPython 3.11)
+        run: |
+          cd prime-agent-runtime
+          uv run --python 3.11 python -m unittest discover -s test
 
   # The Windows job set + the supply-chain deny gate:
   #
@@ -495,7 +508,18 @@ jobs:
   # enforces.
   trust-audit:
     name: trust gate audit
-    needs: [trust, changes, fmt, clippy-test, test-shard, test-summary, windows-cross, deny]
+    needs:
+      [
+        trust,
+        changes,
+        fmt,
+        clippy-test,
+        test-shard,
+        test-summary,
+        runtime,
+        windows-cross,
+        deny,
+      ]
     if: always()
     runs-on: ubuntu-24.04
     timeout-minutes: 10

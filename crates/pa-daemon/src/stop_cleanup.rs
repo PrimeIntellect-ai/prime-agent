@@ -699,6 +699,13 @@ mod tests {
         // The transcript dies (the sweep or a later delete): the bucket's
         // snapshot is now the only carrier — the spend survives.
         std::fs::remove_file(&child_file).unwrap();
+        ledger
+            .append_delete(
+                "sub-1",
+                &child_file.to_string_lossy(),
+                crate::rlm_ledger::RlmLedgerDeleteReason::User,
+            )
+            .unwrap();
         let bucket = ledger.deleted_descendant_usage_by_parent().unwrap();
         assert!((bucket[&parent_key].cost - 0.06).abs() < 1e-9);
     }

@@ -5,11 +5,12 @@
 use super::{
     assert_thinking_supported, bail, create_default_rlm_subagent_session_name, json, now_ms,
     resolve_child_model, rlm_child_label, rlm_depth_limit_error, spawn_name_unavailable_error, Arc,
-    ChildCloseReason, ChildRecord, Context, DaemonCommand, Duration, Instant, Mutex, Path, PathBuf,
-    Result, RlmChildResult, RlmCreateSessionHandle, RlmCreateSessionRequest,
-    RlmDeleteSubagentResult, RlmHostFuture, RlmSpawnHandle, RlmSpawnRequest, RlmSubagentEntry,
-    RlmSubagentHost, SpawnNameReservationGuard, SupervisorChildSessions,
-    SupervisorChildSessionsInner, Value, KILL_TIMEOUT_MS, RENAME_TIMEOUT_MS,
+    ChildCloseReason, ChildObservationSource, ChildRecord, Context, DaemonCommand, Duration,
+    Instant, Mutex, Path, PathBuf, Result, RlmChildResult, RlmCreateSessionHandle,
+    RlmCreateSessionRequest, RlmDeleteSubagentResult, RlmHostFuture, RlmSpawnHandle,
+    RlmSpawnRequest, RlmSubagentEntry, RlmSubagentHost, SpawnNameReservationGuard,
+    SupervisorChildSessions, SupervisorChildSessionsInner, Value, KILL_TIMEOUT_MS,
+    RENAME_TIMEOUT_MS,
 };
 
 /// Resolve the child model with the daemon `allowedModels` allowlist enforced, refusing loudly with
@@ -48,6 +49,32 @@ async fn resolve_child_model_allowlisted(
             Err(error)
         }
     }
+}
+
+/// The `rlm.create_session` launch env (TS `createRlmRootSession`'s
+/// minimal map: `collectDaemonLaunchEnv({ PATH })` plus the provider's
+/// env API-key var plus `PRIME_TEAM_ID` for prime-inference).
+fn create_session_launch_env(model: &str) -> std::collections::BTreeMap<String, String> {
+    let mut env = std::collections::BTreeMap::new();
+    if let Ok(path) = std::env::var("PATH") {
+        env.insert("PATH".to_string(), path);
+    }
+    let provider = model
+        .split_once('/')
+        .map_or(model, |(provider, _)| provider);
+    if let Some(env_key) =
+        pa_ai::env_api_keys::find_env_keys(provider).and_then(|keys| keys.first().cloned())
+    {
+        if let Ok(value) = std::env::var(&env_key) {
+            env.insert(env_key, value);
+        }
+    }
+    if provider == "prime-inference" {
+        if let Ok(team) = std::env::var("PRIME_TEAM_ID") {
+            env.insert("PRIME_TEAM_ID".to_string(), team);
+        }
+    }
+    env
 }
 
 impl RlmSubagentHost for SupervisorChildSessions {
@@ -115,6 +142,12 @@ impl RlmSubagentHost for SupervisorChildSessions {
                         request.spawned_by_request_id.as_deref(),
                         Some(runtime_metadata),
                         &identity,
+                        // TS runs `rlm.spawn` children in-process
+                        // inside the parent worker, so they share its
+                        // env; the Rust child is a separate worker
+                        // process, so the spawn forwards the parent
+                        // worker's env (filtered) instead.
+                        Some(pa_types::daemon::launch_env::collect_process_launch_env()),
                     )
                     .await?;
                 let record = ChildRecord {
@@ -132,10 +165,15 @@ impl RlmSubagentHost for SupervisorChildSessions {
                     answer_text: None,
                     answer_captured: false,
                     replied_since_task: false,
+                    progress_note: None,
+                    tool_use_count: None,
+                    live_observation: None,
+                    direct_observation: Arc::new(Mutex::new(())),
                     notice_delivered: false,
                     prompt_admitted: false,
                     error: None,
                     closed_by_parent: false,
+                    retiring: false,
                     retirement_finished: false,
                     retirement_notified: false,
                     retirement_roster_emitted: false,
@@ -213,7 +251,6 @@ impl RlmSubagentHost for SupervisorChildSessions {
                 if watcher_record.lock().await.closed_by_parent {
                     return;
                 }
-                watcher_record.lock().await.prompt_admitted = true;
                 if let Err(error) = watcher_this
                     .prompt_child(
                         &child_active_session_id,
@@ -249,15 +286,14 @@ impl RlmSubagentHost for SupervisorChildSessions {
                             .kill_child(&child_active_session_id, ChildCloseReason::Killed)
                             .await;
                         watcher_this
-                            .settle_failed(
-                                &watcher_record,
-                                format!("{retry_error:#}"),
-                                super::lifecycle::FailedArm::Prompt,
-                            )
+                            .settle_failed(&watcher_record, format!("{retry_error:#}"))
                             .await;
                         return;
                     }
                 }
+                // The worker accepted the task: from here an idle read is a
+                // finished run, never the pre-prompt idle worker.
+                watcher_record.lock().await.prompt_admitted = true;
                 watcher_this.watch_child_settle(&watcher_record).await;
             });
             Ok(RlmSpawnHandle {
@@ -310,6 +346,9 @@ impl RlmSubagentHost for SupervisorChildSessions {
                     &sessions_dir,
                     None,
                     &identity,
+                    // The TS minimal map for a depth-0 root (the
+                    // env-key heuristic is stated in the PR).
+                    Some(create_session_launch_env(&model)),
                 )
                 .await?;
             // The TS create-path summary validation: a resident depth-0
@@ -337,10 +376,49 @@ impl RlmSubagentHost for SupervisorChildSessions {
         let this = Arc::clone(&self.inner);
         Box::pin(async move {
             let records = this.children.lock().await.clone();
+            // The children's live note and tool count join from the
+            // supervisor's pushed roster: one in-memory read, never a busy
+            // child worker round trip. A failed read keeps the last values
+            // each record observed; the settle watcher owns worker refreshes.
+            let request_order = this
+                .observation_requests
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if let Some(peers) = this.child_roster_rows(&records).await {
+                for record in &records {
+                    let (rlm_child_id, active_session_id) = {
+                        let record = record.lock().await;
+                        (
+                            record.rlm_child_id.clone(),
+                            record.active_session_id.clone(),
+                        )
+                    };
+                    let live = peers
+                        .iter()
+                        .find(|row| {
+                            row.get("rlmChildId").and_then(Value::as_str)
+                                == Some(rlm_child_id.as_str())
+                        })
+                        .or_else(|| {
+                            peers.iter().find(|row| {
+                                row.get("activeSessionId").and_then(Value::as_str)
+                                    == Some(active_session_id.as_str())
+                            })
+                        });
+                    if let Some(live) = live {
+                        this.observe_live_state(
+                            record,
+                            live,
+                            request_order,
+                            ChildObservationSource::Roster,
+                        )
+                        .await;
+                    }
+                }
+            }
             let mut entries = Vec::with_capacity(records.len());
             for record in &records {
-                // The settle watcher owns worker refreshes. A roster read is a
-                // snapshot and must not queue behind a long supervisor request.
+                // A roster read is a snapshot: the rows serve the records'
+                // last observed state without another round trip.
                 let record = record.lock().await;
                 entries.push(SupervisorChildSessions::entry(&record));
             }
@@ -429,14 +507,37 @@ impl RlmSubagentHost for SupervisorChildSessions {
                 ]),
             };
             drop(record_guard);
-            let was_running = record.lock().await.settled_status.is_none();
+            let was_running = {
+                // A delete of a LIVE run must not let a settle watcher that
+                // wakes inside the kill window append a clean
+                // `child_returned` beside the cancel line. The gate is this
+                // mark, not a fake settle: a fake settle would make the
+                // watcher treat the live run as finished and exit, which a
+                // failed kill would then strand (a live, unwatched child).
+                // A settled child's delete records no cancel line, so it
+                // leaves its return alone.
+                let mut row = record.lock().await;
+                let was_running = row.settled_status.is_none();
+                if was_running {
+                    row.retiring = true;
+                }
+                was_running
+            };
             // Capture before the kill: a deleted running child's durable
             // rows are its last observable spend on the parent side.
             if !already_terminated {
                 this.emit_child_usage(&record).await;
-                this.command(&command, KILL_TIMEOUT_MS)
+                if let Err(error) = this
+                    .command(&command, KILL_TIMEOUT_MS)
                     .await
-                    .with_context(|| format!("kill RLM child \"{target}\""))?;
+                    .with_context(|| format!("kill RLM child \"{target}\""))
+                {
+                    // The kill never landed: clear the mark so the
+                    // still-live child stays watchable and a later cancel
+                    // can still record the parent -> child edge.
+                    record.lock().await.retiring = false;
+                    return Err(error);
+                }
                 this.retain_retired_usage(&record, super::RetirementIntent::Delete { was_running });
                 // Observe any rows that landed before the acknowledged kill.
                 this.emit_child_usage(&record).await;

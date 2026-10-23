@@ -187,6 +187,9 @@ fn print_continue_refuses_an_active_daemon_session() {
         .expect("sessions")
         .flatten()
         .map(|entry| entry.path())
+        // The ended print session also persists its info sidecar beside the
+        // file; only the session files count here.
+        .filter(|path| path.extension().and_then(|e| e.to_str()) == Some("jsonl"))
         .collect();
     assert_eq!(session_files.len(), 1, "one persisted session");
     let session_path = session_files[0].clone();

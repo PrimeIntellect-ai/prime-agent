@@ -52,6 +52,25 @@ pub(crate) struct SpawnedWorker {
     orphan_generation: OrphanGeneration,
 }
 
+/// Compose the worker spawn env (TS `launchWorker`'s merged env,
+/// `daemon-supervisor.ts`): the daemon's own process env stays the
+/// inherited base, the client-forwarded launch env rides over it, and
+/// the internal identity overrides ride over both — then `RLM_DEPTH`
+/// never survives: a client may itself run inside an agent (its env
+/// carries the recursion marker), and a worker that inherited it would
+/// stamp every root session it creates with a stale depth (audit #9).
+fn apply_worker_env(
+    command: &mut Command,
+    client_launch_env: Option<&std::collections::BTreeMap<String, String>>,
+    internal_launch_env: std::collections::BTreeMap<String, String>,
+) {
+    if let Some(env) = client_launch_env {
+        command.envs(env);
+    }
+    command.envs(internal_launch_env);
+    command.env_remove("RLM_DEPTH");
+}
+
 impl SpawnedWorker {
     pub(crate) fn id(&self) -> Option<u32> {
         self.child.id()
@@ -555,10 +574,16 @@ impl Supervisor {
         let stderr_log_path =
             crate::worker_stderr::log_path(&self.options.agent_dir, &resident.worker_id);
         let stderr_log = crate::worker_stderr::open_for_spawn(&stderr_log_path)?;
+        // The client launch env travels from the resident (TS `launchEnv`).
+        let client_launch_env = resident
+            .launch_env
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
         let mut command = Command::new(&executable);
+        command.arg("worker");
+        apply_worker_env(&mut command, client_launch_env.as_ref(), launch_env);
         command
-            .arg("worker")
-            .envs(launch_env)
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
             // The worker's stderr lands in its per-worker log (a detached supervisor has no
@@ -989,5 +1014,86 @@ impl Supervisor {
             .store(peer_transport_capable, Ordering::SeqCst);
         pumps.installed = true;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The spawn env precedence (TS `launchWorker`): the client's env
+    /// rides over the inherited daemon base, the internal identity
+    /// overrides ride over the client's env (a client-supplied worker
+    /// token never wins), and `RLM_DEPTH` is an explicit removal even
+    /// when the client forwarded one — the only removal, so the daemon's
+    /// own env stays the inherited base.
+    #[test]
+    fn the_client_env_rides_under_the_internal_overrides() {
+        let client = std::collections::BTreeMap::from([
+            ("PA_MARKER".to_string(), "a-client".to_string()),
+            ("RLM_DEPTH".to_string(), "3".to_string()),
+            (
+                crate::worker::WORKER_TOKEN_ENV.to_string(),
+                "from-client".to_string(),
+            ),
+        ]);
+        let internal = std::collections::BTreeMap::from([(
+            crate::worker::WORKER_TOKEN_ENV.to_string(),
+            "internal-token".to_string(),
+        )]);
+        let mut command = Command::new("x");
+        apply_worker_env(&mut command, Some(&client), internal);
+        let envs: std::collections::BTreeMap<&std::ffi::OsStr, Option<&std::ffi::OsStr>> =
+            command.as_std().get_envs().collect();
+        assert_eq!(
+            envs.get(std::ffi::OsStr::new("PA_MARKER")),
+            Some(&Some(std::ffi::OsStr::new("a-client"))),
+            "the client env rides into the worker"
+        );
+        assert_eq!(
+            envs.get(std::ffi::OsStr::new(crate::worker::WORKER_TOKEN_ENV)),
+            Some(&Some(std::ffi::OsStr::new("internal-token"))),
+            "the internal identity beats a client-supplied same key"
+        );
+        assert_eq!(
+            envs.get(std::ffi::OsStr::new("RLM_DEPTH")),
+            Some(&None),
+            "a client-forwarded RLM_DEPTH is an explicit removal"
+        );
+        let removals: Vec<&std::ffi::OsStr> = envs
+            .iter()
+            .filter(|(_, value)| value.is_none())
+            .map(|(key, _)| *key)
+            .collect();
+        assert_eq!(
+            removals,
+            vec![std::ffi::OsStr::new("RLM_DEPTH")],
+            "RLM_DEPTH is the only removal: the daemon's own env stays             inherited (the e2e's base-sentinel check proves the layer)"
+        );
+    }
+
+    /// The recursion marker is stripped even with no client env at all
+    /// (audit #9): a supervisor started inside an agent's shell spawns
+    /// depth-0 workers.
+    #[test]
+    fn rlm_depth_is_stripped_without_a_client_env() {
+        let internal = std::collections::BTreeMap::from([(
+            crate::worker::WORKER_ROLE_ENV.to_string(),
+            "1".to_string(),
+        )]);
+        let mut command = Command::new("x");
+        apply_worker_env(&mut command, None, internal);
+        let envs: std::collections::BTreeMap<&std::ffi::OsStr, Option<&std::ffi::OsStr>> =
+            command.as_std().get_envs().collect();
+        assert_eq!(
+            envs.get(std::ffi::OsStr::new("RLM_DEPTH")),
+            Some(&None),
+            "RLM_DEPTH is stripped even with no launch env"
+        );
+        assert_eq!(
+            envs.get(std::ffi::OsStr::new(crate::worker::WORKER_ROLE_ENV)),
+            Some(&Some(std::ffi::OsStr::new("1"))),
+            "the internal identity still rides"
+        );
     }
 }

@@ -10,6 +10,7 @@ members = [
     "crates/pa-daemon",
     "crates/pa-tui",
     "crates/pa-cli",
+    "crates/pa-perf",
 ]
 
 # Crossterm 0.28.1's kitty support check holds the process-wide event reader
@@ -19,7 +20,7 @@ members = [
 crossterm = { path = "vendor/crossterm" }
 
 [workspace.package]
-version = "0.10.0"
+version = "0.10.1"
 edition = "2021"
 license = "MIT"
 

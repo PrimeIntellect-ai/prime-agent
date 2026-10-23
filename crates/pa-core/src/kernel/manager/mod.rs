@@ -83,15 +83,9 @@ struct ExitInfo {
 
 /// Fields of a settled execution shared with the stdout reader task.
 #[derive(Default)]
-// The mirrored TS API shape is deliberate (the booleans are the product's own surface).
-#[allow(clippy::struct_excessive_bools)]
 struct ExecBuffers {
-    stdout: String,
-    stderr: String,
-    stdout_chars: usize,
-    stderr_chars: usize,
-    stdout_truncated: bool,
-    stderr_truncated: bool,
+    stdout: HeadTailBuffer,
+    stderr: HeadTailBuffer,
     result: Option<String>,
     diffs: Vec<KernelDiffDisplay>,
     attachments: Vec<KernelAttachment>,
@@ -109,7 +103,6 @@ struct ExecBuffers {
 
 pub(crate) struct ActiveExecution {
     request_id: String,
-    code: String,
     started: Instant,
     max_chars: usize,
     opts: ExecuteOptions,
@@ -120,6 +113,9 @@ pub(crate) struct ActiveExecution {
     restores_namespace: bool,
     buffers: Mutex<ExecBuffers>,
     result_tx: Mutex<Option<oneshot::Sender<anyhow::Result<InternalExecuteResult>>>>,
+    /// When the request frame went on the wire: the cell's own wall-clock start,
+    /// excluding queue wait and kernel boot. `None` until the write begins.
+    cell_started: Mutex<Option<Instant>>,
 }
 
 /// `ExecuteResult` plus the raw fields of the request's `done` event (state ops).
@@ -323,9 +319,6 @@ struct Guarded {
     mcp_status_waiters: HashMap<String, oneshot::Sender<Value>>,
     host_inflight: Vec<tokio::task::JoinHandle<()>>,
     active_execution: Option<Arc<ActiveExecution>>,
-    /// Source of the most recently started cell, retained after it finishes so
-    /// rlm.run spawns from detached asyncio tasks can still attribute their spawning program.
-    last_cell_code: Option<String>,
     ready_tx: Option<oneshot::Sender<anyhow::Result<i64>>>,
 }
 
@@ -419,7 +412,7 @@ mod snapshot;
 mod startup;
 mod teardown;
 
-use requests::{append_truncated, describe_failure, Signal};
+use requests::{append_truncated, describe_failure, HeadTailBuffer, Signal};
 
 // Public API
 
@@ -462,7 +455,6 @@ impl ReplKernelManager {
                 mcp_status_waiters: HashMap::new(),
                 host_inflight: Vec::new(),
                 active_execution: None,
-                last_cell_code: None,
                 ready_tx: None,
             }),
             child: Mutex::new(None),
@@ -611,6 +603,9 @@ impl ReplKernelManager {
         let result = self
             .enqueue_execute(code, opts, execution_timeout_ms)
             .await?;
+        // A watchdog-noted cell stayed ok in the kernel and committed its
+        // namespace changes: the auto-snapshot applies exactly as for any ok
+        // cell, or a crash would revive a namespace missing the cell.
         if result.result.status == ExecuteStatus::Ok {
             self.schedule_snapshot();
         }
@@ -628,7 +623,6 @@ impl ReplKernelManager {
             Request::Execute {
                 code: code.to_string(),
             },
-            code,
             opts,
             execution_timeout_ms,
         )
@@ -817,10 +811,7 @@ impl ReplKernelManager {
             signal,
             ..ExecuteOptions::default()
         };
-        match self
-            .enqueue_request(Request::ListNames, "", opts, None)
-            .await
-        {
+        match self.enqueue_request(Request::ListNames, opts, None).await {
             Ok(r) if r.result.status == ExecuteStatus::Ok => {
                 let names = r
                     .done_fields

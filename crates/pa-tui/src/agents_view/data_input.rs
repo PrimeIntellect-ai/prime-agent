@@ -5,13 +5,18 @@ use super::{
     build_rows, compute_rollups, filter_empty_sessions, filter_unified_sessions,
     parse_search_query, reconcile_unified_sessions, resolve_selection, scope_ancestors, scope_root,
     scope_to_subtree, AgentsViewMode, AgentsViewRow, AgentsViewScope, Composer, OpenedRow, PathBuf,
-    PressedMouseClick, RowKind, ScopeRoot, SelectionEdge, SelectionKey, SessionSelection, Value,
-    ANCHOR_LOADING_HINT,
+    PressedMouseClick, RowKind, SavedMore, ScopeRoot, SelectionEdge, SelectionKey,
+    SessionSelection, Value, ANCHOR_LOADING_HINT, SAVED_CATALOG_PAGE_FILES,
 };
 
 impl AgentsViewMode {
     pub(super) fn records(&self) -> Vec<crate::agents_view_state::UnifiedRecord> {
-        reconcile_unified_sessions(&self.roster, &self.saved)
+        let scope_root_session = self
+            .options
+            .scope
+            .as_ref()
+            .and_then(|scope| scope.session_id.as_deref());
+        reconcile_unified_sessions(&self.roster, &self.saved, scope_root_session)
     }
 
     /// Rebuild rows from the current roster, catalog, and query. A scoped run lists the scope
@@ -68,6 +73,7 @@ impl AgentsViewMode {
             &self.expanded_parents,
             &self.program_shown_parents,
             &rollups,
+            &self.session_activity,
             self.options.anchor_session_id.as_deref(),
         );
         // The entry anchor's row may be nested: arm the same ancestor expansion below so this
@@ -94,7 +100,7 @@ impl AgentsViewMode {
             while added {
                 added = false;
                 for row in &rows {
-                    if row.kind == RowKind::SubagentSummary {
+                    if !matches!(row.kind, RowKind::Agent | RowKind::Subagent) {
                         continue;
                     }
                     let session_id = row.summary.get("sessionId").and_then(Value::as_str);
@@ -112,10 +118,15 @@ impl AgentsViewMode {
                         &self.expanded_parents,
                         &self.program_shown_parents,
                         &rollups,
+                        &self.session_activity,
                         self.options.anchor_session_id.as_deref(),
                     );
                 }
             }
+        }
+        // The machine-wide persistent shells head the unscoped, unsearched list.
+        if !scope_active && self.query.trim().is_empty() {
+            rows.splice(0..0, self.persistent_shell_rows(&records));
         }
         // Keep the selection on the same row across rebuilds, falling back to the carried
         // identity/key.
@@ -140,6 +151,12 @@ impl AgentsViewMode {
             }
         }
         self.rows = rows;
+        if let Some(view) = self.shell_view.as_mut() {
+            view.apply_activities(super::persistent_shells::activities(
+                &self.persistent_shells,
+                &self.rows,
+            ));
+        }
         // The armed confirm only rides a row the list still carries under the session key it
         // armed with: a removed, re-created, or re-keyed row retires it.
         if let Some(pending) = &self.pending_delete {
@@ -271,14 +288,26 @@ impl AgentsViewMode {
         self.saved_stream.push(session);
     }
 
-    /// Flush the streamed batch into the catalog: upsert by path first, then durable id, so a
-    /// superseded fetch's late frames never duplicate a row. Returns whether the catalog changed.
+    /// Flush the streamed batch into the catalog. Returns whether the catalog changed.
     pub(super) fn flush_saved_stream(&mut self) -> bool {
         if self.saved_stream.is_empty() {
             return false;
         }
-        for row in std::mem::take(&mut self.saved_stream) {
+        let rows = std::mem::take(&mut self.saved_stream);
+        self.upsert_saved(rows);
+        self.rebuild_rows();
+        self.settle_pending_shell_open();
+        true
+    }
+
+    /// Upsert rows into the catalog by path first, then durable id, so a superseded fetch's late
+    /// frames or a page that repeats a row never duplicate it. Paths deleted this run stay out.
+    pub(super) fn upsert_saved(&mut self, rows: Vec<Value>) {
+        for row in rows {
             let path = row.get("path").and_then(Value::as_str);
+            if path.is_some_and(|path| self.deleted_saved_paths.contains(path)) {
+                continue;
+            }
             let durable_id = row.get("id").and_then(Value::as_str);
             let existing = self.saved.iter().position(|saved| {
                 path.is_some_and(|path| saved.get("path").and_then(Value::as_str) == Some(path))
@@ -290,8 +319,46 @@ impl AgentsViewMode {
                 None => self.saved.push(row),
             }
         }
-        self.rebuild_rows();
-        true
+    }
+
+    /// The next fetch of the unfolded store, as its cursor and file limit: a search wants the
+    /// whole rest, a selection within a page step of the list's end wants the next page. A
+    /// failed fetch waits for the query-change retry.
+    pub(super) fn next_saved_fetch(&self) -> Option<(String, Option<u64>)> {
+        let more = self
+            .saved_more
+            .as_ref()
+            .filter(|_| !self.saved_fetch_failed)?;
+        if !self.query.trim().is_empty() || self.pending_shell_open.is_some() {
+            return Some((more.cursor.clone(), None));
+        }
+        if self.anchor_selection_pending {
+            return Some((more.cursor.clone(), Some(SAVED_CATALOG_PAGE_FILES)));
+        }
+        if !self.saved_page_requested {
+            return None;
+        }
+        let last = self
+            .rows
+            .iter()
+            .rposition(AgentsViewRow::selectable)
+            .unwrap_or(0);
+        (self.selected + self.page_step() >= last)
+            .then(|| (more.cursor.clone(), Some(SAVED_CATALOG_PAGE_FILES)))
+    }
+
+    pub(super) fn settle_carried_anchor(&mut self) {
+        if self.saved_more.is_none() {
+            self.end_anchor_wait();
+        }
+    }
+
+    pub(super) fn finish_saved_page(&mut self, more: Option<SavedMore>) {
+        self.saved_more = more;
+        if self.saved_more.is_none() {
+            self.end_anchor_wait();
+        }
+        self.settle_pending_shell_open();
     }
 
     /// Drop the unflushed stream batch: the terminal response replaces the catalog wholesale, and
@@ -300,10 +367,11 @@ impl AgentsViewMode {
         self.saved_stream.clear();
     }
 
-    /// The saved-catalog fetch settled on a terminal failure: the entry anchor's wait ends with
-    /// it (the anchor's row can only arrive through this fetch).
+    /// The saved-catalog fetch settled on a terminal failure: the entry anchor's wait and a
+    /// pending shell open end with it (their rows can only arrive through this fetch).
     pub(super) fn settle_anchor_wait_on_saved_failure(&mut self) {
         self.end_anchor_wait();
+        self.pending_shell_open = None;
     }
 
     /// One search edit (TS `queryChanged`). The rebuilt list selects its
@@ -360,13 +428,15 @@ impl AgentsViewMode {
         self.saved_catalog_loaded = true;
     }
 
-    /// Whether the loop must re-arm the saved-catalog fetch (one retry per terminal failure).
+    /// Whether the loop must re-fetch the first saved-catalog page (one retry per terminal
+    /// failure). A failed continuation's retry resumes its cursor through `next_saved_fetch`
+    /// instead, so the pages already loaded stay.
     pub(super) fn take_saved_fetch_rearm(&mut self) -> bool {
         let rearm = std::mem::take(&mut self.saved_query_rearm);
         if rearm {
             self.saved_fetch_failed = false;
         }
-        rearm
+        rearm && self.saved_more.is_none()
     }
 
     /// The loading hint belongs to the wait alone: ending the wait by either arm drops it, so the
@@ -390,6 +460,10 @@ impl AgentsViewMode {
         // A sticky line clears on any keypress (the transient lines ride their own
         // expiry).
         self.clear_sticky_status();
+        if self.shell_view.is_some() {
+            self.handle_shell_view_key(key);
+            return;
+        }
         let was_armed = self.exit_armed;
         // The notice panel: any key closes it (the refusal's ways out stay copy-pasteable while
         // it is up), except the exit key, which falls through so the double-press exit convention
@@ -497,6 +571,7 @@ impl AgentsViewMode {
                 has_children: false,
                 status_message: None,
                 cwd,
+                panel: None,
             });
             self.running = false;
             return;
@@ -531,6 +606,7 @@ impl AgentsViewMode {
             return;
         }
         if self.keybindings.matches(key, "tui.select.down") {
+            self.saved_page_requested = true;
             self.move_selection(1);
             return;
         }
@@ -539,6 +615,7 @@ impl AgentsViewMode {
             return;
         }
         if self.keybindings.matches(key, "tui.select.pageDown") {
+            self.saved_page_requested = true;
             self.move_selection(self.page_step() as isize);
             return;
         }
@@ -550,6 +627,7 @@ impl AgentsViewMode {
             return;
         }
         if self.keybindings.matches(key, "tui.select.bottom") {
+            self.saved_page_requested = true;
             self.move_selection_to(SelectionEdge::Last);
             return;
         }
@@ -665,6 +743,19 @@ impl AgentsViewMode {
     /// selection-centered, not scroll-driven).
     pub(super) fn handle_mouse(&mut self, event: &crate::mouse::MouseEvent) {
         if !crate::mouse_tracking::active() {
+            return;
+        }
+        if let Some(view) = self.shell_view.as_mut() {
+            // Mouse movement is semantic: remapped keyboard arrows must not
+            // change it, and clicks must not reach hidden session rows.
+            if let Some(delta) = crate::mouse::wheel_scroll_delta(event) {
+                for _ in 0..delta.unsigned_abs() {
+                    match view.scroll_output(delta.signum()) {
+                        crate::bash_view::BashViewAction::None => {}
+                        action => self.pending_shell_action = Some(action),
+                    }
+                }
+            }
             return;
         }
         // A buttonless motion report is the hover (operator directive 2026-09-29, `?1003` any-event

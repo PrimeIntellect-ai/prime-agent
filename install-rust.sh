@@ -1606,6 +1606,12 @@ ts_stop_rust_stopped=""
 windows_stop_summary=""
 ts_socket="${TMPDIR:-/tmp}/prime-agent-$(id -u)/daemon.sock"
 rust_socket="${TMPDIR:-/tmp}/prime-agent-rust-$(id -u)/daemon.sock"
+# The launcher pins /tmp when the TMPDIR path exceeds the non-Linux
+# 103-byte sun_path limit (pa-daemon socket_dir() owns the rule); the
+# stop probe must look where the launcher actually pinned.
+if [ "$OS" != "Linux" ] && [ "$(printf '%s' "$rust_socket" | wc -c)" -gt 103 ]; then
+  rust_socket="/tmp/prime-agent-rust-$(id -u)/daemon.sock"
+fi
 env_socket="${PRIME_AGENT_DAEMON_SOCKET:-}"
 # THE TILDE EXPANSION (the CLI's own spelling: the products' clients
 # expand a leading ~/ in PRIME_AGENT_DAEMON_SOCKET before connecting, so
@@ -2531,6 +2537,7 @@ if [ "$WINDOWS" = "yes" ] \
   fi
 fi
 launcher_tmp=""
+npm_launcher_backup=""
 cmd_tmp=""
 preserved_cmd_file=""
 windows_installed=""
@@ -2561,6 +2568,12 @@ on_exit() {
   # to publish into share_dir while this one still restores state — the
   # restore would delete that fresh payload (cross-installer data loss).
   publish_window_restore
+  # npm may have unlinked the public command before an interrupted uninstall.
+  # Restore the saved native launcher before releasing the publication lock.
+  if [ -n "${npm_launcher_backup:-}" ]; then
+    mv -f "$npm_launcher_backup" "$launcher" 2>/dev/null \
+      || echo "warning: restore the native launcher from ${npm_launcher_backup} to ${launcher}" >&2
+  fi
   [ -n "$launcher_tmp" ] && rm -f "$launcher_tmp" 2>/dev/null || true
   [ -n "${cmd_tmp:-}" ] && rm -f "$cmd_tmp" 2>/dev/null || true
   # The extraction stage is disposable on every failed path: a successful
@@ -2840,7 +2853,15 @@ export PRIME_AGENT_CODING_AGENT_DIR="${PRIME_AGENT_CODING_AGENT_DIR:-$HOME/.prim
 if [ -f "$(dirname "$0")/../share/.prime-agent-npm-bridge/legacy-daemon-socket" ]; then
   export PRIME_AGENT_DAEMON_SOCKET="${PRIME_AGENT_DAEMON_SOCKET:-${TMPDIR:-${TMP:-${TEMP:-/tmp}}}/prime-agent-$(id -u)/daemon.sock}"
 else
-  export PRIME_AGENT_DAEMON_SOCKET="${PRIME_AGENT_DAEMON_SOCKET:-${TMPDIR:-/tmp}/prime-agent-rust-$(id -u)/daemon.sock}"
+  if [ -z "${PRIME_AGENT_DAEMON_SOCKET:-}" ]; then
+    # Same rule as pa-daemon socket_dir(): non-Linux sun_path caps a unix
+    # socket at 103 bytes, so a too-deep TMPDIR pins /tmp/prime-agent-rust-<uid>.
+    PRIME_AGENT_DAEMON_SOCKET="${TMPDIR:-/tmp}/prime-agent-rust-$(id -u)/daemon.sock"
+    if [ "$(printf '%s' "$PRIME_AGENT_DAEMON_SOCKET" | wc -c)" -gt 103 ] && [ "$(uname -s)" != "Linux" ]; then
+      PRIME_AGENT_DAEMON_SOCKET="/tmp/prime-agent-rust-$(id -u)/daemon.sock"
+    fi
+    export PRIME_AGENT_DAEMON_SOCKET
+  fi
 fi
 exec "$(dirname "$0")/../share/prime-agent/prime-agent" "$@"
 EOF
@@ -3003,6 +3024,13 @@ try:
 except Exception:
     print("")' "${npm_root}/prime-agent/package.json")"
     if [ -n "$ts_version" ]; then
+      # npm unlinks its old bin entry even when our regular launcher has
+      # replaced that symlink. Keep a sibling copy and publish it again after
+      # uninstall (including a partial failure), without guessing npm's prefix.
+      launcher_tmp="$(mktemp "${bin_dir}/.prime-agent.XXXXXX")"
+      cp -p "$launcher" "$launcher_tmp"
+      npm_launcher_backup="$launcher_tmp"
+      launcher_tmp=""
       step_start "Removing the TypeScript npm package"
       if npm uninstall -g prime-agent >/dev/null 2>&1; then
         step_ok "Removed the TypeScript npm package" "restore: npm install -g prime-agent@${ts_version}"
@@ -3011,6 +3039,8 @@ except Exception:
         note "! The TypeScript npm command can shadow ${launcher} on PATH. Remove it:"
         todo "npm uninstall -g prime-agent"
       fi
+      mv -f "$npm_launcher_backup" "$launcher"
+      npm_launcher_backup=""
     fi
   fi
 fi
@@ -3112,15 +3142,15 @@ else
 fi
 
 # --- verify: the launcher must answer --version -----------------------------------
-# Tried once. The common failure on a fresh install is the first-run kernel
-# venv bootstrap (the sidecar provisions itself on first launch), so the
-# failure prints the output plus a re-run hint instead of failing the
-# install over it.
-version_ok="yes"
+# Tried once. The probe prints the compiled-in version and does not run the
+# first-run kernel venv bootstrap (the pre-warm above stays best-effort; the
+# first session retries it), so a failure here is a broken payload and must
+# fail installation: a published payload alone does not certify a working
+# command.
 if version_out="$("$install_probe_launcher" --version 2>&1)"; then
   say "installed: ${version_out}"
 else
-  version_ok="no"
+  die "The installed prime-agent --version check failed: ${version_out}"
 fi
 
 # --- the summary ---------------------------------------------------------------------
@@ -3170,15 +3200,7 @@ if [ "$ts_stop_rust_stopped" = "yes" ] && [ "$rust_leftover" != "yes" ]; then
 fi
 
 printf '\n' >&2
-if [ "$version_ok" = yes ]; then
-  printf ' %sDone.%s Run %sprime-agent%s to start.\n' "$C_BOLD" "$C_RESET" "$C_BOLD" "$C_RESET" >&2
-else
-  note "! Installed, but the first prime-agent --version run failed (it sets up"
-  note "  the kernel on first launch). Its output:"
-  printf '%s\n' "$version_out" >&2
-  note "  Run it again:"
-  todo "${launcher} --version"
-fi
+printf ' %sDone.%s Run %sprime-agent%s to start.\n' "$C_BOLD" "$C_RESET" "$C_BOLD" "$C_RESET" >&2
 dim "installed to $(tilde "$share_dir") · launcher $(tilde "$launcher")"
 if [ -n "$ts_takeover_from" ]; then
   dim "moved the TypeScript install to $(tilde "$ts_takeover_from") · undo:"

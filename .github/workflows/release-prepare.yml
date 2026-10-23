@@ -140,9 +140,10 @@ jobs:
           print(f"Cargo.toml: {old_row} -> {new_row}")
           PY
           # --workspace refreshes ONLY the workspace-member version rows in
-          # Cargo.lock (never registry deps); --offline proves the registry
-          # is never touched for a member-row refresh.
-          cargo update --workspace --offline
+          # Cargo.lock (never registry deps). Not --offline: resolution reads
+          # the crates.io index even for a member-row refresh, and the bare
+          # runner has no index cache (the 0.11.0 prepare run failed on it).
+          cargo update --workspace
           git diff --stat
       - name: Fold the .changes/ fragments into the root CHANGELOG.md
         env:

@@ -838,17 +838,25 @@ impl Worker {
             .clone()
             .unwrap_or_else(|| capabilities.clone());
         let windowed = crate::snapshot_stream::wants_windowed(&client_capabilities);
-        let (mut messages, omitted, last_user_prompt_ms) = match core.store.as_ref() {
-            Some(store) if windowed => {
-                let windowed = store.windowed_messages(ATTACH_TAIL_MESSAGE_BUDGET);
-                (
-                    windowed.messages,
-                    windowed.omitted,
-                    windowed.last_user_prompt_ms,
-                )
-            }
-            Some(store) => (store.messages(), 0, None),
-            None => (Vec::new(), 0, None),
+        let (mut messages, history_before_entry_id, last_user_prompt_ms) = match core.store.as_ref()
+        {
+            Some(store) if windowed => store
+                .transcript_page(&pa_types::daemon::TranscriptPage::End {
+                    before: None,
+                    limit: ATTACH_TAIL_MESSAGE_BUDGET,
+                })
+                .map_or((Vec::new(), None, None), |page| {
+                    // The resume marker only rides a snapshot with older history.
+                    let last_user_prompt_ms =
+                        page.more.then(|| store.last_user_prompt_ms()).flatten();
+                    (
+                        page.messages,
+                        page.first_entry_id.filter(|_| page.more),
+                        last_user_prompt_ms,
+                    )
+                }),
+            Some(store) => (store.messages(), None, None),
+            None => (Vec::new(), None, None),
         };
         // The image-payload elision: `elide_snapshot_images` clients read the
         // transcript without base64 payloads; the client's set is
@@ -880,8 +888,8 @@ impl Worker {
             "children": [],
         });
         snapshot["messages"] = Value::Array(messages);
-        if omitted > 0 {
-            snapshot["historyBefore"] = json!(omitted);
+        if let Some(entry_id) = history_before_entry_id {
+            snapshot["historyBeforeEntryId"] = json!(entry_id);
             if let Some(last_user_prompt_ms) = last_user_prompt_ms {
                 snapshot["lastUserPromptMs"] = json!(last_user_prompt_ms);
             }

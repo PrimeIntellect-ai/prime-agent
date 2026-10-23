@@ -163,16 +163,7 @@ impl Inner {
             return Err(anyhow!("Kernel was disposed during startup"));
         }
 
-        // bash.py journals its process groups under this pid so the host can
-        // reap them if the runtime dies without running its shutdown hook.
-        let mut env: HashMap<String, String> = std::env::vars().collect();
-        for (key, value) in &self.options.env {
-            env.insert(key.clone(), value.clone());
-        }
-        env.insert(
-            "PRIME_AGENT_KERNEL_OWNER_PID".to_string(),
-            std::process::id().to_string(),
-        );
+        let env = kernel_spawn_env(&self.options.env);
         let cwd = self.options.cwd.clone();
         let mut command = tokio::process::Command::new(&python);
         command
@@ -533,6 +524,26 @@ impl Inner {
     }
 }
 
+/// The kernel child's env (TS repl-manager.ts:374-385): the worker env plus
+/// the provisioner's env, with UTF-8 mode forced on Windows (`CPython` must
+/// read UTF-8 regardless of the active legacy code page, overriding any
+/// provisioner-provided `PYTHONUTF8`) and the owner pid the runtime journals
+/// its process groups under.
+fn kernel_spawn_env(options_env: &HashMap<String, String>) -> HashMap<String, String> {
+    let mut env: HashMap<String, String> = std::env::vars().collect();
+    for (key, value) in options_env {
+        env.insert(key.clone(), value.clone());
+    }
+    if cfg!(windows) {
+        env.insert("PYTHONUTF8".to_string(), "1".to_string());
+    }
+    env.insert(
+        "PRIME_AGENT_KERNEL_OWNER_PID".to_string(),
+        std::process::id().to_string(),
+    );
+    env
+}
+
 #[cfg(unix)]
 fn unix_signal_of(status: std::process::ExitStatus) -> Option<i32> {
     crate::platform::process::termination_signal(&status)
@@ -553,6 +564,19 @@ mod tests {
             std::env::temp_dir().join(format!("pa-stderr-perms-{}-{tag}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         dir
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn kernel_spawn_env_forces_utf8_mode() {
+        let mut options_env = HashMap::new();
+        options_env.insert("PYTHONUTF8".to_string(), "0".to_string());
+        let env = kernel_spawn_env(&options_env);
+        assert_eq!(env.get("PYTHONUTF8").map(String::as_str), Some("1"));
+        assert_eq!(
+            env.get("PRIME_AGENT_KERNEL_OWNER_PID").map(String::as_str),
+            Some(std::process::id().to_string().as_str())
+        );
     }
 
     #[test]

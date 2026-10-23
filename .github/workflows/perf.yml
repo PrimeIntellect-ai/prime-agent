@@ -1,0 +1,185 @@
+# The performance-test lane: a nightly + opt-in-per-PR benchmark of the
+# interactive surfaces (cold/warm start, agents view, open/switch session,
+# @ completion) over deterministic fake stores, driven through the REAL
+# release binary under a pty by `crates/pa-perf`.
+#
+# Triggers:
+#   schedule      — nightly on main (the label path is how a branch proves
+#                   itself; workflow_dispatch/schedule only fire once this
+#                   file is on main).
+#   workflow_dispatch — manual.
+#   pull_request [labeled, synchronize] — gated on the `perf-test` label:
+#                   the label IS the opt-in (deliberately including draft
+#                   PRs — labeling a draft is how this lane proves itself
+#                   before review), and a synchronize re-runs only while the
+#                   label stays on. Never runs for unlabeled PRs: a 4-way
+#                   release-build matrix on every PR would bill the org
+#                   runners hard.
+#
+# Job graph:
+#   build  — release prime-agent + pa-perf once, uploaded as one artifact
+#            (every bench leg downloads the same bytes).
+#   bench  — one matrix leg per corpus profile: generate the corpus
+#            (cold + warm), bootstrap the kernel venv (the same prep
+#            ci.yml's kernel e2e shards use), run every scenario 10x,
+#            upload the result JSONs.
+#   report — aggregate every result against crates/pa-perf/baseline.json:
+#            the $GITHUB_STEP_SUMMARY table (scenario, profile, median,
+#            p95, baseline, delta) always prints deltas and fails ONLY on a
+#            >2x median regression; scenarios marked report-only in the
+#            baseline (spread >20% across 3 CI runs) never fail the gate.
+#
+# Cache policy: Swatinem's cache with a dedicated shared-key, saved ONLY on
+# main-anchored runs (schedule, or a dispatch on main). PR legs restore and
+# never save — PR-ref cache entries are the eviction pressure on the
+# release-build caches, and the repo sits at the 10 GB Actions-cache quota.
+name: perf
+
+on:
+  schedule:
+    - cron: "30 3 * * *"
+  workflow_dispatch:
+  pull_request:
+    types: [labeled, synchronize]
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: perf-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  build:
+    name: build release binaries
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    if: >-
+      github.event_name == 'schedule' ||
+      github.event_name == 'workflow_dispatch' ||
+      contains(github.event.pull_request.labels.*.name, 'perf-test')
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@ce678459e9fc7500d337468f904b95f1b5c10b5e # 1.98.1 action pin; the SHA selects the toolchain
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          # One entry per main-anchored run: PR legs restore, never save
+          # (the save-if gate below), so this lane cannot evict the
+          # release-build caches.
+          shared-key: perf-build
+          cache-on-failure: true
+          save-if: ${{ github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') }}
+      - name: Build (release, locked)
+        run: cargo build --release --locked -p pa-cli --bin prime-agent -p pa-perf --bin pa-perf
+      - name: Upload the binaries
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: perf-bins
+          path: |
+            target/release/prime-agent
+            target/release/pa-perf
+          if-no-files-found: error
+
+  bench:
+    name: bench (${{ matrix.profile }})
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        profile: [small, medium, large, xl]
+    steps:
+      # The checkout provides the packaged kernel runtime (prime-agent-runtime/)
+      # the release binary resolves through PI_PACKAGE_DIR, plus skills/.
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: perf-bins
+          path: bins
+      - name: Stage the binaries
+        run: |
+          set -euo pipefail
+          install -Dm755 bins/prime-agent "$HOME/.local/bin/prime-agent"
+          install -Dm755 bins/pa-perf "$HOME/.local/bin/pa-perf"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+      - name: Install uv (the kernel venv bootstrap below uses it)
+        run: |
+          curl -LsSf https://astral.sh/uv/install.sh | sh
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+      # The same prep ci.yml's kernel-e2e shards run: the venv must be ready
+      # before the first session prewarm, or the first bench run pays the
+      # bootstrap inside its (discarded) warm-up.
+      - name: Bootstrap the kernel venv
+        env:
+          PI_PACKAGE_DIR: ${{ github.workspace }}
+        run: prime-agent --prime-agent-bootstrap
+      # One driver call: pa-perf run generates the cold and warm corpora,
+      # routes every scenario to the corpus state it needs, and writes one
+      # result JSON per scenario into <out>/results/.
+      - name: Run the scenarios
+        env:
+          PI_PACKAGE_DIR: ${{ github.workspace }}
+        run: |
+          set -euo pipefail
+          pa-perf run \
+            --binary "$HOME/.local/bin/prime-agent" \
+            --profile ${{ matrix.profile }} \
+            --out "$RUNNER_TEMP/perf" \
+            --runs 10
+      - name: Upload the results
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: perf-results-${{ matrix.profile }}
+          path: ${{ runner.temp }}/perf/results/*.json
+          if-no-files-found: error
+      # The raw pty streams of the launches that did not complete: the CI
+      # counterpart of the empty-tail failures (nothing debuggable in a
+      # timeout message alone).
+      - name: Upload the failure pty dumps
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: perf-failure-streams-${{ matrix.profile }}
+          path: |
+            ${{ runner.temp }}/perf/corpus-cold/failed-streams/*
+            ${{ runner.temp }}/perf/corpus-warm/failed-streams/*
+          if-no-files-found: ignore
+
+  report:
+    name: report + regression gate
+    needs: bench
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: perf-bins
+          path: bins
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: perf-results-*
+          merge-multiple: true
+          path: results
+      - name: Compare against the baseline
+        run: |
+          set -euo pipefail
+          install -Dm755 bins/pa-perf "$HOME/.local/bin/pa-perf"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          pa-perf report \
+            --baseline crates/pa-perf/baseline.json \
+            --markdown "$GITHUB_STEP_SUMMARY" \
+            --results results/*.json

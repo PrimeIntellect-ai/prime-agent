@@ -32,6 +32,11 @@ pub(crate) struct SessionCore {
     /// The turn's tool calls in flight, keyed by tool-call id: the
     /// roster summary derives `isRunningTools` from its size.
     pub(crate) running_tool_calls: std::collections::HashSet<String>,
+    /// The session's tool executions so far (the summary's `toolUseCount`):
+    /// bumped per `tool_execution_start` under the same core lock the frames
+    /// sequence under, and seeded from the session file when a worker opens
+    /// it, so a revived session never resets the count.
+    pub(crate) tool_use_count: u64,
     /// Admission ids belonging to the current in-flight turn. The queue
     /// handoff and owned cancellation both inspect this under the core lock.
     pub(crate) running_admission_ids: std::collections::HashSet<String>,
@@ -124,6 +129,7 @@ impl SessionCore {
             compacting: false,
             running_tool_calls: std::collections::HashSet::new(),
             running_admission_ids: std::collections::HashSet::new(),
+            tool_use_count: 0,
             auto_compaction_enabled: true,
             last_action_snapshot: Some(SessionActionSnapshot::default()),
             rlm_depth: 0,

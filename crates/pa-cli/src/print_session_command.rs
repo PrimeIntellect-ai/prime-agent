@@ -87,6 +87,7 @@ pub(crate) async fn execute_prompt_session_command(
     global_harness_dir: std::path::PathBuf,
     autonomous: &Arc<tokio::sync::Mutex<AutonomousRuntimeState>>,
     command: &SessionSlashCommand,
+    images: &[pa_agent::types::ImageContent],
 ) -> SessionCommandExecution {
     // The `preparing`/`running` phase frames bookend the durable echo row, and
     // `/compact`'s `compaction_start` goes out before the summarizer runs.
@@ -113,7 +114,7 @@ pub(crate) async fn execute_prompt_session_command(
             global_harness_dir,
             autonomous: &mut autonomous,
         };
-        execute_session_command(engine, &mut params, command).await
+        execute_session_command(engine, &mut params, command, images).await
     };
     // `/compact`: the settled `compaction_end` precedes any failure result row; a skip stays silent
     // beyond the event.
@@ -352,6 +353,7 @@ mod tests {
                     model_info: Some(model.clone()),
                     prewarm_ipython_kernel: None,
                     on_background_work_settled: None,
+                    bash_notice_wake: None,
                     queued_goal_context_purge: None,
                     queued_steering_probe: None,
                     should_stop_after_turn: None,
@@ -406,6 +408,7 @@ mod tests {
             bed.harness_dir.clone(),
             &bed.autonomous,
             &command(text),
+            &[],
         )
         .await;
         if execution.error.is_some() {

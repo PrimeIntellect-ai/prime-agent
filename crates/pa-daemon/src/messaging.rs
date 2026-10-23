@@ -17,7 +17,7 @@ use crate::supervisor::Supervisor;
 
 /// Worker round-trip budget for the sender-summary read and the delivery
 /// route (TS `WORKER_REQUEST_TIMEOUT_MS`).
-const WORKER_REQUEST_TIMEOUT_MS: u64 = 30_000;
+pub(crate) const WORKER_REQUEST_TIMEOUT_MS: u64 = 30_000;
 
 impl Supervisor {
     /// `send_message`: route to the target worker as `worker_deliver_message`;
@@ -216,24 +216,31 @@ impl Supervisor {
                 Err(error) => return WakeOutcome::Failed(error.to_string()),
             },
         };
-        let archive_dir = crate::session_archive::archive_dir(&self.options.agent_dir);
-        let info = match crate::session_catalog::resolve_saved_session(
-            &sessions_dir,
-            &archive_dir,
-            selector,
-            &cwd,
-        ) {
-            Ok(Some(info)) => info,
+        // The catalog scans and an archive restore's copy are blocking file I/O.
+        let archive_dir = self.options.agent_dir.join("sessions-archive");
+        let catalog_selector = selector.to_string();
+        let resolved = tokio::task::spawn_blocking(move || {
+            crate::session_catalog::resolve_saved_session(
+                &sessions_dir,
+                &archive_dir,
+                &catalog_selector,
+                &cwd,
+            )
+        })
+        .await;
+        let info = match resolved {
+            Ok(Ok(Some(info))) => info,
             // The saved-session catalog misses RLM children (they persist in
             // the parent's session-artifacts tree); the spawn ledger still
             // tracks them, so a child selector falls back to its live edges.
-            Ok(None) => {
+            Ok(Ok(None)) => {
                 return match self.wake_ledger_child(selector).await {
                     Some(outcome) => outcome,
                     None => WakeOutcome::Unknown,
                 }
             }
-            Err(error) => return WakeOutcome::Failed(error.to_string()),
+            Ok(Err(error)) => return WakeOutcome::Failed(error.to_string()),
+            Err(error) => return WakeOutcome::Failed(format!("the saved-session lookup: {error}")),
         };
         let session_path = info.path.to_string_lossy().to_string();
         // Reuse before spawning (TS `createOrReuseWorker`): a resident

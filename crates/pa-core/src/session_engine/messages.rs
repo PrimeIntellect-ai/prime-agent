@@ -9,7 +9,7 @@ use pa_types::ai::{
 use pa_types::session::AgentMessage;
 use std::fmt::Write as _;
 
-pub const COMPACTION_SUMMARY_PREFIX: &str = "[compaction-summary]\n\nThe conversation history before this point was compacted into the following summary.\nThe retained messages below are authoritative; this summary may lag behind them.\n\n<summary>\n";
+pub const COMPACTION_SUMMARY_PREFIX: &str = "[compaction-summary]\n\nThe conversation history before this point was compacted into the following summary.\nThe retained messages below are authoritative; this summary may lag behind them.\nBackground work may have progressed during compaction; treat resource statuses as last-observed and refresh them before relying on them.\n\n<summary>\n";
 pub const COMPACTION_SUMMARY_SUFFIX: &str = "\n</summary>";
 pub const BRANCH_SUMMARY_PREFIX: &str = "[branch-summary]\n\nThe following is a summary of a branch that this conversation came back from:\n\n<summary>\n";
 pub const BRANCH_SUMMARY_SUFFIX: &str = "\n</summary>";
@@ -26,6 +26,10 @@ pub const REFINEMENT_NOTICE_CUSTOM_TYPE: &str = "refinement_notice";
 /// DIVERGENCE, operator ruling 2026-09-23): a user-facing disclosure, never
 /// model context — `convert_to_llm` drops it.
 pub const PROVIDER_RETRY_OUTCOME_CUSTOM_TYPE: &str = "provider_retry_outcome";
+/// TS `MCP_CONNECTION_OUTCOME_CUSTOM_TYPE`: the durable row an MCP
+/// connect/disconnect leaves in the transcript (produced by the TS-era
+/// daemon; the row is bookkeeping, never model context).
+pub const MCP_CONNECTION_OUTCOME_CUSTOM_TYPE: &str = "mcp_connection_outcome";
 pub const HEARTBEAT_PROMPT_CUSTOM_TYPE: &str = "heartbeat_prompt";
 /// The durable row a detached kernel bash completion admits as the
 /// woken turn's injected prompt.
@@ -38,6 +42,11 @@ pub const SESSION_RENAMED_CUSTOM_TYPE: &str = "session_renamed";
 /// notice's queued row carries (the TUI renders it with its own label,
 /// no lane prefix).
 pub const ASYNC_BASH_COMPLETION_PREVIEW_LABEL: &str = "Background command finished";
+/// The durable row a factory run milestone (`factory.progress`) admits on
+/// the owning session's steering lane.
+pub const FACTORY_PROGRESS_NOTICE_CUSTOM_TYPE: &str = "factory_progress_notice";
+/// The queue-strip label the factory progress notice's queued row carries.
+pub const FACTORY_PROGRESS_PREVIEW_LABEL: &str = "Factory progress";
 /// The queue-strip preview label for a parked heartbeat fire; the queued row reads
 /// `Heartbeat prompt: <content>` instead of the lane-labeled preview.
 pub const HEARTBEAT_PROMPT_PREVIEW_LABEL: &str = "Heartbeat prompt";
@@ -228,6 +237,35 @@ pub fn create_async_bash_completion_message(
     }
 }
 
+/// The factory run milestone notice: `[factory-progress run:<id>] <kind>: <detail>`,
+/// the kernel's `snake_case` kind rendered with hyphens (`budget_exceeded` reads
+/// `budget-exceeded`). The details keep the kernel's raw values.
+#[must_use]
+pub fn create_factory_progress_message(
+    run_id: &str,
+    kind: &str,
+    node: Option<&str>,
+    detail: &str,
+    timestamp: u64,
+) -> pa_types::session::CustomMessage {
+    let header_run = sanitize_message_header_value(run_id);
+    let header_kind = sanitize_message_header_value(&kind.replace('_', "-"));
+    let mut details = serde_json::json!({ "runId": run_id, "kind": kind, "detail": detail });
+    if let Some(node) = node {
+        details["node"] = serde_json::json!(node);
+    }
+    pa_types::session::CustomMessage {
+        custom_type: FACTORY_PROGRESS_NOTICE_CUSTOM_TYPE.to_string(),
+        content: UserContent::Text(format!(
+            "[factory-progress run:{header_run}] {header_kind}: {detail}"
+        )),
+        display: true,
+        details: Some(details),
+        timestamp,
+        rest: serde_json::Map::default(),
+    }
+}
+
 /// Bash output rendered as a fenced block with a fence longer than any
 /// backtick run inside the output.
 fn bash_output_to_text(
@@ -323,6 +361,7 @@ pub fn convert_to_llm(messages: &[AgentMessage]) -> Vec<AgentMessage> {
                     SESSION_SLASH_COMMAND_CUSTOM_TYPE
                         | SESSION_SLASH_COMMAND_RESULT_CUSTOM_TYPE
                         | COMPACTION_OUTCOME_CUSTOM_TYPE
+                        | MCP_CONNECTION_OUTCOME_CUSTOM_TYPE
                         | REFINEMENT_OUTCOME_CUSTOM_TYPE
                         | PROVIDER_RETRY_OUTCOME_CUSTOM_TYPE
                         | crate::prompts::model_prompts::MODEL_PROMPT_ERROR_CUSTOM_TYPE
@@ -474,6 +513,25 @@ mod tests {
             "/x/model-prompts.toml: bad TOML".to_string(),
         ]);
         assert!(convert_to_llm(&[AgentMessage::Custom(message)]).is_empty());
+    }
+
+    /// TS `MCP_CONNECTION_OUTCOME_CUSTOM_TYPE`: the durable MCP
+    /// login/disconnect line is bookkeeping, never model context.
+    #[test]
+    fn mcp_connection_outcome_row_is_never_context() {
+        // The literal is the on-disk value a TS-era session file carries.
+        let message = pa_types::session::CustomMessage {
+            custom_type: "mcp_connection_outcome".to_string(),
+            content: UserContent::Text("Connected acme (12 tools verified).".to_string()),
+            display: true,
+            details: None,
+            timestamp: 0,
+            rest: serde_json::Map::default(),
+        };
+        assert!(
+            convert_to_llm(&[AgentMessage::Custom(message)]).is_empty(),
+            "the MCP connection outcome row must drop out of model context"
+        );
     }
 
     #[test]

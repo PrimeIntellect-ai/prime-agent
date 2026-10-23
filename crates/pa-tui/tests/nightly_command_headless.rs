@@ -185,6 +185,13 @@ struct StubSettings {
 }
 
 impl pa_tui::client_settings::ClientSettings for StubSettings {
+    fn compaction_threshold_percent(&self) -> f64 {
+        95.0
+    }
+    fn set_compaction_threshold_percent(&self, _percent: f64) -> Result<()> {
+        Ok(())
+    }
+
     fn theme(&self) -> Option<String> {
         None
     }

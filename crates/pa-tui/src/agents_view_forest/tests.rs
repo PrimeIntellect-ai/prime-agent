@@ -41,7 +41,16 @@ fn rows_for(
     scope: Option<&AgentsViewScope>,
     expanded: &[&str],
 ) -> Vec<AgentsViewRow> {
-    let records = reconcile_unified_sessions(roster, &[]);
+    rows_with_activity(roster, scope, expanded, &HashMap::new())
+}
+
+fn rows_with_activity(
+    roster: &[serde_json::Value],
+    scope: Option<&AgentsViewScope>,
+    expanded: &[&str],
+    activity: &HashMap<String, SessionActivity>,
+) -> Vec<AgentsViewRow> {
+    let records = reconcile_unified_sessions(roster, &[], None);
     let rollups = compute_rollups(&records);
     let expanded: HashSet<String> = expanded.iter().map(ToString::to_string).collect();
     build_rows(
@@ -50,6 +59,7 @@ fn rows_for(
         &expanded,
         &HashSet::default(),
         &rollups,
+        activity,
         None,
     )
 }
@@ -82,7 +92,7 @@ fn an_opened_child_nests_under_its_parent() {
     );
     assert!(
         rows.iter().any(|row| {
-            row.kind == RowKind::SubagentSummary && row.title == "1 subagents (0 running)"
+            row.kind == RowKind::SubagentSummary && row.title == "1 subagent · 0 running"
         }),
         "the parent's ONE line labels the aggregate: {rows:?}"
     );
@@ -152,7 +162,7 @@ fn session_model_reads_every_wire_shape() {
     );
 }
 
-/// The ONE line under a parent (the operator's 2026-09-28 merge): `1 subagents (1 running)`,
+/// The ONE line under a parent (the operator's 2026-09-28 merge): `1 subagent · 1 running`,
 /// with the `subagents:` identity, expanding to the child at depth 1.
 #[test]
 fn parent_with_child_renders_the_summary_row_and_nested_child() {
@@ -166,13 +176,13 @@ fn parent_with_child_renders_the_summary_row_and_nested_child() {
     assert_eq!(rows[1].kind, RowKind::SubagentSummary);
     assert_eq!(rows[1].identity, "subagents:file:/x/p.jsonl");
     assert_eq!(rows[1].parent_identity.as_deref(), Some("file:/x/p.jsonl"));
-    assert_eq!(rows[1].title, "1 subagents (1 running)");
+    assert_eq!(rows[1].title, "1 subagent · 1 running");
     assert!(!rows[1].expanded);
     assert_eq!(rows[0].descendant_count, 1);
     assert_eq!(rows[0].running_subagent_count, 1);
     let rows = rows_for(&roster, None, &["file:/x/p.jsonl"]);
     assert_eq!(rows.len(), 3);
-    assert_eq!(rows[1].title, "1 subagents (1 running)");
+    assert_eq!(rows[1].title, "1 subagent · 1 running");
     assert!(rows[1].expanded);
     assert_eq!(rows[2].kind, RowKind::Subagent);
     assert_eq!(rows[2].depth, 1);
@@ -194,7 +204,7 @@ fn deeper_descendants_roll_up_and_nest_recursively() {
     assert_eq!(rows[0].running_subagent_count, 1);
     assert_eq!(rows.len(), 2);
     assert_eq!(rows[1].kind, RowKind::SubagentSummary);
-    assert_eq!(rows[1].title, "2 subagents (1 running)");
+    assert_eq!(rows[1].title, "2 subagents · 1 running");
     let rows = rows_for(&roster, None, &["file:/x/p.jsonl"]);
     assert_eq!(
         rows.iter()
@@ -207,7 +217,7 @@ fn deeper_descendants_roll_up_and_nest_recursively() {
             (RowKind::SubagentSummary, 2),
         ]
     );
-    assert_eq!(rows[3].title, "1 subagents (1 running)");
+    assert_eq!(rows[3].title, "1 subagent · 1 running");
     assert_eq!(rows[3].parent_identity, Some(rows[2].identity.clone()));
     // Expanding the child's line reveals the grandchild at depth 2 (the expansion keys off
     // the rendered row's parent-qualified `agent:` alias).
@@ -225,7 +235,7 @@ fn deeper_descendants_roll_up_and_nest_recursively() {
 }
 
 /// The summary row's title is count-only (the operator's 2026-09-26 follow-up): `"{total}
-/// subagents ({running} running)"`, no model mix.
+/// subagents · {running} running"`, no model mix.
 #[test]
 fn summary_rows_stay_count_only() {
     let mut glm_one = child_summary("c1", "p", "worker one");
@@ -247,7 +257,7 @@ fn summary_rows_stay_count_only() {
         .iter()
         .find(|row| row.kind == RowKind::SubagentSummary)
         .expect("summary row");
-    assert_eq!(summary.title, "4 subagents (0 running)");
+    assert_eq!(summary.title, "4 subagents · 0 running");
     assert!(summary.model.is_empty(), "no model rides the summary row");
     let rows = rows_for(&roster, None, &["file:/x/p.jsonl"]);
     let child = rows
@@ -259,7 +269,7 @@ fn summary_rows_stay_count_only() {
         .iter()
         .find(|row| row.kind == RowKind::SubagentSummary && row.depth == 2)
         .expect("nested summary row");
-    assert_eq!(nested.title, "1 subagents (0 running)");
+    assert_eq!(nested.title, "1 subagent · 0 running");
     // A FOUR-level chain folds at every depth: the great-grandchild still reaches the root's
     // count (the tally walk's dynamic bound).
     let mut gc = child_summary("gc", "c", "grandkid");
@@ -279,7 +289,7 @@ fn summary_rows_stay_count_only() {
         .iter()
         .find(|row| row.kind == RowKind::SubagentSummary)
         .expect("summary row");
-    assert_eq!(summary.title, "3 subagents (0 running)");
+    assert_eq!(summary.title, "3 subagents · 0 running");
     assert_eq!(rows[0].descendant_count, 3);
 }
 
@@ -293,13 +303,13 @@ fn idle_descendants_aggregate_into_the_summary_row() {
         roster_entry("gc", "idle", &grandchild),
     ];
     let rows = rows_for(&roster, None, &[]);
-    assert_eq!(rows[1].title, "2 subagents (0 running)");
+    assert_eq!(rows[1].title, "2 subagents · 0 running");
     let rows = rows_for(&roster, None, &["file:/x/p.jsonl"]);
     let child_summary_row = rows
         .iter()
         .find(|row| row.kind == RowKind::SubagentSummary && row.depth == 2)
         .expect("child summary row");
-    assert_eq!(child_summary_row.title, "1 subagents (0 running)");
+    assert_eq!(child_summary_row.title, "1 subagent · 0 running");
 }
 
 #[test]
@@ -313,11 +323,11 @@ fn running_descendants_aggregate_into_the_summary_row() {
     ];
     let rows = rows_for(&roster, None, &[]);
     assert_eq!(rows.len(), 2, "ONE line, never a second per-status line");
-    assert_eq!(rows[1].title, "2 subagents (2 running)");
+    assert_eq!(rows[1].title, "2 subagents · 2 running");
 }
 
 /// The operator's 2026-09-28 one-dropdown contract: the ONE line expands to the FULL roster —
-/// `46 subagents (6 running)` expands to all forty-six rows, the runners FIRST.
+/// `46 subagents · 6 running` expands to all forty-six rows, the runners FIRST.
 #[test]
 fn the_merged_line_expands_to_the_full_roster_running_first() {
     let mut roster = vec![roster_entry("p", "idle", &parent_summary("p"))];
@@ -338,7 +348,7 @@ fn the_merged_line_expands_to_the_full_roster_running_first() {
     let rows = rows_for(&roster, None, &[]);
     assert_eq!(rows.len(), 2);
     assert_eq!(rows[1].kind, RowKind::SubagentSummary);
-    assert_eq!(rows[1].title, "46 subagents (6 running)");
+    assert_eq!(rows[1].title, "46 subagents · 6 running");
     assert!(!rows[1].expanded);
     let rows = rows_for(&roster, None, &["file:/x/p.jsonl"]);
     assert_eq!(rows.len(), 48);
@@ -397,6 +407,47 @@ fn the_expanded_group_renders_each_agent_once() {
     );
 }
 
+/// A shells/factory activity identity pins the selection's fallbacks to the same-kind line:
+/// when the carried identity goes stale (the parent's identity flips on persist/re-attach),
+/// the session-key fallback must re-find the activity line, not the parent agent row that
+/// shares its summary.
+#[test]
+fn selection_pins_a_stale_activity_identity_to_its_kind() {
+    let roster = vec![roster_entry("p", "idle", &parent_summary("p"))];
+    let counts = activity(&[("p-live", 2, 1, 0)]);
+    let rows = rows_with_activity(&roster, None, &[], &counts);
+    let key = SelectionKey {
+        session_id: Some("p".to_string()),
+        active_session_id: Some("p-live".to_string()),
+    };
+    let index = resolve_selection(&rows, 0, Some("shells:file:/x/OLD.jsonl"), Some(&key));
+    assert_eq!(rows[index].kind, RowKind::Shells);
+    let index = resolve_selection(&rows, 0, Some("factory:file:/x/OLD.jsonl"), Some(&key));
+    assert_eq!(rows[index].kind, RowKind::FactoryRuns);
+}
+
+/// When the pinned activity line vanished (count back to zero), the session key still wins:
+/// the selection lands on that session's own row, never on whatever row holds the old index.
+#[test]
+fn a_vanished_activity_line_falls_back_to_its_sessions_row() {
+    let roster = vec![
+        roster_entry("p", "idle", &parent_summary("p")),
+        roster_entry("q", "idle", &parent_summary("q")),
+    ];
+    let rows = rows_for(&roster, None, &[]);
+    let q_index = rows
+        .iter()
+        .position(|row| row.title == "q name")
+        .expect("the second agent row");
+    let key = SelectionKey {
+        session_id: Some("p".to_string()),
+        active_session_id: Some("p-live".to_string()),
+    };
+    let index = resolve_selection(&rows, q_index, Some("shells:file:/x/p.jsonl"), Some(&key));
+    assert_eq!(rows[index].kind, RowKind::Agent);
+    assert_eq!(rows[index].title, "p name");
+}
+
 /// Summary-line identities pin the selection's fallbacks to the ONE summary row. A carried
 /// legacy `subagents-inactive:` identity (the 2026-09-25 two-line scheme) resolves by its session
 /// key onto the PARENT row.
@@ -414,7 +465,7 @@ fn selection_pins_the_one_summary_line_identity() {
     };
     let index = resolve_selection(&collapsed, 0, Some("subagents:file:/x/p.jsonl"), Some(&key));
     assert_eq!(collapsed[index].kind, RowKind::SubagentSummary);
-    assert_eq!(collapsed[index].title, "2 subagents (1 running)");
+    assert_eq!(collapsed[index].title, "2 subagents · 1 running");
     let index = resolve_selection(
         &collapsed,
         0,
@@ -482,7 +533,7 @@ fn scoped_rows_lift_direct_children_and_exclude_the_root() {
         active_session_id: Some("p-live".to_string()),
         session_name: None,
     };
-    let records = reconcile_unified_sessions(&roster, &[]);
+    let records = reconcile_unified_sessions(&roster, &[], None);
     let subtree = scope_to_subtree(&records, &scope).expect("subtree");
     assert_eq!(subtree.len(), 2);
     let rows = rows_for(&roster, Some(&scope), &[]);
@@ -523,7 +574,7 @@ fn a_root_with_an_empty_session_file_binds_nothing() {
         active_session_id: Some("p-live".to_string()),
         session_name: None,
     };
-    let records = reconcile_unified_sessions(&roster, &[]);
+    let records = reconcile_unified_sessions(&roster, &[], None);
     assert_eq!(
         scope_root(&records, &scope),
         Some(ScopeRoot {
@@ -554,7 +605,7 @@ fn saved_child_nests_under_its_saved_parent() {
             "messageCount": 1,
         }),
     ];
-    let records = reconcile_unified_sessions(&[], &saved);
+    let records = reconcile_unified_sessions(&[], &saved, None);
     let rollups = compute_rollups(&records);
     let rows = build_rows(
         &records,
@@ -562,12 +613,13 @@ fn saved_child_nests_under_its_saved_parent() {
         &std::collections::HashSet::default(),
         &HashSet::default(),
         &rollups,
+        &HashMap::new(),
         None,
     );
     assert_eq!(rows.len(), 2);
     assert_eq!(rows[0].kind, RowKind::Agent);
     assert_eq!(rows[0].title, "root agent");
-    assert_eq!(rows[1].title, "1 subagents (0 running)");
+    assert_eq!(rows[1].title, "1 subagent · 0 running");
     let expanded: HashSet<String> = [rows[0].identity.clone()].into_iter().collect();
     let rows = build_rows(
         &records,
@@ -575,6 +627,7 @@ fn saved_child_nests_under_its_saved_parent() {
         &expanded,
         &HashSet::default(),
         &rollups,
+        &HashMap::new(),
         None,
     );
     assert_eq!(rows[2].title, "saved child");
@@ -671,7 +724,7 @@ fn rollups_sum_costs_over_descendants_only() {
             }),
         ),
     ];
-    let records = reconcile_unified_sessions(&roster, &[]);
+    let records = reconcile_unified_sessions(&roster, &[], None);
     let rollups = compute_rollups(&records);
     let parent = rollups.get("file:/x/p.jsonl").expect("parent rollup");
     assert!((parent.cost - 0.75).abs() < f64::EPSILON);
@@ -724,7 +777,7 @@ fn rollups_sum_costs_over_descendants_only() {
         ),
     ];
     let fixture_records =
-        reconcile_unified_sessions(&fixture_roster, std::slice::from_ref(&saved_parent));
+        reconcile_unified_sessions(&fixture_roster, std::slice::from_ref(&saved_parent), None);
     let fixture_rollups = compute_rollups(&fixture_records);
     let fixture_parent = fixture_rollups
         .get("file:/x/p.jsonl")
@@ -739,7 +792,8 @@ fn rollups_sum_costs_over_descendants_only() {
         "path": "/x/p.jsonl", "id": "p",
         "usage": { "inputTokens": 0, "outputTokens": 0, "cost": 0.0 },
     });
-    let bare_records = reconcile_unified_sessions(&fixture_roster, std::slice::from_ref(&bare));
+    let bare_records =
+        reconcile_unified_sessions(&fixture_roster, std::slice::from_ref(&bare), None);
     let bare_rollups = compute_rollups(&bare_records);
     let bare_parent = bare_rollups.get("file:/x/p.jsonl").expect("parent rollup");
     assert!(
@@ -756,6 +810,7 @@ fn rollups_sum_costs_over_descendants_only() {
         &std::collections::HashSet::default(),
         &HashSet::default(),
         &empty,
+        &HashMap::new(),
         None,
     );
     // Without rollups the per-pass walk fills the same totals.
@@ -797,7 +852,7 @@ fn an_active_query_ranks_hits_globally_ancestors_sink_last() {
             }),
         ),
     ];
-    let records = reconcile_unified_sessions(&roster, &[]);
+    let records = reconcile_unified_sessions(&roster, &[], None);
     let filtered = crate::agents_view_state::filter_unified_sessions(
         &records,
         &crate::agents_view_state::parse_search_query("sweep"),
@@ -805,7 +860,7 @@ fn an_active_query_ranks_hits_globally_ancestors_sink_last() {
     let by_name = |name: &str| {
         filtered
             .iter()
-            .find(|record| record.search.name == name)
+            .find(|record| crate::agents_view_state::record_search_text(record).name == name)
             .unwrap_or_else(|| panic!("missing record {name}"))
     };
     assert!(by_name("policy sweep").search_score.is_some());
@@ -822,6 +877,7 @@ fn an_active_query_ranks_hits_globally_ancestors_sink_last() {
         &expanded,
         &HashSet::default(),
         &rollups,
+        &HashMap::new(),
         None,
     );
     let titles: Vec<&str> = rows.iter().map(|row| row.title.as_str()).collect();
@@ -885,7 +941,7 @@ fn equal_scores_break_ties_by_recency_not_section() {
             }),
         ),
     ];
-    let records = reconcile_unified_sessions(&roster, &[]);
+    let records = reconcile_unified_sessions(&roster, &[], None);
     let filtered = crate::agents_view_state::filter_unified_sessions(
         &records,
         &crate::agents_view_state::parse_search_query("sweep"),
@@ -898,6 +954,7 @@ fn equal_scores_break_ties_by_recency_not_section() {
         &std::collections::HashSet::default(),
         &HashSet::default(),
         &rollups,
+        &HashMap::new(),
         None,
     );
     assert_eq!(
@@ -938,7 +995,7 @@ fn the_summary_line_bills_every_descendant_status() {
         .iter()
         .find(|row| row.identity == "subagents:file:/x/p.jsonl")
         .expect("the ONE line");
-    assert_eq!(summary.title, "4 subagents (2 running)");
+    assert_eq!(summary.title, "4 subagents · 2 running");
     assert!(
         (summary.cost - 4.75).abs() < f64::EPSILON,
         "runner subtree 1.50 + idle 2.50 + inactive 0.75 — every status bills"
@@ -963,7 +1020,7 @@ fn the_summary_line_bills_the_deleted_descendant_bucket() {
         roster_entry("p", "idle", &parent),
         roster_entry("r1", "running", &runner),
     ];
-    let records = reconcile_unified_sessions(&roster, std::slice::from_ref(&saved_parent));
+    let records = reconcile_unified_sessions(&roster, std::slice::from_ref(&saved_parent), None);
     let rollups = compute_rollups(&records);
     assert!(
         (rollups
@@ -981,6 +1038,7 @@ fn the_summary_line_bills_the_deleted_descendant_bucket() {
         &HashSet::new(),
         &HashSet::new(),
         &rollups,
+        &HashMap::new(),
         None,
     );
     let summary = rows
@@ -1010,7 +1068,7 @@ fn the_summary_line_cost_is_zero_when_nothing_bills() {
         .iter()
         .find(|row| row.identity == "subagents:file:/x/p.jsonl")
         .expect("the ONE line");
-    assert_eq!(summary.title, "2 subagents (2 running)");
+    assert_eq!(summary.title, "2 subagents · 2 running");
     assert!((summary.cost - 0.0).abs() < f64::EPSILON);
     let lone = rows_for(
         &[roster_entry("p", "idle", &parent_summary("p"))],
@@ -1047,7 +1105,7 @@ fn a_nested_line_bills_its_own_subtree() {
         .iter()
         .find(|row| row.identity == format!("{SUMMARY_ROW_PREFIX}{child_identity}"))
         .expect("the child's own line");
-    assert_eq!(nested.title, "1 subagents (1 running)");
+    assert_eq!(nested.title, "1 subagent · 1 running");
     assert!(
         (nested.cost - 0.25).abs() < f64::EPSILON,
         "only the grandchild's spend"
@@ -1056,7 +1114,7 @@ fn a_nested_line_bills_its_own_subtree() {
         .iter()
         .find(|row| row.identity == "subagents:file:/x/p.jsonl")
         .expect("the root's line");
-    assert_eq!(root.title, "3 subagents (2 running)");
+    assert_eq!(root.title, "3 subagents · 2 running");
     assert!(
         (root.cost - 4.0).abs() < f64::EPSILON,
         "runner subtree 1.50 + idle 2.50"
@@ -1064,7 +1122,7 @@ fn a_nested_line_bills_its_own_subtree() {
 }
 
 /// The operator's acceptance line: a fleet-scale roster — 331 inactive children plus 2 running —
-/// renders ONE summary row reading `333 subagents (2 running)`, expanding to ALL 333,
+/// renders ONE summary row reading `333 subagents · 2 running`, expanding to ALL 333,
 /// runners first.
 #[test]
 fn one_dropdown_renders_the_full_fleet_roster() {
@@ -1089,7 +1147,7 @@ fn one_dropdown_renders_the_full_fleet_roster() {
     let rows = rows_for(&roster, None, &[]);
     assert_eq!(rows.len(), 2);
     assert_eq!(rows[1].kind, RowKind::SubagentSummary);
-    assert_eq!(rows[1].title, "333 subagents (2 running)");
+    assert_eq!(rows[1].title, "333 subagents · 2 running");
     assert_eq!(rows[1].identity, "subagents:file:/x/p.jsonl");
     assert!(!rows[1].expanded);
     let rows = rows_for(&roster, None, &["file:/x/p.jsonl"]);
@@ -1167,7 +1225,7 @@ fn a_ledger_child_nests_across_the_windows_path_forms() {
             "rlmDepth": 1,
         }),
     ];
-    let records = reconcile_unified_sessions(&roster, &saved);
+    let records = reconcile_unified_sessions(&roster, &saved, None);
     let rollups = compute_rollups(&records);
     let rows = build_rows(
         &records,
@@ -1175,6 +1233,7 @@ fn a_ledger_child_nests_across_the_windows_path_forms() {
         &HashSet::default(),
         &HashSet::default(),
         &rollups,
+        &HashMap::new(),
         None,
     );
     // RED on main: the child's `file:\\?\...` parent key never matches the
@@ -1191,4 +1250,118 @@ fn a_ledger_child_nests_across_the_windows_path_forms() {
             .any(|row| row.kind == RowKind::SubagentSummary && row.title.starts_with("1 subagent")),
         "the parent's summary line counts the child: {rows:?}"
     );
+}
+
+/// Each entry is `(active session, shells, running factory runs, paused factory runs)`.
+fn activity(entries: &[(&str, usize, usize, usize)]) -> HashMap<String, SessionActivity> {
+    entries
+        .iter()
+        .map(|&(active, shells, running, paused)| {
+            (
+                active.to_string(),
+                SessionActivity {
+                    shells,
+                    factory_runs: crate::factory_view::FactoryRunCounts { running, paused },
+                },
+            )
+        })
+        .collect()
+}
+
+/// A node's shells and factory-run lines follow its subagents block: a nested child's own lines
+/// sit after its own subtree and before the next sibling; the parent's lines come after its whole
+/// subtree. A zero count renders no line.
+#[test]
+fn activity_lines_follow_each_nodes_subagents_block() {
+    let mut grandchild = child_summary("gc", "c1", "grandchild");
+    grandchild["rlmChildId"] = json!("child-gc");
+    let roster = vec![
+        roster_entry("p", "idle", &parent_summary("p")),
+        roster_entry("c1", "running", &child_summary("c1", "p", "first child")),
+        roster_entry("c2", "idle", &child_summary("c2", "p", "second child")),
+        roster_entry("gc", "idle", &grandchild),
+    ];
+    let counts = activity(&[
+        ("p-live", 2, 1, 0),
+        ("c1-live", 1, 0, 0),
+        ("c2-live", 0, 0, 0),
+    ]);
+    let rows = rows_with_activity(&roster, None, &["file:/x/p.jsonl"], &counts);
+    let first_child = rows
+        .iter()
+        .find(|row| row.title == "first child")
+        .expect("the first child row")
+        .identity
+        .clone();
+    let rows = rows_with_activity(
+        &roster,
+        None,
+        &["file:/x/p.jsonl", first_child.as_str()],
+        &counts,
+    );
+    assert_eq!(
+        rows.iter()
+            .map(|row| (row.kind, row.depth, row.title.as_str()))
+            .collect::<Vec<_>>(),
+        vec![
+            (RowKind::Agent, 0, "p name"),
+            (RowKind::SubagentSummary, 1, "3 subagents · 1 running"),
+            (RowKind::Subagent, 1, "first child"),
+            (RowKind::SubagentSummary, 2, "1 subagent · 0 running"),
+            (RowKind::Subagent, 2, "grandchild"),
+            (RowKind::Shells, 2, "$ 1 shell"),
+            (RowKind::Subagent, 1, "second child"),
+            (RowKind::Shells, 1, "$ 2 shells"),
+            (RowKind::FactoryRuns, 1, "\u{2699} 1 factory run"),
+        ]
+    );
+    let shells = &rows[7];
+    assert_eq!(shells.identity, "shells:file:/x/p.jsonl");
+    assert_eq!(shells.parent_identity.as_deref(), Some("file:/x/p.jsonl"));
+    assert_eq!(rows[8].identity, "factory:file:/x/p.jsonl");
+    assert!(shells.selectable());
+}
+
+/// A node without subagents shows its lines directly under its row; a node with no counts shows
+/// none.
+#[test]
+fn activity_lines_without_subagents_and_without_counts() {
+    let roster = vec![
+        roster_entry("a", "idle", &parent_summary("a")),
+        roster_entry("b", "idle", &parent_summary("b")),
+    ];
+    let rows = rows_with_activity(&roster, None, &[], &activity(&[("a-live", 0, 3, 0)]));
+    let titles: Vec<&str> = rows.iter().map(|row| row.title.as_str()).collect();
+    let a = titles
+        .iter()
+        .position(|title| *title == "a name")
+        .expect("a row");
+    assert_eq!(titles[a + 1], "\u{2699} 3 factory runs");
+    assert_eq!(
+        rows.len(),
+        3,
+        "b has no lines and a has no shells line: {titles:?}"
+    );
+}
+
+/// Paused factory runs never read as running: the line counts the running runs and names the
+/// paused ones apart, like the dock's paused cluster.
+#[test]
+fn the_factory_line_counts_paused_runs_apart_from_running_ones() {
+    let roster = vec![roster_entry("a", "idle", &parent_summary("a"))];
+    let line = |running, paused| {
+        rows_with_activity(
+            &roster,
+            None,
+            &[],
+            &activity(&[("a-live", 0, running, paused)]),
+        )
+        .into_iter()
+        .filter(|row| row.kind == RowKind::FactoryRuns)
+        .map(|row| row.title)
+        .collect::<Vec<_>>()
+    };
+    assert_eq!(line(0, 1), vec!["\u{2699} 0 factory runs \u{b7} 1 paused"]);
+    assert_eq!(line(2, 1), vec!["\u{2699} 2 factory runs \u{b7} 1 paused"]);
+    assert_eq!(line(1, 0), vec!["\u{2699} 1 factory run"]);
 }

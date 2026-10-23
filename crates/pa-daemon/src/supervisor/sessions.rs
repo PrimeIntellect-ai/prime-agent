@@ -8,6 +8,7 @@ use super::{
     ResidentWorker, Result, RouteAdmission, Supervisor, Value, ROUTE_TIMEOUT_MS,
     SUMMARY_TIMEOUT_MS,
 };
+use crate::session_scan::list_sessions_with;
 
 /// One spawn-name reservation held across a fresh-launch create (TS #2396): the only
 /// cross-create serializer for a same-name admission.
@@ -126,7 +127,8 @@ impl Supervisor {
     }
 
     /// `list_saved_sessions`: stream `session_list_item`/`session_list_progress` events,
-    /// then a final response with the full saved-session rows.
+    /// then a final response with the walked rows, the files left after them
+    /// (`remaining`), and the `nextCursor` that resumes the walk.
     pub(super) async fn handle_saved_session_list(
         self: &Arc<Self>,
         command: &DaemonCommand,
@@ -138,6 +140,8 @@ impl Supervisor {
             session_dir,
             active_session_id,
             scope,
+            limit,
+            cursor,
             ..
         } = command
         else {
@@ -209,15 +213,20 @@ impl Supervisor {
         let scan_command_id = command_id.to_string();
         let scan_active_session_id = active_session_id.clone();
         let scan_cwd = cwd.clone();
+        let agent_dir = self.options.agent_dir.clone();
+        let cursor = cursor.clone();
+        let limit = limit.map(|limit| limit as usize);
         let scan = tokio::task::spawn_blocking(move || {
+            let persistent_shells =
+                crate::persistent_shells::live_shell_rows_by_session(&agent_dir);
             let mut file_total = 0usize;
-            let infos = crate::session_scan::list_sessions_with(&dir, |index, total, info| {
+            let page = list_sessions_with(&dir, cursor.as_deref(), limit, |index, total, info| {
                 file_total = total;
                 if scope_current && info.cwd != scan_cwd {
                     // The row is out of scope, but the scan itself goes on.
                     return true;
                 }
-                let row = saved_session_row(info);
+                let row = saved_session_row(info, &persistent_shells);
                 let mut item = json!({
                     "id": scan_command_id,
                     "type": "session_list_item",
@@ -256,9 +265,9 @@ impl Supervisor {
                     }
                 }
             });
-            (infos, file_total)
+            (page, file_total, persistent_shells)
         });
-        let (mut infos, file_total) = match scan.await {
+        let (page, file_total, persistent_shells) = match scan.await {
             Ok(scanned) => scanned,
             Err(error) => {
                 return vec![response_line(&response_failure(
@@ -272,6 +281,11 @@ impl Supervisor {
         // The scan's parse trees folded and freed inside the blocking task; return their
         // arena high-water to the OS at the phase boundary (live cache untouched).
         pa_types::memory_release::trim_freed_heap();
+        let crate::session_scan::SessionPage {
+            mut infos,
+            remaining,
+            next_cursor,
+        } = page;
         // The current-cwd scope keeps only the session's own rows in the terminal
         // array: the response is the authoritative catalog.
         if scope_current {
@@ -324,7 +338,7 @@ impl Supervisor {
             .filter(|info| !scope_current || info.cwd == cwd)
             .collect();
         for info in &merged {
-            let row = saved_session_row(info);
+            let row = saved_session_row(info, &persistent_shells);
             let mut item = json!({
                 "id": command_id,
                 "type": "session_list_item",
@@ -373,11 +387,18 @@ impl Supervisor {
         // The streamed rows already reached the client; the terminal response is
         // the authoritative array (the scan never re-orders after streaming).
         let mut lines = Vec::new();
-        let sessions: Vec<Value> = infos.iter().map(saved_session_row).collect();
+        let sessions: Vec<Value> = infos
+            .iter()
+            .map(|info| saved_session_row(info, &persistent_shells))
+            .collect();
+        let mut data = json!({ "sessions": sessions, "remaining": remaining });
+        if let Some(next_cursor) = next_cursor {
+            data["nextCursor"] = json!(next_cursor);
+        }
         lines.push(response_line(&response_success(
             Some(command_id),
             "list_saved_sessions",
-            Some(json!({ "sessions": sessions })),
+            Some(data),
         )));
         // Telemetry: how many served rows carry a usage summary (a count only,
         // never session payload).
@@ -532,12 +553,42 @@ impl Supervisor {
                 RouteAdmission::SupervisorInternal,
             )
             .await;
-        match response {
-            Ok(response) if response.success => response
-                .data
-                .unwrap_or_else(|| offline_summary(&resident.worker_id)),
-            _ => offline_summary(&resident.worker_id),
+        if let Some(summary) = response
+            .ok()
+            .filter(|response| response.success)
+            .and_then(|response| response.data)
+        {
+            return summary;
         }
+        let root_active_session_id = resident
+            .descriptor
+            .lock()
+            .await
+            .root_active_session_id
+            .clone();
+        let roster = self
+            .roster
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut summary = offline_summary(&resident.worker_id);
+        // A failed live pull loses activity, not the supervisor's trusted family
+        // binding. Never borrow identity from a row now owned by another worker.
+        if let Some(entry) = roster
+            .by_active_session_id(&root_active_session_id)
+            .filter(|entry| entry.worker_id.as_deref() == Some(resident.worker_id.as_str()))
+        {
+            for key in [
+                "parentActiveSessionId",
+                "parentSessionId",
+                "parentSessionPath",
+                "sessionName",
+            ] {
+                if let Some(value) = entry.summary.get(key) {
+                    summary[key] = value.clone();
+                }
+            }
+        }
+        summary
     }
 
     async fn worker_summaries(self: &Arc<Self>, residents: &[Arc<ResidentWorker>]) -> Vec<Value> {
@@ -786,7 +837,10 @@ fn offline_summary(worker_id: &str) -> Value {
     })
 }
 
-pub(super) fn saved_session_row(info: &crate::session_store::SessionInfo) -> Value {
+pub(super) fn saved_session_row(
+    info: &crate::session_store::SessionInfo,
+    persistent_shells: &std::collections::HashMap<String, Vec<Value>>,
+) -> Value {
     let mut row = json!({
         "path": info.path.to_string_lossy(),
         "id": info.id,
@@ -796,9 +850,6 @@ pub(super) fn saved_session_row(info: &crate::session_store::SessionInfo) -> Val
         "modified": info.modified,
         "messageCount": info.message_count,
         "firstMessage": info.first_message,
-        // The scan's capped transcript corpus (TS `allMessagesText`): the
-        // agents-view full-transcript search field.
-        "allMessagesText": info.all_messages_text,
         "state": info.state.as_ref().map(|state| json!({ "status": state })),
     });
     let object = row.as_object_mut().expect("row object");
@@ -830,6 +881,11 @@ pub(super) fn saved_session_row(info: &crate::session_store::SessionInfo) -> Val
     // live summaries that lack one.
     if let Some(level) = &info.thinking_level {
         object.insert("thinkingLevel".to_string(), json!(level));
+    }
+    // Persistent `bash()` shells outlive the session's kernel: an inactive row still
+    // shows the live ones (kernel activity row shape).
+    if let Some(shells) = persistent_shells.get(&info.id) {
+        object.insert("persistentShells".to_string(), json!(shells));
     }
     row
 }
@@ -952,6 +1008,42 @@ mod tests {
         assert!(
             elapsed < std::time::Duration::from_millis(ROUTE_TIMEOUT_MS),
             "one wedged resident held the list for {elapsed:?}"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_degraded_summary_keeps_only_its_own_workers_family_binding() {
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let supervisor = Arc::new(supervisor(dir.path()));
+        let resident = resident("sibling", None);
+        resident.descriptor.lock().await.root_active_session_id = "sibling".to_string();
+        let _requests = wedged_worker(&resident).await;
+        let binding = json!({
+            "activeSessionId": "sibling", "sessionId": "session-sibling",
+            "sessionName": "sibling-name", "parentActiveSessionId": "parent",
+            "parentSessionId": "session-parent", "parentSessionPath": "/parent.jsonl",
+        });
+        supervisor
+            .roster
+            .lock()
+            .unwrap()
+            .write_summary(binding.clone(), Some("sibling"), None);
+        let summary = supervisor.worker_summary(&resident).await;
+        let mut expected = offline_summary("sibling");
+        expected["sessionName"] = binding["sessionName"].clone();
+        expected["parentActiveSessionId"] = binding["parentActiveSessionId"].clone();
+        expected["parentSessionId"] = binding["parentSessionId"].clone();
+        expected["parentSessionPath"] = binding["parentSessionPath"].clone();
+        assert_eq!(summary, expected);
+
+        supervisor
+            .roster
+            .lock()
+            .unwrap()
+            .write_summary(binding, Some("replacement"), None);
+        assert_eq!(
+            supervisor.worker_summary(&resident).await,
+            offline_summary("sibling")
         );
     }
 
