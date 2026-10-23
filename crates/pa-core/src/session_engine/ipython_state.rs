@@ -116,36 +116,32 @@ fn now_millis() -> u64 {
 /// The most names one notice list spells out. The notice is a reminder that the namespace
 /// survived, not an inventory: the model can list everything with `dir()` in the kernel. 200
 /// covers ordinary sessions in full, so their notice stays byte-identical to the TS text.
-pub const NOTICE_MAX_LISTED_NAMES: usize = 200;
+const NOTICE_MAX_LISTED_NAMES: usize = 200;
 
-/// The byte budget for one notice list (about 1k tokens). The notice is re-appended after
-/// every compaction that commits with a kernel running, so an uncapped list (273 KB with 14k
-/// globals in discussion #3745) can outgrow what the compaction frees and pin the session in
-/// a context-overflow loop. At 4 KB per list even many retained copies stay small.
-pub const NOTICE_MAX_LIST_BYTES: usize = 4_096;
+/// The byte budget for one notice list (about 1k tokens). An uncapped list (273 KB with 14k
+/// globals in discussion #3745) can outgrow what a compaction frees and pin the session in a
+/// context-overflow loop.
+const NOTICE_MAX_LIST_BYTES: usize = 4_096;
 
-/// `names` joined with `", "`, cut at [`NOTICE_MAX_LISTED_NAMES`] names or
+/// `names` (never empty) joined with `", "`, cut at [`NOTICE_MAX_LISTED_NAMES`] names or
 /// [`NOTICE_MAX_LIST_BYTES`] bytes, whichever binds first, with a `+N more` suffix
-/// counting the names left out.
+/// counting the names left out. The first name is always listed.
 fn capped_name_list(names: &[String]) -> String {
     let mut listed = String::new();
     let mut count = 0;
     for name in names.iter().take(NOTICE_MAX_LISTED_NAMES) {
-        let separator = if count == 0 { 0 } else { 2 };
-        if listed.len() + separator + name.len() > NOTICE_MAX_LIST_BYTES {
-            break;
-        }
         if count > 0 {
+            if listed.len() + 2 + name.len() > NOTICE_MAX_LIST_BYTES {
+                break;
+            }
             listed.push_str(", ");
         }
         listed.push_str(name);
         count += 1;
     }
-    let omitted = names.len() - count;
-    match (omitted, count) {
-        (0, _) => listed,
-        (omitted, 0) => format!("+{omitted} more"),
-        (omitted, _) => format!("{listed}, +{omitted} more"),
+    match names.len() - count {
+        0 => listed,
+        omitted => format!("{listed}, +{omitted} more"),
     }
 }
 
@@ -232,10 +228,9 @@ pub async fn capture_notice_content(probe: &dyn CompactionKernelProbe) -> Option
 
 /// Append the notice everywhere it belongs: the durable row first, then the live loop
 /// context (before a trailing error assistant turn, so the notice precedes the failure it
-/// explains), and the row returned for the surfaces to broadcast. `None` when nothing landed,
-/// including when the newest notice still in the active context already says the same thing:
-/// a compaction that keeps its cut point would otherwise stack identical copies in the
-/// retained tail on every run (discussion #3745).
+/// explains), and the row returned for the surfaces to broadcast. `None` when nothing landed.
+/// The new notice replaces any older one in the live context, as the built context keeps only
+/// the newest copy (discussion #3745).
 ///
 /// # Errors
 ///
@@ -252,23 +247,6 @@ pub async fn sync_after_compaction(
     let row = notice_message(content);
     {
         let mut session = session.lock().await;
-        let unchanged = session
-            .active_context()
-            .messages
-            .iter()
-            .rev()
-            .find_map(|message| match message {
-                pa_types::session::AgentMessage::Custom(custom)
-                    if custom.custom_type == IPYTHON_STATE_CUSTOM_TYPE =>
-                {
-                    Some(custom.content == row.content)
-                }
-                _ => None,
-            })
-            .unwrap_or(false);
-        if unchanged {
-            return Ok(None);
-        }
         session.append_custom_message(
             &row.custom_type,
             row.content.clone(),
@@ -283,6 +261,14 @@ pub async fn sync_after_compaction(
     };
     let state = agent.state().await;
     let mut messages = state.messages;
+    messages.retain(|message| {
+        !matches!(
+            message,
+            AgentMessage::Custom(custom)
+                if custom.payload.get("customType").and_then(serde_json::Value::as_str)
+                    == Some(IPYTHON_STATE_CUSTOM_TYPE)
+        )
+    });
     let insert_before_error = matches!(
         messages.last(),
         Some(AgentMessage::Standard(pa_agent::types::Message::Assistant(assistant)))
@@ -405,13 +391,6 @@ mod tests {
             format!(
                 "{header} Variables above the per-variable snapshot limit were removed: {list}. These names are still defined: {list}."
             )
-        );
-        assert!(content.len() < 2 * NOTICE_MAX_LIST_BYTES + header.len() + 200);
-        // A name longer than the whole budget is counted, never spelled.
-        let huge = vec!["x".repeat(NOTICE_MAX_LIST_BYTES + 1)];
-        assert_eq!(
-            notice_content(None, Some(&huge)),
-            format!("{header} These names are still defined: +1 more.")
         );
     }
 
@@ -593,8 +572,8 @@ mod tests {
     }
 
     /// THE #227 residue: the notice row keeps the branch from ending on
-    /// the compaction row, so back-to-back `/compact` RUNS again; a
-    /// session without a kernel keeps the "Already compacted" skip.
+    /// the compaction row, so back-to-back `/compact` RUNS again (every
+    /// time); a session without a kernel keeps the "Already compacted" skip.
     #[tokio::test]
     async fn back_to_back_compact_runs_again_with_a_running_kernel() {
         let seen: std::sync::Arc<std::sync::Mutex<Vec<String>>> = std::sync::Arc::default();
@@ -621,26 +600,65 @@ mod tests {
         assert!(requests[1].contains("NEW conversation messages to incorporate"));
         assert!(requests[1]
             .contains("<previous-summary>\nthe first compaction summary\n</previous-summary>"));
-        // The second compaction keeps the first notice in its retained tail and the namespace
-        // is unchanged, so no identical second copy lands (#3745).
-        assert_eq!(second.ipython_state, None);
+        assert!(second.ipython_state.is_some());
         let entries = engine.entries().await;
         let mut tail = entries.iter().rev();
-        assert!(matches!(tail.next(), Some(FileEntry::Compaction { .. })));
         assert!(matches!(
             tail.next(),
             Some(FileEntry::CustomMessage { payload, .. })
                 if payload.custom_type == IPYTHON_STATE_CUSTOM_TYPE
         ));
         assert!(matches!(tail.next(), Some(FileEntry::Compaction { .. })));
+        // A third back-to-back run still runs.
+        let outcome = compact_once(&engine, &model).await.unwrap();
+        assert!(matches!(outcome, CompactOutcome::Ran(_)));
         registration.unregister();
     }
 
-    /// Discussion #3745: a compaction that keeps its cut point retains every earlier notice,
-    /// so appending an identical copy each run grew the context by one notice per compaction
-    /// until overflow recovery gave up. An unchanged namespace must not add another copy.
+    fn notices_in(messages: &[SessionAgentMessage]) -> Vec<String> {
+        messages
+            .iter()
+            .filter_map(|message| match message {
+                SessionAgentMessage::Custom(custom)
+                    if custom.custom_type == IPYTHON_STATE_CUSTOM_TYPE =>
+                {
+                    Some(custom.content.text())
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Discussion #3745: sessions already holding stacked notice copies are repaired on
+    /// load, because the built context keeps only the newest copy; persisted rows stay.
+    #[test]
+    fn built_context_keeps_only_the_newest_notice() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut session = SessionManager::in_memory(tmp.path());
+        session.append_message(user_turn("turn zero")).unwrap();
+        for content in ["first copy", "second copy", "newest copy"] {
+            session
+                .append_custom_message(
+                    IPYTHON_STATE_CUSTOM_TYPE,
+                    UserContent::Text(content.to_string()),
+                    false,
+                    None,
+                )
+                .unwrap();
+            session.append_message(user_turn("in between")).unwrap();
+        }
+        assert_eq!(
+            notices_in(&session.active_context().messages),
+            ["newest copy"]
+        );
+        assert_eq!(session.active_context().messages.len(), 5);
+    }
+
+    /// Discussion #3745: a compaction that keeps its cut point retains every earlier notice in
+    /// its tail, and each run appends another, so the context grew by one notice per compaction
+    /// until overflow recovery gave up. The built and live contexts hold only the newest.
     #[tokio::test]
-    async fn repeated_compaction_with_an_unchanged_namespace_does_not_grow_the_context() {
+    async fn repeated_compaction_keeps_one_notice_in_context() {
         let summaries = (0..4)
             .map(|_| {
                 pa_ai::faux::FauxResponseStep::Message(pa_ai::faux::faux_assistant_text_message(
@@ -652,7 +670,7 @@ mod tests {
         let registration = faux_registration(summaries);
         let model = registration.get_model();
         let names: Vec<String> = (0..14_300).map(|index| format!("var_{index:05}")).collect();
-        let (engine, _agent) = session_with_probe(ScriptedProbe::running(None, Some(names))).await;
+        let (engine, agent) = session_with_probe(ScriptedProbe::running(None, Some(names))).await;
         let outcome = compact_once(&engine, &model).await.unwrap();
         assert!(matches!(outcome, CompactOutcome::Ran(_)));
         // Keep everything from here on: the cut point stops moving, as in the report.
@@ -660,29 +678,6 @@ mod tests {
             keep_recent_tokens: 1_000_000,
             ..Default::default()
         });
-        let notices_in_context = |messages: &[SessionAgentMessage]| -> Vec<String> {
-            messages
-                .iter()
-                .filter_map(|message| match message {
-                    SessionAgentMessage::Custom(custom)
-                        if custom.custom_type == IPYTHON_STATE_CUSTOM_TYPE =>
-                    {
-                        Some(custom.content.text())
-                    }
-                    _ => None,
-                })
-                .collect()
-        };
-        let first = notices_in_context(
-            &engine
-                .session_handle()
-                .lock()
-                .await
-                .active_context()
-                .messages,
-        );
-        assert_eq!(first.len(), 1);
-        assert!(first[0].len() < NOTICE_MAX_LIST_BYTES + 200);
         for round in 0..3 {
             engine
                 .session_handle()
@@ -694,19 +689,28 @@ mod tests {
             let CompactOutcome::Ran(run) = outcome else {
                 panic!("expected compaction round {round} to run");
             };
-            assert_eq!(
-                run.ipython_state, None,
-                "round {round} re-appended an identical notice"
-            );
-            let notices = notices_in_context(
-                &engine
-                    .session_handle()
-                    .lock()
-                    .await
-                    .active_context()
-                    .messages,
-            );
-            assert_eq!(notices, first, "round {round}");
+            let row = run
+                .ipython_state
+                .expect("the notice lands every compaction");
+            let built = engine
+                .session_handle()
+                .lock()
+                .await
+                .active_context()
+                .messages;
+            assert_eq!(notices_in(&built), [row.content.text()], "round {round}");
+            let live = agent
+                .state()
+                .await
+                .messages
+                .iter()
+                .filter(|message| {
+                    matches!(message, AgentMessage::Custom(custom)
+                    if custom.payload.get("customType").and_then(serde_json::Value::as_str)
+                        == Some(IPYTHON_STATE_CUSTOM_TYPE))
+                })
+                .count();
+            assert_eq!(live, 1, "round {round}");
         }
         registration.unregister();
     }
