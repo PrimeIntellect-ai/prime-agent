@@ -35,6 +35,14 @@ async fn streamed_tool_calls_keep_index_identity_and_complete_arguments() {
             ],
             json!([{"id": "python123", "name": "ipython", "arguments": {"code": "print(1)"}}]),
         ),
+        (
+            // A phantom call that never gets a name (#3648) is dropped from the final message.
+            vec![
+                json!({"index": 0, "id": "python123", "function": {"name": "ipython", "arguments": "{\"code\":\"print(1)\"}"}}),
+                json!({"index": 1, "function": {"arguments": "{\"code\":\"print(2)\"}"}}),
+            ],
+            json!([{"id": "python123", "name": "ipython", "arguments": {"code": "print(1)"}}]),
+        ),
     ];
     for (deltas, expected) in cases {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();

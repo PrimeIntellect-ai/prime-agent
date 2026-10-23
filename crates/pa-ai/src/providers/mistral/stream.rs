@@ -17,7 +17,9 @@ use crate::providers::mistral::convert::{
     build_chat_payload, derive_mistral_tool_call_id, MistralToolCallIdNormalizer,
 };
 use crate::providers::mistral::{build_request_headers, MistralOptions, API_MISTRAL_CONVERSATIONS};
-use crate::providers::transform_messages::transform_messages_with_normalizer;
+use crate::providers::transform_messages::{
+    drop_unnamed_tool_calls, transform_messages_with_normalizer,
+};
 use crate::types::{
     done_reason, error_reason, AssistantContent, AssistantMessage, Context, Model, StopReason,
     TextContent, ThinkingContent, ToolCall, Usage,
@@ -361,6 +363,7 @@ async fn run_stream(
 
     if let Err(error) = stream_result {
         state.settle_partial_tool_calls(output);
+        drop_unnamed_tool_calls(output);
         return Err(error);
     }
 
@@ -722,6 +725,9 @@ impl MistralStreamState {
                 partial: output.clone(),
             });
         }
+        // After the `*_end` events, so the content indices already streamed to the client stay
+        // valid; the final message is what the session stores.
+        drop_unnamed_tool_calls(output);
     }
 }
 
