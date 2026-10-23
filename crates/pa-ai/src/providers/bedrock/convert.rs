@@ -150,6 +150,22 @@ pub fn build_system_prompt(
     Some(blocks)
 }
 
+/// Bedrock Converse rejects consecutive user messages ("A conversation must alternate between user
+/// and assistant roles"). A user turn that follows another one joins it: this happens when an
+/// assistant reply with no content (a turn ended with no text) is dropped, or when a user message
+/// follows tool results. Tool results stay first because they always open their user turn.
+fn push_user_turn(result: &mut Vec<Value>, mut content: Vec<Value>) {
+    if let Some(blocks) = result
+        .last_mut()
+        .filter(|message| message["role"] == "user")
+        .and_then(|message| message["content"].as_array_mut())
+    {
+        blocks.append(&mut content);
+        return;
+    }
+    result.push(json!({ "role": "user", "content": content }));
+}
+
 // Long by design: mirrors the provider's stream shape.
 #[allow(clippy::too_many_lines)]
 pub fn convert_messages(
@@ -185,7 +201,7 @@ pub fn convert_messages(
                         })
                         .collect(),
                 };
-                result.push(json!({ "role": "user", "content": content_blocks }));
+                push_user_turn(&mut result, content_blocks);
                 i += 1;
             }
             Message::Assistant(assistant) => {
@@ -289,7 +305,7 @@ pub fn convert_messages(
                     j += 1;
                 }
                 i = j;
-                result.push(json!({ "role": "user", "content": tool_results }));
+                push_user_turn(&mut result, tool_results);
             }
         }
     }
@@ -425,5 +441,116 @@ mod supports_always_on_adaptive_thinking_tests {
             "us.anthropic.claude-opus-5-v1",
             Some("Claude Opus 5")
         ));
+    }
+}
+
+#[cfg(test)]
+mod convert_messages_tests {
+    use serde_json::{json, Value};
+
+    use super::convert_messages;
+    use crate::types::{CacheRetention, Context, Message, Model};
+
+    fn model() -> Model {
+        Model {
+            id: "us.anthropic.claude-opus-5-5-v1".into(),
+            name: "Claude Opus 5.5".into(),
+            api: "bedrock-converse-stream".into(),
+            provider: "amazon-bedrock".into(),
+            base_url: String::new(),
+            reasoning: true,
+            thinking_level_map: None,
+            input: vec![crate::types::ModelInput::Text],
+            cost: crate::types::zero_model_cost(),
+            context_window: 200_000,
+            max_tokens: 8192,
+            max_tokens_explicit: false,
+            featured: None,
+            headers: None,
+            compat: None,
+        }
+    }
+
+    fn assistant(content: &Value) -> Value {
+        json!({
+            "role": "assistant",
+            "content": content,
+            "api": "bedrock-converse-stream",
+            "provider": "amazon-bedrock",
+            "model": "us.anthropic.claude-opus-5-5-v1",
+            "usage": {
+                "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0, "totalTokens": 0,
+                "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0, "total": 0 },
+            },
+            "stopReason": "stop",
+            "timestamp": 2,
+        })
+    }
+
+    fn convert(messages: Vec<Value>) -> Vec<Value> {
+        let messages: Vec<Message> = messages
+            .into_iter()
+            .map(|message| serde_json::from_value(message).unwrap())
+            .collect();
+        convert_messages(
+            &Context {
+                system_prompt: None,
+                messages,
+                tools: None,
+            },
+            &model(),
+            CacheRetention::None,
+        )
+    }
+
+    /// A turn that ended with no text is dropped; the user turns around it must not reach
+    /// Bedrock as consecutive user messages.
+    #[test]
+    fn user_turns_around_a_dropped_empty_reply_join() {
+        let converted = convert(vec![
+            json!({ "role": "user", "content": "first", "timestamp": 1 }),
+            assistant(&json!([{ "type": "text", "text": "" }])),
+            json!({ "role": "user", "content": "second", "timestamp": 3 }),
+        ]);
+        assert_eq!(
+            converted,
+            vec![json!({ "role": "user", "content": [{ "text": "first" }, { "text": "second" }] })]
+        );
+    }
+
+    #[test]
+    fn a_user_message_after_tool_results_joins_their_turn() {
+        let converted = convert(vec![
+            json!({ "role": "user", "content": "run it", "timestamp": 1 }),
+            assistant(&json!([
+                { "type": "toolCall", "id": "call_1", "name": "bash", "arguments": { "cmd": "ls" } },
+            ])),
+            json!({
+                "role": "toolResult",
+                "toolCallId": "call_1",
+                "toolName": "bash",
+                "content": [{ "type": "text", "text": "ok" }],
+                "isError": false,
+                "timestamp": 3,
+            }),
+            json!({ "role": "user", "content": "steer", "timestamp": 4 }),
+        ]);
+        assert_eq!(
+            converted,
+            vec![
+                json!({ "role": "user", "content": [{ "text": "run it" }] }),
+                json!({
+                    "role": "assistant",
+                    "content": [{ "toolUse": { "toolUseId": "call_1", "name": "bash", "input": { "cmd": "ls" } } }],
+                }),
+                json!({
+                    "role": "user",
+                    "content": [
+                        { "toolResult": { "toolUseId": "call_1", "content": [{ "text": "ok" }], "status": "success" } },
+                        { "text": "steer" },
+                    ],
+                }),
+            ]
+        );
     }
 }
