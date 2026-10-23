@@ -1070,8 +1070,9 @@ def _revive_with_live_globals(
 class _RestoredFileStub(io.IOBase):
     """Closed placeholder for a file handle that a snapshot restore revived.
 
-    Keeps the saved name and mode for inspection; every I/O call raises like
-    any closed file. It never touches the path it names.
+    Keeps the saved name and mode for inspection; read, write and the other
+    I/O calls raise ValueError("I/O operation on closed file.") like any
+    closed file. It never touches the path it names.
     """
 
     def __init__(self, name: Any, mode: Any) -> None:
@@ -1079,6 +1080,12 @@ class _RestoredFileStub(io.IOBase):
         self.name = name
         self.mode = mode
         self.close()
+
+    def read(self, size: int = -1) -> Any:
+        self._checkClosed()
+
+    def write(self, data: Any) -> Any:
+        self._checkClosed()
 
     def __repr__(self) -> str:
         return f"<closed file {self.name!r} mode={self.mode!r} (restored from snapshot)>"
@@ -1088,8 +1095,9 @@ def _snapshot_unpickler(dill: Any) -> type:
     """Unpickler that never reopens a pickled file handle in this kernel.
 
     dill saves a file object as _create_filehandle(name, mode, ...), and its
-    revival reopens name with the saved mode: "w"/"x" truncate the user's file
-    (even for a handle that was closed when saved), and a pipe/socket-backed
+    revival reopens name with the saved mode: "w"/"w+" truncate the user's
+    file (even for a handle that was closed when saved), "x" fails the name
+    when the file exists and creates it when it does not, and a pipe/socket-backed
     file comes back as its raw fd NUMBER, which reopening and closing kills
     for whatever owns that fd now (e.g. the event loop's self-pipe). Raw fd
     records fail just that name; path records revive as a closed stub.

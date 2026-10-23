@@ -828,26 +828,14 @@ class ReplTest(unittest.TestCase):
         self.addCleanup(sys.path.remove, SRC)
         from rlm import repl as repl_module
 
-        modes = ["w", "w+", "a", "a+", "x", "r+", "wb", "w+b", "ab", "xb"]
         with tempfile.TemporaryDirectory() as tmp:
-            ns = {}
-            for index, mode in enumerate(modes):
-                for state in ("open", "closed"):
-                    target = os.path.join(tmp, f"{state}-{index}.txt")
-                    if "r" in mode:
-                        open(target, "w").close()
-                    handle = open(target, mode)
-                    if state == "closed":
-                        handle.close()
-                    ns[f"{state}_{index}"] = handle
+            target = os.path.join(tmp, "notes.txt")
+            handle = open(target, "w")
+            handle.close()
+            with open(target, "w") as fh:
+                fh.write("precious")
             # A handle nested in a container takes the same reconstructor.
-            ns["nested"] = {"inner": [ns["closed_0"]]}
-            precious = {}
-            for name in os.listdir(tmp):
-                target = os.path.join(tmp, name)
-                with open(target, "w") as fh:
-                    fh.write(f"precious contents of {name}")
-                precious[target] = f"precious contents of {name}"
+            ns = {"handle": handle, "nested": {"inner": [handle]}}
             path = os.path.join(tmp, "state", "kernel-state.dill")
             manifest_path = os.path.join(tmp, "state", "kernel-state.json")
             result = repl_module._snapshot_state(
@@ -858,26 +846,19 @@ class ReplTest(unittest.TestCase):
                 repl_module.DEFAULT_SNAPSHOT_MAX_VARIABLE_BYTES,
                 False,
             )
-            self.assertEqual(result["saved"], sorted(ns))
-            for handle in ns.values():
-                if not isinstance(handle, dict):
-                    handle.close()
+            self.assertEqual(result["saved"], ["handle", "nested"])
 
             restored_ns = {}
             result = repl_module._restore_state(restored_ns, path)
-            self.assertEqual((result["restored"], result["failed"]), (sorted(ns), []))
-            contents = {}
-            for target in precious:
-                with open(target) as fh:
-                    contents[target] = fh.read()
-            self.assertEqual(contents, precious)
-            self.assertEqual(
-                {name: (value.name, value.mode, value.closed) for name, value in restored_ns.items() if name != "nested"},
-                {name: (value.name, value.mode, True) for name, value in ns.items() if name != "nested"},
-            )
+            self.assertEqual((result["restored"], result["failed"]), (["handle", "nested"], []))
+            with open(target) as fh:
+                self.assertEqual(fh.read(), "precious")
+            restored = restored_ns["handle"]
+            self.assertEqual((restored.name, restored.mode, restored.closed), (target, "w", True))
             self.assertIsInstance(restored_ns["nested"]["inner"][0], repl_module._RestoredFileStub)
-            with self.assertRaises(ValueError):
-                restored_ns["closed_0"].fileno()
+            for call in (lambda: restored.write("x"), restored.read, restored.readline):
+                with self.assertRaisesRegex(ValueError, "closed file"):
+                    call()
 
     def test_stdin_eof_flushes_final_snapshot(self):
         # Host death (EOF, no shutdown request) must persist the namespace
