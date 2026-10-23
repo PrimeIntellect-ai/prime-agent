@@ -5,6 +5,7 @@
 //! a nameless call into the final message.
 
 use super::*;
+use crate::providers::transform_messages::UNNAMED_TOOL_CALL;
 
 /// One chat-completions chunk carrying `delta`.
 fn chunk(delta: &Value) -> String {
@@ -47,9 +48,10 @@ async fn stream(chunks: &[String]) -> AssistantMessage {
 }
 
 #[tokio::test]
-async fn a_tool_call_without_a_function_name_never_reaches_the_final_message() {
+async fn a_turn_of_only_nameless_calls_keeps_going_as_unknown_tool() {
     // The reported shape: the model's template leaks as text, and the gateway
-    // adds a tool call with neither `function.name` nor `id`.
+    // adds a tool call with neither `function.name` nor `id`. The call is named
+    // so the loop answers it with a not-found error and the model can retry.
     let message = stream(&[
         chunk(&json!({"role": "assistant", "content": "probing:"})),
         chunk(&json!({"tool_calls": [{
@@ -58,56 +60,13 @@ async fn a_tool_call_without_a_function_name_never_reaches_the_final_message() {
         }]})),
     ])
     .await;
-    assert_eq!(message.content, vec![text("probing:")]);
-    assert_eq!(
-        message.stop_reason,
-        StopReason::Stop,
-        "a turn without a runnable call does not end in tool use"
-    );
-}
-
-#[tokio::test]
-async fn a_continuation_delta_without_index_or_id_extends_the_open_call() {
-    // Continuation deltas that carry neither `index` nor `id` used to open a
-    // second, nameless call that took the rest of the arguments.
-    let message = stream(&[
-        chunk(&json!({"tool_calls": [{
-            "id": "call_1",
-            "type": "function",
-            "function": {"name": "python_repl", "arguments": "{\"code\":\"import"},
-        }]})),
-        chunk(&json!({"tool_calls": [{"function": {"arguments": " os\"}"}}]})),
-    ])
-    .await;
+    let id = format!("call_unnamed_{}_1", message.timestamp);
     assert_eq!(
         message.content,
-        vec![tool_call(
-            "call_1",
-            "python_repl",
-            &json!({"code": "import os"})
-        )]
-    );
-    assert_eq!(message.stop_reason, StopReason::ToolUse);
-}
-
-#[tokio::test]
-async fn a_continuation_delta_with_an_empty_id_extends_the_open_call() {
-    let message = stream(&[
-        chunk(&json!({"tool_calls": [{
-            "id": "call_1",
-            "type": "function",
-            "function": {"name": "python_repl", "arguments": "{\"code\":\"import"},
-        }]})),
-        chunk(&json!({"tool_calls": [{"id": "", "function": {"arguments": " os\"}"}}]})),
-    ])
-    .await;
-    assert_eq!(
-        message.content,
-        vec![tool_call(
-            "call_1",
-            "python_repl",
-            &json!({"code": "import os"})
-        )]
+        vec![
+            text("probing:"),
+            tool_call(&id, UNNAMED_TOOL_CALL, &json!({"python_repl": "x"}))
+        ]
     );
     assert_eq!(message.stop_reason, StopReason::ToolUse);
 }

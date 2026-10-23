@@ -18,7 +18,7 @@ use crate::providers::mistral::convert::{
 };
 use crate::providers::mistral::{build_request_headers, MistralOptions, API_MISTRAL_CONVERSATIONS};
 use crate::providers::transform_messages::{
-    drop_unnamed_tool_calls, transform_messages_with_normalizer,
+    repair_unnamed_tool_calls, transform_messages_with_normalizer,
 };
 use crate::types::{
     done_reason, error_reason, AssistantContent, AssistantMessage, Context, Model, StopReason,
@@ -363,12 +363,12 @@ async fn run_stream(
 
     if let Err(error) = stream_result {
         state.settle_partial_tool_calls(output);
-        drop_unnamed_tool_calls(output);
+        repair_unnamed_tool_calls(output);
         return Err(error);
     }
     // After the `*_end` events and the error settle, which address blocks by their streamed
     // content indices; the final message is what the session stores.
-    drop_unnamed_tool_calls(output);
+    repair_unnamed_tool_calls(output);
 
     Ok(())
 }

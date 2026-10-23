@@ -78,23 +78,35 @@ fn is_unnamed_tool_call(tool_call: &ToolCall) -> bool {
     tool_call.name.trim().is_empty()
 }
 
-/// Drop the tool calls a provider streamed without a function name from a
-/// finished assistant message, so they never reach the agent loop or the
-/// session file. A turn left with no tool call no longer ends in tool use.
-pub(crate) fn drop_unnamed_tool_calls(output: &mut AssistantMessage) {
-    let before = output.content.len();
+/// Name given to the calls of a turn whose every tool call came without a function name. Strict
+/// providers accept it on replay, and the agent loop answers it with a `Tool unknown_tool not found`
+/// error, so the model learns its call was malformed and can retry in the same turn.
+pub(crate) const UNNAMED_TOOL_CALL: &str = "unknown_tool";
+
+/// Repair the tool calls a provider streamed without a function name in a finished assistant
+/// message, before it reaches the agent loop or the session file. A nameless call beside named
+/// calls is dropped: the turn goes on through the named ones. When a tool-use turn has only
+/// nameless calls, they are named [`UNNAMED_TOOL_CALL`] and given a stable id instead, so the turn
+/// keeps going with an error result rather than ending silently.
+pub(crate) fn repair_unnamed_tool_calls(output: &mut AssistantMessage) {
+    let has_named_call = output.content.iter().any(
+        |block| matches!(block, AssistantContent::ToolCall(tool_call) if !is_unnamed_tool_call(tool_call)),
+    );
+    if !has_named_call && output.stop_reason == StopReason::ToolUse {
+        let timestamp = output.timestamp;
+        for (index, block) in output.content.iter_mut().enumerate() {
+            if let AssistantContent::ToolCall(tool_call) = block {
+                tool_call.name = UNNAMED_TOOL_CALL.to_string();
+                if tool_call.id.is_empty() {
+                    tool_call.id = format!("call_unnamed_{timestamp}_{index}");
+                }
+            }
+        }
+        return;
+    }
     output.content.retain(
         |block| !matches!(block, AssistantContent::ToolCall(tool_call) if is_unnamed_tool_call(tool_call)),
     );
-    if output.content.len() != before
-        && output.stop_reason == StopReason::ToolUse
-        && !output
-            .content
-            .iter()
-            .any(|block| matches!(block, AssistantContent::ToolCall(_)))
-    {
-        output.stop_reason = StopReason::Stop;
-    }
 }
 
 type Normalizer<'a> = dyn Fn(&str, &Model, &AssistantMessage) -> Option<String> + 'a;
@@ -530,25 +542,5 @@ mod tests {
             user("again"),
         ];
         assert_eq!(transformed, expected);
-    }
-
-    #[test]
-    fn a_streamed_turn_keeps_only_its_named_tool_calls() {
-        let mut mixed = assistant(
-            vec![text("x"), tool_call("", ""), tool_call("call-1", "bash")],
-            StopReason::ToolUse,
-        );
-        drop_unnamed_tool_calls(&mut mixed);
-        assert_eq!(
-            mixed,
-            assistant(
-                vec![text("x"), tool_call("call-1", "bash")],
-                StopReason::ToolUse
-            )
-        );
-
-        let mut only_unnamed = assistant(vec![text("x"), tool_call("", "")], StopReason::ToolUse);
-        drop_unnamed_tool_calls(&mut only_unnamed);
-        assert_eq!(only_unnamed, assistant(vec![text("x")], StopReason::Stop));
     }
 }

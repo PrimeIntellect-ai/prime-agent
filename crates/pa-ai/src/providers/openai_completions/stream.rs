@@ -20,7 +20,7 @@ use crate::providers::openai_completions::{
     REASONING_FIELDS,
 };
 use crate::providers::openai_responses_hooks::apply_service_tier_pricing;
-use crate::providers::transform_messages::drop_unnamed_tool_calls;
+use crate::providers::transform_messages::repair_unnamed_tool_calls;
 use crate::types::{
     done_reason, error_reason, AssistantContent, AssistantMessage, CacheRetention, Context, Model,
     StopReason, TextContent, ThinkingContent, ToolCall, Usage,
@@ -40,11 +40,6 @@ struct StreamingState {
     thinking_block: Option<usize>,
     tool_call_blocks_by_index: HashMap<u64, usize>,
     tool_call_blocks_by_id: HashMap<String, usize>,
-    /// The tool-call block the latest `tool_calls` delta landed in: a
-    /// continuation delta that carries neither `index` nor `id` extends it
-    /// (TS keeps appending to its current block) instead of opening a new,
-    /// nameless call.
-    last_tool_call_block: Option<usize>,
     tool_call_partial_args: HashMap<usize, StreamingJsonAccumulator>,
     reasoning_details_by_index: Vec<(u64, Map<String, Value>)>,
     next_reasoning_details_index: u64,
@@ -64,7 +59,6 @@ impl StreamingState {
             thinking_block: None,
             tool_call_blocks_by_index: HashMap::new(),
             tool_call_blocks_by_id: HashMap::new(),
-            last_tool_call_block: None,
             tool_call_partial_args: HashMap::new(),
             reasoning_details_by_index: Vec::new(),
             next_reasoning_details_index: 0,
@@ -133,11 +127,7 @@ impl StreamingState {
                 block = self.tool_call_blocks_by_id.get(id).copied();
             }
         }
-        if block.is_none() && stream_index.is_none() && id.is_none() {
-            block = self.last_tool_call_block;
-        }
         if let Some(index) = block {
-            self.last_tool_call_block = Some(index);
             if let Some(stream_index) = stream_index {
                 self.tool_call_blocks_by_index.insert(stream_index, index);
             }
@@ -156,7 +146,6 @@ impl StreamingState {
                 rest: Map::default(),
             }));
         let index = self.output.content.len() - 1;
-        self.last_tool_call_block = Some(index);
         if let Some(stream_index) = stream_index {
             self.tool_call_blocks_by_index.insert(stream_index, index);
         }
@@ -656,7 +645,7 @@ async fn run_stream(
                 // calls before the error event carries the message.
                 encode_reasoning_details_signature(&mut state);
                 settle_partial_tool_calls(&mut state);
-                drop_unnamed_tool_calls(&mut state.output);
+                repair_unnamed_tool_calls(&mut state.output);
                 *output = state.output;
                 return Err(error);
             }
@@ -700,7 +689,7 @@ async fn run_stream(
     finish_blocks(&mut state, writer);
     // After the `*_end` events, so the content indices already streamed to
     // the client stay valid; the final message is what the session stores.
-    drop_unnamed_tool_calls(&mut state.output);
+    repair_unnamed_tool_calls(&mut state.output);
     *output = state.output;
 
     if base_options
@@ -796,8 +785,8 @@ mod tests {
     #[path = "stream_wire.rs"]
     mod stream_wire;
 
-    // The nameless-tool-call pins (#3742): continuation deltas and calls the
-    // provider streamed without a function name.
+    // The nameless-tool-call pins (#3742): calls the provider streamed
+    // without a function name.
     #[path = "stream_tool_call_name.rs"]
     mod stream_tool_call_name;
 
