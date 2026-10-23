@@ -386,9 +386,9 @@ pub fn stream_simple_google(
 }
 
 /// The thinking arm the simple Google streams (Generative AI and Vertex) pick for a model +
-/// reasoning level: disabled, level-based, or budget-based. Level-based covers every model whose
-/// catalog `thinkingLevelMap` names Gemini levels (Gemini 3+, Gemini 4) plus the Gemini 3 Pro/Flash
-/// and Gemma 4 id families (the Gemini API rejects `thinkingBudget` with a 400 for Gemma 4).
+/// reasoning level: disabled, level-based, or budget-based. The route follows the Gemini
+/// generation (2.x and earlier take budgets, everything newer takes levels); a catalog
+/// `thinkingLevelMap` only picks which level is sent.
 pub(crate) fn resolve_simple_thinking(
     model: &Model,
     options: Option<&SimpleStreamOptions>,
@@ -529,6 +529,40 @@ mod tests {
         assert_eq!(
             params["systemInstruction"],
             json!({ "parts": [{ "text": "You are terse." }] })
+        );
+    }
+
+    /// A level map on a Gemini 2.5 entry does not move it to `thinkingLevel`, which Google rejects
+    /// on 2.5 and earlier: the generation picks the route, and 2.5 keeps its budgets.
+    #[test]
+    fn level_mapped_gemini25_keeps_thinking_budgets() {
+        let model = serde_json::from_value::<Model>(json!({
+            "id": "gemini-2.5-pro", "name": "Gemini 2.5 Pro",
+            "api": "google-generative-ai", "provider": "google",
+            "baseUrl": "https://generativelanguage.googleapis.com/v1beta",
+            "reasoning": true,
+            "thinkingLevelMap": {
+                "off": null, "minimal": "low", "low": "low", "medium": "medium",
+                "high": "high", "xhigh": null, "max": null
+            },
+            "input": ["text"],
+            "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0 },
+            "contextWindow": 1_048_576, "maxTokens": 65_536
+        }))
+        .unwrap();
+        let configs = [
+            ModelThinkingLevel::Low,
+            ModelThinkingLevel::Medium,
+            ModelThinkingLevel::High,
+        ]
+        .map(|level| thinking_config(&model, level));
+        assert_eq!(
+            configs,
+            [
+                json!({ "includeThoughts": true, "thinkingBudget": 2048 }),
+                json!({ "includeThoughts": true, "thinkingBudget": 8192 }),
+                json!({ "includeThoughts": true, "thinkingBudget": 32768 }),
+            ]
         );
     }
 

@@ -575,6 +575,52 @@ mod tests {
         );
     }
 
+    /// A Gemini 4 entry with no level map (a user `models.json` entry: the live catalog has no
+    /// `google-vertex` Gemini 4) still rides `thinkingLevel`, never the `thinkingBudget` Gemini 4
+    /// rejects with a 400; without a map, off and minimal take LOW.
+    #[test]
+    fn mapless_gemini4_uses_thinking_levels_on_vertex() {
+        let model = serde_json::from_value::<Model>(json!({
+            "id": "gemini-4-argon", "name": "Gemini 4 Argon",
+            "api": "google-vertex", "provider": "google-vertex",
+            "baseUrl": "https://{location}-aiplatform.googleapis.com",
+            "reasoning": true, "input": ["text"],
+            "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0 },
+            "contextWindow": 1_048_576, "maxTokens": 32_768
+        }))
+        .unwrap();
+        let configs = [
+            ModelThinkingLevel::Off,
+            ModelThinkingLevel::Minimal,
+            ModelThinkingLevel::Low,
+            ModelThinkingLevel::Medium,
+            ModelThinkingLevel::High,
+        ]
+        .map(|reasoning| {
+            let simple = SimpleStreamOptions {
+                reasoning: Some(reasoning),
+                ..SimpleStreamOptions::default()
+            };
+            let opts = GoogleVertexOptions {
+                thinking: Some(resolve_simple_thinking(&model, Some(&simple))),
+                base: build_base_options(&model, Some(&simple), None),
+                ..GoogleVertexOptions::default()
+            };
+            build_params(&model, &Context::default(), &opts)["generationConfig"]["thinkingConfig"]
+                .clone()
+        });
+        assert_eq!(
+            configs,
+            [
+                json!({ "thinkingLevel": "LOW" }),
+                json!({ "includeThoughts": true, "thinkingLevel": "LOW" }),
+                json!({ "includeThoughts": true, "thinkingLevel": "LOW" }),
+                json!({ "includeThoughts": true, "thinkingLevel": "MEDIUM" }),
+                json!({ "includeThoughts": true, "thinkingLevel": "HIGH" }),
+            ]
+        );
+    }
+
     /// The system prompt goes out as a `Content` object (`{"parts":[{"text":...}]}`), the shape
     /// Vertex requires for `systemInstruction`.
     #[test]
