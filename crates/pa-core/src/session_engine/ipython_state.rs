@@ -113,21 +113,61 @@ fn now_millis() -> u64 {
         .unwrap_or_default()
 }
 
+/// The most names one notice list spells out. The notice is a reminder that the namespace
+/// survived, not an inventory: the model can list everything with `dir()` in the kernel. 200
+/// covers ordinary sessions in full, so their notice stays byte-identical to the TS text.
+pub const NOTICE_MAX_LISTED_NAMES: usize = 200;
+
+/// The byte budget for one notice list (about 1k tokens). The notice is re-appended after
+/// every compaction that commits with a kernel running, so an uncapped list (273 KB with 14k
+/// globals in discussion #3745) can outgrow what the compaction frees and pin the session in
+/// a context-overflow loop. At 4 KB per list even many retained copies stay small.
+pub const NOTICE_MAX_LIST_BYTES: usize = 4_096;
+
+/// `names` joined with `", "`, cut at [`NOTICE_MAX_LISTED_NAMES`] names or
+/// [`NOTICE_MAX_LIST_BYTES`] bytes, whichever binds first, with a `+N more` suffix
+/// counting the names left out.
+fn capped_name_list(names: &[String]) -> String {
+    let mut listed = String::new();
+    let mut count = 0;
+    for name in names.iter().take(NOTICE_MAX_LISTED_NAMES) {
+        let separator = if count == 0 { 0 } else { 2 };
+        if listed.len() + separator + name.len() > NOTICE_MAX_LIST_BYTES {
+            break;
+        }
+        if count > 0 {
+            listed.push_str(", ");
+        }
+        listed.push_str(name);
+        count += 1;
+    }
+    let omitted = names.len() - count;
+    match (omitted, count) {
+        (0, _) => listed,
+        (omitted, 0) => format!("+{omitted} more"),
+        (omitted, _) => format!("{listed}, +{omitted} more"),
+    }
+}
+
 /// The notice text: the `[python-state]` header, the persistence statement, the pruning
-/// disclosure, and the live-names detail. `names` is `None` on a failed listing.
+/// disclosure, and the live-names detail. `names` is `None` on a failed listing. Both lists
+/// are capped (see [`NOTICE_MAX_LIST_BYTES`]).
 #[must_use]
 pub fn notice_content(pruned: Option<&[String]>, names: Option<&[String]>) -> String {
     let detail = match names {
         None => String::new(),
         Some(names) if !names.is_empty() => {
-            format!(" These names are still defined: {}.", names.join(", "))
+            format!(
+                " These names are still defined: {}.",
+                capped_name_list(names)
+            )
         }
         Some(_) => " You have not defined any names yet.".to_string(),
     };
     let pruned_detail = match pruned {
         Some(pruned) if !pruned.is_empty() => format!(
             " Variables above the per-variable snapshot limit were removed: {}.",
-            pruned.join(", ")
+            capped_name_list(pruned)
         ),
         _ => String::new(),
     };
@@ -192,7 +232,10 @@ pub async fn capture_notice_content(probe: &dyn CompactionKernelProbe) -> Option
 
 /// Append the notice everywhere it belongs: the durable row first, then the live loop
 /// context (before a trailing error assistant turn, so the notice precedes the failure it
-/// explains), and the row returned for the surfaces to broadcast. `None` when nothing landed.
+/// explains), and the row returned for the surfaces to broadcast. `None` when nothing landed,
+/// including when the newest notice still in the active context already says the same thing:
+/// a compaction that keeps its cut point would otherwise stack identical copies in the
+/// retained tail on every run (discussion #3745).
 ///
 /// # Errors
 ///
@@ -209,6 +252,23 @@ pub async fn sync_after_compaction(
     let row = notice_message(content);
     {
         let mut session = session.lock().await;
+        let unchanged = session
+            .active_context()
+            .messages
+            .iter()
+            .rev()
+            .find_map(|message| match message {
+                pa_types::session::AgentMessage::Custom(custom)
+                    if custom.custom_type == IPYTHON_STATE_CUSTOM_TYPE =>
+                {
+                    Some(custom.content == row.content)
+                }
+                _ => None,
+            })
+            .unwrap_or(false);
+        if unchanged {
+            return Ok(None);
+        }
         session.append_custom_message(
             &row.custom_type,
             row.content.clone(),
@@ -318,6 +378,41 @@ mod tests {
         );
         assert!(notice_content(Some(&[]), Some(&["v".to_string()]))
             .contains("still available. These names"));
+    }
+
+    /// Discussion #3745: 14k globals made a 273 KB notice. The count cap binds for short
+    /// names, the byte cap for long ones, and both end with the omitted count.
+    #[test]
+    fn notice_lists_stay_under_the_cap_for_a_huge_name_set() {
+        let header = "[python-state]\n\nYour Python kernel persisted through compaction; its remaining variables, imports, and helpers are still available.";
+        let short: Vec<String> = (0..500).map(|index| format!("v{index}")).collect();
+        assert_eq!(
+            notice_content(None, Some(&short)),
+            format!(
+                "{header} These names are still defined: {}, +300 more.",
+                short[..200].join(", ")
+            )
+        );
+        // 40-byte names: 97 of them take 97 * 42 - 2 = 4072 bytes, a 98th would pass 4096.
+        let long: Vec<String> = (0..14_300)
+            .map(|index| format!("column_{index:033}"))
+            .collect();
+        assert!(long.iter().all(|name| name.len() == 40));
+        let content = notice_content(Some(&long), Some(&long));
+        let list = format!("{}, +14203 more", long[..97].join(", "));
+        assert_eq!(
+            content,
+            format!(
+                "{header} Variables above the per-variable snapshot limit were removed: {list}. These names are still defined: {list}."
+            )
+        );
+        assert!(content.len() < 2 * NOTICE_MAX_LIST_BYTES + header.len() + 200);
+        // A name longer than the whole budget is counted, never spelled.
+        let huge = vec!["x".repeat(NOTICE_MAX_LIST_BYTES + 1)];
+        assert_eq!(
+            notice_content(None, Some(&huge)),
+            format!("{header} These names are still defined: +1 more.")
+        );
     }
 
     #[test]
@@ -526,14 +621,11 @@ mod tests {
         assert!(requests[1].contains("NEW conversation messages to incorporate"));
         assert!(requests[1]
             .contains("<previous-summary>\nthe first compaction summary\n</previous-summary>"));
-        // Notice row after every compaction, in order.
+        // The second compaction keeps the first notice in its retained tail and the namespace
+        // is unchanged, so no identical second copy lands (#3745).
+        assert_eq!(second.ipython_state, None);
         let entries = engine.entries().await;
         let mut tail = entries.iter().rev();
-        assert!(matches!(
-            tail.next(),
-            Some(FileEntry::CustomMessage { payload, .. })
-                if payload.custom_type == IPYTHON_STATE_CUSTOM_TYPE
-        ));
         assert!(matches!(tail.next(), Some(FileEntry::Compaction { .. })));
         assert!(matches!(
             tail.next(),
@@ -541,6 +633,81 @@ mod tests {
                 if payload.custom_type == IPYTHON_STATE_CUSTOM_TYPE
         ));
         assert!(matches!(tail.next(), Some(FileEntry::Compaction { .. })));
+        registration.unregister();
+    }
+
+    /// Discussion #3745: a compaction that keeps its cut point retains every earlier notice,
+    /// so appending an identical copy each run grew the context by one notice per compaction
+    /// until overflow recovery gave up. An unchanged namespace must not add another copy.
+    #[tokio::test]
+    async fn repeated_compaction_with_an_unchanged_namespace_does_not_grow_the_context() {
+        let summaries = (0..4)
+            .map(|_| {
+                pa_ai::faux::FauxResponseStep::Message(pa_ai::faux::faux_assistant_text_message(
+                    "the compaction summary",
+                    pa_ai::faux::FauxAssistantMessageOptions::default(),
+                ))
+            })
+            .collect();
+        let registration = faux_registration(summaries);
+        let model = registration.get_model();
+        let names: Vec<String> = (0..14_300).map(|index| format!("var_{index:05}")).collect();
+        let (engine, _agent) = session_with_probe(ScriptedProbe::running(None, Some(names))).await;
+        let outcome = compact_once(&engine, &model).await.unwrap();
+        assert!(matches!(outcome, CompactOutcome::Ran(_)));
+        // Keep everything from here on: the cut point stops moving, as in the report.
+        engine.set_compaction_settings(crate::session_engine::compaction::CompactionSettings {
+            keep_recent_tokens: 1_000_000,
+            ..Default::default()
+        });
+        let notices_in_context = |messages: &[SessionAgentMessage]| -> Vec<String> {
+            messages
+                .iter()
+                .filter_map(|message| match message {
+                    SessionAgentMessage::Custom(custom)
+                        if custom.custom_type == IPYTHON_STATE_CUSTOM_TYPE =>
+                    {
+                        Some(custom.content.text())
+                    }
+                    _ => None,
+                })
+                .collect()
+        };
+        let first = notices_in_context(
+            &engine
+                .session_handle()
+                .lock()
+                .await
+                .active_context()
+                .messages,
+        );
+        assert_eq!(first.len(), 1);
+        assert!(first[0].len() < NOTICE_MAX_LIST_BYTES + 200);
+        for round in 0..3 {
+            engine
+                .session_handle()
+                .lock()
+                .await
+                .append_message(user_turn(&format!("follow-up {round}")))
+                .unwrap();
+            let outcome = compact_once(&engine, &model).await.unwrap();
+            let CompactOutcome::Ran(run) = outcome else {
+                panic!("expected compaction round {round} to run");
+            };
+            assert_eq!(
+                run.ipython_state, None,
+                "round {round} re-appended an identical notice"
+            );
+            let notices = notices_in_context(
+                &engine
+                    .session_handle()
+                    .lock()
+                    .await
+                    .active_context()
+                    .messages,
+            );
+            assert_eq!(notices, first, "round {round}");
+        }
         registration.unregister();
     }
 
