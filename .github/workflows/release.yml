@@ -202,11 +202,17 @@ jobs:
             echo "::error::binary requires ${max_glibc}, above the GLIBC_2.35 (Ubuntu 22.04) release baseline"
             exit 1
           fi
-      - name: Generate bundled catalog assets (fixture, offline-safe)
+      # The live catalog from prime-agent-catalog (public; no token needed):
+      # a fresh install's first model list comes from this snapshot.
+      - name: Generate bundled catalog assets (live catalog)
         run: |
           set -euo pipefail
-          python3 scripts/release/bundle_catalog.py generate --fixture \
-            --out "target/${{ matrix.target }}/catalog-assets"
+          for attempt in 1 2 3; do
+            python3 scripts/release/bundle_catalog.py generate --network \
+              --out "target/${{ matrix.target }}/catalog-assets" && break
+            [[ "${attempt}" -lt 3 ]] || exit 1
+            sleep $((attempt * 10))
+          done
       - name: Assemble tarball + checksums + manifest
         # Assemble from the separate SHIPPED image; the Cargo binary stays
         # unstripped. The decoder remains a separate release asset.
@@ -343,11 +349,17 @@ jobs:
           bin="target/${{ matrix.target }}/release/prime-agent"
           out="$("${bin}" --version)"
           [[ "${out}" == "${RELEASE_VERSION#v}" ]]             || { echo "binary reports '${out}', expected '${RELEASE_VERSION#v}'"; exit 1; }
-      - name: Generate bundled catalog assets (fixture, offline-safe)
+      # The live catalog from prime-agent-catalog (public; no token needed):
+      # a fresh install's first model list comes from this snapshot.
+      - name: Generate bundled catalog assets (live catalog)
         run: |
           set -euo pipefail
-          python3 scripts/release/bundle_catalog.py generate --fixture \
-            --out "target/${{ matrix.target }}/catalog-assets"
+          for attempt in 1 2 3; do
+            python3 scripts/release/bundle_catalog.py generate --network \
+              --out "target/${{ matrix.target }}/catalog-assets" && break
+            [[ "${attempt}" -lt 3 ]] || exit 1
+            sleep $((attempt * 10))
+          done
       - name: Assemble tarball + checksums + manifest
         run: |
           set -euo pipefail
@@ -458,12 +470,18 @@ jobs:
           bin="target/${{ matrix.target }}/release/prime-agent.exe"
           out="$("${bin}" --version)"
           [[ "${out}" == "${RELEASE_VERSION#v}" ]]             || { echo "binary reports '${out}', expected '${RELEASE_VERSION#v}'"; exit 1; }
-      - name: Generate bundled catalog assets (fixture, offline-safe)
+      # The live catalog from prime-agent-catalog (public; no token needed):
+      # a fresh install's first model list comes from this snapshot.
+      - name: Generate bundled catalog assets (live catalog)
         shell: bash
         run: |
           set -euo pipefail
-          "${PY}" scripts/release/bundle_catalog.py generate --fixture \
-            --out "target/${{ matrix.target }}/catalog-assets"
+          for attempt in 1 2 3; do
+            "${PY}" scripts/release/bundle_catalog.py generate --network \
+              --out "target/${{ matrix.target }}/catalog-assets" && break
+            [[ "${attempt}" -lt 3 ]] || exit 1
+            sleep $((attempt * 10))
+          done
       - name: Assemble tarball + checksums + manifest
         shell: bash
         run: |
