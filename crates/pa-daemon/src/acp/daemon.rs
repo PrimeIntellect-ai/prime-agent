@@ -1097,6 +1097,40 @@ async fn wait_for_steer_admissions(state: &Arc<Mutex<DaemonAcpState>>, acp_sessi
     }
 }
 
+/// One pass of the prompt settlement's steered-run drain: whether the
+/// pass is done, must drain in-flight admissions first, or waits the
+/// runs its snapshot found.
+///
+/// A run id enters `steered_runs` at the admission point, BEFORE its
+/// Steer command reaches the worker, so a run whose admission is still
+/// in flight is unknown at the worker: `WaitForSteerRun` there answers
+/// no settle status, and the wait fails a prompt whose own turn already
+/// succeeded (#3684 review). A pass therefore waits its runs only when
+/// nothing is in flight - a pass whose snapshot carries in-flight
+/// admissions parks on `wait_for_steer_admissions` again and
+/// resnapshots; the runs it found are not lost, they stay un-waited in
+/// `steered_runs` until a later pass with nothing in flight waits them.
+enum SteerSettlementPass {
+    /// Nothing new and nothing in flight: the settlement is done.
+    Done,
+    /// An admission is still in flight: park until it settles, then
+    /// resnapshot before waiting anything.
+    Drain,
+    /// Nothing is in flight: these runs are registered at the worker
+    /// and are waited now.
+    Wait(Vec<String>),
+}
+
+fn steer_settlement_pass(new_runs: Vec<String>, in_flight: usize) -> SteerSettlementPass {
+    if new_runs.is_empty() && in_flight == 0 {
+        SteerSettlementPass::Done
+    } else if in_flight > 0 {
+        SteerSettlementPass::Drain
+    } else {
+        SteerSettlementPass::Wait(new_runs)
+    }
+}
+
 /// TS `cancelOutstandingRlmChildren`: cancel every roster row, no status
 /// filter — a row already settling keeps its own settle, and the cancels
 /// run one after another (TS `Promise.allSettled` is the declared
@@ -2377,7 +2411,12 @@ async fn prompt_turn(
     // admissions (so their runs are registered at the worker before any
     // run is waited), then waits the runs admitted so far, and repeats
     // until a pass admits nothing new and nothing is in flight. Steers
-    // can still be admitted into this turn while the slot is held.
+    // can still be admitted into this turn while the slot is held, and
+    // one admitted after a drain returned but before the snapshot is
+    // already in `steered_runs` with its Steer round trip still in
+    // flight: its pass drains again before waiting anything, because
+    // the run id is unknown at the worker until the round trip lands
+    // and waiting it would fail the prompt on a missing settle status.
     let mut waited_steered_runs: Vec<String> = Vec::new();
     loop {
         wait_for_steer_admissions(state, &params.session_id).await;
@@ -2401,32 +2440,38 @@ async fn prompt_turn(
             let in_flight = hosted.map_or(0, |hosted| hosted.steer_in_flight);
             (new_runs, in_flight)
         };
-        if new_runs.is_empty() && in_flight == 0 {
-            break;
-        }
-        for run_id in &new_runs {
-            match wait_steer_run(link, &hosted_daemon_session_id, run_id).await {
-                Ok(None) => {}
-                Ok(Some(failure)) => {
-                    eprintln!("pa-daemon: acp steered run failed: {failure}");
-                    publish_error_boundary(&producer, turn_id).await;
-                    producer.finish_prompt(turn_id).await;
-                    return super::internal_error(
-                        &id,
-                        &format!("prime-agent steered run failed: {failure}"),
-                    );
+        match steer_settlement_pass(new_runs, in_flight) {
+            SteerSettlementPass::Done => break,
+            // The loop head's wait_for_steer_admissions parks on the
+            // in-flight admissions; this pass resnapshots once they
+            // settle and waits its runs then.
+            SteerSettlementPass::Drain => {}
+            SteerSettlementPass::Wait(new_runs) => {
+                for run_id in &new_runs {
+                    match wait_steer_run(link, &hosted_daemon_session_id, run_id).await {
+                        Ok(None) => {}
+                        Ok(Some(failure)) => {
+                            eprintln!("pa-daemon: acp steered run failed: {failure}");
+                            publish_error_boundary(&producer, turn_id).await;
+                            producer.finish_prompt(turn_id).await;
+                            return super::internal_error(
+                                &id,
+                                &format!("prime-agent steered run failed: {failure}"),
+                            );
+                        }
+                        Err(error) => {
+                            publish_error_boundary(&producer, turn_id).await;
+                            producer.finish_prompt(turn_id).await;
+                            return super::internal_error(
+                                &id,
+                                &format!("prime-agent steered run wait failed: {error}"),
+                            );
+                        }
+                    }
                 }
-                Err(error) => {
-                    publish_error_boundary(&producer, turn_id).await;
-                    producer.finish_prompt(turn_id).await;
-                    return super::internal_error(
-                        &id,
-                        &format!("prime-agent steered run wait failed: {error}"),
-                    );
-                }
+                waited_steered_runs.extend(new_runs);
             }
         }
-        waited_steered_runs.extend(new_runs);
     }
     // The resolved runs leave the turn's tracking: they are done, and
     // the slot release must not migrate already-settled runs into the
@@ -3487,6 +3532,44 @@ mod tests {
         // on the follow-up lane behind non-ACP work, or its turn may have
         // settled before the steer landed.
         assert_eq!(steer_outcome(false), "queued");
+    }
+
+    /// The settlement race a steer can win against the drain: a steer
+    /// admitted after `wait_for_steer_admissions` returned but before
+    /// the snapshot is already in `steered_runs` while its Steer round
+    /// trip is still in flight - its run id is unknown at the worker
+    /// until the round trip lands, and waiting it there answers no
+    /// settle status, failing a prompt whose own turn already succeeded
+    /// (#3684 review, the r4342773489 follow-up). The pass must drain
+    /// the admission and resnapshot; runs wait only once nothing is in
+    /// flight.
+    #[test]
+    fn the_settlement_waits_no_run_while_an_admission_is_in_flight() {
+        assert!(
+            matches!(
+                steer_settlement_pass(vec!["steer-run:1".to_string()], 1),
+                SteerSettlementPass::Drain
+            ),
+            "a run whose admission is still in flight must drain first"
+        );
+        assert!(
+            matches!(
+                steer_settlement_pass(vec!["steer-run:1".to_string()], 0),
+                SteerSettlementPass::Wait(runs) if runs == vec!["steer-run:1".to_string()]
+            ),
+            "the same snapshot waits its runs once nothing is in flight"
+        );
+        assert!(matches!(
+            steer_settlement_pass(Vec::new(), 0),
+            SteerSettlementPass::Done
+        ));
+        assert!(
+            matches!(
+                steer_settlement_pass(Vec::new(), 1),
+                SteerSettlementPass::Drain
+            ),
+            "an in-flight admission without new runs still drains before done"
+        );
     }
 
     /// A steer the worker refused never landed, so its admission settles
