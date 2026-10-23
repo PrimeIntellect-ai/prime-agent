@@ -378,13 +378,13 @@ pub(crate) fn resolve_endpoint(model: &Model, options: &BedrockOptions) -> (Stri
                     &model.base_url,
                 )
             })
-            .or_else(env_region_or_profile)
+            .or_else(|| env_region_or_profile(env, pa_types::platform::home_dir().as_deref()))
             .unwrap_or_else(|| "us-east-1".to_string());
         return (model.base_url.trim_end_matches('/').to_string(), region);
     }
 
     let region = configured_region
-        .or_else(env_region_or_profile)
+        .or_else(|| env_region_or_profile(env, pa_types::platform::home_dir().as_deref()))
         .unwrap_or_else(|| "us-east-1".to_string());
     (
         format!("https://bedrock-runtime.{region}.amazonaws.com"),
@@ -392,22 +392,17 @@ pub(crate) fn resolve_endpoint(model: &Model, options: &BedrockOptions) -> (Stri
     )
 }
 
-/// AWS_PROFILE-resolved region from `~/.aws/config`, else None.
-fn env_region_or_profile() -> Option<String> {
-    if let Some(region) = std::env::var("AWS_REGION").ok().filter(|v| !v.is_empty()) {
+/// `AWS_REGION` / `AWS_DEFAULT_REGION` from `lookup`, else the `AWS_PROFILE` region from the AWS
+/// config file (`AWS_CONFIG_FILE` or `~/.aws/config`), else None.
+fn env_region_or_profile(
+    lookup: impl Fn(&str) -> Option<String>,
+    home: Option<&Path>,
+) -> Option<String> {
+    if let Some(region) = lookup("AWS_REGION").or_else(|| lookup("AWS_DEFAULT_REGION")) {
         return Some(region);
     }
-    if let Some(region) = std::env::var("AWS_DEFAULT_REGION")
-        .ok()
-        .filter(|v| !v.is_empty())
-    {
-        return Some(region);
-    }
-    let profile = std::env::var("AWS_PROFILE")
-        .ok()
-        .filter(|v| !v.is_empty())?;
-    let home = pa_types::platform::home_dir()?;
-    let text = std::fs::read_to_string(home.join(".aws/config")).ok()?;
+    let profile = lookup("AWS_PROFILE")?;
+    let text = std::fs::read_to_string(aws_file_paths(&lookup, home).config?).ok()?;
     let mut in_section = false;
     for line in text.lines() {
         let trimmed = line.trim();
@@ -550,6 +545,40 @@ mod file_path_tests {
                     credentials: None,
                     config: None,
                 },
+            ]
+        );
+    }
+}
+
+#[cfg(test)]
+mod region_tests {
+    use super::*;
+
+    #[test]
+    fn the_profile_region_comes_from_the_config_file_override_without_a_home_directory() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let config = dir.path().join("config");
+        std::fs::write(
+            &config,
+            "[default]\nregion = us-east-1\n\n[profile work]\nregion = eu-central-1\n",
+        )
+        .expect("write config");
+        let config = config.display().to_string();
+        let lookup = |var: &str| match var {
+            "AWS_PROFILE" => Some("work".to_string()),
+            "AWS_CONFIG_FILE" => Some(config.clone()),
+            _ => None,
+        };
+        let empty_home = dir.path().join("home");
+
+        assert_eq!(
+            [
+                env_region_or_profile(lookup, None),
+                env_region_or_profile(lookup, Some(&empty_home)),
+            ],
+            [
+                Some("eu-central-1".to_string()),
+                Some("eu-central-1".to_string())
             ]
         );
     }
