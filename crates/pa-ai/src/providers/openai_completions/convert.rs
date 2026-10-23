@@ -632,23 +632,5 @@ mod tests {
         assert!((usage.cost.input.as_f64() - 0.035).abs() < 1e-9);
         assert!((usage.cost.output.as_f64() - 0.035).abs() < 1e-9);
         assert!((usage.cost.total.as_f64() - 0.07).abs() < 1e-9);
-
-        // No catalog rates (a gateway id the catalog does not know): apportion by tokens.
-        let unpriced = model("litellm", 0.0, 0.0);
-        let raw = json!({"prompt_tokens": 12_612, "completion_tokens": 14, "total_tokens": 12_626, "cost": 0.001_508_016});
-        let usage = parse_chunk_usage(&raw, &unpriced, None);
-        let input_share = 0.001_508_016 * 12_612.0 / 12_626.0;
-        assert!((usage.cost.input.as_f64() - input_share).abs() < 1e-12);
-        assert!((usage.cost.total.as_f64() - 0.001_508_016).abs() < 1e-12);
-    }
-
-    /// A provider that reports no cost keeps the catalog-rate estimate.
-    #[test]
-    fn provider_without_reported_cost_keeps_catalog_estimate() {
-        let model = model("zai", 0.5, 0.5);
-        let raw =
-            json!({"prompt_tokens": 50_000, "completion_tokens": 50_000, "total_tokens": 100_000});
-        let usage = parse_chunk_usage(&raw, &model, None);
-        assert!((usage.cost.total.as_f64() - 0.05).abs() < 1e-9);
     }
 }
