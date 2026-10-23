@@ -3,7 +3,9 @@
 use serde_json::{json, Map, Value};
 
 use crate::models::{calculate_cost, CostOverrides};
-use crate::providers::openai_completions::{decode_reasoning_details, ResolvedCompat};
+use crate::providers::openai_completions::{
+    decode_reasoning_details, ResolvedCompat, UNNAMED_TOOL_CALL,
+};
 use crate::providers::transform_messages::transform_messages_with_normalizer;
 use crate::types::{
     AssistantContent, Context, MessageExt, Model, ModelInput, StopReason, TextContent,
@@ -220,7 +222,13 @@ pub fn convert_messages(model: &Model, context: &Context, compat: &ResolvedCompa
                                 "id": tool_call.id,
                                 "type": "function",
                                 "function": {
-                                    "name": tool_call.name,
+                                    // Sessions written before the stream sanitized nameless
+                                    // calls would otherwise be rejected on every replay.
+                                    "name": if tool_call.name.trim().is_empty() {
+                                        UNNAMED_TOOL_CALL
+                                    } else {
+                                        tool_call.name.as_str()
+                                    },
                                     "arguments": serde_json::Value::Object(tool_call.arguments.clone()).to_string(),
                                 },
                             }))
@@ -528,6 +536,7 @@ pub(crate) fn map_stop_reason(reason: &str) -> (StopReason, Option<String>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::providers::openai_completions::get_compat;
     use crate::types::{ModelCost, ModelInput};
     use pa_types::JsNumber;
 
@@ -630,5 +639,44 @@ mod tests {
         let model = model("zai", 0.5, 0.5);
         let usage = parse_chunk_usage(&raw_usage(0.07, ByokBilling::NotByok), &model, None);
         assert!((usage.cost.total.as_f64() - 0.05).abs() < 1e-9);
+    }
+
+    #[test]
+    fn a_nameless_tool_call_is_named_on_the_wire() {
+        let model = model("zenmux", 0.0, 0.0);
+        // A transcript written before the stream sanitized nameless calls: the
+        // provider synthesized a tool call but dropped `function.name`.
+        let context: Context = serde_json::from_value(json!({
+            "messages": [
+                {"role": "user", "content": "hi", "timestamp": 0},
+                {
+                    "role": "assistant",
+                    "content": [{"type": "toolCall", "id": "call_1", "name": "", "arguments": {}}],
+                    "api": "openai-completions",
+                    "provider": "zenmux",
+                    "model": "m",
+                    "usage": {
+                        "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0,
+                        "totalTokens": 0,
+                        "cost": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0, "total": 0}
+                    },
+                    "stopReason": "toolUse",
+                    "timestamp": 0
+                },
+                {
+                    "role": "toolResult",
+                    "toolCallId": "call_1",
+                    "content": [{"type": "text", "text": "Tool not found"}],
+                    "isError": true,
+                    "timestamp": 0
+                }
+            ]
+        }))
+        .expect("context");
+        let params = convert_messages(&model, &context, &get_compat(&model));
+        assert_eq!(
+            params[1]["tool_calls"][0]["function"]["name"], UNNAMED_TOOL_CALL,
+            "a replay of a nameless call must not send an empty function name"
+        );
     }
 }

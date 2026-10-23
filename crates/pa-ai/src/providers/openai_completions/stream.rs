@@ -17,7 +17,7 @@ use crate::providers::openai_completions::get_compat_cache_control;
 use crate::providers::openai_completions::params::{build_headers, build_params};
 use crate::providers::openai_completions::{
     encode_reasoning_details, get_compat, resolve_cache_retention, OpenAICompletionsOptions,
-    REASONING_FIELDS,
+    REASONING_FIELDS, UNNAMED_TOOL_CALL,
 };
 use crate::providers::openai_responses_hooks::apply_service_tier_pricing;
 use crate::types::{
@@ -443,6 +443,27 @@ fn encode_reasoning_details_signature(state: &mut StreamingState) {
 
 /// Port of the TS catch settle: finalize tool-call blocks whose parsed preview may lag the
 /// accumulated text under the growth throttle.
+/// A gateway can synthesize an `OpenAI` `tool_calls` entry from a model's native
+/// tool-call template and drop the function name (and sometimes the id). A
+/// nameless or id-less call makes strict providers reject every later request
+/// that replays the history (`tool_calls[N] is missing a function name`), which
+/// leaves the session unable to recover: the same history is re-sent on every
+/// turn and no tool can run. Make the call replayable before it enters the
+/// transcript: name it, and give it a stable id when the provider omitted one.
+fn sanitize_tool_calls(output: &mut AssistantMessage) {
+    let timestamp = output.timestamp;
+    for (index, block) in output.content.iter_mut().enumerate() {
+        if let AssistantContent::ToolCall(tool_call) = block {
+            if tool_call.name.trim().is_empty() {
+                tool_call.name = UNNAMED_TOOL_CALL.to_string();
+            }
+            if tool_call.id.is_empty() {
+                tool_call.id = format!("call_unnamed_{timestamp}_{index}");
+            }
+        }
+    }
+}
+
 fn settle_partial_tool_calls(state: &mut StreamingState) {
     for (index, accumulator) in &mut state.tool_call_partial_args {
         let Some(AssistantContent::ToolCall(block)) = state.output.content.get_mut(*index) else {
@@ -640,6 +661,7 @@ async fn run_stream(
                 // calls before the error event carries the message.
                 encode_reasoning_details_signature(&mut state);
                 settle_partial_tool_calls(&mut state);
+                sanitize_tool_calls(&mut state.output);
                 *output = state.output;
                 return Err(error);
             }
@@ -680,6 +702,7 @@ async fn run_stream(
     }
 
     encode_reasoning_details_signature(&mut state);
+    sanitize_tool_calls(&mut state.output);
     finish_blocks(&mut state, writer);
     *output = state.output;
 
@@ -775,6 +798,10 @@ mod tests {
     // own child module with this file's test harness.
     #[path = "stream_wire.rs"]
     mod stream_wire;
+
+    // The nameless-tool-call pin (gateway-synthesized calls without a name).
+    #[path = "stream_tool_call_name.rs"]
+    mod stream_tool_call_name;
 
     /// Serve one SSE response body for the provider's POST and return the
     /// bound address.

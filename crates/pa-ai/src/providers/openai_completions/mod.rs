@@ -25,6 +25,12 @@ pub use stream::stream_openai_completions;
 
 pub const API_OPENAI_COMPLETIONS: &str = "openai-completions";
 
+/// Name substituted for a tool call whose provider-supplied `function.name` is
+/// empty. Gateways that parse a model's native tool-call template can synthesize
+/// such a call; strict providers reject every later request that replays an
+/// empty name, so the call is named before it enters the transcript.
+pub(crate) const UNNAMED_TOOL_CALL: &str = "unknown_tool";
+
 const REASONING_DETAILS_SIGNATURE_TYPE: &str = "openai-completions.reasoning_details.v1";
 pub(crate) const REASONING_FIELDS: [&str; 3] = ["reasoning_content", "reasoning", "reasoning_text"];
 
