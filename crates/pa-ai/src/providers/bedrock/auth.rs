@@ -13,7 +13,7 @@ use crate::types::Model;
 type HmacSha256 = Hmac<Sha256>;
 
 /// Resolved AWS credentials (env vars, profile config, or SigV4-skip dummy).
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AwsCredentials {
     pub access_key_id: String,
     pub secret_access_key: String,
@@ -22,6 +22,13 @@ pub struct AwsCredentials {
 
 fn env(name: &str) -> Option<String> {
     std::env::var(name).ok().filter(|value| !value.is_empty())
+}
+
+/// AWS credential files use `[profile name]` (config) or `[name]`.
+pub(crate) fn profile_section_matches(name: &str, profile: &str) -> bool {
+    name == profile
+        || name == format!("profile {profile}")
+        || name.split_whitespace().last() == Some(profile)
 }
 
 /// Parse an AWS credentials-style ini file: `[section-name]` headers with `key = value` pairs (only
@@ -35,10 +42,7 @@ fn parse_ini_credentials(text: &str, section: &str) -> Option<AwsCredentials> {
         let trimmed = line.trim();
         if trimmed.starts_with('[') && trimmed.ends_with(']') {
             let name = trimmed[1..trimmed.len() - 1].trim();
-            // AWS credential files use `[profile name]` (config) or `[name]`.
-            in_section = name == section
-                || name == format!("profile {section}")
-                || name.split_whitespace().last() == Some(section);
+            in_section = profile_section_matches(name, section);
             continue;
         }
         if !in_section {
@@ -63,7 +67,9 @@ fn parse_ini_credentials(text: &str, section: &str) -> Option<AwsCredentials> {
 }
 
 /// The SDK credential chain used by the TS provider: SigV4-skip dummy keys, static env credentials,
-/// then the shared credentials file (default or `AWS_PROFILE` / `options.profile`).
+/// the shared credentials file (default or `AWS_PROFILE` / `options.profile`), then the profile's
+/// `credential_process` in the AWS config file (`AWS_CONFIG_FILE` or `~/.aws/config`). May run the
+/// credential process, so async callers should call it off the runtime threads.
 pub fn resolve_credentials(profile: Option<&str>) -> Option<AwsCredentials> {
     if std::env::var("AWS_BEDROCK_SKIP_AUTH").as_deref() == Ok("1") {
         return Some(AwsCredentials {
@@ -86,9 +92,15 @@ pub fn resolve_credentials(profile: Option<&str>) -> Option<AwsCredentials> {
         .or_else(|| env("AWS_PROFILE"))
         .unwrap_or_else(|| "default".to_string());
     let home = pa_types::platform::home_dir()?;
-    let path = home.join(".aws/credentials");
-    let text = std::fs::read_to_string(path).ok()?;
-    parse_ini_credentials(&text, &profile)
+    let shared = std::fs::read_to_string(home.join(".aws/credentials"))
+        .ok()
+        .and_then(|text| parse_ini_credentials(&text, &profile));
+    if shared.is_some() {
+        return shared;
+    }
+    let config_path = env("AWS_CONFIG_FILE").map_or_else(|| home.join(".aws/config"), Into::into);
+    let config = std::fs::read_to_string(config_path).ok()?;
+    crate::providers::bedrock::credential_process::credentials_from_process(&profile, &config)
 }
 
 fn sha256_hex(bytes: &[u8]) -> String {
@@ -103,10 +115,7 @@ fn hmac_sha256(key: &[u8], data: &[u8]) -> Vec<u8> {
 
 /// UTC timestamp in `SigV4` formats: `x-amz-date` (20250101T000000Z) and date stamp (20250101).
 /// Uses std time to avoid a chrono dependency.
-fn now_utc_parts() -> (String, String) {
-    let seconds = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |duration| duration.as_secs());
+fn utc_parts(seconds: u64) -> (String, String) {
     let (year, month, day, hour, minute, second) = civil_from_unix(seconds);
     (
         format!("{year:04}{month:02}{day:02}T{hour:02}{minute:02}{second:02}Z"),
@@ -154,13 +163,70 @@ pub struct SigV4Params<'a> {
     pub extra_signed_headers: &'a [(String, String)],
 }
 
+/// Percent-encode every byte outside the `SigV4` unreserved set (`/` kept as the separator).
+fn uri_encode_path(path: &str) -> String {
+    let mut encoded = String::new();
+    for byte in path.bytes() {
+        let c = byte as char;
+        if c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '~' | '/') {
+            encoded.push(c);
+        } else {
+            let _ = write!(encoded, "%{byte:02X}");
+        }
+    }
+    encoded
+}
+
+/// The `SigV4` canonical request: method, canonical URI, canonical query string (an empty line when
+/// there is none), the canonical headers, a blank line, the signed header names and the body hash.
+/// Every service except S3 encodes the already-escaped request path a second time, so a model id
+/// sent as `...v1%3A0` is signed as `...v1%253A0`.
+fn canonical_request(
+    method: &str,
+    path_and_query: &str,
+    canonical_headers_text: &str,
+    signed_headers: &str,
+    payload_hash: &str,
+) -> String {
+    let (path, query) = path_and_query
+        .split_once('?')
+        .unwrap_or((path_and_query, ""));
+    let canonical_uri = uri_encode_path(path);
+    let mut pairs: Vec<(&str, &str)> = query
+        .split('&')
+        .filter(|pair| !pair.is_empty())
+        .map(|pair| pair.split_once('=').unwrap_or((pair, "")))
+        .collect();
+    pairs.sort_unstable();
+    let canonical_query = pairs
+        .iter()
+        .map(|(key, value)| format!("{key}={value}"))
+        .collect::<Vec<_>>()
+        .join("&");
+    format!(
+        "{method}\n{canonical_uri}\n{canonical_query}\n{canonical_headers_text}\n{signed_headers}\n{payload_hash}"
+    )
+}
+
 /// Produce the `SigV4` auth headers for a request. Returns `(x-amz-date, authorization,
 /// x-amz-security-token)`.
 pub fn sigv4_headers(
     params: &SigV4Params<'_>,
     credentials: &AwsCredentials,
 ) -> (String, String, Option<String>) {
-    let (amz_date, date_stamp) = now_utc_parts();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |duration| duration.as_secs());
+    sigv4_headers_at(params, credentials, now)
+}
+
+/// [`sigv4_headers`] for a fixed signing time (Unix seconds).
+fn sigv4_headers_at(
+    params: &SigV4Params<'_>,
+    credentials: &AwsCredentials,
+    unix_seconds: u64,
+) -> (String, String, Option<String>) {
+    let (amz_date, date_stamp) = utc_parts(unix_seconds);
     let payload_hash = sha256_hex(params.body);
 
     let mut canonical_headers: Vec<(String, String)> = vec![
@@ -169,7 +235,9 @@ pub fn sigv4_headers(
         ("x-amz-date".to_string(), amz_date.clone()),
     ];
     for (name, value) in params.extra_signed_headers {
-        canonical_headers.push((name.to_lowercase(), value.clone()));
+        // Canonical header values are trimmed with inner whitespace runs collapsed.
+        let value = value.split_whitespace().collect::<Vec<_>>().join(" ");
+        canonical_headers.push((name.to_lowercase(), value));
     }
     if let Some(token) = &credentials.session_token {
         canonical_headers.push(("x-amz-security-token".to_string(), token.clone()));
@@ -189,9 +257,12 @@ pub fn sigv4_headers(
                 text
             });
 
-    let canonical_request = format!(
-        "{}\n{}\n{canonical_headers_text}\n{signed_headers}\n{payload_hash}",
-        params.method, params.path_and_query
+    let canonical_request = canonical_request(
+        params.method,
+        params.path_and_query,
+        &canonical_headers_text,
+        &signed_headers,
+        &payload_hash,
     );
 
     let credential_scope = format!(
@@ -330,4 +401,87 @@ fn env_region_or_profile() -> Option<String> {
         }
     }
     None
+}
+
+#[cfg(test)]
+mod sigv4_tests {
+    use super::*;
+
+    const PATH: &str = "/model/anthropic.claude-3-5-haiku-20241022-v1%3A0/converse-stream";
+    /// 2015-08-30T12:36:00Z.
+    const SIGNED_AT: u64 = 1_440_938_160;
+
+    fn example_credentials(session_token: Option<&str>) -> AwsCredentials {
+        AwsCredentials {
+            access_key_id: "AKIDEXAMPLE".into(),
+            secret_access_key: "wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY".into(),
+            session_token: session_token.map(str::to_string),
+        }
+    }
+
+    fn sign(
+        extra_signed_headers: &[(String, String)],
+        session_token: Option<&str>,
+    ) -> (String, String, Option<String>) {
+        sigv4_headers_at(
+            &SigV4Params {
+                method: "POST",
+                path_and_query: PATH,
+                host: "bedrock-runtime.us-east-1.amazonaws.com",
+                region: "us-east-1",
+                service: "bedrock",
+                body: br#"{"messages":[]}"#,
+                extra_signed_headers,
+            },
+            &example_credentials(session_token),
+            SIGNED_AT,
+        )
+    }
+
+    /// Expected values come from botocore's `SigV4Auth` signing the same request at the same time.
+    #[test]
+    fn signature_matches_the_aws_sdk_for_a_converse_stream_request() {
+        assert_eq!(
+            sign(&[], None),
+            (
+                "20150830T123600Z".to_string(),
+                "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/20150830/us-east-1/bedrock/aws4_request, SignedHeaders=content-type;host;x-amz-date, Signature=2b962e4a0a2957cde2764ba8f78dae35436939649a081a25a45c3bd64dfe16d2".to_string(),
+                None,
+            )
+        );
+    }
+
+    /// Same request with a session token and the request-metadata header (whose value botocore
+    /// canonicalizes by collapsing inner whitespace runs).
+    #[test]
+    fn signature_matches_the_aws_sdk_with_a_session_token_and_metadata_header() {
+        let metadata = vec![(
+            "x-amzn-bedrock-request-metadata".to_string(),
+            r#"{"team":  "a"}"#.to_string(),
+        )];
+        assert_eq!(
+            sign(&metadata, Some("session-token")),
+            (
+                "20150830T123600Z".to_string(),
+                "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/20150830/us-east-1/bedrock/aws4_request, SignedHeaders=content-type;host;x-amz-date;x-amz-security-token;x-amzn-bedrock-request-metadata, Signature=607ee2b6778ba42dc6f50e8aa52b419c3aa6eaeb0d4ef441787fcb6a3b2cdb15".to_string(),
+                Some("session-token".to_string()),
+            )
+        );
+    }
+
+    #[test]
+    fn canonical_request_has_an_empty_query_line_and_double_encodes_the_path() {
+        assert_eq!(
+            canonical_request("POST", PATH, "host:example\n", "host", "abc"),
+            "POST\n/model/anthropic.claude-3-5-haiku-20241022-v1%253A0/converse-stream\n\nhost:example\n\nhost\nabc"
+        );
+    }
+
+    #[test]
+    fn canonical_request_sorts_the_query() {
+        assert_eq!(
+            canonical_request("GET", "/x?b=2&a=1&a=0", "", "", "h"),
+            "GET\n/x\na=0&a=1&b=2\n\n\nh"
+        );
+    }
 }
