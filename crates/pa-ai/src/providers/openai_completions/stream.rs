@@ -316,7 +316,11 @@ fn handle_chunk(
     if let Some(tool_calls) = delta.get("tool_calls").and_then(|value| value.as_array()) {
         for tool_call in tool_calls {
             let stream_index = tool_call.get("index").and_then(serde_json::Value::as_u64);
-            let id = tool_call.get("id").and_then(|value| value.as_str());
+            // An empty id counts as absent, as TS's truthiness check treats it.
+            let id = tool_call
+                .get("id")
+                .and_then(|value| value.as_str())
+                .filter(|id| !id.is_empty());
             let index = state.ensure_tool_call_block(stream_index, id, writer);
             if let Some(AssistantContent::ToolCall(block)) = state.output.content.get_mut(index) {
                 if block.id.is_empty() {

@@ -91,6 +91,28 @@ async fn a_continuation_delta_without_index_or_id_extends_the_open_call() {
 }
 
 #[tokio::test]
+async fn a_continuation_delta_with_an_empty_id_extends_the_open_call() {
+    let message = stream(&[
+        chunk(&json!({"tool_calls": [{
+            "id": "call_1",
+            "type": "function",
+            "function": {"name": "python_repl", "arguments": "{\"code\":\"import"},
+        }]})),
+        chunk(&json!({"tool_calls": [{"id": "", "function": {"arguments": " os\"}"}}]})),
+    ])
+    .await;
+    assert_eq!(
+        message.content,
+        vec![tool_call(
+            "call_1",
+            "python_repl",
+            &json!({"code": "import os"})
+        )]
+    );
+    assert_eq!(message.stop_reason, StopReason::ToolUse);
+}
+
+#[tokio::test]
 async fn a_nameless_call_beside_a_named_one_is_dropped_alone() {
     let message = stream(&[
         chunk(&json!({"tool_calls": [{

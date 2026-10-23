@@ -113,9 +113,11 @@ pub fn transform_messages_with_normalizer(
     let mut tool_call_id_map: HashMap<String, String> = HashMap::new();
     let image_aware = downgrade_unsupported_images(messages, model);
 
-    let transformed: Vec<Message> = image_aware
+    // `None` marks a dropped unnamed-only assistant turn: it still ends the previous turn's pending
+    // calls, so its own results cannot be replayed against an earlier call that reused the id.
+    let transformed: Vec<Option<Message>> = image_aware
         .iter()
-        .filter_map(|msg| match msg {
+        .map(|msg| match msg {
             Message::User(_) => Some(msg.clone()),
             Message::ToolResult(tool_result) => {
                 if let Some(normalized) = tool_call_id_map.get(&tool_result.tool_call_id) {
@@ -237,6 +239,14 @@ pub fn transform_messages_with_normalizer(
         };
 
     for msg in transformed {
+        let Some(msg) = msg else {
+            insert_synthetic_tool_results(
+                &mut result,
+                &mut pending_tool_calls,
+                &mut existing_tool_result_ids,
+            );
+            continue;
+        };
         match &msg {
             Message::Assistant(assistant) => {
                 insert_synthetic_tool_results(
@@ -490,6 +500,31 @@ mod tests {
         let expected = vec![
             user("hi"),
             Message::Assistant(assistant(vec![text("probing")], StopReason::ToolUse)),
+            Message::Assistant(assistant(vec![named], StopReason::ToolUse)),
+            tool_result("call-1", "bash", "ok"),
+            user("again"),
+        ];
+        assert_eq!(transformed, expected);
+    }
+
+    #[test]
+    fn a_dropped_unnamed_turn_does_not_answer_an_earlier_call_with_the_same_id() {
+        let named = tool_call("call-1", "bash");
+        let messages = vec![
+            user("hi"),
+            Message::Assistant(assistant(vec![named.clone()], StopReason::ToolUse)),
+            tool_result("call-1", "bash", "ok"),
+            Message::Assistant(assistant(
+                vec![tool_call("call-1", "")],
+                StopReason::ToolUse,
+            )),
+            tool_result("call-1", "", "Tool  not found"),
+            user("again"),
+        ];
+        let transformed =
+            transform_messages_with_normalizer(&messages, &test_model(), &|_, _, _| None);
+        let expected = vec![
+            user("hi"),
             Message::Assistant(assistant(vec![named], StopReason::ToolUse)),
             tool_result("call-1", "bash", "ok"),
             user("again"),

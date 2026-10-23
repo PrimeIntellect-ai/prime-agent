@@ -366,6 +366,9 @@ async fn run_stream(
         drop_unnamed_tool_calls(output);
         return Err(error);
     }
+    // After the `*_end` events and the error settle, which address blocks by their streamed
+    // content indices; the final message is what the session stores.
+    drop_unnamed_tool_calls(output);
 
     Ok(())
 }
@@ -725,9 +728,6 @@ impl MistralStreamState {
                 partial: output.clone(),
             });
         }
-        // After the `*_end` events, so the content indices already streamed to the client stay
-        // valid; the final message is what the session stores.
-        drop_unnamed_tool_calls(output);
     }
 }
 
