@@ -81,8 +81,6 @@ pub enum McpServerConfig {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         headers: Option<HashMap<String, String>>,
         /// Env var holding a static bearer token (skips OAuth).
-        /// `bearer_token_env_var` is what `mcp add` wrote before it matched
-        /// this key; existing settings keep working.
         #[serde(
             rename = "bearerTokenEnvVar",
             alias = "bearer_token_env_var",

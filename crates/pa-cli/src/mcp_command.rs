@@ -43,8 +43,6 @@ pub enum McpServerConfig {
     #[serde(rename = "http")]
     Http {
         url: String,
-        /// Written as the engine's `bearerTokenEnvVar`; the `snake_case` key
-        /// older builds wrote still reads.
         #[serde(
             rename = "bearerTokenEnvVar",
             alias = "bearer_token_env_var",
