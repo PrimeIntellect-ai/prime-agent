@@ -12,7 +12,7 @@ use crate::types::{
 };
 use crate::utils_inner::sanitize_unicode::sanitize_surrogates;
 
-fn get_model_match_candidates(model_id: &str, model_name: Option<&str>) -> Vec<String> {
+pub(crate) fn get_model_match_candidates(model_id: &str, model_name: Option<&str>) -> Vec<String> {
     let mut values = vec![model_id.to_string()];
     if let Some(name) = model_name {
         values.push(name.to_string());
