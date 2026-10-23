@@ -164,19 +164,22 @@ pub fn convert_messages(
                             if thinking.thinking.trim().is_empty() {
                                 continue;
                             }
+                            // Unsigned thinking (an aborted stream, or an Anthropic-compatible
+                            // endpoint that never signs, e.g. MiMo) cannot be replayed as a
+                            // `thinking` block: the API requires a valid signature. Drop it rather
+                            // than replaying it as `text`, which makes the model read its own
+                            // reasoning as part of its earlier replies and start echoing it
+                            // (discussion #3391). Cross-model thinking never reaches here: the
+                            // transform step already turned it into text.
                             let signature = thinking.thinking_signature.as_deref().unwrap_or("");
                             if signature.trim().is_empty() {
-                                blocks.push(json!({
-                                    "type": "text",
-                                    "text": sanitize_surrogates(&thinking.thinking),
-                                }));
-                            } else {
-                                blocks.push(json!({
-                                    "type": "thinking",
-                                    "thinking": sanitize_surrogates(&thinking.thinking),
-                                    "signature": signature,
-                                }));
+                                continue;
                             }
+                            blocks.push(json!({
+                                "type": "thinking",
+                                "thinking": sanitize_surrogates(&thinking.thinking),
+                                "signature": signature,
+                            }));
                         }
                         AssistantContent::ToolCall(tool_call) => {
                             blocks.push(json!({
@@ -315,5 +318,80 @@ pub(crate) fn map_stop_reason(reason: &str) -> Result<StopReason, String> {
         "tool_use" => Ok(StopReason::ToolUse),
         "refusal" | "sensitive" => Ok(StopReason::Error),
         other => Err(format!("Unhandled stop reason: {other}")),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::convert_messages;
+    use crate::types::{Context, Message, Model};
+    use serde_json::{json, Value};
+
+    fn model() -> Model {
+        serde_json::from_value(json!({
+            "id": "mimo-v2.6-pro", "name": "MiMo", "api": "anthropic-messages",
+            "provider": "xiaomi", "baseUrl": "http://localhost", "reasoning": true,
+            "input": ["text"],
+            "cost": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0},
+            "contextWindow": 128_000, "maxTokens": 8192
+        }))
+        .expect("model json")
+    }
+
+    fn assistant_turn(blocks: &Value) -> Value {
+        let messages: Vec<Message> = serde_json::from_value(json!([
+            {"role": "user", "content": "rebuild", "timestamp": 1},
+            {
+                "role": "assistant", "content": blocks,
+                "api": "anthropic-messages", "provider": "xiaomi", "model": "mimo-v2.6-pro",
+                "usage": {
+                    "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0, "totalTokens": 0,
+                    "cost": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0, "total": 0}
+                },
+                "stopReason": "stop", "timestamp": 2
+            },
+            {"role": "user", "content": "again", "timestamp": 3}
+        ]))
+        .expect("messages json");
+        let context = Context {
+            system_prompt: None,
+            messages,
+            tools: None,
+        };
+        convert_messages(&context, &model(), false, None)
+            .into_iter()
+            .find(|message| message["role"] == "assistant")
+            .unwrap_or(Value::Null)
+    }
+
+    /// Discussion #3391: same-model thinking without a signature is dropped from the replayed
+    /// history instead of being replayed as visible text the model then imitates.
+    #[test]
+    fn unsigned_thinking_is_not_replayed_as_text() {
+        let turn = assistant_turn(&json!([
+            {"type": "thinking", "thinking": "Let me do it fast.", "thinkingSignature": ""},
+            {"type": "thinking", "thinking": "No signature field at all."},
+            {"type": "text", "text": "Rebuilt."}
+        ]));
+        assert_eq!(
+            turn,
+            json!({"role": "assistant", "content": [{"type": "text", "text": "Rebuilt."}]})
+        );
+    }
+
+    /// Signed thinking still replays as a `thinking` block with its signature.
+    #[test]
+    fn signed_thinking_replays_as_thinking() {
+        let turn = assistant_turn(&json!([
+            {"type": "thinking", "thinking": "Plan.", "thinkingSignature": "sig"},
+            {"type": "text", "text": "Rebuilt."}
+        ]));
+        assert_eq!(
+            turn,
+            json!({"role": "assistant", "content": [
+                {"type": "thinking", "thinking": "Plan.", "signature": "sig"},
+                {"type": "text", "text": "Rebuilt."}
+            ]})
+        );
     }
 }
