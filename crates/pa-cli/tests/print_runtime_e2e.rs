@@ -807,11 +807,11 @@ fn print_mode_json_streams_the_threshold_compaction_pair() {
             "compaction": { "enabled": true, "reserveTokens": 1, "keepRecentTokens": 10 }
         }),
     );
-    // The conversation-scoped faux cache counts the ~8.1k seed prompt
-    // as input plus cache-write tokens. It stays below the 23_808 ceiling
-    // (32k - 4_096 output - 4_096 headroom); the crossing turn exceeds it.
+    // A small context window: the ~8.1k seed turn stays below the 15_808
+    // ceiling (24k - 4_096 output - 4_096 headroom), and the ~12k-token
+    // crossing turn pushes past it.
     let script = serde_json::json!({
-        "contextWindow": 32000,
+        "contextWindow": 24000,
         "responses": [
             {"text": "seed reply"},
             {"text": "crossing reply"},

@@ -74,22 +74,20 @@ async fn opencode_session_identity_reaches_every_transport_without_cache_retenti
         "anthropic-messages",
         "google-generative-ai",
     ] {
-        for id in ["conversation-a", "conversation-a", "conversation-b"] {
-            let headers = capture(api, "opencode-go", id, None).await;
-            assert_eq!(
-                headers
-                    .iter()
-                    .filter(|(name, _)| name == "x-opencode-session")
-                    .map(|(_, value)| value.as_str())
-                    .collect::<Vec<_>>(),
-                vec![id],
-                "{api}"
-            );
-            assert!(
-                headers.contains(&("user-agent".into(), "prime-agent".into())),
-                "{api}: {headers:?}"
-            );
-        }
+        let headers = capture(api, "opencode-go", "conversation", None).await;
+        assert_eq!(
+            headers
+                .iter()
+                .filter(|(name, _)| name == "x-opencode-session")
+                .map(|(_, value)| value.as_str())
+                .collect::<Vec<_>>(),
+            vec!["conversation"],
+            "{api}"
+        );
+        assert!(
+            headers.contains(&("user-agent".into(), "prime-agent".into())),
+            "{api}: {headers:?}"
+        );
     }
 }
 

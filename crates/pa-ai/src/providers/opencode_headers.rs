@@ -4,11 +4,12 @@ pub(super) fn apply(headers: &mut Vec<(String, String)>, provider: &str, session
     if !matches!(provider, "opencode" | "opencode-go") {
         return;
     }
+    // TS `withOpenCodeHeaders`: a missing id is skipped; explicit caller headers win.
     for (name, value) in [
         ("User-Agent", Some("prime-agent")),
         ("x-opencode-session", session_id),
     ] {
-        let Some(value) = value.filter(|value| !value.trim().is_empty()) else {
+        let Some(value) = value else {
             continue;
         };
         if !headers

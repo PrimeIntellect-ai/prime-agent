@@ -495,7 +495,7 @@ pub async fn create_session(mut config: SessionEngineConfig) -> anyhow::Result<S
     let cell_timeout_ms =
         super::runtime_wiring::arm_cell_timeout_ms(config.daemonless, python_cell_timeout_ms);
     let provisioner = super::runtime_wiring::kernel_provisioner(
-        session_id.clone(),
+        session_id,
         handlers,
         python_skills.clone(),
         cwd.clone(),
@@ -697,7 +697,6 @@ pub async fn create_session(mut config: SessionEngineConfig) -> anyhow::Result<S
         None => timing_stream_fn,
     };
     let agent = Agent::new(AgentOptions {
-        session_id: Some(session_id),
         initial_state: AgentInitialState {
             system_prompt: Some(system_prompt.clone()),
             model: Some(model),

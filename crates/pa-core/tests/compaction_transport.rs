@@ -209,6 +209,7 @@ async fn branch_summary_respects_mandatory_thinking() {
             replace_instructions: false,
             reserve_tokens: DEFAULT_BRANCH_RESERVE_TOKENS,
             auxiliary: None,
+            session_id: None,
         },
     )
     .await;
