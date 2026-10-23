@@ -225,10 +225,13 @@ async fn branch_summary_respects_mandatory_thinking() {
 #[tokio::test]
 async fn refiner_call_respects_mandatory_thinking() {
     let (model, request, server) = mock_summary(Reply::Complete).await;
-    let reply =
-        default_refiner_call(Some("synthetic-key".into()))(model, "system", "prompt".into())
-            .await
-            .unwrap();
+    let reply = default_refiner_call(Some("synthetic-key".into()), "synthetic-session".into())(
+        model,
+        "system",
+        "prompt".into(),
+    )
+    .await
+    .unwrap();
     assert!(matches!(
         reply.content.as_slice(),
         [pa_types::ai::AssistantContentBlock::Text(text)] if text.text == "summary"
