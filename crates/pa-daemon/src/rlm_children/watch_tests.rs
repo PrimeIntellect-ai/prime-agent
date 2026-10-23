@@ -43,6 +43,10 @@ enum FakeChild {
     /// Unreachable; the watcher's give-up poll parks until the test
     /// lands a reader's verdict.
     UnreachableUntilVerdict,
+    /// Every model call of the task run fails (#3366): the admitted
+    /// prompt's run leaves a failed assistant row and the retry
+    /// episode's failed outcome row in the child's session file.
+    FinalTurnFails,
 }
 
 /// A scripted JSONL supervisor for the watcher tests: creates one child
@@ -173,6 +177,21 @@ async fn spawn_fake_supervisor(
                             })),
                         ),
                         "prompt" => {
+                            if matches!(child, FakeChild::FinalTurnFails) {
+                                use super::lifecycle::exit_capture_tests::{
+                                    assistant_row_ending, retry_outcome_row,
+                                };
+                                let failed_call = assistant_row_ending(
+                                    "",
+                                    pa_types::ai::StopReason::Error,
+                                    Some("429 Provider returned error"),
+                                );
+                                std::fs::write(
+                                    &*child_session_file,
+                                    format!("{failed_call}\n{}\n", retry_outcome_row(false)),
+                                )
+                                .unwrap();
+                            }
                             if let Some(gate) = child_subagents
                                 .prompt_gate
                                 .as_ref()
@@ -995,6 +1014,44 @@ async fn a_child_whose_task_prompt_cannot_be_routed_delivers_the_failure_notice(
     let kill = kill_rx.try_recv().expect("the unadmitted child is killed");
     assert_eq!(kill["activeSessionId"], "child-live");
     // Exactly one failure row lands: the claim admits one writer.
+    let extra = tokio::time::timeout(Duration::from_millis(300), follow_up_rx.recv()).await;
+    assert!(extra.is_err(), "no second notice may arrive");
+}
+
+/// #3366: a child whose model calls all failed settles `error`, not
+/// `done`: the parent receives the failure row carrying the provider
+/// error (not the no-reply notice), and the roster and the collect
+/// envelope report the error with its text.
+#[tokio::test]
+async fn a_child_whose_final_turn_failed_settles_as_an_error() {
+    let (follow_up_tx, mut follow_up_rx) = mpsc::unbounded_channel();
+    let (sessions, _kill_rx) = sessions_with_fake_supervisor(
+        follow_up_tx,
+        0,
+        FakeKill::Success,
+        FakeChild::FinalTurnFails,
+    )
+    .await;
+    let handle = spawn_child(&sessions).await;
+    sessions.notify_turn_done();
+
+    let follow_up = tokio::time::timeout(Duration::from_secs(10), follow_up_rx.recv())
+        .await
+        .expect("the failed child must deliver its failure notice")
+        .expect("the follow_up channel stays open");
+    let error = "Error: Retry failed after 3 attempts: 429 Provider returned error";
+    assert_failure_row(&follow_up, &handle.rlm_child_id, error);
+    let entries = sessions.list_subagents().await.expect("child roster");
+    assert_eq!(entries[0].status, "error");
+    let results = sessions
+        .collect(vec![handle.rlm_child_id.clone()], 0)
+        .await
+        .expect("collect the failed child");
+    assert_eq!(
+        (results[0].status, results[0].error.as_deref()),
+        ("error", Some(error))
+    );
+    // Exactly one notice lands: the watcher delivers once.
     let extra = tokio::time::timeout(Duration::from_millis(300), follow_up_rx.recv()).await;
     assert!(extra.is_err(), "no second notice may arrive");
 }
