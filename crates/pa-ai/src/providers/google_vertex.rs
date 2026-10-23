@@ -575,6 +575,21 @@ mod tests {
         );
     }
 
+    /// The system prompt goes out as a `Content` object (`{"parts":[{"text":...}]}`), the shape
+    /// Vertex requires for `systemInstruction`.
+    #[test]
+    fn system_instruction_is_sent_as_content_parts() {
+        let context = Context {
+            system_prompt: Some("You are terse.".into()),
+            ..Context::default()
+        };
+        let params = build_params(&gemma4_model(), &context, &GoogleVertexOptions::default());
+        assert_eq!(
+            params["systemInstruction"],
+            json!({ "parts": [{ "text": "You are terse." }] })
+        );
+    }
+
     /// A budget-based model keeps the budget arm (the level list must not swallow the default
     /// path).
     #[test]

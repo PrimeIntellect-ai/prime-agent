@@ -516,6 +516,22 @@ mod tests {
         }
     }
 
+    /// The system prompt goes out as a `Content` object (`{"parts":[{"text":...}]}`), the shape
+    /// the Gemini API requires for `systemInstruction`.
+    #[test]
+    fn system_instruction_is_sent_as_content_parts() {
+        let model = level_mapped_model("gemini-4-argon");
+        let context = Context {
+            system_prompt: Some("You are terse.".into()),
+            ..Context::default()
+        };
+        let params = build_params(&model, &context, &GoogleOptions::default());
+        assert_eq!(
+            params["systemInstruction"],
+            json!({ "parts": [{ "text": "You are terse." }] })
+        );
+    }
+
     /// Gemini 2.5 (no level map) keeps per-effort budgets and disables with a zero budget.
     #[test]
     fn gemini25_keeps_thinking_budgets() {
