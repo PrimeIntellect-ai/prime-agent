@@ -1,6 +1,6 @@
 //! Azure `OpenAI` Responses API streaming provider: deployment name resolution (options/env map),
-//! base-URL normalization with the /openai/v1 path, the `<base>/responses` route (deployment in
-//! the body, api-version query only for non-v1 versions), and the shared Responses stream processor.
+//! base-URL normalization with the /openai/v1 path, the `<base>/responses?api-version=<v>` route
+//! (deployment in the body), and the shared Responses stream processor.
 
 use std::collections::HashMap;
 
@@ -122,16 +122,22 @@ fn build_default_base_url(resource_name: &str) -> String {
 }
 
 /// Resolves the Responses request URL. Azure's Responses API has no per-deployment route: the
-/// deployment travels as `model` in the body and the URL is `<base>/responses`. The v1 API takes no
-/// api-version; any other version (`preview`, or a dated one against a legacy `/openai` base) rides
-/// as the `api-version` query.
+/// deployment travels as `model` in the body and the URL is `<base>/responses?api-version=<v>`.
+/// The query is always sent (`v1` by default), as the TS `AzureOpenAI` client did. Azure hosts
+/// are normalized to `/openai/v1`, where Azure documents only `v1` and `preview`; a dated version
+/// only reaches a `/openai` path on a non-Azure gateway base URL.
 fn resolve_responses_url(
     model: &Model,
     options: Option<&AzureOpenAIResponsesOptions>,
 ) -> Result<String, String> {
     let api_version = options
         .and_then(|options| options.azure_api_version.clone())
-        .or_else(|| std::env::var("AZURE_OPENAI_API_VERSION").ok())
+        .filter(|value| !value.is_empty())
+        .or_else(|| {
+            std::env::var("AZURE_OPENAI_API_VERSION")
+                .ok()
+                .filter(|value| !value.is_empty())
+        })
         .unwrap_or_else(|| DEFAULT_AZURE_API_VERSION.to_string());
 
     let base_url = options
@@ -166,9 +172,6 @@ fn resolve_responses_url(
 
     let base_url = normalize_azure_base_url(&resolved_base_url)?;
     let base_url = base_url.trim_end_matches('/');
-    if api_version == DEFAULT_AZURE_API_VERSION {
-        return Ok(format!("{base_url}/responses"));
-    }
     Ok(format!("{base_url}/responses?api-version={api_version}"))
 }
 
@@ -548,24 +551,26 @@ mod tests {
         resolve_responses_url(&model, Some(&options)).unwrap()
     }
 
-    /// Discussion #3712: the v1 API posts to `<resource>/openai/v1/responses` with the deployment
-    /// in the body and no api-version query; the old `/deployments/<name>/responses` route 404s.
+    /// Discussion #3712: the v1 API posts to `<resource>/openai/v1/responses?api-version=v1` with
+    /// the deployment in the body (byte parity with the TS `AzureOpenAI` client); the old
+    /// `/deployments/<name>/responses` route 404s. An empty version falls back to `v1`, as in TS.
     #[test]
-    fn v1_requests_post_to_the_responses_route_without_api_version() {
-        let expected = "https://res.openai.azure.com/openai/v1/responses";
+    fn v1_requests_post_to_the_responses_route() {
+        let expected = "https://res.openai.azure.com/openai/v1/responses?api-version=v1";
         assert_eq!(
             [
                 url_for(Some("https://res.openai.azure.com"), None, "v1"),
                 url_for(Some("https://res.openai.azure.com/openai/"), None, "v1"),
                 url_for(Some("https://res.openai.azure.com/openai/v1"), None, "v1"),
                 url_for(None, Some("res"), "v1"),
+                url_for(None, Some("res"), ""),
             ],
-            [expected; 4].map(str::to_string)
+            [expected; 5].map(str::to_string)
         );
     }
 
-    /// A non-v1 version keeps the api-version query: `preview` on the v1 path, or a dated version
-    /// against an explicitly configured legacy `/openai` base.
+    /// Other versions ride the same query: `preview` on the v1 path, or a dated version against a
+    /// non-Azure gateway's `/openai` base.
     #[test]
     fn non_v1_versions_keep_the_api_version_query() {
         assert_eq!(
