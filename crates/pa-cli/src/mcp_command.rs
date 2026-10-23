@@ -43,7 +43,7 @@ pub enum McpServerConfig {
     #[serde(rename = "http")]
     Http {
         url: String,
-        /// Written as the engine's `bearerTokenEnvVar`; the snake_case key
+        /// Written as the engine's `bearerTokenEnvVar`; the `snake_case` key
         /// older builds wrote still reads.
         #[serde(
             rename = "bearerTokenEnvVar",
@@ -482,9 +482,15 @@ mod tests {
 
     #[test]
     fn mcp_add_writes_the_bearer_token_key_the_engine_reads() {
-        let args: Vec<String> = ["x", "--url", "https://e.com/mcp", "--bearer-token-env-var", "MY_TOKEN"]
-            .map(String::from)
-            .to_vec();
+        let args: Vec<String> = [
+            "x",
+            "--url",
+            "https://e.com/mcp",
+            "--bearer-token-env-var",
+            "MY_TOKEN",
+        ]
+        .map(String::from)
+        .to_vec();
         let (_, config, _) = parse_mcp_add_args(&args).unwrap();
         let written = serde_json::to_value(&config).unwrap();
         assert_eq!(
