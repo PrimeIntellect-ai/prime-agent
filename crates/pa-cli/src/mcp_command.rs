@@ -43,7 +43,14 @@ pub enum McpServerConfig {
     #[serde(rename = "http")]
     Http {
         url: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
+        /// Written as the engine's `bearerTokenEnvVar`; the snake_case key
+        /// older builds wrote still reads.
+        #[serde(
+            rename = "bearerTokenEnvVar",
+            alias = "bearer_token_env_var",
+            default,
+            skip_serializing_if = "Option::is_none"
+        )]
         bearer_token_env_var: Option<String>,
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         oauth: bool,
@@ -471,6 +478,35 @@ mod tests {
             serialized,
             serde_json::json!({"y": {"type": "http", "url": "https://example.com/mcp"}})
         );
+    }
+
+    #[test]
+    fn mcp_add_writes_the_bearer_token_key_the_engine_reads() {
+        let args: Vec<String> = ["x", "--url", "https://e.com/mcp", "--bearer-token-env-var", "MY_TOKEN"]
+            .map(String::from)
+            .to_vec();
+        let (_, config, _) = parse_mcp_add_args(&args).unwrap();
+        let written = serde_json::to_value(&config).unwrap();
+        assert_eq!(
+            written,
+            serde_json::json!({
+                "type": "http",
+                "url": "https://e.com/mcp",
+                "bearerTokenEnvVar": "MY_TOKEN"
+            })
+        );
+        let engine: pa_core::mcp::McpServerConfig = serde_json::from_value(written).unwrap();
+        assert!(matches!(
+            engine,
+            pa_core::mcp::McpServerConfig::Http { bearer_token_env_var: Some(ref var), .. } if var == "MY_TOKEN"
+        ));
+        let legacy: McpServerConfig = serde_json::from_value(serde_json::json!({
+            "type": "http",
+            "url": "https://e.com/mcp",
+            "bearer_token_env_var": "MY_TOKEN"
+        }))
+        .unwrap();
+        assert_eq!(legacy, config);
     }
 
     #[test]

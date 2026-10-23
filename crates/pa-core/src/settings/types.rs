@@ -262,7 +262,12 @@ pub enum McpServerConfig {
         url: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         headers: Option<serde_json::Map<String, serde_json::Value>>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[serde(
+            rename = "bearerTokenEnvVar",
+            alias = "bearer_token_env_var",
+            default,
+            skip_serializing_if = "Option::is_none"
+        )]
         bearer_token_env_var: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         oauth: Option<bool>,
