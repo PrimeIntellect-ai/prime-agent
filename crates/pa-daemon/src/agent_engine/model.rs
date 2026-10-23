@@ -178,7 +178,6 @@ impl AgentSessionEngine {
         let auth = pa_core::auth::AuthStorage::create(&self.config.agent_dir);
         let mut registry =
             pa_core::models::ModelRegistry::create(auth, self.config.agent_dir.join("models.json"));
-        registry.load_private_authorization_from_cache();
         let restored = pa_core::models::find_session_model_with_readiness_wait(
             &mut registry,
             &provider,
@@ -272,12 +271,8 @@ impl AgentSessionEngine {
     /// arm or the startup chain.
     fn resolve_registry_model_unchecked(&self) -> anyhow::Result<Model> {
         let auth = pa_core::auth::AuthStorage::create(&self.config.agent_dir);
-        let mut registry =
+        let registry =
             pa_core::models::ModelRegistry::create(auth, self.config.agent_dir.join("models.json"));
-        // A fresh registry gates private Prime Inference models out until the
-        // async authorization refresh runs; adopt the on-disk cache so
-        // create-time resolution can pick the session's private model.
-        registry.load_private_authorization_from_cache();
         let selection = self.current_selection();
         let Some(model_name) = selection.model.as_deref() else {
             if let Some(model) = self.restored_model_resolution(&registry) {

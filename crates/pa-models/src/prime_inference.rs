@@ -253,7 +253,8 @@ fn parse_string_array(value: Option<&serde_json::Value>) -> Option<Vec<String>> 
 /// # Errors
 ///
 /// Fails when the payload carries no `data` array, on a duplicate model
-/// id, or when every entry was dropped and `allow_empty` is false.
+/// id, when all entries are malformed, or when every entry was filtered and
+/// `allow_empty` is false.
 // TS-parity parser: entry sanitization stays one pass over each item.
 #[allow(clippy::too_many_lines)]
 pub fn parse_prime_inference_model_catalog(
@@ -264,6 +265,7 @@ pub fn parse_prime_inference_model_catalog(
         return Err("Invalid Prime Inference model catalog".into());
     };
     let mut entries = Vec::with_capacity(items.len());
+    let mut valid_entries = 0;
     let mut seen: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
     for item in items {
         let wire: WireItem = match serde_json::from_value(item.clone()) {
@@ -297,6 +299,7 @@ pub fn parse_prime_inference_model_catalog(
         if !seen.insert(wire.id.clone()) {
             return Err(format!("Duplicate Prime Inference model {}", wire.id));
         }
+        valid_entries += 1;
         let supported_parameters = parse_string_array(wire.supported_parameters.as_ref());
         // Capability filtering (a documented deviation from the TS parser, which never reads this
         // field): a route declaring its supported parameters without "tools" can never serve a
@@ -362,6 +365,12 @@ pub fn parse_prime_inference_model_catalog(
             entry.reasoning = wire.specs.supports_reasoning;
         }
         entries.push(entry);
+    }
+    // Only an explicitly empty payload or valid entries filtered for lack of
+    // tool support may yield an empty authoritative snapshot. Malformed-only
+    // responses must not revoke a scope's last-good private entitlements.
+    if !items.is_empty() && valid_entries == 0 {
+        return Err("Prime Inference model catalog has no valid entries".into());
     }
     if entries.is_empty() && !allow_empty {
         return Err("Prime Inference model catalog is empty".into());
@@ -555,6 +564,17 @@ pub fn merge_prime_inference_models(bundled: &[Model], live: Option<&[Model]>) -
     }
 }
 
+/// An authenticated response is authoritative, including a valid empty list
+/// (revocation). Malformed payloads reject the refresh and retain last-good.
+fn parse_authenticated_catalog(
+    payload: &serde_json::Value,
+    templates: &[Model],
+) -> Result<Vec<Model>, String> {
+    let entries = parse_prime_inference_model_catalog(payload, true)?;
+    build_prime_inference_models(templates, &entries, true, Some(0))
+        .ok_or_else(|| "Prime Inference catalog build failed".to_string())
+}
+
 /// The scope-keyed Prime Inference catalog: one last-good snapshot per
 /// credential+team scope, fetched live with credentials.
 pub struct PrimeInferenceCatalog {
@@ -569,11 +589,8 @@ impl PrimeInferenceCatalog {
         let templates = Arc::new(transports::prime_inference_offline_entries());
         let cache_path = models_dir.map(|dir| dir.join(CACHE_FILE));
         let parse_templates = Arc::clone(&templates);
-        let parse: crate::cache::CatalogParse<Vec<Model>> = Arc::new(move |payload, _scope| {
-            let entries = parse_prime_inference_model_catalog(payload, false)?;
-            build_prime_inference_models(&parse_templates, &entries, false, None)
-                .ok_or_else(|| "Prime Inference catalog coverage gate failed".to_string())
-        });
+        let parse: crate::cache::CatalogParse<Vec<Model>> =
+            Arc::new(move |payload, _scope| parse_authenticated_catalog(payload, &parse_templates));
         Self {
             cache: CatalogCache::new(
                 &format!("{PRIME_INFERENCE_BASE_URL}/models"),
@@ -594,11 +611,8 @@ impl PrimeInferenceCatalog {
         let templates = Arc::new(transports::prime_inference_offline_entries());
         let cache_path = models_dir.map(|dir| dir.join(CACHE_FILE));
         let parse_templates = Arc::clone(&templates);
-        let parse: crate::cache::CatalogParse<Vec<Model>> = Arc::new(move |payload, _scope| {
-            let entries = parse_prime_inference_model_catalog(payload, false)?;
-            build_prime_inference_models(&parse_templates, &entries, false, None)
-                .ok_or_else(|| "Prime Inference catalog coverage gate failed".to_string())
-        });
+        let parse: crate::cache::CatalogParse<Vec<Model>> =
+            Arc::new(move |payload, _scope| parse_authenticated_catalog(payload, &parse_templates));
         Self {
             cache: CatalogCache::new(
                 &format!("{base_url}/models"),
@@ -740,6 +754,53 @@ mod tests {
         assert!(parse_prime_inference_model_catalog(&json!({"data": []}), false).is_err());
         assert!(parse_prime_inference_model_catalog(&json!({"data": []}), true).is_ok());
         assert!(parse_prime_inference_model_catalog(&json!({}), false).is_err());
+    }
+
+    #[test]
+    fn authenticated_catalog_is_authoritative_even_when_thin_or_empty() {
+        let compiled = transports::prime_inference_offline_entries();
+        let private_only = payload(&["internal/entitled", "dev/also-entitled"]);
+        let resolved = parse_authenticated_catalog(&private_only, &compiled)
+            .expect("private-only authenticated response");
+        assert_eq!(resolved.len(), 2);
+        assert!(resolved.iter().any(|model| model.id == "internal/entitled"));
+        assert!(resolved.iter().any(|model| model.id == "dev/also-entitled"));
+        let thin_public = payload(&["vendor/partial"]);
+        let resolved =
+            parse_authenticated_catalog(&thin_public, &compiled).expect("valid thin response");
+        assert_eq!(resolved.len(), 1);
+        assert_eq!(resolved[0].id, "vendor/partial");
+        assert!(parse_authenticated_catalog(&json!({"data": []}), &compiled)
+            .expect("empty response revokes all routes")
+            .is_empty());
+        assert!(parse_authenticated_catalog(&json!({}), &compiled).is_err());
+        assert!(parse_authenticated_catalog(
+            &json!({"data": [
+                {"id": "no-price"},
+                {"malformed": true}
+            ]}),
+            &compiled
+        )
+        .is_err());
+        let mut no_tools = wire_entry("internal/no-tools", 1.0, 2.0);
+        no_tools["supported_parameters"] = json!(["max_tokens"]);
+        assert!(
+            parse_authenticated_catalog(&json!({"data": [no_tools]}), &compiled)
+                .expect("valid routes without tools revoke available models")
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn merge_empty_authoritative_response_revokes_offline_prime_routes() {
+        let compiled = transports::compiled_models();
+        let revoked = merge_prime_inference_models(compiled, Some(&[]));
+        assert!(!revoked
+            .iter()
+            .any(|model| model.provider == "prime-inference"));
+        assert!(merge_prime_inference_models(compiled, None)
+            .iter()
+            .any(|model| model.provider == "prime-inference"));
     }
 
     #[test]

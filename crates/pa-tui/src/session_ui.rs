@@ -178,7 +178,6 @@ pub(crate) struct SessionUi {
     /// The settings recent-model list (`provider/id` keys, newest first).
     model_recent_models: Vec<String>,
     default_thinking_level: Option<String>,
-    models_fetched_at: Option<std::time::Instant>,
     pasted_images: std::collections::BTreeMap<u64, LoadedImage>,
     next_image_marker_id: u64,
     telemetry_disabled: Option<bool>,

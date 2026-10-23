@@ -101,7 +101,7 @@ impl Worker {
             "get_messages" => self.handle_get_messages(payload),
             "get_session_header" => self.handle_get_session_header(),
             "get_session_stats" => self.handle_get_session_stats(),
-            "get_model_catalog" => self.handle_get_model_catalog(),
+            "get_model_catalog" => self.handle_get_model_catalog(payload),
             "get_queue" => self.handle_get_queue(),
             "clear_queue" => self.handle_clear_queue(),
             "abort_and_clear_queue" => self.handle_abort_and_clear_queue(),

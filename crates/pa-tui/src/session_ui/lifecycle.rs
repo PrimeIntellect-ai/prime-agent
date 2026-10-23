@@ -71,7 +71,6 @@ impl SessionUi {
             model_configured_providers: options.model_configured_providers.clone(),
             model_recent_models: options.model_recent_models.clone(),
             default_thinking_level: options.default_thinking_level.clone(),
-            models_fetched_at: None,
             catalog_updates,
             heartbeat_updates: activity_updates.heartbeats,
             telemetry_disabled: options.telemetry_disabled,
