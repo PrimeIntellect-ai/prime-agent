@@ -702,9 +702,16 @@ async fn hook_diagnostics_persist_as_display_rows_and_never_reach_the_model() {
             _ => None,
         })
         .collect();
-    let notice = "Stop hook failed, operation unchanged: EOF while parsing a value at line 1 column 12\ncommand: cat >/dev/null; printf '{\"decision\":'";
-    // Identical failures surface once per session.
-    assert_eq!(notices, [(notice.to_string(), true)]);
+    // Identical failures surface once per session. The parser's own wording
+    // is not part of the contract: only the event, outcome and command are.
+    let [(notice, true)] = notices.as_slice() else {
+        panic!("one display-only notice: {notices:?}");
+    };
+    assert!(
+        notice.starts_with("Stop hook failed, operation unchanged: ")
+            && notice.ends_with("\ncommand: cat >/dev/null; printf '{\"decision\":'"),
+        "{notice}"
+    );
     let live = engine.session.agent().state().await.messages;
     assert!(live.iter().any(|message| matches!(
         message,
