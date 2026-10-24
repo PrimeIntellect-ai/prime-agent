@@ -178,8 +178,8 @@ fn civil_from_unix(secs: u64) -> (i64, u32, u32, u32, u32, u32) {
 /// x-amz-security-token)`.
 pub struct SigV4Params<'a> {
     pub method: &'a str,
-    /// Path with query string, starting with `/`.
-    pub path_and_query: &'a str,
+    /// Request path, starting with `/`; signed requests carry no query string.
+    pub path: &'a str,
     pub host: &'a str,
     pub region: &'a str,
     pub service: &'a str,
@@ -202,34 +202,21 @@ fn uri_encode_path(path: &str) -> String {
     encoded
 }
 
-/// The `SigV4` canonical request: method, canonical URI, canonical query string (an empty line when
-/// there is none), the canonical headers, a blank line, the signed header names and the body hash.
+/// The `SigV4` canonical request: method, canonical URI, an empty canonical query string (signed
+/// requests carry none), the canonical headers, a blank line, the signed header names and the body
+/// hash.
 /// Every service except S3 encodes the already-escaped request path a second time, so a model id
 /// sent as `...v1%3A0` is signed as `...v1%253A0`.
 fn canonical_request(
     method: &str,
-    path_and_query: &str,
+    path: &str,
     canonical_headers_text: &str,
     signed_headers: &str,
     payload_hash: &str,
 ) -> String {
-    let (path, query) = path_and_query
-        .split_once('?')
-        .unwrap_or((path_and_query, ""));
     let canonical_uri = uri_encode_path(path);
-    let mut pairs: Vec<(&str, &str)> = query
-        .split('&')
-        .filter(|pair| !pair.is_empty())
-        .map(|pair| pair.split_once('=').unwrap_or((pair, "")))
-        .collect();
-    pairs.sort_unstable();
-    let canonical_query = pairs
-        .iter()
-        .map(|(key, value)| format!("{key}={value}"))
-        .collect::<Vec<_>>()
-        .join("&");
     format!(
-        "{method}\n{canonical_uri}\n{canonical_query}\n{canonical_headers_text}\n{signed_headers}\n{payload_hash}"
+        "{method}\n{canonical_uri}\n\n{canonical_headers_text}\n{signed_headers}\n{payload_hash}"
     )
 }
 
@@ -284,7 +271,7 @@ fn sigv4_headers_at(
 
     let canonical_request = canonical_request(
         params.method,
-        params.path_and_query,
+        params.path,
         &canonical_headers_text,
         &signed_headers,
         &payload_hash,
@@ -446,7 +433,7 @@ mod sigv4_tests {
         sigv4_headers_at(
             &SigV4Params {
                 method: "POST",
-                path_and_query: PATH,
+                path: PATH,
                 host: "bedrock-runtime.us-east-1.amazonaws.com",
                 region: "us-east-1",
                 service: "bedrock",
@@ -494,14 +481,6 @@ mod sigv4_tests {
         assert_eq!(
             canonical_request("POST", PATH, "host:example\n", "host", "abc"),
             "POST\n/model/anthropic.claude-3-5-haiku-20241022-v1%253A0/converse-stream\n\nhost:example\n\nhost\nabc"
-        );
-    }
-
-    #[test]
-    fn canonical_request_sorts_the_query() {
-        assert_eq!(
-            canonical_request("GET", "/x?b=2&a=1&a=0", "", "", "h"),
-            "GET\n/x\na=0&a=1&b=2\n\n\nh"
         );
     }
 }
