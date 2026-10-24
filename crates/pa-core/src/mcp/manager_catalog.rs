@@ -440,6 +440,8 @@ fn http_config(url: &str, uses_oauth: bool) -> McpServerConfig {
         call_timeout_ms: None,
         client_id: None,
         callback_port: None,
+        client_secret: None,
+        scopes: None,
     }
 }
 
@@ -457,6 +459,8 @@ fn disabled_config(config: McpServerConfig) -> McpServerConfig {
             call_timeout_ms: None,
             client_id: None,
             callback_port: None,
+            client_secret: None,
+            scopes: None,
         },
         other @ McpServerConfig::Stdio { .. } => other,
     }

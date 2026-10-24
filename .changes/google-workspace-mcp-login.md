@@ -1,0 +1,1 @@
+- User `mcpServers` entries accept `clientSecret` and `scopes`, and OAuth discovery accepts an issuer that differs only by a trailing slash, so Google's Drive and Sheets MCP servers can be logged in with your own Google OAuth client; logins against Google request offline access so the grant refreshes. See `docs/google-workspace-mcp.md`.

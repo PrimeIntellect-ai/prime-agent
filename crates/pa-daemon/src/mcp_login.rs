@@ -233,13 +233,16 @@ mod tests {
                 call_timeout_ms: None,
                 client_id: None,
                 callback_port: None,
+                client_secret: None,
+                scopes: None,
             },
         );
         let manager = McpManager::new(McpManagerOptions {
             auth_storage: AuthStorage::create_with_oauth(
                 agent.path(),
                 Arc::new(pa_core::mcp::McpOAuth::with_http(
-                    Arc::clone(&http) as Arc<dyn pa_core::mcp::OAuthHttp>
+                    Arc::clone(&http) as Arc<dyn pa_core::mcp::OAuthHttp>,
+                    Arc::new(|| None),
                 )),
             ),
             get_user_servers: Box::new(move || Some(user_servers.clone())),
@@ -387,7 +390,8 @@ mod tests {
             auth_storage: AuthStorage::create_with_oauth(
                 agent.path(),
                 Arc::new(pa_core::mcp::McpOAuth::with_http(
-                    Arc::clone(&http) as Arc<dyn pa_core::mcp::OAuthHttp>
+                    Arc::clone(&http) as Arc<dyn pa_core::mcp::OAuthHttp>,
+                    Arc::new(|| None),
                 )),
             ),
             get_user_servers: Box::new(|| None),
