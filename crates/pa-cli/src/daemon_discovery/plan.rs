@@ -23,7 +23,7 @@ pub(crate) struct ReapAction {
 /// What `doctor --fix` may do with each discovered daemon (pure). Only
 /// clearly-safe targets are touched: orphaned socket files, and
 /// reachable idle daemons on non-default sockets. The default daemon,
-/// and any daemon with live sessions, are never touched.
+/// and any daemon with live sessions or tracked workers, are never touched.
 pub(crate) fn plan_reap(daemons: &[DaemonInfo], force: bool) -> Vec<ReapAction> {
     let mut pid_counts: HashMap<u32, usize> = HashMap::new();
     for daemon in daemons {
@@ -86,6 +86,15 @@ pub(crate) fn plan_reap(daemons: &[DaemonInfo], force: bool) -> Vec<ReapAction> 
                     kind: ReapActionKind::Skip,
                     daemon: daemon.clone(),
                     reason: Some(format!("has {count} session(s)")),
+                };
+            }
+            // Client-owned workers do not count as sessions, so a supervisor hosting
+            // them reports zero sessions while it is busy.
+            if daemon.has_tracked_workers == Some(true) {
+                return ReapAction {
+                    kind: ReapActionKind::Skip,
+                    daemon: daemon.clone(),
+                    reason: Some("has tracked workers".to_string()),
                 };
             }
             ReapAction {
@@ -205,6 +214,19 @@ mod tests {
         assert_eq!(actions[1].daemon.socket_path, PathBuf::from("/d/current"));
         assert_eq!(actions[2].reason.as_deref(), Some("has 3 session(s)"));
         assert_eq!(actions[3].reason.as_deref(), Some("has unknown session(s)"));
+    }
+
+    #[test]
+    fn reap_keeps_a_sessionless_daemon_with_tracked_workers() {
+        let mut busy = daemon("/d/workers", DaemonStatus::Current, false, Some(4), Some(0));
+        busy.has_tracked_workers = Some(true);
+        let idle = daemon("/d/idle", DaemonStatus::Current, false, Some(5), Some(0));
+        let actions = plan_reap(&[busy, idle], false);
+        assert_eq!(
+            kinds(&actions),
+            vec![ReapActionKind::Skip, ReapActionKind::Shutdown]
+        );
+        assert_eq!(actions[0].reason.as_deref(), Some("has tracked workers"));
     }
 
     #[test]
