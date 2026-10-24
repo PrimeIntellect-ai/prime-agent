@@ -103,7 +103,6 @@ fn events(path: &Path) -> Vec<Value> {
 
 #[tokio::test]
 async fn session_start_is_deferred_and_rearms_only_after_compaction() {
-    let _command_guard = crate::hooks::test_command_guard().await;
     let fixture = Fixture::new(&json!({"hooks": {"SessionStart": [{"hooks": [{
         "type": "command", "command": "{ cat; printf '\\n'; } >> starts.jsonl"
     }]}]}}));
@@ -144,7 +143,6 @@ async fn session_start_is_deferred_and_rearms_only_after_compaction() {
 
 #[tokio::test]
 async fn denied_prompt_restores_deferred_custom_rows_for_the_next_accepted_turn() {
-    let _command_guard = crate::hooks::test_command_guard().await;
     let fixture = Fixture::new(&json!({"hooks": {"UserPromptSubmit": [{"hooks": [{
         "type": "command", "command": "cat >/dev/null; if [ ! -f allow ]; then printf '%s' '{\"decision\":\"block\",\"reason\":\"not yet\"}'; fi"
     }]}]}}));
@@ -179,7 +177,6 @@ async fn denied_prompt_restores_deferred_custom_rows_for_the_next_accepted_turn(
 
 #[tokio::test]
 async fn subagent_excludes_every_lifecycle_hook_even_with_shared_trusted_configuration() {
-    let _command_guard = crate::hooks::test_command_guard().await;
     let mut hook_map = serde_json::Map::new();
     for event in [
         "SessionStart",
@@ -263,7 +260,6 @@ async fn subagent_excludes_every_lifecycle_hook_even_with_shared_trusted_configu
 
 #[tokio::test]
 async fn hooks_use_host_durable_identity_instead_of_in_memory_mirror_id() {
-    let _command_guard = crate::hooks::test_command_guard().await;
     let fixture = Fixture::new(&json!({"hooks": {"SessionEnd": [{"hooks": [{
         "type": "command", "command": "cat > ended.json"
     }]}]}}));
@@ -295,7 +291,6 @@ async fn hooks_use_host_durable_identity_instead_of_in_memory_mirror_id() {
 
 #[tokio::test]
 async fn late_durable_history_adoption_marks_resume_without_rearming_navigation() {
-    let _command_guard = crate::hooks::test_command_guard().await;
     for windowed in [false, true] {
         let fixture = Fixture::new(&json!({"hooks": {"SessionStart": [{"hooks": [{
             "type": "command", "command": "{ cat; printf '\\n'; } >> starts.jsonl"
@@ -356,7 +351,6 @@ async fn late_durable_history_adoption_marks_resume_without_rearming_navigation(
 
 #[tokio::test]
 async fn session_start_stop_is_consumed_before_the_next_submission() {
-    let _command_guard = crate::hooks::test_command_guard().await;
     let fixture = Fixture::new(&json!({"hooks": {"SessionStart": [{"hooks": [{
         "type": "command", "command": "{ cat; printf '\\n'; } >> starts.jsonl; printf '%s' '{\"continue\":false,\"stopReason\":\"pause this admission\"}'"
     }]}]}}));
@@ -379,7 +373,6 @@ async fn session_start_stop_is_consumed_before_the_next_submission() {
 
 #[tokio::test]
 async fn cancelled_session_start_remains_pending_for_next_submission() {
-    let _command_guard = crate::hooks::test_command_guard().await;
     let fixture = Fixture::new(&json!({"hooks": {"SessionStart": [{"hooks": [{
         "type": "command", "command": "{ cat; printf '\\n'; } >> starts.jsonl"
     }]}]}}));
@@ -414,7 +407,6 @@ async fn cancelled_session_start_remains_pending_for_next_submission() {
 
 #[tokio::test]
 async fn custom_only_adoption_keeps_startup_source() {
-    let _command_guard = crate::hooks::test_command_guard().await;
     for adoption in ["construction", "branch", "window"] {
         let fixture = Fixture::new(&json!({"hooks": {"SessionStart": [{"hooks": [{
             "type": "command", "command": "{ cat; printf '\\n'; } >> starts.jsonl"
@@ -472,7 +464,6 @@ async fn custom_only_adoption_keeps_startup_source() {
 
 #[tokio::test]
 async fn stop_feedback_is_attributed_persisted_bounded_and_admitted() {
-    let _command_guard = crate::hooks::test_command_guard().await;
     let reason = "Run remaining validation.\nPreserve these details.";
     let attributed = format!("Continuation requested by a Stop hook: {reason}");
     for veto_continuation in [false, true] {
@@ -573,7 +564,6 @@ async fn stop_feedback_is_attributed_persisted_bounded_and_admitted() {
 
 #[tokio::test]
 async fn pre_admission_compaction_preserves_initial_event_order_and_stop_retry() {
-    let _command_guard = crate::hooks::test_command_guard().await;
     for resumed in [false, true] {
         for stop_initial in [false, true] {
             let fixture = Fixture::new(&json!({"hooks": {"SessionStart": [{"hooks": [{
@@ -643,7 +633,6 @@ async fn pre_admission_compaction_preserves_initial_event_order_and_stop_retry()
 
 #[tokio::test]
 async fn compact_mark_arriving_during_dispatch_survives_for_next_gate() {
-    let _command_guard = crate::hooks::test_command_guard().await;
     let fixture = Fixture::new(&json!({"hooks": {"SessionStart": [{"hooks": [{
         "type": "command", "command": "input=$(cat); printf '%s\\n' \"$input\" >> starts.jsonl; case \"$input\" in *'\"source\":\"compact\"'*) touch entered; while [ ! -f release ]; do sleep 0.02; done;; esac"
     }]}]}}));
@@ -684,7 +673,6 @@ async fn compact_mark_arriving_during_dispatch_survives_for_next_gate() {
 
 #[tokio::test]
 async fn hook_diagnostics_persist_as_display_rows_and_never_reach_the_model() {
-    let _command_guard = crate::hooks::test_command_guard().await;
     let fixture = Fixture::new(&json!({"hooks": {"Stop": [{"hooks": [{
         "type": "command", "command": "cat >/dev/null; printf '{\"decision\":'"
     }]}]}}));

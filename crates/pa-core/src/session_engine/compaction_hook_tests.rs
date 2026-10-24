@@ -99,7 +99,6 @@ async fn fixture(command: &str, turns: usize) -> Fixture {
 
 #[tokio::test]
 async fn skipped_compaction_never_runs_precompact_command() {
-    let _command_guard = crate::hooks::test_command_guard().await;
     let fixture = fixture(
         "touch hook-ran; printf '%s' '{\"continue\":false,\"stopReason\":\"hook stopped\"}'",
         0,
@@ -119,7 +118,6 @@ async fn skipped_compaction_never_runs_precompact_command() {
 
 #[tokio::test]
 async fn precompact_stop_preserves_transcript_and_releases_locks_for_manual_and_auto() {
-    let _command_guard = crate::hooks::test_command_guard().await;
     for trigger in [CompactionTrigger::Manual, CompactionTrigger::Auto] {
         let fixture = fixture(
             "cat > payload.tmp; mv payload.tmp payload.json; while ! test -e release; do sleep 0.01; done; printf '%s' '{\"continue\":false,\"stopReason\":\"hook stopped\"}'", 3,
@@ -189,7 +187,6 @@ async fn precompact_stop_preserves_transcript_and_releases_locks_for_manual_and_
 
 #[tokio::test]
 async fn permit_is_session_scoped_and_consumption_does_not_repeat_hook() {
-    let _command_guard = crate::hooks::test_command_guard().await;
     let fixture = fixture("printf x >> hook-count; printf '%s' '{}'", 3).await;
     let model = fixture.provider.get_model();
     fixture.provider.set_responses(
@@ -253,7 +250,6 @@ async fn permit_is_session_scoped_and_consumption_does_not_repeat_hook() {
 
 #[tokio::test]
 async fn veto_permit_preserves_raw_slash_echo_and_failure_without_repeating_hook() {
-    let _command_guard = crate::hooks::test_command_guard().await;
     let fixture = fixture(
         "printf x >> hook-count; printf '%s' '{\"continue\":false,\"stopReason\":\"retain raw attempt\"}'", 3,
     ).await;
@@ -358,7 +354,6 @@ async fn veto_permit_preserves_raw_slash_echo_and_failure_without_repeating_hook
 
 #[tokio::test]
 async fn permit_retains_host_cancellation_when_executor_omits_signal() {
-    let _command_guard = crate::hooks::test_command_guard().await;
     let fixture = fixture("printf x >> hook-count", 3).await;
     let model = fixture.provider.get_model();
     let controller = pa_agent::abort::AbortController::new();
@@ -394,7 +389,6 @@ async fn permit_retains_host_cancellation_when_executor_omits_signal() {
 
 #[tokio::test]
 async fn host_abort_cancels_ready_precompact_command_before_permit() {
-    let _command_guard = crate::hooks::test_command_guard().await;
     let fixture = fixture("cat >/dev/null; touch ready; while :; do sleep 1; done", 3).await;
     let model = fixture.provider.get_model();
     let controller = pa_agent::abort::AbortController::new();

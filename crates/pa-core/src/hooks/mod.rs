@@ -34,25 +34,6 @@ const INPUT_LIMIT: usize = 1024 * 1024;
 const NOTICE_LIMIT: usize = 32;
 const COMMAND_PREVIEW_CHARS: usize = 120;
 const MESSAGE_PREVIEW_CHARS: usize = 1000;
-static COMMAND_SLOTS: Semaphore = Semaphore::const_new(4);
-// Observers cannot consume the final slot reserved for synchronous decisions.
-static OBSERVER_COMMAND_SLOTS: Semaphore = Semaphore::const_new(3);
-
-// Runtime tests share the production process limits across modules. Isolate their
-// readiness/deadline assertions without changing the limits they exercise.
-#[cfg(all(test, unix))]
-pub(crate) async fn test_command_guard() -> tokio::sync::MutexGuard<'static, ()> {
-    static TEST_COMMANDS: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
-    let guard = TEST_COMMANDS.lock().await;
-    // A preceding test may have dropped a runtime with aborted observers whose
-    // task teardown is still pending. Drain those permits before starting clocks.
-    let observers = OBSERVER_COMMAND_SLOTS.acquire_many(3).await.unwrap();
-    let commands = COMMAND_SLOTS.acquire_many(4).await.unwrap();
-    drop(commands);
-    drop(observers);
-    guard
-}
-
 struct State {
     cwd: PathBuf,
     agent_dir: PathBuf,
@@ -244,7 +225,8 @@ impl HookRuntime {
                         .map(str::to_owned)
                 })
                 .unwrap_or_default();
-            // One bounded observation task owns its hooks; hook launch is bounded globally.
+            // One bounded observation task owns its hooks; pending observations
+            // are bounded per session by `observer_slots`.
             let matching = hooks
                 .iter()
                 .filter(|hook| hook.matches(Event::PostToolUse, &name));
@@ -424,17 +406,6 @@ impl State {
         };
         let shutdown = self.shutdown.signal();
         let operation = async {
-            // Acquire observer capacity first: never occupy decision capacity while
-            // waiting for an observer slot. All waits share the command deadline.
-            let _observer_slot = if hook.event == Event::PostToolUse {
-                Some(OBSERVER_COMMAND_SLOTS.acquire().await?)
-            } else {
-                None
-            };
-            let _slot = COMMAND_SLOTS.acquire().await?;
-            if signal.is_aborted() {
-                anyhow::bail!("hook canceled before execution");
-            }
             if !self.executed.swap(true, Ordering::Relaxed) {
                 if let Some(callback) = self.on_execute.get() {
                     callback();
