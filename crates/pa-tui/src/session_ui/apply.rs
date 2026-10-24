@@ -275,7 +275,7 @@ impl SessionUi {
                     self.outcome_after_compaction = None;
                     view.working = None;
                     view.retry = None;
-                    view.retry = None;
+                    view.compaction = None;
                     // The closed session cannot run again: its remembered
                     // settle owes the dead surface nothing.
                     self.settled = None;

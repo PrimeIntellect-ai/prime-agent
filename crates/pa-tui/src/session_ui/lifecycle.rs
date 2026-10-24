@@ -499,6 +499,7 @@ impl SessionUi {
         self.loader_anchor_ms = reconstructed.last_user_prompt_ms;
         self.goal_view.seed(reconstructed.goal.unwrap_or_default());
         self.settled = None;
+        self.outcome_after_compaction = None;
         // The resynced state owns the loader: a turn still live behind the
         // re-attach keeps the spinner, one that died with the old link does
         // not. A compaction in flight seeds the compaction loader instead
