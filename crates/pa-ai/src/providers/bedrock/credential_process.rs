@@ -115,25 +115,31 @@ fn parse_output(stdout: &[u8]) -> Option<(AwsCredentials, Expiry)> {
 /// in place), so a caller that stops waiting (cancellation, timeout) is not tied to a stalled
 /// `credential_process`.
 async fn run(command: &str) -> Option<Vec<u8>> {
-    let mut process = if cfg!(windows) {
+    // Like Node's `exec` (the TS SDK's runner): `cmd /d /s /c "<command>"` passed verbatim, since
+    // cmd.exe does not understand the MSVC quoting `arg` applies, which breaks quoted paths.
+    #[cfg(windows)]
+    let mut process = {
+        use std::os::windows::process::CommandExt as _;
         let mut process = tokio::process::Command::new("cmd");
-        process.args(["/C", command]);
         process
-    } else {
+            .as_std_mut()
+            .raw_arg(format!("/d /s /c \"{command}\""));
+        process
+    };
+    #[cfg(not(windows))]
+    let mut process = {
         let mut process = tokio::process::Command::new("sh");
         process.args(["-c", command]);
         process
     };
-    // stderr stays off the terminal: the TUI owns the screen.
-    let output = process
-        .stdin(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .kill_on_drop(true)
-        .output()
-        .await
-        .ok()?;
+    // `output()` closes stdin and captures stderr, so neither reaches the TUI.
+    let output = process.kill_on_drop(true).output().await.ok()?;
     if !output.status.success() {
-        tracing::warn!(status = %output.status, "AWS credential_process exited unsuccessfully");
+        tracing::warn!(
+            status = %output.status,
+            stderr = %String::from_utf8_lossy(&output.stderr).trim(),
+            "AWS credential_process exited unsuccessfully"
+        );
         return None;
     }
     Some(output.stdout)
@@ -373,6 +379,32 @@ mod tests {
             );
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
+    }
+
+    /// The AWS docs' Windows form: a quoted script path plus a quoted argument with spaces reaches
+    /// the script intact.
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn a_quoted_windows_command_path_and_argument_run() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let script_dir = dir.path().join("dir with spaces");
+        std::fs::create_dir(&script_dir).expect("script dir");
+        let script = script_dir.join("credentials.cmd");
+        std::fs::write(
+            &script,
+            "@if not \"%~2\"==\"parameter with spaces\" exit /b 1\r\n@echo {\"Version\":1,\"AccessKeyId\":\"AKIDWIN\",\"SecretAccessKey\":\"s\"}\r\n",
+        )
+        .expect("write script");
+        let config = format!(
+            "[profile cp-stub-windows]\ncredential_process = \"{}\" parameterWithoutSpaces \"parameter with spaces\"\n",
+            script.display()
+        );
+
+        let credentials = credentials_from_process("cp-stub-windows", &config)
+            .await
+            .expect("quoted command runs");
+
+        assert_eq!(credentials.access_key_id, "AKIDWIN");
     }
 
     #[cfg(unix)]
