@@ -676,11 +676,7 @@ async fn run_bash(run: RunBash<'_>) -> BashEnd {
     // `normalizedExitCode`); a cancelled run still reports none below.
     let exit_code = status
         .ok()
-        .and_then(|status| {
-            status.code().or_else(|| {
-                pa_core::platform::process::termination_signal(&status).map(|signal| 128 + signal)
-            })
-        })
+        .and_then(|status| pa_core::platform::process::normalized_exit_code(&status))
         .map(i64::from);
     let cancelled = run.cancellation.is_cancelled();
     // The pumps are dropped, so this is the last reference; a poisoned

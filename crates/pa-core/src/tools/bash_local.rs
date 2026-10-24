@@ -1,6 +1,6 @@
 //! Local shell execution backend for the bash tool: spawns the shell in its own process group,
 //! streams stdout+stderr through one ordered channel, kills the whole group on timeout or abort,
-//! and resolves with the exit code (`None` when killed by a signal).
+//! and resolves with the exit code (128 + the signal number when killed by a signal).
 
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
@@ -167,7 +167,38 @@ impl BashOperations for LocalBashOperations {
             if timed_out.load(Ordering::SeqCst) {
                 anyhow::bail!("timeout:{}", timeout.unwrap_or_default());
             }
-            Ok(status.code())
+            Ok(crate::platform::process::normalized_exit_code(&status))
         })
+    }
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use crate::tools::bash::{execute_bash, BashToolOptions};
+
+    /// A command killed by a signal fails with 128 + the signal number, like TS
+    /// `waitForChildProcess`; with no exit code the model would read it as a success.
+    #[tokio::test]
+    async fn a_signal_death_fails_with_128_plus_the_signal() {
+        let cwd = tempfile::tempdir().expect("tempdir");
+        let cwd = cwd.path().to_str().expect("utf-8 tempdir");
+        for (command, code) in [("kill -KILL $$", 137), ("kill -SEGV $$", 139)] {
+            let err = execute_bash(
+                cwd,
+                &BashToolOptions::default(),
+                command,
+                None,
+                None,
+                None,
+                None,
+            )
+            .await
+            .expect_err(command);
+            assert_eq!(
+                err.to_string(),
+                format!("(no output)\n\nCommand exited with code {code}"),
+                "{command}"
+            );
+        }
     }
 }
