@@ -51,9 +51,10 @@ impl Generation {
 }
 /// The snapshot format version: a sidecar serves only at exactly this
 /// version (any other version is rebuilt by the full walk). A served
-/// snapshot's `WindowStats` already folds the child usage attributions,
-/// and unread keys are ignored on load (no `deny_unknown_fields`).
-pub(super) const SNAPSHOT_VERSION: u32 = 7;
+/// snapshot's `WindowStats` already folds the child usage attributions and
+/// the older path's billed rows, and unread keys are ignored on load (no
+/// `deny_unknown_fields`).
+pub(super) const SNAPSHOT_VERSION: u32 = 8;
 // `retained_whole_file` is `#[serde(default)]` false: older sidecars
 // deserialize it as false and skip the full-history fast paths until the
 // next walk rewrites the sidecar (a version bump would force a re-walk).

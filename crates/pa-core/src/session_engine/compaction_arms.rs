@@ -280,9 +280,14 @@ impl AgentSession {
                 summary_delta: options.summary_delta.clone(),
                 semantic_edges: options.semantic_edges.clone(),
             };
+            let summaries = UncommittedSummaries {
+                store: std::sync::Arc::clone(&self.usage_store),
+                bill: crate::session_engine::compact_session::SummaryBill::default(),
+            };
             let mut prepared = crate::session_engine::compact_session::summarize_attempt(
                 &attempt,
                 &attempt_options,
+                &summaries.bill,
             )
             .await?;
             // A toggle during the summarizer request must not re-inject the captured digest.
@@ -300,6 +305,8 @@ impl AgentSession {
                 )?
             };
             if committed {
+                // The committed row carries the attempt's calls.
+                summaries.bill.take();
                 return Ok(CompactOutcome::Ran(Box::new(
                     crate::session_engine::compact_session::CompactRun {
                         result: prepared.result,
@@ -476,5 +483,34 @@ impl AgentSession {
             self.agent.append_messages(loop_rows).await;
         }
         Ok(result)
+    }
+}
+
+/// One compaction attempt's summarizer spend until it commits. An attempt
+/// that ends any other way (a structural conflict, a failure, an abort, or
+/// the caller dropping the compaction mid-flight) records its resolved calls
+/// as a `compaction_discarded` `model_usage` row when this drops; a commit
+/// takes the bill first, since the compaction row carries those calls.
+struct UncommittedSummaries {
+    store: std::sync::Arc<dyn super::rlm_usage::RlmChildUsageStore>,
+    bill: crate::session_engine::compact_session::SummaryBill,
+}
+
+impl Drop for UncommittedSummaries {
+    fn drop(&mut self) {
+        let Some(usage) = self.bill.take() else {
+            return;
+        };
+        // A drop cannot await the append, and a dropped compaction future
+        // leaves no caller to await it.
+        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
+        let store = std::sync::Arc::clone(&self.store);
+        runtime.spawn(async move {
+            if let Err(error) = store.append_model_usage(usage).await {
+                eprintln!("pa-core: model usage row not persisted: {error}");
+            }
+        });
     }
 }

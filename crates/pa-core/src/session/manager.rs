@@ -78,6 +78,8 @@ pub struct SessionManager {
     /// Exact worker-owned rows replayed by the current prompt admission.
     admitted_user_rows: std::collections::VecDeque<String>,
     persist_listeners: Vec<SessionPersistListener>,
+    /// Told about each appended row that bills a model call.
+    billed_row_sink: Option<super::billed_row::BilledRowSink>,
 }
 
 /// The refine transcript's consumed artifacts: the conversation message

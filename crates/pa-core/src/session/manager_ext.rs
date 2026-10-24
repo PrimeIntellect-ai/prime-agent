@@ -265,7 +265,7 @@ fn normalize_state(status: SessionStateStatus) -> SessionStateStatus {
     }
 }
 
-fn entry_type(entry: &FileEntry) -> &'static str {
+pub(crate) fn entry_type(entry: &FileEntry) -> &'static str {
     match entry {
         FileEntry::Header { .. } => "session",
         FileEntry::Message { .. } => "message",

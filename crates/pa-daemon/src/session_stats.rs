@@ -12,9 +12,12 @@ use crate::session_store::{SessionEntry, SessionFile};
 /// `context_window` is the engine model's context window; `None` (or zero)
 /// omits `contextUsage`.
 ///
-/// The token/cost totals walk the ACTIVE BRANCH (gap-bridged) from the
-/// latest compaction's `firstKeptEntryId` onward; the summarizer's own
-/// usage rides the `compaction` entry. `contextUsage` keeps the strict branch.
+/// The message counts walk the ACTIVE BRANCH (gap-bridged) from the latest
+/// compaction's `firstKeptEntryId` onward. `tokens`/`cost` are the branch's
+/// spend across every compaction: the fold `get_context_tree` serves as the
+/// root's `totalUsage` (assistant rows with their attributed child spend,
+/// plus the compaction, branch-summary, and `model_usage` rows), plus a
+/// windowed load's folded older path. `contextUsage` keeps the strict branch.
 pub fn session_stats(store: &SessionFile, context_window: Option<u64>) -> Value {
     let branch = store.branch();
     let messages: Vec<&Value> = branch
@@ -27,61 +30,45 @@ pub fn session_stats(store: &SessionFile, context_window: Option<u64>) -> Value 
     let mut assistant_messages = 0u64;
     let mut tool_results = 0u64;
     let mut tool_calls = 0u64;
-    let mut input = 0u64;
-    let mut output = 0u64;
-    let mut cache_read = 0u64;
-    let mut cache_write = 0u64;
-    let mut cost = 0.0;
     for message in &durable_messages {
         match message.get("role").and_then(Value::as_str) {
             Some("user") => user_messages += 1,
             Some("assistant") => {
                 assistant_messages += 1;
                 tool_calls += tool_call_count(message);
-                if let Some(usage) = message.get("usage") {
-                    input += usage
-                        .get("input")
-                        .and_then(Value::as_u64)
-                        .unwrap_or_default();
-                    output += usage
-                        .get("output")
-                        .and_then(Value::as_u64)
-                        .unwrap_or_default();
-                    cache_read += usage
-                        .get("cacheRead")
-                        .and_then(Value::as_u64)
-                        .unwrap_or_default();
-                    cache_write += usage
-                        .get("cacheWrite")
-                        .and_then(Value::as_u64)
-                        .unwrap_or_default();
-                    cost += usage
-                        .get("cost")
-                        .and_then(|cost| cost.get("total"))
-                        .and_then(Value::as_f64)
-                        .unwrap_or_default();
-                }
             }
             Some("toolResult") => tool_results += 1,
             _ => {}
         }
     }
-    // The window is a load optimization, not a session state: without a
-    // compaction boundary the kept region covers the whole chain, and with
-    // a boundary the retained region IS the kept region.
+    let (_, spend) =
+        crate::state_getters::compute_own_and_total_usage(&store.branch_bridged(), store.entries());
+    let field = |name: &str| spend.get(name).and_then(Value::as_u64).unwrap_or_default();
+    let mut input = field("input");
+    let mut output = field("output");
+    let mut cache_read = field("cacheRead");
+    let mut cache_write = field("cacheWrite");
+    let mut cost = spend
+        .get("cost")
+        .and_then(|cost| cost.get("total"))
+        .and_then(Value::as_f64)
+        .unwrap_or_default();
+    // The window is a load optimization, not a session state: its folded
+    // older path is spend on this branch, and without a compaction boundary
+    // the kept region's counts cover that path too.
     let mut older_total_messages = 0u64;
-    if boundary.is_none() {
-        if let Some(window) = &store.window {
-            let older = &window.older_path_stats;
+    if let Some(window) = &store.window {
+        let older = &window.older_path_stats;
+        input += older.input;
+        output += older.output;
+        cache_read += older.cache_read;
+        cache_write += older.cache_write;
+        cost += older.cost;
+        if boundary.is_none() {
             user_messages += older.user_messages;
             assistant_messages += older.assistant_messages;
             tool_results += older.tool_results;
             tool_calls += older.tool_calls;
-            input += older.input;
-            output += older.output;
-            cache_read += older.cache_read;
-            cache_write += older.cache_write;
-            cost += older.cost;
             older_total_messages = older.total_messages;
         }
     }

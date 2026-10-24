@@ -1045,6 +1045,20 @@ impl pa_core::session_engine::rlm_usage::RlmChildUsageStore for CoreUsageStore {
                 .map_err(|error| std::io::Error::other(format!("{error:#}")))
         })
     }
+
+    /// The engine builds on the store a create or a replacement installed;
+    /// a replacement retires the engine, so the rebuild re-observes.
+    fn observe_billed_rows(
+        &self,
+        sink: pa_core::session::billed_row::BilledRowSink,
+    ) -> pa_core::session_engine::rlm_usage::RlmChildUsageFuture<'_, ()> {
+        let core = Arc::clone(&self.0);
+        Box::pin(async move {
+            if let Some(store) = core.lock().unwrap().store.as_mut() {
+                store.billed_row_sink = crate::session_store::BilledRowSinkSlot(Some(sink));
+            }
+        })
+    }
 }
 
 /// Whether one queued item is a minted goal-context turn (TS's

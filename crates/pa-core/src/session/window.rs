@@ -148,6 +148,18 @@ struct OlderPathUsage {
     cost: f64,
 }
 
+impl From<pa_types::ai::Usage> for OlderPathUsage {
+    fn from(usage: pa_types::ai::Usage) -> Self {
+        Self {
+            input: usage.input,
+            output: usage.output,
+            cache_read: usage.cache_read,
+            cache_write: usage.cache_write,
+            cost: usage.cost.total.as_f64(),
+        }
+    }
+}
+
 impl OlderPathUsage {
     fn from_usage(usage: &serde_json::Value) -> Self {
         let field = |name: &str| {
@@ -386,6 +398,11 @@ impl WindowedSessionStore {
                             }
                             _ => {}
                         }
+                    }
+                } else if window_done {
+                    // The older path's compactions and other billed calls.
+                    if let Some(row) = super::billed_row::billed_line(&meta.kind, text) {
+                        older_usage.push((id.to_owned(), OlderPathUsage::from(row.usage)));
                     }
                 }
                 expected.clone_from(&meta.parent_id);

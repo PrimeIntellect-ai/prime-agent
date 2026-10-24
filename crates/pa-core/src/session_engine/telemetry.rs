@@ -517,6 +517,25 @@ impl SessionTelemetry {
         }
     }
 
+    /// A model call outside the agent loop billed the session (a row
+    /// [`billed_row`](crate::session::billed_row) classifies: a compaction,
+    /// a branch summary, a refinement or side-question call). Like
+    /// [`Self::note_compaction`], its cost counts toward the active run.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the telemetry state mutex is poisoned.
+    pub fn note_billed_call(&self, usage: &pa_types::ai::Usage) {
+        let mut state = self.state.lock().expect("telemetry state poisoned");
+        if !state.recording {
+            sever_off_period_run(&mut state);
+            return;
+        }
+        if let Some(run) = state.active_run.as_mut() {
+            run.cost_usd += usage.cost.total.as_f64();
+        }
+    }
+
     /// One auto-retry event from the retry seam (TS `auto_retry_start`):
     /// `Start` counts the retry (and a backup-provider switch as a
     /// failover) into the active run, sums the retry wait, and keeps the

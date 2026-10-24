@@ -143,6 +143,34 @@ pub(crate) struct PreparedCompaction {
     pub(crate) entry: pa_types::session::CompactionEntry,
 }
 
+/// The summarizer calls one attempt made so far, summed on the model that
+/// served them: the spend whether or not the attempt commits.
+#[derive(Default)]
+pub(crate) struct SummaryBill(std::sync::Mutex<Option<super::model_usage::ModelUsage>>);
+
+impl SummaryBill {
+    fn add(&self, model: &pa_types::ai::Model, usage: Option<&pa_types::ai::Usage>) {
+        let Some(usage) = usage else {
+            return;
+        };
+        let mut spent = self.0.lock().expect("summary bill lock");
+        if let Some(spent) = spent.as_mut() {
+            add_assistant_usage(&mut spent.usage, usage);
+        } else {
+            *spent = super::model_usage::ModelUsage::new(
+                "compaction_discarded",
+                &model.provider,
+                &model.id,
+                *usage,
+            );
+        }
+    }
+
+    pub(crate) fn take(&self) -> Option<super::model_usage::ModelUsage> {
+        self.0.lock().expect("summary bill lock").take()
+    }
+}
+
 /// PREPARE under the caller's session lock: resolve the cut, begin the
 /// ledger guard, and record the leaf the commit's structural check walks
 /// back to.
@@ -238,6 +266,7 @@ pub(crate) fn prepare_attempt(
 /// labels the unusable replies.
 #[allow(clippy::too_many_arguments)] // the call mirrors complete_summary_call's shape
 async fn summary_call_with_retry(
+    bill: &SummaryBill,
     compaction: Option<&super::semantic_edges::SemanticCompaction>,
     summary_headers: Option<std::collections::BTreeMap<String, String>>,
     model: &pa_types::ai::Model,
@@ -260,6 +289,7 @@ async fn summary_call_with_retry(
             )
         })
         .await?;
+    bill.add(model, first.usage.as_ref());
     if !first.truncated {
         return Ok(first);
     }
@@ -279,6 +309,7 @@ async fn summary_call_with_retry(
         complete_summary_call(model, api_key, headers, max_tokens, request, None, failure)
     })
     .await?;
+    bill.add(model, retry.usage.as_ref());
     // Both attempts are wire calls, so both bill: the slice's usage is their sum.
     let mut usage = first.usage.unwrap_or_default();
     if let Some(retry_usage) = &retry.usage {
@@ -300,10 +331,12 @@ async fn summary_call_with_retry(
     })
 }
 
-/// SUMMARIZE: run the summarizer calls with no session lock held.
+/// SUMMARIZE: run the summarizer calls with no session lock held. Each
+/// resolved call adds to `bill`, whatever the attempt's outcome.
 pub(crate) async fn summarize_attempt(
     attempt: &CompactionAttempt,
     options: &CompactOptions<'_>,
+    bill: &SummaryBill,
 ) -> anyhow::Result<PreparedCompaction> {
     // A run aborted before the summarizer request never starts one.
     pa_agent::abort::throw_if_aborted_signal(options.abort)?;
@@ -391,6 +424,7 @@ pub(crate) async fn summarize_attempt(
             options.settings.reserve_tokens,
         );
         summary_call_with_retry(
+            bill,
             attempt.semantic_compaction.as_ref(),
             summary_headers.clone(),
             &model,
@@ -414,6 +448,7 @@ pub(crate) async fn summarize_attempt(
         // completed prefix flushes through the sink after the join, so
         // the live block converges to the exact committed summary.
         let slice = summary_call_with_retry(
+            bill,
             attempt.semantic_compaction.as_ref(),
             summary_headers.clone(),
             &model,
