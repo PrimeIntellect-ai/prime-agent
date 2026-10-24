@@ -111,9 +111,8 @@ impl SessionUi {
         let goal_label = tray_goal_label(&self.goal_view.goal);
         // The dock's shells group lists only runs actively running right now (operator scoping):
         // finished runs stay in the bash view.
-        let shells = crate::bash_view::dock_shell_items(&crate::bash_view::parse_bash_activities(
-            &self.bash_activities,
-        ));
+        let shell_rows = crate::bash_view::parse_bash_activities(&self.bash_activities);
+        let shells = crate::bash_view::dock_shell_items(&shell_rows);
         // The dock's factory group lists live runs only — the view's one liveness rule
         // (`FactoryRunSnapshot::is_live`: a live state, or children still in flight — a `done`
         // run whose resident children still run keeps its entry like its panel and its stop
@@ -137,6 +136,7 @@ impl SessionUi {
             ),
             heartbeats_paused: paused_heartbeat_count(&self.heartbeat_catalog),
             shells,
+            shells_persistent: crate::bash_view::ShellCounts::of(&shell_rows).persistent,
             factory_runs,
             factory_counts: crate::factory_view::FactoryRunCounts::of(&runs),
             // The group renders exactly while the daemon advertises the
