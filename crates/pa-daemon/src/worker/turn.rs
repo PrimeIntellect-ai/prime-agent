@@ -321,6 +321,7 @@ impl TurnRunner {
         self.emit_turn_event(json!({ "type": "turn_start" }));
         // The pane reporter's run boundary (TS `agent_start`): working.
         self.herdr.lock().unwrap().run_started();
+        engine.on_turn_start();
 
         let prompt_index = {
             let core = self.core.lock().unwrap();
