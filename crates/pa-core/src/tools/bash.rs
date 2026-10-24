@@ -12,8 +12,9 @@ use std::time::Duration;
 use serde_json::json;
 
 use crate::tools::bash_guard::{
-    find_destructive_git_discard_commands, format_dirty_tree_refusal, is_truthy_env_value,
-    resolve_discard_probe_target, DiscardProbeResolution, BASH_DESTRUCTIVE_GIT_BYPASS_ENV,
+    find_destructive_git_discard_commands, format_dirty_tree_refusal, format_scan_cost_warning,
+    is_truthy_env_value, is_unbounded_home_scan, resolve_discard_probe_target,
+    scan_timeout_from_env, DiscardProbeResolution, BASH_DESTRUCTIVE_GIT_BYPASS_ENV,
 };
 use crate::tools::output_accumulator::{OutputAccumulator, OutputAccumulatorOptions};
 use crate::tools::shell_utils::get_shell_env;
@@ -233,6 +234,14 @@ fn append_status(text: &str, status: &str) -> String {
     }
 }
 
+/// Prepend the scan-cost warning, when one fired, to the model-facing text.
+fn prepend_scan_warning(text: &str, warning: Option<&str>) -> String {
+    match warning {
+        Some(warning) => format!("{warning}\n\n{text}"),
+        None => text.to_string(),
+    }
+}
+
 /// Execute one bash tool call. Errors carry the model-facing text.
 #[tracing::instrument(
     level = "debug",
@@ -327,6 +336,20 @@ pub async fn execute_bash(
             }
         }
     }
+
+    // Scan-cost guard: a recursive scan of home-scale directories with no time
+    // or depth bound is unbounded in time — output caps (`| head`) never bound
+    // how long a no-match scan walks. The tool call is awaited inline by the
+    // agent loop, so the scan stalls the whole turn; warn (never block), and
+    // apply the opted-in PRIME_AGENT_SCAN_TIMEOUT when it is set.
+    let scan = is_unbounded_home_scan(&resolved_command, timeout);
+    let scan_timeout = if scan {
+        scan_timeout_from_env(&spawn_context.env)
+    } else {
+        None
+    };
+    let timeout = scan_timeout.or(timeout);
+    let scan_warning = scan.then(|| format_scan_cost_warning(scan_timeout));
 
     let acc = Arc::new(Mutex::new(OutputAccumulator::new(
         &OutputAccumulatorOptions {
@@ -430,12 +453,15 @@ pub async fn execute_bash(
             let message = err.to_string();
             if message == "aborted" {
                 let formatted = format_output(&snapshot, last_line_bytes, "");
-                anyhow::bail!(append_status(&formatted.text, "Command aborted"));
+                anyhow::bail!(append_status(
+                    &prepend_scan_warning(&formatted.text, scan_warning.as_deref()),
+                    "Command aborted"
+                ));
             }
             if let Some(secs) = message.strip_prefix("timeout:") {
                 let formatted = format_output(&snapshot, last_line_bytes, "");
                 anyhow::bail!(append_status(
-                    &formatted.text,
+                    &prepend_scan_warning(&formatted.text, scan_warning.as_deref()),
                     &format!("Command timed out after {secs} seconds")
                 ));
             }
@@ -443,7 +469,7 @@ pub async fn execute_bash(
         }
         Ok(exit_code) => {
             let formatted = format_output(&snapshot, last_line_bytes, "(no output)");
-            let text = formatted.text;
+            let text = prepend_scan_warning(&formatted.text, scan_warning.as_deref());
             if exit_code.is_some_and(|code| code != 0) {
                 anyhow::bail!(append_status(
                     &text,

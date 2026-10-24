@@ -7,6 +7,7 @@ import atexit
 import functools
 import json
 import os
+import re
 import secrets
 import selectors
 import shutil
@@ -105,6 +106,648 @@ def _note_degrade(handle: "BashHandle", bound: float) -> None:
         "returned a snapshot: r.running is True, r.output is the output so "
         "far, r.handle is the live handle. End the turn — a [bash-done] "
         "notification arrives when it finishes.\n"
+    )
+
+
+# Scan-cost guard (parity with the Rust bash_guard, crates/pa-core
+# src/tools/bash_guard.rs): a recursive scan over home-scale roots with no
+# time or depth bound is unbounded in time — output caps (`| head`) never
+# bound how long a no-match scan walks. The Rust tool call is awaited inline
+# by the agent loop; bash() cannot know at dispatch whether the cell will
+# await the handle inline, so the kernel-side surface teaches at dispatch
+# with a budgeted stderr hint and the command still runs (searches are
+# legitimate, the kernel's own await is already bounded by yield_after).
+_MAX_SCAN_HINTS = 3
+_scan_hints_written = 0
+
+
+def _is_home_scale_root(token: str) -> bool:
+    """A ~-rooted path or a $HOME expansion; exact names keep other env vars
+    ($HOMEDIR, ${HOMEBREW_PREFIX}) out. A grouping paren glued to the token
+    (`(rg pattern $HOME)`) is stripped first — only `)`: `${HOME}`'s closing
+    brace is part of the expansion. Mirrors the Rust bash_guard."""
+    token = token.rstrip(")")
+    return (
+        token.startswith("~")
+        or token in ("$HOME", "${HOME}")
+        or token.startswith(("$HOME/", "${HOME}/"))
+    )
+
+
+def _is_rg_depth_bound(tokens: list[str]) -> bool:
+    """rg's --max-depth[=]N / -d N / -dN with a numeric argument; a bare
+    token (the filename maxdepth.txt) never counts."""
+    for i, t in enumerate(tokens):
+        if t in ("--max-depth", "-d") and i + 1 < len(tokens) and tokens[i + 1].isdigit():
+            return True
+        if t.startswith("--max-depth=") and t[len("--max-depth=") :].isdigit():
+            return True
+        if t.startswith("-d") and len(t) > 2 and t[2:].isdigit():
+            return True
+    return False
+
+
+def _is_find_depth_bound(tokens: list[str]) -> bool:
+    """find's `-maxdepth N` with a numeric argument."""
+    for i, t in enumerate(tokens):
+        if t == "-maxdepth" and i + 1 < len(tokens) and tokens[i + 1].isdigit():
+            return True
+    return False
+
+
+# Redirection operators: the token after one is a target file, not a scan
+# root, so a project-local scan writing to ~ must not warn.
+_REDIRECT_OPERATORS = frozenset(
+    {">", ">>", "<", "<>", ">|", ">&", "<&", "&>", "&>>"}
+)
+
+
+def _is_redirect_operator(token: str) -> bool:
+    """A redirection operator token, with its optional fd prefix (`2>`).
+    Mirrors the Rust bash_guard."""
+    return token.lstrip("0123456789") in _REDIRECT_OPERATORS
+
+
+# find's global options precede the paths, so they do not start the
+# expression; `-O level` / `-D debugopts` take an operand when bare.
+_FIND_GLOBAL_OPTIONS = frozenset(
+    {"-H", "-L", "-P", "-X", "-d", "-s", "-x", "--"}
+)
+
+
+# Masked quoted arguments leave this placeholder token behind: bash saw an
+# argument here, and the scanner's positional pattern-skip must skip the
+# placeholder, not a scan root that follows it.
+MASK_PLACEHOLDER = "\x01"
+
+# Substitution nesting deeper than this is not scanned: a malformed
+# deeply-nested command must stay cheap on both stack and time.
+_SUBSTITUTION_DEPTH_CAP = 8
+
+
+def _starts_with_home_expansion(chars: list[str], at: int) -> bool:
+    """True when chars[at:] starts with $HOME or ${HOME}; a following
+    variable-name character ($HOMEDIR) is a different variable. Mirrors the
+    Rust bash_guard helper."""
+    if at + 1 < len(chars) and chars[at + 1] == "{":
+        return "".join(chars[at : at + 7]) == "${HOME}"
+    if "".join(chars[at : at + 5]) != "$HOME":
+        return False
+    nxt = chars[at + 5] if at + 5 < len(chars) else None
+    return nxt is None or not (nxt.isascii() and (nxt.isalnum() or nxt == "_"))
+
+
+# Heredoc bodies masked per command: each one scans forward for its
+# terminator line, so a malformed command full of `<<` operators must not
+# turn the preflight scan quadratic.
+_HEREDOC_MASK_CAP = 8
+
+
+def _mask_scan_literals(command: str) -> str:
+    """Mirror of the Rust bash_guard masker: one linear scan masking
+    single-quoted spans, double-quoted literal data, comments, and heredoc
+    bodies so they cannot masquerade as a scan. A double-quoted span that
+    starts with a $HOME/${HOME} expansion stays fully live (the path argument
+    of a scan); all-digit quoted spans stay visible (a quoted depth bound like
+    `--max-depth "3"` is an argument, not data); $(...) and backticks stay live
+    (they execute). Heredoc bodies are input text, never executed, so the
+    whole body through the delimiter line is masked — except that an unquoted
+    delimiter still expands, so $(...) and backticks in its body stay live.
+    """
+    chars = list(command)
+    n = len(chars)
+    heredocs_masked = 0
+    i = 0
+    while i < n:
+        ch = chars[i]
+        if ch == "'":
+            # An all-digit quoted span is an argument (`-maxdepth '2'`), not
+            # data: keep the digits visible for bound detection.
+            j = i + 1
+            while j < n and chars[j].isascii() and chars[j].isdigit():
+                j += 1
+            if j > i + 1 and j < n and chars[j] == "'":
+                chars[i] = " "
+                chars[j] = " "
+                i = j + 1
+                continue
+            j = i + 1
+            while j < n and chars[j] != "'":
+                chars[j] = " "
+                j += 1
+            chars[i] = MASK_PLACEHOLDER
+            if j < n:
+                chars[j] = " "
+            i = j + 1
+            continue
+        if ch == "$" and i + 2 < n and chars[i + 1] == "(" and chars[i + 2] == "(":
+            # Arithmetic expansion `$((...))` is not command text for the
+            # guard: skip it whole so a `<<` shift inside it (`$((a<<b))`)
+            # cannot read as a heredoc operator.
+            depth = 0
+            j = i + 1
+            while j < n:
+                if chars[j] == "(":
+                    depth += 1
+                elif chars[j] == ")":
+                    depth -= 1
+                    if depth == 0:
+                        break
+                j += 1
+            i = (j + 1) if j < n else n
+            continue
+        if (
+            ch == "<"
+            and i + 1 < n
+            and chars[i + 1] == "<"
+            and not (i + 2 < n and chars[i + 2] == "<")
+            and (i == 0 or chars[i - 1] != "<")
+            and heredocs_masked < _HEREDOC_MASK_CAP
+        ):
+            heredocs_masked += 1
+            # Heredoc `<<[-]DELIM` in all its spellings (`cat<<EOF`,
+            # `2<<EOF`, `<< EOF`, `<< 'EOF'`): the body until the delimiter
+            # line is input text, never executed, so mask it. A digit-first
+            # delimiter is an arithmetic shift (`$((1<<2))`), not a heredoc.
+            j = i + 2
+            tabbed = False
+            if j < n and chars[j] == "-":
+                tabbed = True
+                j += 1
+            while j < n and chars[j] in " \t":
+                j += 1
+            word_chars: list[str] = []
+            backslashed = False
+            # The delimiter word stops at shell operators outside quoted
+            # text, so `<<EOF; cmd` leaves `; cmd` live on the start line.
+            # A backslash quotes the next character (`<<\EOF` is the quoted
+            # delimiter `EOF`).
+            while j < n:
+                c = chars[j]
+                if c in ("'", '"'):
+                    word_chars.append(c)
+                    j += 1
+                    while j < n and chars[j] != c:
+                        word_chars.append(chars[j])
+                        j += 1
+                    if j < n:
+                        word_chars.append(chars[j])
+                        j += 1
+                elif c == "\\" and j + 1 < n:
+                    backslashed = True
+                    word_chars.append(chars[j + 1])
+                    j += 2
+                elif c.isspace() or c in ";&|()<>":
+                    break
+                else:
+                    word_chars.append(c)
+                    j += 1
+            word = "".join(word_chars)
+            # Shell quote removal across the whole delimiter word: `E'OF'` is
+            # `EOF`, and any quoting or escaping anywhere in the word
+            # disables expansion.
+            quoted = "'" in word or '"' in word or backslashed
+            delim = word.replace("'", "").replace('"', "")
+            # A present (even empty, `<<''`) delimiter word is a heredoc.
+            if word:
+                body = j
+                while body < n and chars[body] != "\n":
+                    body += 1
+                if body < n:
+                    body += 1  # first char of the body
+                    # The terminator line ends the heredoc even mid-
+                    # substitution; find it on the raw text.
+                    probe = body
+                    region_end = n
+                    while True:
+                        eol = probe
+                        while eol < n and chars[eol] != "\n":
+                            eol += 1
+                        start = probe
+                        if tabbed:
+                            while start < eol and chars[start] == "\t":
+                                start += 1
+                        if "".join(chars[start:eol]) == delim:
+                            region_end = probe
+                            break  # terminator line: body ends here
+                        if eol >= n:
+                            region_end = n
+                            break  # no terminator: bash reads to EOF
+                        probe = eol + 1
+                    # Mask the whole body region in one pass: with an
+                    # unquoted delimiter, $(...) and backticks stay live
+                    # (bash runs them in the body, and a substitution may
+                    # span lines); an escaped \$, \`, or \\ is literal;
+                    # everything else is data. The terminator line is data.
+                    term_eol = region_end
+                    while term_eol < n and chars[term_eol] != "\n":
+                        term_eol += 1
+                    if quoted:
+                        for k in range(body, term_eol):
+                            chars[k] = " "
+                    else:
+                        k = body
+                        sub_depth = 0
+                        sub_quote = None
+                        while k < region_end:
+                            c = chars[k]
+                            if sub_depth > 0:
+                                # Inside a live command substitution; the
+                                # paren depth carries across body lines, and
+                                # quoted parens do not count toward it.
+                                if sub_quote is not None:
+                                    if c == sub_quote:
+                                        sub_quote = None
+                                elif c in ("'", '"'):
+                                    sub_quote = c
+                                elif c == "(":
+                                    sub_depth += 1
+                                elif c == ")":
+                                    sub_depth -= 1
+                                k += 1
+                            elif (
+                                c == "\\"
+                                and k + 1 < region_end
+                                and chars[k + 1] in ("$", "`", "\\")
+                            ):
+                                # An escaped \$, \`, or \\ is literal.
+                                chars[k] = " "
+                                chars[k + 1] = " "
+                                k += 2
+                            elif c == "$" and k + 1 < region_end and chars[k + 1] == "(":
+                                sub_depth = 1
+                                k += 2
+                            elif c == "`":
+                                k += 1
+                                while k < region_end and chars[k] != "`":
+                                    k += 1
+                                k += 1
+                            else:
+                                chars[k] = " "
+                                k += 1
+                        for k in range(region_end, term_eol):
+                            chars[k] = " "
+            i += 2
+            continue
+        if ch == '"':
+            # An all-digit quoted span is an argument (`--max-depth "3"`),
+            # not data: keep the digits visible for bound detection.
+            j = i + 1
+            while j < n and chars[j].isascii() and chars[j].isdigit():
+                j += 1
+            if j > i + 1 and j < n and chars[j] == '"':
+                chars[i] = " "
+                chars[j] = " "
+                i = j + 1
+                continue
+            # A span that starts with a home expansion is a path argument:
+            # keep the whole span live so the expansion is never split into
+            # its own token (the positional pattern-skip in the segment
+            # scanner keeps quoted patterns from counting as roots).
+            if _starts_with_home_expansion(chars, i + 1):
+                # Mask separator characters outside substitutions: quoted
+                # separators are data, but a $(...)/backtick inside the span
+                # still executes and its body must stay intact for the
+                # substitution scan.
+                j = i + 1
+                while j < n and chars[j] != '"':
+                    j += 1
+                close = j
+                k = i + 1
+                sub_depth = 0
+                backtick = False
+                while k < close:
+                    c = chars[k]
+                    if sub_depth > 0:
+                        if c == "(":
+                            sub_depth += 1
+                        elif c == ")":
+                            sub_depth -= 1
+                        k += 1
+                    elif backtick:
+                        if c == "`":
+                            backtick = False
+                        k += 1
+                    elif c == "$" and k + 1 < close and chars[k + 1] == "(":
+                        sub_depth = 1
+                        k += 2
+                    elif c == "`":
+                        backtick = True
+                        k += 1
+                    else:
+                        # Quoted separators and spaces are data: replace them
+                        # with the non-whitespace placeholder so the span
+                        # stays ONE token.
+                        if c.isspace():
+                            chars[k] = MASK_PLACEHOLDER
+                        k += 1
+                chars[i] = " "
+                if close < n:
+                    chars[close] = " "
+                i = close + 1
+                continue
+            chars[i] = MASK_PLACEHOLDER
+            i += 1
+            while i < n and chars[i] != '"':
+                if chars[i] == "\\" and i + 1 < n:
+                    # Escapes inside double quotes are literal data, including
+                    # an escaped \$HOME.
+                    chars[i] = " "
+                    chars[i + 1] = " "
+                    i += 2
+                elif chars[i] == "$" and i + 1 < n and chars[i + 1] == "(":
+                    depth = 0
+                    quote = None
+                    j = i
+                    while j < n:
+                        qc = chars[j]
+                        if quote is not None:
+                            # Quoted parens do not count toward the depth.
+                            if qc == quote:
+                                quote = None
+                        elif qc in ("'", '"'):
+                            quote = qc
+                        elif qc == "(":
+                            depth += 1
+                        elif qc == ")":
+                            depth -= 1
+                            if depth == 0:
+                                break
+                        j += 1
+                    i = (j + 1) if j < n else n
+                elif chars[i] == "`":
+                    i += 1
+                    while i < n and chars[i] != "`":
+                        i += 1
+                    i += 1
+                else:
+                    chars[i] = " "
+                    i += 1
+            if i < n:
+                chars[i] = " "  # closing quote
+            i += 1
+            continue
+        if ch == "#" and (
+            i == 0
+            or chars[i - 1].isspace()
+            or chars[i - 1] in ";&|()<>"
+        ):
+            while i < n and chars[i] != "\n":
+                chars[i] = " "
+                i += 1
+            continue
+        i += 1
+    return "".join(chars)
+
+
+def _segments_contain_unbounded_scan(masked: str) -> bool:
+    """True when any segment of the masked command is an unbounded scan."""
+    for segment in re.split(r"&&|\|\||;|\||\n", masked):
+        tokens = segment.split()
+        # Leading grouping operators: `(find ...)` and `{ ...; }` run the
+        # same command, so the shape must survive grouping. Walk by index
+        # and strip all prefixes at once: popping the head or copying one
+        # character per round is quadratic in the number of prefixes.
+        command_start = 0
+        while command_start < len(tokens):
+            stripped = tokens[command_start].lstrip("({")
+            if stripped:
+                tokens[command_start] = stripped
+                break
+            command_start += 1
+        tokens = tokens[command_start:]
+        if not tokens or tokens[0] == "timeout":
+            continue
+        if tokens[0] in ("grep", "egrep", "fgrep"):
+            if not any(
+                t.startswith("--recursive")
+                or (t.startswith("-") and not t.startswith("--") and "r" in t.lower())
+                for t in tokens[1:]
+            ):
+                continue
+        elif tokens[0] not in ("rg", "find"):
+            continue
+        # Depth bounds are tool-specific: rg takes --max-depth/-d, find
+        # takes -maxdepth; the grep family has no depth option (a `-d2`
+        # after `-e` is the pattern, not a bound).
+        rest = tokens[1:]
+        if tokens[0] == "rg":
+            if _is_rg_depth_bound(rest):
+                continue
+        elif tokens[0] == "find":
+            if _is_find_depth_bound(rest):
+                continue
+        # grep-family and rg take their pattern as the first non-option
+        # argument — pattern text, not a scan root; a quoted pattern
+        # containing $HOME must not count as a home root (a masked pattern
+        # leaves a placeholder in its position). When the pattern came from
+        # a pattern option (-e/--regexp/-f/--file), every non-option
+        # argument is a root and none is skipped.
+        # Pattern options (-e/--regexp/-f/--file) supply the pattern: their
+        # operands are skipped, not roots. rg's --files listing mode takes
+        # no pattern at all, so every positional is a path.
+        # Pattern options belong to grep-family and rg only: BSD find's
+        # `-f` supplies the hierarchy to walk, not a pattern file.
+        if tokens[0] == "find":
+            # find's syntax is `find [path...] [expression]`: a `-`-led
+            # token starts the expression, and everything after it (-exec
+            # bodies, -newer operands, ...) is operands, not scan roots —
+            # so `find . -exec cp {} ~/backup/ \;` stays quiet. BSD's
+            # `-f path` names the hierarchy itself. A redirection's target
+            # is a file to write, never a scan root.
+            root_tokens = []
+            expression = False
+            i = 0
+            while i < len(rest):
+                t = rest[i]
+                if _is_redirect_operator(t):
+                    i += 2  # the operator and its target
+                    continue
+                if expression:
+                    i += 1
+                    continue
+                if t in _FIND_GLOBAL_OPTIONS or t.startswith(("-O", "-D")):
+                    # Global options never start the expression; a bare
+                    # `-O`/`-D` consumes its operand token.
+                    i += 2 if t in ("-O", "-D") else 1
+                    continue
+                if t == "-f":
+                    if i + 1 < len(rest):
+                        root_tokens.append(rest[i + 1])
+                    i += 2
+                    continue
+                if t.startswith("-"):
+                    expression = True
+                else:
+                    root_tokens.append(t)
+                i += 1
+            if not any(_is_home_scale_root(t) for t in root_tokens):
+                continue
+            return True
+        takes_pattern_options = tokens[0] in ("grep", "egrep", "fgrep", "rg")
+        rg_files_mode = tokens[0] == "rg" and "--files" in rest
+        pattern_from_option = takes_pattern_options and any(
+            t in ("-e", "--regexp", "-f", "--file")
+            or t.startswith(("--regexp=", "--file="))
+            for t in rest
+        )
+        root_tokens = []
+        skip_next = False
+        pattern_skipped = rg_files_mode or pattern_from_option
+        seen_ddash = False
+        for t in rest:
+            if skip_next:
+                skip_next = False  # the operand of a pattern option
+                continue
+            if _is_redirect_operator(t):
+                skip_next = True  # its target is a file to write, not a root
+                continue
+            if not seen_ddash and t == "--":
+                # `--` ends option parsing: the next positional is the
+                # pattern even when it starts with `-`.
+                seen_ddash = True
+                continue
+            if not seen_ddash and takes_pattern_options and t in (
+                "-e",
+                "--regexp",
+                "-f",
+                "--file",
+            ):
+                skip_next = True
+                continue
+            if takes_pattern_options and t.startswith(("--regexp=", "--file=")):
+                continue
+            if not pattern_skipped and tokens[0] in (
+                "grep",
+                "egrep",
+                "fgrep",
+                "rg",
+            ) and (seen_ddash or not t.startswith("-")):
+                pattern_skipped = True  # the positional pattern
+                continue
+            root_tokens.append(t)
+        if not any(_is_home_scale_root(t) for t in root_tokens):
+            continue
+        return True
+    return False
+
+
+def _extract_substitutions(masked: str) -> tuple[str, list[str]]:
+    """Replace every $(...) span (paren-depth matched, quote-aware) and
+    backtick span with a placeholder, returning the parent text with bodies
+    blanked plus the bodies themselves: the bodies execute, so they are
+    command text — but they are scanned separately, so a quoted separator
+    inside one must never split the parent command."""
+
+    def _is_escaped(at: int) -> bool:
+        # A backslash-escaped `\$(` or backtick is literal data, not a
+        # substitution opener.
+        run = 0
+        k = at - 1
+        while k >= 0 and masked[k] == "\\":
+            run += 1
+            k -= 1
+        return run % 2 == 1
+
+    chars = list(masked)
+    n = len(chars)
+    bodies: list[str] = []
+    i = 0
+    while i < len(masked):
+        if (
+            chars[i] == "$"
+            and i + 1 < n
+            and chars[i + 1] == "("
+            and not _is_escaped(i)
+        ):
+            depth = 0
+            quote = None
+            j = i + 1
+            while j < n:
+                c = chars[j]
+                if quote is not None:
+                    # Quoted parens do not count toward the depth; the
+                    # substitution still closes at its real `)`.
+                    if c == quote:
+                        quote = None
+                elif c in ("'", '"'):
+                    quote = c
+                elif c == "(":
+                    depth += 1
+                elif c == ")":
+                    depth -= 1
+                    if depth == 0:
+                        break
+                j += 1
+            if j < n:
+                body = "".join(chars[i + 2 : j])
+                if body.strip():
+                    bodies.append(body)
+                # Blank the whole span in the parent: the body is scanned
+                # on its own.
+                for k in range(i, j + 1):
+                    chars[k] = " "
+                chars[i] = MASK_PLACEHOLDER
+                i = j
+            else:
+                # An unmatched `$(` has no closing paren ahead: the suffix is
+                # its unclosed body, so stop scanning there instead of
+                # rescanning it for every later `$(` (quadratic).
+                break
+        elif chars[i] == "`" and not _is_escaped(i):
+            j = i + 1
+            while j < n and chars[j] != "`":
+                j += 1
+            if j < n:
+                body = "".join(chars[i + 1 : j])
+                if body.strip():
+                    bodies.append(body)
+                for k in range(i, j + 1):
+                    chars[k] = " "
+                chars[i] = MASK_PLACEHOLDER
+                i = j
+        i += 1
+    return "".join(chars), bodies
+
+
+def _is_unbounded_home_scan(command: str) -> bool:
+    """True for the unbounded-scan shape; mirrors the Rust bash_guard rule.
+
+    Recursive scan (grep -r, rg, find — recursive by default) over a ~/$HOME
+    root, with no `timeout` prefix and no --max-depth/-maxdepth bound.
+    Quoted literal data, heredoc bodies, and comments are masked first so
+    they cannot masquerade as a scan; command-substitution bodies run in a
+    subshell, so they are scanned as commands too (the same rules as the
+    Rust guard).
+    """
+    # Iterative worklist with a depth cap: recursion would hit Python's
+    # limit (or the agent's stack) on deeply nested malformed input before
+    # the executor ever starts, and an uncapped walk would spend quadratic
+    # time on it.
+    worklist = [(command, 0)]
+    while worklist:
+        text, depth = worklist.pop()
+        masked = _mask_scan_literals(text)
+        parent, bodies = _extract_substitutions(masked)
+        if _segments_contain_unbounded_scan(parent):
+            return True
+        if depth + 1 < _SUBSTITUTION_DEPTH_CAP:
+            worklist.extend((b, depth + 1) for b in bodies)
+    return False
+
+
+def _note_scan_cost(command: str) -> None:
+    """Write the scan-cost hint to the dispatching cell's stderr, within budget."""
+    global _scan_hints_written
+    if _scan_hints_written >= _MAX_SCAN_HINTS or not _is_unbounded_home_scan(command):
+        return
+    _scan_hints_written += 1
+    sys.stderr.write(
+        "bash: this recursive scan of home-scale directories is unbounded "
+        "in time; output caps (| head) do not bound scan time, and "
+        "awaiting it inline can stall the turn. Wrap it in `timeout 60 "
+        "...`, add --max-depth / -maxdepth, or background it and end the "
+        "turn.\n"
     )
 
 
@@ -1350,6 +1993,7 @@ def bash(command: str, yield_after: float | None = None, persistent: bool = Fals
         raise TypeError("command must be a non-empty str")
     if yield_after is not None and yield_after <= 0:
         raise ValueError("yield_after must be a positive number of seconds")
+    _note_scan_cost(command)
     if persistent:
         handle: BashHandle = _spawn_persistent(command, yield_after)
     else:
