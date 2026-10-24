@@ -14,10 +14,10 @@ impl Fixture {
         let temp = tempfile::tempdir().unwrap();
         let cwd = temp.path().join("project");
         let agent = temp.path().join("agent");
-        std::fs::create_dir_all(cwd.join(".prime")).unwrap();
+        std::fs::create_dir_all(cwd.join(".prime/agent")).unwrap();
         std::fs::create_dir(cwd.join(".git")).unwrap();
         std::fs::create_dir(&agent).unwrap();
-        let source = cwd.join(".prime/hooks.json");
+        let source = cwd.join(".prime/agent/hooks.json");
         Self {
             _temp: temp,
             cwd,
@@ -78,14 +78,13 @@ fn project_local_trust_cannot_authorize_hooks() {
     let error = load(&fixture.cwd, &fixture.cwd.join(".prime"))
         .err()
         .unwrap();
-    let cwd = fixture.cwd.canonicalize().unwrap();
-    assert_eq!(
-        format!("{error:#}"),
-        format!(
-            "the agent directory {} is inside the project root {}, and project-local agent directories cannot authorize hooks; start the session from a directory outside it",
-            cwd.join(".prime").display(),
-            cwd.display()
-        )
+    let message = format!("{error:#}");
+    assert!(
+        message.starts_with(&format!(
+            "the agent directory {} is inside the project root",
+            fixture.cwd.canonicalize().unwrap().join(".prime").display()
+        )),
+        "{message}"
     );
 }
 
@@ -101,46 +100,104 @@ fn untrusted_source_reports_its_path_and_fingerprint() {
         &configuration(),
     );
     assert!(loaded.hooks.is_empty());
-    assert_eq!(
-        loaded.diagnostics,
-        [format!(
-            "Hooks skipped: {} is not trusted for {}. Trust covers the file's path and bytes and the session directory, so an edit or another directory needs a new entry. After reviewing it, add this fingerprint to {} (see docs/hooks.md):\n{digest}",
-            cwd.join(".prime/hooks.json").display(),
-            cwd.display(),
-            fixture.agent.canonicalize().unwrap().join("hook-trust.json").display(),
-        )]
-    );
+    let [diagnostic] = loaded.diagnostics.as_slice() else {
+        panic!("one diagnostic: {:?}", loaded.diagnostics);
+    };
+    // The notice names the source, the trust file, and the exact fingerprint.
+    assert!(diagnostic.starts_with(&format!(
+        "Hooks skipped: {} is not trusted",
+        cwd.join(".prime/agent/hooks.json").display()
+    )));
+    assert!(diagnostic.contains(
+        &fixture
+            .agent
+            .canonicalize()
+            .unwrap()
+            .join("hook-trust.json")
+            .display()
+            .to_string()
+    ));
+    assert!(diagnostic.ends_with(&format!("\n{digest}")));
 }
 
 #[test]
 fn trusted_invalid_source_reports_why_it_was_skipped() {
     let fixture = Fixture::new();
-    std::fs::write(&fixture.source, br#"{"hooks":{"UnsupportedEvent":[]}}"#).unwrap();
+    std::fs::write(&fixture.source, b"{").unwrap();
     fixture.approve(&[&fixture.source]);
     let loaded = load(&fixture.cwd, &fixture.agent).unwrap();
     assert!(loaded.hooks.is_empty());
+    let [diagnostic] = loaded.diagnostics.as_slice() else {
+        panic!("one diagnostic: {:?}", loaded.diagnostics);
+    };
+    assert!(diagnostic.starts_with(&format!(
+        "Hooks skipped: {}: invalid hook configuration",
+        fixture
+            .cwd
+            .canonicalize()
+            .unwrap()
+            .join(".prime/agent/hooks.json")
+            .display()
+    )));
+}
+
+/// Codex documents share this format: a Codex-only event, handler type,
+/// execution mode or field skips only that part, never the source's other
+/// policies, and the skipped parts are reported.
+#[test]
+fn unsupported_parts_are_skipped_with_a_notice_and_the_rest_loads() {
+    let fixture = Fixture::new();
+    let bytes = serde_json::to_vec(&json!({"hooks":{
+        "PermissionRequest":[{"hooks":[{"type":"command","command":"true"}]}],
+        "PreToolUse":[{"matcher":"^bash$","hooks":[
+            {"type":"command","command":"exit 2","statusMessage":"Checking","timeout":3},
+            {"type":"prompt","prompt":"judge this"},
+            {"type":"command","command":"true","additionalContextLimit":10}
+        ]}],
+        "PostToolUse":[{"hooks":[{"type":"command","command":"sync observer"}]}]
+    }}))
+    .unwrap();
+    std::fs::write(&fixture.source, &bytes).unwrap();
+    fixture.approve(&[&fixture.source]);
+    let loaded = load(&fixture.cwd, &fixture.agent).unwrap();
     assert_eq!(
-        loaded.diagnostics,
-        [format!(
-            "Hooks skipped: {}: unsupported hook event UnsupportedEvent. Other trusted hook sources remain active.",
-            fixture.cwd.canonicalize().unwrap().join(".prime/hooks.json").display()
-        )]
+        loaded
+            .hooks
+            .iter()
+            .map(|hook| (hook.event, hook.command.as_str()))
+            .collect::<Vec<_>>(),
+        [(Event::PreToolUse, "exit 2"), (Event::PreToolUse, "true")]
     );
+    let [diagnostic] = loaded.diagnostics.as_slice() else {
+        panic!("one diagnostic: {:?}", loaded.diagnostics);
+    };
+    for part in [
+        "PreToolUse handler field(s) additionalContextLimit",
+        "PermissionRequest hooks (unsupported event)",
+        "PreToolUse handler (type prompt is unsupported",
+        "PostToolUse handler (PostToolUse requires async:true)",
+    ] {
+        assert!(diagnostic.contains(part), "{part}: {diagnostic}");
+    }
+    assert!(!diagnostic.contains("statusMessage"), "{diagnostic}");
 }
 
 #[test]
-fn rejects_unsupported_or_malformed_configuration() {
+fn skips_unsupported_handlers_and_rejects_malformed_configuration() {
     for value in [
         json!({"hooks":{"UnsupportedEvent":[]}}),
         json!({"hooks":{"PostToolUse":[{"hooks":[{"type":"command","command":"true"}]}]}}),
         json!({"hooks":{"PreToolUse":[{"hooks":[{"type":"command","command":"true","async":true}]}]}}),
         json!({"hooks":{"PreToolUse":[{"hooks":[{"type":"prompt","command":"true"}]}]}}),
         json!({"hooks":{"PreToolUse":[{"hooks":[{"type":"command","command":"true","timeout":601}]}]}}),
-        json!({"hooks":{},"unknown":true}),
+        json!({"hooks":{"PreToolUse":[{"matcher":"[","hooks":[{"type":"command","command":"true"}]}]}}),
     ] {
-        assert!(parse(&serde_json::to_vec(&value).unwrap(), &mut 0).is_err());
+        let parsed = parse(&serde_json::to_vec(&value).unwrap(), &mut 0).unwrap();
+        assert!(parsed.hooks.is_empty(), "{value}");
+        assert_eq!(parsed.notices.len(), 1, "{value}");
     }
     assert!(parse(b"{", &mut 0).is_err());
+    assert!(parse(br#"{"hooks":{"PreToolUse":{}}}"#, &mut 0).is_err());
 }
 
 #[test]
@@ -148,7 +205,7 @@ fn trusted_invalid_source_preserves_other_trusted_policies() {
     let fixture = Fixture::new();
     let user_source = fixture.agent.join("hooks.json");
     std::fs::write(&user_source, configuration()).unwrap();
-    std::fs::write(&fixture.source, br#"{"hooks":{"UnsupportedEvent":[]}}"#).unwrap();
+    std::fs::write(&fixture.source, b"{").unwrap();
     fixture.approve(&[&user_source, &fixture.source]);
     let hooks = load(&fixture.cwd, &fixture.agent).unwrap().hooks;
     assert_eq!(hooks.len(), 1);
@@ -162,7 +219,7 @@ fn preserves_handler_order_and_accepts_background_observers() {
         {"type":"command","command":"second","async":true}
     ]}]}}))
     .unwrap();
-    let hooks = parse(&bytes, &mut 0).unwrap();
+    let hooks = parse(&bytes, &mut 0).unwrap().hooks;
     assert_eq!(
         hooks
             .iter()
@@ -313,7 +370,7 @@ fn lifecycle_configuration_preserves_matchers_and_end_deadlines() {
         "PreCompact":[{"matcher":"^auto$","hooks":[{"type":"command","command":"true"}]}],
         "SessionEnd":[{"matcher":"other","hooks":[{"type":"command","command":"true","async":true}]}]
     }})).unwrap();
-    let hooks = parse(&bytes, &mut 0).unwrap();
+    let hooks = parse(&bytes, &mut 0).unwrap().hooks;
     assert!(hooks
         .iter()
         .any(|hook| hook.matches(Event::SessionStart, "resume")));
@@ -343,8 +400,10 @@ fn lifecycle_configuration_preserves_matchers_and_end_deadlines() {
     for event in ["SessionStart", "UserPromptSubmit", "PreCompact", "Stop"] {
         let config =
             json!({"hooks":{event:[{"hooks":[{"type":"command","command":"true","async":true}]}]}});
-        assert!(parse(&serde_json::to_vec(&config).unwrap(), &mut 0).is_err());
+        let parsed = parse(&serde_json::to_vec(&config).unwrap(), &mut 0).unwrap();
+        assert!(parsed.hooks.is_empty() && parsed.notices.len() == 1);
     }
     let too_long = json!({"hooks":{"SessionEnd":[{"hooks":[{"type":"command","command":"true","timeout":4}]}]}});
-    assert!(parse(&serde_json::to_vec(&too_long).unwrap(), &mut 0).is_err());
+    let parsed = parse(&serde_json::to_vec(&too_long).unwrap(), &mut 0).unwrap();
+    assert!(parsed.hooks.is_empty() && parsed.notices.len() == 1);
 }

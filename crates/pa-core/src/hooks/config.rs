@@ -50,31 +50,41 @@ impl Event {
     }
 }
 
+// Configuration documents are shared with Codex. Unknown keys are ignored with
+// a notice instead of rejecting the whole source, so one Codex-only field never
+// drops the policies around it. Cosmetic Codex keys are ignored silently.
 #[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
 struct Document {
     #[serde(default)]
     description: Option<String>,
     hooks: BTreeMap<String, Vec<Group>>,
+    #[serde(flatten)]
+    unknown: BTreeMap<String, serde_json::Value>,
 }
 
 #[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
 struct Group {
     matcher: Option<String>,
     hooks: Vec<Handler>,
+    #[serde(flatten)]
+    unknown: BTreeMap<String, serde_json::Value>,
 }
 
 #[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
 struct Handler {
     #[serde(rename = "type")]
     kind: String,
-    command: String,
+    #[serde(default)]
+    command: Option<String>,
     timeout: Option<u64>,
     #[serde(default, rename = "async")]
     background: bool,
+    #[serde(flatten)]
+    unknown: BTreeMap<String, serde_json::Value>,
 }
+
+/// Codex display-only handler keys: accepting them changes no behavior.
+const COSMETIC_HANDLER_FIELDS: [&str; 1] = ["statusMessage"];
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -174,68 +184,112 @@ fn read_bounded(path: &Path, kind: SourceKind) -> anyhow::Result<Option<Vec<u8>>
     Ok(Some(bytes))
 }
 
-fn parse(bytes: &[u8], group_count: &mut usize) -> anyhow::Result<Vec<ConfiguredHook>> {
+/// Parsed hooks plus notices for the parts of a source that were skipped.
+struct Parsed {
+    hooks: Vec<ConfiguredHook>,
+    notices: Vec<String>,
+}
+
+fn parse(bytes: &[u8], group_count: &mut usize) -> anyhow::Result<Parsed> {
     let document: Document = serde_json::from_slice(bytes).context("invalid hook configuration")?;
     let _ = document.description;
     *group_count += document.hooks.values().map(Vec::len).sum::<usize>();
     if *group_count > HANDLER_LIMIT {
         bail!("at most 32 hook groups total across user and project sources");
     }
+    let mut notices = Vec::new();
+    let mut ignore_fields = |scope: &str, unknown: BTreeMap<String, serde_json::Value>| {
+        let names: Vec<_> = unknown
+            .into_keys()
+            .filter(|name| !COSMETIC_HANDLER_FIELDS.contains(&name.as_str()))
+            .collect();
+        if !names.is_empty() {
+            notices.push(format!(
+                "ignored unsupported {scope} field(s) {}",
+                names.join(", ")
+            ));
+        }
+    };
+    ignore_fields("configuration", document.unknown);
     let mut hooks = Vec::new();
-    for (event, groups) in document.hooks {
-        let event = Event::parse(&event)?;
+    let mut skipped = Vec::new();
+    for (name, groups) in document.hooks {
+        let Ok(event) = Event::parse(&name) else {
+            skipped.push(format!("{name} hooks (unsupported event)"));
+            continue;
+        };
         for group in groups {
+            ignore_fields(&format!("{name} group"), group.unknown);
             if group.matcher.as_ref().is_some_and(|m| m.len() > 1024) {
-                bail!("hook matcher exceeds 1024 bytes");
+                skipped.push(format!("a {name} group (matcher exceeds 1024 bytes)"));
+                continue;
             }
             let matcher = match group.matcher.as_deref() {
                 _ if matches!(event, Event::UserPromptSubmit | Event::Stop) => None,
                 None | Some("" | "*") => None,
-                Some(pattern) => Some(
-                    RegexBuilder::new(pattern)
-                        .backtrack_limit(10_000)
-                        .build()
-                        .context("invalid hook matcher")?,
-                ),
+                Some(pattern) => match RegexBuilder::new(pattern).backtrack_limit(10_000).build() {
+                    Ok(matcher) => Some(matcher),
+                    Err(error) => {
+                        skipped.push(format!("a {name} group (invalid matcher: {error})"));
+                        continue;
+                    }
+                },
             };
             for handler in group.hooks {
-                if handler.kind != "command" {
-                    bail!(
-                        "unsupported hook handler {}; only command is supported",
-                        handler.kind
-                    );
-                }
-                if handler.command.trim().is_empty() || handler.command.len() > 16 * 1024 {
-                    bail!("hook command must contain 1..16384 bytes");
-                }
-                if event != Event::SessionEnd && handler.background != (event == Event::PostToolUse)
-                {
-                    bail!(
-                        "PostToolUse requires async:true; decision events require synchronous execution"
-                    );
-                }
-                let (default, maximum) = if event == Event::SessionEnd {
-                    (1, 3)
-                } else {
-                    (600, 600)
-                };
-                let timeout = handler.timeout.unwrap_or(default);
-                if !(1..=maximum).contains(&timeout) {
-                    bail!("hook timeout must be 1..{maximum} seconds");
-                }
-                hooks.push(ConfiguredHook {
-                    event,
-                    command: handler.command,
-                    timeout: Duration::from_secs(timeout),
-                    matcher: matcher.clone(),
-                });
-                if hooks.len() > HANDLER_LIMIT {
-                    bail!("at most 32 command hooks may be configured");
+                let unknown = handler.unknown;
+                // An unsupported handler is skipped without discarding the
+                // rest of its source.
+                let accepted = (|| -> Result<_, String> {
+                    if handler.kind != "command" {
+                        return Err(format!(
+                            "type {} is unsupported; only command is supported",
+                            handler.kind
+                        ));
+                    }
+                    let command = handler.command.unwrap_or_default();
+                    if command.trim().is_empty() || command.len() > 16 * 1024 {
+                        return Err("command must contain 1..16384 bytes".into());
+                    }
+                    if event != Event::SessionEnd
+                        && handler.background != (event == Event::PostToolUse)
+                    {
+                        return Err(if event == Event::PostToolUse {
+                            "PostToolUse requires async:true".into()
+                        } else {
+                            format!("{name} requires synchronous execution")
+                        });
+                    }
+                    let (default, maximum) = if event == Event::SessionEnd {
+                        (1, 3)
+                    } else {
+                        (600, 600)
+                    };
+                    let timeout = handler.timeout.unwrap_or(default);
+                    if !(1..=maximum).contains(&timeout) {
+                        return Err(format!("timeout must be 1..{maximum} seconds"));
+                    }
+                    Ok((command, Duration::from_secs(timeout)))
+                })();
+                match accepted {
+                    Ok((command, timeout)) => {
+                        ignore_fields(&format!("{name} handler"), unknown);
+                        hooks.push(ConfiguredHook {
+                            event,
+                            command,
+                            timeout,
+                            matcher: matcher.clone(),
+                        });
+                        if hooks.len() > HANDLER_LIMIT {
+                            bail!("at most 32 command hooks may be configured");
+                        }
+                    }
+                    Err(reason) => skipped.push(format!("a {name} handler ({reason})")),
                 }
             }
         }
     }
-    Ok(hooks)
+    notices.extend(skipped.into_iter().map(|part| format!("skipped {part}")));
+    Ok(Parsed { hooks, notices })
 }
 
 pub(super) fn load(cwd: &Path, agent_dir: &Path) -> anyhow::Result<Loaded> {
@@ -247,7 +301,9 @@ pub(super) fn load(cwd: &Path, agent_dir: &Path) -> anyhow::Result<Loaded> {
         .find(|path| path.join(".git").exists())
         .unwrap_or(&cwd);
     let user_source = agent_dir.join("hooks.json");
-    let project_source = root.join(".prime/hooks.json");
+    // Mirrors the user source `<agent-dir>/hooks.json` and the existing
+    // project configuration directory `.prime/agent/`.
+    let project_source = root.join(".prime/agent/hooks.json");
     // Missing files are normal. Avoid even reading trust in the common no-hooks case.
     if !user_source.exists() && !project_source.exists() {
         return Ok(Loaded {
@@ -306,16 +362,23 @@ pub(super) fn load(cwd: &Path, agent_dir: &Path) -> anyhow::Result<Loaded> {
                 return Ok(None);
             }
             let mut candidate_groups = group_count;
-            let hooks = parse(&bytes, &mut candidate_groups)?;
-            if result.len() + hooks.len() > HANDLER_LIMIT {
+            let parsed = parse(&bytes, &mut candidate_groups)?;
+            if result.len() + parsed.hooks.len() > HANDLER_LIMIT {
                 bail!("at most 32 hooks total across user and project sources");
             }
-            Ok(Some((hooks, candidate_groups)))
+            Ok(Some((parsed, candidate_groups)))
         })();
         match attempt {
-            Ok(Some((hooks, candidate_groups))) => {
+            Ok(Some((parsed, candidate_groups))) => {
                 group_count = candidate_groups;
-                result.extend(hooks);
+                result.extend(parsed.hooks);
+                if !parsed.notices.is_empty() {
+                    diagnostics.push(format!(
+                        "Hooks partially loaded from {}: {}. Its other hooks remain active.",
+                        source.display(),
+                        parsed.notices.join("; ")
+                    ));
+                }
             }
             Ok(None) => {}
             Err(error) => {
