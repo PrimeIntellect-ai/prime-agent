@@ -25,6 +25,11 @@ struct Specific {
     hook_event_name: String,
     permission_decision: Option<String>,
     permission_decision_reason: Option<String>,
+    /// Codex model context. Prime has no channel for it yet: ignored with a notice.
+    additional_context: Option<String>,
+    /// Codex input rewrite. Unsupported, so any rewrite blocks the call rather
+    /// than running the input the hook tried to replace.
+    updated_input: Option<serde_json::Value>,
 }
 
 pub(super) fn parse(event: Event, output: CommandOutput) -> anyhow::Result<HookOutcome> {
@@ -119,13 +124,35 @@ pub(super) fn parse(event: Event, output: CommandOutput) -> anyhow::Result<HookO
             !matches!(event, Event::Stop | Event::PreCompact),
             "hookSpecificOutput is unsupported for this event"
         );
+        if specific.additional_context.is_some() {
+            outcome.notices.push(format!(
+                "{} hook additionalContext ignored: model context from hooks is not supported.",
+                event.name()
+            ));
+        }
+        if specific.updated_input.is_some() && specific.permission_decision.as_deref() != Some("deny") {
+            ensure!(
+                event == Event::PreToolUse,
+                "updatedInput is unsupported for this event"
+            );
+            let reason = specific
+                .permission_decision_reason
+                .as_deref()
+                .map(str::trim)
+                .filter(|reason| !reason.is_empty())
+                .map_or_else(String::new, |reason| format!(" ({reason})"));
+            outcome.deny = Some(format!(
+                "the hook requested an input rewrite (updatedInput), which is unsupported{reason}"
+            ));
+            return Ok(outcome);
+        }
         match specific.permission_decision.as_deref() {
             Some("deny") if event == Event::PreToolUse => {
                 let reason = specific.permission_decision_reason.unwrap_or_default();
                 ensure!(!reason.trim().is_empty(), "permissionDecision:deny requires a nonempty permissionDecisionReason");
                 outcome.deny = Some(reason.trim().to_string());
             }
-            Some("allow") if event == Event::PreToolUse => bail!("permissionDecision:allow requires updatedInput, which this subset does not support"),
+            Some("allow") if event == Event::PreToolUse => bail!("permissionDecision:allow is unsupported without a permission prompt to bypass"),
             None if specific.permission_decision_reason.is_none() => {}
             Some(_) | None => bail!("unsupported permission decision for this event"),
         }
@@ -292,8 +319,6 @@ mod tests {
     fn unsupported_output_is_rejected_atomically() {
         for value in [
             r#"{"decision":"block","reason":"stop","continue":false}"#,
-            r#"{"hookSpecificOutput":{"hookEventName":"PreToolUse","updatedInput":{}}}"#,
-            r#"{"hookSpecificOutput":{"hookEventName":"PreToolUse","additionalContext":"x"}}"#,
             r#"{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"ask"}}"#,
             "{",
             "[]",
@@ -319,6 +344,49 @@ mod tests {
             output(r#"{"hookSpecificOutput":{"hookEventName":"Stop"}}"#)
         )
         .is_err());
+    }
+
+    /// Codex PreToolUse fields: context is ignored with a notice and never
+    /// breaks a denial; any input rewrite blocks instead of failing open.
+    #[test]
+    fn codex_context_is_ignored_and_input_rewrites_block() {
+        let denied = parse(
+            Event::PreToolUse,
+            output(
+                r#"{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"no","additionalContext":"x"}}"#,
+            ),
+        )
+        .unwrap();
+        assert_eq!(
+            denied,
+            HookOutcome {
+                deny: Some("no".into()),
+                notices: vec![
+                    "PreToolUse hook additionalContext ignored: model context from hooks is not supported.".into()
+                ],
+                ..Default::default()
+            }
+        );
+        for value in [
+            r#"{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"allow","updatedInput":{"code":"safe"}}}"#,
+            r#"{"hookSpecificOutput":{"hookEventName":"PreToolUse","updatedInput":{}}}"#,
+        ] {
+            let outcome = parse(Event::PreToolUse, output(value)).unwrap();
+            assert!(
+                outcome
+                    .deny
+                    .as_deref()
+                    .is_some_and(|reason| reason.contains("updatedInput")),
+                "{value}: {outcome:?}"
+            );
+        }
+        let context_only = parse(
+            Event::SessionStart,
+            output(r#"{"hookSpecificOutput":{"hookEventName":"SessionStart","additionalContext":"x"}}"#),
+        )
+        .unwrap();
+        assert_eq!(context_only.deny, None);
+        assert_eq!(context_only.notices.len(), 1);
     }
 
     #[test]

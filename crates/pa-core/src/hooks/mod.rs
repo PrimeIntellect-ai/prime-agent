@@ -21,6 +21,8 @@ pub(crate) struct HookOutcome {
     pub stop: Option<String>,
     pub continuation: Option<String>,
     pub message: Option<String>,
+    /// Non-fatal diagnostics about ignored output, shown once to the user.
+    pub notices: Vec<String>,
 }
 
 /// Delivers one user-facing hook diagnostic. The session engine renders it as a
@@ -464,7 +466,10 @@ impl State {
             COMMAND_PREVIEW_CHARS,
         );
         match result {
-            Ok(Ok(outcome)) => {
+            Ok(Ok(mut outcome)) => {
+                for notice in std::mem::take(&mut outcome.notices) {
+                    self.notify(format!("{notice}\ncommand: {command}")).await;
+                }
                 if let Some(message) = &outcome.message {
                     tracing::warn!(%message, event, %command, "hook systemMessage");
                     let message = preview(message, MESSAGE_PREVIEW_CHARS);
