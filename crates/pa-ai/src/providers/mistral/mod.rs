@@ -21,6 +21,8 @@ use serde_json::{json, Value};
 
 mod convert;
 mod stream;
+#[cfg(test)]
+mod wire_tests;
 
 pub use stream::stream_mistral;
 
