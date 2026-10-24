@@ -174,11 +174,12 @@ fn validate_factory_progress(data: &Value) -> anyhow::Result<KernelNotice> {
     })
 }
 
-/// The session's agent through which the in-process sinks steer and
-/// withdraw: late-bound because the handlers register before the agent
-/// exists, and weak so the handler -> agent -> kernel -> handler graph
-/// stays acyclic (a dropped session's handlers bind nothing).
-pub type BashNoticeAgentSlot = Arc<Mutex<Option<Weak<pa_agent::agent::Agent>>>>;
+/// The session's agent the host handlers reach (the in-process notice sinks
+/// steer and withdraw through it; `rlm.respond` attaches its row):
+/// late-bound because the handlers register before the agent exists, and
+/// weak so the handler -> agent -> kernel -> handler graph stays acyclic (a
+/// dropped session's handlers bind nothing).
+pub type SessionAgentSlot = Arc<Mutex<Option<Weak<pa_agent::agent::Agent>>>>;
 
 /// The in-process sinks over one session's own agent (the daemonless
 /// embeddings): a notice steers its row (`[bash-done]` or
@@ -188,7 +189,7 @@ pub type BashNoticeAgentSlot = Arc<Mutex<Option<Weak<pa_agent::agent::Agent>>>>;
 /// consumed notice withdraws the queued completion row.
 pub fn register_in_process_kernel_notice_handlers(
     wake: &BashNoticeWake,
-    agent_slot: &BashNoticeAgentSlot,
+    agent_slot: &SessionAgentSlot,
     handlers: &mut HostRequestHandlers,
 ) {
     let notice_wake = Arc::clone(wake);
@@ -223,9 +224,9 @@ pub fn register_in_process_kernel_notice_handlers(
 }
 
 /// The bound agent behind the late slot, when the session still lives.
-fn bound_agent(slot: &BashNoticeAgentSlot) -> Option<Arc<pa_agent::agent::Agent>> {
+pub(crate) fn bound_agent(slot: &SessionAgentSlot) -> Option<Arc<pa_agent::agent::Agent>> {
     slot.lock()
-        .expect("bash notice agent slot lock")
+        .expect("session agent slot lock")
         .as_ref()
         .and_then(Weak::upgrade)
 }
@@ -271,14 +272,14 @@ mod tests {
 
     fn wired_agent() -> (
         Arc<pa_agent::agent::Agent>,
-        BashNoticeAgentSlot,
+        SessionAgentSlot,
         Arc<AtomicUsize>,
         HostRequestHandlers,
     ) {
         let agent = Arc::new(pa_agent::agent::Agent::new(
             pa_agent::agent::AgentOptions::default(),
         ));
-        let slot: BashNoticeAgentSlot = Arc::new(Mutex::new(Some(Arc::downgrade(&agent))));
+        let slot: SessionAgentSlot = Arc::new(Mutex::new(Some(Arc::downgrade(&agent))));
         let wakes = Arc::new(AtomicUsize::new(0));
         let wake = {
             let wakes = Arc::clone(&wakes);

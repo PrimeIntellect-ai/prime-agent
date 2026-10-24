@@ -631,6 +631,74 @@ async fn steering_message_injects_before_next_turn() {
     assert!(user_texts.contains(&"steered"));
 }
 
+/// Tool standing in for `rlm.respond`: attaches two rows to the running batch.
+struct AttachingTool {
+    agent: OnceLock<Agent>,
+}
+
+impl AgentTool for AttachingTool {
+    fn name(&self) -> &'static str {
+        "attach"
+    }
+
+    fn description(&self) -> &'static str {
+        "Attaches rows to the running tool batch."
+    }
+
+    fn parameters(&self) -> &serde_json::Value {
+        static SCHEMA: OnceLock<serde_json::Value> = OnceLock::new();
+        SCHEMA.get_or_init(|| serde_json::json!({ "type": "object", "properties": {} }))
+    }
+
+    fn execute(
+        self: Arc<Self>,
+        _tool_call_id: String,
+        _params: serde_json::Value,
+        _signal: AbortSignal,
+        _on_update: AgentToolUpdateCallback,
+    ) -> pa_agent::BoxFut<'static, anyhow::Result<AgentToolResult>> {
+        Box::pin(async move {
+            let agent = self.agent.get().expect("agent bound before the run");
+            agent.attach_to_tool_batch(AgentMessage::user("row a"));
+            agent.attach_to_tool_batch(AgentMessage::user("row b"));
+            Ok(AgentToolResult::text("attached"))
+        })
+    }
+}
+
+#[tokio::test]
+async fn attached_rows_follow_their_tool_batch_without_a_turn_of_their_own() {
+    let tool = Arc::new(AttachingTool {
+        agent: OnceLock::new(),
+    });
+    // The default one-at-a-time steering mode must not split the rows.
+    let (agent, provider, _events) = scripted_agent(vec![tool.clone()]).await;
+    assert!(tool.agent.set(agent.clone()).is_ok());
+    provider.push_tool_call_turn(None, vec![("call-1", "attach", serde_json::json!({}))]);
+    provider.push_text_turn("done");
+
+    agent.prompt("go").await.unwrap();
+    agent.wait_for_idle().await;
+
+    let calls = provider.calls();
+    assert_eq!(calls.len(), 2, "the rows ride the existing next turn");
+    let roles: Vec<String> = calls[1].messages[1..]
+        .iter()
+        .map(|message| match message {
+            Message::User(user) => match &user.content {
+                UserContent::Text(text) => format!("user:{text}"),
+                UserContent::Parts(_) => "user:parts".to_string(),
+            },
+            Message::Assistant(_) => "assistant".to_string(),
+            Message::ToolResult(_) => "toolResult".to_string(),
+        })
+        .collect();
+    assert_eq!(
+        roles,
+        ["assistant", "toolResult", "user:row a", "user:row b"]
+    );
+}
+
 #[tokio::test]
 async fn terminate_tool_result_stops_the_run() {
     let (agent, provider, _events) = scripted_agent(vec![Arc::new(TerminatingTool)]).await;

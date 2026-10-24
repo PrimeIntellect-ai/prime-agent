@@ -325,6 +325,8 @@ struct AgentInner {
     shared: tokio::sync::Mutex<Shared>,
     steering_queue: Mutex<PendingMessageQueue>,
     follow_up_queue: Mutex<PendingMessageQueue>,
+    /// Rows a running tool adds to the transcript (see [`Agent::attach_to_tool_batch`]).
+    tool_batch_rows: Mutex<Vec<AgentMessage>>,
     /// Active-run bookkeeping. A plain mutex: never held across awaits.
     run: Mutex<Option<ActiveRun>>,
     convert_to_llm: ConvertToLlmFn,
@@ -550,6 +552,12 @@ impl AgentInner {
                     as crate::BoxFut<'static, anyhow::Result<Vec<AgentMessage>>>
             }) as PollMessagesFn
         };
+        let tool_batch_inner = Arc::clone(self);
+        let tool_batch_rows = Arc::new(move || {
+            let inner = Arc::clone(&tool_batch_inner);
+            Box::pin(async move { Ok(std::mem::take(&mut *inner.tool_batch_rows.lock().unwrap())) })
+                as crate::BoxFut<'static, anyhow::Result<Vec<AgentMessage>>>
+        }) as PollMessagesFn;
         let continuation = self.get_continuation_messages.lock().unwrap().clone();
         let should_stop_after_turn = self.should_stop_after_turn.clone();
 
@@ -571,6 +579,7 @@ impl AgentInner {
             .clone_from(&self.should_stop_before_turn);
         config.get_steering_messages = Some(steering);
         config.get_follow_up_messages = Some(follow_up);
+        config.get_tool_batch_rows = Some(tool_batch_rows);
         config.get_continuation_messages = continuation;
         config.tool_execution = self.tool_execution;
         config.tool_progress = self.tool_progress;
@@ -785,6 +794,7 @@ impl Agent {
             follow_up_queue: Mutex::new(PendingMessageQueue::new(
                 options.follow_up_mode.unwrap_or(QueueMode::OneAtATime),
             )),
+            tool_batch_rows: Mutex::new(Vec::new()),
             run: Mutex::new(None),
             convert_to_llm: options
                 .convert_to_llm
@@ -988,6 +998,18 @@ impl Agent {
             .enqueue(message.into());
     }
 
+    /// Add a row to the transcript right after the running tool batch's
+    /// results. Unlike [`Agent::steer`], the row never waits for a turn of its
+    /// own: the loop appends every attached row with the batch, whatever the
+    /// steering mode or stop hooks decide.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the `tool_batch_rows` mutex is poisoned.
+    pub fn attach_to_tool_batch(&self, message: AgentMessage) {
+        self.inner.tool_batch_rows.lock().unwrap().push(message);
+    }
+
     /// Queue a message batch to run only after the agent would otherwise stop.
     ///
     /// # Panics
@@ -1125,6 +1147,11 @@ impl Agent {
         }
     }
 
+    /// Clear the transcript, the run state, and every queue.
+    ///
+    /// # Panics
+    ///
+    /// Panics if a queue mutex is poisoned.
     pub async fn reset(&self) {
         {
             let mut shared = self.inner.shared.lock().await;
@@ -1136,6 +1163,7 @@ impl Agent {
         }
         self.clear_follow_up_queue();
         self.clear_steering_queue();
+        self.inner.tool_batch_rows.lock().unwrap().clear();
     }
 
     /// Run the loop with a new prompt.

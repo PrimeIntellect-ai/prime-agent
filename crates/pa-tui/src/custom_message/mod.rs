@@ -64,6 +64,8 @@ pub const REFINEMENT_OUTCOME_CUSTOM_TYPE: &str = "refinement_outcome";
 pub const PROVIDER_RETRY_OUTCOME_CUSTOM_TYPE: &str = "provider_retry_outcome";
 /// Wire twin of `pa_core::prompts::model_prompts::MODEL_PROMPT_ERROR_CUSTOM_TYPE`.
 pub const MODEL_PROMPT_ERROR_CUSTOM_TYPE: &str = "model_prompt_error";
+/// Wire twin of `pa_core::session_engine::messages::RLM_RESPONSE_CUSTOM_TYPE`.
+pub const RLM_RESPONSE_CUSTOM_TYPE: &str = "rlm_response";
 
 /// Which agent-message side a row renders: the received transcript rows, or the
 /// sent/queued ipython cell receipts. The direction word folds into the
@@ -198,6 +200,17 @@ pub fn custom_message_entries(message: &Value) -> Vec<ChatEntry> {
             text: content,
             kind: crate::chat::StatusKind::Warning,
         }],
+        // The model wrote this text and sent it with `rlm.respond`: it
+        // renders as the assistant's own markdown.
+        RLM_RESPONSE_CUSTOM_TYPE => vec![ChatEntry::Assistant(Box::new(
+            crate::chat::AssistantMessage {
+                blocks: vec![crate::chat::MessageBlock::Text(content)],
+                has_tool_calls: false,
+                streaming: false,
+                error: None,
+                aborted: false,
+            },
+        ))],
         REFINEMENT_OUTCOME_CUSTOM_TYPE => refinement::refinement_outcome_entries(message, details),
         AGENT_MESSAGE_CUSTOM_TYPE => agent_message_entry(details).map_or_else(
             || vec![generic_panel_entry(custom_type, message)],
@@ -496,6 +509,26 @@ mod tests {
                 "{custom_type} rendered {entries:?}"
             );
         }
+    }
+
+    /// A sent response decodes to the same transcript entry as an assistant
+    /// message with that text, so it renders exactly like one.
+    #[test]
+    fn a_sent_response_decodes_like_assistant_text() {
+        let text = "| a | b |\n|---|---|\n| 1 | 2 |";
+        let response = decoded(&json!({
+            "role": "custom",
+            "customType": RLM_RESPONSE_CUSTOM_TYPE,
+            "content": text,
+            "display": true,
+        }));
+        let assistant = crate::snapshot::message_value_to_entries(&json!({
+            "role": "assistant",
+            "content": [{ "type": "text", "text": text }],
+            "stopReason": "stop",
+        }));
+        assert_eq!(response, assistant);
+        assert!(matches!(response.as_slice(), [ChatEntry::Assistant(_)]));
     }
 
     #[test]

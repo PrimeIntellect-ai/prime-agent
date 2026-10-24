@@ -453,14 +453,15 @@ pub async fn create_session(mut config: SessionEngineConfig) -> anyhow::Result<S
     // every mode): the in-process sinks steer the notice row onto this
     // session's agent and fire the embedding's wake once the agent
     // exists (the slot binds below).
-    let bash_notice_agent = super::bash_notices::BashNoticeAgentSlot::default();
+    let agent_slot = super::bash_notices::SessionAgentSlot::default();
     if let Some(wake) = config.bash_notice_wake.clone() {
         super::bash_notices::register_in_process_kernel_notice_handlers(
             &wake,
-            &bash_notice_agent,
+            &agent_slot,
             &mut handlers,
         );
     }
+    super::respond::register_respond_handler(&agent_slot, &mut handlers);
     // One model-visible skill list, computed now that the host-handler
     // registry is final (every registration, the refine handlers, and
     // the in-process bash notices are in): a controller-backed bundled
@@ -742,11 +743,9 @@ pub async fn create_session(mut config: SessionEngineConfig) -> anyhow::Result<S
     });
 
     let agent = Arc::new(agent);
-    // The in-process bash-notice sinks bind their agent late: their
-    // handlers registered before the agent existed.
-    *bash_notice_agent
-        .lock()
-        .expect("bash notice agent slot lock") = Some(Arc::downgrade(&agent));
+    // The slot's handlers (the in-process bash-notice sinks, `rlm.respond`)
+    // bind their agent late: they registered before the agent existed.
+    *agent_slot.lock().expect("session agent slot lock") = Some(Arc::downgrade(&agent));
     // TS `_startRlmChildRun`'s spawn anchor: the `rlm.spawn` host handler
     // names the parent's in-flight turn through this weak seam (the
     // bridge is built before the agent exists, and a strong edge would

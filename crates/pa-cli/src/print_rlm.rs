@@ -458,41 +458,28 @@ async fn drive_child(child: Arc<InlineChild>) {
     }
 }
 
-/// Settle one child: capture its last assistant text as the answer,
+/// Settle one child: capture its newest reply as the answer,
 /// publish the terminal status, deliver the no-reply notice or the
 /// failure row to the parent, and fire the parent's activity. A terminal
 /// assistant row that stopped on a provider error settles failed like a
 /// drive error (the run path itself returns `Ok` for it).
 async fn settle_child(child: &Arc<InlineChild>, run_error: Option<String>) {
-    // The last assistant row: its text is the answer the collect envelope
-    // and the no-reply notice carry (trailing non-assistant rows are
-    // skipped); a provider-error stop on it is the terminal error.
-    let (answer, terminal_error) =
-        if let Some(pa_types::session::AgentMessage::Assistant(assistant)) =
-            child.engine.session.last_assistant_message().await
+    // The newest reply (assistant text or a sent `rlm.respond` message) is
+    // the answer the collect envelope and the no-reply notice carry; a
+    // provider-error stop on the last assistant row is the terminal error.
+    let answer = child.engine.session.last_reply_text().await;
+    let terminal_error = match child.engine.session.last_assistant_message().await {
+        Some(pa_types::session::AgentMessage::Assistant(assistant))
+            if assistant.stop_reason == pa_types::ai::StopReason::Error =>
         {
-            let text = assistant
-                .content
-                .iter()
-                .filter_map(|block| match block {
-                    pa_types::ai::AssistantContentBlock::Text(text) => Some(text.text.clone()),
-                    pa_types::ai::AssistantContentBlock::Thinking(_)
-                    | pa_types::ai::AssistantContentBlock::ToolCall(_) => None,
-                })
-                .collect::<String>();
-            let terminal_error = if assistant.stop_reason == pa_types::ai::StopReason::Error {
-                Some(
-                    assistant
-                        .error_message
-                        .unwrap_or_else(|| "Assistant response failed".to_string()),
-                )
-            } else {
-                None
-            };
-            ((!text.is_empty()).then_some(text), terminal_error)
-        } else {
-            (None, None)
-        };
+            Some(
+                assistant
+                    .error_message
+                    .unwrap_or_else(|| "Assistant response failed".to_string()),
+            )
+        }
+        _ => None,
+    };
     let name = child
         .node
         .session_name()

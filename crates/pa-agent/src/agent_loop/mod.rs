@@ -107,6 +107,9 @@ pub struct AgentLoopConfig {
     pub should_stop_before_turn: Option<ShouldStopBeforeTurnFn>,
     pub get_steering_messages: Option<PollMessagesFn>,
     pub get_follow_up_messages: Option<PollMessagesFn>,
+    /// Returns the rows tools attached during the batch that just ran; the
+    /// loop appends them right after the batch's tool results.
+    pub get_tool_batch_rows: Option<PollMessagesFn>,
     pub get_continuation_messages: Option<GetContinuationMessagesFn>,
     pub tool_execution: ToolExecutionMode,
     /// Heartbeat cadence for in-flight tool calls (start-side trace
@@ -136,6 +139,7 @@ impl AgentLoopConfig {
             should_stop_before_turn: None,
             get_steering_messages: None,
             get_follow_up_messages: None,
+            get_tool_batch_rows: None,
             get_continuation_messages: None,
             tool_execution: ToolExecutionMode::Parallel,
             tool_progress: crate::types::ToolProgressCadence::default(),

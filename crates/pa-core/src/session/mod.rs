@@ -478,10 +478,8 @@ pub fn build_session_context(entries: &[FileEntry], leaf_id: Option<&str>) -> Se
     }
 }
 
-pub(crate) fn create_custom_message(
-    payload: &CustomMessageEntry,
-    entry: &FileEntry,
-) -> CustomMessage {
+#[must_use]
+pub fn create_custom_message(payload: &CustomMessageEntry, entry: &FileEntry) -> CustomMessage {
     CustomMessage {
         custom_type: payload.custom_type.clone(),
         content: payload.content.clone(),
