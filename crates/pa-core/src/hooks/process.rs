@@ -1,5 +1,7 @@
-//! Bounded command execution. Process groups contain ordinary descendants; this
-//! is not a sandbox against a trusted hook deliberately detaching itself.
+//! Bounded command execution. A command's process group is killed when it times
+//! out, fails or is canceled. After a successful run the group is left alone, so
+//! helpers a hook detaches on purpose (with redirected stdio) keep running; a
+//! descendant that keeps the output pipes open is bounded by the deadline.
 
 use std::{path::Path, time::Duration};
 
@@ -39,6 +41,8 @@ impl Drop for ProcessGroup {
     }
 }
 
+/// Reads to EOF but keeps only the first 64 KiB: memory stays bounded and a
+/// chatty hook is never killed for its output volume.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 async fn read_bounded(mut reader: impl tokio::io::AsyncRead + Unpin) -> anyhow::Result<Vec<u8>> {
     use tokio::io::AsyncReadExt;
@@ -50,11 +54,8 @@ async fn read_bounded(mut reader: impl tokio::io::AsyncRead + Unpin) -> anyhow::
         if count == 0 {
             return Ok(output);
         }
-        anyhow::ensure!(
-            output.len() + count <= OUTPUT_LIMIT,
-            "hook output exceeds 64 KiB"
-        );
-        output.extend_from_slice(&buffer[..count]);
+        let kept = count.min(OUTPUT_LIMIT - output.len());
+        output.extend_from_slice(&buffer[..kept]);
     }
 }
 
@@ -107,15 +108,12 @@ pub(super) async fn run(
             drop(stdin);
             Ok(())
         };
-        let wait = async {
-            let status = child.wait().await?;
-            // A shell can exit while a descendant still holds stdout open.
-            // Stop those descendants immediately, then drain bounded pipes.
-            group.terminate();
-            Ok::<_, anyhow::Error>(status)
-        };
+        let wait = async { Ok::<_, anyhow::Error>(child.wait().await?) };
         let ((), stdout, stderr, status) =
             tokio::try_join!(write, read_bounded(stdout), read_bounded(stderr), wait)?;
+        // Success disarms the guard: descendants that released the pipes were
+        // detached on purpose. Timeout, failure and cancellation kill the group.
+        group.0 = None;
         Ok(CommandOutput {
             stdout,
             stderr,

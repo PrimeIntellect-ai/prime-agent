@@ -55,14 +55,19 @@ async fn rejects_oversized_input_before_spawning() {
     assert!(!dir.path().join("marker").exists());
 }
 
+/// Output past the cap is dropped, not fatal: the command runs to completion.
 #[tokio::test]
-async fn bounds_each_output_stream() {
-    for command in ["head -c 65537 /dev/zero", "head -c 65537 /dev/zero >&2"] {
-        let error = execute(command, vec![]).await.unwrap_err();
-        assert!(error.to_string().contains("output exceeds"));
-    }
-    let result = execute("head -c 65536 /dev/zero", vec![]).await.unwrap();
-    assert_eq!(result.stdout.len(), OUTPUT_LIMIT);
+async fn bounds_each_output_stream_without_killing_the_command() {
+    let result = execute(
+        "head -c 200000 /dev/zero; head -c 200000 /dev/zero >&2; exit 2",
+        vec![],
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        (result.stdout.len(), result.stderr.len(), result.code),
+        (OUTPUT_LIMIT, OUTPUT_LIMIT, Some(2))
+    );
 }
 
 #[tokio::test]
@@ -91,16 +96,53 @@ async fn timeout_covers_blocked_stdin_and_descendant_pipes() {
 }
 
 #[tokio::test]
-async fn shell_exit_cleans_up_descendants_holding_pipes() {
-    let result = execute("sleep 60 & printf complete", vec![]).await.unwrap();
-    assert_eq!(
-        result,
-        CommandOutput {
-            stdout: b"complete".to_vec(),
-            stderr: vec![],
-            code: Some(0)
-        }
+async fn deadline_bounds_descendants_holding_pipes() {
+    let dir = tempfile::tempdir().unwrap();
+    let pid_file = dir.path().join("pid");
+    let command = format!("sleep 60 & echo $! > {}; printf complete", pid_file.display());
+    let result = run(
+        &command,
+        dir.path(),
+        vec![],
+        Duration::from_millis(300),
+        AbortSignal::never(),
+    )
+    .await;
+    assert!(result.unwrap_err().to_string().contains("timed out"));
+    exited(ready_pid(&pid_file).await).await;
+}
+
+/// A hook may detach a helper with redirected stdio, e.g. a notifier or an
+/// upload sent to the background; a successful run must not kill it.
+#[tokio::test]
+async fn successful_run_keeps_detached_helpers() {
+    let dir = tempfile::tempdir().unwrap();
+    let pid_file = dir.path().join("pid");
+    let command = format!(
+        "sleep 60 >/dev/null 2>&1 </dev/null & echo $! > {}; printf complete",
+        pid_file.display()
     );
+    let result = run(
+        &command,
+        dir.path(),
+        vec![],
+        Duration::from_secs(5),
+        AbortSignal::never(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(result.stdout, b"complete");
+    let pid = ready_pid(&pid_file).await;
+    let alive = nix::sys::signal::kill(
+        nix::unistd::Pid::from_raw(i32::try_from(pid).unwrap()),
+        None,
+    )
+    .is_ok();
+    let _ = nix::sys::signal::kill(
+        nix::unistd::Pid::from_raw(i32::try_from(pid).unwrap()),
+        nix::sys::signal::Signal::SIGKILL,
+    );
+    assert!(alive, "the detached helper survived the successful run");
 }
 
 async fn ready_pid(path: &Path) -> u32 {
