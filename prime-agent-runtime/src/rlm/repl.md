@@ -118,9 +118,11 @@ or unknown requests are dropped.
 
 Delivery: the reader thread sends SIGINT to the main thread (also the loop
 thread); the handler asks asyncio which task's step the signal interrupted.
-On Windows (no `signal.pthread_kill`) the reader instead cancels the active
-cell task on the loop, so await-suspended cells interrupt normally but cells
-blocked in synchronous code cannot be broken (best-effort parity):
+On Windows (no `signal.pthread_kill`) the reader pends the same SIGINT for the
+main thread with `_thread.interrupt_main()`, so both paths below apply there
+too. Only a cell inside a single long blocking call (`time.sleep(30)`, a
+blocking socket read) is out of reach until that call returns: killing the
+kernel is the way out of it.
 
 - The active cell's own task is mid-step (sync bytecode such as a `time.sleep`
   loop, or a blocking syscall such as `selectors.select()` woken by EINTR):

@@ -7,6 +7,7 @@ next to this file. Cells execute with top-level await in one persistent
 
 from __future__ import annotations
 
+import _thread
 import ast
 import asyncio
 import codecs
@@ -431,7 +432,6 @@ def _request_interrupt(target: str | None) -> None:
     """
     global _sigint_target
     with _interrupt_lock:
-        task = _active["task"]
         rid = _active["rid"]
         if rid is not None and (target is None or target == rid):
             # Active, or in the done-task handoff before _run_guarded's finally:
@@ -450,24 +450,17 @@ def _request_interrupt(target: str | None) -> None:
         else:
             return
     # SIGINT must land on the main thread, where cells execute. Windows has no
-    # signal.pthread_kill: fall back to cancelling the active task on the loop
-    # (sync-blocked cells and the finishing repr/drain cannot be broken there;
-    # best-effort parity).
+    # signal.pthread_kill, so pend the same SIGINT for the main thread instead:
+    # the handler then decides, exactly as on POSIX, and a cell blocked in sync
+    # code reaches it at its next bytecode. Cancelling the active task cannot do
+    # that: the loop is inside the cell and never runs the cancel.
     if hasattr(signal, "pthread_kill"):
         signal.pthread_kill(threading.main_thread().ident, signal.SIGINT)
-        if _loop is not None:
-            # Wake the selector so a cancel scheduled by the handler runs promptly.
-            _loop.call_soon_threadsafe(lambda: None)
-        return
+    else:
+        _thread.interrupt_main()
     if _loop is not None:
-
-        def cancel_active() -> None:
-            current = _active["task"]
-            if current is task and current is not None and not current.done():
-                _active["interrupted"] = True
-                current.cancel()
-
-        _loop.call_soon_threadsafe(cancel_active)
+        # Wake the selector so the handler scheduled by the signal runs promptly.
+        _loop.call_soon_threadsafe(lambda: None)
 
 
 def _consume_pending_interrupt(rid: str) -> bool:

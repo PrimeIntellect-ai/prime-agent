@@ -447,8 +447,8 @@ class ReplTest(unittest.TestCase):
         self.assertIn("wrote 262144", tagged)
 
     def test_interrupt_without_pthread_kill_cancels_awaited_cell(self):
-        # Windows fallback seam: with pthread_kill absent the reader cancels
-        # the active task on the loop; an await-suspended cell still interrupts.
+        # Windows fallback seam: with pthread_kill absent the reader pends the
+        # SIGINT for the main thread; an await-suspended cell still interrupts.
         code = "\n".join(
             [
                 "import signal",
@@ -554,6 +554,26 @@ class ReplTest(unittest.TestCase):
         self.assertEqual(one(events, "done")["status"], "error")
         follow = self.repl.execute("after-sync", "1+1")
         self.assertEqual(one(follow, "result")["text"], "2")
+
+    def test_interrupt_sync_blocking_without_pthread_kill(self):
+        # Windows has no signal.pthread_kill. A cell that never awaits must
+        # still stop: its task cannot be cancelled while the loop is inside it.
+        events = self._interrupt_after_running(
+            "sync-nokill",
+            "\n".join(
+                [
+                    "import signal",
+                    "if hasattr(signal, 'pthread_kill'):",
+                    "    del signal.pthread_kill",
+                    "import time",
+                    "while True:",
+                    "    time.sleep(0.05)",
+                ]
+            ),
+        )
+        error = one(events, "error")
+        self.assertEqual(error["ename"], "KeyboardInterrupt")
+        self.assertEqual(one(events, "done")["status"], "error")
 
     def test_interrupt_survives_cell_rebinding_sigint(self):
         # A cell that ignores SIGINT must not break protocol interrupts for later cells.
