@@ -148,6 +148,9 @@ pub struct SessionEngine {
     /// loops the graph and keeps a dropped session's kernel process alive
     /// until the process exits.
     pub(crate) provisioner: std::sync::Arc<crate::kernel::provisioner::IpythonKernelProvisioner>,
+    /// The identity the agent's requests carry: the session's cached Codex
+    /// WebSocket is keyed on it.
+    provider_session_id: String,
 }
 
 /// Skill overrides for built-in integrations the user is not logged into,
@@ -495,7 +498,7 @@ pub async fn create_session(mut config: SessionEngineConfig) -> anyhow::Result<S
     let cell_timeout_ms =
         super::runtime_wiring::arm_cell_timeout_ms(config.daemonless, python_cell_timeout_ms);
     let provisioner = super::runtime_wiring::kernel_provisioner(
-        session_id,
+        session_id.clone(),
         handlers,
         python_skills.clone(),
         cwd.clone(),
@@ -697,6 +700,10 @@ pub async fn create_session(mut config: SessionEngineConfig) -> anyhow::Result<S
         None => timing_stream_fn,
     };
     let agent = Agent::new(AgentOptions {
+        // Every request in the session carries this identity: providers key prompt caching
+        // (`prompt_cache_key`), session headers, and WebSocket/`previous_response_id` reuse on it
+        // (TS `sdk.ts` passes `sessionManager.getSessionId()`).
+        session_id: Some(session_id.clone()),
         initial_state: AgentInitialState {
             system_prompt: Some(system_prompt.clone()),
             model: Some(model),
@@ -930,6 +937,7 @@ pub async fn create_session(mut config: SessionEngineConfig) -> anyhow::Result<S
         factory_host,
         rlm_progress_notes: Arc::clone(&wiring.rlm.notes),
         provisioner,
+        provider_session_id: session_id,
     })
 }
 
@@ -1023,7 +1031,11 @@ impl SessionEngine {
 
     /// Tear the kernel down now with a final namespace snapshot, for a host that
     /// ends the session but keeps the engine alive; dropping the engine tears the kernel down too.
+    /// The session's cached Codex WebSocket closes with it (TS `cleanupSessionResources` on
+    /// dispose), so a worker that replaces its session does not hold the old socket until the
+    /// idle expiry.
     pub async fn dispose_kernel(&self) {
+        pa_ai::codex_debug::close_websocket_sessions(Some(&self.provider_session_id));
         self.provisioner.dispose(None).await;
     }
 
