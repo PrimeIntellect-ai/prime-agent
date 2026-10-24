@@ -199,7 +199,7 @@ impl AgentSession {
         };
         // The flight spans the attempts, the rebuilt-context replace, and
         // the kernel-state notice: every path here REPLACES the live loop
-        // context, and the other replacers — `refine_with_refiner`'s
+        // context, and the other replacers — `commit_refinement`'s
         // outcome push and `record_compaction_outcome`'s failure row —
         // take the same flight. A row pushed onto the context must not
         // interleave with the replace: it would duplicate in the rebuilt
@@ -415,30 +415,6 @@ impl AgentSession {
         Ok(())
     }
 
-    /// Execute `/refine`: plan, re-read, apply, and persist the continual
-    /// harness state for this session.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the conversation history cannot be read, or
-    /// when the refinement plan, apply, or persist fails.
-    pub async fn refine(
-        &self,
-        options: &refine::RefineOptions,
-        source: refine::RefinementSource,
-        model: &pa_types::ai::Model,
-        api_key: Option<String>,
-        global_harness_dir: std::path::PathBuf,
-    ) -> anyhow::Result<crate::refinement::RefinementResult> {
-        self.refine_with_refiner(
-            options,
-            source,
-            model,
-            self.refiner_call(model, api_key).await?,
-            global_harness_dir,
-        )
-        .await
-    }
 
     /// Start ephemeral background refinement; awaiting the returned task is
     /// optional for hosts that deliver completion through their event stream.
@@ -481,8 +457,9 @@ impl AgentSession {
         })
     }
 
-    /// [`Self::refine`] with an injected refiner call: the seam the parity
-    /// tests use to drive the refinement without a provider.
+    /// One awaited refinement run with an injected refiner call: the seam the
+    /// parity tests use to drive the refinement without a provider.
+    #[cfg(test)]
     pub(crate) async fn refine_with_refiner(
         &self,
         options: &refine::RefineOptions,

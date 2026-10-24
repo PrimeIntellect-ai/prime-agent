@@ -971,41 +971,6 @@ impl AgentSession {
         })
     }
 
-    /// The serialized arm's compact-trigger round: the review, then only on
-    /// approval the refinement run. The serialized boundary is quiescent, so
-    /// this arm carries no active-agent gate.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the review or the refinement run fails; a decline
-    /// is `Ok(None)`.
-    pub async fn auto_refine_after_compaction(
-        &self,
-        model: &pa_types::ai::Model,
-        api_key: Option<String>,
-        global_harness_dir: std::path::PathBuf,
-        turns_since_last_review: u32,
-        branch_version: u64,
-    ) -> anyhow::Result<Option<RefinementResult>> {
-        let cancel = self.refinement_signal();
-        let Some(review) = self
-            .review_compact_auto_refine(
-                model,
-                api_key.clone(),
-                &global_harness_dir,
-                turns_since_last_review,
-                branch_version,
-            )
-            .await?
-        else {
-            return Ok(None);
-        };
-        Ok(Some(
-            self.run_approved_refine(&review, model, api_key, global_harness_dir, cancel)
-                .await?,
-        ))
-    }
-
     /// The approved review's refinement run; the result consumes the
     /// review.
     pub(crate) async fn run_approved_refine(
