@@ -16,7 +16,6 @@ const APP: &str = "prime-agent";
 
 /// The states a detection reply without `states=` accepts (fixed by the
 /// protocol's "Feature detection").
-#[cfg(unix)]
 const BASE_STATES: [&str; 5] = ["idle", "working", "done", "blocked", "error"];
 
 /// The statuses the TUI reports.
