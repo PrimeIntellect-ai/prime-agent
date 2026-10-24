@@ -105,6 +105,7 @@ mod signal_drain;
 pub mod snapshot_stream;
 pub mod socket;
 pub(crate) mod state_getters;
+pub(crate) mod steer_runs;
 mod stop_cleanup;
 pub(crate) mod streaming;
 pub mod supervisor;

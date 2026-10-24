@@ -90,6 +90,17 @@ pub struct PrimeAgentSessionMeta {
     pub subagents: Option<Vec<PrimeAgentSubagentMeta>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub autonomous: Option<PrimeAgentAutonomousMeta>,
+    /// Advertised in `initialize` only: `session/steering` is served.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub steering: Option<PrimeAgentSteeringMeta>,
+}
+
+/// The `session/steering` capability advertised at `initialize`
+/// (`_meta.steering.supported`, the nano-rlm #205 extension shape).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PrimeAgentSteeringMeta {
+    pub supported: bool,
 }
 
 /// A goal's live state, surfaced after `/goal` commands and driver turns.
@@ -245,6 +256,20 @@ pub fn acp_stop_reason_for_status(
 /// Wrap a prime-agent payload in its reverse-domain `_meta` envelope.
 pub fn prime_agent_meta(payload: &PrimeAgentSessionMeta) -> Value {
     json!({ PRIME_AGENT_META_NAMESPACE: payload })
+}
+
+/// The `initialize` steering advertisement: the flat `_meta.steering`
+/// key the SDK consumers read (nano-rlm #205's shape; verifiers reads
+/// `field_meta.steering.supported` directly) plus the same payload under
+/// the reverse-domain namespace every other prime-agent `_meta` field
+/// uses.
+pub fn steering_advertisement_meta() -> Value {
+    let mut meta = prime_agent_meta(&PrimeAgentSessionMeta {
+        steering: Some(PrimeAgentSteeringMeta { supported: true }),
+        ..Default::default()
+    });
+    meta["steering"] = json!({ "supported": true });
+    meta
 }
 
 #[cfg(test)]

@@ -94,6 +94,7 @@ impl Worker {
             }
             "set_auto_compaction" => self.handle_set_auto_compaction(payload),
             "wait_for_idle" => self.handle_wait_for_idle(payload).await,
+            "wait_for_steer_run" => self.handle_wait_for_steer_run(payload).await,
             "wait_for_headless_completion" => {
                 self.handle_wait_for_headless_completion(payload).await
             }
@@ -410,6 +411,71 @@ impl Worker {
         // async deliveries the resumed pump runs at the settle.
         self.abort_and_send_queued();
         response_success(None, "abort_and_send_queued", None)
+    }
+
+    /// `wait_for_steer_run { runId, probe? }`: the settle of one ACP
+    /// steer run. A probe answers the non-blocking read (`running` while
+    /// the item is queued or its turn is in flight); without it the
+    /// handler parks until the run's turn settled. `completed` and
+    /// `aborted` are the ordinary settles; `withdrawn` = the item was
+    /// dropped before delivery; `unknown` = no such run id.
+    async fn handle_wait_for_steer_run(&self, payload: &Value) -> DaemonResponse {
+        if let Err(response) = self.require_created("wait_for_steer_run") {
+            return response;
+        }
+        let run_id = payload
+            .get("runId")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        let probe = payload.get("probe").and_then(Value::as_bool) == Some(true);
+        let settle = if probe {
+            match self.steer_runs.probe(&run_id) {
+                Some(crate::steer_runs::SteerRunProbe::Running) => {
+                    return response_success(
+                        None,
+                        "wait_for_steer_run",
+                        Some(json!({ "status": "running" })),
+                    );
+                }
+                Some(crate::steer_runs::SteerRunProbe::Settled(settled)) => settled,
+                None => {
+                    return response_failure(
+                        None,
+                        "wait_for_steer_run",
+                        "Unknown steered run id",
+                        None,
+                    );
+                }
+            }
+        } else {
+            match self.steer_runs.wait(&run_id).await {
+                Some(settled) => settled,
+                None => {
+                    return response_failure(
+                        None,
+                        "wait_for_steer_run",
+                        "Unknown steered run id",
+                        None,
+                    );
+                }
+            }
+        };
+        let (status, error) = match settle {
+            None => ("withdrawn", None),
+            Some(crate::worker::TurnSettle::Completed) => ("completed", None),
+            Some(crate::worker::TurnSettle::Aborted) => ("aborted", None),
+            Some(crate::worker::TurnSettle::Withdrawn(text)) => ("withdrawn", Some(text)),
+            Some(crate::worker::TurnSettle::Failed(text)) => ("failed", Some(text)),
+        };
+        response_success(
+            None,
+            "wait_for_steer_run",
+            Some(match error {
+                Some(error) => json!({ "status": status, "error": error }),
+                None => json!({ "status": status }),
+            }),
+        )
     }
 
     fn handle_get_state(&self) -> DaemonResponse {

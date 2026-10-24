@@ -1030,3 +1030,21 @@ async fn abort_and_send_queued_under_a_held_pause_delivers_on_the_release() {
     }
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// The steer receipt's busy flag (the ACP `session/steering` arm maps its
+/// injected/queued outcome from it): an idle worker answers the queue
+/// admission with `busy: false`. The busy side of the truth table is the
+/// ACP e2e's injected receipt.
+#[tokio::test]
+async fn steer_receipt_reports_the_worker_busy_flag() {
+    let worker = created_dispatch_worker().await;
+    let steered = worker
+        .dispatch("steer", &json!({ "message": "idle steer" }))
+        .await;
+    assert!(steered.success, "steer failed: {steered:?}");
+    assert_eq!(
+        steered.data.as_ref().expect("the steer receipt"),
+        &json!({ "queued": true, "busy": false }),
+        "an idle steer answers the queue admission with the worker's own busy flag"
+    );
+}

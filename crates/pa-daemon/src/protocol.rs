@@ -631,6 +631,9 @@ pub fn command_active_session_id(command: &DaemonCommand) -> Option<&str> {
         | DaemonCommand::PromptAndWait {
             active_session_id, ..
         }
+        | DaemonCommand::WaitForSteerRun {
+            active_session_id, ..
+        }
         | DaemonCommand::Steer {
             active_session_id, ..
         }
@@ -988,6 +991,7 @@ pub fn command_type_name(command: &DaemonCommand) -> &'static str {
         DaemonCommand::FactoryActivity { .. } => "factory_activity",
         DaemonCommand::DeleteRlmSubagent { .. } => "delete_rlm_subagent",
         DaemonCommand::WaitForIdle { .. } => "wait_for_idle",
+        DaemonCommand::WaitForSteerRun { .. } => "wait_for_steer_run",
         DaemonCommand::WaitForHeadlessCompletion { .. } => "wait_for_headless_completion",
         DaemonCommand::GetSessionHeader { .. } => "get_session_header",
         DaemonCommand::GetState { .. } => "get_state",

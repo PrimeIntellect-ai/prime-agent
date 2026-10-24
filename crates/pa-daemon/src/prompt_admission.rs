@@ -337,11 +337,13 @@ impl Supervisor {
             active_session_id,
             admission_id,
             cancel_owned,
+            probe,
             ..
         } = command
         else {
             return Self::admission_failure(command_id, type_name, "invalid command");
         };
+        let probe = *probe == Some(true);
         let mut key = prompt_admission_key(active_session_id, admission_id);
         if connection.prompt_admissions.with(&key, |_| ()).is_none() {
             // The stale-active-id rebind: a cancel addressed by the
@@ -368,12 +370,15 @@ impl Supervisor {
             }
         }
         // A waiting admission with no worker yet cancels outright (the TS
-        // pre-check: the prompt route fails at its next check).
-        connection.prompt_admissions.update(&key, |admission| {
-            if admission.status == AdmissionStatus::Waiting && admission.worker_id.is_none() {
-                admission.status = AdmissionStatus::Cancelled;
-            }
-        });
+        // pre-check: the prompt route fails at its next check). A probe
+        // never mutates: it only reports.
+        if !probe {
+            connection.prompt_admissions.update(&key, |admission| {
+                if admission.status == AdmissionStatus::Waiting && admission.worker_id.is_none() {
+                    admission.status = AdmissionStatus::Cancelled;
+                }
+            });
+        }
         let Some(status) = connection
             .prompt_admissions
             .with(&key, |admission| admission.status)
@@ -386,8 +391,8 @@ impl Supervisor {
             }
             AdmissionStatus::Owned => Self::admission_status(command_id, type_name, "owned"),
             AdmissionStatus::Waiting => {
-                // The route is in flight: forward the cancellation to the
-                // worker and map its status.
+                // The route is in flight: forward the cancellation (or the
+                // probe) to the worker and map its status.
                 let fields = connection.prompt_admissions.with(&key, |admission| {
                     (
                         admission.worker_admission_id.clone(),
@@ -396,16 +401,32 @@ impl Supervisor {
                     )
                 });
                 let Some((worker_admission_id, worker_active, worker_id)) = fields else {
-                    return Self::admission_status(command_id, type_name, "cancelled");
+                    return Self::admission_status(
+                        command_id,
+                        type_name,
+                        if probe { "waiting" } else { "cancelled" },
+                    );
                 };
                 let Some(worker_active) = worker_active else {
-                    return Self::admission_status(command_id, type_name, "cancelled");
+                    return Self::admission_status(
+                        command_id,
+                        type_name,
+                        if probe { "waiting" } else { "cancelled" },
+                    );
                 };
                 let Some(worker_id) = worker_id else {
-                    return Self::admission_status(command_id, type_name, "cancelled");
+                    return Self::admission_status(
+                        command_id,
+                        type_name,
+                        if probe { "waiting" } else { "cancelled" },
+                    );
                 };
                 let Some(resident) = self.registry.get(&worker_id).await else {
-                    return Self::admission_status(command_id, type_name, "cancelled");
+                    return Self::admission_status(
+                        command_id,
+                        type_name,
+                        if probe { "waiting" } else { "cancelled" },
+                    );
                 };
                 let mut payload = json!({
                     "activeSessionId": worker_active,
@@ -413,6 +434,9 @@ impl Supervisor {
                 });
                 if *cancel_owned == Some(true) {
                     payload["cancelOwned"] = json!(true);
+                }
+                if probe {
+                    payload["probe"] = json!(true);
                 }
                 let mut response = match self
                     .route_command_typed(
@@ -430,7 +454,8 @@ impl Supervisor {
                     }
                 };
                 // The mapped status updates the supervisor record (TS
-                // re-reads and downgrades only through waiting).
+                // re-reads and downgrades only through waiting). A probe
+                // is read-only: the record keeps its state.
                 let status = response
                     .data
                     .as_ref()
@@ -438,6 +463,10 @@ impl Supervisor {
                     .and_then(Value::as_str)
                     .unwrap_or("unknown")
                     .to_string();
+                if probe {
+                    response.id = Some(command_id.to_string());
+                    return (vec![response_line(&response)], false);
+                }
                 connection
                     .prompt_admissions
                     .update(&key, |admission| match status.as_str() {
@@ -542,6 +571,16 @@ impl WorkerAdmissions {
             }
         }
     }
+
+    /// The read-only read of one admission: no waiting admission is
+    /// cancelled (the wire `probe` flag).
+    pub(crate) fn status(&self, admission_id: &str) -> Option<AdmissionStatus> {
+        self.admissions
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(admission_id)
+            .copied()
+    }
 }
 
 impl Worker {
@@ -562,19 +601,31 @@ impl Worker {
             .and_then(Value::as_str)
             .unwrap_or_default();
         let cancel_owned = payload.get("cancelOwned").and_then(Value::as_bool) == Some(true);
-        let (status, dropped_queued, abort_running) = {
+        // `probe`: the read-only report (no cancellation, no abort) the
+        // ACP steering receipt asks with - is the prompt's own turn
+        // running?
+        let probe = payload.get("probe").and_then(Value::as_bool) == Some(true);
+        let (status, dropped_queued, abort_running, running) = {
             // The enqueue/commit transition holds this same lock. Decide
             // whether the owned admission is still queued atomically with
             // removing it; never abort a different in-flight turn.
             let mut core = self.core.lock().unwrap();
-            let status = self.prompt_admissions.cancel(admission_id);
+            let status = if probe {
+                self.prompt_admissions.status(admission_id)
+            } else {
+                self.prompt_admissions.cancel(admission_id)
+            };
             let queued = core
                 .steering
                 .iter()
                 .chain(&core.follow_up)
                 .any(|item| item.admission_id.as_deref() == Some(admission_id));
-            let dropped_queued = matches!(status, Some(AdmissionStatus::Cancelled))
-                || (cancel_owned && status == Some(AdmissionStatus::Owned) && queued);
+            let running = status == Some(AdmissionStatus::Owned)
+                && core.running_admission_ids.contains(admission_id);
+            // A probe is read-only: nothing is dropped, nothing aborts.
+            let dropped_queued = !probe
+                && (matches!(status, Some(AdmissionStatus::Cancelled))
+                    || (cancel_owned && status == Some(AdmissionStatus::Owned) && queued));
             if dropped_queued {
                 core.steering
                     .retain(|item| item.admission_id.as_deref() != Some(admission_id));
@@ -583,13 +634,14 @@ impl Worker {
                 self.prompt_admissions.clear(admission_id);
                 crate::worker::clear_withdrawn_progress_note(&core, self.engine.as_ref());
             }
-            let abort_running = cancel_owned
+            let abort_running = !probe
+                && cancel_owned
                 && status == Some(AdmissionStatus::Owned)
                 && core.running_admission_ids.contains(admission_id);
             if abort_running {
                 core.abort_requested = true;
             }
-            (status, dropped_queued, abort_running)
+            (status, dropped_queued, abort_running, running)
         };
         if dropped_queued {
             self.checkpoint_queue(crate::worker::QueueCheckpoint::Settle {
@@ -606,6 +658,15 @@ impl Worker {
             Some(AdmissionStatus::Owned) => "owned",
             Some(AdmissionStatus::Waiting | AdmissionStatus::Cancelled) => "cancelled",
         };
+        // The probe's own answer: whether the admission's turn is the
+        // worker's running turn (the ACP steering receipt's `injected`).
+        if probe {
+            return response_success(
+                None,
+                "cancel_prompt_admission",
+                Some(json!({ "status": status, "running": running })),
+            );
+        }
         response_success(
             None,
             "cancel_prompt_admission",

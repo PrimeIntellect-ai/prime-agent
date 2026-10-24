@@ -45,6 +45,7 @@ pub(crate) fn client_route_timeout(command: &DaemonCommand) -> u64 {
         command,
         DaemonCommand::PromptAndWait { .. }
             | DaemonCommand::WaitForIdle { .. }
+            | DaemonCommand::WaitForSteerRun { probe: None | Some(false), .. }
             // Headless completion settles a whole autonomous run.
             | DaemonCommand::WaitForHeadlessCompletion { .. }
             // Compaction runs a summarizer model call, like a turn.
