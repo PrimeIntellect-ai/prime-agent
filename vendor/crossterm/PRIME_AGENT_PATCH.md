@@ -86,6 +86,25 @@ terminal write per round until that poll says empty, split a pasted line at its 
 Now a record that produces no event loops straight to the next one while the console still holds
 records; the timeout applies only when the buffer is empty. Upstream crossterm has the same code.
 
+# OSC 7501 detection rides the terminal probe (2026-10-24)
+
+The app's terminal probe (`terminal::probe_terminal_checked_raw`, replacing
+`supports_keyboard_enhancement_checked_raw`) writes `OSC 7501 ; ? ST` (the Program Status Protocol's
+feature detection), the kitty flags query when asked, and the DA1 query in ONE write, and reads
+the replies through the same sliced 250ms window and shared reader. Terminals answer in order: a
+`ProgramStatusSupport` reply read before the DA1 means supported (its `states=`/`kinds=` lists are
+returned as sent); the DA1 alone means unsupported; one DA1 concludes both queries, so two probes
+can never take each other's DA1. The kitty verdict is unchanged (flags reply, then the DA1 flush
+read); `TerminalProbeFilter` (flags, DA1, or the OSC 7501 reply) replaces `KeyboardEnhancementFlagsFilter`. The stock `supports_keyboard_enhancement` keeps upstream's bytes (no OSC 7501 query).
+
+`src/event/sys/unix/parse.rs` parses the reply `ESC ] 7501 ; ? [: key=value]* ST|BEL` into
+`InternalEvent::ProgramStatusSupport`, so it never leaks as keystrokes; a partial reply waits for
+more bytes, and one past the protocol's 4096-byte sequence cap is dropped. Every other `ESC ]`
+stays upstream's Alt+] key; the one cost is that a byte following `ESC ]` in the same read that
+does not continue the reply head is dropped with it (legacy-mode Alt+] then a key in one read).
+The parser test runs like the poll test above:
+`TERM=xterm-256color cargo test --features event-stream --lib -- program_status`.
+
 # Alt+numpad characters are presses on Windows (2026-10-28)
 
 `src/event/sys/windows/parse.rs` receives a completed Alt+numpad character on the Alt key-up

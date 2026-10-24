@@ -436,6 +436,8 @@ impl TurnRunner {
             // success too: one row replaces TS's per-attempt error rows
             // (operator ruling 2026-09-23).
             let mut last_retry_error: Option<String> = None;
+            // A failed run's `agent_end` frame, held for the frame after it.
+            let mut held_run_end: Option<Value> = None;
             let mut emit = |mut event: EngineEvent| -> bool {
                 // A cancelled turn stops consuming its own events, except the frames
                 // TS still broadcasts for an interrupted turn: aborted row/tool settle
@@ -716,6 +718,16 @@ impl TurnRunner {
                     EngineEvent::DoneAborted => Some(TurnSettle::Aborted),
                     _ => None,
                 };
+                // The retry loop decides only after a failed run ended, so
+                // that run's `agent_end` goes out after the next event's
+                // frames (or at the join): a client sees the pending retry
+                // (`auto_retry_start`) before the end of the attempt it
+                // retries.
+                let failed_run_end = matches!(
+                    &event,
+                    EngineEvent::AgentEnd { messages, aborted: false }
+                        if crate::herdr::error_hold_message(messages).is_some()
+                );
                 // One event may map to several wire frames (a custom row
                 // is a message_start + message_end pair).
                 let mut frames: Vec<Value> = match event {
@@ -986,6 +998,15 @@ impl TurnRunner {
                         }));
                     }
                 }
+                if !frames.is_empty() {
+                    frames.extend(held_run_end.take());
+                }
+                if failed_run_end {
+                    held_run_end = frames
+                        .iter()
+                        .position(|frame| frame["type"] == "agent_end")
+                        .map(|index| frames.remove(index));
+                }
                 // Verification seam: dump the emitted session events for
                 // harness debugging (PA_DAEMON_EVENT_LOG=<path>).
                 if let Ok(path) = std::env::var("PA_DAEMON_EVENT_LOG") {
@@ -1071,13 +1092,17 @@ impl TurnRunner {
                 engine.set_prompt_context_boundary(prompt_context_leaf);
             }
             engine.run_prompt(prompt_index, request, &aborted_probe, &mut emit);
+            held_run_end
         });
-        let _ = turn.await;
+        let held_run_end = turn.await.ok().flatten();
         let accepted_rows = accepted_prefix.load(std::sync::atomic::Ordering::SeqCst);
         // The emit path is joined: a stale parked partial must not
         // surface after the settle events.
         coalescer.close();
         flusher.abort();
+        if let Some(frame) = held_run_end {
+            self.emit_turn_event(frame);
+        }
 
         let more_queued = {
             let mut core = self.core.lock().unwrap();

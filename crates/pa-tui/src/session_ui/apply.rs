@@ -272,6 +272,7 @@ impl SessionUi {
                 if active_session_id == self.active_session_id {
                     self.turn_active = false;
                     self.run_open = false;
+                    self.outcome_after_compaction = None;
                     view.working = None;
                     view.retry = None;
                     view.retry = None;
@@ -397,7 +398,10 @@ impl SessionUi {
         match update {
             TurnUpdate::TurnStarted => {
                 self.turn_active = true;
-                self.run_open = true;
+                if !self.run_open {
+                    self.run_open = true;
+                    self.run_outcome = crate::program_status::Status::Done;
+                }
                 self.settled = None;
                 self.turn_error_shown = false;
                 // A new turn also settles leftovers from a lost turn-end frame.
@@ -504,15 +508,14 @@ impl SessionUi {
                 // `agent_end`.
                 self.streaming_index = None;
                 self.turn_ends_seen += 1;
-                // A step's settle leaves the run open; an aborted or
-                // failed one ends the run without a done report.
-                if run_failed {
+                // An aborted settle ends the run (the abort fallback frame
+                // has no agent_end); a failed step leaves the run open for
+                // its agent_end, which a pending retry follows first.
+                if aborted {
                     self.run_open = false;
-                    self.settled = if aborted {
-                        None
-                    } else {
-                        Some(crate::program_status::Status::Error)
-                    };
+                    self.settled = None;
+                } else if run_failed {
+                    self.run_outcome = crate::program_status::Status::Error;
                 }
                 view.retry = None;
                 crate::snapshot::settle_pending_tool_cards(
@@ -554,18 +557,17 @@ impl SessionUi {
             }
             TurnUpdate::AutoRetryEnd {
                 aborted,
-                success,
+                success: _,
                 attempt: _,
                 final_error,
                 restored_model,
             } => {
                 view.retry = None;
+                // A cancelled retry rests idle, whether it cancels the
+                // countdown or the failed attempt before its agent_end.
                 if aborted {
-                    self.run_open = false;
+                    self.run_outcome = crate::program_status::Status::Idle;
                     self.settled = None;
-                } else if !success {
-                    self.run_open = false;
-                    self.settled = Some(crate::program_status::Status::Error);
                 }
                 if final_error.is_some() {
                     self.turn_error_shown = true;
@@ -611,8 +613,17 @@ impl SessionUi {
                 aborted,
                 error_message,
                 error_severity,
+                will_retry,
             } => {
                 view.compaction = None;
+                // The overflow recovery's end decides the run it held open:
+                // a re-issued turn reports for itself, a cancelled recovery
+                // rests idle, a failed or skipped one settles the outcome.
+                if let Some(outcome) = self.outcome_after_compaction.take() {
+                    if !will_retry {
+                        self.settled = (!aborted).then_some(outcome);
+                    }
+                }
                 if let Some(result) = result {
                     // The display transcript keeps every row: the summary appends at the
                     // compaction's own position.
@@ -652,20 +663,22 @@ impl SessionUi {
                 }
             }
             TurnUpdate::Idle { aborted } => {
-                if aborted {
-                    self.settled = None;
-                }
                 self.end_run(view);
-                // The run's normal end settles the report's done; an
-                // aborted one settles idle (a stream-time abort already
-                // closed the run at its failed turn_end, but one landing
-                // between steps and tools ends through the original
-                // toolUse settle), and a goal's terminal outcome is kept.
+                // The run's end settles its outcome. An abort between steps
+                // and tools keeps the original toolUse turn_end, so only the
+                // marker tells it apart. A failed attempt whose retry is
+                // pending rests working on the countdown instead, and one
+                // whose overflow recovery compaction runs leaves the outcome
+                // to that compaction's end.
                 if self.run_open {
                     self.run_open = false;
+                    self.settled = None;
                     if !aborted {
-                        self.settled
-                            .get_or_insert(crate::program_status::Status::Done);
+                        if view.compaction.is_some() {
+                            self.outcome_after_compaction = Some(self.run_outcome);
+                        } else if view.retry.is_none() {
+                            self.settled = Some(self.run_outcome);
+                        }
                     }
                 }
             }
@@ -915,13 +928,12 @@ impl SessionUi {
             None
         };
         if abort_text.is_some() || stop_reason == Some("error") {
-            // Lifecycle failures can emit agent_end before any turn_end.
-            // Their terminal message must not leave a successful run open.
-            self.run_open = false;
-            self.settled = if abort_text.is_some() {
-                None
+            // Lifecycle failures can emit agent_end before any turn_end:
+            // the terminal message itself decides the run's outcome.
+            self.run_outcome = if abort_text.is_some() {
+                crate::program_status::Status::Idle
             } else {
-                Some(crate::program_status::Status::Error)
+                crate::program_status::Status::Error
             };
             let settle_text = abort_text.clone().unwrap_or_else(|| {
                 message

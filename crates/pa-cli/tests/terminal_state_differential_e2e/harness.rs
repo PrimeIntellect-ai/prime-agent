@@ -31,6 +31,7 @@ use pa_tui::interactive::{InteractiveOptions, ModelSelection, SessionSelection};
 use crate::ledger::ModeLedger;
 use crate::{
     CHILD_MODE_ENV, CHILD_SOCKET_ENV, CHILD_TERM, KITTY_ANSWER, KITTY_FLAGS_PUSH, KITTY_QUERY,
+    PROGRAM_STATUS_ANSWER, PROGRAM_STATUS_QUERY,
 };
 
 // The pty harness.
@@ -138,6 +139,16 @@ impl DifferentialHarness {
     /// Answer the kitty query like a kitty terminal (query, answer, push).
     pub(crate) fn answer_kitty_query(&mut self) {
         self.wait_from_start(KITTY_QUERY, "the kitty capability query");
+        self.write(KITTY_ANSWER);
+        self.wait_from_start(KITTY_FLAGS_PUSH, "the kitty flags push");
+    }
+
+    /// Answer the terminal probe like a kitty terminal that supports OSC 7501:
+    /// the detection reply comes first, then the kitty flags and the DA1.
+    pub(crate) fn answer_terminal_probe(&mut self) {
+        self.wait_from_start(PROGRAM_STATUS_QUERY, "the OSC 7501 detection query");
+        self.wait_from_start(KITTY_QUERY, "the kitty capability query");
+        self.write(PROGRAM_STATUS_ANSWER);
         self.write(KITTY_ANSWER);
         self.wait_from_start(KITTY_FLAGS_PUSH, "the kitty flags push");
     }
@@ -393,6 +404,10 @@ impl MockSupervisor {
         let mut retry_pending = false;
         let mut settled_done = false;
         let mut in_tools = false;
+        // The frames each later /copy delivers, one batch per /copy (a
+        // compaction that starts or settles later).
+        let mut pending_on_copy: std::collections::VecDeque<Vec<Value>> =
+            std::collections::VecDeque::new();
         write_json(
             &mut writer,
             &json!({
@@ -453,6 +468,20 @@ impl MockSupervisor {
                     let event = pending_compaction_end.take().expect("the guard checked it");
                     events_seen += 1;
                     push_event(&mut writer, events_seen, &event);
+                    write_json(
+                        &mut writer,
+                        &json!({
+                            "type": "response", "id": id,
+                            "command": "get_last_assistant_text", "success": true,
+                            "data": { "text": "" },
+                        }),
+                    );
+                }
+                "get_last_assistant_text" if !pending_on_copy.is_empty() => {
+                    for event in pending_on_copy.pop_front().expect("the guard checked it") {
+                        events_seen += 1;
+                        push_event(&mut writer, events_seen, &event);
+                    }
                     write_json(
                         &mut writer,
                         &json!({
@@ -528,59 +557,115 @@ impl MockSupervisor {
                             "data": {},
                         }),
                     );
-                    if command.get("message").and_then(Value::as_str) == Some("lifecycle-failure") {
-                        // Agent::handle_run_failure emits the failed message and
-                        // agent_end without turn_end. The daemon adds its error
-                        // turn_end only after the admission returns the failure.
-                        let message = json!({
-                            "role": "assistant", "content": [], "stopReason": "error",
-                            "errorMessage": "lifecycle-failure-sentinel",
-                        });
-                        for event in [
-                            json!({ "type": "message_start", "message": message }),
+                    let message = json!({
+                        "role": "assistant", "content": [], "stopReason": "error",
+                        "errorMessage": "failed-attempt-sentinel",
+                    });
+                    // The failure routes, in the daemon's frame order: a failed run's
+                    // agent_end follows the retry loop's next frame.
+                    let failure = match command.get("message").and_then(Value::as_str) {
+                        // A final provider failure: the retry loop's give-up.
+                        Some("provider-failure") => Some(vec![
                             json!({ "type": "message_end", "message": message }),
+                            json!({ "type": "turn_end", "message": message }),
+                            json!({ "type": "auto_retry_end", "success": false, "attempt": 0, "finalError": "down" }),
                             json!({ "type": "agent_end", "messages": [message] }),
+                        ]),
+                        // A lifecycle failure has no engine turn_end: the daemon's
+                        // fallback turn_end carries the error.
+                        Some("lifecycle-failure") => Some(vec![
+                            json!({ "type": "message_end", "message": message }),
                             json!({ "type": "turn_end", "error": "lifecycle-failure-sentinel" }),
-                        ] {
+                            json!({ "type": "agent_end", "messages": [message] }),
+                        ]),
+                        // An abort the gate settles: the aborted fallback frame alone.
+                        Some("terminal-abort") => Some(vec![json!({
+                            "type": "turn_end", "error": "No response produced.", "aborted": true,
+                        })]),
+                        // A failed attempt cancelled before its retry starts.
+                        Some("cancel-failed") => Some(vec![
+                            json!({ "type": "message_end", "message": message }),
+                            json!({ "type": "turn_end", "message": message }),
+                            json!({ "type": "auto_retry_end", "success": false, "attempt": 0, "finalError": "Retry cancelled", "aborted": true }),
+                            json!({ "type": "agent_end", "messages": [message] }),
+                        ]),
+                        // The pending retry's next attempt fails for good.
+                        Some("retry-failure") => Some(vec![
+                            json!({ "type": "agent_start" }),
+                            json!({ "type": "message_end", "message": message }),
+                            json!({ "type": "turn_end", "message": message }),
+                            json!({ "type": "auto_retry_end", "success": false, "attempt": 1, "finalError": "down" }),
+                            json!({ "type": "agent_end", "messages": [message] }),
+                        ]),
+                        // The pending retry's countdown is cancelled; the daemon's
+                        // fallback turn_end settles the delivery (the prompt ACK
+                        // armed the loader).
+                        Some("retry-cancel") => Some(vec![
+                            json!({
+                                "type": "auto_retry_end", "success": false, "attempt": 1,
+                                "finalError": "Retry cancelled", "aborted": true,
+                            }),
+                            json!({ "type": "turn_end" }),
+                        ]),
+                        _ => None,
+                    };
+                    // The overflow recovery: the failed attempt's agent_end follows
+                    // the recovery's compaction_start; the next /copy settles the
+                    // compaction (re-issuing the turn, or giving up). A threshold
+                    // compaction follows a settled run the same way.
+                    let compaction_route = match command.get("message").and_then(Value::as_str) {
+                        Some(route @ ("overflow-recover" | "overflow-fail")) => Some((
+                            vec![
+                                json!({ "type": "turn_start" }),
+                                json!({ "type": "message_end", "message": message }),
+                                json!({ "type": "turn_end", "message": message }),
+                                json!({ "type": "compaction_start", "reason": "overflow" }),
+                                json!({ "type": "agent_end", "messages": [message] }),
+                            ],
+                            vec![if route == "overflow-recover" {
+                                vec![
+                                    json!({
+                                        "type": "compaction_end", "reason": "overflow",
+                                        "result": { "summary": "compaction-settled-needle", "tokensBefore": 1 },
+                                        "aborted": false, "willRetry": true,
+                                    }),
+                                    json!({ "type": "agent_start" }),
+                                    json!({ "type": "turn_start" }),
+                                    json!({ "type": "turn_end", "message": { "role": "assistant", "stopReason": "stop" } }),
+                                    json!({ "type": "agent_end" }),
+                                ]
+                            } else {
+                                vec![json!({
+                                    "type": "compaction_end", "reason": "overflow",
+                                    "aborted": false, "willRetry": false,
+                                    "errorMessage": "compaction-error-needle",
+                                })]
+                            }],
+                        )),
+                        Some("threshold") => Some((
+                            vec![
+                                json!({ "type": "turn_start" }),
+                                json!({ "type": "turn_end", "message": { "role": "assistant", "stopReason": "stop" } }),
+                                json!({ "type": "agent_end" }),
+                            ],
+                            vec![
+                                vec![json!({ "type": "compaction_start", "reason": "threshold" })],
+                                vec![json!({
+                                    "type": "compaction_end", "reason": "threshold",
+                                    "result": { "summary": "compaction-settled-needle", "tokensBefore": 1 },
+                                    "aborted": false, "willRetry": false,
+                                })],
+                            ],
+                        )),
+                        _ => None,
+                    };
+                    if let Some((now, on_copy)) = compaction_route {
+                        for event in now {
                             events_seen += 1;
                             push_event(&mut writer, events_seen, &event);
                         }
-                        run_open = false;
-                    } else if matches!(
-                        command.get("message").and_then(Value::as_str),
-                        Some(
-                            "provider-failure"
-                                | "terminal-failure"
-                                | "terminal-abort"
-                                | "retry-failure"
-                                | "retry-cancel"
-                        )
-                    ) {
-                        let kind = command["message"].as_str().unwrap();
-                        let aborted = kind.ends_with("abort") || kind.ends_with("cancel");
-                        let message = json!({ "role": "assistant", "content": [], "stopReason": "error", "errorMessage": "Retry cancelled" });
-                        let events = if kind.starts_with("retry-") {
-                            // Identical text for failure and cancellation proves the
-                            // client consumes typed provenance, not error wording.
-                            // The prompt ACK arms a turn; the bare close frames end
-                            // it, and the outcome rides auto_retry_end alone.
-                            vec![
-                                json!({ "type": "auto_retry_end", "success": false, "attempt": 1, "finalError": "Retry cancelled", "aborted": aborted }),
-                                json!({ "type": "turn_end" }),
-                                json!({ "type": "agent_end" }),
-                            ]
-                        } else if kind == "provider-failure" {
-                            vec![
-                                json!({ "type": "message_end", "message": message }),
-                                json!({ "type": "turn_end", "message": message }),
-                                json!({ "type": "agent_end", "messages": [message] }),
-                            ]
-                        } else {
-                            vec![
-                                json!({ "type": "turn_end", "error": "No response produced.", "aborted": aborted }),
-                                json!({ "type": "agent_end", "aborted": aborted }),
-                            ]
-                        };
+                        pending_on_copy = on_copy.into();
+                    } else if let Some(events) = failure {
                         for event in events {
                             events_seen += 1;
                             push_event(&mut writer, events_seen, &event);
@@ -589,18 +674,9 @@ impl MockSupervisor {
                         retry_pending = false;
                     } else if run_open {
                         if retry_pending {
-                            for event in [
-                                json!({ "type": "turn_start" }),
-                                json!({
-                                    "type": "auto_retry_end",
-                                    "success": true,
-                                    "attempt": 1,
-                                }),
-                            ] {
-                                events_seen += 1;
-                                push_event(&mut writer, events_seen, &event);
-                            }
-                            retry_pending = false;
+                            // The countdown ends: the retried attempt runs.
+                            events_seen += 1;
+                            push_event(&mut writer, events_seen, &json!({ "type": "agent_start" }));
                         }
                         events_seen += 1;
                         push_event(
@@ -613,25 +689,24 @@ impl MockSupervisor {
                         );
                         events_seen += 1;
                         push_event(&mut writer, events_seen, &json!({ "type": "agent_end" }));
+                        if retry_pending {
+                            events_seen += 1;
+                            push_event(
+                                &mut writer,
+                                events_seen,
+                                &json!({ "type": "auto_retry_end", "success": true, "attempt": 1 }),
+                            );
+                            retry_pending = false;
+                        }
                         run_open = false;
                         settled_done = true;
                     } else if command.get("message").and_then(Value::as_str) == Some("retry") {
-                        // A failed attempt settles before its retry countdown starts.
-                        // Keep the next attempt pending until the next prompt.
+                        // A failed attempt whose retry is pending: the countdown
+                        // precedes the attempt's agent_end. The next prompt resumes it.
                         for event in [
                             json!({ "type": "turn_start" }),
-                            json!({
-                                "type": "message_end",
-                                "message": {
-                                    "role": "assistant", "content": [], "stopReason": "error",
-                                    "errorMessage": "failed-attempt-sentinel",
-                                },
-                            }),
-                            json!({
-                                "type": "turn_end",
-                                "message": { "role": "assistant", "stopReason": "error" },
-                            }),
-                            json!({ "type": "agent_end" }),
+                            json!({ "type": "message_end", "message": message }),
+                            json!({ "type": "turn_end", "message": message }),
                             json!({
                                 "type": "auto_retry_start",
                                 "attempt": 1,
@@ -639,6 +714,7 @@ impl MockSupervisor {
                                 "delayMs": 60_000,
                                 "errorMessage": "status-retry-sentinel",
                             }),
+                            json!({ "type": "agent_end", "messages": [message] }),
                         ] {
                             events_seen += 1;
                             push_event(&mut writer, events_seen, &event);

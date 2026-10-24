@@ -1792,7 +1792,7 @@ fn decodes_compaction_events() {
             "reason": "manual",
             "result": { "summary": "s", "firstKeptEntryId": "e1", "tokensBefore": 12 },
             "aborted": false,
-            "willRetry": false,
+            "willRetry": true,
             "customInstructions": "focus",
         })),
         Some(TurnUpdate::CompactionEnd {
@@ -1802,6 +1802,7 @@ fn decodes_compaction_events() {
             aborted: false,
             error_message: None,
             error_severity: None,
+            will_retry: true,
         })
     );
     assert_eq!(
@@ -1820,6 +1821,7 @@ fn decodes_compaction_events() {
             aborted: false,
             error_message: Some("Session is too short to compact".to_string()),
             error_severity: Some("warning".to_string()),
+            will_retry: false,
         })
     );
     // The settling end stays the summary's only durable source.

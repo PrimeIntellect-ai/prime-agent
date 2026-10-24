@@ -647,6 +647,153 @@ async fn an_aborted_end_keeps_its_marker_after_the_request_flag_clears() {
     );
 }
 
+/// A failed run's `agent_end` goes out after the retry loop's next frame:
+/// the pending retry's `auto_retry_start` reaches clients before the end of
+/// the attempt it retries.
+#[tokio::test]
+async fn a_failed_runs_agent_end_follows_its_retry_start() {
+    let failed = json!({ "role": "assistant", "stopReason": "error", "errorMessage": "down" });
+    let events = gate_sighting_events(
+        vec![
+            EngineEvent::TurnEnd {
+                message: failed.clone(),
+                tool_results: Vec::new(),
+            },
+            EngineEvent::AgentEnd {
+                aborted: false,
+                messages: vec![failed],
+            },
+            EngineEvent::AutoRetryStart {
+                attempt: 1,
+                max_attempts: 3,
+                delay_ms: 1_000,
+                error_message: "down".to_string(),
+                reason: pa_core::session_engine::auto_retry::RetryStartReason::Quick,
+            },
+        ],
+        false,
+        false,
+    )
+    .await;
+    let order: Vec<&str> = events
+        .iter()
+        .filter_map(|event| event["type"].as_str())
+        .filter(|kind| ["turn_end", "auto_retry_start", "agent_end"].contains(kind))
+        .collect();
+    assert_eq!(
+        order,
+        ["turn_end", "auto_retry_start", "agent_end"],
+        "{events:?}"
+    );
+}
+
+/// The final failure's verdict also precedes the failed run's `agent_end`.
+#[tokio::test]
+async fn a_failed_runs_agent_end_follows_its_final_retry_end() {
+    let failed = json!({ "role": "assistant", "stopReason": "error", "errorMessage": "down" });
+    let events = gate_sighting_events(
+        vec![
+            EngineEvent::TurnEnd {
+                message: failed.clone(),
+                tool_results: Vec::new(),
+            },
+            EngineEvent::AgentEnd {
+                aborted: false,
+                messages: vec![failed],
+            },
+            EngineEvent::AutoRetryEnd {
+                aborted: false,
+                success: false,
+                attempt: 3,
+                final_error: Some("down".to_string()),
+                restored_model: None,
+            },
+        ],
+        false,
+        false,
+    )
+    .await;
+    let order: Vec<&str> = events
+        .iter()
+        .filter_map(|event| event["type"].as_str())
+        .filter(|kind| ["turn_end", "auto_retry_end", "agent_end"].contains(kind))
+        .collect();
+    assert_eq!(
+        order,
+        ["turn_end", "auto_retry_end", "agent_end"],
+        "{events:?}"
+    );
+}
+
+/// #4: the turn's tool executions count onto the session's `toolUseCount`
+/// (TS bumps the child's counter per `tool_execution_start`), the value the
+/// worker's roster deltas carry.
+#[tokio::test]
+async fn a_turns_tool_executions_count_onto_the_summary() {
+    let engine: Arc<dyn SessionEngine> = Arc::new(GateProbeEngine {
+        frames: vec![
+            EngineEvent::ToolExecutionStart {
+                tool_call_id: "t1".to_string(),
+                tool_name: "bash".to_string(),
+                args: Value::Null,
+            },
+            EngineEvent::ToolExecutionEnd {
+                tool_call_id: "t1".to_string(),
+                result: Value::Null,
+                is_error: false,
+            },
+            EngineEvent::ToolExecutionStart {
+                tool_call_id: "t2".to_string(),
+                tool_name: "edit".to_string(),
+                args: Value::Null,
+            },
+            EngineEvent::Done(Ok(())),
+        ],
+        ..GateProbeEngine::default()
+    });
+    let runner = burst_runner(Arc::clone(&engine));
+    runner
+        .run_turn(
+            engine,
+            Lane::Steering,
+            vec![QueuedItem {
+                priority: QueuePriority::Human,
+                preview: None,
+                message: "tools".to_string(),
+                custom_message: None,
+                agent_message: None,
+                queue_key: None,
+                admission_id: None,
+                images: Vec::new(),
+                done: None,
+                queue_visible: true,
+                policy: TurnPolicy::Queued,
+                forced_batch: false,
+            }],
+        )
+        .await;
+    let summary = {
+        let core = runner.core.lock().unwrap();
+        session_summary(
+            &core,
+            SummaryInputs {
+                thinking_level: "default".to_string(),
+                model: None,
+                model_fallback_message: None,
+                bash_running: false,
+                quota_parked: false,
+                subagents_running: false,
+                progress_note: None,
+            },
+        )
+    };
+    let summary = serde_json::to_value(&summary).unwrap();
+    assert_eq!(
+        summary["toolUseCount"],
+        json!(2),
+        "the summary: {summary:?}"
+    );
+}
 /// A settle frame that would forward on a plain flag sighting drops when
 /// `suppress_aborted_row` is set; the fallback still closes the run.
 #[tokio::test]

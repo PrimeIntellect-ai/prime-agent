@@ -45,6 +45,9 @@ const KITTY_FLAGS_PUSH: &[u8] = b"\x1b[>7u";
 const KITTY_QUERY: &[u8] = b"\x1b[?u";
 /// The harness's kitty answer: flags supported, then the primary DA.
 const KITTY_ANSWER: &[u8] = b"\x1b[?7u\x1b[?62;c";
+/// The shared harness's OSC 7501 detection constants (unused by these routes).
+const PROGRAM_STATUS_QUERY: &[u8] = b"\x1b]7501;?\x1b\\";
+const PROGRAM_STATUS_ANSWER: &[u8] = b"\x1b]7501;?\x1b\\";
 /// The child-mode env: which surface the re-executed binary runs.
 const CHILD_MODE_ENV: &str = "PA_TERMIOS_CHILD_MODE";
 /// The mock-supervisor socket for the chat/view surfaces.

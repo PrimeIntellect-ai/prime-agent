@@ -103,6 +103,8 @@ pub enum TurnUpdate {
         error_message: Option<String>,
         /// `warning` or `error`.
         error_severity: Option<String>,
+        /// The overflow recovery re-issues the failed turn next.
+        will_retry: bool,
     },
     /// `goal_update`: the raw wire `goal` payload (the session view
     /// owns rendering).
@@ -200,6 +202,10 @@ pub fn event_to_update(event: &Value) -> Option<TurnUpdate> {
                 .get("errorSeverity")
                 .and_then(Value::as_str)
                 .map(str::to_string),
+            will_retry: event
+                .get("willRetry")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
         }),
         "agent_start" | "turn_start" => Some(TurnUpdate::TurnStarted),
         // Every attached client re-reads the session display name.
