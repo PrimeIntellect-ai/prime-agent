@@ -611,14 +611,14 @@ async fn refinement_and_auto_review_preserve_conversation_identity() {
     let expected = session.session_id().await;
     let registration =
         pa_ai::faux::register_faux_provider(pa_ai::faux::RegisterFauxProviderOptions::default());
-    let observed: Arc<std::sync::Mutex<Vec<Option<String>>>> = Arc::default();
+    let observed = Arc::new(std::sync::Mutex::new(Vec::new()));
     let step = |text: &'static str| {
         let observed = Arc::clone(&observed);
         pa_ai::faux::FauxResponseStep::Factory(Arc::new(move |_, options, _, _| {
-            observed
-                .lock()
-                .unwrap()
-                .push(options.and_then(|o| o.session_id.clone()));
+            observed.lock().unwrap().push((
+                options.and_then(|o| o.session_id.clone()),
+                options.and_then(|o| o.transport),
+            ));
             Ok(pa_ai::faux::faux_assistant_text_message(
                 text,
                 pa_ai::faux::FauxAssistantMessageOptions::default(),
@@ -645,5 +645,8 @@ async fn refinement_and_auto_review_preserve_conversation_identity() {
         .review_compact_auto_refine(&model, None, &global, 5, 0)
         .await
         .unwrap();
-    assert_eq!(*observed.lock().unwrap(), vec![Some(expected); 2]);
+    assert_eq!(
+        *observed.lock().unwrap(),
+        vec![(Some(expected), Some(pa_ai::types::Transport::Sse)); 2]
+    );
 }

@@ -85,6 +85,12 @@ async fn split_turn_compaction_runs_two_summarizer_calls_and_merges_the_turn_con
                   _call: u64,
                   _model: &pa_types::ai::Model| {
                 let actual = options.and_then(|o| o.session_id.as_deref());
+                let transport = options.and_then(|o| o.transport);
+                if transport != Some(pa_ai::types::Transport::Sse) {
+                    return Err(format!(
+                        "expected the SSE transport, received {transport:?}"
+                    ));
+                }
                 if actual != Some(expected_session_id.as_str()) {
                     return Err(format!(
                         "expected conversation {expected_session_id}, received {actual:?}"

@@ -632,6 +632,10 @@ pub fn default_refiner_call(
                 pa_ai::types::SimpleStreamOptions::from_base(pa_ai::types::StreamOptions {
                     api_key,
                     session_id: Some(session_id),
+                    // One-off prompts ride SSE: they keep the conversation id (cache key,
+                    // opencode routing) but never take or replace the session's Codex
+                    // WebSocket and its continuation.
+                    transport: Some(pa_ai::types::Transport::Sse),
                     ..Default::default()
                 });
             stream_options.reasoning = pa_types::ai::minimum_reasoning(&model);

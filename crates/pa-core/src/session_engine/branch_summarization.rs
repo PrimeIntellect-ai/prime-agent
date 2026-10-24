@@ -461,6 +461,9 @@ pub async fn generate_branch_summary(
             max_tokens: Some(BRANCH_SUMMARY_MAX_TOKENS),
             api_key,
             session_id: session_id.map(str::to_string),
+            // One-off prompts ride SSE: they keep the conversation id (cache key, opencode routing)
+            // but never take or replace the session's Codex WebSocket and its continuation.
+            transport: Some(pa_ai::types::Transport::Sse),
             headers: summary_headers.map(|headers| headers.into_iter().collect()),
             ..Default::default()
         });
@@ -774,7 +777,9 @@ mod tests {
                 agent_dir: tmp.path().to_path_buf(),
             };
             let seen_models =
-                std::sync::Arc::new(std::sync::Mutex::new(Vec::<(String, Option<String>)>::new()));
+                std::sync::Arc::new(std::sync::Mutex::new(
+                    Vec::<(String, Option<String>, bool)>::new(),
+                ));
             let recorder = seen_models.clone();
             registration.set_responses(vec![pa_ai::faux::FauxResponseStep::Factory(
                 std::sync::Arc::new(
@@ -785,6 +790,8 @@ mod tests {
                         recorder.lock().unwrap().push((
                             model.id.clone(),
                             options.and_then(|options| options.session_id.clone()),
+                            options.and_then(|options| options.transport)
+                                == Some(pa_ai::types::Transport::Sse),
                         ));
                         Ok(pa_ai::faux::faux_assistant_text_message(
                             "## Goal\nexplore the tree",
@@ -812,7 +819,7 @@ mod tests {
             // The routed call still carries the owning conversation's id.
             assert_eq!(
                 seen_models.lock().unwrap().as_slice(),
-                [("faux-1".to_string(), Some("conversation".to_string()))]
+                [("faux-1".to_string(), Some("conversation".to_string()), true)]
             );
             registration.unregister();
         }

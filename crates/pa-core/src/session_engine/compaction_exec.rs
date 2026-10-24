@@ -172,6 +172,9 @@ pub async fn complete_summary_call(
             signal: Some(cancel),
             max_tokens: Some(max_tokens),
             session_id: Some(session_id.to_string()),
+            // One-off prompts ride SSE: they keep the conversation id (cache key, opencode routing)
+            // but never take or replace the session's Codex WebSocket and its continuation.
+            transport: Some(pa_ai::types::Transport::Sse),
             api_key,
             headers: headers.map(|headers| headers.into_iter().collect()),
             ..Default::default()
