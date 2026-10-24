@@ -739,6 +739,12 @@ impl SessionEngine for AgentSessionEngine {
             agent_dir: self.config.agent_dir.clone(),
         };
         let run = async {
+            // The summary call carries the built session's conversation id, like the main
+            // requests (opencode rejects a request without `x-opencode-session`).
+            let session_id = match self.session.lock().await.as_deref() {
+                Some(engine) => Some(engine.session.session_id().await),
+                None => None,
+            };
             pa_core::session_engine::branch_summarization::generate_branch_summary(
                 &entries,
                 pa_core::session_engine::branch_summarization::GenerateBranchSummaryOptions {
@@ -748,6 +754,7 @@ impl SessionEngine for AgentSessionEngine {
                     replace_instructions,
                     reserve_tokens,
                     auxiliary: Some(&auxiliary),
+                    session_id: session_id.as_deref(),
                 },
             )
             .await

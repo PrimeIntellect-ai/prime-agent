@@ -97,6 +97,7 @@ async fn summary_respects_mandatory_thinking() {
     let (model, request, server) = mock_summary(Reply::Complete).await;
     let summary = complete_summary_call(
         &model,
+        "synthetic-session",
         Some("synthetic-key".into()),
         None,
         512,
@@ -124,6 +125,7 @@ async fn dropped_summary_closes_hung_transport() {
         let task = tokio::spawn(async move {
             complete_summary_call(
                 &model,
+                "synthetic-session",
                 Some("synthetic-key".into()),
                 None,
                 512,
@@ -167,6 +169,7 @@ async fn summary_preserves_unspecified_reasoning_when_off_is_supported() {
         let model = serde_json::from_value(wire).unwrap();
         complete_summary_call(
             &model,
+            "synthetic-session",
             Some("synthetic-key".into()),
             None,
             512,
@@ -206,6 +209,7 @@ async fn branch_summary_respects_mandatory_thinking() {
             replace_instructions: false,
             reserve_tokens: DEFAULT_BRANCH_RESERVE_TOKENS,
             auxiliary: None,
+            session_id: None,
         },
     )
     .await;
@@ -222,10 +226,13 @@ async fn branch_summary_respects_mandatory_thinking() {
 #[tokio::test]
 async fn refiner_call_respects_mandatory_thinking() {
     let (model, request, server) = mock_summary(Reply::Complete).await;
-    let reply =
-        default_refiner_call(Some("synthetic-key".into()))(model, "system", "prompt".into())
-            .await
-            .unwrap();
+    let reply = default_refiner_call(Some("synthetic-key".into()), "synthetic-session".into())(
+        model,
+        "system",
+        "prompt".into(),
+    )
+    .await
+    .unwrap();
     assert!(matches!(
         reply.content.as_slice(),
         [pa_types::ai::AssistantContentBlock::Text(text)] if text.text == "summary"

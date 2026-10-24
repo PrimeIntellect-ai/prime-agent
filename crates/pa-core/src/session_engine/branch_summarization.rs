@@ -300,6 +300,9 @@ pub struct GenerateBranchSummaryOptions<'a> {
     /// When present, the summary call resolves its model through the
     /// `auxiliaryModel` setting with a context-window fit check.
     pub auxiliary: Option<&'a super::auxiliary_model::AuxiliaryModelContext>,
+    /// The owning conversation's id (TS `branch-summarization.ts` passes `sessionId`), so
+    /// providers that route by conversation (opencode's `x-opencode-session`) accept the call.
+    pub session_id: Option<&'a str>,
 }
 
 /// The default reserve budget.
@@ -357,6 +360,7 @@ pub async fn generate_branch_summary(
         replace_instructions,
         reserve_tokens,
         auxiliary,
+        session_id,
     } = options;
     // The branch summary runs with its own prompt prefix, so on the session model it
     // re-reads the whole branch — route it to the auxiliary model when its known window fits.
@@ -456,6 +460,10 @@ pub async fn generate_branch_summary(
         pa_ai::types::SimpleStreamOptions::from_base(pa_ai::types::StreamOptions {
             max_tokens: Some(BRANCH_SUMMARY_MAX_TOKENS),
             api_key,
+            session_id: session_id.map(str::to_string),
+            // One-off prompts ride SSE: they keep the conversation id (cache key, opencode routing)
+            // but never take or replace the session's Codex WebSocket and its continuation.
+            transport: Some(pa_ai::types::Transport::Sse),
             headers: summary_headers.map(|headers| headers.into_iter().collect()),
             ..Default::default()
         });
@@ -698,6 +706,7 @@ mod tests {
                 replace_instructions: false,
                 reserve_tokens: DEFAULT_BRANCH_RESERVE_TOKENS,
                 auxiliary: None,
+                session_id: None,
             },
         )
         .await;
@@ -730,6 +739,7 @@ mod tests {
                 replace_instructions: false,
                 reserve_tokens: DEFAULT_BRANCH_RESERVE_TOKENS,
                 auxiliary: None,
+                session_id: None,
             },
         )
         .await;
@@ -766,16 +776,23 @@ mod tests {
                 cwd: tmp.path().to_path_buf(),
                 agent_dir: tmp.path().to_path_buf(),
             };
-            let seen_models: std::sync::Arc<std::sync::Mutex<Vec<String>>> =
-                std::sync::Arc::default();
+            let seen_models =
+                std::sync::Arc::new(std::sync::Mutex::new(
+                    Vec::<(String, Option<String>, bool)>::new(),
+                ));
             let recorder = seen_models.clone();
             registration.set_responses(vec![pa_ai::faux::FauxResponseStep::Factory(
                 std::sync::Arc::new(
                     move |_context: &pa_types::ai::Context,
-                          _options: Option<&pa_ai::types::StreamOptions>,
+                          options: Option<&pa_ai::types::StreamOptions>,
                           _call: u64,
                           model: &pa_types::ai::Model| {
-                        recorder.lock().unwrap().push(model.id.clone());
+                        recorder.lock().unwrap().push((
+                            model.id.clone(),
+                            options.and_then(|options| options.session_id.clone()),
+                            options.and_then(|options| options.transport)
+                                == Some(pa_ai::types::Transport::Sse),
+                        ));
                         Ok(pa_ai::faux::faux_assistant_text_message(
                             "## Goal\nexplore the tree",
                             pa_ai::faux::FauxAssistantMessageOptions::default(),
@@ -793,12 +810,17 @@ mod tests {
                     replace_instructions: false,
                     reserve_tokens: DEFAULT_BRANCH_RESERVE_TOKENS,
                     auxiliary: Some(&aux),
+                    session_id: Some("conversation"),
                 },
             )
             .await;
             assert!(result.error.is_none(), "error: {:?}", result.error);
             assert!(result.summary.is_some());
-            assert_eq!(seen_models.lock().unwrap().as_slice(), ["faux-1"]);
+            // The routed call still carries the owning conversation's id.
+            assert_eq!(
+                seen_models.lock().unwrap().as_slice(),
+                [("faux-1".to_string(), Some("conversation".to_string()), true)]
+            );
             registration.unregister();
         }
     }
