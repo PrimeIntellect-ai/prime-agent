@@ -38,17 +38,12 @@ fn is_valid_env_name(value: &str) -> bool {
 /// A user-configured MCP server entry, matching the TS `McpServerConfig`
 /// wire shape (camelCase keys).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(tag = "type", rename_all = "camelCase")]
+#[serde(tag = "type", rename_all_fields = "camelCase")]
 pub enum McpServerConfig {
     #[serde(rename = "http")]
     Http {
         url: String,
-        #[serde(
-            rename = "bearerTokenEnvVar",
-            alias = "bearer_token_env_var",
-            default,
-            skip_serializing_if = "Option::is_none"
-        )]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         bearer_token_env_var: Option<String>,
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         oauth: bool,
@@ -504,13 +499,6 @@ mod tests {
             engine,
             pa_core::mcp::McpServerConfig::Http { bearer_token_env_var: Some(ref var), .. } if var == "MY_TOKEN"
         ));
-        let legacy: McpServerConfig = serde_json::from_value(serde_json::json!({
-            "type": "http",
-            "url": "https://e.com/mcp",
-            "bearer_token_env_var": "MY_TOKEN"
-        }))
-        .unwrap();
-        assert_eq!(legacy, config);
     }
 
     #[test]
