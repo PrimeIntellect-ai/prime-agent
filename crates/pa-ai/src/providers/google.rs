@@ -12,7 +12,7 @@ use crate::event_stream::{
 use crate::models::clamp_thinking_level;
 use crate::providers::google_shared::{
     budget_effort, convert_messages, convert_tools, get_disabled_thinking_config,
-    get_google_thinking_budget, get_thinking_level, API_GOOGLE_GENERATIVE_AI,
+    get_google_thinking_budget, get_thinking_level, uses_thinking_levels, API_GOOGLE_GENERATIVE_AI,
 };
 use crate::providers::google_stream::GoogleStreamState;
 use crate::providers::simple_options::build_base_options;
@@ -159,10 +159,7 @@ fn build_params(model: &Model, context: &Context, options: &GoogleOptions) -> Va
             }
             generation_config.insert("thinkingConfig".into(), Value::Object(thinking_config));
         } else if model.reasoning && !thinking.enabled {
-            generation_config.insert(
-                "thinkingConfig".into(),
-                get_disabled_thinking_config(&model.id),
-            );
+            generation_config.insert("thinkingConfig".into(), get_disabled_thinking_config(model));
         }
     }
 
@@ -380,51 +377,49 @@ pub fn stream_simple_google(
         Some(api_key) => build_base_options(model, options, Some(&api_key)),
         None => build_base_options(model, options, None),
     };
+    let stream_options = GoogleOptions {
+        base,
+        tool_choice: None,
+        thinking: Some(resolve_simple_thinking(model, options)),
+    };
+    stream_google(model, context, Some(&stream_options))
+}
+
+/// The thinking arm the simple Google streams (Generative AI and Vertex) pick for a model +
+/// reasoning level: disabled, level-based, or budget-based. The route follows the Gemini
+/// generation (2.x and earlier take budgets, everything newer takes levels); a catalog
+/// `thinkingLevelMap` only picks which level is sent.
+pub(crate) fn resolve_simple_thinking(
+    model: &Model,
+    options: Option<&SimpleStreamOptions>,
+) -> GoogleThinking {
     let reasoning = options.and_then(|options| options.reasoning);
     if reasoning.is_none() || reasoning == Some(ModelThinkingLevel::Off) {
-        let stream_options = GoogleOptions {
-            base,
-            tool_choice: None,
-            thinking: Some(GoogleThinking {
-                enabled: false,
-                budget_tokens: None,
-                level: None,
-            }),
+        return GoogleThinking {
+            enabled: false,
+            budget_tokens: None,
+            level: None,
         };
-        return stream_google(model, context, Some(&stream_options));
     }
 
     let clamped = reasoning.map(|reasoning| clamp_thinking_level(model, reasoning));
     let effort = clamped.unwrap_or(ModelThinkingLevel::High);
 
-    if crate::providers::google_shared::is_gemini3_pro_model(&model.id)
-        || crate::providers::google_shared::is_gemini3_flash_model(&model.id)
-        || crate::providers::google_shared::is_gemma4_model(&model.id)
-    {
-        let stream_options = GoogleOptions {
-            base,
-            tool_choice: None,
-            thinking: Some(GoogleThinking {
-                enabled: true,
-                budget_tokens: None,
-                level: Some(get_thinking_level(effort, &model.id)),
-            }),
+    if uses_thinking_levels(model) {
+        return GoogleThinking {
+            enabled: true,
+            budget_tokens: None,
+            level: Some(get_thinking_level(effort, model)),
         };
-        return stream_google(model, context, Some(&stream_options));
     }
 
     let budgets = options.and_then(|options| options.thinking_budgets.as_ref());
     let budget = get_google_thinking_budget(&model.id, budget_effort(effort), budgets);
-    let stream_options = GoogleOptions {
-        base,
-        tool_choice: None,
-        thinking: Some(GoogleThinking {
-            enabled: true,
-            budget_tokens: Some(budget),
-            level: None,
-        }),
-    };
-    stream_google(model, context, Some(&stream_options))
+    GoogleThinking {
+        enabled: true,
+        budget_tokens: Some(budget),
+        level: None,
+    }
 }
 
 /// Registry provider for the `google-generative-ai` API.
@@ -452,5 +447,152 @@ impl Provider for GoogleGenerativeAiProvider {
         options: Option<&SimpleStreamOptions>,
     ) -> AssistantMessageEventStream {
         stream_simple_google(model, context, options)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A Gemini-4-shaped catalog entry: level-based thinking that cannot be turned off.
+    fn level_mapped_model(id: &str) -> Model {
+        serde_json::from_value::<Model>(json!({
+            "id": id, "name": id,
+            "api": "google-generative-ai", "provider": "google",
+            "baseUrl": "https://generativelanguage.googleapis.com/v1beta",
+            "reasoning": true,
+            "thinkingLevelMap": {
+                "off": null, "minimal": null, "low": "low", "medium": "medium",
+                "high": "high", "xhigh": null, "max": null
+            },
+            "input": ["text", "image"],
+            "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0 },
+            "contextWindow": 1_048_576, "maxTokens": 32_768
+        }))
+        .unwrap()
+    }
+
+    fn thinking_config(model: &Model, reasoning: ModelThinkingLevel) -> Value {
+        let simple = SimpleStreamOptions {
+            reasoning: Some(reasoning),
+            ..SimpleStreamOptions::default()
+        };
+        let options = GoogleOptions {
+            base: build_base_options(model, Some(&simple), None),
+            tool_choice: None,
+            thinking: Some(resolve_simple_thinking(model, Some(&simple))),
+        };
+        build_params(model, &Context::default(), &options)["generationConfig"]["thinkingConfig"]
+            .clone()
+    }
+
+    /// Models outside the Gemini 3 / Gemma 4 id patterns ride `thinkingLevel` when the catalog
+    /// map declares levels: low, medium and high reach the API as distinct levels instead of one
+    /// `thinkingBudget: -1`, and off sends the lowest level instead of a `thinkingBudget: 0` the
+    /// API rejects for models that cannot disable thinking.
+    #[test]
+    fn level_mapped_models_use_distinct_thinking_levels_not_budgets() {
+        for id in ["gemini-4-argon", "gemini-flash-latest"] {
+            let model = level_mapped_model(id);
+            let configs = [
+                ModelThinkingLevel::Off,
+                ModelThinkingLevel::Minimal,
+                ModelThinkingLevel::Low,
+                ModelThinkingLevel::Medium,
+                ModelThinkingLevel::High,
+            ]
+            .map(|level| thinking_config(&model, level));
+            assert_eq!(
+                configs,
+                [
+                    json!({ "thinkingLevel": "LOW" }),
+                    json!({ "includeThoughts": true, "thinkingLevel": "LOW" }),
+                    json!({ "includeThoughts": true, "thinkingLevel": "LOW" }),
+                    json!({ "includeThoughts": true, "thinkingLevel": "MEDIUM" }),
+                    json!({ "includeThoughts": true, "thinkingLevel": "HIGH" }),
+                ],
+                "{id}"
+            );
+        }
+    }
+
+    /// The system prompt goes out as a `Content` object (`{"parts":[{"text":...}]}`), the shape
+    /// the Gemini API requires for `systemInstruction`.
+    #[test]
+    fn system_instruction_is_sent_as_content_parts() {
+        let model = level_mapped_model("gemini-4-argon");
+        let context = Context {
+            system_prompt: Some("You are terse.".into()),
+            ..Context::default()
+        };
+        let params = build_params(&model, &context, &GoogleOptions::default());
+        assert_eq!(
+            params["systemInstruction"],
+            json!({ "parts": [{ "text": "You are terse." }] })
+        );
+    }
+
+    /// A level map on a Gemini 2.5 entry does not move it to `thinkingLevel`, which Google rejects
+    /// on 2.5 and earlier: the generation picks the route, and 2.5 keeps its budgets.
+    #[test]
+    fn level_mapped_gemini25_keeps_thinking_budgets() {
+        let model = serde_json::from_value::<Model>(json!({
+            "id": "gemini-2.5-pro", "name": "Gemini 2.5 Pro",
+            "api": "google-generative-ai", "provider": "google",
+            "baseUrl": "https://generativelanguage.googleapis.com/v1beta",
+            "reasoning": true,
+            "thinkingLevelMap": {
+                "off": null, "minimal": "low", "low": "low", "medium": "medium",
+                "high": "high", "xhigh": null, "max": null
+            },
+            "input": ["text"],
+            "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0 },
+            "contextWindow": 1_048_576, "maxTokens": 65_536
+        }))
+        .unwrap();
+        let configs = [
+            ModelThinkingLevel::Low,
+            ModelThinkingLevel::Medium,
+            ModelThinkingLevel::High,
+        ]
+        .map(|level| thinking_config(&model, level));
+        assert_eq!(
+            configs,
+            [
+                json!({ "includeThoughts": true, "thinkingBudget": 2048 }),
+                json!({ "includeThoughts": true, "thinkingBudget": 8192 }),
+                json!({ "includeThoughts": true, "thinkingBudget": 32768 }),
+            ]
+        );
+    }
+
+    /// Gemini 2.5 (no level map) keeps per-effort budgets and disables with a zero budget.
+    #[test]
+    fn gemini25_keeps_thinking_budgets() {
+        let model = serde_json::from_value::<Model>(json!({
+            "id": "gemini-2.5-flash", "name": "Gemini 2.5 Flash",
+            "api": "google-generative-ai", "provider": "google",
+            "baseUrl": "https://generativelanguage.googleapis.com/v1beta",
+            "reasoning": true, "input": ["text"],
+            "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0 },
+            "contextWindow": 1_048_576, "maxTokens": 65_536
+        }))
+        .unwrap();
+        let configs = [
+            ModelThinkingLevel::Off,
+            ModelThinkingLevel::Low,
+            ModelThinkingLevel::Medium,
+            ModelThinkingLevel::High,
+        ]
+        .map(|level| thinking_config(&model, level));
+        assert_eq!(
+            configs,
+            [
+                json!({ "thinkingBudget": 0 }),
+                json!({ "includeThoughts": true, "thinkingBudget": 2048 }),
+                json!({ "includeThoughts": true, "thinkingBudget": 8192 }),
+                json!({ "includeThoughts": true, "thinkingBudget": 24576 }),
+            ]
+        );
     }
 }

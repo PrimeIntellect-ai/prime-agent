@@ -509,30 +509,67 @@ fn regex_is_match(model_id: &str, pattern: &str) -> bool {
     regex.is_match(&model_id.to_lowercase())
 }
 
-/// Thinking config for disabled reasoning, per model family.
-pub fn get_disabled_thinking_config(model_id: &str) -> Value {
-    // Gemini 3.1 Pro cannot disable thinking, and Gemini 3 Flash / Flash-Lite do not support full
-    // thinking-off: use the lowest supported level without includeThoughts so hidden thinking
-    // remains invisible.
-    if is_gemini3_pro_model(model_id) {
-        return json!({ "thinkingLevel": "LOW" });
+/// The Gemini thinking level a catalog `thinkingLevelMap` declares for `level`, when the map
+/// carries a non-null value naming a Gemini level (case-insensitive: catalogs spell it `low` or
+/// `LOW`).
+fn mapped_thinking_level(
+    model: &Model,
+    level: crate::types::ModelThinkingLevel,
+) -> Option<GoogleThinkingLevel> {
+    let value = model.thinking_level_map_value(level).flatten()?;
+    match value.to_ascii_uppercase().as_str() {
+        "MINIMAL" => Some(GoogleThinkingLevel::Minimal),
+        "LOW" => Some(GoogleThinkingLevel::Low),
+        "MEDIUM" => Some(GoogleThinkingLevel::Medium),
+        "HIGH" => Some(GoogleThinkingLevel::High),
+        _ => None,
     }
-    if is_gemini3_flash_model(model_id) {
-        return json!({ "thinkingLevel": "MINIMAL" });
-    }
-    if is_gemma4_model(model_id) {
-        return json!({ "thinkingLevel": "MINIMAL" });
-    }
-    // Gemini 2.x supports disabling via thinkingBudget = 0.
-    json!({ "thinkingBudget": 0 })
 }
 
-/// Map a Prime Agent thinking level to a Gemini 3 thinking level.
+/// Whether reasoning for `model` rides `thinkingConfig.thinkingLevel` rather than
+/// `thinkingBudget`. Google splits the two by generation: Gemini 2.x and earlier take only
+/// `thinkingBudget` and reject `thinkingLevel`, while Gemini 3+, Gemini 4, Gemma 4 and the
+/// `-latest` aliases take `thinkingLevel` (Gemini 4 and Gemma 4 answer a budget with a 400). The
+/// catalog `thinkingLevelMap` only picks the level, never the route, so a map-less entry (a user
+/// `models.json` Gemini 4 on Vertex) still gets levels and a mapped 2.5 entry still gets budgets.
+pub fn uses_thinking_levels(model: &Model) -> bool {
+    !regex_is_match(&model.id, r"gemini-[12](?:\.\d+)?(?:-|$)")
+}
+
+/// Thinking config for disabled reasoning, per model generation.
+pub fn get_disabled_thinking_config(model: &Model) -> Value {
+    // Gemini 2.x supports disabling via thinkingBudget = 0.
+    if !uses_thinking_levels(model) {
+        return json!({ "thinkingBudget": 0 });
+    }
+    // Level-based Gemini keeps thinking on, so off sends the lowest supported level without
+    // includeThoughts and the hidden thinking stays invisible. A catalog map names that level
+    // when it cannot turn thinking off (`off: null`).
+    if let Some(minimum) = pa_types::ai::minimum_reasoning(model) {
+        if let Some(level) = mapped_thinking_level(model, minimum) {
+            return json!({ "thinkingLevel": level.as_str() });
+        }
+    }
+    // Without a map, by family: Gemini 3 Flash / Flash-Lite and Gemma 4 go down to MINIMAL (Gemma
+    // 4 has no LOW); Gemini 3.1 Pro and newer generations take LOW, which every level-based Gemini
+    // accepts.
+    if is_gemini3_flash_model(&model.id) || is_gemma4_model(&model.id) {
+        return json!({ "thinkingLevel": "MINIMAL" });
+    }
+    json!({ "thinkingLevel": "LOW" })
+}
+
+/// Map a Prime Agent thinking level to a Gemini thinking level: the catalog map's value when it
+/// names one, else the per-family default.
 pub fn get_thinking_level(
     effort: crate::types::ModelThinkingLevel,
-    model_id: &str,
+    model: &Model,
 ) -> GoogleThinkingLevel {
     use crate::types::ModelThinkingLevel;
+    if let Some(level) = mapped_thinking_level(model, effort) {
+        return level;
+    }
+    let model_id = model.id.as_str();
     if is_gemini3_pro_model(model_id) {
         return match effort {
             ModelThinkingLevel::Minimal | ModelThinkingLevel::Low => GoogleThinkingLevel::Low,
@@ -546,8 +583,12 @@ pub fn get_thinking_level(
         };
     }
     match effort {
-        ModelThinkingLevel::Minimal => GoogleThinkingLevel::Minimal,
-        ModelThinkingLevel::Low => GoogleThinkingLevel::Low,
+        // Only Gemini 3 Flash / Flash-Lite (and Gemma 4, above) are known to take MINIMAL; newer
+        // map-less generations get LOW, which every level-based Gemini accepts.
+        ModelThinkingLevel::Minimal if is_gemini3_flash_model(model_id) => {
+            GoogleThinkingLevel::Minimal
+        }
+        ModelThinkingLevel::Minimal | ModelThinkingLevel::Low => GoogleThinkingLevel::Low,
         ModelThinkingLevel::Medium => GoogleThinkingLevel::Medium,
         _ => GoogleThinkingLevel::High,
     }
