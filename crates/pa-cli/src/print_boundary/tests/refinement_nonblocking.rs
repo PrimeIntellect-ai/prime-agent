@@ -500,7 +500,7 @@ async fn background_completion_replays_the_persisted_refinement_rows() {
     // Force the wall clock past the commit's row timestamps: a reporter
     // rebuilding the rows would stamp a later now_millis().
     tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-    boundary.report_background_refinement(pending);
+    boundary.report_background_refinement(pending, /*fails_run*/ true);
     boundary.wait_for_refinement_reports().await;
     let durable = refine_rows(&engine).await;
     assert_eq!(durable.len(), 2, "the outcome and notice rows landed");

@@ -40,6 +40,8 @@ type EventSink = std::sync::Arc<dyn Fn(&serde_json::Value) + Send + Sync>;
 pub(crate) struct TurnBoundary {
     recovery: OverflowRecovery,
     refinement_reports: Vec<tokio::task::JoinHandle<()>>,
+    /// Set by a failed `/refine` command's report: the print run exits 1.
+    refine_command_failed: std::sync::Arc<std::sync::atomic::AtomicBool>,
     /// A successful compaction schedules the compact-trigger auto-refine
     /// review for the next serialized checkpoint (or the disposal drain).
     compact_auto_refine_pending: bool,
@@ -63,6 +65,7 @@ impl TurnBoundary {
         Self {
             recovery: OverflowRecovery::Idle,
             refinement_reports: Vec::new(),
+            refine_command_failed: std::sync::Arc::default(),
             compact_auto_refine_pending: false,
             last_auto_refine_review_at: None,
             assistant_turns_since_review: 0,
@@ -79,6 +82,7 @@ impl TurnBoundary {
         Self {
             recovery: OverflowRecovery::Idle,
             refinement_reports: Vec::new(),
+            refine_command_failed: std::sync::Arc::default(),
             compact_auto_refine_pending: false,
             last_auto_refine_review_at: None,
             assistant_turns_since_review: 0,
@@ -172,7 +176,7 @@ impl TurnBoundary {
             .start_pending_refinement(model, api_key, global_harness_dir)
             .await
         {
-            self.report_background_refinement(pending);
+            self.report_background_refinement(pending, /*fails_run*/ false);
         }
         Ok(())
     }

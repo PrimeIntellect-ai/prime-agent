@@ -22,11 +22,14 @@ pub(super) enum RefineSurface {
 }
 
 impl TurnBoundary {
+    /// `fails_run`: a failed `/refine` command fails the print run (exit 1); a
+    /// model-requested refinement only reports its failure.
     pub(crate) fn report_background_refinement(
         &mut self,
         pending: tokio::task::JoinHandle<
             anyhow::Result<pa_core::session_engine::refine::CommittedRefinement>,
         >,
+        fails_run: bool,
     ) {
         let pending = tokio::spawn(async move {
             pending
@@ -34,7 +37,14 @@ impl TurnBoundary {
                 .unwrap_or_else(|error| Err(anyhow::anyhow!("refinement task failed: {error}")))
                 .map(Some)
         });
-        self.report_optional_refinement(pending, /*emit*/ true);
+        self.report_optional_refinement(pending, /*emit*/ true, fails_run);
+    }
+
+    /// Whether a `/refine` command's background refinement failed; read after
+    /// the disposal drain has awaited every report.
+    pub(crate) fn refine_command_failed(&self) -> bool {
+        self.refine_command_failed
+            .load(std::sync::atomic::Ordering::Acquire)
     }
 
     fn report_optional_refinement(
@@ -43,14 +53,19 @@ impl TurnBoundary {
             anyhow::Result<Option<pa_core::session_engine::refine::CommittedRefinement>>,
         >,
         emit: bool,
+        fails_run: bool,
     ) {
         let sink = self.sink.clone();
         let json_mode = self.json_mode;
+        let refine_command_failed = self.refine_command_failed.clone();
         self.refinement_reports.retain(|job| !job.is_finished());
         self.refinement_reports.push(tokio::spawn(async move {
             let outcome = pending
                 .await
                 .unwrap_or_else(|error| Err(anyhow::anyhow!("refinement task failed: {error}")));
+            if fails_run && outcome.is_err() {
+                refine_command_failed.store(true, std::sync::atomic::Ordering::Release);
+            }
             if !emit {
                 return;
             }
@@ -190,6 +205,10 @@ impl TurnBoundary {
         // at every user turn while its provider call remains in flight.
         self.last_auto_refine_review_at = Some(now_millis());
         self.assistant_turns_since_review = 0;
-        self.report_optional_refinement(pending, surface == RefineSurface::Checkpoint);
+        self.report_optional_refinement(
+            pending,
+            surface == RefineSurface::Checkpoint,
+            /*fails_run*/ false,
+        );
     }
 }
