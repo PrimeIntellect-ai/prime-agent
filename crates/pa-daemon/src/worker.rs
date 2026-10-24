@@ -1021,6 +1021,30 @@ impl pa_core::session_engine::rlm_usage::RlmChildUsageStore for CoreUsageStore {
                 .map_err(|error| std::io::Error::other(format!("{error:#}")))
         })
     }
+
+    fn append_model_usage(
+        &self,
+        usage: pa_core::session_engine::model_usage::ModelUsage,
+    ) -> pa_core::session_engine::rlm_usage::RlmChildUsageFuture<'_, std::io::Result<()>> {
+        let core = Arc::clone(&self.0);
+        Box::pin(async move {
+            let data = serde_json::to_value(&usage)?;
+            let mut core = core.lock().unwrap();
+            let Some(store) = core.store.as_mut() else {
+                return Err(std::io::Error::other("session store not created"));
+            };
+            store
+                .persist_entry(
+                    "custom",
+                    json!({
+                        "customType": pa_core::session_engine::model_usage::MODEL_USAGE_CUSTOM_TYPE,
+                        "data": data,
+                    }),
+                )
+                .map(|_| ())
+                .map_err(|error| std::io::Error::other(format!("{error:#}")))
+        })
+    }
 }
 
 /// Whether one queued item is a minted goal-context turn (TS's

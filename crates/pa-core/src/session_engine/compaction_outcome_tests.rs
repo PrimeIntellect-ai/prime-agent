@@ -445,6 +445,52 @@ async fn refine_with_an_empty_plan_pushes_only_the_outcome_row() {
     );
 }
 
+/// The planning call bills the session: its usage lands on a durable row
+/// whether or not the plan edits anything.
+#[tokio::test]
+async fn refine_records_the_planning_call_usage() {
+    let (session, tmp) = refine_test_session().await;
+    let usage = pa_types::ai::Usage {
+        input: 1_200,
+        output: 80,
+        total_tokens: 1_280,
+        cost: pa_types::ai::UsageCost {
+            total: pa_types::JsNumber(0.004),
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let billed_plan: crate::refinement::executor::RefinerFn =
+        Box::new(move |model, system, prompt| {
+            let reply = refine_plan_call(EMPTY_PLAN)(model, system, prompt);
+            Box::pin(async move {
+                let mut reply = reply.await?;
+                reply.usage = usage;
+                Ok(reply)
+            })
+        });
+    session
+        .refine_with_refiner(
+            &refine::RefineOptions::default(),
+            refine::RefinementSource::User,
+            &session_ai_model(),
+            billed_plan,
+            tmp.path().join("harness"),
+        )
+        .await
+        .unwrap();
+    let rows = session.shared_persistence().lock().await.get_entries();
+    let billed: Vec<serde_json::Value> = rows
+        .iter()
+        .filter_map(|entry| match entry {
+            pa_types::session::FileEntry::Custom { payload, .. } => payload.data.clone(),
+            _ => None,
+        })
+        .filter_map(|data| data.get("usage").cloned())
+        .collect();
+    assert_eq!(billed, vec![serde_json::to_value(usage).unwrap()]);
+}
+
 #[tokio::test]
 async fn sequential_refines_push_exactly_their_own_rows() {
     // The second run must select exactly its own rows (by id), never

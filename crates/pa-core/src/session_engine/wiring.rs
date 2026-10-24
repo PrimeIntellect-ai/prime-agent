@@ -1,6 +1,6 @@
 use super::{
-    auxiliary_model, compaction, compaction_exec, image_model_routing, ipython_state,
-    provider_adapter, refine, semantic_edges, telemetry, AgentSession, PromptBatchRow,
+    auxiliary_model, compaction, compaction_exec, image_model_routing, ipython_state, model_usage,
+    provider_adapter, refine, rlm_usage, semantic_edges, telemetry, AgentSession, PromptBatchRow,
 };
 
 impl AgentSession {
@@ -100,6 +100,22 @@ impl AgentSession {
     /// installs it once the session telemetry is assembled).
     pub fn set_skill_telemetry(&mut self, telemetry: std::sync::Arc<telemetry::SessionTelemetry>) {
         self.skill_telemetry = Some(telemetry);
+    }
+
+    /// Bind the durable store the session's `model_usage` rows append to.
+    pub fn set_usage_store(&mut self, store: std::sync::Arc<dyn rlm_usage::RlmChildUsageStore>) {
+        self.usage_store = store;
+    }
+
+    /// Record one billed model call made outside the agent loop. A failed
+    /// append is logged; the call's result stands either way.
+    pub async fn record_model_usage(&self, usage: Option<model_usage::ModelUsage>) {
+        let Some(usage) = usage else {
+            return;
+        };
+        if let Err(error) = self.usage_store.append_model_usage(usage).await {
+            eprintln!("pa-core: model usage row not persisted: {error}");
+        }
     }
 
     /// Bind the auto-refine surface for this session: whether the session may

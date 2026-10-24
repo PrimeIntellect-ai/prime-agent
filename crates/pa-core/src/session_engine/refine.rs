@@ -7,6 +7,7 @@ use pa_types::ai::{UserContent, UserMessage};
 use pa_types::session::{AgentMessage, CustomMessage, FileEntry};
 use serde_json::json;
 
+use super::model_usage::ModelUsage;
 use super::AgentSession;
 use crate::refinement::executor::{
     apply_refinement_plan, plan_refinement, review_auto_refine, AutoRefineReview,
@@ -496,6 +497,10 @@ impl AgentSession {
     ///
     /// Returns an error when the conversation history cannot be read or
     /// when the review request fails; a decline is `Ok(None)`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the billed-call slot's mutex is poisoned.
     pub async fn review_compact_auto_refine(
         &self,
         model: &pa_types::ai::Model,
@@ -527,6 +532,8 @@ impl AgentSession {
             refinement_history: session_history,
         } = parts.await?;
         let history = crate::refinement::merge_refinement_history(&history, &session_history);
+        let (review_call, billed) =
+            billed_refiner_call(default_refiner_call(api_key.clone()), "refine_review");
         let review = review_auto_refine(
             &messages,
             &merged_state,
@@ -536,9 +543,12 @@ impl AgentSession {
                 reason: AUTO_REFINE_COMPACT_REASON.to_string(),
                 turns_since_last_review,
             },
-            default_refiner_call(api_key.clone()),
+            review_call,
         )
-        .await?;
+        .await;
+        let billed = billed.lock().expect("billed refiner call lock").take();
+        self.record_model_usage(billed).await;
+        let review = review?;
         if !review.should_refine {
             return Ok(None);
         }
@@ -608,6 +618,29 @@ impl AgentSession {
         )
         .await
     }
+}
+
+/// The refiner seam plus the slot its reply's billed call lands in. The
+/// caller records the call once the refinement released the session lock:
+/// the session-file usage store appends through that same lock.
+pub(crate) fn billed_refiner_call(
+    call: crate::refinement::executor::RefinerFn,
+    source: &'static str,
+) -> (
+    crate::refinement::executor::RefinerFn,
+    std::sync::Arc<std::sync::Mutex<Option<ModelUsage>>>,
+) {
+    let billed = std::sync::Arc::new(std::sync::Mutex::new(None));
+    let slot = std::sync::Arc::clone(&billed);
+    let seam: crate::refinement::executor::RefinerFn = Box::new(move |model, system, prompt| {
+        let reply = call(model, system, prompt);
+        Box::pin(async move {
+            let reply = reply.await?;
+            *slot.lock().expect("billed refiner call lock") = ModelUsage::of_reply(source, &reply);
+            Ok(reply)
+        })
+    });
+    (seam, billed)
 }
 
 /// The default model seam over pa-ai completion.

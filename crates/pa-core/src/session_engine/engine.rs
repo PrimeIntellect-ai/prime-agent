@@ -782,6 +782,7 @@ pub async fn create_session(mut config: SessionEngineConfig) -> anyhow::Result<S
     )));
     session.set_auto_refine(auto_refine_allowed, auto_refine_gates);
     session.set_agent_dir(config.agent_dir.clone());
+    session.set_usage_store(wiring.rlm_usage.store());
     // Keep the context descriptor even while disabled, so re-enabling can load it.
     session.harness_digest = Some(digest_context);
     session.refinement_settings = Some(refinement_settings);

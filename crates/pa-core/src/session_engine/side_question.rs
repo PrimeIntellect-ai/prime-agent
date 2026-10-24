@@ -14,6 +14,7 @@ use pa_agent::types::{
     UserPart,
 };
 
+use super::model_usage::ModelUsage;
 use super::provider_retry::{
     is_agent_lifecycle_failure, is_faux_provider_queue_exhausted,
     is_permanent_provider_failure_kind, provider_retry_delay, provider_stream_failure_kind,
@@ -64,6 +65,8 @@ pub struct SideQuestionResult {
     pub status: SideQuestionStatus,
     pub answer: String,
     pub error_message: Option<String>,
+    /// The run's model calls summed (every turn and retry, whatever the outcome).
+    pub usage: Option<ModelUsage>,
 }
 
 impl SideQuestionResult {
@@ -72,6 +75,7 @@ impl SideQuestionResult {
             status: SideQuestionStatus::Cancelled,
             answer,
             error_message: None,
+            usage: None,
         }
     }
 
@@ -80,6 +84,7 @@ impl SideQuestionResult {
             status: SideQuestionStatus::Error,
             answer,
             error_message: Some(error_message),
+            usage: None,
         }
     }
 }
@@ -104,6 +109,10 @@ fn assistant_text(message: &AssistantMessage) -> String {
 /// (returning `false` aborts the run), honors `signal` for external
 /// aborts, and retries provider failures per `retry_policy`. It never
 /// mutates the parent agent or its history.
+///
+/// # Panics
+///
+/// Panics if the usage tally mutex is poisoned.
 pub async fn run_side_question(
     parent: &Arc<Agent>,
     stream_fn: pa_agent::stream::StreamFn,
@@ -200,10 +209,25 @@ pub async fn run_side_question(
     // text as it arrives; the answer of the whole run is derived at the end.
     let (update_tx, update_rx) = std::sync::mpsc::channel::<String>();
     let update_tx = Arc::new(update_tx);
+    let billed = Arc::new(std::sync::Mutex::new(pa_types::ai::Usage::default()));
+    let billed_sink = Arc::clone(&billed);
     let subscription = side_agent
         .subscribe(move |event, _signal| {
             let update_tx = Arc::clone(&update_tx);
+            let billed = Arc::clone(&billed_sink);
             Box::pin(async move {
+                if let pa_agent::types::AgentEvent::MessageEnd {
+                    message: pa_agent::types::AgentMessage::Standard(Message::Assistant(assistant)),
+                } = &event
+                {
+                    // The session-file usage shape: both types serialize the TS `Usage`.
+                    if let Ok(usage) = serde_json::to_value(&assistant.usage)
+                        .and_then(serde_json::from_value::<pa_types::ai::Usage>)
+                    {
+                        let mut billed = billed.lock().expect("side question usage lock");
+                        super::rlm_usage::add_assistant_usage(&mut billed, &usage);
+                    }
+                }
                 let message = match &event {
                     pa_agent::types::AgentEvent::MessageUpdate { message, .. } => Some(&**message),
                     pa_agent::types::AgentEvent::MessageEnd { message } => Some(message),
@@ -223,7 +247,7 @@ pub async fn run_side_question(
         })
         .await;
 
-    let result = run_attempts(
+    let mut result = run_attempts(
         &side_agent,
         question,
         previous_turns,
@@ -235,6 +259,13 @@ pub async fn run_side_question(
     )
     .await;
     let () = subscription.unsubscribe().await;
+    let billed = *billed.lock().expect("side question usage lock");
+    result.usage = ModelUsage::new(
+        "side_question",
+        &parent_state.model.provider,
+        &parent_state.model.id,
+        billed,
+    );
     result
 }
 
@@ -357,6 +388,7 @@ async fn run_attempts(
         status: SideQuestionStatus::Complete,
         answer: final_answer,
         error_message: None,
+        usage: None,
     }
 }
 

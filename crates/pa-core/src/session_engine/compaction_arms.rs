@@ -430,7 +430,8 @@ impl AgentSession {
             messages,
             refinement_history,
         } = parts.await?;
-        let (result, context_row_ids) = {
+        let (refine_call, billed) = refine::billed_refiner_call(refine_call, "refine");
+        let refined = {
             let mut session = self.session.lock().await;
             // The factory opt-in resolves at apply time, not here: the
             // agent dir (the same settings.json the kernel-side factory
@@ -455,8 +456,12 @@ impl AgentSession {
                 refine_call,
                 self.agent_dir.as_deref(),
             )
-            .await?
+            .await
         };
+        // The planning call bills whether or not its plan applied.
+        let billed = billed.lock().expect("billed refiner call lock").take();
+        self.record_model_usage(billed).await;
+        let (result, context_row_ids) = refined?;
         // The outcome rows (and the notice row when any edit applied) push
         // onto the live context after the durable append, never a full rebuild
         // — a rebuild would resurrect a retried turn's dropped trailing

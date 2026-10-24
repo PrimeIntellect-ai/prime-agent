@@ -1022,6 +1022,12 @@ impl SessionEngine for AgentSessionEngine {
                     signal,
                     sink,
                 ));
+        // The answer never enters the history, but the run's model calls bill the session.
+        let engine = self.session.blocking_lock().clone();
+        if let Some(engine) = engine {
+            self.runtime
+                .block_on(engine.session.record_model_usage(result.usage.clone()));
+        }
         match result.status {
             pa_core::session_engine::side_question::SideQuestionStatus::Complete => {
                 SideQuestionOutcome::Complete {
