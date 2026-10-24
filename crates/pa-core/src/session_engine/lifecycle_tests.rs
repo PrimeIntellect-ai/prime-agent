@@ -725,3 +725,88 @@ async fn hook_diagnostics_persist_as_display_rows_and_never_reach_the_model() {
         );
     }
 }
+
+/// Every root session installs the tool-hook callbacks, even with no
+/// configuration. An abort during a tool call must still record the executed
+/// abort result with its status and duration, not the callback's abort error.
+#[tokio::test]
+async fn aborted_tool_call_keeps_its_result_with_hook_callbacks_installed() {
+    let directory = tempfile::tempdir().unwrap();
+    let cwd = directory.path().join("project");
+    let agent_dir = directory.path().join("agent");
+    std::fs::create_dir(&cwd).unwrap();
+    std::fs::create_dir(&agent_dir).unwrap();
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let entered_tool = Arc::clone(&entered);
+    let provider = Arc::new(ScriptedProvider::new(Model::unknown()));
+    provider.push_tool_call_turn(Some("calling"), vec![("call-1", "stall", json!({}))]);
+    provider.push_text_turn("unused");
+    let engine = create_session(SessionEngineConfig {
+        cwd,
+        agent_dir,
+        model: Some(Model::unknown()),
+        stream_fn: Some(provider.stream_fn()),
+        custom_system_prompt: Some("Test aborts.".into()),
+        tools: vec![super::tool_bridge::bridge_tool(
+            crate::tools::tool_definition::ToolDefinition {
+                name: "stall".into(),
+                label: "Stall".into(),
+                description: "Runs until aborted".into(),
+                prompt_snippet: String::new(),
+                parameters: json!({"type": "object"}),
+                execution_mode: None,
+                prepare_arguments: None,
+                execute: Arc::new(move |_, _, _, _| {
+                    let entered = Arc::clone(&entered_tool);
+                    Box::pin(async move {
+                        entered.notify_one();
+                        tokio::time::sleep(std::time::Duration::from_secs(600)).await;
+                        Ok(crate::tools::tool_definition::ToolExecutionResult::text(
+                            "finished",
+                        ))
+                    })
+                }),
+            },
+        )],
+        prewarm_ipython_kernel: Some(false),
+        ..Default::default()
+    })
+    .await
+    .unwrap();
+    let engine = Arc::new(engine);
+    let prompting = tokio::spawn({
+        let engine = Arc::clone(&engine);
+        async move { engine.session.prompt("go", PromptOptions::default()).await }
+    });
+    let session = &engine.session;
+    tokio::time::timeout(std::time::Duration::from_secs(5), entered.notified())
+        .await
+        .expect("the tool started");
+    session.agent().abort();
+    let _ = prompting.await.unwrap();
+    session.agent().wait_for_idle().await;
+    let result = session
+        .entries()
+        .await
+        .into_iter()
+        .find_map(|entry| match entry {
+            pa_types::session::FileEntry::Message {
+                message: SessionAgentMessage::ToolResult(result),
+                ..
+            } => Some(result),
+            _ => None,
+        })
+        .expect("aborted toolResult persisted");
+    let text = match &result.content[..] {
+        [pa_types::ai::UserContentBlock::Text(text)] => text.text.clone(),
+        other => panic!("expected the abort text: {other:?}"),
+    };
+    assert_eq!(
+        (result.is_error, text.as_str()),
+        (true, "Tool execution aborted")
+    );
+    assert_eq!(
+        result.details.as_ref().and_then(|details| details.get("status")),
+        Some(&json!("aborted"))
+    );
+}

@@ -369,6 +369,9 @@ pub(crate) async fn finalize_executed_tool_call(
                 result = merged;
             }
             Ok(None) => {}
+            // An abort raced the callback: the executed result (including an
+            // aborted execution's status and duration) stays authoritative.
+            Err(_) if signal.is_some_and(AbortSignal::is_aborted) => {}
             Err(error) => {
                 result = AgentToolResult::error(format!("{error:#}"));
                 is_error = true;
