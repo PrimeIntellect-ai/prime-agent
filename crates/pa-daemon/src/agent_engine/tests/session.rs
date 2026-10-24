@@ -88,69 +88,58 @@ async fn get_commands_enumerates_skills_before_the_first_prompt() {
 }
 
 /// The built engine carries the durable file's header id, not the in-memory
-/// manager's fresh one, and keeps it across a replacement build (#3618).
-#[tokio::test]
-async fn the_built_session_carries_the_durable_header_id_across_rebuilds() {
-    let (engine, model, durable_id, _dir) = tokio::task::spawn_blocking(|| {
-        let _faux = FAUX_TEST_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let dir = tempfile::TempDir::new().unwrap();
-        let mut store = crate::session_store::SessionFile::create(
-            dir.path().to_str().unwrap_or("/tmp"),
-            None,
-            0,
-        );
-        let durable_id = store.session_id().to_string();
-        let path = dir
-            .path()
-            .join(crate::session_store::session_file_name(&durable_id));
-        store.set_path(path.clone());
-        store.rewrite().unwrap();
-        let engine = AgentSessionEngine::new(AgentEngineConfig {
-            cwd: dir.path().to_path_buf(),
-            agent_dir: dir.path().join("agent"),
-            provider: None,
-            model: None,
-            api_key: None,
-            thinking: None,
-            session_dir: None,
-            session_file: Some(path),
-            faux_script: Some(
-                json!({ "engine": "faux", "responses": [{ "text": "ok" }] }).to_string(),
-            ),
-            supervisor_link: None,
-            telemetry_disabled: Some(true),
-            cron_store: None,
-            queued_steering_probe: None,
-        })
-        .unwrap();
-        let engine = std::sync::Arc::new(engine);
-        engine.register_arc();
-        let model = engine.resolve_model().expect("faux model");
-        (engine, model, durable_id, dir)
+/// manager's fresh one, and keeps it across a replacement build (#3618). The
+/// faux registry is process-global, so the whole test holds `FAUX_TEST_LOCK`
+/// and drives the async seams on the engine's own runtime.
+#[test]
+fn the_built_session_carries_the_durable_header_id_across_rebuilds() {
+    let _faux = FAUX_TEST_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let dir = tempfile::TempDir::new().unwrap();
+    let mut store =
+        crate::session_store::SessionFile::create(dir.path().to_str().unwrap_or("/tmp"), None, 0);
+    let durable_id = store.session_id().to_string();
+    let path = dir
+        .path()
+        .join(crate::session_store::session_file_name(&durable_id));
+    store.set_path(path.clone());
+    store.rewrite().unwrap();
+    let engine = AgentSessionEngine::new(AgentEngineConfig {
+        cwd: dir.path().to_path_buf(),
+        agent_dir: dir.path().join("agent"),
+        provider: None,
+        model: None,
+        api_key: None,
+        thinking: None,
+        session_dir: None,
+        session_file: Some(path),
+        faux_script: Some(json!({ "engine": "faux", "responses": [{ "text": "ok" }] }).to_string()),
+        supervisor_link: None,
+        telemetry_disabled: Some(true),
+        cron_store: None,
+        queued_steering_probe: None,
     })
-    .await
-    .expect("engine build join");
+    .unwrap();
+    let model = engine.resolve_model().expect("faux model");
     for _ in 0..2 {
-        engine
-            .ensure_core_session_async(&model)
-            .await
-            .expect("build");
-        {
-            let session = engine.session.lock().await;
-            let built = session.as_deref().expect("built session");
-            assert_eq!(built.session.session_id().await, durable_id);
-            assert_eq!(
-                built.session.agent().session_id(),
-                Some(durable_id.as_str())
-            );
-        }
-        engine.retire_session_runtime().await;
+        engine.runtime.block_on(async {
+            engine
+                .ensure_core_session_async(&model)
+                .await
+                .expect("build");
+            {
+                let session = engine.session.lock().await;
+                let built = session.as_deref().expect("built session");
+                assert_eq!(built.session.session_id().await, durable_id);
+                assert_eq!(
+                    built.session.agent().session_id(),
+                    Some(durable_id.as_str())
+                );
+            }
+            engine.retire_session_runtime().await;
+        });
     }
-    tokio::task::spawn_blocking(move || drop(engine))
-        .await
-        .expect("engine drop join");
 }
 
 #[tokio::test]
