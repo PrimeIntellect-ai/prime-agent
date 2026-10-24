@@ -10,7 +10,8 @@ use serde_json::Value;
 
 use super::ipython_details::{
     format_duration, is_agent_message_receipt, is_edit_confirmation, parse_sent_agent_message,
-    read_background_shell, BackgroundShell, BashCommands, IpythonDetails, IpythonError,
+    read_background_shell, transcript_reads_summary, BackgroundShell, BashCommands, IpythonDetails,
+    IpythonError,
 };
 use super::layout::RowOutput;
 use super::{highlight, ToolCallCard};
@@ -162,10 +163,12 @@ fn layout(
     // collapsed; the body opens up only when expanded.
     if !detail.tool_output_expanded() {
         render_sent_agent_messages(lines, &details, false, theme, width);
+        render_transcript_reads(lines, &details, false, theme, width);
         return;
     }
     let has_code = render_code(lines, code, theme, width);
     render_sent_agent_messages(lines, &details, true, theme, width);
+    render_transcript_reads(lines, &details, true, theme, width);
     render_output(card, &details, lines, has_code, show_images, theme, width);
     // Image blocks render below the card when shown (TS adds these rows
     // for every tool shell).
@@ -501,6 +504,34 @@ fn render_sent_agent_messages(
                 }
             }
         }
+    }
+}
+
+/// One summary row for the cell's `rlm.session.messages` reads, shaped like
+/// the sent agent-message rows; the expanded view sets it off from the code.
+fn render_transcript_reads(
+    lines: &mut RowOutput,
+    details: &IpythonDetails,
+    expanded: bool,
+    theme: &Theme,
+    width: usize,
+) {
+    if let Some(summary) = transcript_reads_summary(&details.transcript_reads) {
+        if expanded {
+            lines.blank();
+        }
+        lines.push(|| {
+            let row: Line = vec![
+                Span::raw(" "),
+                Span::styled(
+                    "\u{2261} transcript".to_string(),
+                    theme.fg_style(ThemeColor::Muted),
+                ),
+                Span::styled(" \u{b7} ".to_string(), theme.fg_style(ThemeColor::Dim)),
+                Span::styled(summary, theme.fg_style(ThemeColor::Dim)),
+            ];
+            truncate_line(&row, width, "\u{2026}")
+        });
     }
 }
 

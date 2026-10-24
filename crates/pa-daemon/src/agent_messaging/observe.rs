@@ -12,7 +12,7 @@ use super::{
 /// full session summaries from the supervisor. The roster this controller
 /// reports is the caller's NUCLEAR FAMILY, derived from the same durable
 /// parent edges `agent_message.send` resolves through — never the whole daemon.
-pub(crate) struct LinkAgentObserveController {
+pub struct LinkAgentObserveController {
     link: Arc<SupervisorLink>,
     /// This worker's live active session id (the family-scope anchor).
     active_session_id: String,
@@ -24,7 +24,7 @@ pub(crate) struct LinkAgentObserveController {
 }
 
 impl LinkAgentObserveController {
-    pub(crate) fn new(
+    pub fn new(
         link: Arc<SupervisorLink>,
         active_session_id: String,
         own_summary: Arc<std::sync::Mutex<Option<Value>>>,
@@ -86,6 +86,13 @@ impl LinkAgentObserveController {
         Ok(summaries_from_roster(sessions, &identity, &child_ids))
     }
 
+    /// The family member `target` names: the one resolution and permission check
+    /// every read of another session goes through.
+    async fn family_target(&self, target: &str) -> anyhow::Result<AgentObserveSummary> {
+        find_target(self.family_summaries().await?, target)?
+            .ok_or_else(|| anyhow::anyhow!("agent {target} is not reachable"))
+    }
+
     /// The caller's own summary from its pushed state alone, no roster
     /// read: the row `list_agents` serves when the walk missed this
     /// session's live row.
@@ -103,7 +110,8 @@ impl LinkAgentObserveController {
 }
 
 /// Resolve within the nuclear family using the registry's normalized id-suffix
-/// and exact-name contract. Exact active ids retain direct-lookup precedence.
+/// and exact-name contract, or the exact RLM child id. Exact active ids retain
+/// direct-lookup precedence.
 fn find_target(
     mut summaries: Vec<AgentObserveSummary>,
     target: &str,
@@ -123,6 +131,7 @@ fn find_target(
                 .is_some_and(|id| crate::registry::selector_matches(id, target))
                 || crate::registry::selector_matches(&summary.session_id, target)
                 || summary.session_name.as_deref() == Some(target)
+                || summary.rlm_child_id.as_deref() == Some(target)
         })
         .collect();
     if matches.len() > 1 {
@@ -185,8 +194,7 @@ impl AgentObserveController for LinkAgentObserveController {
         limit: usize,
         max_chars: usize,
     ) -> anyhow::Result<AgentObserveRecentMessagesResult> {
-        let agent = find_target(self.family_summaries().await?, target)?
-            .ok_or_else(|| anyhow::anyhow!("agent {target} is not reachable"))?;
+        let agent = self.family_target(target).await?;
         // A family member with no live session (a passivated child) has no
         // worker to read; TS hydrates it first, the roster walk errors. A
         // live member whose `get_state` degraded shows the offline stub
@@ -245,6 +253,37 @@ impl AgentObserveController for LinkAgentObserveController {
             max_chars,
             truncated: start > 0,
         })
+    }
+
+    /// The member's own worker answers with its store and running calls; the supervisor
+    /// reads the file of a member no worker holds.
+    async fn session_messages(
+        &self,
+        target: &str,
+        start: i64,
+        limit: u64,
+        roles: Vec<String>,
+    ) -> anyhow::Result<Value> {
+        let agent = self.family_target(target).await?;
+        let active_session_id = agent.active_session_id.unwrap_or_default();
+        let command = pa_types::daemon::DaemonCommand::GetSessionMessages {
+            id: None,
+            active_session_id: active_session_id.clone(),
+            start,
+            limit,
+            roles,
+            session_file: agent.session_file,
+            rest: serde_json::Map::default(),
+        };
+        let mut data = self
+            .link
+            .request_success(
+                serde_json::to_value(command)?,
+                std::time::Duration::from_secs(30),
+            )
+            .await?;
+        data["agent"] = json!(agent.session_name.unwrap_or(active_session_id));
+        Ok(data)
     }
 }
 
@@ -379,6 +418,7 @@ pub(super) fn summaries_from_roster(
                 rlm_child_id: row_str(&session, "rlmChildId").map(str::to_string),
                 first_message: row_str(&session, "firstMessage")
                     .map(|text| truncate_chars(text, AGENT_OBSERVE_PREVIEW_MAX_CHARS)),
+                session_file: row_str(&session, "sessionFile").map(str::to_string),
             })
         })
         .collect()

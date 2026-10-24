@@ -114,6 +114,93 @@ pub struct TranscriptPageRows {
     pub more: bool,
 }
 
+/// One `rlm.session.messages` slice ([`SessionFile::session_messages`]).
+#[derive(Debug, Clone)]
+pub struct SessionMessages {
+    /// Each row's index among the matching rows, entry id, and wire message, oldest first.
+    pub rows: Vec<(usize, String, Value)>,
+    /// How many rows match on the active branch.
+    pub total: usize,
+}
+
+impl SessionMessages {
+    /// The `get_session_messages` reply `{messages: [{index, id, message}], total}`,
+    /// snapshot image payloads left out.
+    #[must_use]
+    pub fn into_reply(self) -> Value {
+        let messages: Vec<Value> = self
+            .rows
+            .into_iter()
+            .map(|(index, id, mut message)| {
+                crate::snapshot_stream::elide_snapshot_image_payloads(std::slice::from_mut(
+                    &mut message,
+                ));
+                json!({ "index": index, "id": id, "message": message })
+            })
+            .collect();
+        json!({ "messages": messages, "total": self.total })
+    }
+}
+
+/// One `get_session_messages` request: the slice bounds and the compiled role globs.
+pub struct SessionMessagesQuery {
+    start: i64,
+    limit: usize,
+    roles: globset::GlobSet,
+}
+
+impl SessionMessagesQuery {
+    /// Compile the role globs.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when a role is not a valid glob.
+    pub fn new(start: i64, limit: u64, roles: &[String]) -> Result<Self, globset::Error> {
+        let mut globs = globset::GlobSetBuilder::new();
+        for role in roles {
+            globs.add(globset::Glob::new(role)?);
+        }
+        Ok(Self {
+            start,
+            limit: usize::try_from(limit).unwrap_or(usize::MAX),
+            roles: globs.build()?,
+        })
+    }
+
+    /// The slice from `store`; `None` when it reaches a windowed store's unloaded prefix.
+    pub fn read(
+        &self,
+        store: &mut SessionFile,
+        running_calls: &std::collections::HashSet<String>,
+    ) -> Option<SessionMessages> {
+        store.session_messages(
+            self.start,
+            self.limit,
+            |role| self.roles.is_match(role),
+            running_calls,
+        )
+    }
+
+    /// The slice from a session file no worker holds, read-only: no lease and no
+    /// session-file write (the windowed open may refresh its window-cache sidecar).
+    /// The windowed open serves slices inside the window; one that reaches the
+    /// unloaded prefix reads the full file. Nothing runs, so nothing is in flight.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the file cannot be read.
+    pub fn read_file(&self, path: &Path) -> Result<SessionMessages> {
+        let idle = std::collections::HashSet::new();
+        if let Some(slice) = self.read(&mut SessionFile::open_windowed(path)?, &idle) {
+            return Ok(slice);
+        }
+        let slice = self.read(&mut SessionFile::open(path)?, &idle);
+        // The whole-file load was transient: release its freed heap.
+        pa_types::memory_release::trim_freed_heap();
+        slice.ok_or_else(|| anyhow!("Session history is unavailable"))
+    }
+}
+
 /// The windowed sequence's summary scalars (newest timestamp, message count),
 /// from [`SessionFile::scan_message_scalars`] without materializing the fold.
 #[derive(Debug, Default, Clone, Copy, PartialEq)]
@@ -133,7 +220,10 @@ pub struct SessionFile {
     pub(crate) by_id: HashMap<String, usize>,
     /// Parallel to `entries`: each entry's parent-chain link (maintained with `by_id`).
     chain: Vec<index::ChainLink>,
-    pub(crate) leaf_id: Option<String>,
+    leaf_id: Option<String>,
+    /// The active branch's display rows by role, a window's unloaded prefix included: kept
+    /// by [`Self::set_leaf`], `None` while stale (the next read recounts).
+    branch_roles: Option<HashMap<String, usize>>,
     pub(crate) window: Option<SessionWindow>,
     pub(crate) trace_upload: Option<std::sync::Arc<pa_core::agent_traces::ContinuousTraceUpload>>,
     pub(crate) lease: Option<std::sync::Arc<crate::lease::SessionLease>>,

@@ -5,6 +5,7 @@ from __future__ import annotations
 import sys
 import types
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -82,6 +83,22 @@ class RLMSubagent:
 class RLMProgressNoteResult:
     accepted: bool
     retry_after_ms: int | None = None
+
+
+@dataclass(frozen=True)
+class RLMMessage:
+    """One message of this session's transcript, from `rlm.session.messages()`.
+
+    `index` is the message's position among the messages the same `role` filter
+    keeps. `raw` is the stored message (tool calls, thinking, tool-result details).
+    """
+
+    index: int
+    id: str
+    role: str
+    text: str
+    timestamp: int | None
+    raw: dict[str, Any]
 
 
 @dataclass(frozen=True)
@@ -628,8 +645,101 @@ class _RLMFactoryNamespace:
         return FACTORY_HELP
 
 
+# Display MIME the host collects into the cell card's transcript row: one per read.
+_TRANSCRIPT_READ_MIME = "application/vnd.prime-agent.transcript-read+json"
+
+
+def _message_text(message: dict[str, Any]) -> str:
+    role = message["role"]
+    if role in ("compactionSummary", "branchSummary"):
+        return message.get("summary", "")
+    if role == "bashExecution":
+        return "\n".join(part for part in (message.get("command"), message.get("output")) if part)
+    content = message.get("content")
+    if isinstance(content, str):
+        return content
+    return "\n".join(block["text"] for block in content or [] if block.get("type") == "text")
+
+
+def _message_timestamp(message: dict[str, Any]) -> int | None:
+    value = message.get("timestamp")
+    if isinstance(value, str):
+        # Custom rows carry their row's ISO time; every other row carries epoch ms.
+        return int(datetime.fromisoformat(value).timestamp() * 1000)
+    return None if value is None else int(value)
+
+
+def _roles(role: str | tuple[str, ...]) -> list[str]:
+    return [role] if isinstance(role, str) else list(role)
+
+
+class _RLMSessionNamespace:
+    """A session's transcript as data: ``await rlm.session.messages()``."""
+
+    async def messages(
+        self,
+        start: int = -10,
+        limit: int = 10,
+        *,
+        role: str | tuple[str, ...] = "*",
+        agent: str | RLMSpawnHandle | RLMSubagent | None = None,
+    ) -> list[RLMMessage]:
+        """Return ``rows[start:][:limit]`` of a session's transcript on the active branch.
+
+        ``rows`` are the messages whose role matches ``role`` (an fnmatch glob or a
+        tuple of globs), oldest first, including the messages compaction summarized
+        away (each compaction appears in place as a ``compactionSummary`` message).
+        ``start`` counts from the end when negative. Each message's ``index`` is its
+        position in ``rows``. ``agent`` reads a nuclear-family member's transcript
+        instead of this session's: a name, child id, session id, spawn handle, or
+        ``list_subagents()`` row.
+        """
+        if limit < 0:
+            raise ValueError("limit must not be negative")
+        roles = _roles(role)
+        reply = await _read_transcript(start, limit, roles, agent)
+        messages = [
+            RLMMessage(
+                index=row["index"],
+                id=row["id"],
+                role=row["message"]["role"],
+                text=_message_text(row["message"]),
+                timestamp=_message_timestamp(row["message"]),
+                raw=row["message"],
+            )
+            for row in reply["messages"]
+        ]
+        first = messages[0].index if messages else None
+        read = {"returned": len(messages), "first": first, "total": reply["total"], "roles": roles}
+        if agent is not None:
+            read["agent"] = reply["agent"]
+        emit({_TRANSCRIPT_READ_MIME: read})
+        return messages
+
+    async def count(
+        self,
+        role: str | tuple[str, ...] = "*",
+        *,
+        agent: str | RLMSpawnHandle | RLMSubagent | None = None,
+    ) -> int:
+        """Return how many messages of the transcript match ``role`` (``agent`` as in ``messages``)."""
+        reply = await _read_transcript(0, 0, _roles(role), agent)
+        return reply["total"]
+
+
+async def _read_transcript(
+    start: int, limit: int, roles: list[str], agent: str | RLMSpawnHandle | RLMSubagent | None
+) -> dict[str, Any]:
+    request = {"start": start, "limit": limit, "roles": roles}
+    if agent is None:
+        return await host_request("rlm.session.messages", request)
+    target = _collect_target_selector(agent, "agent")
+    return await host_request("agent_observe.session_messages", {**request, "target": target})
+
+
 class _RLMNamespace:
     harness = _harness_state
+    session = _RLMSessionNamespace()
     get_harness_state = staticmethod(get_harness_state)
 
     async def spawn(
@@ -708,6 +818,7 @@ __all__ = [
     "McpToolError",
     "NotEnabled",
     "RLMCreateSessionHandle",
+    "RLMMessage",
     "RLMModel",
     "RLMProgressNoteResult",
     "RLMSpawnHandle",

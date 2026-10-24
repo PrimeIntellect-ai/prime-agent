@@ -26,6 +26,7 @@ fn observe_rows_carry_the_typed_status_and_activity() {
         parent_session_id: None,
         rlm_child_id: None,
         first_message: None,
+        session_file: None,
     };
     let value = row.to_value();
     assert_eq!(value["status"], "running");
@@ -471,6 +472,7 @@ fn observe_row(active_session_id: &str, is_current: bool) -> AgentObserveSummary
         parent_session_id: None,
         rlm_child_id: None,
         first_message: None,
+        session_file: None,
     }
 }
 
@@ -528,6 +530,16 @@ impl AgentObserveController for StaticObserveController {
             max_chars,
             truncated: true,
         }))
+    }
+
+    fn session_messages(
+        &self,
+        _target: &str,
+        _start: i64,
+        _limit: u64,
+        _roles: Vec<String>,
+    ) -> impl Future<Output = anyhow::Result<Value>> + Send {
+        std::future::ready(Ok(json!({ "messages": [], "total": 0, "agent": "kid-1" })))
     }
 }
 

@@ -382,6 +382,47 @@ fn bash_dominated_cell_renders_as_bash() {
 }
 
 #[test]
+fn transcript_reads_render_one_summary_row_below_the_summary() {
+    let read = |returned: u64, first: u64, roles: &[&str]| json!({ "returned": returned, "first": first, "total": 17, "roles": roles });
+    for (reads, summary) in [
+        (
+            json!([read(5, 12, &["user"])]),
+            "read 5 messages (role user) #12\u{2013}#16 of 17",
+        ),
+        (
+            json!([read(3, 0, &["*"]), read(10, 7, &["user", "assistant"])]),
+            "read 13 messages in 2 reads",
+        ),
+        (
+            json!([{ "returned": 10, "first": 30, "total": 40, "roles": ["*"], "agent": "worker-a" }]),
+            "read 10 messages from worker-a #30\u{2013}#39 of 40",
+        ),
+    ] {
+        let card = cell_card(
+            "msgs = await rlm.session.messages(role='user')",
+            json!({ "status": "ok", "durationMs": 40, "transcriptReads": reads }),
+            false,
+            false,
+        );
+        let rows: Vec<String> = render(&card, 0, Detail::Overview, &theme(), 100, true)
+            .iter()
+            .map(text_of)
+            .collect();
+        assert_eq!(
+            rows[1..],
+            [format!(" \u{2261} transcript \u{b7} {summary}")]
+        );
+        for detail in [Detail::Overview, Detail::All] {
+            assert_eq!(
+                count(&card, 0, detail, &theme(), 100, true),
+                render(&card, 0, detail, &theme(), 100, true).len(),
+                "the row count matches the painted rows"
+            );
+        }
+    }
+}
+
+#[test]
 fn bash_minority_cell_stays_python() {
     let code = "async def sh(cmd):\n    return await bash(cmd)\nr = await sh(\"ls\")\nprint(r.pid)";
     let card = cell_card(

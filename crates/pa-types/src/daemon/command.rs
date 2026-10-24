@@ -665,6 +665,23 @@ pub enum DaemonCommand {
         #[serde(flatten)]
         rest: JsonMap,
     },
+    /// One slice of the session's display transcript for `rlm.session.messages`:
+    /// `rows[start:][:limit]` over the rows whose role matches a `roles` glob.
+    /// Rust-native extension.
+    GetSessionMessages {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
+        active_session_id: String,
+        start: i64,
+        limit: u64,
+        roles: Vec<String>,
+        /// The session's file, which the supervisor reads when no worker holds the
+        /// session (a family member's read).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        session_file: Option<String>,
+        #[serde(flatten)]
+        rest: JsonMap,
+    },
     GetRlmChildren {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         id: Option<String>,

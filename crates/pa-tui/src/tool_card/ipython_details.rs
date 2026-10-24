@@ -1,7 +1,7 @@
 //! Parsing of ipython execution `details` for the cell card: the
 //! details record, the background-shell handle repr, literal shell
-//! launches, and the edit-confirmation and agent-message-receipt
-//! suppressions.
+//! launches, the transcript reads, and the edit-confirmation and
+//! agent-message-receipt suppressions.
 
 use serde_json::Value;
 
@@ -18,6 +18,7 @@ pub(crate) struct IpythonDetails {
     pub(crate) diffs: Vec<Value>,
     pub(crate) sent_agent_messages: Vec<Value>,
     pub(crate) bash_commands: Option<BashCommands>,
+    pub(crate) transcript_reads: Vec<TranscriptRead>,
 }
 
 pub(crate) struct IpythonError {
@@ -47,6 +48,75 @@ fn read_bash_commands(value: &Value) -> Option<BashCommands> {
             .as_u64()
             .and_then(|lines| usize::try_from(lines).ok())?,
     })
+}
+
+/// One `transcriptReads` record: what one `rlm.session.messages` read returned.
+pub(crate) struct TranscriptRead {
+    returned: u64,
+    first: Option<u64>,
+    total: u64,
+    roles: Vec<String>,
+    /// The family member whose transcript was read; `None` for the session's own.
+    agent: Option<String>,
+}
+
+impl TranscriptRead {
+    fn parse(value: &Value) -> Option<TranscriptRead> {
+        Some(TranscriptRead {
+            returned: value.get("returned")?.as_u64()?,
+            first: value.get("first").and_then(Value::as_u64),
+            total: value.get("total")?.as_u64()?,
+            roles: value
+                .get("roles")?
+                .as_array()?
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::to_string)
+                .collect(),
+            agent: value
+                .get("agent")
+                .and_then(Value::as_str)
+                .map(str::to_string),
+        })
+    }
+}
+
+/// The card row for a cell's reads: `read 5 messages (role user) #12–#16 of 17`
+/// for one read, `read 13 messages in 3 reads` for several. Reads of one family
+/// member's transcript name it: `read 10 messages from worker-a #0–#9 of 40`.
+pub(crate) fn transcript_reads_summary(reads: &[TranscriptRead]) -> Option<String> {
+    let plural =
+        |count: u64, noun: &str| format!("{count} {noun}{}", if count == 1 { "" } else { "s" });
+    let agent = reads.first()?.agent.as_deref();
+    let from = agent
+        .filter(|_| reads.iter().all(|read| read.agent.as_deref() == agent))
+        .map(|agent| format!(" from {agent}"))
+        .unwrap_or_default();
+    match reads {
+        [read] => {
+            let roles = (read.roles != ["*"]).then(|| format!(" (role {})", read.roles.join("|")));
+            let range = read.first.filter(|_| read.returned > 0).map(|first| {
+                let last = first + read.returned - 1;
+                if first == last {
+                    format!(" #{first}")
+                } else {
+                    format!(" #{first}\u{2013}#{last}")
+                }
+            });
+            Some(format!(
+                "read {}{from}{}{} of {}",
+                plural(read.returned, "message"),
+                roles.unwrap_or_default(),
+                range.unwrap_or_default(),
+                read.total
+            ))
+        }
+        _ => Some(format!(
+            "read {}{from} in {}",
+            plural(reads.iter().map(|read| read.returned).sum(), "message"),
+            plural(reads.len() as u64, "read")
+        )),
+    }
 }
 
 pub(crate) fn read_error_details(value: &Value) -> Option<IpythonError> {
@@ -86,6 +156,7 @@ impl IpythonDetails {
             diffs: Vec::new(),
             sent_agent_messages: Vec::new(),
             bash_commands: None,
+            transcript_reads: Vec::new(),
         };
         let Some(record) = details.as_object() else {
             return empty;
@@ -131,6 +202,11 @@ impl IpythonDetails {
                 .cloned()
                 .unwrap_or_default(),
             bash_commands: record.get("bashCommands").and_then(read_bash_commands),
+            transcript_reads: record
+                .get("transcriptReads")
+                .and_then(Value::as_array)
+                .map(|reads| reads.iter().filter_map(TranscriptRead::parse).collect())
+                .unwrap_or_default(),
         }
     }
 }
