@@ -40,6 +40,9 @@ pub use tools::bash::{
     create_bash_tool_definition, create_bash_tool_definition_with_options, BashOperations,
     BashSpawnContext, BashSpawnHook, BashToolOptions, LocalBashOperations,
 };
+// The bash tool's streaming pipe decoder (TS `TextDecoder` `{ stream: true }`), shared with the
+// daemon's `!` command runner so both decode split characters the same way.
+pub use tools::output_accumulator::StreamingUtf8;
 
 // edit tool: definition + filesystem operations seam.
 pub use tools::edit::{

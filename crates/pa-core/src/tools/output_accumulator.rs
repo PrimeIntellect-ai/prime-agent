@@ -39,13 +39,17 @@ fn default_temp_file_path(prefix: &str) -> PathBuf {
 
 /// Streaming UTF-8 decoder matching `TextDecoder` `{ stream: true }`: incomplete
 /// sequences are buffered; invalid bytes become one U+FFFD per maximal subpart.
+/// One decoder per byte stream: feed each read to [`Self::decode_chunk`], then
+/// [`Self::flush`] once at end of stream.
 #[derive(Default)]
-struct StreamingUtf8 {
+pub struct StreamingUtf8 {
     buffer: Vec<u8>,
 }
 
 impl StreamingUtf8 {
-    fn decode_chunk(&mut self, data: &[u8]) -> String {
+    /// Decode the complete characters buffered so far plus `data`; a trailing
+    /// incomplete sequence waits for the next chunk.
+    pub fn decode_chunk(&mut self, data: &[u8]) -> String {
         self.buffer.extend_from_slice(data);
         let mut text = String::new();
         let mut start = 0usize;
@@ -70,7 +74,9 @@ impl StreamingUtf8 {
         text
     }
 
-    fn flush(&mut self) -> String {
+    /// End of stream: decode whatever is left, a truncated trailing sequence
+    /// as one U+FFFD.
+    pub fn flush(&mut self) -> String {
         if self.buffer.is_empty() {
             return String::new();
         }

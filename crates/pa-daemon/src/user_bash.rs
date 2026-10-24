@@ -532,8 +532,8 @@ impl OutputStream {
         self.clone()
     }
 
-    fn push(&mut self, data: &[u8]) {
-        let text = sanitize_output(&String::from_utf8_lossy(data));
+    fn push(&mut self, data: &str) {
+        let text = sanitize_output(data);
         if text.is_empty() {
             return;
         }
@@ -632,12 +632,20 @@ async fn run_bash(run: RunBash<'_>) -> BashEnd {
         let stream = Arc::clone(&stream);
         async move {
             let mut buffer = [0u8; 8192];
+            // A read can end inside a multi-byte character; the decoder holds its leading
+            // bytes for the next read (TS `TextDecoder`, `stream: true`).
+            let mut decoder = pa_core::StreamingUtf8::default();
             loop {
                 match reader.read(&mut buffer).await {
                     Ok(0) | Err(_) => break,
-                    Ok(read) => stream.lock().unwrap().push(&buffer[..read]),
+                    Ok(read) => {
+                        let text = decoder.decode_chunk(&buffer[..read]);
+                        stream.lock().unwrap().push(&text);
+                    }
                 }
             }
+            let rest = decoder.flush();
+            stream.lock().unwrap().push(&rest);
         }
     };
     let stdout_pump = stdout.map(|pipe| pump(Box::new(pipe)));
@@ -1027,6 +1035,40 @@ mod tests {
         assert_eq!(
             response.error.as_deref(),
             Some("execute_bash_and_wait requires a command")
+        );
+    }
+
+    /// Multi-byte characters that straddle a pipe read decode intact: a per-read decode replaced
+    /// both halves with U+FFFD in the stream, the spill and the row the model reads.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn characters_split_across_reads_decode_intact() {
+        let cwd = tempfile::tempdir().expect("tempdir");
+        let worker = created_worker(cwd.path()).await;
+        // 7-byte lines, so 8 KiB reads keep landing inside a 3-byte character.
+        let response = worker
+            .dispatch(
+                "execute_bash_and_wait",
+                &json!({
+                    "activeSessionId": "bash-session",
+                    "command": "yes '\u{20ac}\u{20ac}' | head -c 3000000",
+                }),
+            )
+            .await;
+        assert!(response.success, "failed: {response:?}");
+        let data = response.data.expect("data");
+        let output = data["output"].as_str().expect("output");
+        let spill_path = data["fullOutputPath"].as_str().expect("spill path");
+        let spill = std::fs::read_to_string(spill_path).expect("read the spill");
+        // Spills land in the shared temp dir; this test owns this one.
+        std::fs::remove_file(spill_path).expect("remove the spill");
+        assert_eq!(
+            (
+                output.matches('\u{fffd}').count(),
+                spill.matches('\u{fffd}').count()
+            ),
+            (0, 0),
+            "replacement characters in the output and the spill"
         );
     }
 
