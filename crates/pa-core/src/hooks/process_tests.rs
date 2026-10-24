@@ -99,7 +99,10 @@ async fn timeout_covers_blocked_stdin_and_descendant_pipes() {
 async fn deadline_bounds_descendants_holding_pipes() {
     let dir = tempfile::tempdir().unwrap();
     let pid_file = dir.path().join("pid");
-    let command = format!("sleep 60 & echo $! > {}; printf complete", pid_file.display());
+    let command = format!(
+        "sleep 60 & echo $! > {}; printf complete",
+        pid_file.display()
+    );
     let result = run(
         &command,
         dir.path(),

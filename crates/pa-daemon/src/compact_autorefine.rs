@@ -427,7 +427,6 @@ mod tests {
             &engine,
             &refine_command(),
             &[],
-            &|| false,
             &mut |event| {
                 events.push(event);
                 true
@@ -473,7 +472,6 @@ mod tests {
             &engine,
             &refine_command(),
             &[],
-            &|| false,
             &mut |event| {
                 events.push(event);
                 true

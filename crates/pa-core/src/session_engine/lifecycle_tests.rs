@@ -830,7 +830,10 @@ async fn aborted_tool_call_keeps_its_result_with_hook_callbacks_installed() {
         (true, "Tool execution aborted")
     );
     assert_eq!(
-        result.details.as_ref().and_then(|details| details.get("status")),
+        result
+            .details
+            .as_ref()
+            .and_then(|details| details.get("status")),
         Some(&json!("aborted"))
     );
 }

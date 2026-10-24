@@ -21,7 +21,6 @@ pub(crate) fn run_session_command(
     engine: &AgentSessionEngine,
     command: &SessionSlashCommand,
     images: &[pa_agent::types::ImageContent],
-    aborted: &dyn Fn() -> bool,
     emit: &mut dyn FnMut(EngineEvent) -> bool,
 ) -> Option<SessionCommandExecution> {
     let is_compact = command.name == "compact";
@@ -40,7 +39,7 @@ pub(crate) fn run_session_command(
             return None;
         }
     }
-    let execution = match engine.execute_session_command(command, images, aborted) {
+    let execution = match engine.execute_session_command(command, images) {
         Ok(execution) => execution,
         // Pre-execution failures (model resolution, session build) still record the
         // attempted command as a failure result row (the echo row above already went out).

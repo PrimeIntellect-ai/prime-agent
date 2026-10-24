@@ -118,7 +118,9 @@ impl LifecycleHooks {
             // lifecycle work remains available to the next admitted prompt.
             claim.event = 0;
             if let Some(reason) = outcome.stop.or(outcome.deny) {
-                return Err(self.reject("SessionStart hook stopped the request", reason).await);
+                return Err(self
+                    .reject("SessionStart hook stopped the request", reason)
+                    .await);
             }
             if let Some(message) = outcome.message {
                 tracing::warn!(%message, "session-start hook message");

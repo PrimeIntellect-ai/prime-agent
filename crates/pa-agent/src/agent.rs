@@ -643,11 +643,11 @@ impl AgentInner {
         let result = executor(run_signal, run_override).await;
         // A rejected input batch already closed its run and was reported by
         // the gate: it is not a run failure and records no failure row.
-        if let Some(error) = result
-            .as_ref()
-            .err()
-            .filter(|error| error.downcast_ref::<crate::agent_loop::InputRejected>().is_none())
-        {
+        if let Some(error) = result.as_ref().err().filter(|error| {
+            error
+                .downcast_ref::<crate::agent_loop::InputRejected>()
+                .is_none()
+        }) {
             let aborted = self
                 .current_signal()
                 .is_some_and(|signal| signal.is_aborted());

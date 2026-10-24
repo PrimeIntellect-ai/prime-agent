@@ -130,7 +130,9 @@ pub(super) fn parse(event: Event, output: CommandOutput) -> anyhow::Result<HookO
                 event.name()
             ));
         }
-        if specific.updated_input.is_some() && specific.permission_decision.as_deref() != Some("deny") {
+        if specific.updated_input.is_some()
+            && specific.permission_decision.as_deref() != Some("deny")
+        {
             ensure!(
                 event == Event::PreToolUse,
                 "updatedInput is unsupported for this event"
@@ -149,10 +151,15 @@ pub(super) fn parse(event: Event, output: CommandOutput) -> anyhow::Result<HookO
         match specific.permission_decision.as_deref() {
             Some("deny") if event == Event::PreToolUse => {
                 let reason = specific.permission_decision_reason.unwrap_or_default();
-                ensure!(!reason.trim().is_empty(), "permissionDecision:deny requires a nonempty permissionDecisionReason");
+                ensure!(
+                    !reason.trim().is_empty(),
+                    "permissionDecision:deny requires a nonempty permissionDecisionReason"
+                );
                 outcome.deny = Some(reason.trim().to_string());
             }
-            Some("allow") if event == Event::PreToolUse => bail!("permissionDecision:allow is unsupported without a permission prompt to bypass"),
+            Some("allow") if event == Event::PreToolUse => bail!(
+                "permissionDecision:allow is unsupported without a permission prompt to bypass"
+            ),
             None if specific.permission_decision_reason.is_none() => {}
             Some(_) | None => bail!("unsupported permission decision for this event"),
         }
@@ -346,7 +353,7 @@ mod tests {
         .is_err());
     }
 
-    /// Codex PreToolUse fields: context is ignored with a notice and never
+    /// Codex `PreToolUse` fields: context is ignored with a notice and never
     /// breaks a denial; any input rewrite blocks instead of failing open.
     #[test]
     fn codex_context_is_ignored_and_input_rewrites_block() {

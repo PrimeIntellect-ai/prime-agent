@@ -224,11 +224,6 @@ impl RpcSession {
         self.signal_shutdown.is_cancelled()
     }
 
-    /// Cancel external preflight work before a signal exit tears down the runtime.
-    pub(crate) async fn shutdown_cancelled(&self) {
-        self.signal_shutdown.cancelled().await;
-    }
-
     /// Whole-session replacement with the lease already held by the caller.
     ///
     /// # Errors
