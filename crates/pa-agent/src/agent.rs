@@ -12,7 +12,7 @@ use crate::abort::{AbortController, AbortSignal};
 use crate::agent_loop::{
     AfterToolCallFn, AgentEventSink, AgentLoopConfig, BeforeToolCallFn, ConvertToLlmFn,
     GetContinuationMessagesFn, PollMessagesFn, ShouldStopAfterTurnFn, ShouldStopBeforeTurnFn,
-    TransformContextFn,
+    ToolHookContextMode, TransformContextFn,
 };
 use crate::stream::StreamFn;
 use crate::types::{
@@ -95,6 +95,11 @@ pub struct AgentOptions {
     pub get_api_key: Option<crate::agent_loop::GetApiKeyFn>,
     pub before_tool_call: Option<BeforeToolCallFn>,
     pub after_tool_call: Option<AfterToolCallFn>,
+    pub tool_hook_context: ToolHookContextMode,
+    pub before_input: Option<crate::agent_loop::BeforeInputFn>,
+    pub before_model: Option<crate::agent_loop::BeforeModelFn>,
+    pub final_stop: Option<crate::agent_loop::FinalStopFn>,
+    pub final_stop_enabled: Option<ShouldStopBeforeTurnFn>,
     pub should_stop_after_turn: Option<ShouldStopAfterTurnFn>,
     pub should_stop_before_turn: Option<ShouldStopBeforeTurnFn>,
     pub get_continuation_messages: Option<GetContinuationMessagesFn>,
@@ -333,6 +338,12 @@ struct AgentInner {
     get_api_key: Option<crate::agent_loop::GetApiKeyFn>,
     before_tool_call: Option<BeforeToolCallFn>,
     after_tool_call: Option<AfterToolCallFn>,
+    tool_hook_context: ToolHookContextMode,
+    before_input: Option<crate::agent_loop::BeforeInputFn>,
+    before_model: Option<crate::agent_loop::BeforeModelFn>,
+    final_stop: Option<crate::agent_loop::FinalStopFn>,
+    final_stop_enabled: Option<ShouldStopBeforeTurnFn>,
+    stop_hook_eligibility: Mutex<Option<crate::agent_loop::StopHookEligibilityFn>>,
     should_stop_after_turn: Option<ShouldStopAfterTurnFn>,
     should_stop_before_turn: Option<ShouldStopBeforeTurnFn>,
     /// The natural-turn-end continuation hook: settable after construction so the session engine
@@ -576,6 +587,19 @@ impl AgentInner {
         config.tool_progress = self.tool_progress;
         config.before_tool_call.clone_from(&self.before_tool_call);
         config.after_tool_call.clone_from(&self.after_tool_call);
+        config.tool_hook_context = self.tool_hook_context;
+        config.before_input.clone_from(&self.before_input);
+        config.before_model.clone_from(&self.before_model);
+        config.final_stop.clone_from(&self.final_stop);
+        config
+            .final_stop_enabled
+            .clone_from(&self.final_stop_enabled);
+        config.stop_hook_eligibility.clone_from(
+            &self
+                .stop_hook_eligibility
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+        );
         config
     }
 
@@ -794,6 +818,12 @@ impl Agent {
             get_api_key: options.get_api_key,
             before_tool_call: options.before_tool_call,
             after_tool_call: options.after_tool_call,
+            tool_hook_context: options.tool_hook_context,
+            before_input: options.before_input,
+            before_model: options.before_model,
+            final_stop: options.final_stop,
+            final_stop_enabled: options.final_stop_enabled,
+            stop_hook_eligibility: Mutex::new(None),
             should_stop_after_turn: options.should_stop_after_turn,
             should_stop_before_turn: options.should_stop_before_turn,
             get_continuation_messages: Mutex::new(options.get_continuation_messages),
@@ -954,6 +984,19 @@ impl Agent {
     /// Panics if the `get_continuation_messages` mutex is poisoned.
     pub fn set_continuation_hook(&self, hook: Option<GetContinuationMessagesFn>) {
         *self.inner.get_continuation_messages.lock().unwrap() = hook;
+    }
+
+    /// Set the host's natural-stop eligibility probe. Deferred input, compaction,
+    /// goals and background work must suppress external stop continuations.
+    pub fn set_stop_hook_eligibility(
+        &self,
+        probe: Option<crate::agent_loop::StopHookEligibilityFn>,
+    ) {
+        *self
+            .inner
+            .stop_hook_eligibility
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = probe;
     }
 
     /// Install or replace the `MessageEnd` landing transform: the owner that

@@ -457,6 +457,11 @@ impl PrintGoalSurface {
             .await
     }
 
+    /// Read-only queue ownership probe for continuation and final Stop checks.
+    pub(crate) async fn has_queued_input(&self) -> bool {
+        self.queued.lock().await.is_some()
+    }
+
     /// The goal arm of the natural-turn-end consult: queued input (the
     /// armed steer) and a compaction due gate the mint; an owning goal
     /// defers behind unsettled descendant work, an ownerless boundary
@@ -471,7 +476,7 @@ impl PrintGoalSurface {
     ) -> NaturalContinuation {
         // Queued session input owns the boundary before any goal work — the armed budget steer ends
         // the run so the queue drains it.
-        if self.queued.lock().await.is_some() {
+        if self.has_queued_input().await {
             return NaturalContinuation::QueuedInput;
         }
         if engine.turn_boundary.compaction_scheduled().await {

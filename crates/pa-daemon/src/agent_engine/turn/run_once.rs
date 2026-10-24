@@ -226,17 +226,26 @@ impl AgentSessionEngine {
                                             }
                                         }
                                     }
-                                    // An in-run continuation's user row: the
-                                    // `boundary_passed` gate separates it from
-                                    // the admitted prompt's row, which the loop
-                                    // already emitted.
+                                    // Every admitted user row, including the initial
+                                    // batch and later queued/continuation rows. The
+                                    // core emits these only after admission succeeds.
                                     pa_agent::types::AgentMessage::Standard(
                                         pa_agent::types::Message::User(_),
-                                    ) if boundary_passed
-                                        .load(std::sync::atomic::Ordering::SeqCst) =>
-                                    {
+                                    ) => {
                                         if let Some(value) = session_wire_value(agent_message) {
                                             let _ = tx.send(EngineEvent::UserMessage(value));
+                                        }
+                                    }
+                                    // Hook diagnostics are the core's display-only rows:
+                                    // the worker persists and frames them like any other
+                                    // durable custom row. Other custom rows keep their
+                                    // host-owned representation.
+                                    pa_agent::types::AgentMessage::Custom(custom)
+                                        if custom.payload.get("customType").and_then(Value::as_str)
+                                            == Some(pa_core::session_engine::messages::HOOK_NOTICE_CUSTOM_TYPE) =>
+                                    {
+                                        if let Some(value) = session_wire_value(agent_message) {
+                                            let _ = tx.send(EngineEvent::CustomMessage(value));
                                         }
                                     }
                                     _ => {}

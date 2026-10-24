@@ -657,12 +657,17 @@ impl TurnRunner {
                 }
                 // The `committing`/`running` transitions ride the events that mark the moments.
                 let mut action_frame: Option<SessionActionSnapshot> = None;
+                // A hook diagnostic can land while admission is still pending;
+                // it commits nothing.
                 if !emitting_prefix_rows.get()
                     && !active_committed
-                    && matches!(
-                        event,
-                        EngineEvent::UserMessage(_) | EngineEvent::CustomMessage(_)
-                    )
+                    && (matches!(event, EngineEvent::UserMessage(_))
+                        || matches!(
+                            &event,
+                            EngineEvent::CustomMessage(message)
+                                if message.get("customType").and_then(Value::as_str)
+                                    != Some(pa_core::session_engine::messages::HOOK_NOTICE_CUSTOM_TYPE)
+                        ))
                 {
                     active_committed = true;
                     if let Some(active) = core.active_action.as_mut() {

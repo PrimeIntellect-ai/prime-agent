@@ -3,11 +3,11 @@
 //! turn state machine, and the export/telemetry reads.
 
 use super::{
-    artifact_reference, json, map_thinking_level, now_millis, AgentSessionEngine, Arc,
-    BranchSummaryOutcome, BranchSummaryRequest, BranchSummaryRun, CompactionOutcome,
-    CompactionRequest, CompactionRun, EngineEvent, EngineModelSelection, ParentIdentity,
-    PromptContextBoundary, PromptRequest, ProviderTarget, SessionEngine, SideQuestionOutcome,
-    SideQuestionRequest, StartupScope, TurnPrompt, Value, DEFAULT_RLM_MAX_DEPTH,
+    artifact_reference, json, map_thinking_level, AgentSessionEngine, Arc, BranchSummaryOutcome,
+    BranchSummaryRequest, BranchSummaryRun, CompactionOutcome, CompactionRequest, CompactionRun,
+    EngineEvent, EngineModelSelection, ParentIdentity, PromptContextBoundary, PromptRequest,
+    ProviderTarget, SessionEngine, SideQuestionOutcome, SideQuestionRequest, StartupScope,
+    TurnPrompt, Value, DEFAULT_RLM_MAX_DEPTH,
 };
 
 impl SessionEngine for AgentSessionEngine {
@@ -187,6 +187,22 @@ impl SessionEngine for AgentSessionEngine {
         Box::pin(async move {
             let state = autonomous.lock().await;
             Some(pa_core::autonomous::autonomous_status(&state))
+        })
+    }
+
+    fn end_session_hooks(
+        &self,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + '_>> {
+        Box::pin(async move {
+            let hook = {
+                let session = self.session.lock().await;
+                session
+                    .as_deref()
+                    .and_then(pa_core::session_engine::engine::SessionEngine::session_end_hook)
+            };
+            if let Some(hook) = hook {
+                hook().await;
+            }
         })
     }
 
@@ -1342,6 +1358,7 @@ impl SessionEngine for AgentSessionEngine {
                 self,
                 &command,
                 &request.images,
+                aborted,
                 &mut emit,
             ) else {
                 return;
@@ -1388,53 +1405,16 @@ impl SessionEngine for AgentSessionEngine {
             }
             None => None,
         };
-        // The accepted turn row: an injected custom row replaces the user
-        // message; the plain turn records the accepted row, images after.
-        let accepted = if let Some(custom) = &request.custom_message {
-            EngineEvent::CustomMessage(custom.clone())
-        } else {
-            let mut content = vec![json!({ "type": "text", "text": request.message })];
-            for image in &request.images {
-                let mut block = match serde_json::to_value(image) {
-                    Ok(Value::Object(block)) => Value::Object(block),
-                    _ => continue,
-                };
-                if let Some(object) = block.as_object_mut() {
-                    object.insert("type".to_string(), json!("image"));
-                }
-                content.push(block);
-            }
-            EngineEvent::UserMessage(json!({
-                "role": "user",
-                "content": content,
-                "timestamp": now_millis(),
-            }))
-        };
-        if !emit(accepted) {
+        // Injected custom rows retain their existing host-owned representation.
+        // User rows are emitted from the core's accepted MessageEnd events:
+        // persisting them here precedes hook admission and makes a fresh lazy
+        // engine mistake this submission for restored conversation history.
+        if request
+            .custom_message
+            .as_ref()
+            .is_some_and(|custom| !emit(EngineEvent::CustomMessage(custom.clone())))
+        {
             return;
-        }
-        // The batched co-delivery rows: one accepted user row per batched
-        // message, in delivery order, already expanded above.
-        for row in &request.batch {
-            let text = row.text.clone();
-            let mut content = vec![json!({ "type": "text", "text": text })];
-            for image in &row.images {
-                let mut block = match serde_json::to_value(image) {
-                    Ok(Value::Object(block)) => Value::Object(block),
-                    _ => continue,
-                };
-                if let Some(object) = block.as_object_mut() {
-                    object.insert("type".to_string(), json!("image"));
-                }
-                content.push(block);
-            }
-            if !emit(EngineEvent::UserMessage(json!({
-                "role": "user",
-                "content": content,
-                "timestamp": now_millis(),
-            }))) {
-                return;
-            }
         }
         let turn_prompt = match injected {
             Some(custom) => TurnPrompt::Injected(custom),
@@ -1462,6 +1442,7 @@ impl SessionEngine for AgentSessionEngine {
     }
 
     fn abort_in_flight_turn(&self) {
+        self.manual_compaction_cancel.abort();
         // The active run aborts and the in-flight fetch cancels; none in flight: nothing.
         let agent = self.turn_agent.lock().expect("turn agent lock").clone();
         if let Some(agent) = agent {

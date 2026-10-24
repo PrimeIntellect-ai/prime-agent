@@ -1,0 +1,1 @@
+Added opt-in, explicitly trusted command hooks for seven lifecycle events, with bounded execution, user-visible diagnostics (untrusted sources with their fingerprint, disabled hooks, failed or timed-out commands) in the TUI and on headless stderr, and documented compatibility and security limitations.

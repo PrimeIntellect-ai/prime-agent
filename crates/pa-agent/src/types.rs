@@ -624,6 +624,8 @@ pub struct AfterToolCallResult {
 #[derive(Clone)]
 pub struct BeforeToolCallContext {
     pub assistant_message: AssistantMessage,
+    /// Canonical name of the resolved executor; `tool_call` retains the model spelling.
+    pub resolved_tool_name: String,
     pub tool_call: ToolCall,
     pub args: serde_json::Value,
     pub context: AgentContext,
@@ -632,6 +634,8 @@ pub struct BeforeToolCallContext {
 #[derive(Clone)]
 pub struct AfterToolCallContext {
     pub assistant_message: AssistantMessage,
+    /// Canonical name of the resolved executor; `tool_call` retains the model spelling.
+    pub resolved_tool_name: String,
     pub tool_call: ToolCall,
     pub args: serde_json::Value,
     pub result: AgentToolResult,

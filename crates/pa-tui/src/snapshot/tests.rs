@@ -1193,6 +1193,24 @@ fn model_prompt_error_row_is_a_warning_status_line() {
 }
 
 #[test]
+fn hook_notice_row_is_a_warning_status_line() {
+    let text = "Hooks skipped: /repo/.prime/hooks.json is not trusted for /repo.";
+    let message = json!({
+        "role": "custom",
+        "customType": "hook_notice",
+        "content": text,
+        "display": true,
+    });
+    assert_eq!(
+        transcript_to_entries(&[message]),
+        [ChatEntry::Status {
+            text: text.to_string(),
+            kind: StatusKind::Warning,
+        }]
+    );
+}
+
+#[test]
 fn a_lone_failed_attempt_without_an_outcome_row_stays() {
     let user = json!({"role": "user", "content": "hi"});
     let failed = json!({

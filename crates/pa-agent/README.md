@@ -13,3 +13,22 @@ No tool implementations (pa-core), no providers (pa-ai), no session persistence,
 
 ## Depends on
 No workspace dependencies.
+
+Tool callback callers can select `ToolHookContextMode` on `AgentOptions` or
+`AgentLoopConfig`. The default `Full` preserves the callback context contract;
+`Omit` supplies an empty context without cloning session history. Prime Agent's
+external command hooks use `Omit` because their protocol needs only invocation
+metadata. This is an additive public configuration API, with no dependency changes.
+Before/after tool callback metadata includes the resolved executor name separately
+from the original model call, so policy adapters can match executable aliases
+without rewriting call history.
+
+`BeforeInputFn` gates submitted batches before their message events or context
+append; `BeforeModelFn` supports deferred initialization. Both receive the active
+run's cancellation signal and execute outside agent state locks. Submitted batch
+metadata includes custom rows so an embedding can restore deferred bookkeeping
+when admission is refused. Internal continuation rows retain separate provenance.
+`FinalStopFn` runs after the normal continuation policy and allows one feedback
+continuation per run. The host's async `StopHookEligibilityFn` is rechecked after
+external work; `final_stop_enabled` avoids ownership queries when unused. These
+are additive provider-independent callback APIs, not process execution facilities.

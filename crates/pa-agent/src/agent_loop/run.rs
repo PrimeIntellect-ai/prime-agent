@@ -27,6 +27,8 @@ pub(crate) async fn run_loop(
     stream_fn: Option<&StreamFn>,
 ) -> anyhow::Result<()> {
     let mut first_turn = true;
+    let mut stop_hook_active = false;
+    let mut input_origin = InputOrigin::Submission;
     let mut last_turn: Option<ShouldStopAfterTurnContext> = None;
     let mut pending_messages =
         poll_messages_unless_aborted(config.get_steering_messages.as_ref(), signal).await?;
@@ -55,6 +57,9 @@ pub(crate) async fn run_loop(
             }
 
             if !pending_messages.is_empty() {
+                if input_origin == InputOrigin::Submission {
+                    before_input_batch(&pending_messages, config, signal).await?;
+                }
                 for message in pending_messages.drain(..) {
                     emit(AgentEvent::MessageStart {
                         message: message.clone(),
@@ -67,6 +72,14 @@ pub(crate) async fn run_loop(
                     current_context.messages.push(message.clone());
                     new_messages.push(message);
                 }
+            }
+
+            if let Some(before_model) = &config.before_model {
+                race_with_abort(
+                    before_model(config.model.clone(), signal.cloned().unwrap_or_default()),
+                    signal,
+                )
+                .await?;
             }
 
             let message =
@@ -175,6 +188,7 @@ pub(crate) async fn run_loop(
                 }
                 PostTurnResult::Completed(messages) => {
                     pending_messages = messages;
+                    input_origin = InputOrigin::Submission;
                     // Steering drained by this poll owns the turn boundary;
                     // stop only when it was empty.
                     if pending_messages.is_empty() && should_stop_before_turn!() {
@@ -208,6 +222,7 @@ pub(crate) async fn run_loop(
         };
         if !follow_up_messages.is_empty() {
             pending_messages = follow_up_messages;
+            input_origin = InputOrigin::Submission;
             continue;
         }
 
@@ -237,7 +252,60 @@ pub(crate) async fn run_loop(
         };
         if !continuation_messages.is_empty() {
             pending_messages = continuation_messages;
+            input_origin = InputOrigin::InternalContinuation;
             continue;
+        }
+
+        if config.final_stop.is_some()
+            && config
+                .final_stop_enabled
+                .as_ref()
+                .is_none_or(|enabled| enabled())
+            && stop_hook_eligible(config, signal).await?
+        {
+            if let (Some(final_stop), Some(context)) = (&config.final_stop, &last_turn) {
+                let continuation = race_with_abort(
+                    final_stop(
+                        context.message.clone(),
+                        stop_hook_active,
+                        signal.cloned().unwrap_or_default(),
+                    ),
+                    signal,
+                )
+                .await?;
+                crate::abort::throw_if_aborted_signal(signal)?;
+                // Commands may take time. Input that arrived meanwhile still
+                // owns the boundary before a hook-created continuation.
+                if should_stop_before_turn!() {
+                    break;
+                }
+                let mut arrived =
+                    poll_messages_unless_aborted(config.get_steering_messages.as_ref(), signal)
+                        .await?;
+                if arrived.is_empty() {
+                    arrived = poll_messages_unless_aborted(
+                        config.get_follow_up_messages.as_ref(),
+                        signal,
+                    )
+                    .await?;
+                }
+                if !arrived.is_empty() {
+                    pending_messages = arrived;
+                    input_origin = InputOrigin::Submission;
+                    continue;
+                }
+                if !stop_hook_eligible(config, signal).await? {
+                    break;
+                }
+                if !continuation.is_empty() && !stop_hook_active {
+                    stop_hook_active = true;
+                    pending_messages = continuation;
+                    // Hook feedback is a new user submission; autonomous and goal
+                    // continuations above retain their internal provenance.
+                    input_origin = InputOrigin::Submission;
+                    continue;
+                }
+            }
         }
 
         break;
@@ -247,6 +315,41 @@ pub(crate) async fn run_loop(
         messages: new_messages.clone(),
     })
     .await?;
+    Ok(())
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum InputOrigin {
+    Submission,
+    InternalContinuation,
+}
+
+async fn stop_hook_eligible(
+    config: &AgentLoopConfig,
+    signal: Option<&AbortSignal>,
+) -> anyhow::Result<bool> {
+    match &config.stop_hook_eligibility {
+        Some(eligible) => race_with_abort(async { Ok(eligible().await) }, signal).await,
+        None => Ok(true),
+    }
+}
+
+pub(crate) async fn before_input_batch(
+    messages: &[AgentMessage],
+    config: &AgentLoopConfig,
+    signal: Option<&AbortSignal>,
+) -> anyhow::Result<()> {
+    if let Some(before_input) = &config.before_input {
+        race_with_abort(
+            before_input(
+                messages.to_vec(),
+                config.model.clone(),
+                signal.cloned().unwrap_or_default(),
+            ),
+            signal,
+        )
+        .await?;
+    }
     Ok(())
 }
 

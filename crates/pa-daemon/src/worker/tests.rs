@@ -111,6 +111,7 @@ mod goal_tests;
 mod kill_broadcast_tests;
 mod navigation_pause_tests;
 mod queue_tests;
+mod session_end_hook_tests;
 mod sidecar_exit_tests;
 mod summary_tests;
 mod warning_marker_tests;

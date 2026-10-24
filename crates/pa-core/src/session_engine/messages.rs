@@ -30,6 +30,10 @@ pub const PROVIDER_RETRY_OUTCOME_CUSTOM_TYPE: &str = "provider_retry_outcome";
 /// connect/disconnect leaves in the transcript (produced by the TS-era
 /// daemon; the row is bookkeeping, never model context).
 pub const MCP_CONNECTION_OUTCOME_CUSTOM_TYPE: &str = "mcp_connection_outcome";
+/// A command-hook diagnostic (untrusted or skipped source, disabled hooks, a
+/// failed or timed-out command, a hook `systemMessage`): shown to the user,
+/// never model context.
+pub const HOOK_NOTICE_CUSTOM_TYPE: &str = "hook_notice";
 pub const HEARTBEAT_PROMPT_CUSTOM_TYPE: &str = "heartbeat_prompt";
 /// The durable row a detached kernel bash completion admits as the
 /// woken turn's injected prompt.
@@ -141,6 +145,19 @@ pub fn create_provider_retry_outcome_message(
             "attempts": attempts,
             "finalError": error,
         })),
+        timestamp: now_millis(),
+        rest: serde_json::Map::default(),
+    }
+}
+
+/// The durable display row of one command-hook diagnostic.
+#[must_use]
+pub fn create_hook_notice_message(text: &str) -> pa_types::session::CustomMessage {
+    pa_types::session::CustomMessage {
+        custom_type: HOOK_NOTICE_CUSTOM_TYPE.to_string(),
+        content: UserContent::Text(text.to_string()),
+        display: true,
+        details: None,
         timestamp: now_millis(),
         rest: serde_json::Map::default(),
     }
@@ -362,6 +379,7 @@ pub fn convert_to_llm(messages: &[AgentMessage]) -> Vec<AgentMessage> {
                         | SESSION_SLASH_COMMAND_RESULT_CUSTOM_TYPE
                         | COMPACTION_OUTCOME_CUSTOM_TYPE
                         | MCP_CONNECTION_OUTCOME_CUSTOM_TYPE
+                        | HOOK_NOTICE_CUSTOM_TYPE
                         | REFINEMENT_OUTCOME_CUSTOM_TYPE
                         | PROVIDER_RETRY_OUTCOME_CUSTOM_TYPE
                         | crate::prompts::model_prompts::MODEL_PROMPT_ERROR_CUSTOM_TYPE
@@ -505,6 +523,12 @@ mod tests {
             converted.is_empty(),
             "outcome row must not convert to LLM context"
         );
+    }
+
+    #[test]
+    fn hook_notice_row_is_never_context() {
+        let message = create_hook_notice_message("Hooks skipped: /x/hooks.json is not trusted");
+        assert!(convert_to_llm(&[AgentMessage::Custom(message)]).is_empty());
     }
 
     #[test]

@@ -8,7 +8,7 @@ use serde_json::Value;
 use crate::agent_engine::AgentSessionEngine;
 use crate::engine::EngineEvent;
 use pa_agent::abort::AbortController;
-use pa_core::session_engine::compact_session::CompactOutcome;
+use pa_core::session_engine::compact_session::{CompactOutcome, CompactionTrigger};
 use pa_core::session_engine::messages::CompactionOutcomeKind;
 use pa_core::session_engine::messages::CompactionOutcomeReason;
 use pa_core::session_engine::provider_adapter::json_round_trip;
@@ -284,11 +284,12 @@ impl AgentSessionEngine {
             let compact = async {
                 engine
                     .session
-                    .compact(
+                    .compact_with_trigger(
                         custom_instructions.as_deref(),
                         &model,
                         api_key,
                         Some(&signal),
+                        CompactionTrigger::Auto,
                     )
                     .await
             };

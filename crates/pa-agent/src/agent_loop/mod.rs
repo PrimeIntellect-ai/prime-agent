@@ -38,6 +38,30 @@ pub type TransformContextFn = Arc<
 /// Resolves the system prompt immediately before each LLM call.
 pub type GetSystemPromptFn = Arc<dyn Fn() -> String + Send + Sync>;
 
+/// Gates an external input batch before any of its rows enter context or persistence.
+pub type BeforeInputFn = Arc<
+    dyn Fn(Vec<AgentMessage>, Model, AbortSignal) -> crate::BoxFut<'static, anyhow::Result<()>>
+        + Send
+        + Sync,
+>;
+/// Deferred session initialization at a cancellable model boundary.
+pub type BeforeModelFn =
+    Arc<dyn Fn(Model, AbortSignal) -> crate::BoxFut<'static, anyhow::Result<()>> + Send + Sync>;
+/// Consulted only on a natural final stop, after the host continuation policy.
+/// The boolean says a stop-hook continuation has already run in this root run.
+pub type FinalStopFn = Arc<
+    dyn Fn(
+            crate::types::AssistantMessage,
+            bool,
+            AbortSignal,
+        ) -> crate::BoxFut<'static, anyhow::Result<Vec<AgentMessage>>>
+        + Send
+        + Sync,
+>;
+
+/// Read-only host ownership check, refreshed after potentially long stop work.
+pub type StopHookEligibilityFn = Arc<dyn Fn() -> crate::BoxFut<'static, bool> + Send + Sync>;
+
 /// Resolves an API key dynamically for each LLM call.
 pub type GetApiKeyFn =
     Arc<dyn Fn(String) -> crate::BoxFut<'static, anyhow::Result<Option<String>>> + Send + Sync>;
@@ -88,6 +112,29 @@ pub type AfterToolCallFn = Arc<
         + Sync,
 >;
 
+/// Select the history snapshot supplied to tool callbacks. Metadata-only hooks
+/// can omit it to avoid copying the conversation at every tool boundary.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ToolHookContextMode {
+    /// Preserve the full context contract for existing callback consumers.
+    #[default]
+    Full,
+    /// Supply an empty context; tool, arguments and result remain available.
+    Omit,
+}
+
+impl ToolHookContextMode {
+    pub(crate) fn snapshot(
+        self,
+        context: &crate::types::AgentContext,
+    ) -> crate::types::AgentContext {
+        match self {
+            Self::Full => run::clone_context(context),
+            Self::Omit => crate::types::AgentContext::default(),
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct AgentLoopConfig {
     pub model: Model,
@@ -114,6 +161,13 @@ pub struct AgentLoopConfig {
     pub tool_progress: crate::types::ToolProgressCadence,
     pub before_tool_call: Option<BeforeToolCallFn>,
     pub after_tool_call: Option<AfterToolCallFn>,
+    pub tool_hook_context: ToolHookContextMode,
+    pub before_input: Option<BeforeInputFn>,
+    pub before_model: Option<BeforeModelFn>,
+    pub final_stop: Option<FinalStopFn>,
+    /// Cheap feature gate before querying host ownership or cloning a response.
+    pub final_stop_enabled: Option<ShouldStopBeforeTurnFn>,
+    pub stop_hook_eligibility: Option<StopHookEligibilityFn>,
 }
 
 impl AgentLoopConfig {
@@ -141,6 +195,12 @@ impl AgentLoopConfig {
             tool_progress: crate::types::ToolProgressCadence::default(),
             before_tool_call: None,
             after_tool_call: None,
+            tool_hook_context: ToolHookContextMode::default(),
+            before_input: None,
+            before_model: None,
+            final_stop: None,
+            final_stop_enabled: None,
+            stop_hook_eligibility: None,
         }
     }
 

@@ -111,3 +111,30 @@ revocation/errors; bytes already sent cannot be recalled. Recovery belongs to al
 live hosts sharing the agent directory and cancels when the last host disappears.
 Catch-up uses at most three delivery cycles per pending entry, honors Retry-After,
 and releases upload capacity during retry waits; exhaustion retains durable intent.
+
+### Command hooks
+
+The private `hooks` module owns strict command configuration, cwd-bound source
+trust, bounded process execution, and observer lifetime. The session engine's
+private adapter supplies tool metadata through `pa-agent`'s existing tool-call
+callbacks. It never changes tool arguments, approvals, or raw tool results.
+See [the compatibility contract](../../docs/hooks.md). Hook protocol v1 is
+identified by `PRIME_AGENT_HOOK_PROTOCOL_VERSION=1`; stdin keeps upstream fields.
+First execution records the existing primitive-only feature outcome counter
+`feature_hooks_initiated_count`, through the session telemetry background client.
+No config discovery, command, or telemetry delivery is awaited on session creation.
+Hook diagnostics (skipped or untrusted sources, disabled hooks, command failures,
+timeouts, `systemMessage`) become display-only rows of the public
+`session_engine::messages::HOOK_NOTICE_CUSTOM_TYPE` (built by
+`create_hook_notice_message`), delivered through the agent's event path during a
+run and as a next-turn row otherwise; `convert_to_llm` drops them.
+
+The private lifecycle adapter supplies SessionStart, UserPromptSubmit, Stop and
+PreCompact decisions at cancellable runtime boundaries. Deferred custom rows are
+restored when admission is refused; raw accepted rows remain unchanged. The public
+`engine::SessionEndHook` is a cloneable close handle: hosts snapshot it under their
+selection lock and await it after releasing that lock. `CompactionTrigger`,
+`compact_with_trigger`, `CompactionHookPermit`, `preflight_compaction_hook` and
+`compact_with_permit` let hosts run commands before taking their operation locks,
+then consume a session-bound permit inside the existing serialized compaction
+path. These public APIs introduce no dependency edges or new dependencies.

@@ -16,7 +16,7 @@ use crate::slash_command_args::{
     GoalCommand,
 };
 
-use super::compact_session::CompactOutcome;
+use super::compact_session::{CompactOutcome, CompactionHookPermit};
 use super::engine::SessionEngine;
 use super::goal_driver::GoalDriver;
 use super::messages::{
@@ -169,6 +169,19 @@ pub async fn execute_session_command(
     command: &SessionSlashCommand,
     images: &[pa_agent::types::ImageContent],
 ) -> SessionCommandExecution {
+    execute_session_command_with_compaction_permit(engine, params, command, images, None).await
+}
+
+/// Execute a command with an optional preflight permit obtained before transport
+/// locks. The permit is consumed only by `/compact`; no external compaction hook
+/// runs while executing that permit.
+pub async fn execute_session_command_with_compaction_permit(
+    engine: &SessionEngine,
+    params: &mut SessionCommandParams<'_>,
+    command: &SessionSlashCommand,
+    images: &[pa_agent::types::ImageContent],
+    permit: Option<CompactionHookPermit>,
+) -> SessionCommandExecution {
     let mut execution = SessionCommandExecution::default();
     // The echo row is recorded BEFORE the command runs, so the command's
     // own work sees it in the session branch.
@@ -179,7 +192,7 @@ pub async fn execute_session_command(
         return execution;
     }
     let result = match command.name {
-        "compact" => execute_compact(engine, params, command, &mut execution).await,
+        "compact" => execute_compact(engine, params, command, &mut execution, permit).await,
         "refine" => execute_refine(engine, params, command, &mut execution).await,
         "goal" => execute_goal(engine, command, images, &mut execution).await,
         "autonomous" => execute_autonomous(params, command, &mut execution),
@@ -228,13 +241,30 @@ async fn execute_compact(
     params: &SessionCommandParams<'_>,
     command: &SessionSlashCommand,
     execution: &mut SessionCommandExecution,
+    permit: Option<CompactionHookPermit>,
 ) -> Result<(), String> {
     let instructions = (!command.args.is_empty()).then_some(command.args.as_str());
-    let outcome = engine
-        .session
-        .compact(instructions, params.model, params.api_key.clone(), None)
-        .await
-        .map_err(|error| format!("{error:#}"))?;
+    let outcome = match permit {
+        Some(permit) => {
+            engine
+                .session
+                .compact_with_permit(
+                    instructions,
+                    params.model,
+                    params.api_key.clone(),
+                    None,
+                    permit,
+                )
+                .await
+        }
+        None => {
+            engine
+                .session
+                .compact(instructions, params.model, params.api_key.clone(), None)
+                .await
+        }
+    }
+    .map_err(|error| format!("{error:#}"))?;
     match outcome {
         CompactOutcome::Skipped(message) => {
             execution.compaction_skipped = Some(message);

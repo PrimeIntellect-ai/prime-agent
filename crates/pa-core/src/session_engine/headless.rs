@@ -4,7 +4,7 @@
 
 use pa_types::session::{AgentMessage, FileEntry};
 
-use super::messages::SESSION_SLASH_COMMAND_RESULT_CUSTOM_TYPE;
+use super::messages::{HOOK_NOTICE_CUSTOM_TYPE, SESSION_SLASH_COMMAND_RESULT_CUSTOM_TYPE};
 
 pub const COMPACTION_OUTCOME_CUSTOM_TYPE: &str = "compaction_outcome";
 pub const HARNESS_DIGEST_CUSTOM_TYPE: &str = "harness_digest";
@@ -125,10 +125,12 @@ pub fn select_headless_terminal_result(messages: &[AgentMessage]) -> HeadlessTer
                     index -= 1;
                 }
                 // A corrupt outcome is still part of the suffix; skip it
-                // without letting it hide earlier valid outcomes.
+                // without letting it hide earlier valid outcomes. A hook
+                // notice (e.g. a failed Stop hook) streams on its own.
                 REFINEMENT_OUTCOME_CUSTOM_TYPE
                 | REFINEMENT_NOTICE_CUSTOM_TYPE
-                | HARNESS_DIGEST_CUSTOM_TYPE => {
+                | HARNESS_DIGEST_CUSTOM_TYPE
+                | HOOK_NOTICE_CUSTOM_TYPE => {
                     index -= 1;
                 }
                 _ => break,
@@ -282,6 +284,7 @@ mod tests {
             ),
             custom(REFINEMENT_NOTICE_CUSTOM_TYPE, "[self-refinement]", None),
             custom(HARNESS_DIGEST_CUSTOM_TYPE, "digest", None),
+            custom(HOOK_NOTICE_CUSTOM_TYPE, "Stop hook failed", None),
             custom(
                 COMPACTION_OUTCOME_CUSTOM_TYPE,
                 "compacted again",

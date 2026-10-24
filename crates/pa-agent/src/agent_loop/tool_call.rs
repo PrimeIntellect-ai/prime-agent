@@ -12,7 +12,6 @@ use crate::types::{
 };
 
 use super::abort::race_with_abort;
-use super::run::clone_context;
 use super::tools::{find_tool, FinalizedToolCallOutcome, Preparation, PreparedToolCall};
 use super::{AgentEventSink, AgentLoopConfig};
 
@@ -77,10 +76,11 @@ async fn prepare_tool_call_inner(
         let before_result = race_with_abort(
             before_tool_call(
                 BeforeToolCallContext {
+                    resolved_tool_name: tool.name().to_string(),
                     assistant_message: assistant_message.clone(),
                     tool_call: tool_call.clone(),
                     args: validated_args.clone(),
-                    context: clone_context(current_context),
+                    context: config.tool_hook_context.snapshot(current_context),
                 },
                 signal.cloned().unwrap_or_default(),
             ),
@@ -337,12 +337,13 @@ pub(crate) async fn finalize_executed_tool_call(
         let after_result = race_with_abort(
             after_tool_call(
                 AfterToolCallContext {
+                    resolved_tool_name: prepared.tool.name().to_string(),
                     assistant_message: assistant_message.clone(),
                     tool_call: prepared.tool_call.clone(),
                     args: prepared.args.clone(),
                     result: result.clone(),
                     is_error,
-                    context: clone_context(current_context),
+                    context: config.tool_hook_context.snapshot(current_context),
                 },
                 signal.cloned().unwrap_or_default(),
             ),

@@ -2,6 +2,8 @@
 //! requested/threshold compaction arms of the print runtime's turn
 //! boundary.
 
+use pa_core::session_engine::compact_session::CompactionTrigger;
+
 use super::{
     compaction_end_success_event, compaction_start_event, is_context_overflow_failure,
     json_round_trip, CompactOutcome, CompactionOutcomeKind, CompactionOutcomeReason, Model,
@@ -125,7 +127,11 @@ impl TurnBoundary {
                         CompactionOutcomeReason::Threshold.wire(),
                         None,
                     ));
-                    match engine.session.compact(None, model, api_key, None).await {
+                    match engine
+                        .session
+                        .compact_with_trigger(None, model, api_key, None, CompactionTrigger::Auto)
+                        .await
+                    {
                         Ok(CompactOutcome::Ran(run)) => {
                             if let Some(telemetry) = engine.telemetry.as_ref() {
                                 telemetry.note_compaction(Some(run.duration_ms));
@@ -249,7 +255,13 @@ impl TurnBoundary {
         // the run.
         let outcome = engine
             .session
-            .compact(custom_instructions.as_deref(), model, api_key, None)
+            .compact_with_trigger(
+                custom_instructions.as_deref(),
+                model,
+                api_key,
+                None,
+                CompactionTrigger::Auto,
+            )
             .await;
         match outcome {
             Ok(CompactOutcome::Ran(run)) => {

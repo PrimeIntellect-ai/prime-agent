@@ -38,6 +38,7 @@ pub mod branch_navigation;
 pub(crate) mod child_status_notices;
 mod compact_autorefine;
 pub mod compaction;
+mod compaction_cancel;
 mod compaction_outcome;
 pub(crate) mod compaction_supervision;
 pub(crate) mod context_tree_cache;
