@@ -12,10 +12,11 @@ use std::time::{Duration, Instant};
 use serde_json::Value;
 
 /// The custom kinds ONLY the daemon's notice producer creates (pa-core
-/// `rlm_notices`): the terminal-notice and failure rows.
-pub(crate) const RESERVED_CUSTOM_KINDS: [&str; 2] = [
+/// `rlm_notices`): the terminal-notice, failure, and agent-watch rows.
+pub(crate) const RESERVED_CUSTOM_KINDS: [&str; 3] = [
     pa_core::session_engine::rlm_notices::RLM_CHILD_TERMINAL_NOTICE_CUSTOM_TYPE,
     pa_core::session_engine::rlm_notices::RLM_CHILD_FAILURE_CUSTOM_TYPE,
+    pa_core::session_engine::rlm_notices::AGENT_WATCH_NOTICE_CUSTOM_TYPE,
 ];
 
 /// Whether one custom row claims a reserved child-status kind (exact
@@ -26,6 +27,7 @@ pub(crate) fn is_reserved_child_status_custom_type(custom_message: &Value) -> bo
         Some(
             pa_core::session_engine::rlm_notices::RLM_CHILD_TERMINAL_NOTICE_CUSTOM_TYPE
                 | pa_core::session_engine::rlm_notices::RLM_CHILD_FAILURE_CUSTOM_TYPE
+                | pa_core::session_engine::rlm_notices::AGENT_WATCH_NOTICE_CUSTOM_TYPE
         )
     )
 }

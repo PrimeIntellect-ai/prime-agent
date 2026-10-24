@@ -235,6 +235,9 @@ impl SupervisorChildSessionsInner {
     /// A child whose session is already gone is a completed no-op; every
     /// other close failure is kept (walk all children, rethrow the first error).
     pub(super) async fn close_children_inner(&self, reason: ChildCloseReason) -> Result<()> {
+        // The owner session is closing: its watches die with it (nano-rlm
+        // "owner termination cancels subscriptions").
+        self.shutdown_agent_watch().await;
         let usage_persisted = self.replay_retired_usage(None).await;
         let children = self.children.lock().await.clone();
         let mut close_error = (!usage_persisted)
@@ -455,6 +458,43 @@ impl SupervisorChildSessionsInner {
             }
         }
         None
+    }
+
+    /// The record whose child id is exactly `child_id` (the watch
+    /// poller's target): a sibling whose session NAME happens to equal a
+    /// watched child's id must not shadow the child - `find_record` is a
+    /// first-match scan, so name matches there can win over the id.
+    pub(super) async fn find_record_by_child_id(
+        &self,
+        child_id: &str,
+    ) -> Option<Arc<Mutex<ChildRecord>>> {
+        let children = self.children.lock().await;
+        for record in children.iter() {
+            if record.lock().await.rlm_child_id == child_id {
+                return Some(Arc::clone(record));
+            }
+        }
+        None
+    }
+
+    /// The id-first, name-second resolution the watch lane documents: an
+    /// earlier sibling's name never shadows a later child's id.
+    pub(super) async fn find_record_ordered(
+        &self,
+        target: &str,
+    ) -> Option<Arc<Mutex<ChildRecord>>> {
+        let children = self.children.lock().await;
+        let mut by_name: Option<Arc<Mutex<ChildRecord>>> = None;
+        for record in children.iter() {
+            let child = record.lock().await;
+            if child.matches_id(target) {
+                return Some(Arc::clone(record));
+            }
+            if by_name.is_none() && child.session_name == target {
+                by_name = Some(Arc::clone(record));
+            }
+        }
+        by_name
     }
 
     /// The one record matching a selector, or the TS selector errors

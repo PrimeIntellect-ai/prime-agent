@@ -9,6 +9,10 @@ use serde_json::json;
 
 /// A child run that failed (TS `rlm_child_failure`).
 pub const RLM_CHILD_FAILURE_CUSTOM_TYPE: &str = "rlm_child_failure";
+/// One batched agent-watch wake row (the PR-E `agent_watch_notice`):
+/// `display: false`, ranges only — the row wakes an idle orchestrator to
+/// read the ring (`rlm.watch.read`), it is never the payload itself.
+pub const AGENT_WATCH_NOTICE_CUSTOM_TYPE: &str = "agent_watch_notice";
 /// A child run that ended without an explicit reply or was cancelled
 /// (TS `rlm_child_terminal_notice`).
 pub const RLM_CHILD_TERMINAL_NOTICE_CUSTOM_TYPE: &str = "rlm_child_terminal_notice";
@@ -91,6 +95,73 @@ pub fn create_rlm_child_terminal_notice(
     }
 }
 
+/// One line of the batched agent-watch notice (one watched child's
+/// activity in one poll tick).
+pub struct AgentWatchNoticeLine<'a> {
+    pub subscription_id: &'a str,
+    pub child_id: &'a str,
+    pub child_name: &'a str,
+    /// Half-open message range: `[start, end)` over the child's ledger.
+    pub from_index: u64,
+    pub to_index: u64,
+    /// The activity transition the same poll observed, if any.
+    pub status: Option<(&'a str, &'a str)>,
+}
+
+/// The agent-watch wake row: one quiet (`display: false`) custom notice
+/// per poll batch, one line per child. Content is ranges and status
+/// transitions only — never child transcript content.
+#[must_use]
+pub fn create_agent_watch_notice(
+    lines: &[AgentWatchNoticeLine<'_>],
+    timestamp: u64,
+) -> CustomMessage {
+    let content = lines
+        .iter()
+        .map(|line| {
+            let name = sanitize_message_header_value(line.child_name);
+            let mut text = format!(
+                "[watch-agent child:{name}] messages {}..{} (+{})",
+                line.from_index,
+                line.to_index,
+                line.to_index.saturating_sub(line.from_index)
+            );
+            if let Some((from, to)) = line.status {
+                text.push_str(format!(" status: {from} -> {to}").as_str());
+            }
+            text
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let details = json!({
+        "watch": "agent",
+        "events": lines
+            .iter()
+            .map(|line| {
+                let mut row = json!({
+                    "subscriptionId": line.subscription_id,
+                    "childId": line.child_id,
+                    "childName": line.child_name,
+                    "fromIndex": line.from_index,
+                    "toIndex": line.to_index,
+                });
+                if let Some((from, to)) = line.status {
+                    row["statusChange"] = json!({ "from": from, "to": to });
+                }
+                row
+            })
+            .collect::<Vec<_>>(),
+    });
+    CustomMessage {
+        custom_type: AGENT_WATCH_NOTICE_CUSTOM_TYPE.to_string(),
+        content: UserContent::Text(content),
+        display: false,
+        details: Some(details),
+        timestamp,
+        rest: serde_json::Map::default(),
+    }
+}
+
 /// The failure row: `[child-failed child:<name>]` with the error text.
 #[must_use]
 pub fn create_rlm_child_failure_message(
@@ -118,6 +189,50 @@ pub fn create_rlm_child_failure_message(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn agent_watch_notice_is_quiet_and_ranges_only() {
+        let notice = create_agent_watch_notice(
+            &[
+                AgentWatchNoticeLine {
+                    subscription_id: "watch-agent-sub-1",
+                    child_id: "sub-1",
+                    child_name: "researcher",
+                    from_index: 42,
+                    to_index: 44,
+                    status: Some(("idle", "running")),
+                },
+                AgentWatchNoticeLine {
+                    subscription_id: "watch-agent-sub-2",
+                    child_id: "sub-2",
+                    child_name: "writer",
+                    from_index: 10,
+                    to_index: 12,
+                    status: None,
+                },
+            ],
+            1_000,
+        );
+        assert_eq!(notice.custom_type, "agent_watch_notice");
+        // Quiet: the row wakes the session to read the ring, it renders nothing.
+        assert!(!notice.display);
+        assert_eq!(
+            notice.content,
+            UserContent::Text(
+                "[watch-agent child:researcher] messages 42..44 (+2) status: idle -> running\n[watch-agent child:writer] messages 10..12 (+2)"
+                    .to_string()
+            )
+        );
+        let details = notice.details.unwrap();
+        assert_eq!(details["watch"], "agent");
+        let events = details["events"].as_array().unwrap();
+        assert_eq!(events.len(), 2);
+        assert_eq!(
+            events[0]["statusChange"],
+            json!({ "from": "idle", "to": "running" })
+        );
+        assert!(events[1].get("statusChange").is_none());
+    }
 
     #[test]
     fn no_reply_notice_matches_the_ts_shape() {

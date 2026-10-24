@@ -366,6 +366,31 @@ impl SupervisorChildSessionsInner {
         Ok(child_busy_flags(&state))
     }
 
+    /// One `GetState` round trip distilled to what a watch observes: the
+    /// child's `messageCount` (the ledger index a `watch.agent` event's
+    /// `start:end` range addresses) and an activity label
+    /// (`running` while the child itself streams, queues, or hosts
+    /// running descendants; else `idle`). A count and a label only —
+    /// there is no path from a message body into a watch event.
+    pub(super) async fn child_watch_snapshot(
+        &self,
+        active_session_id: &str,
+    ) -> Result<(u64, &'static str)> {
+        let state = self.child_state(active_session_id).await?;
+        let count = state
+            .get("messageCount")
+            .and_then(Value::as_u64)
+            .unwrap_or(0);
+        Ok((
+            count,
+            if child_busy_flags(&state) {
+                "running"
+            } else {
+                "idle"
+            },
+        ))
+    }
+
     /// One `GetLastAssistantText` round trip: the raw text the roster
     /// preview and the collect envelope's binding lane both derive from
     /// (the preview compacts it; the binding lane caps it at

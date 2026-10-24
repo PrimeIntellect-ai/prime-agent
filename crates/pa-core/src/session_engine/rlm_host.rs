@@ -1,8 +1,9 @@
 //! The `rlm.*` kernel host-request bridge: wire validation, the child-session
 //! host seam, and handler registration for `rlm.spawn` (`rlm.run`),
 //! `rlm.create_session`, `rlm.find_models`, `rlm.list_subagents`,
-//! `rlm.collect`, `rlm.progress.note`, `rlm.delete_subagent`, and
-//! `rlm.rename`.
+//! `rlm.collect`, `rlm.progress.note`, `rlm.delete_subagent`,
+//! `rlm.rename`, and the `rlm.watch.*` subscriptions (`watch.agent`,
+//! `watch.agent_list`, `watch.agent_cancel`, `watch.read`).
 //!
 //! Wire contract: the Python side (`rlm/__init__.py`) sends typed requests and
 //! parses strict `snake_case` replies. Pure normalization lives in
@@ -30,6 +31,10 @@ use super::agent_messaging::assert_direct_agent_message_target;
 pub const RLM_PROGRESS_NOTE_MAX_LENGTH: usize = 512;
 pub const RLM_PROGRESS_NOTE_MIN_INTERVAL_MS: u64 = 10_000;
 const RLM_COLLECT_MAX_TIMEOUT_MS: u64 = 2_147_483_647;
+/// Default and cap for one `rlm.watch.read` page (the host's ring is
+/// bounded; the page limit never enlarges it).
+const RLM_WATCH_READ_LIMIT_DEFAULT: u64 = 100;
+const RLM_WATCH_READ_LIMIT_MAX: u64 = 500;
 
 // Wire shapes (strict snake_case, parsed by the Python rlm module)
 
@@ -131,6 +136,68 @@ pub struct RlmChildResult {
     pub replied_since_task: Option<bool>,
 }
 
+/// One `rlm.watch.agent` subscription row (subscribe reply and list row
+/// share the shape; a subscribe always reports `total_events: 0`).
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct RlmAgentWatch {
+    /// Deterministic: `watch-agent-<rlm_child_id>`; a re-register of the
+    /// same child re-baselines the one subscription.
+    pub id: String,
+    pub child_id: String,
+    pub child_name: String,
+    /// The subscription's message baseline (the `start` of the next
+    /// event); `0` until the child's first reachable snapshot arms it.
+    pub messages: u64,
+    /// `active` | `cancelled` | `stopped`.
+    pub status: &'static str,
+    /// Event batches this subscription has emitted.
+    pub total_events: u64,
+    pub created_at_ms: u64,
+}
+
+/// One watch activity status transition (the `watch.agent` content).
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct RlmWatchStatusChange {
+    pub from: &'static str,
+    pub to: &'static str,
+}
+
+/// The `watch.agent` event content: a half-open message range over the
+/// child's ledger — indexes only, never content.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct RlmWatchAgentContent {
+    /// The watched child's `rlm_child_id`.
+    pub target: String,
+    pub start: u64,
+    pub end: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status: Option<RlmWatchStatusChange>,
+}
+
+/// One `rlm.watch.read` event: the nano-rlm watch envelope, `snake_case`.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct RlmWatchEvent {
+    pub id: String,
+    /// The monotonic read cursor: a read returns events with
+    /// `seq > since_seq` and answers the cursor to pass next.
+    pub seq: u64,
+    pub subscription_id: String,
+    /// `watch.agent` (stage 1; `watch.job`/`watch.path` follow).
+    pub kind: &'static str,
+    pub content: RlmWatchAgentContent,
+    pub at_ms: u64,
+}
+
+/// One `rlm.watch.read` page.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct RlmWatchReadPage {
+    pub events: Vec<RlmWatchEvent>,
+    /// The cursor the next read passes as `since_seq`.
+    pub next_seq: u64,
+    /// Events the bounded ring dropped before this page (never silent).
+    pub dropped: u64,
+}
+
 // Requests into the host
 
 /// Validated `rlm.spawn` request handed to the child-session host.
@@ -178,6 +245,20 @@ pub trait RlmSubagentHost: Send + Sync {
     /// Rename the current session (`session_id` absent) or one direct
     /// child (TS `rlm.rename`); answers the applied name.
     fn rename(&self, name: String, session_id: Option<String>) -> RlmHostFuture<String>;
+    /// `rlm.watch.agent`: subscribe to a direct child's activity
+    /// (message ranges and status transitions, never content). `wake`
+    /// selects whether the subscription's events also deliver the
+    /// coalesced quiet wake row per poll batch, or only page through
+    /// `rlm.watch.read` (the factory's own waits: it reads the ring
+    /// itself, so its subscriptions never spend a parent turn).
+    fn watch_agent(&self, target: String, wake: bool) -> RlmHostFuture<RlmAgentWatch>;
+    /// `rlm.watch.agent_list`: the owner's watch rows.
+    fn watch_agent_list(&self) -> RlmHostFuture<Vec<RlmAgentWatch>>;
+    /// `rlm.watch.agent_cancel`: idempotent cancel; `false` for an
+    /// unknown or already-terminal id, never an error.
+    fn watch_agent_cancel(&self, id: String) -> RlmHostFuture<bool>;
+    /// `rlm.watch.read`: one page of the owner's bounded watch event ring.
+    fn watch_read(&self, since_seq: u64, limit: u64) -> RlmHostFuture<RlmWatchReadPage>;
 }
 
 /// Host behavior for sessions with no child runtime: truthful empties and the
@@ -241,6 +322,33 @@ impl RlmSubagentHost for NoRlmChildren {
                 .append_session_info(&name)
                 .map_err(anyhow::Error::from)?;
             Ok(name)
+        })
+    }
+    fn watch_agent(&self, target: String, _wake: bool) -> RlmHostFuture<RlmAgentWatch> {
+        Box::pin(async move {
+            // Distinct from the daemon's roster miss: this session can
+            // never have children, so a kernel-side wait parked on this
+            // error would stall until its deadline. The factory keys its
+            // park-retry on the daemon miss text ("No direct child
+            // matches"); this form fails the wait fast instead.
+            anyhow::bail!(
+                "cannot watch \"{target}\": this session has no RLM child runtime (a daemon-backed parent session is required)"
+            )
+        })
+    }
+    fn watch_agent_list(&self) -> RlmHostFuture<Vec<RlmAgentWatch>> {
+        Box::pin(async { Ok(Vec::new()) })
+    }
+    fn watch_agent_cancel(&self, _id: String) -> RlmHostFuture<bool> {
+        Box::pin(async { Ok(false) })
+    }
+    fn watch_read(&self, _since_seq: u64, _limit: u64) -> RlmHostFuture<RlmWatchReadPage> {
+        Box::pin(async {
+            Ok(RlmWatchReadPage {
+                events: Vec::new(),
+                next_seq: 0,
+                dropped: 0,
+            })
         })
     }
 }
@@ -513,6 +621,114 @@ pub fn register_rlm_host_handlers(handlers: &mut HostRequestHandlers, bridge: &A
     register_delete_subagent(handlers, bridge);
     register_collect(handlers, bridge);
     register_rename(handlers, bridge);
+    register_watch_agent(handlers, bridge);
+    register_watch_agent_list(handlers, bridge);
+    register_watch_agent_cancel(handlers, bridge);
+    register_watch_read(handlers, bridge);
+}
+
+/// `rlm.watch.agent`: subscribe to a direct child's activity. The watch
+/// surface is supervisor-owned (it survives a kernel restart), so the
+/// handlers only validate and forward; the registry semantics live with
+/// the daemon host.
+fn register_watch_agent(handlers: &mut HostRequestHandlers, bridge: &Arc<RlmHostBridge>) {
+    let host = Arc::clone(&bridge.host);
+    handlers.register(
+        "rlm.watch.agent",
+        host_handler(move |payload| {
+            let host = Arc::clone(&host);
+            Box::pin(async move {
+                let Some(target) = payload
+                    .data
+                    .get("target")
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|target| !target.is_empty())
+                else {
+                    anyhow::bail!("rlm.watch.agent requires a target child name or id");
+                };
+                let wake = match payload.data.get("wake") {
+                    None | Some(Value::Null) => true,
+                    Some(Value::Bool(wake)) => *wake,
+                    Some(_) => {
+                        anyhow::bail!("rlm.watch.agent wake must be a boolean");
+                    }
+                };
+                let watch = host.watch_agent(target.to_string(), wake).await?;
+                serde_json::to_value(&watch).map_err(anyhow::Error::new)
+            })
+        }),
+    );
+}
+
+fn register_watch_agent_list(handlers: &mut HostRequestHandlers, bridge: &Arc<RlmHostBridge>) {
+    let host = Arc::clone(&bridge.host);
+    handlers.register(
+        "rlm.watch.agent_list",
+        host_handler(move |_payload| {
+            let host = Arc::clone(&host);
+            Box::pin(async move {
+                let watches = host.watch_agent_list().await?;
+                Ok(json!({ "watches": watches }))
+            })
+        }),
+    );
+}
+
+fn register_watch_agent_cancel(handlers: &mut HostRequestHandlers, bridge: &Arc<RlmHostBridge>) {
+    let host = Arc::clone(&bridge.host);
+    handlers.register(
+        "rlm.watch.agent_cancel",
+        host_handler(move |payload| {
+            let host = Arc::clone(&host);
+            Box::pin(async move {
+                let Some(id) = payload
+                    .data
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|id| !id.is_empty())
+                else {
+                    anyhow::bail!("rlm.watch.agent_cancel requires an id");
+                };
+                let cancelled = host.watch_agent_cancel(id.to_string()).await?;
+                Ok(json!({ "cancelled": cancelled }))
+            })
+        }),
+    );
+}
+
+fn register_watch_read(handlers: &mut HostRequestHandlers, bridge: &Arc<RlmHostBridge>) {
+    let host = Arc::clone(&bridge.host);
+    handlers.register(
+        "rlm.watch.read",
+        host_handler(move |payload| {
+            let host = Arc::clone(&host);
+            Box::pin(async move {
+                let data = &payload.data;
+                let since_seq = match data.get("since_seq") {
+                    None | Some(Value::Null) => Some(0),
+                    Some(value) => value.as_u64(),
+                };
+                let Some(since_seq) = since_seq else {
+                    anyhow::bail!("rlm.watch.read since_seq must be a non-negative integer");
+                };
+                let limit = match data.get("limit") {
+                    None | Some(Value::Null) => Some(RLM_WATCH_READ_LIMIT_DEFAULT),
+                    Some(value) => value
+                        .as_u64()
+                        .filter(|limit| (1..=RLM_WATCH_READ_LIMIT_MAX).contains(limit)),
+                };
+                let Some(limit) = limit else {
+                    anyhow::bail!(
+                        "rlm.watch.read limit must be an integer from 1 to {RLM_WATCH_READ_LIMIT_MAX}"
+                    );
+                };
+                let page = host.watch_read(since_seq, limit).await?;
+                serde_json::to_value(&page).map_err(anyhow::Error::new)
+            })
+        }),
+    );
 }
 
 fn register_find_models(handlers: &mut HostRequestHandlers, bridge: &Arc<RlmHostBridge>) {
@@ -1015,6 +1231,75 @@ mod tests {
                 renames.lock().await.push((name.clone(), session_id));
                 Ok(name)
             })
+        }
+        fn watch_agent(&self, target: String, _wake: bool) -> RlmHostFuture<RlmAgentWatch> {
+            let targets = Arc::clone(&self.targets);
+            Box::pin(async move {
+                targets.lock().await.push(target);
+                Ok(RlmAgentWatch {
+                    id: "watch-agent-sub-1".into(),
+                    child_id: "sub-1".into(),
+                    child_name: "worker".into(),
+                    messages: 3,
+                    status: "active",
+                    total_events: 0,
+                    created_at_ms: 1_000,
+                })
+            })
+        }
+        fn watch_agent_list(&self) -> RlmHostFuture<Vec<RlmAgentWatch>> {
+            Box::pin(async {
+                Ok(vec![RlmAgentWatch {
+                    id: "watch-agent-sub-1".into(),
+                    child_id: "sub-1".into(),
+                    child_name: "worker".into(),
+                    messages: 7,
+                    status: "active",
+                    total_events: 2,
+                    created_at_ms: 1_000,
+                }])
+            })
+        }
+        fn watch_agent_cancel(&self, id: String) -> RlmHostFuture<bool> {
+            let targets = Arc::clone(&self.targets);
+            Box::pin(async move {
+                targets.lock().await.push(id);
+                Ok(true)
+            })
+        }
+        fn watch_read(&self, since_seq: u64, limit: u64) -> RlmHostFuture<RlmWatchReadPage> {
+            let collects = Arc::clone(&self.collects);
+            Box::pin(async move {
+                collects
+                    .lock()
+                    .await
+                    .push((vec![since_seq.to_string()], limit));
+                Ok(RlmWatchReadPage {
+                    events: vec![watch_event(1), watch_event(2)],
+                    next_seq: 2,
+                    dropped: 1,
+                })
+            })
+        }
+    }
+
+    /// One scripted `rlm.watch.read` event row at the given seq.
+    fn watch_event(seq: u64) -> RlmWatchEvent {
+        RlmWatchEvent {
+            id: format!("watch-{seq}"),
+            seq,
+            subscription_id: "watch-agent-sub-1".into(),
+            kind: "watch.agent",
+            content: RlmWatchAgentContent {
+                target: "sub-1".into(),
+                start: 3,
+                end: 3 + seq,
+                status: Some(RlmWatchStatusChange {
+                    from: "idle",
+                    to: "running",
+                }),
+            },
+            at_ms: 1_000 + seq,
         }
     }
 
@@ -1690,5 +1975,145 @@ mod tests {
             error.to_string(),
             "rlm.spawn requires a daemon-backed session: this session has no RLM child runtime"
         );
+    }
+
+    /// `rlm.watch.agent` validates the target before the host sees it,
+    /// then forwards and serializes the handle.
+    #[tokio::test]
+    async fn rlm_watch_agent_requires_a_target() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let host = RecordingHost::new();
+        let wiring = wired(dir.path(), Some(host.clone()));
+        for empty in [
+            json!({}),
+            json!({ "target": "" }),
+            json!({ "target": "   " }),
+        ] {
+            let error = call(&wiring, "rlm.watch.agent", empty).await.unwrap_err();
+            assert_eq!(
+                error.to_string(),
+                "rlm.watch.agent requires a target child name or id"
+            );
+        }
+        let watch = call(
+            &wiring,
+            "rlm.watch.agent",
+            json!({ "type": "rlm.watch.agent", "target": "worker" }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            watch,
+            json!({
+                "id": "watch-agent-sub-1",
+                "child_id": "sub-1",
+                "child_name": "worker",
+                "messages": 3,
+                "status": "active",
+                "total_events": 0,
+                "created_at_ms": 1000,
+            })
+        );
+        assert_eq!(host.targets.lock().await.last().unwrap(), "worker");
+    }
+
+    /// `wake` defaults to true and must be a boolean: a non-bool is a
+    /// validation error before the host sees the request.
+    #[tokio::test]
+    async fn watch_agent_wake_defaults_true_and_rejects_non_bools() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let wiring = wired(dir.path(), None);
+        let error = call(
+            &wiring,
+            "rlm.watch.agent",
+            json!({ "type": "rlm.watch.agent", "target": "worker", "wake": "yes" }),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.to_string(), "rlm.watch.agent wake must be a boolean");
+    }
+
+    /// A session with no child runtime refuses a watch with the truthful
+    /// selector error, never an empty watch.
+    #[tokio::test]
+    async fn no_children_watch_agent_is_a_truthful_refusal() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let wiring = wired(dir.path(), None);
+        let error = call(
+            &wiring,
+            "rlm.watch.agent",
+            json!({ "type": "rlm.watch.agent", "target": "worker" }),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "cannot watch \"worker\": this session has no RLM child runtime (a daemon-backed parent session is required)"
+        );
+    }
+
+    /// Cancelling an unknown watch id answers `false`, not an error (the
+    /// idempotent-delete contract `rlm.delete_subagent` established).
+    #[tokio::test]
+    async fn watch_agent_cancel_of_an_unknown_id_is_false_not_an_error() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let wiring = wired(dir.path(), None);
+        let error = call(&wiring, "rlm.watch.agent_cancel", json!({}))
+            .await
+            .unwrap_err();
+        assert_eq!(error.to_string(), "rlm.watch.agent_cancel requires an id");
+        let cancelled = call(
+            &wiring,
+            "rlm.watch.agent_cancel",
+            json!({ "type": "rlm.watch.agent_cancel", "id": "watch-agent-ghost" }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(cancelled, json!({ "cancelled": false }));
+    }
+
+    /// `rlm.watch.read` forwards the cursor and limit and answers the
+    /// page verbatim (events, `next_seq`, dropped).
+    #[tokio::test]
+    async fn watch_read_pages_by_seq_and_reports_dropped() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let host = RecordingHost::new();
+        let wiring = wired(dir.path(), Some(host.clone()));
+        let page = call(
+            &wiring,
+            "rlm.watch.read",
+            json!({ "type": "rlm.watch.read", "since_seq": 1, "limit": 10 }),
+        )
+        .await
+        .unwrap();
+        let events = page["events"].as_array().unwrap();
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0]["seq"], 1);
+        assert_eq!(events[0]["kind"], "watch.agent");
+        assert_eq!(events[0]["content"]["start"], 3);
+        assert_eq!(events[0]["content"]["end"], 4);
+        assert_eq!(
+            events[0]["content"]["status"],
+            json!({ "from": "idle", "to": "running" })
+        );
+        assert_eq!(page["next_seq"], 2);
+        assert_eq!(page["dropped"], 1);
+        let error = call(
+            &wiring,
+            "rlm.watch.read",
+            json!({ "type": "rlm.watch.read", "limit": 0 }),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "rlm.watch.read limit must be an integer from 1 to 500"
+        );
+        // The list and cancel shapes round-trip too.
+        let listed = call(&wiring, "rlm.watch.agent_list", json!({}))
+            .await
+            .unwrap();
+        assert_eq!(listed["watches"][0]["messages"], 7);
+        assert_eq!(listed["watches"][0]["total_events"], 2);
     }
 }

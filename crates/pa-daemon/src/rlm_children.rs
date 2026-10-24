@@ -11,9 +11,9 @@ use std::time::{Duration, Instant};
 use anyhow::{anyhow, bail, Context, Result};
 use pa_core::kernel::rlm_runtime::create_default_rlm_subagent_session_name;
 use pa_core::session_engine::rlm_host::{
-    RlmChildResult, RlmCreateSessionHandle, RlmCreateSessionRequest, RlmDeleteSubagentResult,
-    RlmHostFuture, RlmSpawnHandle, RlmSpawnRequest, RlmSubagentActivity, RlmSubagentEntry,
-    RlmSubagentHost,
+    RlmAgentWatch, RlmChildResult, RlmCreateSessionHandle, RlmCreateSessionRequest,
+    RlmDeleteSubagentResult, RlmHostFuture, RlmSpawnHandle, RlmSpawnRequest, RlmSubagentActivity,
+    RlmSubagentEntry, RlmSubagentHost, RlmWatchReadPage,
 };
 use pa_core::session_engine::rlm_notices::{
     create_rlm_child_failure_message, create_rlm_child_terminal_notice, RlmChildTerminalNotice,
@@ -428,6 +428,10 @@ struct SupervisorChildSessionsInner {
     semantic_edges: std::sync::Mutex<
         Option<std::sync::Arc<pa_core::session_engine::semantic_edges::SemanticEdgeRecorder>>,
     >,
+    /// The `rlm.watch.agent` registry: one per parent session worker,
+    /// supervisor-owned (it survives the Python kernel). Held beside the
+    /// child ledger so the poller reads the same roster it observes.
+    agent_watch: Mutex<agent_watch::AgentWatchRegistry>,
 }
 
 impl Clone for SupervisorChildSessions {
@@ -473,6 +477,7 @@ impl SupervisorChildSessions {
                 delete_notifier: std::sync::Mutex::new(None),
                 child_update_sink: std::sync::Mutex::new(None),
                 semantic_edges: std::sync::Mutex::new(None),
+                agent_watch: Mutex::new(agent_watch::AgentWatchRegistry::default()),
             }),
         }
     }
@@ -724,6 +729,52 @@ impl SupervisorChildSessions {
                 // continuation is released by the hook a real settle fires.
                 self.inner.fire_settle_hook(&record).await;
             }
+        }
+    }
+
+    /// Test seam: drop one child record from the roster (the watch
+    /// poller's vanished-child arm against a hand-deleted child).
+    #[cfg(test)]
+    pub(crate) async fn drop_test_child(&self, child_id: &str) {
+        let mut children = self.inner.children.lock().await;
+        let mut victims: Vec<Arc<Mutex<ChildRecord>>> = Vec::new();
+        for record in children.iter() {
+            if record.lock().await.rlm_child_id == child_id {
+                victims.push(Arc::clone(record));
+            }
+        }
+        children.retain(|record| !victims.iter().any(|victim| Arc::ptr_eq(victim, record)));
+    }
+
+    /// Test seam: flip one child record's prompt admission (the watch
+    /// register/poll behavior across the spawn -> watch window, where
+    /// the task prompt has not landed yet). Admitting runs the same
+    /// admission arm the spawn watcher runs (host.rs), so the tests
+    /// exercise the real arming path.
+    #[cfg(test)]
+    pub(crate) async fn set_test_child_prompt_admitted(
+        &self,
+        active_session_id: &str,
+        admitted: bool,
+    ) {
+        let admitted_child_id = {
+            let children = self.inner.children.lock().await;
+            let mut admitted_child_id = None;
+            for record in children.iter() {
+                let mut record = record.lock().await;
+                if record.active_session_id == active_session_id {
+                    record.prompt_admitted = admitted;
+                    if admitted {
+                        admitted_child_id = Some(record.rlm_child_id.clone());
+                    }
+                }
+            }
+            admitted_child_id
+        };
+        if let Some(child_id) = admitted_child_id {
+            self.inner
+                .admit_agent_watch_baselines(&child_id, active_session_id)
+                .await;
         }
     }
 
@@ -1091,6 +1142,7 @@ impl SupervisorChildSessionsInner {
     }
 }
 
+mod agent_watch;
 mod host;
 mod lifecycle;
 mod registry;
@@ -1098,6 +1150,9 @@ mod usage;
 
 #[cfg(test)]
 mod watch_tests;
+
+#[cfg(test)]
+mod agent_watch_tests;
 
 #[cfg(test)]
 mod usage_emit_tests;

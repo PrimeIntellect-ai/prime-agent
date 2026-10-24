@@ -1,16 +1,17 @@
 //! The host adapter concern: the `RlmSubagentHost` wire surface
 //! (`spawn`, `create_session`, `list_subagents`, `delete_subagent`,
-//! `collect`, `rename`) over the supervisor's child-sessions registry,
-//! with the spawn-admission helpers only this surface uses.
+//! `collect`, `rename`, the `rlm.watch.*` family) over the supervisor's
+//! child-sessions registry, with the spawn-admission helpers only this
+//! surface uses.
 use super::{
     assert_thinking_supported, bail, create_default_rlm_subagent_session_name, json, now_ms,
     resolve_child_model, rlm_child_label, rlm_depth_limit_error, spawn_name_unavailable_error, Arc,
     ChildCloseReason, ChildObservationSource, ChildRecord, Context, DaemonCommand, Duration,
-    Instant, Mutex, Path, PathBuf, Result, RlmChildResult, RlmCreateSessionHandle,
+    Instant, Mutex, Path, PathBuf, Result, RlmAgentWatch, RlmChildResult, RlmCreateSessionHandle,
     RlmCreateSessionRequest, RlmDeleteSubagentResult, RlmHostFuture, RlmSpawnHandle,
-    RlmSpawnRequest, RlmSubagentEntry, RlmSubagentHost, SpawnNameReservationGuard,
-    SupervisorChildSessions, SupervisorChildSessionsInner, Value, KILL_TIMEOUT_MS,
-    RENAME_TIMEOUT_MS,
+    RlmSpawnRequest, RlmSubagentEntry, RlmSubagentHost, RlmWatchReadPage,
+    SpawnNameReservationGuard, SupervisorChildSessions, SupervisorChildSessionsInner, Value,
+    KILL_TIMEOUT_MS, RENAME_TIMEOUT_MS,
 };
 
 /// Resolve the child model with the daemon `allowedModels` allowlist enforced, refusing loudly with
@@ -294,6 +295,14 @@ impl RlmSubagentHost for SupervisorChildSessions {
                 // The worker accepted the task: from here an idle read is a
                 // finished run, never the pre-prompt idle worker.
                 watcher_record.lock().await.prompt_admitted = true;
+                // Admission closes the spawn -> watch window: arm every
+                // watch registered against the never-prompted child at
+                // the admission boundary, so a fast child's growth is
+                // preserved instead of absorbed by the next poll tick's
+                // baseline.
+                watcher_this
+                    .admit_agent_watch_baselines(&child_log_id, &child_active_session_id)
+                    .await;
                 watcher_this.watch_child_settle(&watcher_record).await;
             });
             Ok(RlmSpawnHandle {
@@ -740,6 +749,32 @@ impl RlmSubagentHost for SupervisorChildSessions {
             }
             Ok(name)
         })
+    }
+
+    // -- rlm.watch.* (supervisor-owned agent activity watches) --------
+
+    fn watch_agent(&self, target: String, wake: bool) -> RlmHostFuture<RlmAgentWatch> {
+        let this = Arc::clone(&self.inner);
+        Box::pin(async move {
+            let handle = this.watch_agent_register(&target, wake).await?;
+            super::agent_watch::ensure_agent_watch_poller(&this).await;
+            Ok(handle)
+        })
+    }
+
+    fn watch_agent_list(&self) -> RlmHostFuture<Vec<RlmAgentWatch>> {
+        let this = Arc::clone(&self.inner);
+        Box::pin(async move { Ok(this.agent_watch.lock().await.rows()) })
+    }
+
+    fn watch_agent_cancel(&self, id: String) -> RlmHostFuture<bool> {
+        let this = Arc::clone(&self.inner);
+        Box::pin(async move { Ok(this.agent_watch.lock().await.cancel(&id)) })
+    }
+
+    fn watch_read(&self, since_seq: u64, limit: u64) -> RlmHostFuture<RlmWatchReadPage> {
+        let this = Arc::clone(&self.inner);
+        Box::pin(async move { Ok(this.agent_watch.lock().await.read(since_seq, limit)) })
     }
 }
 
