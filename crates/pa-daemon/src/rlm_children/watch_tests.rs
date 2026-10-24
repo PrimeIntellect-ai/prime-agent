@@ -409,6 +409,7 @@ async fn spawn_child(sessions: &SupervisorChildSessions) -> RlmSpawnHandle {
             name: Some("f20-worker".to_string()),
             model: None,
             thinking: None,
+            decision_child: false,
             spawned_by_request_id: None,
         })
         .await

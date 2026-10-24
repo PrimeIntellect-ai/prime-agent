@@ -1276,6 +1276,7 @@ mod tests {
             name: Some("late".to_string()),
             model: None,
             thinking: None,
+            decision_child: false,
             spawned_by_request_id: None,
         });
         std::future::poll_fn(|context| {

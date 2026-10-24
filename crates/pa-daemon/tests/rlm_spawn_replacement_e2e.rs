@@ -231,6 +231,7 @@ fn spawn_request(name: &str, prompt: &str) -> RlmSpawnRequest {
         name: Some(name.to_string()),
         model: None,
         thinking: None,
+        decision_child: false,
         spawned_by_request_id: None,
     }
 }

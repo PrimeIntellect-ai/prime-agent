@@ -7,6 +7,7 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use pa_agent::abort::AbortSignal;
+use pa_core::session_engine::agent_messaging::AgentFamilyRelationship;
 use pa_core::session_engine::provider_adapter::json_round_trip;
 use pa_core::session_engine::provider_retry::{ProviderRetryPolicy, UNBOUNDED_BACKOFF_MS};
 use pa_core::session_engine::side_question::{SideQuestionSink, SideQuestionTurn};
@@ -29,6 +30,20 @@ mod scripted;
 
 /// The turn behavior a worker session runs.
 pub trait SessionEngine: Send + Sync {
+    /// Consume one tagged Decision API message without starting a turn:
+    /// the decision child consumes the parent's `decision_api.goal`
+    /// messages into its goal input. Engines without a decision loop use
+    /// normal message routing. `relationship` is the sender's fully
+    /// resolved edge to this session (`None` for an unaffiliated sender):
+    /// the consuming engine authorizes the sender by it.
+    fn route_decision_api_event(
+        &self,
+        _relationship: Option<AgentFamilyRelationship>,
+        _sender_name: &str,
+        _message: &str,
+    ) -> bool {
+        false
+    }
     /// The session's shared MCP manager, when the engine owns one: the
     /// `replace_acp_mcp_servers` command writes through it.
     fn acp_mcp_manager(
