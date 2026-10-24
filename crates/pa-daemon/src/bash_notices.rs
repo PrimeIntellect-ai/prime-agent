@@ -55,3 +55,61 @@ impl AgentSessionEngine {
         );
     }
 }
+
+/// Map one promoted inline bash job's completion onto the kernel notice
+/// lane's shape (`[bash-done pid:N exit:M]`): the same
+/// `KernelNotice::bash_completion` the `bash.completed` host handler
+/// validates and admits. The promoted job's spill path rides along: the
+/// model cannot re-read the process (it lived in the dispatch task), so
+/// the spill file is the only durable output and the row must name it.
+/// `None` when the promoted job has no pid (the operations backend did
+/// not report one — such jobs never detach; see the bash tool).
+pub(crate) fn auto_background_to_bash_completion(
+    completion: &pa_agent::auto_background::AutoBackgroundCompletion,
+) -> Option<pa_core::session_engine::bash_notices::KernelNotice> {
+    let pid = completion.pid?;
+    Some(
+        pa_core::session_engine::bash_notices::KernelNotice::bash_completion(
+            pid,
+            &completion.command,
+            i64::from(completion.exit_code.unwrap_or(-1)),
+            completion.full_output_path.as_deref(),
+            completion.status.as_deref(),
+        ),
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn promoted_completions_map_onto_the_bash_done_lane() {
+        let completion = pa_agent::auto_background::AutoBackgroundCompletion {
+            pid: Some(4321),
+            exit_code: Some(0),
+            command: "sleep 61".to_string(),
+            output: String::new(),
+            full_output_path: Some("/tmp/spill/bash-4321.out".to_string()),
+            status: None,
+        };
+        let notice = auto_background_to_bash_completion(&completion).expect("pid known");
+        // The promoted job rides the existing bash-done shape PLUS the
+        // spill pointer (the process is gone; the spill is the output).
+        assert_eq!(
+            notice.row.content.text().as_str(),
+            "[bash-done pid:4321 exit:0]\n\nCommand: \"sleep 61\"\n\nOutput: /tmp/spill/bash-4321.out"
+        );
+        assert!(auto_background_to_bash_completion(
+            &pa_agent::auto_background::AutoBackgroundCompletion {
+                pid: None,
+                exit_code: None,
+                command: String::new(),
+                output: String::new(),
+                full_output_path: None,
+                status: None,
+            }
+        )
+        .is_none());
+    }
+}

@@ -63,7 +63,13 @@ async fn queue_withdrawals_clear_only_the_last_idle_notes() {
                     &worker.recovery,
                     &worker.core,
                     &Arc::new(Notify::new()),
-                    crate::engine::KernelNotice::bash_completion(4321, "fixture command", 0),
+                    crate::engine::KernelNotice::bash_completion(
+                        4321,
+                        "fixture command",
+                        0,
+                        None,
+                        None,
+                    ),
                     || false,
                 );
                 withdraw_bash_completion_notice(

@@ -33,14 +33,26 @@ pub struct KernelNotice {
 }
 
 impl KernelNotice {
-    /// The `[bash-done]` notice for one finished detached command.
+    /// The `[bash-done]` notice for one finished detached command. The
+    /// promoted native-bash job's spill path and terminal status line
+    /// ride along (kernel completions pass `None`: the model re-reads a
+    /// live handle; a promoted job's only durable output is the spill
+    /// file, and its exit -1 needs its reason).
     #[must_use]
-    pub fn bash_completion(pid: u32, command: &str, exit_code: i64) -> Self {
+    pub fn bash_completion(
+        pid: u32,
+        command: &str,
+        exit_code: i64,
+        full_output_path: Option<&str>,
+        status: Option<&str>,
+    ) -> Self {
         Self {
             row: messages::create_async_bash_completion_message(
                 pid,
                 command,
                 exit_code,
+                full_output_path,
+                status,
                 crate::autonomous::now_millis(),
             ),
             preview_label: ASYNC_BASH_COMPLETION_PREVIEW_LABEL,
@@ -126,6 +138,8 @@ fn validate_completion(data: &Value) -> anyhow::Result<KernelNotice> {
         consumed.pid,
         &consumed.command,
         exit_code,
+        None,
+        None,
     ))
 }
 

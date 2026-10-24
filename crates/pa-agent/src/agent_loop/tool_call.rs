@@ -110,6 +110,49 @@ pub(crate) struct ExecutedToolCallOutcome {
     is_error: bool,
 }
 
+/// One inline bash call's watchdog registration: the arm is consumed by
+/// the bash dispatch; the drop removes an unconsumed arm.
+struct AutoBackgroundArmGuard {
+    armed: bool,
+    tool_call_id: String,
+    registry: std::sync::Arc<crate::auto_background::AutoBackgroundRegistry>,
+}
+
+impl AutoBackgroundArmGuard {
+    /// Arm the per-call watchdog for `bash` tool calls. A ZERO window is
+    /// armed too (as a zero arm): the dispatch must learn the loop's
+    /// disable, not fall back to the tool options' default window.
+    fn arm_for(
+        directive: &crate::auto_background::AutoBackgroundDirective,
+        tool_call_id: &str,
+        tool_name: &str,
+    ) -> Self {
+        let armed = tool_name == "bash";
+        if armed {
+            directive.registry.arm(
+                tool_call_id,
+                crate::auto_background::AutoBackgroundArm {
+                    window: directive.window,
+                    notice: directive.notice.clone(),
+                },
+            );
+        }
+        Self {
+            armed,
+            tool_call_id: tool_call_id.to_string(),
+            registry: std::sync::Arc::clone(&directive.registry),
+        }
+    }
+}
+
+impl Drop for AutoBackgroundArmGuard {
+    fn drop(&mut self) {
+        if self.armed {
+            self.registry.disarm(&self.tool_call_id);
+        }
+    }
+}
+
 /// Race the tool against abort, stream `tool_execution_update` events
 /// through a background emitter task, and return an error tool result when
 /// the tool fails (or aborts, with the TS message "Tool execution aborted").
@@ -118,6 +161,7 @@ pub(crate) async fn execute_prepared_tool_call(
     progress: ToolProgressCadence,
     signal: Option<&AbortSignal>,
     emit: &AgentEventSink,
+    auto_background: &crate::auto_background::AutoBackgroundDirective,
 ) -> ExecutedToolCallOutcome {
     let accepting_updates = Arc::new(std::sync::atomic::AtomicBool::new(true));
     let (update_tx, mut update_rx) = tokio::sync::mpsc::unbounded_channel::<AgentToolResult>();
@@ -141,6 +185,17 @@ pub(crate) async fn execute_prepared_tool_call(
         progress,
     )));
     let signal_for_updates = signal.cloned().unwrap_or_default();
+
+    // The inline-bash watchdog: arm the promotion window for this call so
+    // the bash dispatch (pa-core) can promote a command that outlives it.
+    // The arm is consumed by the dispatch; the guard removes anything left
+    // over after the call settles.
+    let auto_background_guard = AutoBackgroundArmGuard::arm_for(
+        auto_background,
+        &prepared.tool_call.id,
+        prepared.tool.name(),
+    );
+    let _auto_background_guard = auto_background_guard;
     let emit_updates = tokio::spawn(async move {
         while let Some(partial_result) = update_rx.recv().await {
             sink(AgentEvent::ToolExecutionUpdate {
@@ -218,7 +273,6 @@ pub(crate) async fn execute_prepared_tool_call(
         }
     }
 }
-
 /// Aborts the heartbeat task on every exit path. Dropping the bare
 /// `JoinHandle` only detaches the unbounded tick task: on a panic or a
 /// cancellation (a dropped `execute_prepared_tool_call` future) the explicit
@@ -488,7 +542,20 @@ mod tests {
             every_ms: 25,
         };
         let execution = tokio::spawn(async move {
-            execute_prepared_tool_call(&prepared, progress, None, &sink).await;
+            execute_prepared_tool_call(
+                &prepared,
+                progress,
+                None,
+                &sink,
+                &crate::auto_background::AutoBackgroundDirective {
+                    window: std::time::Duration::from_millis(0),
+                    notice: None,
+                    registry: std::sync::Arc::new(
+                        crate::auto_background::AutoBackgroundRegistry::new(),
+                    ),
+                },
+            )
+            .await;
         });
         let count = || *ticks.lock().unwrap();
         // Bounded first-tick wait: a broken heartbeat fails the test

@@ -109,6 +109,13 @@ pub struct AgentLoopConfig {
     pub get_follow_up_messages: Option<PollMessagesFn>,
     pub get_continuation_messages: Option<GetContinuationMessagesFn>,
     pub tool_execution: ToolExecutionMode,
+    /// The inline-bash promotion window (zero disables promotion): the
+    /// loop arms a per-call watchdog of this length for `bash` tool calls.
+    pub auto_background_after: std::time::Duration,
+    /// The completion notice hook for promoted bash jobs.
+    pub auto_background_notice: Option<crate::auto_background::AutoBackgroundNoticeFn>,
+    /// The registry the per-call arms go into (one per agent).
+    pub auto_background_registry: std::sync::Arc<crate::auto_background::AutoBackgroundRegistry>,
     /// Heartbeat cadence for in-flight tool calls (start-side trace
     /// visibility for long calls); defaults to a 60s tick.
     pub tool_progress: crate::types::ToolProgressCadence,
@@ -138,6 +145,13 @@ impl AgentLoopConfig {
             get_follow_up_messages: None,
             get_continuation_messages: None,
             tool_execution: ToolExecutionMode::Parallel,
+            auto_background_after: std::time::Duration::from_millis(
+                crate::auto_background::DEFAULT_AUTO_BACKGROUND_AFTER_MS,
+            ),
+            auto_background_notice: None,
+            auto_background_registry: std::sync::Arc::new(
+                crate::auto_background::AutoBackgroundRegistry::new(),
+            ),
             tool_progress: crate::types::ToolProgressCadence::default(),
             before_tool_call: None,
             after_tool_call: None,

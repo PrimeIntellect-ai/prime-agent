@@ -5,6 +5,7 @@
 pub mod abort;
 pub mod agent;
 pub mod agent_loop;
+pub mod auto_background;
 pub mod scripted;
 pub mod stream;
 pub mod types;

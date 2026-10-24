@@ -348,6 +348,22 @@ impl OutputAccumulator {
         }
     }
 
+    /// Force the disk spill open, replaying the buffered chunks: the
+    /// promotion hand-off needs `snapshot().full_output_path` to exist
+    /// even for low-output commands (the synthetic result promises the
+    /// output streams to disk, and nothing re-reads it in memory later).
+    /// After this, appends write through the spill.
+    pub fn force_spill(&mut self) {
+        // An open spill is already streaming; a FINALIZED one (the exec task
+        // settled it before the promotion edge landed) keeps its complete
+        // file - reopening here would advertise an empty replacement.
+        if self.spill.is_open() || self.spill.current_path().is_some() {
+            return;
+        }
+        let replay = std::mem::take(&mut self.raw_chunks);
+        self.spill.open(&replay);
+    }
+
     /// Settle the spill; afterwards `snapshot().full_output_path` is terminal.
     #[allow(dead_code)]
     pub async fn close_temp_file(&mut self) {
@@ -440,3 +456,59 @@ impl OutputAccumulator {
 
 #[allow(dead_code)]
 fn _unused(_: &Path) {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn force_spill_preserves_a_finalized_spill() {
+        // The promotion edge can land after the exec task finalized the
+        // spill: force_spill must keep the complete file instead of
+        // advertising an empty replacement.
+        let dir = tempfile::tempdir().expect("temp dir");
+        let options = OutputAccumulatorOptions {
+            temp_file_prefix: dir.path().join("spill").display().to_string(),
+            ..OutputAccumulatorOptions::default()
+        };
+        let mut acc = OutputAccumulator::new(&options);
+        acc.append(b"finalized-lander\n");
+        // The promotion opened the spill, the command finished, and the
+        // exec task finalized it - a LATE promotion edge must keep the file.
+        acc.force_spill();
+        acc.finish();
+        acc.close_temp_file_sync();
+        let finalized = acc.snapshot().full_output_path.expect("spilled");
+        acc.force_spill();
+        let snapshot = acc.snapshot();
+        assert_eq!(
+            snapshot.full_output_path.as_deref(),
+            Some(finalized.as_str()),
+            "a finalized spill must not be replaced"
+        );
+        assert!(std::fs::read_to_string(&finalized)
+            .expect("finalized spill readable")
+            .contains("finalized-lander"));
+    }
+
+    #[test]
+    fn force_spill_opens_a_live_spill_with_the_buffered_output() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let options = OutputAccumulatorOptions {
+            temp_file_prefix: dir.path().join("spill").display().to_string(),
+            ..OutputAccumulatorOptions::default()
+        };
+        let mut acc = OutputAccumulator::new(&options);
+        acc.append(b"live-lander\n");
+        acc.force_spill();
+        let snapshot = acc.snapshot();
+        let forced = snapshot.full_output_path.expect("forced spill");
+        acc.append(b"more\n");
+        acc.finish();
+        acc.close_temp_file_sync();
+        let settled = acc.snapshot().full_output_path.expect("spilled");
+        assert_eq!(forced, settled, "the forced spill stays the live spill");
+        let content = std::fs::read_to_string(&settled).expect("spill readable");
+        assert!(content.contains("live-lander") && content.contains("more"));
+    }
+}

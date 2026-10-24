@@ -713,3 +713,127 @@ fn scripted_event_shapes_round_trip_through_the_event_enum() {
             if matches!(**event, AssistantMessageEvent::Error { .. })
     )));
 }
+
+/// A bash-named tool that consumes the loop's watchdog arm and reports
+/// it, mirroring the pa-core bash dispatch's arm consumption.
+struct ArmProbeTool {
+    registry: Arc<pa_agent::auto_background::AutoBackgroundRegistry>,
+    armed: std::sync::atomic::AtomicBool,
+    window_ms: std::sync::atomic::AtomicU64,
+}
+
+impl AgentTool for ArmProbeTool {
+    fn name(&self) -> &'static str {
+        "bash"
+    }
+
+    fn description(&self) -> &'static str {
+        "Arm probe."
+    }
+
+    fn parameters(&self) -> &'static serde_json::Value {
+        static SCHEMA: OnceLock<serde_json::Value> = OnceLock::new();
+        SCHEMA.get_or_init(|| {
+            serde_json::json!({ "type": "object", "properties": { "command": { "type": "string" } } })
+        })
+    }
+
+    fn execute(
+        self: Arc<Self>,
+        tool_call_id: String,
+        _params: serde_json::Value,
+        _signal: AbortSignal,
+        _on_update: AgentToolUpdateCallback,
+    ) -> pa_agent::BoxFut<'static, anyhow::Result<AgentToolResult>> {
+        Box::pin(async move {
+            match self.registry.take(&tool_call_id) {
+                Some(pa_agent::auto_background::AutoBackgroundArm { window, notice }) => {
+                    assert!(notice.is_none(), "test wires no notice lane");
+                    self.armed.store(true, Ordering::SeqCst);
+                    self.window_ms.store(
+                        u64::try_from(window.as_millis()).expect("window ms fit"),
+                        Ordering::SeqCst,
+                    );
+                }
+                None => self.armed.store(false, Ordering::SeqCst),
+            }
+            Ok(AgentToolResult::text("probe done"))
+        })
+    }
+}
+
+#[tokio::test]
+async fn inline_bash_calls_get_the_auto_background_arm() {
+    use pa_agent::auto_background::AutoBackgroundRegistry;
+
+    let registry = Arc::new(AutoBackgroundRegistry::new());
+    let probe = Arc::new(ArmProbeTool {
+        registry: Arc::clone(&registry),
+        armed: std::sync::atomic::AtomicBool::new(false),
+        window_ms: std::sync::atomic::AtomicU64::new(0),
+    });
+    let provider = Arc::new(ScriptedProvider::new(test_model()));
+    let agent = Agent::new(AgentOptions {
+        initial_state: pa_agent::agent::AgentInitialState {
+            tools: Some(vec![probe.clone() as Arc<dyn AgentTool>]),
+            ..Default::default()
+        },
+        stream_fn: Some(provider.stream_fn()),
+        auto_background_after: Some(2_500),
+        auto_background_registry: Some(Arc::clone(&registry)),
+        ..Default::default()
+    });
+    agent.set_model(test_model()).await;
+    provider.push_tool_call_turn(
+        None,
+        vec![("call-1", "bash", serde_json::json!({ "command": "true" }))],
+    );
+    provider.push_text_turn("done");
+    agent.prompt("run it").await.unwrap();
+    agent.wait_for_idle().await;
+
+    assert!(
+        probe.armed.load(Ordering::SeqCst),
+        "bash call must be armed"
+    );
+    assert_eq!(probe.window_ms.load(Ordering::SeqCst), 2_500);
+}
+
+#[tokio::test]
+async fn a_zero_window_arms_as_a_zero_arm() {
+    use pa_agent::auto_background::AutoBackgroundRegistry;
+
+    // A ZERO window arms as a zero arm: the loop's disable must reach the
+    // dispatch (a no-arm fall-through would fall back to the tool options'
+    // default window and promote anyway).
+    let registry = Arc::new(AutoBackgroundRegistry::new());
+    let probe = Arc::new(ArmProbeTool {
+        registry: Arc::clone(&registry),
+        armed: std::sync::atomic::AtomicBool::new(false),
+        window_ms: std::sync::atomic::AtomicU64::new(u64::MAX),
+    });
+    let provider = Arc::new(ScriptedProvider::new(test_model()));
+    let agent = Agent::new(AgentOptions {
+        initial_state: pa_agent::agent::AgentInitialState {
+            tools: Some(vec![probe.clone() as Arc<dyn AgentTool>]),
+            ..Default::default()
+        },
+        stream_fn: Some(provider.stream_fn()),
+        auto_background_after: Some(0),
+        auto_background_registry: Some(Arc::clone(&registry)),
+        ..Default::default()
+    });
+    agent.set_model(test_model()).await;
+    provider.push_tool_call_turn(
+        None,
+        vec![("call-2", "bash", serde_json::json!({ "command": "true" }))],
+    );
+    provider.push_text_turn("done");
+    agent.prompt("run it").await.unwrap();
+    agent.wait_for_idle().await;
+    assert!(
+        probe.armed.load(Ordering::SeqCst),
+        "a zero window still arms the bash call"
+    );
+    assert_eq!(probe.window_ms.load(Ordering::SeqCst), 0);
+}

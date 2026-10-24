@@ -322,6 +322,10 @@ pub struct Settings {
     pub transport: Option<TransportSetting>,
     pub steering_mode: Option<QueueModeSetting>,
     pub follow_up_mode: Option<QueueModeSetting>,
+    /// Inline-bash promotion window in milliseconds: an inline `bash` tool
+    /// call still running this long is promoted to a background job
+    /// (`0` disables; unset keeps the 60s default).
+    pub auto_background_after_ms: Option<u64>,
     pub theme: Option<String>,
     pub compaction: Option<CompactionSettings>,
     pub auto_refine: Option<AutoRefineSettings>,

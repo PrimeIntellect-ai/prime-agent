@@ -74,7 +74,13 @@ pub fn record_orphan_process_state(pid: i32, active: bool) {
     let Ok(mut file) = options.open(&path) else {
         return;
     };
-    let _ = writeln!(file, "{record}");
+    // ONE write per record: `writeln!` on a `File` issues one write per fmt
+    // fragment, and concurrent journalers (the kernel lane and promoted
+    // jobs) would interleave their fragments and corrupt both rows.
+    // `O_APPEND` keeps a single sub-PIPE_BUF write atomic.
+    let mut line = record.to_string();
+    line.push('\n');
+    let _ = file.write_all(line.as_bytes());
     let _ = file.sync_all();
 }
 

@@ -28,6 +28,7 @@ impl BashOperations for LocalBashOperations {
         // binding, so partial moves of its fields would borrow-check-fail.
         let ExecOptions {
             on_data,
+            on_spawn,
             signal,
             timeout,
             env,
@@ -63,6 +64,10 @@ impl BashOperations for LocalBashOperations {
             crate::platform::process::set_no_window(&mut process);
 
             let mut child = process.spawn()?;
+
+            if let Some(on_spawn) = on_spawn {
+                on_spawn(child.id());
+            }
 
             let pid = child.id() as i32;
             let stdout = child.stdout.take().expect("piped stdout");

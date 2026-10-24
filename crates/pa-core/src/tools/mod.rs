@@ -1,6 +1,8 @@
 //! All modules are `pub(crate)` internals of the tools subsystem; the
 //! crate facade (crate root) re-exports only the public tool surface.
 
+#[cfg(test)]
+pub(crate) mod auto_background_loop_tests;
 pub(crate) mod bash;
 pub(crate) mod bash_guard;
 pub(crate) mod bash_local;
