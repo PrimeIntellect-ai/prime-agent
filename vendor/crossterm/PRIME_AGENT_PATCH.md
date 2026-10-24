@@ -75,3 +75,13 @@ The test is an inline `#[cfg(test)]` module because only it can reach the privat
 `UnixInternalEventSource::try_read`; cargo does not test a non-member crate in place, so run it from
 a copy of `vendor/crossterm` without the `[[example]]` entries (the examples are not vendored):
 `TERM=xterm-256color cargo test --features event-stream --lib -- a_keystroke_in_the_same_poll`.
+
+# A zero-timeout poll serves every queued console record on Windows (2026-10-23)
+
+`src/event/source/windows.rs` `try_read` checked its timeout after every record, including records
+that map to no event (the `VK_SHIFT`/`VK_CONTROL`/`VK_MENU` key records the console synthesizes
+around each shifted character of a paste). A `poll(Duration::ZERO)` therefore returned `false`
+while input was still queued, and the app reader (`crates/pa-tui/src/input.rs`), which drains one
+terminal write per round until that poll says empty, split a pasted line at its first capital.
+Now a record that produces no event loops straight to the next one while the console still holds
+records; the timeout applies only when the buffer is empty. Upstream crossterm has the same code.

@@ -26,6 +26,17 @@ static PREVIOUS_READER: Mutex<Option<Reader>> = Mutex::new(None);
 /// — an indefinite park would starve its slices), and the fallback when no wake handle exists.
 const POLL_TIMEOUT_MS: u64 = 10;
 
+/// How long a held keystroke burst waits for its next drain round before it is classified
+/// ([`BurstCoalescer`]). Windows only: crossterm reads the console's input records there, never the
+/// VT byte stream, so bracketed paste never reaches the app and a paste arrives as one key press
+/// and release per character, delivered over as many rounds as the console's input pipe splits it
+/// into. Elsewhere one round is one terminal write and the TS per-chunk heuristic stands alone.
+const BURST_CONTINUATION: Duration = if cfg!(windows) {
+    Duration::from_millis(30)
+} else {
+    Duration::ZERO
+};
+
 /// Stop the running reader and join it (the external-editor handoff): the reader must be GONE
 /// before the child editor runs — it keeps polling the tty and would steal the editor's
 /// keystrokes. The stop goes through [`request_reader_stop`] (the #3126 reader parks edge-driven,
@@ -108,8 +119,13 @@ where
     let thread_waker = waker.clone();
     let handle = std::thread::spawn(move || {
         let mut guard = SequenceGuard::default();
+        let mut coalescer = BurstCoalescer::new(BURST_CONTINUATION);
         loop {
             if thread_stop.load(Ordering::Acquire) {
+                // A held burst was read before the stop: deliver it like a drained round.
+                let held = coalescer.take_held();
+                let whole = !crate::enhanced_keys::kitty_probe_pending();
+                let _ = forward_rounds(held, whole, &mut on_input);
                 break;
             }
             // The wait never runs past a held escape sequence's deadline (the guard flushes on the
@@ -118,9 +134,15 @@ where
             // Kitty setup and its answer window: an indefinite park before the first draw
             // would hold crossterm's reader lock and prevent the deferred probe from reading replies.
             // While the probe shares the lock, a zero-timeout poll can miss it and end the drain
-            // mid-write: a round marks its chunk end only when no probe ran around it.
+            // mid-write: a round marks its chunk end only when no probe ran around it. A held
+            // burst's continuation deadline bounds the wait like a held sequence's.
             let probe_pending = crate::enhanced_keys::kitty_probe_pending();
-            let timeout = guard.poll_deadline(Instant::now()).or_else(|| {
+            let now = Instant::now();
+            let held_deadline = match (guard.poll_deadline(now), coalescer.poll_deadline(now)) {
+                (Some(sequence), Some(burst)) => Some(sequence.min(burst)),
+                (sequence, burst) => sequence.or(burst),
+            };
+            let timeout = held_deadline.or_else(|| {
                 if thread_waker.is_none() || probe_pending {
                     Some(Duration::from_millis(POLL_TIMEOUT_MS))
                 } else {
@@ -129,9 +151,11 @@ where
             });
             match crossterm::event::poll_opt(timeout) {
                 Ok(false) => {
-                    let outputs = guard.flush_expired(Instant::now());
+                    let now = Instant::now();
+                    let mut rounds = coalescer.flush_expired(now);
+                    rounds.extend(coalescer.push_round(guard.flush_expired(now), now));
                     let whole = !probe_pending && !crate::enhanced_keys::kitty_probe_pending();
-                    if !forward_chunk(outputs, whole, &mut on_input) {
+                    if !forward_rounds(rounds, whole, &mut on_input) {
                         return;
                     }
                 }
@@ -166,8 +190,9 @@ where
                     for event in events {
                         outputs.extend(guard.feed(event, Instant::now()));
                     }
+                    let rounds = coalescer.push_round(outputs, Instant::now());
                     let whole = !probe_pending && !crate::enhanced_keys::kitty_probe_pending();
-                    if !forward_chunk(outputs, whole, &mut on_input) {
+                    if !forward_rounds(rounds, whole, &mut on_input) {
                         return;
                     }
                 }
@@ -196,27 +221,125 @@ fn forward_chunk(
     forward(outputs, on_input) && (!whole || on_input(ReaderInput::ChunkEnd))
 }
 
+/// Holds a marker-less keystroke burst open across drain rounds for [`BURST_CONTINUATION`], so a
+/// paste the input source splits into several rounds is classified as one burst. A round opens a
+/// hold only when it carries two or more text presses and nothing a paste cannot carry: a typed key
+/// is one press per round and passes straight through. Every following plain round within the
+/// window joins the hold and extends it; any other round, or the window expiring, releases the held
+/// rounds as one round, in stream order. A zero window disables the hold.
+struct BurstCoalescer {
+    window: Duration,
+    held: Vec<GuardOutput>,
+    deadline: Option<Instant>,
+}
+
+impl BurstCoalescer {
+    fn new(window: Duration) -> Self {
+        Self {
+            window,
+            held: Vec::new(),
+            deadline: None,
+        }
+    }
+
+    /// The time left before a held burst must be released; `None` when nothing is held.
+    fn poll_deadline(&self, now: Instant) -> Option<Duration> {
+        self.deadline
+            .map(|deadline| deadline.saturating_duration_since(now))
+    }
+
+    /// The held burst as one round once its window has passed.
+    fn flush_expired(&mut self, now: Instant) -> Vec<Vec<GuardOutput>> {
+        match self.deadline {
+            Some(deadline) if now >= deadline => {
+                self.deadline = None;
+                vec![std::mem::take(&mut self.held)]
+            }
+            Some(_) | None => Vec::new(),
+        }
+    }
+
+    /// The held burst as one round regardless of its window (the reader is stopping).
+    fn take_held(&mut self) -> Vec<Vec<GuardOutput>> {
+        match self.deadline.take() {
+            Some(_) => vec![std::mem::take(&mut self.held)],
+            None => Vec::new(),
+        }
+    }
+
+    /// Take one drained round; returns the rounds now ready to forward, in stream order.
+    fn push_round(&mut self, outputs: Vec<GuardOutput>, now: Instant) -> Vec<Vec<GuardOutput>> {
+        let mut ready = self.flush_expired(now);
+        if outputs.is_empty() {
+            return ready;
+        }
+        // A control shortcut (Ctrl+C) is never paste continuation: it must reach dispatch and the
+        // exit guard as a key, so its round releases the hold.
+        let text_presses = burst_text(&outputs)
+            .filter(|(text, _)| !text.chars().any(is_control_shortcut))
+            .map(|(_, presses)| presses);
+        if self.deadline.is_some() {
+            if text_presses.is_some() {
+                self.held.extend(outputs);
+                self.deadline = Some(now + self.window);
+            } else {
+                self.deadline = None;
+                ready.push(std::mem::take(&mut self.held));
+                ready.push(outputs);
+            }
+        } else if !self.window.is_zero() && text_presses.is_some_and(|presses| presses >= 2) {
+            self.held = outputs;
+            self.deadline = Some(now + self.window);
+        } else {
+            ready.push(outputs);
+        }
+        ready
+    }
+}
+
+/// A control byte other than the line breaks and tab a paste carries.
+fn is_control_shortcut(c: char) -> bool {
+    c.is_control() && !matches!(c, '\r' | '\n' | '\t')
+}
+
+/// [`forward_chunk`] each ready round in order; `false` when the surface stopped the reader.
+fn forward_rounds(
+    rounds: Vec<Vec<GuardOutput>>,
+    whole: bool,
+    on_input: &mut dyn FnMut(ReaderInput) -> bool,
+) -> bool {
+    rounds
+        .into_iter()
+        .all(|round| forward_chunk(round, whole, on_input))
+}
+
+/// The burst reading of one round: the text a paste would carry and its count of text presses, or
+/// `None` when the round holds anything a paste cannot carry. Key releases are transparent: the
+/// Windows console reports a release for every pasted key, and dispatch drops them anyway.
+fn burst_text(outputs: &[GuardOutput]) -> Option<(String, usize)> {
+    let mut text = String::new();
+    let mut presses = 0;
+    for output in outputs {
+        match output {
+            GuardOutput::Event(event) if is_key_release(event) => {}
+            GuardOutput::Event(event) => {
+                text.push_str(&printable_text(event)?);
+                presses += 1;
+            }
+            // A reassembled report breaks the burst like a parsed mouse event.
+            GuardOutput::Mouse(_) => return None,
+        }
+    }
+    Some((text, presses))
+}
+
 /// Deliver one drained round to the surface: a whole-write burst that reconstructs to marker-less
 /// multi-line text coalesces into one [`ReaderInput::BurstPaste`]; everything else passes the TS
 /// dispatch filters and forwards input by input. Returns `false` when the surface stopped the
 /// reader.
 fn forward(outputs: Vec<GuardOutput>, on_input: &mut dyn FnMut(ReaderInput) -> bool) -> bool {
-    if !outputs.is_empty() {
-        let mut text = String::new();
-        let mut burst_is_plain_text = true;
-        for output in &outputs {
-            match output {
-                GuardOutput::Event(event) => match printable_text(event) {
-                    Some(chunk) => text.push_str(&chunk),
-                    None => burst_is_plain_text = false,
-                },
-                // A reassembled report breaks the burst like a parsed mouse event.
-                GuardOutput::Mouse(_) => burst_is_plain_text = false,
-            }
-        }
-        if burst_is_plain_text && is_raw_multiline_paste(&text) {
-            return on_input(ReaderInput::BurstPaste(text));
-        }
+    if let Some((text, _)) = burst_text(&outputs).filter(|(text, _)| is_raw_multiline_paste(text)) {
+        return on_input(ReaderInput::BurstPaste(text));
     }
     // The dispatch filters run after the guard — a reassembled sequence can complete mid-round, and
     // its synthesized form must pass them like a parsed event. Mouse reports keep their stream
@@ -476,6 +599,10 @@ fn plain_press_char(event: &Event) -> Option<char> {
 /// Enter is `\r` and Ctrl+letters are their control bytes, so the payload byte-matches the
 /// terminal stream. Anything else — mouse reports, resize, escape sequences, modified keys, key
 /// releases — marks the burst as not a raw paste (TS bails on any escape byte).
+///
+/// The Windows console synthesizes each pasted character as the key that types it, modifiers
+/// included: a shifted symbol carries SHIFT, an `AltGr` character carries CONTROL and ALT, and a
+/// bare LF is Ctrl+Enter. Those shapes carry their text too.
 fn printable_text(event: &Event) -> Option<String> {
     let Event::Key(key) = event else {
         return None;
@@ -483,14 +610,25 @@ fn printable_text(event: &Event) -> Option<String> {
     if !matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) {
         return None;
     }
-    let alt_or_meta = key.modifiers.intersects(
-        KeyModifiers::ALT | KeyModifiers::SUPER | KeyModifiers::HYPER | KeyModifiers::META,
-    );
-    if alt_or_meta {
-        return None;
-    }
     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
     let shift = key.modifiers.contains(KeyModifiers::SHIFT);
+    let alt = key.modifiers.contains(KeyModifiers::ALT);
+    if key
+        .modifiers
+        .intersects(KeyModifiers::SUPER | KeyModifiers::HYPER | KeyModifiers::META)
+    {
+        return None;
+    }
+    if alt {
+        // AltGr is CONTROL+ALT on Windows; the character it produced is the text. A letter under
+        // the same chord is a real Ctrl+Alt binding.
+        return match key.code {
+            KeyCode::Char(c) if ctrl && !c.is_ascii_alphabetic() && !c.is_control() => {
+                Some(c.to_string())
+            }
+            _ => None,
+        };
+    }
     match key.code {
         KeyCode::Char(c) => {
             if ctrl {
@@ -503,13 +641,16 @@ fn printable_text(event: &Event) -> Option<String> {
                 } else {
                     None
                 }
-            } else if !shift || c.is_uppercase() {
+            } else if !shift || !c.is_lowercase() {
+                // A shifted lowercase letter is a modified key, not text; an uppercase letter or
+                // a shifted symbol is the character itself.
                 Some(c.to_string())
             } else {
                 None
             }
         }
         KeyCode::Enter if !ctrl && !shift => Some("\r".to_string()),
+        KeyCode::Enter if ctrl && !shift => Some("\n".to_string()),
         KeyCode::Tab if !ctrl && !shift => Some("\t".to_string()),
         _ => None,
     }
@@ -576,6 +717,20 @@ mod tests {
             printable_text(&key(KeyCode::Char('I'), M::CONTROL)),
             Some("\t".into())
         );
+        // The Windows console's synthesized paste keys: a shifted symbol, an AltGr character,
+        // and a bare LF.
+        assert_eq!(
+            printable_text(&key(KeyCode::Char('!'), M::SHIFT)),
+            Some("!".into())
+        );
+        assert_eq!(
+            printable_text(&key(KeyCode::Char('@'), M::CONTROL | M::ALT)),
+            Some("@".into())
+        );
+        assert_eq!(
+            printable_text(&key(KeyCode::Enter, M::CONTROL)),
+            Some("\n".into())
+        );
     }
 
     #[test]
@@ -586,6 +741,11 @@ mod tests {
         assert_eq!(printable_text(&key(KeyCode::Char('a'), M::SHIFT)), None);
         assert_eq!(printable_text(&key(KeyCode::Left, M::CONTROL)), None);
         assert_eq!(printable_text(&key(KeyCode::Esc, M::NONE)), None);
+        // A Ctrl+Alt letter is a binding, never AltGr text.
+        assert_eq!(
+            printable_text(&key(KeyCode::Char('a'), M::CONTROL | M::ALT)),
+            None
+        );
         // Mouse and resize events break the burst (TS bails on any ESC).
         assert_eq!(printable_text(&Event::Resize(80, 24)), None);
     }
@@ -1001,5 +1161,198 @@ mod tests {
         assert!(guard
             .flush_expired(now + crate::sequence_guard::HOLD)
             .is_empty());
+    }
+
+    /// One pasted character the way crossterm reads it from the Windows console: the key that
+    /// types it (SHIFT for capitals and shifted symbols, Enter for a line break), then its release.
+    fn windows_key_records(c: char) -> [GuardOutput; 2] {
+        let (code, modifiers) = match c {
+            '\r' | '\n' => (KeyCode::Enter, KeyModifiers::NONE),
+            c if c.is_uppercase() || "!@#$%^&*()_+{}|:\"<>?~".contains(c) => {
+                (KeyCode::Char(c), KeyModifiers::SHIFT)
+            }
+            c => (KeyCode::Char(c), KeyModifiers::NONE),
+        };
+        [
+            GuardOutput::Event(key_with_kind(code, modifiers, KeyEventKind::Press)),
+            GuardOutput::Event(key_with_kind(code, modifiers, KeyEventKind::Release)),
+        ]
+    }
+
+    fn windows_paste(text: &str) -> Vec<GuardOutput> {
+        text.chars().flat_map(windows_key_records).collect()
+    }
+
+    /// Drive the coalescer the way the reader does: each round lands at its offset (ms), then the
+    /// reader idles past every deadline. Returns what reached the surface.
+    fn drive(window: Duration, rounds: Vec<(u64, Vec<GuardOutput>)>) -> Vec<ReaderInput> {
+        let start = Instant::now();
+        let mut coalescer = BurstCoalescer::new(window);
+        let mut inputs = Vec::new();
+        let mut sink = |input: ReaderInput| {
+            inputs.push(input);
+            true
+        };
+        for (offset, round) in rounds {
+            let ready = coalescer.push_round(round, start + Duration::from_millis(offset));
+            assert!(forward_rounds(ready, false, &mut sink));
+        }
+        let idle = start + Duration::from_secs(60);
+        assert!(forward_rounds(
+            coalescer.flush_expired(idle),
+            false,
+            &mut sink
+        ));
+        assert_eq!(coalescer.poll_deadline(idle), None);
+        inputs
+    }
+
+    const WINDOWS_WINDOW: Duration = Duration::from_millis(30);
+
+    /// Discussions #3690 / #3465: a Windows paste reaches the reader as press+release pairs with
+    /// SHIFT on capitals and symbols. The whole paste in one round is one paste, not one message
+    /// per line.
+    #[test]
+    fn a_windows_console_paste_in_one_round_is_one_paste() {
+        let text = "Fix the bug!\rThen run: cargo test\rDone.";
+        assert_eq!(
+            collect_forwarded(windows_paste(text)),
+            vec![ReaderInput::BurstPaste(text.into())]
+        );
+    }
+
+    /// The console input pipe can split a paste over several drain rounds, including right before
+    /// a line break; the coalescer joins them so no Enter ever dispatches as a submit.
+    #[test]
+    fn a_windows_paste_split_across_rounds_is_one_paste() {
+        let text = "first line\rSecond line\rthird";
+        let records = windows_paste(text);
+        // Split right before the first Enter press and inside the second line.
+        let enter_at = 2 * "first line".len();
+        let mid_second = enter_at + 2 * 5;
+        let rounds = vec![
+            (0, records[..enter_at].to_vec()),
+            (4, records[enter_at..mid_second].to_vec()),
+            (9, records[mid_second..].to_vec()),
+        ];
+        assert_eq!(
+            drive(WINDOWS_WINDOW, rounds),
+            vec![ReaderInput::BurstPaste(text.into())]
+        );
+    }
+
+    /// Typing on Windows is one key per round: nothing is held, and Enter dispatches as a key.
+    #[test]
+    fn typed_windows_keys_pass_straight_through() {
+        let mut coalescer = BurstCoalescer::new(WINDOWS_WINDOW);
+        let now = Instant::now();
+        for c in ['h', 'i', '\r'] {
+            let [press, release] = windows_key_records(c);
+            for record in [press, release] {
+                assert_eq!(
+                    coalescer.push_round(vec![record.clone()], now),
+                    vec![vec![record]]
+                );
+            }
+        }
+        assert_eq!(coalescer.poll_deadline(now), None);
+    }
+
+    /// A non-text round releases the held burst first, in stream order; a single-line burst
+    /// stays keystrokes.
+    #[test]
+    fn a_key_round_releases_the_held_burst_in_order() {
+        let _guard = crate::enhanced_keys::TEST_STATE_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        crate::enhanced_keys::set_kitty_active_for_tests(false);
+        let up = GuardOutput::Event(key(KeyCode::Up, KeyModifiers::NONE));
+        let inputs = drive(
+            WINDOWS_WINDOW,
+            vec![(0, windows_paste("ab")), (5, vec![up])],
+        );
+        assert_eq!(
+            inputs,
+            vec![
+                ReaderInput::Event(key(KeyCode::Char('a'), KeyModifiers::NONE)),
+                ReaderInput::Event(key(KeyCode::Char('b'), KeyModifiers::NONE)),
+                ReaderInput::Event(key(KeyCode::Up, KeyModifiers::NONE)),
+            ]
+        );
+    }
+
+    /// A round that lands after the window closed starts fresh: the earlier burst was already
+    /// complete.
+    #[test]
+    fn a_round_after_the_window_is_not_joined() {
+        let _guard = crate::enhanced_keys::TEST_STATE_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        crate::enhanced_keys::set_kitty_active_for_tests(false);
+        let enter = GuardOutput::Event(key(KeyCode::Enter, KeyModifiers::NONE));
+        let inputs = drive(
+            WINDOWS_WINDOW,
+            vec![(0, windows_paste("ok")), (500, vec![enter])],
+        );
+        assert_eq!(
+            inputs,
+            vec![
+                ReaderInput::Event(key(KeyCode::Char('o'), KeyModifiers::NONE)),
+                ReaderInput::Event(key(KeyCode::Char('k'), KeyModifiers::NONE)),
+                ReaderInput::Event(key(KeyCode::Enter, KeyModifiers::NONE)),
+            ]
+        );
+    }
+
+    /// Off Windows the window is zero: every round is classified alone (TS per-chunk parity).
+    #[test]
+    fn a_zero_window_classifies_each_round_alone() {
+        let first = vec![
+            GuardOutput::Event(key(KeyCode::Char('x'), KeyModifiers::NONE)),
+            GuardOutput::Event(key(KeyCode::Char('y'), KeyModifiers::NONE)),
+        ];
+        let second = vec![
+            GuardOutput::Event(key(KeyCode::Enter, KeyModifiers::NONE)),
+            GuardOutput::Event(key(KeyCode::Char('z'), KeyModifiers::NONE)),
+        ];
+        let mut coalescer = BurstCoalescer::new(Duration::ZERO);
+        let now = Instant::now();
+        assert_eq!(coalescer.push_round(first.clone(), now), vec![first]);
+        assert_eq!(coalescer.push_round(second.clone(), now), vec![second]);
+        assert_eq!(coalescer.poll_deadline(now), None);
+    }
+
+    /// A Ctrl+C round during a held paste releases the paste and still dispatches as a key (the
+    /// exit guard and interrupt see it).
+    #[test]
+    fn a_ctrl_c_round_is_never_joined_to_a_held_paste() {
+        let _guard = crate::enhanced_keys::TEST_STATE_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        crate::enhanced_keys::set_kitty_active_for_tests(false);
+        let ctrl_c = GuardOutput::Event(key(KeyCode::Char('c'), KeyModifiers::CONTROL));
+        let inputs = drive(
+            WINDOWS_WINDOW,
+            vec![(0, windows_paste("a\rb")), (5, vec![ctrl_c])],
+        );
+        assert_eq!(
+            inputs,
+            vec![
+                ReaderInput::BurstPaste("a\rb".into()),
+                ReaderInput::Event(key(KeyCode::Char('c'), KeyModifiers::CONTROL)),
+            ]
+        );
+    }
+
+    /// A reader stop inside the window hands the held burst over instead of dropping it.
+    #[test]
+    fn a_stop_takes_the_held_burst() {
+        let mut coalescer = BurstCoalescer::new(WINDOWS_WINDOW);
+        let now = Instant::now();
+        let paste = windows_paste("a\rb");
+        assert!(coalescer.push_round(paste.clone(), now).is_empty());
+        assert_eq!(coalescer.take_held(), vec![paste]);
+        assert_eq!(coalescer.poll_deadline(now), None);
+        assert!(coalescer.take_held().is_empty());
     }
 }
