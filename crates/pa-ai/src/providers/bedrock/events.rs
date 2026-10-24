@@ -61,11 +61,11 @@ impl BedrockStreamState {
 }
 
 /// On the wire the payload is the bare event body and `:event-type` names it; the handlers read the
-/// SDK's wrapped form `{"<eventType>": {...}}`, so wrap it unless it already is (or it is an
-/// exception, which carries its own header).
+/// SDK's wrapped form `{"<eventType>": {...}}`, so wrap it as the SDK does (exceptions carry their
+/// own header and stay bare).
 fn wrap_event_payload(event_type: Option<&str>, is_exception: bool, parsed: Value) -> Value {
     match event_type {
-        Some(event_type) if !is_exception && parsed.get(event_type).is_none() => {
+        Some(event_type) if !is_exception => {
             let mut wrapped = Map::new();
             wrapped.insert(event_type.to_string(), parsed);
             Value::Object(wrapped)
@@ -607,15 +607,11 @@ mod tests {
     }
 
     #[test]
-    fn wrapped_exception_and_headerless_payloads_pass_through() {
+    fn event_payloads_are_wrapped_and_exception_and_headerless_payloads_pass_through() {
         let bare = json!({"contentBlockIndex": 0, "delta": {"text": "hi"}});
         let wrapped = json!({"contentBlockDelta": bare});
         assert_eq!(
             wrap_event_payload(Some("contentBlockDelta"), false, bare.clone()),
-            wrapped
-        );
-        assert_eq!(
-            wrap_event_payload(Some("contentBlockDelta"), false, wrapped.clone()),
             wrapped
         );
         assert_eq!(
