@@ -9,6 +9,28 @@ use pa_core::session_engine::auto_refine_trigger::CompactAutoRefineSurface;
 use crate::agent_engine::AgentSessionEngine;
 
 impl AgentSessionEngine {
+    pub(crate) fn report_background_refinement(
+        &self,
+        pending: tokio::task::JoinHandle<
+            anyhow::Result<pa_core::session_engine::refine::CommittedRefinement>,
+        >,
+    ) {
+        let sink = self.refinement_completion_sink.lock().unwrap().clone();
+        if let Some(sink) = sink {
+            sink(pending);
+        } else {
+            // Non-worker hosts can omit the stream sink; durable core rows still
+            // persist. Observe errors instead of silently discarding the task.
+            self.runtime.spawn(async move {
+                match pending.await {
+                    Ok(Ok(_)) => {}
+                    Ok(Err(error)) => eprintln!("pa-daemon: refinement failed: {error:#}"),
+                    Err(error) => eprintln!("pa-daemon: refinement task failed: {error}"),
+                }
+            });
+        }
+    }
+
     /// Whether a compaction armed the compact-trigger review on the built
     /// session (TS `_compactAutoRefinePending`).
     pub(crate) fn compact_auto_refine_pending(&self) -> bool {
@@ -416,82 +438,51 @@ mod tests {
     }
 
     #[test]
-    fn refine_session_command_emits_the_refine_events() {
+    fn refine_session_command_hands_completion_off_the_turn_runner() {
         let _faux = FAUX_TEST_LOCK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let plan = r#"{"summary":"one edit","edits":[{"action":"create","kind":"memory","id":"m1","title":"t","content":"c"}]}"#;
-        let (engine, _dir) = trigger_engine(&json!({ "responses": [ {"text": plan} ] }), 1, true);
-        let mut events: Vec<EngineEvent> = Vec::new();
-        let execution = crate::session_commands::run_session_command(
-            &engine,
-            &refine_command(),
-            &[],
-            &mut |event| {
-                events.push(event);
-                true
-            },
-        );
-        assert!(execution.is_some(), "the /refine command ran");
-        let results: Vec<&serde_json::Value> = events
-            .iter()
-            .filter_map(|event| match event {
-                EngineEvent::RefineComplete { result } => Some(result),
-                _ => None,
-            })
-            .collect();
-        assert_eq!(results.len(), 1, "events: {events:?}");
-        assert_eq!(results[0]["summary"], "one edit");
-        assert_eq!(results[0]["appliedEdits"][0]["applied"], json!(true));
-        let complete_index = events
-            .iter()
-            .position(|event| matches!(event, EngineEvent::RefineComplete { .. }))
-            .expect("the complete event");
-        let result_row_index = events
-            .iter()
-            .rposition(|event| matches!(
-                event,
-                EngineEvent::CustomMessage(row) if row["customType"] == "session_slash_command_result"
-            ))
-            .expect("the result row");
-        assert!(
-            complete_index < result_row_index,
-            "the event precedes the result row: {events:?}"
-        );
-        assert!(
-            events
-                .iter()
-                .all(|event| !matches!(event, EngineEvent::RefineFailed { .. })),
-            "a successful run emits no failure: {events:?}"
-        );
-
-        let (engine, _dir) =
-            trigger_engine(&json!({ "responses": [ {"text": "not json"} ] }), 1, true);
-        let mut events: Vec<EngineEvent> = Vec::new();
-        crate::session_commands::run_session_command(
-            &engine,
-            &refine_command(),
-            &[],
-            &mut |event| {
-                events.push(event);
-                true
-            },
-        );
-        let errors: Vec<String> = events
-            .iter()
-            .filter_map(|event| match event {
-                EngineEvent::RefineFailed { error } => Some(error.clone()),
-                _ => None,
-            })
-            .collect();
-        assert_eq!(errors.len(), 1, "events: {events:?}");
-        assert_eq!(errors[0], "Refiner did not return a JSON object");
-        assert!(
-            events
-                .iter()
-                .all(|event| !matches!(event, EngineEvent::RefineComplete { .. })),
-            "a failed run emits no completion: {events:?}"
-        );
+        for (reply, succeeds) in [
+            (
+                r#"{"summary":"one edit","edits":[{"action":"create","kind":"memory","id":"m1","title":"t","content":"c"}]}"#,
+                true,
+            ),
+            ("not json", false),
+        ] {
+            let (engine, _dir) =
+                trigger_engine(&json!({ "responses": [{"text": reply}] }), 1, true);
+            let (send, receive) = std::sync::mpsc::channel();
+            *engine.refinement_completion_sink.lock().unwrap() =
+                Some(std::sync::Arc::new(move |pending| {
+                    send.send(pending).unwrap();
+                }));
+            let mut events = Vec::new();
+            let execution = crate::session_commands::run_session_command(
+                &engine,
+                &refine_command(),
+                &[],
+                &mut |event| {
+                    events.push(event);
+                    true
+                },
+            )
+            .expect("slash command returns after scheduling");
+            assert!(execution.error.is_none());
+            let pending = receive
+                .try_recv()
+                .expect("completion handed to background sink");
+            let committed = engine.runtime.block_on(pending).unwrap();
+            if succeeds {
+                let result = committed.unwrap();
+                assert_eq!(result.result.summary, "one edit");
+                assert!(result.result.applied_edits[0].applied);
+            } else {
+                assert_eq!(
+                    committed.unwrap_err().to_string(),
+                    "Refiner did not return a JSON object"
+                );
+            }
+        }
     }
 
     fn refine_command() -> pa_core::session_engine::slash_commands::SessionSlashCommand {

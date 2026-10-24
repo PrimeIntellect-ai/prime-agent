@@ -143,7 +143,7 @@ pub struct AgentSession {
     auto_refine: refine::AutoRefineGates,
     /// Session-side auto-refine state the transport surfaces arm and
     /// consume.
-    compact_auto_refine: std::sync::Mutex<auto_refine_trigger::CompactAutoRefineState>,
+    compact_auto_refine: Arc<std::sync::Mutex<auto_refine_trigger::CompactAutoRefineState>>,
     /// The kernel-state probe behind the post-compaction
     /// `ipython_state` notice; `None` without a kernel.
     kernel_state: Option<std::sync::Arc<dyn ipython_state::CompactionKernelProbe>>,
@@ -165,7 +165,11 @@ pub struct AgentSession {
     /// One compaction at a time: a second `compact` waits for the
     /// in-flight run and prepares against its result; reads and writes
     /// keep using the session lock meanwhile.
-    compaction_flight: tokio::sync::Mutex<()>,
+    compaction_flight: Arc<tokio::sync::Mutex<()>>,
+    /// Refinement runs currently planning or committing (`refine.status`'s
+    /// `in_flight`): every run holds its flight guard for its whole body.
+    refinements_in_flight: Arc<std::sync::atomic::AtomicUsize>,
+    refinement_cancel: std::sync::Mutex<pa_agent::abort::AbortController>,
     /// The session's semantic-edge recorder (TS
     /// `AgentSession._semanticEdges`): `None` in sessions the engine
     /// built without a semantic identity (verification harnesses
@@ -243,7 +247,7 @@ impl AgentSession {
             auto_refine_allowed: false,
             refinement_settings: None,
             auto_refine: refine::AutoRefineGates::default(),
-            compact_auto_refine: std::sync::Mutex::default(),
+            compact_auto_refine: Arc::default(),
             kernel_state: None,
             pending_next_turn_rows: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
             skills: Vec::new(),
@@ -253,7 +257,9 @@ impl AgentSession {
             semantic_edges: std::sync::Mutex::new(None),
             side_question_stream_fn: std::sync::Mutex::new(None),
             agent_dir: None,
-            compaction_flight: tokio::sync::Mutex::new(()),
+            compaction_flight: Arc::new(tokio::sync::Mutex::new(())),
+            refinements_in_flight: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            refinement_cancel: std::sync::Mutex::default(),
         };
         this.ensure_harness_digest_context().await?;
         Ok(this)
@@ -523,3 +529,12 @@ mod compaction_outcome_tests;
 
 #[cfg(test)]
 mod compaction_unblocked_tests;
+
+impl Drop for AgentSession {
+    fn drop(&mut self) {
+        self.refinement_cancel
+            .get_mut()
+            .expect("refinement cancellation lock")
+            .abort();
+    }
+}

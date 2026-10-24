@@ -1564,6 +1564,7 @@ async fn run_prompts_and_emit(
                 api_key.clone(),
                 global_harness_dir.clone(),
                 &autonomous_state,
+                &mut boundary,
                 &command,
                 &images,
             )
@@ -1774,10 +1775,15 @@ async fn run_prompts_and_emit(
         exit_code = 1;
     }
     // The disposal order: the exit code first, then the teardown drains a
-    // compact-trigger auto-refine no later boundary consumed.
+    // compact-trigger auto-refine no later boundary consumed. A `/refine`
+    // command plans in the background, so its failure joins the exit code
+    // only once the drain has awaited it (both output modes).
     boundary
         .drain_compact_auto_refine_at_disposal(engine, model, api_key, global_harness_dir)
         .await;
+    if boundary.refine_command_failed() {
+        exit_code = 1;
+    }
     Ok(exit_code)
 }
 

@@ -78,6 +78,8 @@ fn manual_compaction_end_unsuccessful(
 
 /// Execute one session command and stream its surface. The driver owns the exit
 /// contract: the execution's `error` field carries the raw failure (stderr, exit 1).
+/// A `/refine` hands its background planning to `boundary` — the same disposal
+/// drain that finishes every other in-flight refinement.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn execute_prompt_session_command(
     engine: &Arc<SessionEngine>,
@@ -86,6 +88,7 @@ pub(crate) async fn execute_prompt_session_command(
     api_key: Option<String>,
     global_harness_dir: std::path::PathBuf,
     autonomous: &Arc<tokio::sync::Mutex<AutonomousRuntimeState>>,
+    boundary: &mut crate::print_boundary::TurnBoundary,
     command: &SessionSlashCommand,
     images: &[pa_agent::types::ImageContent],
 ) -> SessionCommandExecution {
@@ -103,10 +106,7 @@ pub(crate) async fn execute_prompt_session_command(
         }
         goal.emit_stream_event(&event);
     }
-    // The refinement rows the executor's refine run appends (streamed in TS order
-    // ahead of `refine_complete`).
-    let entries_before = engine.session.entries().await.len();
-    let execution = {
+    let mut execution = {
         let mut autonomous = autonomous.lock().await;
         let mut params = SessionCommandParams {
             model,
@@ -143,22 +143,8 @@ pub(crate) async fn execute_prompt_session_command(
         };
         goal.emit_stream_event(&end);
     }
-    // `/refine`: the durable refinement rows stream as message pairs, then
-    // `refine_complete` (or `refine_failed`), before the result row.
-    if command.name == "refine" {
-        for row in
-            crate::print_boundary::TurnBoundary::refinement_rows_since(engine, entries_before).await
-        {
-            goal.emit_row_pair(&row);
-        }
-        if let Some(error) = &execution.refinement_failed {
-            goal.emit_stream_event(&json!({ "type": "refine_failed", "error": error }));
-        } else if let Some(result) = &execution.refinement {
-            goal.emit_stream_event(&json!({
-                "type": "refine_complete",
-                "result": serde_json::to_value(result).unwrap_or(Value::Null),
-            }));
-        }
+    if let Some(pending) = execution.pending_refinement.take() {
+        boundary.report_background_refinement(pending, /*fails_run*/ true);
     }
     // `/goal`: the state change publishes unconditionally, before the queue frame of a scheduled
     // continuation.
@@ -400,6 +386,7 @@ mod tests {
 
     /// The driver's session-command branch (`print_runtime`'s loop body).
     async fn run_command(bed: &Bed, text: &str) -> Option<String> {
+        let mut boundary = TurnBoundary::new(false);
         let execution = execute_prompt_session_command(
             &bed.engine,
             &bed.goal,
@@ -407,6 +394,7 @@ mod tests {
             None,
             bed.harness_dir.clone(),
             &bed.autonomous,
+            &mut boundary,
             &command(text),
             &[],
         )
@@ -415,7 +403,6 @@ mod tests {
             return execution.error;
         }
         if let Some(continuation) = execution.continuation_message {
-            let mut boundary = TurnBoundary::new(false);
             bed.goal
                 .run_session_command_continuation(
                     &bed.engine,
@@ -428,7 +415,6 @@ mod tests {
                 .await
                 .unwrap();
         }
-        let mut boundary = TurnBoundary::new(false);
         bed.goal
             .drive_boundary(
                 &bed.engine,

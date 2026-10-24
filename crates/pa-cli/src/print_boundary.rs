@@ -39,6 +39,9 @@ type EventSink = std::sync::Arc<dyn Fn(&serde_json::Value) + Send + Sync>;
 /// compact-trigger auto-refine bookkeeping, and the json/text output mode.
 pub(crate) struct TurnBoundary {
     recovery: OverflowRecovery,
+    refinement_reports: Vec<tokio::task::JoinHandle<()>>,
+    /// Set by a failed `/refine` command's report: the print run exits 1.
+    refine_command_failed: std::sync::Arc<std::sync::atomic::AtomicBool>,
     /// A successful compaction schedules the compact-trigger auto-refine
     /// review for the next serialized checkpoint (or the disposal drain).
     compact_auto_refine_pending: bool,
@@ -61,6 +64,8 @@ impl TurnBoundary {
     pub(crate) fn new(json_mode: bool) -> Self {
         Self {
             recovery: OverflowRecovery::Idle,
+            refinement_reports: Vec::new(),
+            refine_command_failed: std::sync::Arc::default(),
             compact_auto_refine_pending: false,
             last_auto_refine_review_at: None,
             assistant_turns_since_review: 0,
@@ -76,6 +81,8 @@ impl TurnBoundary {
     pub(crate) fn with_sink(json_mode: bool, sink: EventSink) -> Self {
         Self {
             recovery: OverflowRecovery::Idle,
+            refinement_reports: Vec::new(),
+            refine_command_failed: std::sync::Arc::default(),
             compact_auto_refine_pending: false,
             last_auto_refine_review_at: None,
             assistant_turns_since_review: 0,
@@ -137,8 +144,7 @@ impl TurnBoundary {
             api_key.clone(),
             global_harness_dir.clone(),
             RefineSurface::Checkpoint,
-        )
-        .await?;
+        );
         let arm_finished = loop {
             let outcome = self
                 .overflow_recovery_attempt(
@@ -155,8 +161,7 @@ impl TurnBoundary {
                     api_key.clone(),
                     global_harness_dir.clone(),
                     RefineSurface::Checkpoint,
-                )
-                .await?;
+                );
             } else {
                 break matches!(outcome, OverflowOutcome::Finished);
             }
@@ -167,13 +172,11 @@ impl TurnBoundary {
         }
         // The requested refinement runs whenever the turn did not
         // re-issue (a retried turn consumes it at its own boundary).
-        let entries_before = engine.session.entries().await.len();
-        if let Some(outcome) = engine
-            .consume_pending_refinement(model, api_key, global_harness_dir)
+        if let Some(pending) = engine
+            .start_pending_refinement(model, api_key, global_harness_dir)
             .await
         {
-            self.stream_refinement_outcome(engine, &outcome, entries_before, true, "requested")
-                .await;
+            self.report_background_refinement(pending, /*fails_run*/ false);
         }
         Ok(())
     }

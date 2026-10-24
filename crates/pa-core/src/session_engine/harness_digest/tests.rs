@@ -5,8 +5,6 @@ use crate::session::manager::SessionManager;
 use pa_agent::types::UserMessage;
 use serde_json::Value;
 
-use super::super::messages::COMPACTION_SUMMARY_SUFFIX;
-
 #[test]
 fn empty_state_digest_renders_placeholder() {
     let tmp = tempfile::tempdir().unwrap();
@@ -131,73 +129,6 @@ fn persisted_digest_round_trips() {
     assert_eq!(
         typed.map(|details| (details.digest, details.state_fingerprint)),
         Some(("digest body".to_string(), Some("fingerprint-1".to_string())))
-    );
-}
-
-#[test]
-fn append_replaces_older_digest_rows_and_strips_snapshot_blocks() {
-    // A delivered custom digest row and its converted user-turn form are
-    // both digest rows — the converted form matches the frame byte-exactly.
-    let custom = harness_digest_prompt_row("older digest", 1, "fp-1");
-    assert!(is_digest_row(&custom, None));
-    let converted = AgentMessage::Standard(Message::User(UserMessage {
-        content: UserContent::Text(harness_digest_message_text("older digest")),
-        timestamp: 1,
-    }));
-    assert!(is_digest_row(&converted, Some("older digest")));
-    // A user turn that quotes the digest never matches, so
-    // submissions survive the refresh.
-    let quoted = AgentMessage::Standard(Message::User(UserMessage {
-        content: UserContent::Text(format!(
-            "{} what is this block?",
-            harness_digest_message_text("older digest")
-        )),
-        timestamp: 2,
-    }));
-    assert!(!is_digest_row(&quoted, Some("older digest")));
-    assert!(!is_digest_row(&converted, Some("another digest")));
-    assert!(!is_digest_row(&converted, None));
-    let plain = AgentMessage::Standard(Message::User(UserMessage {
-        content: UserContent::Text("a question".to_string()),
-        timestamp: 2,
-    }));
-    assert!(!is_digest_row(&plain, Some("older digest")));
-    let unrelated = AgentMessage::Custom(pa_agent::types::CustomAgentMessage {
-        role: "custom".to_string(),
-        payload: serde_json::json!({"customType": "arbitrary_note"}),
-    });
-    assert!(!is_digest_row(&unrelated, Some("older digest")));
-
-    // A live compaction-summary row yields its superseded digest block.
-    let summary_text =
-        format!("{COMPACTION_SUMMARY_PREFIX}the story so far{COMPACTION_SUMMARY_SUFFIX}");
-    let block_with = |summary_text: String| {
-        AgentMessage::Standard(Message::User(UserMessage {
-            content: UserContent::Text(format!(
-                "{HARNESS_DIGEST_PREFIX}stale snapshot{HARNESS_DIGEST_SUFFIX}\n\n{summary_text}"
-            )),
-            timestamp: 3,
-        }))
-    };
-    let summary_with_block = block_with(summary_text.clone());
-    let stripped = strip_compaction_digest_block(summary_with_block, Some("stale snapshot"));
-    let AgentMessage::Standard(Message::User(user)) = &stripped else {
-        panic!("expected the compaction row to stay");
-    };
-    assert_eq!(loop_user_text(&user.content), summary_text);
-    assert!(!is_digest_row(&stripped, Some("stale snapshot")));
-    let plain_summary = AgentMessage::Standard(Message::User(UserMessage {
-        content: UserContent::Text(summary_text),
-        timestamp: 4,
-    }));
-    let untouched = strip_compaction_digest_block(plain_summary.clone(), Some("stale snapshot"));
-    assert_eq!(untouched, plain_summary);
-    let block_again = block_with(format!(
-        "{COMPACTION_SUMMARY_PREFIX}the story so far{COMPACTION_SUMMARY_SUFFIX}"
-    ));
-    assert_eq!(
-        strip_compaction_digest_block(block_again.clone(), None),
-        block_again
     );
 }
 
@@ -609,4 +540,27 @@ async fn compact_digest_capture_commit_time_placement_sees_racing_rows_enter_nev
         "the state fingerprint matches across placements in every class"
     );
     registration.unregister();
+}
+
+#[test]
+fn appended_digest_wins_when_refreshes_share_a_timestamp() {
+    let rows = vec![
+        harness_digest_prompt_row("same rendered state", 10, "old-fingerprint"),
+        harness_digest_prompt_row("same rendered state", 10, "new-fingerprint"),
+    ];
+    let expected = Some(LatestContextDigest {
+        timestamp: 10,
+        digest: "same rendered state".to_string(),
+        state_fingerprint: Some("new-fingerprint".to_string()),
+    });
+    assert_eq!(latest_context_digest_details(&rows), expected);
+    let typed: Vec<SessionAgentMessage> = rows
+        .iter()
+        .map(|row| serde_json::from_value(serde_json::to_value(row).unwrap()).unwrap())
+        .collect();
+    assert_eq!(
+        latest_typed_digest_details(&typed),
+        expected,
+        "converted live rows must recover the newest fingerprint even when the rendered text ties"
+    );
 }

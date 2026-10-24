@@ -66,12 +66,10 @@ pub struct SessionCommandExecution {
     /// The command failed: the TS error message (the failure result row
     /// is already appended to `messages`).
     pub error: Option<String>,
-    /// A refinement run's structured outcome; the result row in
-    /// `messages` stays display-only.
-    pub refinement: Option<crate::refinement::RefinementResult>,
-    /// A refinement run failed: the raw run error (option-parse failures
-    /// leave this `None`; they are command failures, not refinement events).
-    pub refinement_failed: Option<String>,
+    /// Background planning and the eventual idle-boundary commit. Hosts await this
+    /// off their command runner and surface the durable result when it settles.
+    pub pending_refinement:
+        Option<tokio::task::JoinHandle<anyhow::Result<super::refine::CommittedRefinement>>>,
 }
 
 impl SessionCommandExecution {
@@ -178,9 +176,18 @@ pub async fn execute_session_command(
         execution.error = Some(error);
         return execution;
     }
+    if command.name == "refine" {
+        // Append only the new bookkeeping row. Rebuilding from disk here could
+        // resurrect retry-dropped messages and change the cached model prefix.
+        if let Some(message) =
+            super::session_message_to_loop(&pa_types::session::AgentMessage::Custom(echo))
+        {
+            engine.session.agent().append_messages(vec![message]).await;
+        }
+    }
     let result = match command.name {
         "compact" => execute_compact(engine, params, command, &mut execution).await,
-        "refine" => execute_refine(engine, params, command, &mut execution).await,
+        "refine" => execute_refine(engine, params, command, &mut execution),
         "goal" => execute_goal(engine, command, images, &mut execution).await,
         "autonomous" => execute_autonomous(params, command, &mut execution),
         other => Err(format!("Unknown session command: {other}")),
@@ -200,7 +207,21 @@ pub async fn execute_session_command(
     if let Err(error) = persist_rows(engine, execution.messages.iter().skip(1)).await {
         execution.error = Some(error);
     }
-    sync_live_context(engine).await;
+    if command.name == "refine" {
+        let messages = execution
+            .messages
+            .iter()
+            .skip(1)
+            .filter_map(|row| {
+                super::session_message_to_loop(&pa_types::session::AgentMessage::Custom(
+                    row.clone(),
+                ))
+            })
+            .collect();
+        engine.session.agent().append_messages(messages).await;
+    } else {
+        sync_live_context(engine).await;
+    }
     execution
 }
 
@@ -253,8 +274,8 @@ async fn execute_compact(
     Ok(())
 }
 
-/// `/refine`: run the refinement and record the applied-edit count.
-async fn execute_refine(
+/// `/refine`: schedule planning without holding the host command runner.
+fn execute_refine(
     engine: &SessionEngine,
     params: &mut SessionCommandParams<'_>,
     command: &SessionSlashCommand,
@@ -266,39 +287,12 @@ async fn execute_refine(
         instructions: options.instructions,
         rollback_id: options.rollback_id,
     };
-    let result = match engine
-        .session
-        .refine(
-            &refine_options,
-            RefinementSource::User,
-            params.model,
-            params.api_key.take(),
-            params.global_harness_dir.clone(),
-        )
-        .await
-    {
-        Ok(result) => result,
-        Err(error) => {
-            // The refinement run itself failed: a host transport surfaces
-            // this as a refinement event, distinct from the command failure.
-            execution.refinement_failed = Some(format!("{error:#}"));
-            return Err(format!("{error:#}"));
-        }
-    };
-    execution.refinement = Some(result.clone());
-    let applied = result
-        .applied_edits
-        .iter()
-        .filter(|edit| edit.applied)
-        .count();
-    let content = format!(
-        "Refined continual harness state: {applied} edit{} applied.",
-        if applied == 1 { "" } else { "s" }
-    );
-    // The refinement outcome message renders the details; the result row is
-    // durable but not displayed (TS `displayResult = false`).
-    execution.push_message(slash_command_result(
-        command, content, true, "info", None, false,
+    execution.pending_refinement = Some(engine.session.start_refinement(
+        refine_options,
+        RefinementSource::User,
+        params.model.clone(),
+        params.api_key.take(),
+        params.global_harness_dir.clone(),
     ));
     Ok(())
 }
