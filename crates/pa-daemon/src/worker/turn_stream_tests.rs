@@ -29,6 +29,8 @@ fn burst_runner(engine: Arc<dyn SessionEngine>) -> TurnRunner {
         created: false,
         attached_client_ids: Vec::new(),
         abort_requested: false,
+        turn_cancelled: false,
+        turn_completed: false,
         suppress_aborted_row: false,
         shutdown_requested: false,
         compacting: false,
@@ -84,6 +86,7 @@ async fn turn_session_events(engine: Arc<dyn SessionEngine>) -> Vec<Value> {
     runner
         .run_turn(
             engine,
+            Lane::Steering,
             vec![QueuedItem {
                 priority: QueuePriority::Human,
                 preview: None,
@@ -210,6 +213,7 @@ async fn gate_sighting_events(
     runner
         .run_turn(
             engine,
+            Lane::Steering,
             vec![QueuedItem {
                 priority: QueuePriority::Human,
                 preview: None,
@@ -297,6 +301,7 @@ async fn a_turns_tool_executions_count_onto_the_summary() {
     runner
         .run_turn(
             engine,
+            Lane::Steering,
             vec![QueuedItem {
                 priority: QueuePriority::Human,
                 preview: None,
@@ -413,6 +418,7 @@ async fn model_transitions_reach_the_worker_owned_session_file() {
         runner
             .run_turn(
                 engine,
+                Lane::Steering,
                 vec![QueuedItem {
                     priority: QueuePriority::Human,
                     preview: None,
@@ -490,6 +496,7 @@ async fn prompt_restore_boundary_is_supplied_only_for_file_backed_stores() {
         runner
             .run_turn(
                 dynamic,
+                Lane::Steering,
                 vec![QueuedItem {
                     priority: QueuePriority::Human,
                     preview: None,

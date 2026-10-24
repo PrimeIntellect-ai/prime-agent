@@ -15,6 +15,7 @@ async fn the_waiting_prompt_resolves_only_after_the_turn_settles() {
         runner
             .run_turn(
                 engine,
+                Lane::Steering,
                 vec![QueuedItem {
                     priority: QueuePriority::Human,
                     preview: None,
@@ -121,6 +122,7 @@ async fn roster_feed_publishes_live_tool_activity() {
     runner
         .run_turn(
             engine,
+            Lane::Steering,
             vec![QueuedItem {
                 priority: QueuePriority::Human,
                 preview: None,
