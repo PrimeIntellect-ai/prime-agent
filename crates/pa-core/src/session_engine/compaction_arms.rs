@@ -1,4 +1,4 @@
-use super::compact_session::{CompactOutcome, CompactionHookPermit, CompactionTrigger};
+use super::compact_session::{CompactOutcome, CompactionTrigger};
 use super::{
     compaction, compaction_trace, ipython_state, provider_adapter, rebuilt_loop_messages, refine,
     session_message_to_loop, standard_message, AgentMessage, AgentSession, FileEntry,
@@ -174,7 +174,9 @@ impl AgentSession {
         .await
     }
 
-    /// Compact with the origin supplied to the `PreCompact` hook.
+    /// Compact with the origin supplied to the `PreCompact` hook. The hook runs
+    /// here, under whatever guards the host holds for the compaction, and the
+    /// host's `abort` signal cancels it like the summarizer.
     ///
     /// # Errors
     ///
@@ -192,107 +194,27 @@ impl AgentSession {
         abort: Option<&pa_agent::abort::AbortSignal>,
         trigger: CompactionTrigger,
     ) -> anyhow::Result<CompactOutcome> {
-        let permit = self
-            .preflight_compaction_hook(trigger, custom_instructions, model, abort)
-            .await?;
-        self.compact_with_permit(custom_instructions, model, api_key, abort, permit)
-            .await
-    }
-
-    /// Evaluate `PreCompact` before acquiring any transport serialization locks.
-    /// A skipped preflight stays skipped even if the branch grows before consumption.
-    /// Eligible permits revalidate the branch when execution obtains its flight lock.
-    ///
-    /// # Errors
-    ///
-    /// Returns cancellation. Hook vetoes are retained in the permit and reported
-    /// when execution consumes it, preserving normal command transcript handling.
-    pub async fn preflight_compaction_hook(
-        &self,
-        trigger: CompactionTrigger,
-        custom_instructions: Option<&str>,
-        model: &pa_types::ai::Model,
-        abort: Option<&pa_agent::abort::AbortSignal>,
-    ) -> anyhow::Result<CompactionHookPermit> {
         pa_agent::abort::throw_if_aborted_signal(abort)?;
-        let mut permit = CompactionHookPermit {
-            session: std::sync::Arc::clone(&self.session),
-            instructions: custom_instructions.map(str::to_owned),
-            model_id: model.id.clone(),
-            provider: model.provider.clone(),
-            skipped: None,
-            veto: None,
-            abort: abort.cloned(),
-        };
         if self
             .lifecycle_hooks
             .as_ref()
             .is_some_and(|hooks| hooks.might_run_precompact())
         {
-            // No semantic events or external commands under the persistence lock.
+            // An ineligible session skips without running the hook. No
+            // external command runs under the persistence lock.
             {
                 let session = self.session.lock().await;
                 if let Err(skip) = super::compact_session::prepare_compaction(
                     session.retained_entries(),
                     self.compaction_settings().keep_recent_tokens,
                 ) {
-                    permit.skipped = Some(skip.user_message());
-                    return Ok(permit);
+                    return Ok(CompactOutcome::Skipped(skip.user_message()));
                 }
             }
-            pa_agent::abort::throw_if_aborted_signal(abort)?;
-            if let Err(error) = self
-                .before_compaction_hook(trigger, custom_instructions, model, abort)
-                .await
-            {
-                if pa_agent::abort::is_abort_error(&error) {
-                    return Err(error);
-                }
-                // Defer the veto to guarded execution so slash-command echo and
-                // failure rows retain the attempted command in the raw transcript.
-                permit.veto = Some(error);
-            }
+            self.before_compaction_hook(trigger, custom_instructions, model, abort)
+                .await?;
             pa_agent::abort::throw_if_aborted_signal(abort)?;
         }
-        Ok(permit)
-    }
-
-    /// Consume a preflight decision without executing external hooks.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error for a permit from another session or different inputs,
-    /// cancellation, or summarizer/persistence failure.
-    ///
-    /// # Panics
-    ///
-    /// Panics when the compaction summary sink slot's mutex is poisoned.
-    pub async fn compact_with_permit(
-        &self,
-        custom_instructions: Option<&str>,
-        model: &pa_types::ai::Model,
-        api_key: Option<String>,
-        abort: Option<&pa_agent::abort::AbortSignal>,
-        permit: CompactionHookPermit,
-    ) -> anyhow::Result<CompactOutcome> {
-        if !std::sync::Arc::ptr_eq(&self.session, &permit.session)
-            || permit.instructions.as_deref() != custom_instructions
-            || permit.model_id != model.id
-            || permit.provider != model.provider
-        {
-            anyhow::bail!("compaction preflight permit does not match session or inputs");
-        }
-        // The host preflight owns cancellation across the serialization gap.
-        // Legacy executor wrappers may omit an explicit signal at consumption.
-        let abort = abort.or(permit.abort.as_ref());
-        pa_agent::abort::throw_if_aborted_signal(abort)?;
-        if let Some(error) = permit.veto {
-            return Err(error);
-        }
-        if let Some(message) = permit.skipped {
-            return Ok(CompactOutcome::Skipped(message));
-        }
-        pa_agent::abort::throw_if_aborted_signal(abort)?;
         compaction_trace::trace(
             "compact.enter",
             &serde_json::json!({

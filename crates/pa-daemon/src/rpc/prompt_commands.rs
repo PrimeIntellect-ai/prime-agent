@@ -145,12 +145,16 @@ async fn run_session_command(
         // The executor rebuilds session context on its compact branch:
         // serialize against the other context rebuilders.
         let _ops = state.session_ops.lock().await;
+        let compaction = is_compact.then(|| state.manual_compaction_cancel.register());
         let mut autonomous = state.autonomous.lock().await;
         let mut params = SessionCommandParams {
             model: &model,
             api_key: api_key.clone(),
             global_harness_dir: state.agent_dir.clone(),
             autonomous: &mut autonomous,
+            compaction_abort: compaction
+                .as_ref()
+                .map(crate::compaction_cancel::CompactionOperation::signal),
         };
         // The executor never errors out of the call: failures ride
         // `execution.error` and the session events.

@@ -133,8 +133,8 @@ The private lifecycle adapter supplies SessionStart, UserPromptSubmit, Stop and
 PreCompact decisions at cancellable runtime boundaries. Deferred custom rows are
 restored when admission is refused; raw accepted rows remain unchanged. The public
 `engine::SessionEndHook` is a cloneable close handle: hosts snapshot it under their
-selection lock and await it after releasing that lock. `CompactionTrigger`,
-`compact_with_trigger`, `CompactionHookPermit`, `preflight_compaction_hook` and
-`compact_with_permit` let hosts run commands before taking their operation locks,
-then consume a session-bound permit inside the existing serialized compaction
-path. These public APIs introduce no dependency edges or new dependencies.
+selection lock and await it after releasing that lock. `CompactionTrigger` and
+`compact_with_trigger` run PreCompact inside the existing serialized compaction
+path, cancelled by the host's compaction abort signal; `SessionCommandParams`
+carries that signal for `/compact`. These public APIs introduce no dependency
+edges or new dependencies.

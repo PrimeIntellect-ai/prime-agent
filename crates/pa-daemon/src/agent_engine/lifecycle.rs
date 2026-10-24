@@ -4,7 +4,7 @@
 use std::sync::atomic::Ordering;
 
 use super::{
-    execute_session_command_with_compaction_permit, json_round_trip, map_thinking_level,
+    execute_session_command, json_round_trip, map_thinking_level,
     register_agent_message_host_handlers, register_agent_observe_host_handlers,
     switchable_stream_fn, AgentEngineConfig, AgentSessionEngine, Arc, CoreSessionEngine,
     EngineModelSelection, HostRequestHandlers, LinkAgentMessageController,
@@ -193,7 +193,6 @@ impl AgentSessionEngine {
             reloaded_goal_update: std::sync::Mutex::new(None),
             faux_model: std::sync::OnceLock::new(),
             overflow_recovery: std::sync::Mutex::new(OverflowRecovery::default()),
-            manual_compaction_cancel: crate::compaction_cancel::CompactionCancellation::default(),
             auto_compaction_abort: std::sync::Mutex::new(None),
             compaction_summary_sink: std::sync::Mutex::new(None),
             progress_notes: std::sync::Mutex::new(None),
@@ -901,56 +900,43 @@ impl AgentSessionEngine {
         &self,
         command: &pa_core::session_engine::slash_commands::SessionSlashCommand,
         images: &[pa_agent::types::ImageContent],
-        aborted: &dyn Fn() -> bool,
     ) -> anyhow::Result<SessionCommandExecution> {
-        let operation =
-            (command.name == "compact").then(|| self.manual_compaction_cancel.register());
-        if aborted() {
-            return Err(pa_agent::abort::aborted_error());
-        }
         let model = self.session_model()?;
         self.ensure_core_session(&model)?;
         let api_key = self.resolve_request_api_key(&model);
-        let core = self
-            .session
-            .blocking_lock()
-            .clone()
-            .expect("session built by ensure_core_session");
-        let permit = if let Some(operation) = &operation {
-            let signal = operation.signal();
-            if aborted() {
-                return Err(pa_agent::abort::aborted_error());
-            }
-            Some(
-                self.runtime
-                    .block_on(core.session.preflight_compaction_hook(
-                        pa_core::session_engine::compact_session::CompactionTrigger::Manual,
-                        (!command.args.is_empty()).then_some(command.args.as_str()),
-                        &model,
-                        Some(&signal),
-                    ))?,
-            )
-        } else {
-            None
-        };
-        // External commands completed before taking the autonomous guard. The
-        // one-use permit carries cancellation through the actual compaction.
+        // Typed `/compact` takes the compaction abort slot for its run, so
+        // `abort_compaction` and the shutdown/replacement aborts cancel it
+        // (summarizer and PreCompact hook) like an automatic compaction.
+        let controller = (command.name == "compact")
+            .then(|| std::sync::Arc::new(pa_agent::abort::AbortController::new()));
+        if let Some(controller) = &controller {
+            *self
+                .auto_compaction_abort
+                .lock()
+                .expect("auto compaction abort lock") = Some(std::sync::Arc::clone(controller));
+        }
         let mut autonomous = self.autonomous.blocking_lock();
         let mut params = SessionCommandParams {
             model: &model,
             api_key,
             global_harness_dir: self.config.agent_dir.clone(),
             autonomous: &mut autonomous,
+            compaction_abort: controller.as_ref().map(|controller| controller.signal()),
         };
-        Ok(self
+        // The lock covers the clone only: the command below can run a summarizer call, so the
+        // mutex must not ride it.
+        let core = self
+            .session
+            .blocking_lock()
+            .clone()
+            .expect("session built by ensure_core_session");
+        let execution = self
             .runtime
-            .block_on(execute_session_command_with_compaction_permit(
-                &core,
-                &mut params,
-                command,
-                images,
-                permit,
-            )))
+            .block_on(async { execute_session_command(&core, &mut params, command, images).await });
+        if let Some(controller) = &controller {
+            self.clear_auto_compaction_abort(controller);
+        }
+        Ok(execution)
     }
 
     /// The current explicit selection (create-config flags over the

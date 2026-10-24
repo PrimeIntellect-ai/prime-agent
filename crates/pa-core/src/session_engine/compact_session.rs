@@ -44,20 +44,6 @@ pub enum CompactionTrigger {
     Auto,
 }
 
-/// One-use preflight result scoped to the session and compaction inputs.
-/// Transports obtain it before acquiring command serialization locks, then
-/// consume it while those locks protect the actual compaction. It retains the
-/// preflight cancellation signal when consumption supplies none. It is not Clone.
-pub struct CompactionHookPermit {
-    pub(super) session: std::sync::Arc<tokio::sync::Mutex<SessionManager>>,
-    pub(super) instructions: Option<String>,
-    pub(super) model_id: String,
-    pub(super) provider: String,
-    pub(super) skipped: Option<&'static str>,
-    pub(super) veto: Option<anyhow::Error>,
-    pub(super) abort: Option<pa_agent::abort::AbortSignal>,
-}
-
 pub struct CompactOptions<'a> {
     pub model: pa_types::ai::Model,
     /// Resolved API key (None falls back to provider env resolution).

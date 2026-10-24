@@ -186,70 +186,7 @@ async fn precompact_stop_preserves_transcript_and_releases_locks_for_manual_and_
 }
 
 #[tokio::test]
-async fn permit_is_session_scoped_and_consumption_does_not_repeat_hook() {
-    let fixture = fixture("printf x >> hook-count; printf '%s' '{}'", 3).await;
-    let model = fixture.provider.get_model();
-    fixture.provider.set_responses(
-        (0..4)
-            .map(|_| {
-                pa_ai::faux::FauxResponseStep::Message(pa_ai::faux::faux_assistant_text_message(
-                    "Preserved decisions and remaining work.",
-                    pa_ai::faux::FauxAssistantMessageOptions::default(),
-                ))
-            })
-            .collect(),
-    );
-    let permit = fixture
-        .session
-        .preflight_compaction_hook(CompactionTrigger::Manual, None, &model, None)
-        .await
-        .unwrap();
-    let other = AgentSession::new(
-        Arc::new(Agent::new(AgentOptions::default())),
-        SessionManager::in_memory(fixture.directory.path()),
-        Vec::new(),
-    )
-    .await
-    .unwrap();
-    let error = other
-        .compact_with_permit(None, &model, None, None, permit)
-        .await
-        .unwrap_err();
-    assert!(error
-        .to_string()
-        .contains("does not match session or inputs"));
-    let permit = fixture
-        .session
-        .preflight_compaction_hook(CompactionTrigger::Manual, None, &model, None)
-        .await
-        .unwrap();
-    let error = fixture
-        .session
-        .compact_with_permit(Some("changed instructions"), &model, None, None, permit)
-        .await
-        .unwrap_err();
-    assert!(error
-        .to_string()
-        .contains("does not match session or inputs"));
-    let permit = fixture
-        .session
-        .preflight_compaction_hook(CompactionTrigger::Manual, None, &model, None)
-        .await
-        .unwrap();
-    let result = fixture
-        .session
-        .compact_with_permit(None, &model, None, None, permit)
-        .await
-        .unwrap();
-    assert!(matches!(result, CompactOutcome::Ran(_)));
-    assert_eq!(
-        std::fs::read(fixture.directory.path().join("project/hook-count")).unwrap(),
-        b"xxx"
-    );
-}
-
-#[tokio::test]
-async fn veto_permit_preserves_raw_slash_echo_and_failure_without_repeating_hook() {
+async fn veto_preserves_raw_slash_echo_and_failure_row() {
     let fixture = fixture(
         "printf x >> hook-count; printf '%s' '{\"continue\":false,\"stopReason\":\"retain raw attempt\"}'", 3,
     ).await;
@@ -280,16 +217,6 @@ async fn veto_permit_preserves_raw_slash_echo_and_failure_without_repeating_hook
             ..Default::default()
         });
     let model = fixture.provider.get_model();
-    let permit = engine
-        .session
-        .preflight_compaction_hook(
-            CompactionTrigger::Manual,
-            Some("retain decisions"),
-            &model,
-            None,
-        )
-        .await
-        .unwrap();
     let original = engine
         .session
         .session
@@ -303,17 +230,17 @@ async fn veto_permit_preserves_raw_slash_echo_and_failure_without_repeating_hook
         text: "/compact retain decisions".into(),
     };
     let mut autonomous = crate::autonomous::create_autonomous_runtime_state(None, None);
-    let execution = super::session_commands::execute_session_command_with_compaction_permit(
+    let execution = super::session_commands::execute_session_command(
         &engine,
         &mut super::session_commands::SessionCommandParams {
             model: &model,
             api_key: None,
             global_harness_dir: fixture.directory.path().join("harness"),
             autonomous: &mut autonomous,
+            compaction_abort: None,
         },
         &command,
         &[],
-        Some(permit),
     )
     .await;
     assert!(execution
@@ -353,42 +280,7 @@ async fn veto_permit_preserves_raw_slash_echo_and_failure_without_repeating_hook
 }
 
 #[tokio::test]
-async fn permit_retains_host_cancellation_when_executor_omits_signal() {
-    let fixture = fixture("printf x >> hook-count", 3).await;
-    let model = fixture.provider.get_model();
-    let controller = pa_agent::abort::AbortController::new();
-    let signal = controller.signal();
-    let permit = fixture
-        .session
-        .preflight_compaction_hook(CompactionTrigger::Manual, None, &model, Some(&signal))
-        .await
-        .unwrap();
-    let original = fixture
-        .session
-        .session
-        .lock()
-        .await
-        .retained_entries()
-        .to_vec();
-    controller.abort();
-    let error = fixture
-        .session
-        .compact_with_permit(None, &model, None, None, permit)
-        .await
-        .unwrap_err();
-    assert!(pa_agent::abort::is_abort_error(&error));
-    assert_eq!(
-        fixture.session.session.lock().await.retained_entries(),
-        original.as_slice()
-    );
-    assert_eq!(
-        std::fs::read(fixture.directory.path().join("project/hook-count")).unwrap(),
-        b"x"
-    );
-}
-
-#[tokio::test]
-async fn host_abort_cancels_ready_precompact_command_before_permit() {
+async fn host_abort_cancels_a_ready_precompact_command() {
     let fixture = fixture("cat >/dev/null; touch ready; while :; do sleep 1; done", 3).await;
     let model = fixture.provider.get_model();
     let controller = pa_agent::abort::AbortController::new();
@@ -400,11 +292,12 @@ async fn host_abort_cancels_ready_precompact_command_before_permit() {
         .await
         .retained_entries()
         .to_vec();
-    let preflight = fixture.session.preflight_compaction_hook(
-        CompactionTrigger::Manual,
+    let compaction = fixture.session.compact_with_trigger(
         None,
         &model,
+        None,
         Some(&signal),
+        CompactionTrigger::Manual,
     );
     let cancel_when_ready = async {
         tokio::time::timeout(Duration::from_secs(5), async {
@@ -418,13 +311,13 @@ async fn host_abort_cancels_ready_precompact_command_before_permit() {
         controller.abort();
     };
     let result = tokio::time::timeout(Duration::from_secs(7), async {
-        let (result, ()) = tokio::join!(preflight, cancel_when_ready);
+        let (result, ()) = tokio::join!(compaction, cancel_when_ready);
         result
     })
     .await
     .expect("host abort cancels before the configured ten-second timeout");
     let Err(error) = result else {
-        panic!("cancelled preflight must not return a permit");
+        panic!("a cancelled hook must not compact");
     };
     assert!(pa_agent::abort::is_abort_error(&error));
     assert_eq!(

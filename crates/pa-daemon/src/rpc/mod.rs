@@ -283,7 +283,6 @@ async fn serve_stdin(state: Arc<commands::RpcState>) -> i32 {
             }
         }
     }
-    state.manual_compaction_cancel.close();
     // stdin closed: settle the in-flight handlers, wait the session
     // idle, dispose, drain the queued frames, exit 0.
     while pending.join_next().await.is_some() {}
