@@ -253,3 +253,116 @@ async fn user_input_arriving_during_stop_work_preempts_hook_feedback() {
     );
     assert_eq!(provider.calls().len(), 2);
 }
+
+fn rejected(reason: &str) -> anyhow::Error {
+    anyhow::Error::new(pa_agent::agent_loop::InputRejected(reason.into()))
+}
+
+fn has_failure_row(messages: &[AgentMessage]) -> bool {
+    messages.iter().any(|message| {
+        matches!(
+            message,
+            AgentMessage::Standard(Message::Assistant(assistant))
+                if assistant.error_message.is_some()
+        )
+    })
+}
+
+/// A veto at run entry is one signal: the caller's error. No empty failure
+/// row is recorded, and the run is still closed for event listeners.
+#[tokio::test]
+async fn entry_veto_returns_the_reason_without_a_failure_row() {
+    let provider = Arc::new(ScriptedProvider::new(Model::unknown()));
+    let agent = Agent::new(AgentOptions {
+        stream_fn: Some(provider.stream_fn()),
+        before_input: Some(Arc::new(|_, _, _| {
+            Box::pin(async { Err(rejected("not this prompt")) })
+        })),
+        ..Default::default()
+    });
+    let ended = Arc::new(AtomicUsize::new(0));
+    let ended_sink = Arc::clone(&ended);
+    let _subscription = agent
+        .subscribe(move |event, _| {
+            if matches!(event, pa_agent::types::AgentEvent::AgentEnd { .. }) {
+                ended_sink.fetch_add(1, Ordering::SeqCst);
+            }
+            Box::pin(async { Ok(()) })
+        })
+        .await;
+    let error = agent.prompt("vetoed").await.unwrap_err();
+    assert_eq!(error.to_string(), "not this prompt");
+    assert_eq!(ended.load(Ordering::SeqCst), 1);
+    assert!(provider.calls().is_empty());
+    assert!(agent.state().await.messages.is_empty());
+}
+
+/// A rejected queued batch is dropped; the finished run and its answer stand.
+#[tokio::test]
+async fn rejected_queued_batch_is_dropped_and_the_run_completes() {
+    let provider = Arc::new(ScriptedProvider::new(Model::unknown()));
+    provider.push_text_turn("answer");
+    let agent = Agent::new(AgentOptions {
+        stream_fn: Some(provider.stream_fn()),
+        before_input: Some(Arc::new(|users, _, _| {
+            let queued = users.iter().any(|row| {
+                matches!(row, AgentMessage::Standard(Message::User(user))
+                    if user.content == UserContent::Text("queued".into()))
+            });
+            Box::pin(async move {
+                if queued {
+                    Err(rejected("queued input rejected"))
+                } else {
+                    Ok(())
+                }
+            })
+        })),
+        ..Default::default()
+    });
+    agent.follow_up(user("queued"));
+    agent.prompt("first").await.unwrap();
+    assert_eq!(provider.calls().len(), 1);
+    let messages = agent.state().await.messages;
+    assert!(!has_failure_row(&messages));
+    assert!(!messages.iter().any(|message| matches!(
+        message,
+        AgentMessage::Standard(Message::User(user))
+            if user.content == UserContent::Text("queued".into())
+    )));
+}
+
+/// An abort while the Stop hook runs ends the finished run cleanly: no
+/// aborted row follows the final answer and the prompt succeeds.
+#[tokio::test]
+async fn abort_during_stop_work_keeps_the_finished_run() {
+    let provider = Arc::new(ScriptedProvider::new(Model::unknown()));
+    provider.push_text_turn("final answer");
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let entered_hook = Arc::clone(&entered);
+    let agent = Arc::new(Agent::new(AgentOptions {
+        stream_fn: Some(provider.stream_fn()),
+        final_stop: Some(Arc::new(move |_, _, _| {
+            entered_hook.notify_one();
+            Box::pin(std::future::pending())
+        })),
+        ..Default::default()
+    }));
+    let running = Arc::clone(&agent);
+    let run = tokio::spawn(async move { running.prompt("go").await });
+    tokio::time::timeout(Duration::from_secs(2), entered.notified())
+        .await
+        .unwrap();
+    agent.abort();
+    tokio::time::timeout(Duration::from_secs(2), run)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    let messages = agent.state().await.messages;
+    assert!(!has_failure_row(&messages));
+    assert!(matches!(
+        messages.last(),
+        Some(AgentMessage::Standard(Message::Assistant(assistant)))
+            if assistant.stop_reason == pa_agent::types::StopReason::Stop
+    ));
+}

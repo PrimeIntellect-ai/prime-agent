@@ -98,6 +98,14 @@ impl HookRuntime {
         let _ = self.state.on_notice.set(sink);
     }
 
+    /// Show a hook decision to the user. Unlike diagnostics, decisions are
+    /// never deduplicated: every rejected submission is reported.
+    pub(crate) async fn report(&self, text: String) {
+        if let Some(sink) = self.state.on_notice.get() {
+            sink(text).await;
+        }
+    }
+
     pub(crate) async fn evaluate(&self, input: Value, signal: AbortSignal) -> Option<String> {
         self.dispatch(input, signal).await.deny
     }

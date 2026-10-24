@@ -484,15 +484,39 @@ async fn stop_feedback_is_attributed_persisted_bounded_and_admitted() {
         provider.push_text_turn("initial answer");
         provider.push_text_turn("validation answer");
         let engine = create_session(fixture.config(&provider)).await.unwrap();
-        let outcome = engine.prompt("begin", PromptOptions::default()).await;
-        if veto_continuation {
-            assert!(outcome
-                .unwrap_err()
-                .to_string()
-                .contains("continuation veto"));
-        } else {
-            outcome.unwrap();
-        }
+        // A vetoed continuation is dropped with a notice: the finished run
+        // stays successful and its answer is not followed by a failure row.
+        engine
+            .prompt("begin", PromptOptions::default())
+            .await
+            .unwrap();
+        let entries = engine.session.entries().await;
+        let notices: Vec<_> = entries
+            .iter()
+            .filter_map(|entry| match entry {
+                pa_types::session::FileEntry::CustomMessage { payload, .. }
+                    if payload.custom_type == super::messages::HOOK_NOTICE_CUSTOM_TYPE =>
+                {
+                    Some(payload.content.text())
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            notices,
+            if veto_continuation {
+                vec!["Prompt blocked by a UserPromptSubmit hook: continuation veto".to_string()]
+            } else {
+                vec![]
+            }
+        );
+        assert!(!entries.iter().any(|entry| matches!(
+            entry,
+            pa_types::session::FileEntry::Message {
+                message: SessionAgentMessage::Assistant(assistant),
+                ..
+            } if assistant.error_message.is_some()
+        )));
         let prompts = events(&fixture.cwd.join("prompts.jsonl"));
         assert_eq!(
             prompts

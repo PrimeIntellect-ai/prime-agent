@@ -118,7 +118,7 @@ impl LifecycleHooks {
             // lifecycle work remains available to the next admitted prompt.
             claim.event = 0;
             if let Some(reason) = outcome.stop.or(outcome.deny) {
-                anyhow::bail!("{reason}");
+                return Err(self.reject("SessionStart hook stopped the request", reason).await);
             }
             if let Some(message) = outcome.message {
                 tracing::warn!(%message, "session-start hook message");
@@ -181,7 +181,9 @@ impl LifecycleHooks {
                 let outcome = self.runtime.dispatch(input, signal.clone()).await;
                 pa_agent::abort::throw_if_aborted_signal(Some(&signal))?;
                 if let Some(reason) = outcome.stop.or(outcome.deny) {
-                    anyhow::bail!("{reason}");
+                    return Err(self
+                        .reject("Prompt blocked by a UserPromptSubmit hook", reason)
+                        .await);
                 }
                 if let Some(message) = outcome.message {
                     tracing::warn!(%message, "prompt hook message");
@@ -190,6 +192,13 @@ impl LifecycleHooks {
             deferred.rows.clear();
             Ok(())
         }
+    }
+
+    /// One veto signal: a display-only notice for the user, plus the
+    /// loop's [`pa_agent::agent_loop::InputRejected`] for the caller.
+    async fn reject(&self, what: &str, reason: String) -> anyhow::Error {
+        self.runtime.report(format!("{what}: {reason}")).await;
+        anyhow::Error::new(pa_agent::agent_loop::InputRejected(reason))
     }
 
     pub async fn stop(

@@ -28,7 +28,23 @@ pub async fn run_agent_loop(
     };
     emit(AgentEvent::AgentStart).await?;
     emit(AgentEvent::TurnStart).await?;
-    super::run::before_input_batch(&prompts, config, signal).await?;
+    if let Err(error) = super::run::before_input_batch(&prompts, config, signal).await {
+        // Nothing was admitted: a veto or a cancellation at the gate closes
+        // the run without a failure row. The caller still gets the error.
+        let error = if crate::abort::is_abort_error(&error) {
+            let reason = error.to_string();
+            error.context(super::InputRejected(reason))
+        } else {
+            error
+        };
+        if error.downcast_ref::<super::InputRejected>().is_some() {
+            emit(AgentEvent::AgentEnd {
+                messages: Vec::new(),
+            })
+            .await?;
+        }
+        return Err(error);
+    }
     current_context.messages.extend(prompts.iter().cloned());
     new_messages.extend(prompts.iter().cloned());
     for prompt in &prompts {

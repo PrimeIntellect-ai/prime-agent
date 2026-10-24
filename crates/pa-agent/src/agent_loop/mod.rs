@@ -38,7 +38,16 @@ pub type TransformContextFn = Arc<
 /// Resolves the system prompt immediately before each LLM call.
 pub type GetSystemPromptFn = Arc<dyn Fn() -> String + Send + Sync>;
 
+/// A [`BeforeInputFn`] veto: the batch is not admitted. At run entry the run
+/// ends with this error and records no failure row; a batch rejected mid-run is
+/// dropped and the loop continues at its normal boundary. The gate reports the
+/// reason to the user itself; any other gate error fails the run.
+#[derive(Debug, thiserror::Error)]
+#[error("{0}")]
+pub struct InputRejected(pub String);
+
 /// Gates an external input batch before any of its rows enter context or persistence.
+/// Returns [`InputRejected`] to veto the batch.
 pub type BeforeInputFn = Arc<
     dyn Fn(Vec<AgentMessage>, Model, AbortSignal) -> crate::BoxFut<'static, anyhow::Result<()>>
         + Send
