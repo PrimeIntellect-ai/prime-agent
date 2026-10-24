@@ -413,6 +413,31 @@ impl Supervisor {
                                     );
                                 }
                             }
+                        } else if let DaemonCommand::GetSessionMessages {
+                            start,
+                            limit,
+                            roles,
+                            session_file: Some(session_file),
+                            ..
+                        } = command
+                        {
+                            // A family member's read of a session no worker holds (a
+                            // passivated child): a read-only open of its file, never a wake.
+                            let response =
+                                match saved_session_messages(session_file, *start, *limit, roles)
+                                    .await
+                                {
+                                    Ok(data) => {
+                                        response_success(Some(&command_id), &type_name, Some(data))
+                                    }
+                                    Err(error) => response_failure(
+                                        Some(&command_id),
+                                        &type_name,
+                                        &format!("{error:#}"),
+                                        None,
+                                    ),
+                                };
+                            return (vec![response_line(&response)], false);
                         } else if let DaemonCommand::Kill { rest, .. } = command {
                             if let Some(reason) = rest
                                 .get("rlmLedgerDelete")
@@ -1148,6 +1173,20 @@ impl Supervisor {
         self.push_roster_update(changed, removed);
         Ok(())
     }
+}
+
+/// `get_session_messages` over a session file no worker holds; the file I/O runs off
+/// the async runtime.
+async fn saved_session_messages(
+    session_file: &str,
+    start: i64,
+    limit: u64,
+    roles: &[String],
+) -> Result<Value> {
+    let query = crate::session_store::SessionMessagesQuery::new(start, limit, roles)?;
+    let path = std::path::PathBuf::from(session_file);
+    let slice = tokio::task::spawn_blocking(move || query.read_file(&path)).await??;
+    Ok(slice.into_reply())
 }
 
 /// The ledger edge a delete addresses, as `(child_id, child_file)`. `rlmChildId` is the durable

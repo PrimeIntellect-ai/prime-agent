@@ -60,7 +60,8 @@ async fn spawn_fake_supervisor(
                         ),
                         // Target-specific transcripts let resolver regressions prove
                         // which worker was read; older fixtures retain their five-row tail.
-                        "get_messages" => {
+                        // Serves the tail reads (`start = -limit`) recent messages sends.
+                        "get_session_messages" => {
                             let active = command["activeSessionId"].as_str().unwrap_or_default();
                             let messages = roster["messagesByActiveSessionId"]
                                 .get(active)
@@ -74,10 +75,20 @@ async fn spawn_fake_supervisor(
                                         { "role": "user", "content": "m4", "timestamp": 14 },
                                     ])
                                 });
+                            let messages = messages.as_array().unwrap();
+                            let tail = usize::try_from(command["limit"].as_u64().unwrap()).unwrap();
+                            let begin = messages.len().saturating_sub(tail);
+                            let rows: Vec<Value> = messages[begin..]
+                                .iter()
+                                .enumerate()
+                                .map(|(offset, message)| {
+                                    json!({ "index": begin + offset, "id": "", "message": message })
+                                })
+                                .collect();
                             response_success(
                                 Some(&id),
-                                "get_messages",
-                                Some(json!({ "messages": messages })),
+                                "get_session_messages",
+                                Some(json!({ "messages": rows, "total": messages.len() })),
                             )
                         }
                         "get_worker_peer_transport" => match ticket_response.clone() {
