@@ -21,6 +21,9 @@ pub const DEFAULT_THRESHOLD_PERCENT: f64 = COMPACT_THRESHOLD_RATIO * 100.0;
 /// chars/4 estimate error); `reserve_tokens` raises it when larger.
 pub const COMBINED_LIMIT_HEADROOM_FLOOR: u64 = 4_096;
 
+/// Headroom multiples between the background watermark and the blocking threshold.
+pub const BACKGROUND_COMPACTION_HEADROOMS: u64 = 2;
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct CompactionSettings {
     pub enabled: bool,
@@ -149,6 +152,20 @@ fn div4(chars: u64) -> u64 {
     chars.div_ceil(4)
 }
 
+fn headroom(settings: &CompactionSettings) -> u64 {
+    settings.reserve_tokens.max(COMBINED_LIMIT_HEADROOM_FLOOR)
+}
+
+/// Retained history and both summary passes must fit below any trigger,
+/// otherwise a low percentage re-summarizes the same retained context on
+/// every tool turn. Two reserves cover both summary completion budgets.
+fn retention_floor(settings: &CompactionSettings) -> u64 {
+    settings
+        .keep_recent_tokens
+        .saturating_add(settings.reserve_tokens.saturating_mul(2))
+        .saturating_add(1)
+}
+
 /// The effective compaction threshold: a retention-floored percentage capped by model safety.
 /// PERCENTAGE: `context_window * threshold_percent / 100` (estimate drift on
 /// large windows). COMBINED-LIMIT: `context_window - max_output_tokens -
@@ -168,36 +185,11 @@ pub fn compaction_threshold(
         DEFAULT_THRESHOLD_PERCENT
     };
     let requested = (context_window as f64 * (percent / 100.0)) as u64;
-    // Retained history and both summary passes must fit below the trigger,
-    // otherwise a low percentage re-summarizes the same retained context on
-    // every tool turn. Two reserves cover both summary completion budgets.
-    let retention_floor = settings
-        .keep_recent_tokens
-        .saturating_add(settings.reserve_tokens.saturating_mul(2))
-        .saturating_add(1);
-    let percentage = requested.max(retention_floor);
-    let headroom = settings.reserve_tokens.max(COMBINED_LIMIT_HEADROOM_FLOOR);
+    let percentage = requested.max(retention_floor(settings));
     let combined = context_window
         .saturating_sub(max_output_tokens)
-        .saturating_sub(headroom);
+        .saturating_sub(headroom(settings));
     percentage.min(combined)
-}
-
-#[must_use]
-pub fn should_compact(
-    context_tokens: u64,
-    context_window: u64,
-    max_output_tokens: u64,
-    settings: &CompactionSettings,
-) -> bool {
-    if !settings.enabled {
-        return false;
-    }
-    if context_window == 0 {
-        return false;
-    }
-    let threshold = compaction_threshold(context_window, max_output_tokens, settings);
-    threshold > 0 && context_tokens > threshold
 }
 
 /// The effective requested output budget of the session's next model call:
@@ -267,18 +259,25 @@ fn message_timestamp(message: &AgentMessage) -> u64 {
     }
 }
 
-/// Whether the live context crossed the effective threshold
-/// ([`compaction_threshold`]) and an automatic compaction should run. Usage
-/// from before the newest `CompactionSummary` never re-triggers.
+/// The live context's band against the background watermark and the blocking threshold.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ContextPressure {
+    Below,
+    Background,
+    Reserve,
+}
+
+/// The live context's [`ContextPressure`]; usage from before the newest
+/// `CompactionSummary` never re-triggers.
 #[must_use]
-pub fn threshold_compaction_due(
+pub fn context_pressure(
     messages: &[AgentMessage],
     context_window: u64,
     max_output_tokens: u64,
     settings: &CompactionSettings,
-) -> bool {
+) -> ContextPressure {
     if !settings.enabled || context_window == 0 {
-        return false;
+        return ContextPressure::Below;
     }
     let compaction_timestamp = messages.iter().rev().find_map(|message| match message {
         AgentMessage::CompactionSummary(summary) => Some(summary.timestamp),
@@ -290,7 +289,7 @@ pub fn threshold_compaction_due(
         if compaction_timestamp
             .is_some_and(|timestamp| message_timestamp(&messages[index]) <= timestamp)
         {
-            return false;
+            return ContextPressure::Below;
         }
         estimate.tokens
     }
@@ -302,17 +301,32 @@ pub fn threshold_compaction_due(
             .rev()
             .find(|message| matches!(message, AgentMessage::Assistant(_)))
         else {
-            return false;
+            return ContextPressure::Below;
         };
         if assistant.stop_reason == pa_types::ai::StopReason::Error {
-            return false;
+            return ContextPressure::Below;
         }
         if compaction_timestamp.is_some_and(|timestamp| assistant.timestamp <= timestamp) {
-            return false;
+            return ContextPressure::Below;
         }
         calculate_context_tokens(&assistant.usage)
     };
-    should_compact(context_tokens, context_window, max_output_tokens, settings)
+    let threshold = compaction_threshold(context_window, max_output_tokens, settings);
+    // A disabled trigger disables its background band too: no summary can
+    // relieve a zero threshold.
+    if threshold == 0 {
+        return ContextPressure::Below;
+    }
+    if context_tokens > threshold {
+        return ContextPressure::Reserve;
+    }
+    let watermark = threshold
+        .saturating_sub(BACKGROUND_COMPACTION_HEADROOMS.saturating_mul(headroom(settings)))
+        .max(retention_floor(settings));
+    if context_tokens > watermark {
+        return ContextPressure::Background;
+    }
+    ContextPressure::Below
 }
 
 /// Valid cut point indices: user/assistant/custom/branch/compaction-summary
@@ -556,7 +570,7 @@ mod tests {
         )
     }
 
-    fn user_message(text: &str, timestamp: u64) -> AgentMessage {
+    pub(super) fn user_message(text: &str, timestamp: u64) -> AgentMessage {
         AgentMessage::User(pa_types::ai::UserMessage {
             content: pa_types::ai::UserContent::Text(text.to_string()),
             timestamp,
@@ -564,7 +578,7 @@ mod tests {
         })
     }
 
-    fn assistant_message(usage_total: u64, timestamp: u64) -> AgentMessage {
+    pub(super) fn assistant_message(usage_total: u64, timestamp: u64) -> AgentMessage {
         AgentMessage::Assistant(pa_types::ai::AssistantMessage {
             content: vec![pa_types::ai::AssistantContentBlock::Text(
                 pa_types::ai::TextContent {
@@ -639,20 +653,32 @@ mod tests {
             user_message("f14 threshold crossing turn", 3),
             assistant_message(126_010, 4),
         ];
-        assert!(threshold_compaction_due(&messages, 128_000, 0, &settings));
+        assert_eq!(
+            context_pressure(&messages, 128_000, 0, &settings),
+            ContextPressure::Reserve
+        );
         let messages = vec![
             user_message("f14 auto seed turn", 1),
             assistant_message(110, 2),
         ];
-        assert!(!threshold_compaction_due(&messages, 128_000, 0, &settings));
+        assert_eq!(
+            context_pressure(&messages, 128_000, 0, &settings),
+            ContextPressure::Below
+        );
         let disabled = CompactionSettings {
             threshold_percent: 95.0,
             enabled: false,
             reserve_tokens: 127_500,
             keep_recent_tokens: 10,
         };
-        assert!(!threshold_compaction_due(&messages, 128_000, 0, &disabled));
-        assert!(!threshold_compaction_due(&messages, 0, 0, &settings));
+        assert_eq!(
+            context_pressure(&messages, 128_000, 0, &disabled),
+            ContextPressure::Below
+        );
+        assert_eq!(
+            context_pressure(&messages, 0, 0, &settings),
+            ContextPressure::Below
+        );
     }
 
     #[test]
@@ -665,16 +691,18 @@ mod tests {
             user_message("live session turn", 1),
             assistant_message(1_017_457, 2),
         ];
-        assert!(threshold_compaction_due(
-            &messages, 1_048_576, 32_000, &settings
-        ));
+        assert_eq!(
+            context_pressure(&messages, 1_048_576, 32_000, &settings),
+            ContextPressure::Reserve
+        );
         let messages = vec![
             user_message("live session turn", 1),
             assistant_message(990_000, 2),
         ];
-        assert!(!threshold_compaction_due(
-            &messages, 1_048_576, 32_000, &settings
-        ));
+        assert_eq!(
+            context_pressure(&messages, 1_048_576, 32_000, &settings),
+            ContextPressure::Background
+        );
         // A 64k output budget pushes the combined ceiling below the percentage
         // one (1_048_576 - 65_536 - 16_384 = 966_656): 970_000 fires on the
         // combined ceiling alone — under the old reserve line AND 95% of the window.
@@ -682,12 +710,14 @@ mod tests {
             user_message("live session turn", 1),
             assistant_message(970_000, 2),
         ];
-        assert!(threshold_compaction_due(
-            &messages, 1_048_576, 65_536, &settings
-        ));
-        assert!(!threshold_compaction_due(
-            &messages, 1_048_576, 0, &settings
-        ));
+        assert_eq!(
+            context_pressure(&messages, 1_048_576, 65_536, &settings),
+            ContextPressure::Reserve
+        );
+        assert_eq!(
+            context_pressure(&messages, 1_048_576, 0, &settings),
+            ContextPressure::Background
+        );
     }
 
     #[test]
@@ -695,8 +725,8 @@ mod tests {
         // Past 95% of a large window the percentage ceiling fires before
         // the combined ceiling (1_048_576 * 0.95 = 996_147).
         let settings = CompactionSettings::default();
-        assert!(should_compact(996_148, 1_048_576, 32_000, &settings));
-        assert!(!should_compact(996_000, 1_048_576, 32_000, &settings));
+        assert!(996_148 > compaction_threshold(1_048_576, 32_000, &settings));
+        assert!(996_000 <= compaction_threshold(1_048_576, 32_000, &settings));
     }
 
     #[test]
@@ -705,8 +735,8 @@ mod tests {
         // — the combined ceiling (131_072 - 32_768 - 16_384 = 81_920) comes first.
         let settings = CompactionSettings::default();
         assert_eq!(compaction_threshold(131_072, 32_768, &settings), 81_920);
-        assert!(should_compact(82_000, 131_072, 32_768, &settings));
-        assert!(!should_compact(81_000, 131_072, 32_768, &settings));
+        assert!(82_000 > compaction_threshold(131_072, 32_768, &settings));
+        assert!(81_000 <= compaction_threshold(131_072, 32_768, &settings));
     }
 
     #[test]
@@ -726,12 +756,61 @@ mod tests {
             compaction_threshold(128_000, 124_000, &CompactionSettings::default()),
             0
         );
-        assert!(!should_compact(
-            126_000,
-            128_000,
-            124_000,
-            &CompactionSettings::default()
-        ));
+    }
+
+    #[test]
+    fn a_disabled_threshold_never_starts_the_background_band() {
+        // No context fits beside a 124k output budget: the trigger is
+        // disabled, so a context far above the retention floor stays Below.
+        let settings = CompactionSettings::default();
+        assert_eq!(compaction_threshold(128_000, 124_000, &settings), 0);
+        assert_eq!(
+            context_pressure(
+                &[user_message("turn", 1), assistant_message(100_000, 2)],
+                128_000,
+                124_000,
+                &settings,
+            ),
+            ContextPressure::Below
+        );
+    }
+
+    #[test]
+    fn the_background_band_sits_below_the_reserve_threshold() {
+        let settings = CompactionSettings {
+            threshold_percent: 95.0,
+            enabled: true,
+            reserve_tokens: 10_000,
+            keep_recent_tokens: 10,
+        };
+        let pressure = |tokens| {
+            context_pressure(
+                &[user_message("turn", 1), assistant_message(tokens, 2)],
+                100_000,
+                16_384,
+                &settings,
+            )
+        };
+        assert_eq!(pressure(53_616), ContextPressure::Below);
+        assert_eq!(pressure(53_617), ContextPressure::Background);
+        assert_eq!(pressure(73_616), ContextPressure::Background);
+        assert_eq!(pressure(73_617), ContextPressure::Reserve);
+        let tight = CompactionSettings {
+            threshold_percent: 95.0,
+            enabled: true,
+            reserve_tokens: 16_384,
+            keep_recent_tokens: 10,
+        };
+        let tight_pressure = |tokens| {
+            context_pressure(
+                &[user_message("turn", 1), assistant_message(tokens, 2)],
+                60_000,
+                32_768,
+                &tight,
+            )
+        };
+        assert_eq!(tight_pressure(10_848), ContextPressure::Below);
+        assert_eq!(tight_pressure(10_849), ContextPressure::Reserve);
     }
 
     #[test]
@@ -747,13 +826,19 @@ mod tests {
             user_message("kept turn", 5),
             assistant_message(126_010, 6),
         ];
-        assert!(!threshold_compaction_due(&messages, 128_000, 0, &settings));
+        assert_eq!(
+            context_pressure(&messages, 128_000, 0, &settings),
+            ContextPressure::Below
+        );
         let messages = vec![
             compaction_summary(10),
             user_message("new turn", 11),
             assistant_message(126_010, 12),
         ];
-        assert!(threshold_compaction_due(&messages, 128_000, 0, &settings));
+        assert_eq!(
+            context_pressure(&messages, 128_000, 0, &settings),
+            ContextPressure::Reserve
+        );
     }
 
     #[test]
@@ -773,19 +858,6 @@ mod tests {
             cost: pa_types::ai::UsageCost::default(),
         };
         assert_eq!(calculate_context_tokens(&usage), 100);
-    }
-
-    #[test]
-    fn should_compact_threshold() {
-        let settings = CompactionSettings::default();
-        assert!(should_compact(120_000, 128_000, 0, &settings)); // > 128k - 16k
-        assert!(!should_compact(100_000, 128_000, 0, &settings));
-        let disabled = CompactionSettings {
-            enabled: false,
-            ..settings
-        };
-        assert!(!should_compact(200_000, 128_000, 0, &disabled));
-        assert!(!should_compact(1, 0, 0, &settings));
     }
 
     #[test]

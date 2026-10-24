@@ -4,7 +4,7 @@
 use std::sync::atomic::Ordering;
 
 use super::{
-    execute_session_command, json_round_trip, map_thinking_level,
+    auto_compaction_inputs, execute_session_command, json_round_trip, map_thinking_level,
     register_agent_message_host_handlers, register_agent_observe_host_handlers,
     switchable_stream_fn, AgentEngineConfig, AgentSessionEngine, Arc, CoreSessionEngine,
     EngineModelSelection, HostRequestHandlers, LinkAgentMessageController,
@@ -144,13 +144,14 @@ impl AgentSessionEngine {
             goal_backoff_wake_job_id: std::sync::Mutex::new(None),
             stale_goal_terminal_pending: std::sync::Mutex::new(None),
             turn_agent: std::sync::Mutex::new(None),
+            compaction_session: std::sync::Mutex::default(),
             queue_modes,
             autonomous_boundary: std::sync::Mutex::new(None),
             background_bash_probe: std::sync::Mutex::new(None),
             kernel_release_probe: std::sync::Mutex::new(None),
             registered_jobs_probe: std::sync::Mutex::new(None),
             session_file,
-            selection: std::sync::RwLock::new(selection.clone()),
+            selection: std::sync::Arc::new(std::sync::RwLock::new(selection.clone())),
             restored_model: std::sync::Mutex::new(None),
             startup_scope: std::sync::Mutex::new(None),
             initial_selection: std::sync::RwLock::new(selection),
@@ -165,7 +166,7 @@ impl AgentSessionEngine {
             pending_branch: std::sync::Mutex::new(None),
             prompt_context_boundary: std::sync::Mutex::new(None),
             provider_target: std::sync::Arc::new(std::sync::RwLock::new(None)),
-            image_route: std::sync::Mutex::new(None),
+            image_route: std::sync::Arc::new(std::sync::Mutex::new(None)),
             reload_lock: std::sync::Mutex::new(()),
             own_summary: std::sync::Arc::new(std::sync::Mutex::new(None)),
             create_resources: std::sync::RwLock::default(),
@@ -264,6 +265,10 @@ impl AgentSessionEngine {
         }
         let built = Arc::new(self.build_session(model).await?);
         self.adopt_built_session(&built).await?;
+        *self
+            .compaction_session
+            .lock()
+            .expect("compaction session lock") = Arc::downgrade(&built);
         self.session.lock().await.replace(built);
         Ok(())
     }
@@ -767,6 +772,10 @@ impl AgentSessionEngine {
         *self.progress_notes.lock().expect("progress notes lock") = None;
         *self.turn_agent.lock().expect("turn agent lock") = None;
         *self
+            .compaction_session
+            .lock()
+            .expect("compaction session lock") = std::sync::Weak::new();
+        *self
             .autonomous_boundary
             .lock()
             .expect("autonomous boundary lock") = None;
@@ -1183,11 +1192,17 @@ impl AgentSessionEngine {
             should_stop_after_turn: Some({
                 let session = Arc::downgrade(&self.session);
                 let target = Arc::clone(&self.provider_target);
+                let image_route = Arc::clone(&self.image_route);
+                let selection = Arc::clone(&self.selection);
+                let agent_dir = self.config.agent_dir.clone();
                 let yielded = Arc::clone(&self.threshold_yielded);
                 let enabled = Arc::clone(&self.threshold_checks_enabled);
                 Arc::new(move |context| {
                     let session = session.clone();
                     let target = Arc::clone(&target);
+                    let image_route = Arc::clone(&image_route);
+                    let selection = Arc::clone(&selection);
+                    let agent_dir = agent_dir.clone();
                     let yielded = Arc::clone(&yielded);
                     let enabled = Arc::clone(&enabled);
                     Box::pin(async move {
@@ -1208,29 +1223,27 @@ impl AgentSessionEngine {
                             .as_ref()
                             .map(|target| target.model.clone());
                         let Some(model) = model else { return Ok(false) };
-                        let agent = engine.session.agent();
-                        let thinking = match agent.model_override() {
-                            Some(route) => route.thinking_level,
-                            None => agent.state().await.thinking_level,
-                        };
-                        let messages = context
-                            .context
-                            .messages
-                            .iter()
-                            .filter_map(|message| serde_json::to_value(message).ok())
-                            .filter_map(|value| serde_json::from_value(value).ok())
-                            .collect::<Vec<_>>();
-                        let due = pa_core::session_engine::compaction::threshold_compaction_due(
-                            &messages,
-                            model.context_window,
-                            pa_core::session_engine::compaction::request_output_budget(
+                        // The consult inputs resolve through the same derivation
+                        // the boundary arm uses (see `auto_compaction_inputs`).
+                        let (run_model, api_key) =
+                            auto_compaction_inputs(&image_route, &selection, &agent_dir, &model);
+                        // The banded consult the turn boundaries run: the
+                        // Background band starts (or keeps) the background
+                        // summarize without yielding; a ready-to-commit
+                        // summary or a Reserve crossing yields for the model
+                        // turn's boundary arm to commit. The run's own signal
+                        // is the consult's abort: Stop aborts the run before
+                        // it resets the background epoch.
+                        let run_signal = engine.session.agent().signal();
+                        let due = engine
+                            .session
+                            .auto_compaction_now_with_abort(
+                                &run_model,
                                 &model,
-                                pa_core::session_engine::provider_adapter::model_thinking_level(
-                                    thinking,
-                                ),
-                            ),
-                            &engine.session.compaction_settings(),
-                        );
+                                api_key,
+                                run_signal.as_ref(),
+                            )
+                            .await;
                         if due {
                             yielded.store(true, Ordering::SeqCst);
                         }
