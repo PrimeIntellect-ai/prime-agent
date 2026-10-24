@@ -773,10 +773,8 @@ mod tests {
                 cwd: tmp.path().to_path_buf(),
                 agent_dir: tmp.path().to_path_buf(),
             };
-            let seen_models = std::sync::Arc::new(std::sync::Mutex::new(Vec::<(
-                String,
-                Option<String>,
-            )>::new()));
+            let seen_models =
+                std::sync::Arc::new(std::sync::Mutex::new(Vec::<(String, Option<String>)>::new()));
             let recorder = seen_models.clone();
             registration.set_responses(vec![pa_ai::faux::FauxResponseStep::Factory(
                 std::sync::Arc::new(
