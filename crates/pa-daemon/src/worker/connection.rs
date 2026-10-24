@@ -963,6 +963,10 @@ impl Worker {
             }
         }
 
+        // A direct viewer changes `attachedClients` with no session event
+        // (TS daemon-mode.ts flushes the roster on session_client attach):
+        // the summary cache must not serve the pre-attach count.
+        self.push_roster_delta();
         response_success(None, "attach", Some(result))
     }
 
@@ -1032,6 +1036,13 @@ impl Worker {
         // The runner's park re-arms: the released hold opens the idle
         // passivation's unattached gate for a now-detached child.
         self.work_notify.notify_one();
+        // The raw disconnect's roster flush: the guard's Drop runs this
+        // release when the socket drops without a `detach`, so the release
+        // must mirror the attach/detach arms' push — the summary cache
+        // must not keep serving the pre-disconnect `attachedClients` until
+        // some later session event. The coalescing queue folds the detach
+        // arm's own push into this one when both fire.
+        self.push_roster_delta();
     }
 
     pub(crate) fn handle_detach(&self, payload: &Value) -> DaemonResponse {
@@ -1066,6 +1077,10 @@ impl Worker {
         // The notify re-arms the runner's idle-passivation window now
         // that the client detached.
         self.work_notify.notify_one();
+        // A direct viewer changes `attachedClients` with no session event
+        // (TS daemon-mode.ts flushes the roster on session_client detach):
+        // the summary cache must not serve the pre-detach count.
+        self.push_roster_delta();
         response_success(None, "detach", None)
     }
 }
