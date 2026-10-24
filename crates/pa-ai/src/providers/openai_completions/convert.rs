@@ -452,14 +452,11 @@ pub(crate) fn parse_chunk_usage(
             })
             .as_ref(),
     );
-    // OpenRouter reports billing truth in usage, already priced by the endpoint and service tier
-    // that served the request (https://openrouter.ai/docs/api-reference/overview). Trust it over
-    // the catalog-rate estimate, scaling the component breakdown to match.
-    let reported_cost = if model.provider == "openrouter" {
-        openrouter_reported_cost(raw_usage)
-    } else {
-        None
-    };
+    // A provider that reports `usage.cost` (OpenRouter, and gateways such as LiteLLM in front of
+    // it) already priced the request at the endpoint and service tier that served it
+    // (https://openrouter.ai/docs/api-reference/overview). Trust it over the catalog-rate
+    // estimate, whichever provider it came through, scaling the component breakdown to match.
+    let reported_cost = reported_cost(raw_usage);
     // Token counts sit far below f64's 2^53 exact-integer range; the cost apportioning math is f64 by design.
     #[allow(clippy::cast_precision_loss)]
     if let Some(reported_cost) = reported_cost {
@@ -483,12 +480,13 @@ pub(crate) fn parse_chunk_usage(
     usage
 }
 
-/// The user's real spend for an `OpenRouter` request, or `None` to keep the catalog estimate.
-/// `usage.cost` only carries what `OpenRouter` charged the account's credits: for BYOK requests
-/// that is just `OpenRouter`'s fee, so real spend is the upstream provider's bill plus that fee. A
-/// cost of 0 can mean not-billed-via-credits (e.g. `:free` endpoints) rather than free, so it keeps
-/// the catalog estimate.
-fn openrouter_reported_cost(raw_usage: &Value) -> Option<f64> {
+/// The user's real spend as reported in `usage`, or `None` to keep the catalog estimate. The
+/// field follows `OpenRouter`'s shape, which gateways forward or reproduce: `usage.cost` only
+/// carries what was charged to the account's credits, so for BYOK requests (just `OpenRouter`'s
+/// fee) real spend is the upstream provider's bill plus that fee. A missing cost, or a cost of 0
+/// (which can mean not-billed-via-credits, e.g. `:free` endpoints, rather than free), keeps the
+/// catalog estimate.
+fn reported_cost(raw_usage: &Value) -> Option<f64> {
     let credits = raw_usage
         .get("cost")
         .and_then(Value::as_f64)
@@ -625,10 +623,14 @@ mod tests {
         assert!((usage.cost.total.as_f64() - 0.15).abs() < 1e-9);
     }
 
+    /// Discussion #3483: a gateway in front of `OpenRouter` (e.g. `LiteLLM`) reports the same
+    /// `usage.cost`; it replaces the catalog estimate whatever the provider is called.
     #[test]
-    fn non_openrouter_provider_ignores_reported_cost() {
-        let model = model("zai", 0.5, 0.5);
-        let usage = parse_chunk_usage(&raw_usage(0.07, ByokBilling::NotByok), &model, None);
-        assert!((usage.cost.total.as_f64() - 0.05).abs() < 1e-9);
+    fn any_provider_uses_its_reported_cost() {
+        let priced = model("litellm", 0.5, 0.5);
+        let usage = parse_chunk_usage(&raw_usage(0.07, ByokBilling::NotByok), &priced, None);
+        assert!((usage.cost.input.as_f64() - 0.035).abs() < 1e-9);
+        assert!((usage.cost.output.as_f64() - 0.035).abs() < 1e-9);
+        assert!((usage.cost.total.as_f64() - 0.07).abs() < 1e-9);
     }
 }
