@@ -141,13 +141,15 @@ pub trait SessionEngine: Send + Sync {
     /// Consume a pending compact-trigger auto-refine review: the engine
     /// resolves the model and runs the gated round. `Ok(None)` is every
     /// silent outcome — no trigger armed, a gate drop, cooldown, or decline.
+    /// `Ok(Some(committed))` carries the committed result plus the rows the
+    /// commit persisted, for the caller to replay.
     ///
     /// # Errors
     ///
     /// Errors when the armed round itself fails (its model call).
     fn consume_compact_auto_refine(
         &self,
-    ) -> anyhow::Result<Option<pa_core::refinement::RefinementResult>> {
+    ) -> anyhow::Result<Option<pa_core::session_engine::refine::CommittedRefinement>> {
         Ok(None)
     }
 
@@ -435,7 +437,8 @@ pub trait SessionEngine: Send + Sync {
     }
 
     /// Run one refinement (the daemon `refine` command): plan, apply, and
-    /// persist the harness state.
+    /// persist the harness state. The committed value carries the result
+    /// plus the rows the commit persisted, for the caller to replay.
     ///
     /// # Errors
     ///
@@ -444,7 +447,7 @@ pub trait SessionEngine: Send + Sync {
     fn run_refinement(
         &self,
         options: pa_core::session_engine::refine::RefineOptions,
-    ) -> Result<Value> {
+    ) -> Result<pa_core::session_engine::refine::CommittedRefinement> {
         let _ = options;
         anyhow::bail!("This session does not support refinement")
     }

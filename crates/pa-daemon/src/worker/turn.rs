@@ -1180,28 +1180,11 @@ impl TurnRunner {
                     Err(anyhow::anyhow!("auto-refinement task failed: {error}"))
                 });
                 match refined {
-                    Ok(Some(result)) => {
-                        // The outcome row and the model-facing notice (when edits
-                        // applied) persist like the `/refine` command's rows, fenced on
-                        // the serviced session.
-                        let outcome_row =
-                            pa_core::session_engine::refine::create_refinement_outcome_message(
-                                &result,
-                            );
-                        if let Ok(value) = serde_json::to_value(
-                            pa_types::session::AgentMessage::Custom(outcome_row),
-                        ) {
-                            emit_refinement_row(&core, &events, &review_session_id, &value);
-                        }
-                        if result.applied_edits.iter().any(|edit| edit.applied) {
-                            let notice =
-                                pa_core::session_engine::refine::create_refinement_notice_message(
-                                    &result,
-                                    pa_core::session_engine::refine::RefinementSource::Auto,
-                                );
-                            if let Ok(value) = serde_json::to_value(
-                                pa_types::session::AgentMessage::Custom(notice),
-                            ) {
+                    Ok(Some(committed)) => {
+                        for row in committed.rows {
+                            if let Ok(value) =
+                                serde_json::to_value(pa_types::session::AgentMessage::Custom(row))
+                            {
                                 emit_refinement_row(&core, &events, &review_session_id, &value);
                             }
                         }
@@ -1209,7 +1192,7 @@ impl TurnRunner {
                             &core,
                             &events,
                             &review_session_id,
-                            crate::worker::refine_complete_event(&result),
+                            crate::worker::refine_complete_event(&committed.result),
                         );
                     }
                     Ok(None) => {}

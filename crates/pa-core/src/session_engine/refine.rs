@@ -710,7 +710,7 @@ pub(crate) enum AutoRefineRound {
     /// boundary runs it.
     Deferred(AutoRefineReview),
     /// The refinement ran.
-    Ran(RefinementResult),
+    Ran(CommittedRefinement),
 }
 
 async fn review_compact_refinement(
@@ -876,7 +876,7 @@ impl AgentSession {
         api_key: Option<String>,
         global_harness_dir: std::path::PathBuf,
         cancel: pa_agent::abort::AbortSignal,
-    ) -> anyhow::Result<RefinementResult> {
+    ) -> anyhow::Result<CommittedRefinement> {
         let options = RefineOptions {
             global: false,
             instructions: Some(auto_refine_instructions(AUTO_REFINE_COMPACT_REASON, review)),
@@ -896,7 +896,6 @@ impl AgentSession {
             global_harness_dir,
         )
         .await
-        .map(|committed| committed.result)
     }
 }
 

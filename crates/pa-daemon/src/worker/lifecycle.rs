@@ -472,32 +472,18 @@ impl Worker {
                         })
                 };
                 match refined {
-                    Ok(Some(result)) => {
-                        let outcome_row =
-                            pa_core::session_engine::refine::create_refinement_outcome_message(
-                                &result,
-                            );
-                        if let Ok(value) = serde_json::to_value(
-                            pa_types::session::AgentMessage::Custom(outcome_row),
-                        ) {
-                            self.emit_custom_row(&value);
-                        }
-                        if result.applied_edits.iter().any(|edit| edit.applied) {
-                            let notice =
-                                pa_core::session_engine::refine::create_refinement_notice_message(
-                                    &result,
-                                    pa_core::session_engine::refine::RefinementSource::Auto,
-                                );
-                            if let Ok(value) = serde_json::to_value(
-                                pa_types::session::AgentMessage::Custom(notice),
-                            ) {
+                    Ok(Some(committed)) => {
+                        for row in committed.rows {
+                            if let Ok(value) =
+                                serde_json::to_value(pa_types::session::AgentMessage::Custom(row))
+                            {
                                 self.emit_custom_row(&value);
                             }
                         }
                         crate::user_bash::emit_session_event_frame(
                             &self.core,
                             &self.events,
-                            crate::worker::refine_complete_event(&result),
+                            crate::worker::refine_complete_event(&committed.result),
                         );
                     }
                     Ok(None) => {}
