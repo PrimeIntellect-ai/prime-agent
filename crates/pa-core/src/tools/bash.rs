@@ -48,12 +48,12 @@ pub struct ExecOptions<'a> {
 }
 
 /// Pluggable operations for the bash tool. Implementations stream merged stdout/stderr through
-/// `on_data`, kill the process tree on cancellation, resolve with the child exit code (`None` when
-/// killed by a signal), and reject with `"aborted"` / `"timeout:<seconds>"`. Object-safe on purpose
-/// (`&dyn` injection).
+/// `on_data`, kill the process tree on cancellation, resolve with the child exit code (128 + the
+/// signal number when killed by a signal, like TS `waitForChildProcess`), and reject with
+/// `"aborted"` / `"timeout:<seconds>"`. Object-safe on purpose (`&dyn` injection).
 pub trait BashOperations: Send + Sync {
-    /// Execute a command and stream output through `on_data`; resolves with the exit code (`None`
-    /// when killed by a signal), or an error: `"aborted"` or `"timeout:<seconds>"`.
+    /// Execute a command and stream output through `on_data`; resolves with the exit code (128 +
+    /// the signal number when killed by a signal), or an error: `"aborted"` or `"timeout:<seconds>"`.
     fn exec<'a>(
         &'a self,
         command: &'a str,
