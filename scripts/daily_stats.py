@@ -115,7 +115,7 @@ def change(current, previous, *, percentage_points=False):
     else:
         delta, unit = (current / previous - 1) * 100, "%"
     delta = round(delta, 1)
-    arrow = "↑" if delta > 0 else "↓" if delta < 0 else "→"
+    arrow = "🟢 ↑" if delta > 0 else "🔴 ↓" if delta < 0 else "→"
     return f"{arrow} {abs(delta):.1f}{unit}"
 
 
@@ -148,10 +148,7 @@ def render_report(points, day):
     lines.append(f"• *Run success rate: {rate}* · "
                  f"{change(rates[day], rates[yesterday], percentage_points=True)} vs yesterday · "
                  f"{change(rates[day], rates[last_week], percentage_points=True)} vs last week")
-    lines.extend([f"<{DASHBOARD_URL}|Open dashboard>",
-                  "Active users count anonymous installations with a completed run. "
-                  "Tokens are recorded usage, including cache; they do not measure cost. "
-                  "Test accounts and known benchmarks are excluded."])
+    lines.extend(["", f"<{DASHBOARD_URL}|Open dashboard>"])
     return "\n".join(lines)
 
 
@@ -205,7 +202,19 @@ def main():
                     "refresh": "force_blocking", "async": False,
                 }, token=token, service="PostHog"))
             text = render_report(parse_results(response, day), day)
-            args.output.write_text(json.dumps({"text": text, "unfurl_links": False,
+            metrics, dashboard = text.rsplit("\n\n", 1)
+            # Slack limits each section to 3,000 characters; keep metric lines intact.
+            sections = [""]
+            for line in metrics.splitlines(keepends=True):
+                if len(sections[-1]) + len(line) > 3000:
+                    sections.append("")
+                sections[-1] += line
+            blocks = [{"type": "section", "text": {"type": "mrkdwn", "text": section.rstrip()}}
+                      for section in sections] + [
+                {"type": "divider"},
+                {"type": "section", "text": {"type": "mrkdwn", "text": dashboard}},
+            ]
+            args.output.write_text(json.dumps({"text": text, "blocks": blocks, "unfurl_links": False,
                                                 "unfurl_media": False}))
             print("Report prepared and validated. Metric values were not logged.")
         elif args.command == "send":
