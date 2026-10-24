@@ -192,9 +192,9 @@ fn agent_engine_streams_updates_and_final_message() {
     assert_eq!(events.last(), Some(&EngineEvent::Done(Ok(()))));
 }
 
-/// The worker persists the accepted row before the lazy core builds. Its
-/// pre-admission leaf must keep that row out of restored model history, while
-/// repeated text and image blocks remain distinct turns after a runtime rebuild.
+/// The lazy core builds from the worker's pre-admission leaf, and the accepted
+/// user row is persisted only after core admission, exactly once. Repeated text
+/// and image blocks remain distinct turns after a runtime rebuild.
 #[test]
 fn lazy_build_restores_only_the_pre_admission_prompt_context() {
     let _faux = FAUX_TEST_LOCK

@@ -967,17 +967,6 @@ impl SessionEngine for AgentSessionEngine {
             .prompt_context_boundary
             .lock()
             .expect("prompt context boundary lock") = None;
-        self.runtime.block_on(async {
-            let core = self.session.lock().await.clone();
-            if let Some(core) = core {
-                core.session
-                    .shared_persistence()
-                    .lock()
-                    .await
-                    .replay_admitted_user_rows(Vec::new())
-                    .expect("clearing admitted rows cannot fail");
-            }
-        });
         if let Some(children) = &self.children {
             children.notify_turn_done();
         }
