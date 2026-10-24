@@ -72,7 +72,10 @@ pub(crate) fn convert_content_blocks(content: &[UserOrToolContent]) -> Value {
 /// left the two back to back.
 fn merge_user_turns_at(params: &mut Vec<Value>, position: usize) {
     let is_user = |message: Option<&Value>| {
-        message.and_then(|message| message.get("role")).and_then(Value::as_str) == Some("user")
+        message
+            .and_then(|message| message.get("role"))
+            .and_then(Value::as_str)
+            == Some("user")
     };
     if position == 0 || !is_user(params.get(position - 1)) || !is_user(params.get(position)) {
         return;
