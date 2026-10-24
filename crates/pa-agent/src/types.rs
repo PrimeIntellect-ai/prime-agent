@@ -553,6 +553,9 @@ pub enum AgentEvent {
     /// Last event of a run; carries all messages produced by the run.
     AgentEnd {
         messages: Vec<AgentMessage>,
+        /// Whether this run ended through a cancellation path. Captured
+        /// before dispatch, so later abort requests cannot relabel it.
+        aborted: bool,
     },
     TurnStart,
     TurnEnd {

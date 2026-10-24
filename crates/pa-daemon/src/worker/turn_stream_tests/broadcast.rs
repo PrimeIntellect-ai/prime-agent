@@ -300,9 +300,10 @@ async fn a_turn_without_a_model_turn_keeps_the_bare_fallback_frames() {
     );
 }
 
-/// One `agent_end` per agent run on the wire: the retry run re-opens with
-/// its own `agent_start` + `turn_start` frames, and its `agent_end`
-/// carries only the retry's messages; no bare synthesized frame trails.
+/// One `agent_end` per agent run on the wire: the failed run's `agent_end`
+/// follows the retry start, the retry run re-opens with its own
+/// `agent_start` + `turn_start` frames, and its `agent_end` carries only
+/// the retry's messages; no bare synthesized frame trails.
 #[allow(clippy::await_holding_lock)] // the faux registry is process-global: the guard must span the async flow
 #[tokio::test]
 async fn a_retried_turn_broadcasts_one_agent_end_per_run() {
@@ -449,11 +450,11 @@ async fn a_retried_turn_broadcasts_one_agent_end_per_run() {
     let retry_starts = positions_of(&events, "auto_retry_start");
     assert_eq!(retry_starts.len(), 1, "the retry start frame: {events:?}");
     assert!(
-        agent_ends[0] < retry_starts[0]
-            && retry_starts[0] < agent_starts[1]
+        retry_starts[0] < agent_ends[0]
+            && agent_ends[0] < agent_starts[1]
             && agent_starts[1] < turn_starts[1]
             && turn_starts[1] < agent_ends[1],
-        "the retry run's frames sit between the two agent_ends: {events:?}"
+        "the failed run's agent_end follows its retry start, then the retry run's frames: {events:?}"
     );
     assert!(
         events.iter().all(|event| {

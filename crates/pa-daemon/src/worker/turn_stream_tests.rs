@@ -126,6 +126,7 @@ fn positions_of(events: &[Value], frame_type: &str) -> Vec<usize> {
 #[derive(Default)]
 struct GateProbeEngine {
     frames: Vec<EngineEvent>,
+    before_delivery: Mutex<Option<Box<dyn Fn() + Send>>>,
     boundaries: Mutex<Vec<Option<String>>>,
 }
 
@@ -142,7 +143,11 @@ impl SessionEngine for GateProbeEngine {
         emit: &mut dyn FnMut(EngineEvent) -> bool,
     ) {
         for frame in &self.frames {
-            if !emit(frame.clone()) {
+            let queued_frame = frame.clone();
+            if let Some(before_delivery) = self.before_delivery.lock().unwrap().as_ref() {
+                before_delivery();
+            }
+            if !emit(queued_frame) {
                 return;
             }
         }
@@ -189,23 +194,24 @@ impl SessionEngine for GateProbeEngine {
     }
 }
 
-/// One gated sighting battery: the scripted frames through the worker's turn with
-/// the abort flag (and the suppressed-row class) preset.
+/// One gated sighting battery: change the worker flags after producing each
+/// scripted frame, immediately before delivering it to the worker callback.
 async fn gate_sighting_events(
     frames: Vec<EngineEvent>,
     abort_requested: bool,
     suppress_aborted_row: bool,
 ) -> Vec<Value> {
-    let engine: Arc<dyn SessionEngine> = Arc::new(GateProbeEngine {
+    let engine = Arc::new(GateProbeEngine {
         frames,
-        boundaries: Mutex::new(Vec::new()),
+        ..GateProbeEngine::default()
     });
-    let runner = burst_runner(Arc::clone(&engine));
-    {
-        let mut core = runner.core.lock().unwrap();
+    let runner = burst_runner(engine.clone());
+    let core = Arc::clone(&runner.core);
+    *engine.before_delivery.lock().unwrap() = Some(Box::new(move || {
+        let mut core = core.lock().unwrap();
         core.abort_requested = abort_requested;
         core.suppress_aborted_row = suppress_aborted_row;
-    }
+    }));
     let mut subscription = runner.events.subscribe();
     runner
         .run_turn(
@@ -264,6 +270,304 @@ async fn done_aborted_arms_the_fallback_silence() {
     assert!(
         positions_of(&events, "agent_end").is_empty(),
         "the aborted settle keeps the suppressed-run silence: {events:?}"
+    );
+}
+
+/// An abort landing between the run's steps settles through the run's own
+/// terminal frames — the original `toolUse` `turn_end`, then an `agent_end`
+/// that carries the abort marker (the wire fact an attached client's
+/// idle-vs-done settle keys on).
+#[tokio::test]
+async fn an_abort_between_steps_marks_the_runs_agent_end() {
+    let tool_message = json!({ "role": "assistant", "stopReason": "toolUse" });
+    let events = gate_sighting_events(
+        vec![
+            EngineEvent::ToolExecutionEnd {
+                tool_call_id: "t1".to_string(),
+                result: json!({ "text": "the tool settled" }),
+                is_error: false,
+            },
+            EngineEvent::TurnEnd {
+                message: tool_message.clone(),
+                tool_results: Vec::new(),
+            },
+            EngineEvent::AgentEnd {
+                aborted: true,
+                messages: vec![tool_message],
+            },
+        ],
+        true,
+        false,
+    )
+    .await;
+    let turn_ends = positions_of(&events, "turn_end");
+    assert_eq!(turn_ends.len(), 1, "the run's terminal frame: {events:?}");
+    assert_eq!(
+        events[turn_ends[0]]["message"]["stopReason"],
+        json!("toolUse"),
+        "the abort between steps keeps the original terminal frame: {events:?}"
+    );
+    let agent_ends = positions_of(&events, "agent_end");
+    assert_eq!(
+        agent_ends.len(),
+        1,
+        "the aborted run still ends: {events:?}"
+    );
+    assert_eq!(
+        events[agent_ends[0]]["aborted"],
+        json!(true),
+        "the aborted run's agent_end carries the marker: {events:?}"
+    );
+    assert!(
+        turn_ends[0] < agent_ends[0],
+        "the settle pair lands in order: {events:?}"
+    );
+}
+
+#[tokio::test]
+async fn fallback_cancellation_has_provenance_even_when_error_text_matches_failure() {
+    for (event, expected) in [
+        (
+            EngineEvent::DoneAborted,
+            json!({ "type": "turn_end", "error": "No response produced.", "aborted": true }),
+        ),
+        (
+            EngineEvent::Done(Err("No response produced.".to_string())),
+            json!({ "type": "turn_end", "error": "No response produced." }),
+        ),
+    ] {
+        let events = gate_sighting_events(vec![event], false, false).await;
+        let ends = positions_of(&events, "turn_end");
+        assert_eq!(ends.len(), 1);
+        assert_eq!(events[ends[0]], expected);
+    }
+}
+
+#[tokio::test]
+async fn retry_cancellation_marker_comes_from_the_outcome_not_the_error_text() {
+    for aborted in [false, true] {
+        let events = gate_sighting_events(
+            vec![EngineEvent::AutoRetryEnd {
+                aborted,
+                success: false,
+                attempt: 1,
+                final_error: Some("Retry cancelled".to_string()),
+                restored_model: None,
+            }],
+            false,
+            false,
+        )
+        .await;
+        let ends = positions_of(&events, "auto_retry_end");
+        assert_eq!(ends.len(), 1);
+        let mut expected = json!({ "type": "auto_retry_end", "success": false, "attempt": 1, "finalError": "Retry cancelled" });
+        if aborted {
+            expected["aborted"] = json!(true);
+        }
+        assert_eq!(events[ends[0]], expected);
+    }
+}
+
+#[tokio::test]
+async fn retry_cancellation_passes_the_armed_abort_gate_unless_rows_are_suppressed() {
+    let cancelled = EngineEvent::AutoRetryEnd {
+        aborted: true,
+        success: false,
+        attempt: 1,
+        final_error: Some("Retry cancelled".to_string()),
+        restored_model: None,
+    };
+    let events = gate_sighting_events(
+        vec![
+            EngineEvent::TurnEnd {
+                message: json!({ "role": "assistant", "stopReason": "error" }),
+                tool_results: Vec::new(),
+            },
+            cancelled.clone(),
+        ],
+        /*abort_requested*/ true,
+        /*suppress_aborted_row*/ false,
+    )
+    .await;
+    let ends = positions_of(&events, "auto_retry_end");
+    assert_eq!(
+        ends.len(),
+        1,
+        "the real abort gate must forward cancellation: {events:?}"
+    );
+    assert_eq!(
+        events[ends[0]],
+        json!({ "type": "auto_retry_end", "success": false, "attempt": 1, "finalError": "Retry cancelled", "aborted": true })
+    );
+    let suppressed = gate_sighting_events(
+        vec![cancelled],
+        /*abort_requested*/ true,
+        /*suppress_aborted_row*/ true,
+    )
+    .await;
+    assert!(
+        positions_of(&suppressed, "auto_retry_end").is_empty(),
+        "suppression remains authoritative: {suppressed:?}"
+    );
+}
+
+/// A run that settled on its own keeps the TS `agent_end` shape — the marker
+/// rides aborted runs only.
+#[tokio::test]
+async fn a_self_settled_runs_agent_end_carries_no_marker() {
+    let tool_message = json!({ "role": "assistant", "stopReason": "toolUse" });
+    let events = gate_sighting_events(
+        vec![
+            EngineEvent::TurnEnd {
+                message: tool_message.clone(),
+                tool_results: Vec::new(),
+            },
+            EngineEvent::AgentEnd {
+                aborted: false,
+                messages: vec![tool_message],
+            },
+        ],
+        false,
+        false,
+    )
+    .await;
+    let agent_ends = positions_of(&events, "agent_end");
+    assert_eq!(
+        agent_ends.len(),
+        1,
+        "the settled run's agent_end: {events:?}"
+    );
+    assert!(
+        events[agent_ends[0]].get("aborted").is_none(),
+        "the self-settled run keeps the TS frame shape: {events:?}"
+    );
+}
+
+/// A completed end frame can wait in the engine channel while a new
+/// abort request sets the worker flag. Delivery must retain the run's
+/// completed outcome rather than relabeling the queued frame.
+#[tokio::test]
+async fn a_late_abort_does_not_relabel_a_completed_agent_end() {
+    let message = json!({ "role": "assistant", "stopReason": "stop" });
+    let events = gate_sighting_events(
+        vec![EngineEvent::AgentEnd {
+            aborted: false,
+            messages: vec![message.clone()],
+        }],
+        true,
+        false,
+    )
+    .await;
+    let ends: Vec<&Value> = events
+        .iter()
+        .filter(|event| event["type"] == "agent_end")
+        .collect();
+    assert_eq!(
+        ends,
+        vec![&json!({ "type": "agent_end", "messages": [message] })],
+        "a late abort cannot change a completed run's queued end frame"
+    );
+}
+
+/// The queued end also retains cancellation after the worker's request
+/// flag has been cleared for a later delivery.
+#[tokio::test]
+async fn an_aborted_end_keeps_its_marker_after_the_request_flag_clears() {
+    let message = json!({ "role": "assistant", "stopReason": "toolUse" });
+    let events = gate_sighting_events(
+        vec![EngineEvent::AgentEnd {
+            aborted: true,
+            messages: vec![message.clone()],
+        }],
+        false,
+        false,
+    )
+    .await;
+    let ends: Vec<&Value> = events
+        .iter()
+        .filter(|event| event["type"] == "agent_end")
+        .collect();
+    assert_eq!(
+        ends,
+        vec![&json!({ "type": "agent_end", "messages": [message], "aborted": true })]
+    );
+}
+
+/// A failed run's `agent_end` goes out after the retry loop's next frame:
+/// the pending retry's `auto_retry_start` reaches clients before the end of
+/// the attempt it retries.
+#[tokio::test]
+async fn a_failed_runs_agent_end_follows_its_retry_start() {
+    let failed = json!({ "role": "assistant", "stopReason": "error", "errorMessage": "down" });
+    let events = gate_sighting_events(
+        vec![
+            EngineEvent::TurnEnd {
+                message: failed.clone(),
+                tool_results: Vec::new(),
+            },
+            EngineEvent::AgentEnd {
+                aborted: false,
+                messages: vec![failed],
+            },
+            EngineEvent::AutoRetryStart {
+                attempt: 1,
+                max_attempts: 3,
+                delay_ms: 1_000,
+                error_message: "down".to_string(),
+                reason: pa_core::session_engine::auto_retry::RetryStartReason::Quick,
+            },
+        ],
+        false,
+        false,
+    )
+    .await;
+    let order: Vec<&str> = events
+        .iter()
+        .filter_map(|event| event["type"].as_str())
+        .filter(|kind| ["turn_end", "auto_retry_start", "agent_end"].contains(kind))
+        .collect();
+    assert_eq!(
+        order,
+        ["turn_end", "auto_retry_start", "agent_end"],
+        "{events:?}"
+    );
+}
+
+/// The final failure's verdict also precedes the failed run's `agent_end`.
+#[tokio::test]
+async fn a_failed_runs_agent_end_follows_its_final_retry_end() {
+    let failed = json!({ "role": "assistant", "stopReason": "error", "errorMessage": "down" });
+    let events = gate_sighting_events(
+        vec![
+            EngineEvent::TurnEnd {
+                message: failed.clone(),
+                tool_results: Vec::new(),
+            },
+            EngineEvent::AgentEnd {
+                aborted: false,
+                messages: vec![failed],
+            },
+            EngineEvent::AutoRetryEnd {
+                aborted: false,
+                success: false,
+                attempt: 3,
+                final_error: Some("down".to_string()),
+                restored_model: None,
+            },
+        ],
+        false,
+        false,
+    )
+    .await;
+    let order: Vec<&str> = events
+        .iter()
+        .filter_map(|event| event["type"].as_str())
+        .filter(|kind| ["turn_end", "auto_retry_end", "agent_end"].contains(kind))
+        .collect();
+    assert_eq!(
+        order,
+        ["turn_end", "auto_retry_end", "agent_end"],
+        "{events:?}"
     );
 }
 
@@ -398,7 +702,7 @@ async fn model_transitions_reach_the_worker_owned_session_file() {
         }
         let engine: Arc<dyn SessionEngine> = Arc::new(GateProbeEngine {
             frames,
-            boundaries: Mutex::new(Vec::new()),
+            ..GateProbeEngine::default()
         });
         let runner = burst_runner(Arc::clone(&engine));
         let mut store = crate::session_store::SessionFile::create("/fixture", None, 0);
@@ -468,7 +772,7 @@ async fn prompt_restore_boundary_is_supplied_only_for_file_backed_stores() {
     for file_backed in [false, true] {
         let engine = Arc::new(GateProbeEngine {
             frames: vec![EngineEvent::Done(Ok(()))],
-            boundaries: Mutex::new(Vec::new()),
+            ..GateProbeEngine::default()
         });
         let dynamic: Arc<dyn SessionEngine> = engine.clone();
         let runner = burst_runner(Arc::clone(&dynamic));

@@ -506,6 +506,7 @@ impl AgentInner {
             .await;
         let _ = self
             .process_events(AgentEvent::AgentEnd {
+                aborted,
                 messages: vec![AgentMessage::Standard(crate::types::Message::Assistant(
                     failure_message.clone(),
                 ))],

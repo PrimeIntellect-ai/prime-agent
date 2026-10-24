@@ -101,19 +101,43 @@ pub(crate) mod sys;
 #[cfg(feature = "events")]
 pub use sys::supports_keyboard_enhancement;
 
-/// Prime Agent patch: the raw-path keyboard-enhancement check for a
-/// caller that already holds the terminal in raw mode. The stock
-/// [`supports_keyboard_enhancement`] re-decides the raw state at its
-/// entry and, when raw is off, brackets raw mode ITSELF - an implicit
+/// Prime Agent patch: the OSC 7501 (Program Status Protocol) detection
+/// reply. `None` means the reply carried no such list: the protocol then
+/// fixes it to its base list.
+#[derive(Debug, PartialOrd, PartialEq, Hash, Clone, Eq)]
+pub struct ProgramStatusSupport {
+    /// The `states=` list.
+    pub states: Option<Vec<String>>,
+    /// The `kinds=` list.
+    pub kinds: Option<Vec<String>>,
+}
+
+/// Prime Agent patch: what one [`probe_terminal_checked_raw`] learned.
+#[cfg(all(unix, feature = "events"))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TerminalProbe {
+    /// The terminal answered the kitty keyboard flags query.
+    pub keyboard_enhancement: bool,
+    /// The OSC 7501 reply that arrived before the primary device
+    /// attributes; `None` means the protocol is unsupported.
+    pub program_status: Option<ProgramStatusSupport>,
+}
+
+/// Prime Agent patch: the raw-path terminal probe for a caller that
+/// already holds the terminal in raw mode. One write carries the OSC 7501
+/// detection query, the kitty keyboard flags query when `keyboard` is set,
+/// and the primary device attributes query whose reply concludes both.
+/// The stock [`supports_keyboard_enhancement`] re-decides the raw state at
+/// its entry and, when raw is off, brackets raw mode ITSELF - an implicit
 /// `enable_raw_mode` that must never run while a TUI hands its terminal
 /// back to the shell (the suspend window: the bracket would re-arm raw
-/// on the shell's terminal while the process group stops). The kitty
-/// probe guards its call on the app's own raw bracket and then takes
-/// this path, so the probe can never re-arm anything, whatever races
-/// the window between the guard's read and the check's own.
+/// on the shell's terminal while the process group stops). The probe
+/// guards its call on the app's own raw bracket and then takes this path,
+/// so the probe can never re-arm anything, whatever races the window
+/// between the guard's read and the check's own.
 #[cfg(all(unix, feature = "events"))]
-pub fn supports_keyboard_enhancement_checked_raw() -> io::Result<bool> {
-    sys::read_supports_keyboard_enhancement_raw()
+pub fn probe_terminal_checked_raw(keyboard: bool) -> io::Result<TerminalProbe> {
+    sys::probe_terminal_raw(keyboard, true)
 }
 
 /// Tells whether the raw mode is enabled.

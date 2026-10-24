@@ -434,6 +434,8 @@ impl TurnRunner {
             // success too: one row replaces TS's per-attempt error rows
             // (operator ruling 2026-09-23).
             let mut last_retry_error: Option<String> = None;
+            // A failed run's `agent_end` frame, held for the frame after it.
+            let mut held_run_end: Option<Value> = None;
             let mut emit = |mut event: EngineEvent| -> bool {
                 // A cancelled turn stops consuming its own events, except the frames
                 // TS still broadcasts for an interrupted turn: aborted row/tool settle
@@ -462,10 +464,13 @@ impl TurnRunner {
                         )
                 ) || matches!(
                     &event,
-                    EngineEvent::AgentEnd { messages }
+                    EngineEvent::AgentEnd { messages, .. }
                         if messages.iter().any(|message| {
                             message.get("stopReason").and_then(Value::as_str) == Some("aborted")
                         })
+                ) || matches!(
+                    &event,
+                    EngineEvent::AutoRetryEnd { aborted: true, .. }
                 );
                 let abort_settle = matches!(
                     &event,
@@ -525,7 +530,7 @@ impl TurnRunner {
                         // pane working.
                         herdr_run_end_seen.store(false, std::sync::atomic::Ordering::SeqCst);
                     }
-                    EngineEvent::AgentEnd { messages } => {
+                    EngineEvent::AgentEnd { messages, .. } => {
                         herdr
                             .lock()
                             .unwrap()
@@ -705,6 +710,16 @@ impl TurnRunner {
                     }
                     _ => None,
                 };
+                // The retry loop decides only after a failed run ended, so
+                // that run's `agent_end` goes out after the next event's
+                // frames (or at the join): a client sees the pending retry
+                // (`auto_retry_start`) before the end of the attempt it
+                // retries.
+                let failed_run_end = matches!(
+                    &event,
+                    EngineEvent::AgentEnd { messages, aborted: false }
+                        if crate::herdr::error_hold_message(messages).is_some()
+                );
                 // One event may map to several wire frames (a custom row
                 // is a message_start + message_end pair).
                 let mut frames: Vec<Value> = match event {
@@ -840,12 +855,22 @@ impl TurnRunner {
                     // `agent_end` (one frame per agent run — retried and
                     // continued runs included); the rows themselves
                     // already went out through their own events, so no
-                    // persist here.
+                    // persist here. A run ending under an abort carries the
+                    // marker: between steps and tools the abort keeps the
+                    // original `toolUse` turn_end, so the marker is the one
+                    // wire fact that separates the aborted settle from a
+                    // normal one.
                     EngineEvent::AgentStart => vec![json!({ "type": "agent_start" })],
-                    EngineEvent::AgentEnd { messages } => vec![json!({
-                        "type": "agent_end",
-                        "messages": messages,
-                    })],
+                    EngineEvent::AgentEnd { messages, aborted } => {
+                        let mut frame = json!({
+                            "type": "agent_end",
+                            "messages": messages,
+                        });
+                        if aborted {
+                            frame["aborted"] = json!(true);
+                        }
+                        vec![frame]
+                    }
                     // Turn-boundary frames: the terminal message and tool
                     // results ride `turn_end`; no persist here.
                     EngineEvent::TurnStart => vec![json!({ "type": "turn_start" })],
@@ -872,6 +897,7 @@ impl TurnRunner {
                     EngineEvent::DoneAborted if !engine_turn_ended => vec![json!({
                         "type": "turn_end",
                         "error": ABORTED_TURN_SETTLE_ERROR,
+                        "aborted": true,
                     })],
                     EngineEvent::ModelChange(_)
                     | EngineEvent::Done(Ok(()) | Err(_))
@@ -903,6 +929,7 @@ impl TurnRunner {
                         vec![event]
                     }
                     EngineEvent::AutoRetryEnd {
+                        aborted,
                         success,
                         attempt,
                         final_error,
@@ -913,6 +940,9 @@ impl TurnRunner {
                             "success": success,
                             "attempt": attempt,
                         });
+                        if aborted {
+                            event["aborted"] = json!(true);
+                        }
                         if let Some(final_error) = &final_error {
                             event["finalError"] = json!(final_error);
                         }
@@ -959,6 +989,15 @@ impl TurnRunner {
                             "actions": snapshot,
                         }));
                     }
+                }
+                if !frames.is_empty() {
+                    frames.extend(held_run_end.take());
+                }
+                if failed_run_end {
+                    held_run_end = frames
+                        .iter()
+                        .position(|frame| frame["type"] == "agent_end")
+                        .map(|index| frames.remove(index));
                 }
                 // Verification seam: dump the emitted session events for
                 // harness debugging (PA_DAEMON_EVENT_LOG=<path>).
@@ -1045,12 +1084,16 @@ impl TurnRunner {
                 engine.set_prompt_context_boundary(prompt_context_leaf);
             }
             engine.run_prompt(prompt_index, request, &aborted_probe, &mut emit);
+            held_run_end
         });
-        let _ = turn.await;
+        let held_run_end = turn.await.ok().flatten();
         // The emit path is joined: a stale parked partial must not
         // surface after the settle events.
         coalescer.close();
         flusher.abort();
+        if let Some(frame) = held_run_end {
+            self.emit_turn_event(frame);
+        }
 
         let engine_reported_run_end = engine_agent_end.load(std::sync::atomic::Ordering::SeqCst);
         let more_queued = {

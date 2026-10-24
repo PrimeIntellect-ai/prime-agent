@@ -235,7 +235,14 @@ impl SessionUi {
             } => {
                 if active_session_id == self.active_session_id {
                     self.turn_active = false;
+                    self.run_open = false;
+                    self.outcome_after_compaction = None;
                     view.working = None;
+                    view.retry = None;
+                    view.compaction = None;
+                    // The closed session cannot run again: its remembered
+                    // settle owes the dead surface nothing.
+                    self.settled = None;
                     self.bash_list_epoch += 1;
                     self.factory_list_epoch += 1;
                     self.bash_activities = serde_json::json!({"activities": []});
@@ -348,6 +355,11 @@ impl SessionUi {
         match update {
             TurnUpdate::TurnStarted => {
                 self.turn_active = true;
+                if !self.run_open {
+                    self.run_open = true;
+                    self.run_outcome = crate::program_status::Status::Done;
+                }
+                self.settled = None;
                 self.turn_error_shown = false;
                 // No card from a previous run settles on this one's failure.
                 self.pending_tools.clear();
@@ -435,12 +447,25 @@ impl SessionUi {
                     }
                 }
             }
-            TurnUpdate::TurnEnded { error } => {
+            TurnUpdate::TurnEnded {
+                error,
+                run_failed,
+                aborted,
+            } => {
                 // Only the engine's own turn_end clears the busy state: trailing frames
                 // from the previous turn must not cancel a turn admitted in between.
                 self.streaming_index = None;
                 self.turn_ends_seen += 1;
                 self.turn_active = false;
+                // An aborted settle ends the run (the abort fallback frame
+                // has no agent_end); a failed step leaves the run open for
+                // its agent_end, which a pending retry follows first.
+                if aborted {
+                    self.run_open = false;
+                    self.settled = None;
+                } else if run_failed {
+                    self.run_outcome = crate::program_status::Status::Error;
+                }
                 view.working = None;
                 view.working_since = None;
                 view.retry = None;
@@ -480,12 +505,19 @@ impl SessionUi {
                 });
             }
             TurnUpdate::AutoRetryEnd {
+                aborted,
                 success: _,
                 attempt: _,
                 final_error,
                 restored_model,
             } => {
                 view.retry = None;
+                // A cancelled retry rests idle, whether it cancels the
+                // countdown or the failed attempt before its agent_end.
+                if aborted {
+                    self.run_outcome = crate::program_status::Status::Idle;
+                    self.settled = None;
+                }
                 if final_error.is_some() {
                     self.turn_error_shown = true;
                     // The give-up's final attempt is superseded by the ONE terminal line.
@@ -530,8 +562,17 @@ impl SessionUi {
                 aborted,
                 error_message,
                 error_severity,
+                will_retry,
             } => {
                 view.compaction = None;
+                // The overflow recovery's end decides the run it held open:
+                // a re-issued turn reports for itself, a cancelled recovery
+                // rests idle, a failed or skipped one settles the outcome.
+                if let Some(outcome) = self.outcome_after_compaction.take() {
+                    if !will_retry {
+                        self.settled = (!aborted).then_some(outcome);
+                    }
+                }
                 if let Some(result) = result {
                     // The display transcript keeps every row: the summary appends at the
                     // compaction's own position.
@@ -570,9 +611,26 @@ impl SessionUi {
                     }
                 }
             }
-            TurnUpdate::Idle => {
+            TurnUpdate::Idle { aborted } => {
                 if !self.turn_active {
                     view.working = None;
+                }
+                // The run's end settles its outcome. An abort between steps
+                // and tools keeps the original toolUse turn_end, so only the
+                // marker tells it apart. A failed attempt whose retry is
+                // pending rests working on the countdown instead, and one
+                // whose overflow recovery compaction runs leaves the outcome
+                // to that compaction's end.
+                if self.run_open {
+                    self.run_open = false;
+                    self.settled = None;
+                    if !aborted {
+                        if view.compaction.is_some() {
+                            self.outcome_after_compaction = Some(self.run_outcome);
+                        } else if view.retry.is_none() {
+                            self.settled = Some(self.run_outcome);
+                        }
+                    }
                 }
             }
             TurnUpdate::GoalUpdate(goal) => {
@@ -801,6 +859,13 @@ impl SessionUi {
             None
         };
         if abort_text.is_some() || stop_reason == Some("error") {
+            // Lifecycle failures can emit agent_end before any turn_end:
+            // the terminal message itself decides the run's outcome.
+            self.run_outcome = if abort_text.is_some() {
+                crate::program_status::Status::Idle
+            } else {
+                crate::program_status::Status::Error
+            };
             let settle_text = abort_text.clone().unwrap_or_else(|| {
                 message
                     .get("errorMessage")

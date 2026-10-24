@@ -1287,6 +1287,7 @@ fn decodes_auto_retry_events() {
     assert_eq!(
         end,
         TurnUpdate::AutoRetryEnd {
+            aborted: false,
             success: false,
             attempt: 2,
             final_error: Some("provider down".to_string()),
@@ -1303,6 +1304,7 @@ fn decodes_auto_retry_events() {
     assert_eq!(
         settled,
         TurnUpdate::AutoRetryEnd {
+            aborted: false,
             success: true,
             attempt: 2,
             final_error: None,
@@ -1413,17 +1415,45 @@ fn decodes_streamed_events() {
         TurnUpdate::AssistantMessage { message, streaming: false, .. } if message["content"] == "done"
     ));
     let ended = event_to_update(&json!({ "type": "turn_end" })).unwrap();
-    assert_eq!(ended, TurnUpdate::TurnEnded { error: None });
+    assert_eq!(
+        ended,
+        TurnUpdate::TurnEnded {
+            error: None,
+            run_failed: false,
+            aborted: false,
+        }
+    );
     let failed = event_to_update(&json!({ "type": "turn_end", "error": "boom" })).unwrap();
     assert_eq!(
         failed,
         TurnUpdate::TurnEnded {
-            error: Some("boom".to_string())
+            error: Some("boom".to_string()),
+            run_failed: true,
+            aborted: false,
         }
     );
+    // The engine's own terminal message settles the run as failed too; a
+    // step's toolUse settle does not.
+    for (stop_reason, run_failed) in [("aborted", true), ("error", true), ("toolUse", false)] {
+        assert_eq!(
+            event_to_update(&json!({
+                "type": "turn_end",
+                "message": { "role": "assistant", "stopReason": stop_reason },
+            })),
+            Some(TurnUpdate::TurnEnded {
+                error: None,
+                run_failed,
+                aborted: stop_reason == "aborted",
+            })
+        );
+    }
     assert_eq!(
         event_to_update(&json!({ "type": "agent_end" })),
-        Some(TurnUpdate::Idle)
+        Some(TurnUpdate::Idle { aborted: false })
+    );
+    assert_eq!(
+        event_to_update(&json!({ "type": "agent_end", "aborted": true })),
+        Some(TurnUpdate::Idle { aborted: true })
     );
 }
 
@@ -1761,7 +1791,7 @@ fn decodes_compaction_events() {
             "reason": "manual",
             "result": { "summary": "s", "firstKeptEntryId": "e1", "tokensBefore": 12 },
             "aborted": false,
-            "willRetry": false,
+            "willRetry": true,
             "customInstructions": "focus",
         })),
         Some(TurnUpdate::CompactionEnd {
@@ -1771,6 +1801,7 @@ fn decodes_compaction_events() {
             aborted: false,
             error_message: None,
             error_severity: None,
+            will_retry: true,
         })
     );
     assert_eq!(
@@ -1789,6 +1820,7 @@ fn decodes_compaction_events() {
             aborted: false,
             error_message: Some("Session is too short to compact".to_string()),
             error_severity: Some("warning".to_string()),
+            will_retry: false,
         })
     );
     // The settling end stays the summary's only durable source.
