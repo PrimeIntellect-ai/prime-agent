@@ -11,10 +11,11 @@ impl AgentView {
     /// flipped for the entries a click toggled away from it. Exact for
     /// both sides: the never-toggled entries get `self.detail` (a click
     /// can only toggle the kinds `transcript_click_target` matches),
-    /// and the card renderers read `Detail` only through
-    /// `tool_output_expanded()` — the level's other readers (thinking
-    /// blocks, edit diffs) belong to rows no click can toggle, so the
-    /// flip never leaks into them.
+    /// and the card renderers read this `Detail` only through
+    /// `tool_output_expanded()`. The level's other readers never see the
+    /// flip: thinking blocks belong to rows no click can toggle, and the
+    /// ipython card's edit diffs read the conversation level (`self.detail`)
+    /// passed beside this one.
     #[must_use]
     pub(super) fn entry_detail(&self, index: usize) -> Detail {
         if self.toggled_cards.contains(&index) {

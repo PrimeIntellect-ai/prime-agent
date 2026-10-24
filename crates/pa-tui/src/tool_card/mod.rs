@@ -112,7 +112,9 @@ pub fn working_icon(frame: usize) -> &'static str {
     crate::chat::working_icon_frame(frame)
 }
 
-/// Render one tool-call card through its tool shell. `show_images` (the
+/// Render one tool-call card through its tool shell. `detail` is the
+/// card's own level (a click may flip it); `conversation_detail` is the
+/// conversation level, which alone drives edit diffs. `show_images` (the
 /// `terminal.showImages` setting) renders metadata rows or `[Image: ...]`
 /// placeholders.
 #[must_use]
@@ -120,14 +122,21 @@ pub fn render_tool_card(
     card: &ToolCallCard,
     frame: usize,
     detail: Detail,
+    conversation_detail: Detail,
     theme: &Theme,
     width: usize,
     show_images: bool,
 ) -> Vec<Line> {
     match card.name.as_str() {
-        name if pa_types::ai::is_python_tool_name(name) => {
-            ipython::render(card, frame, detail, theme, width, show_images)
-        }
+        name if pa_types::ai::is_python_tool_name(name) => ipython::render(
+            card,
+            frame,
+            detail,
+            conversation_detail,
+            theme,
+            width,
+            show_images,
+        ),
         "bash" => bash::render(card, frame, detail, theme, width, show_images),
         _ => generic::render(card, frame, detail, theme, width, show_images),
     }
@@ -330,14 +339,21 @@ pub(crate) fn count_tool_card(
     card: &ToolCallCard,
     frame: usize,
     detail: Detail,
+    conversation_detail: Detail,
     theme: &Theme,
     width: usize,
     show_images: bool,
 ) -> usize {
     match card.name.as_str() {
-        name if pa_types::ai::is_python_tool_name(name) => {
-            ipython::count(card, frame, detail, theme, width, show_images)
-        }
+        name if pa_types::ai::is_python_tool_name(name) => ipython::count(
+            card,
+            frame,
+            detail,
+            conversation_detail,
+            theme,
+            width,
+            show_images,
+        ),
         "bash" => bash::count(card, frame, detail, theme, width, show_images),
         _ => generic::count(card, frame, detail, theme, width, show_images),
     }

@@ -1,10 +1,13 @@
 //! The `ipython` tool-call card: a fixed collapsed summary line (marker,
-//! language, preview, line counts, duration, error name), plus in expanded
+//! language, preview, line counts, duration, error name), per-file edit
+//! summaries (with diff rows when edit diffs expand), plus in expanded
 //! mode the full cell source and output. The top line never changes with
 //! expansion, so toggling detail never shifts the layout.
 
+mod diffs;
 mod output;
 
+use diffs::render_diffs;
 use output::render_output;
 use serde_json::Value;
 
@@ -99,19 +102,31 @@ fn cell_code(card: &ToolCallCard) -> &str {
         .unwrap_or_default()
 }
 
-/// Render the ipython cell card: the fixed summary line, then the expanded
-/// code and output rows when conversation detail is `all`.
+/// Render the ipython cell card: the fixed summary line, the edit
+/// summaries, then the expanded code and output rows when the card's
+/// `detail` is `all`. Edit diff rows follow `conversation_detail`, never a
+/// card's own click toggle.
 #[must_use]
 pub fn render(
     card: &ToolCallCard,
     frame: usize,
     detail: Detail,
+    conversation_detail: Detail,
     theme: &Theme,
     width: usize,
     show_images: bool,
 ) -> Vec<Line> {
     let mut lines = RowOutput::paint();
-    layout(card, frame, detail, theme, width, show_images, &mut lines);
+    layout(
+        card,
+        frame,
+        detail,
+        conversation_detail,
+        theme,
+        width,
+        show_images,
+        &mut lines,
+    );
     lines.into_lines()
 }
 
@@ -119,19 +134,33 @@ pub(super) fn count(
     card: &ToolCallCard,
     frame: usize,
     detail: Detail,
+    conversation_detail: Detail,
     theme: &Theme,
     width: usize,
     show_images: bool,
 ) -> usize {
     let mut lines = RowOutput::count();
-    layout(card, frame, detail, theme, width, show_images, &mut lines);
+    layout(
+        card,
+        frame,
+        detail,
+        conversation_detail,
+        theme,
+        width,
+        show_images,
+        &mut lines,
+    );
     lines.len()
 }
 
+// One more than clippy's limit: the paint/count sink rides beside the
+// render inputs so both traversals share this single layout.
+#[allow(clippy::too_many_arguments)]
 fn layout(
     card: &ToolCallCard,
     frame: usize,
     detail: Detail,
+    conversation_detail: Detail,
     theme: &Theme,
     width: usize,
     show_images: bool,
@@ -158,14 +187,22 @@ fn layout(
             code,
         )
     });
-    // TS renders the sent-message receipt rows even when the cell is
-    // collapsed; the body opens up only when expanded.
-    if !detail.tool_output_expanded() {
-        render_sent_agent_messages(lines, &details, false, theme, width);
+    // Edit summaries and sent-message receipts show even when the cell is
+    // collapsed; code and output open up only when expanded.
+    let expanded = detail.tool_output_expanded();
+    let has_code = expanded && render_code(lines, code, theme, width);
+    render_diffs(
+        lines,
+        &details.diffs,
+        has_code,
+        conversation_detail.edit_diffs_expanded(),
+        theme,
+        width,
+    );
+    render_sent_agent_messages(lines, &details, expanded, theme, width);
+    if !expanded {
         return;
     }
-    let has_code = render_code(lines, code, theme, width);
-    render_sent_agent_messages(lines, &details, true, theme, width);
     render_output(card, &details, lines, has_code, show_images, theme, width);
     // Image blocks render below the card when shown (TS adds these rows
     // for every tool shell).
