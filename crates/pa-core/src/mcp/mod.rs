@@ -83,6 +83,7 @@ pub enum McpServerConfig {
         /// Env var holding a static bearer token (skips OAuth).
         #[serde(
             rename = "bearerTokenEnvVar",
+            alias = "bearer_token_env_var",
             default,
             skip_serializing_if = "Option::is_none"
         )]
@@ -1042,6 +1043,20 @@ mod tests {
             call_timeout_ms: None,
             client_id: None,
             callback_port: None,
+        }
+    }
+
+    #[test]
+    fn both_bearer_token_env_var_spellings_read() {
+        let expected = http_config("https://e.com/mcp", None, Some("MY_TOKEN"));
+        for key in ["bearerTokenEnvVar", "bearer_token_env_var"] {
+            let parsed: McpServerConfig = serde_json::from_value(serde_json::json!({
+                "type": "http",
+                "url": "https://e.com/mcp",
+                key: "MY_TOKEN"
+            }))
+            .unwrap();
+            assert_eq!(parsed, expected, "{key}");
         }
     }
 

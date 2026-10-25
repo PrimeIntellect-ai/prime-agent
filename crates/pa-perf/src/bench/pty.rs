@@ -21,6 +21,12 @@ pub(crate) const KITTY_ANSWER: &[u8] = b"\x1b[?7u\x1b[?62;c";
 /// The idle poll slice between empty reads (poll(2) drives the wakeups).
 const IDLE_POLL: Duration = Duration::from_millis(25);
 
+/// The synchronized-output bracket (mode 2026): the terminal the bench
+/// presents as (ghostty) shows only completed frames, so screen predicates
+/// must too.
+const SYNC_BEGIN: &[u8] = b"\x1b[?2026h";
+const SYNC_END: &[u8] = b"\x1b[?2026l";
+
 /// One product child on a pty, plus the collected master stream and the
 /// decoded screen (a vt100 model): byte needles cover literal paints; the
 /// screen model covers content that only exists as cell diffs (the agents
@@ -36,6 +42,10 @@ pub(crate) struct PtyChild {
     kitty_answered: bool,
     /// Set only after the exited child's final PTY bytes have drained.
     exited: Option<std::process::ExitStatus>,
+    /// When each read chunk arrived (the stall gauge's no-output gaps).
+    arrivals: Vec<Instant>,
+    /// Inside an unfinished synchronized-output frame.
+    in_frame: bool,
 }
 
 impl PtyChild {
@@ -84,6 +94,8 @@ impl PtyChild {
             screen: vt100::Parser::new(rows, cols, 0),
             kitty_answered: false,
             exited: None,
+            arrivals: Vec::new(),
+            in_frame: false,
         })
     }
 
@@ -194,9 +206,17 @@ impl PtyChild {
 
     /// Include the previous read's overlap when a terminal query is split.
     fn receive(&mut self, chunk: &[u8]) -> anyhow::Result<()> {
+        self.arrivals.push(Instant::now());
         let from = self.output.len().saturating_sub(KITTY_QUERY.len() - 1);
+        let frame_from = self.output.len().saturating_sub(SYNC_BEGIN.len() - 1);
         self.output.extend_from_slice(chunk);
         self.screen.process(chunk);
+        let tail = &self.output[frame_from..];
+        match (rfind(tail, SYNC_BEGIN), rfind(tail, SYNC_END)) {
+            (Some(begin), end) if end.is_none_or(|end| begin > end) => self.in_frame = true,
+            (_, Some(_)) => self.in_frame = false,
+            _ => {}
+        }
         if !self.kitty_answered && find(&self.output[from..], KITTY_QUERY).is_some() {
             self.write(KITTY_ANSWER)?;
             self.kitty_answered = true;
@@ -234,7 +254,7 @@ impl PtyChild {
         settled: impl Fn(&str) -> bool,
     ) -> anyhow::Result<Instant> {
         loop {
-            if settled(&self.screen_text()) {
+            if !self.in_frame && settled(&self.screen_text()) {
                 return Ok(Instant::now());
             }
             if let Some(status) = self.exited {
@@ -254,8 +274,32 @@ impl PtyChild {
     }
 
     /// The decoded screen's text (rows joined; trailing blanks trimmed).
-    fn screen_text(&mut self) -> String {
+    pub(crate) fn screen_text(&self) -> String {
         self.screen.screen().contents().trim_end().to_string()
+    }
+
+    /// Keep reading (and answering) the child's output until `deadline`: a
+    /// measured window must not stall the child on a full pty.
+    ///
+    /// # Errors
+    ///
+    /// Errors when the child exits inside the window.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn drain_until(&mut self, deadline: Instant) -> anyhow::Result<()> {
+        loop {
+            self.pump(Some(deadline))?;
+            if let Some(status) = self.exited {
+                anyhow::bail!("child exited with {status} inside the measured window");
+            }
+            if Instant::now() >= deadline {
+                return Ok(());
+            }
+        }
+    }
+
+    /// The longest no-output stretch from `from` until now.
+    pub(crate) fn longest_gap_since(&self, from: Instant) -> Duration {
+        longest_gap(&self.arrivals, from, Instant::now())
     }
 
     /// The child's pid (teardown signals this pid only).
@@ -306,6 +350,27 @@ fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     haystack.windows(needle.len()).position(|w| w == needle)
 }
 
+fn rfind(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    haystack.windows(needle.len()).rposition(|w| w == needle)
+}
+
+/// The longest stretch of `from..=to` in which no chunk arrived; the window
+/// edges bound the first and last stretch (`arrivals` is ascending).
+fn longest_gap(arrivals: &[Instant], from: Instant, to: Instant) -> Duration {
+    let first = arrivals.partition_point(|at| *at < from);
+    let mut previous = from;
+    let mut longest = Duration::ZERO;
+    for &at in arrivals[first..]
+        .iter()
+        .take_while(|at| **at <= to)
+        .chain(std::iter::once(&to))
+    {
+        longest = longest.max(at.saturating_duration_since(previous));
+        previous = at;
+    }
+    longest
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -333,6 +398,49 @@ mod tests {
             child.master = closed;
             child.receive(KITTY_QUERY).expect("already answered");
         }
+    }
+
+    #[test]
+    fn screen_predicates_see_only_completed_frames_at_every_read_boundary() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let frame = [SYNC_BEGIN, b"painted".as_slice(), SYNC_END].concat();
+        for split in 1..frame.len() {
+            let mut child = PtyChild::spawn(
+                std::path::Path::new("/bin/cat"),
+                &[],
+                &[],
+                dir.path(),
+                120,
+                36,
+            )
+            .expect("spawn mock terminal peer");
+            child.receive(&frame[..split]).expect("first chunk");
+            assert_eq!(
+                child.in_frame,
+                split >= SYNC_BEGIN.len(),
+                "split at {split}"
+            );
+            child.receive(&frame[split..]).expect("second chunk");
+            assert!(!child.in_frame, "the frame end was missed at {split}");
+        }
+    }
+
+    #[test]
+    fn the_longest_gap_is_bounded_by_the_window_edges() {
+        let start = Instant::now();
+        let at = |ms| start + Duration::from_millis(ms);
+        let arrivals = [at(0), at(5), at(40), at(45), at(200)];
+        // Arrivals before the window never shorten its leading stretch.
+        assert_eq!(
+            longest_gap(&arrivals, at(10), at(42)),
+            Duration::from_millis(30)
+        );
+        // The trailing stretch runs to the window end, not the next arrival.
+        assert_eq!(
+            longest_gap(&arrivals, at(10), at(100)),
+            Duration::from_millis(55)
+        );
+        assert_eq!(longest_gap(&[], at(0), at(7)), Duration::from_millis(7));
     }
 
     #[test]
@@ -365,6 +473,26 @@ mod tests {
             .expect_err("screen wait also sees exit")
             .to_string()
             .contains("exit status: 7"));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_child_exit_seen_by_the_last_drain_pump_fails_the_window() {
+        let directory = tempfile::tempdir().expect("mock directory");
+        let mut child = PtyChild::spawn(
+            std::path::Path::new("/bin/sh"),
+            &["-c".into(), "exit 7".into()],
+            &[],
+            directory.path(),
+            120,
+            36,
+        )
+        .expect("spawn exiting mock");
+        child.child.wait().expect("the mock exits");
+        let error = child
+            .drain_until(Instant::now())
+            .expect_err("a dead child fails the window");
+        assert!(error.to_string().contains("exit status: 7"), "{error}");
     }
 
     #[test]

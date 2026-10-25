@@ -236,7 +236,7 @@ fn build_params(model: &Model, context: &Context, options: &GoogleVertexOptions)
     if let Some(system_prompt) = &context.system_prompt {
         body.insert(
             "systemInstruction".into(),
-            json!(sanitize_surrogates(system_prompt)),
+            json!({ "parts": [{ "text": sanitize_surrogates(system_prompt) }] }),
         );
     }
     if let Some(tools) = &context.tools {

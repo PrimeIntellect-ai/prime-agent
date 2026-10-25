@@ -8,8 +8,8 @@ use std::time::{Duration, Instant};
 
 use anyhow::Context;
 
-use crate::bench::{BenchCorpus, BenchOptions, BenchResult, RunOptions, Scenario};
-use crate::corpus::{self, CacheMode, CorpusOptions, Manifest};
+use crate::bench::{BenchCorpus, BenchOptions, BenchResult, RunOptions, Scenario, Series};
+use crate::corpus::{self, CacheMode, CorpusOptions, Manifest, Profile};
 
 use super::pty::PtyChild;
 
@@ -23,6 +23,53 @@ const FIRST_PAINT_NEEDLE: &[u8] = "▗▄▄█▀".as_bytes();
 /// the daemon session is attached. A fresh session's usage is always
 /// "0 (0%)".
 const READY_NEEDLE: &str = "0 (0%)";
+
+const PAGE_UP: &[u8] = b"\x1b[5~";
+/// Few enough pages to stay inside the attach tail (TUI-local scrolling).
+const PAGES: usize = 20;
+/// The product's default `tui.viewport.top` key (shift+alt+up).
+const VIEWPORT_TOP: &[u8] = b"\x1b[1;4A";
+
+const IDLE_WINDOW: Duration = Duration::from_secs(30);
+
+/// One run's measurements (transcript-paging settles once per page).
+#[derive(Debug, Default)]
+struct Measured {
+    settled: Vec<f64>,
+    first_paint: Option<f64>,
+    worst_gap: Option<f64>,
+    wakeups: Option<u64>,
+}
+
+impl Measured {
+    fn single(mark: Mark) -> Self {
+        Self {
+            settled: vec![mark.ms],
+            worst_gap: Some(mark.gap_ms),
+            ..Self::default()
+        }
+    }
+}
+
+/// A trigger -> mark interval and its longest no-output gap.
+#[derive(Debug, Clone, Copy)]
+struct Mark {
+    ms: f64,
+    gap_ms: f64,
+}
+
+impl Mark {
+    fn since(child: &PtyChild, started: Instant) -> Self {
+        Self {
+            ms: millis(started.elapsed()),
+            gap_ms: millis(child.longest_gap_since(started)),
+        }
+    }
+}
+
+fn millis(duration: Duration) -> f64 {
+    duration.as_secs_f64() * 1000.0
+}
 
 /// One bench run's anchored paths.
 struct RunCtx {
@@ -98,10 +145,10 @@ pub(super) fn run(options: &BenchOptions) -> anyhow::Result<BenchResult> {
         &options.corpus,
         Duration::from_secs(options.liveness_secs),
     )?;
-    let samples = sample_runs(&ctx, options.runs, |index| {
-        scenario_once(&ctx, options.scenario, index)
+    let runs = sample_runs(&ctx, options.runs, |index| {
+        Ok(launch(&ctx, options.scenario, index)?.0)
     })?;
-    let result = build_result(&ctx, options.scenario, samples);
+    let result = build_result(&ctx, options.scenario, runs);
     write_result(&result, &options.json)?;
     Ok(result)
 }
@@ -112,9 +159,9 @@ pub(super) fn run(options: &BenchOptions) -> anyhow::Result<BenchResult> {
 fn sample_runs(
     ctx: &RunCtx,
     runs: usize,
-    mut scenario: impl FnMut(usize) -> anyhow::Result<f64>,
-) -> anyhow::Result<Vec<f64>> {
-    let mut samples = Vec::with_capacity(runs + 1);
+    mut scenario: impl FnMut(usize) -> anyhow::Result<Measured>,
+) -> anyhow::Result<Vec<Measured>> {
+    let mut measured = Vec::with_capacity(runs);
     let total = runs + 1;
     for index in 0..total {
         restore(ctx)?;
@@ -124,44 +171,41 @@ fn sample_runs(
             outcome?;
             continue;
         }
-        let sample = outcome.context("a sampled run failed")?;
-        samples.push(sample);
+        let run = outcome.context("a sampled run failed")?;
         println!(
-            "run {index}/{runs}: {sample:.1}ms (wall {:.1}s)",
+            "run {index}/{runs}: {:.1?}ms (wall {:.1}s)",
+            run.settled,
             started.elapsed().as_secs_f32()
         );
+        measured.push(run);
     }
-    Ok(samples)
-}
-
-/// One scenario pass; returns the sample in ms.
-fn scenario_once(ctx: &RunCtx, scenario: Scenario, run: usize) -> anyhow::Result<f64> {
-    let (sample, _) = launch(ctx, scenario, run)?;
-    Ok(sample)
+    Ok(measured)
 }
 
 /// The ONE launch path: the pre-started daemon for warm-* scenarios, the
 /// scenario's own resume target + first needle, the post-launch mechanics,
 /// and the daemon teardown on every path. Both `run()` (single scenario)
 /// and `run_suite()` call this.
-fn launch(ctx: &RunCtx, scenario: Scenario, run: usize) -> anyhow::Result<(f64, Launch)> {
+fn launch(ctx: &RunCtx, scenario: Scenario, run: usize) -> anyhow::Result<(Measured, Launch)> {
     let socket = run_socket(ctx, run);
     std::fs::create_dir_all(socket.parent().expect("a socket dir"))?;
     let mut daemon = if matches!(
         scenario,
-        Scenario::WarmStart | Scenario::WarmReady | Scenario::AgentsViewWarm
+        Scenario::WarmStart | Scenario::WarmReady | Scenario::AgentsViewWarm | Scenario::IdleCost
     ) {
         // AgentsViewWarm pre-starts so both TUIs share the daemon the first
         // populate warms; the single-scenario path cannot express that (its
         // second launch would spawn a second daemon), so it runs the first
-        // populate only and the sample is the suite's warm number.
+        // populate only and the sample is the suite's warm number. IdleCost
+        // pre-starts so the daemon is an owned pid whose /proc it can read.
         Some(start_daemon(ctx, &socket)?)
     } else {
         None
     };
-    let outcome: anyhow::Result<(f64, Launch)> = (|| {
+    let daemon_pid = daemon.as_ref().map(|daemon| daemon.child.id() as i32);
+    let outcome: anyhow::Result<(Measured, Launch)> = (|| {
         let mut launched = spawn_for_scenario(ctx, &socket, scenario, run)?;
-        let sample = launch_scenario(ctx, &mut launched, scenario)?;
+        let sample = launch_scenario(ctx, &mut launched, scenario, daemon_pid)?;
         // The measured client must disconnect before daemon shutdown.
         // Keeping it alive while waiting for daemon exit can hold server
         // connection draining open or start the client's reconnect path.
@@ -229,7 +273,9 @@ pub(super) fn run_suite(options: &RunOptions) -> anyhow::Result<Vec<BenchResult>
     let cold_ctx = RunCtx::load(&options.binary, &options.out.join("corpus-cold"), liveness)?;
     let warm_ctx = RunCtx::load(&options.binary, &options.out.join("corpus-warm"), liveness)?;
 
-    let mut samples: BTreeMap<Scenario, Vec<f64>> = BTreeMap::new();
+    let mut samples: BTreeMap<Scenario, Vec<Measured>> = BTreeMap::new();
+    // Each scenario's share of the suite's wall time (the CI budget).
+    let mut wall: BTreeMap<Scenario, Duration> = BTreeMap::new();
     let total = options.runs + 1;
     for index in 0..total {
         let started = Instant::now();
@@ -238,51 +284,84 @@ pub(super) fn run_suite(options: &RunOptions) -> anyhow::Result<Vec<BenchResult>
         // per launch; the cold-start/cold-ready (and warm-*) pairs share
         // one launch each.
         restore(&cold_ctx)?;
-        let (start_sample, launched) = launch(&cold_ctx, Scenario::ColdStart, index)?;
-        let ready_sample = launched
-            .ready_ms
-            .context("the cold launch never attached")?;
-        push(&mut samples, index, Scenario::ColdStart, start_sample);
-        push(&mut samples, index, Scenario::ColdReady, ready_sample);
+        let (start, launched) = launch(&cold_ctx, Scenario::ColdStart, index)?;
+        let ready = launched.ready.context("the cold launch never attached")?;
+        push(&mut samples, index, Scenario::ColdStart, start);
+        push(
+            &mut samples,
+            index,
+            Scenario::ColdReady,
+            Measured::single(ready),
+        );
         for scenario in [
             Scenario::AgentsView,
             Scenario::AgentsViewWarm,
             Scenario::OpenSession,
             Scenario::SessionSwitch,
             Scenario::AtCompletion,
+            Scenario::TranscriptPaging,
+            Scenario::TranscriptTop,
         ] {
+            let launched = Instant::now();
             restore(&cold_ctx)?;
-            let (sample, _) = launch(&cold_ctx, scenario, index)?;
-            push(&mut samples, index, scenario, sample);
+            let (measured, _) = launch(&cold_ctx, scenario, index)?;
+            push(&mut samples, index, scenario, measured);
+            *wall.entry(scenario).or_default() += launched.elapsed();
         }
         restore(&warm_ctx)?;
-        let (start_sample, launched) = launch(&warm_ctx, Scenario::WarmStart, index)?;
-        let ready_sample = launched
-            .ready_ms
-            .context("the warm launch never attached")?;
-        push(&mut samples, index, Scenario::WarmStart, start_sample);
-        push(&mut samples, index, Scenario::WarmReady, ready_sample);
+        let (start, launched) = launch(&warm_ctx, Scenario::WarmStart, index)?;
+        let ready = launched.ready.context("the warm launch never attached")?;
+        push(&mut samples, index, Scenario::WarmStart, start);
+        push(
+            &mut samples,
+            index,
+            Scenario::WarmReady,
+            Measured::single(ready),
+        );
         println!(
             "run {index}/{} complete ({:.1}s)",
             options.runs,
             started.elapsed().as_secs_f32()
         );
     }
+    // One idle window per suite on one profile: an idle ready session's
+    // cost is per process, not per corpus size, so one leg pays the window.
+    if options.profile == Profile::Medium {
+        if cfg!(target_os = "linux") {
+            let launched = Instant::now();
+            restore(&cold_ctx)?;
+            let (measured, _) = launch(&cold_ctx, Scenario::IdleCost, total)?;
+            samples.insert(Scenario::IdleCost, vec![measured]);
+            wall.insert(Scenario::IdleCost, launched.elapsed());
+        } else {
+            println!("idle-cost skipped: it reads /proc (Linux-only)");
+        }
+    }
+    for (scenario, spent) in &wall {
+        println!(
+            "wall {}: {:.1}s",
+            crate::report::key_of(*scenario),
+            spent.as_secs_f32()
+        );
+    }
 
     let results_dir = options.out.join("results");
     std::fs::create_dir_all(&results_dir)?;
     let mut results = Vec::new();
-    for (scenario, mut samples) in samples {
-        samples.sort_by(f64::total_cmp);
-        if samples.len() != options.runs {
+    for (scenario, runs) in samples {
+        let expected = if scenario == Scenario::IdleCost {
+            1
+        } else {
+            options.runs
+        };
+        if runs.len() != expected {
             anyhow::bail!(
-                "{scenario:?} collected {} samples, expected {}",
-                samples.len(),
-                options.runs
+                "{scenario:?} collected {} runs, expected {expected}",
+                runs.len(),
             );
         }
         let ctx = corpus_for(scenario, &cold_ctx, &warm_ctx);
-        let result = build_result(ctx, scenario, samples);
+        let result = build_result(ctx, scenario, runs);
         let name = crate::report::key_of(scenario);
         // Per-profile unique names: the CI legs merge their artifacts into
         // one results dir, and same-named files would overwrite each other.
@@ -309,14 +388,22 @@ fn corpus_for<'a>(scenario: Scenario, cold: &'a RunCtx, warm: &'a RunCtx) -> &'a
         | Scenario::AgentsViewWarm
         | Scenario::OpenSession
         | Scenario::SessionSwitch
-        | Scenario::AtCompletion => cold,
+        | Scenario::AtCompletion
+        | Scenario::TranscriptPaging
+        | Scenario::TranscriptTop
+        | Scenario::IdleCost => cold,
     }
 }
 
-/// Push a sample unless this is the discarded warm-up run.
-fn push(samples: &mut BTreeMap<Scenario, Vec<f64>>, index: usize, scenario: Scenario, sample: f64) {
+/// Push a run unless this is the discarded warm-up run.
+fn push(
+    samples: &mut BTreeMap<Scenario, Vec<Measured>>,
+    index: usize,
+    scenario: Scenario,
+    measured: Measured,
+) {
     if index > 0 {
-        samples.entry(scenario).or_default().push(sample);
+        samples.entry(scenario).or_default().push(measured);
     }
 }
 
@@ -328,7 +415,7 @@ fn spawn_for_scenario(
     run: usize,
 ) -> anyhow::Result<Launch> {
     let (resume, first_needle) = match scenario {
-        Scenario::OpenSession => (
+        Scenario::OpenSession | Scenario::TranscriptPaging | Scenario::TranscriptTop => (
             Some(ctx.manifest.markers.huge.file.clone()),
             ctx.manifest.markers.huge.needle.as_bytes().to_vec(),
         ),
@@ -345,7 +432,11 @@ fn spawn_for_scenario(
     let mut launch = Launch::spawn(ctx, socket, resume.as_deref(), &first_needle, dump)?;
     if matches!(
         scenario,
-        Scenario::ColdStart | Scenario::WarmStart | Scenario::ColdReady | Scenario::WarmReady
+        Scenario::ColdStart
+            | Scenario::WarmStart
+            | Scenario::ColdReady
+            | Scenario::WarmReady
+            | Scenario::IdleCost
     ) {
         launch.wait_ready()?;
     }
@@ -354,16 +445,28 @@ fn spawn_for_scenario(
 
 /// The scenario mechanics after the launch needle; a completed launch
 /// never dumps its stream.
-fn launch_scenario(ctx: &RunCtx, launch: &mut Launch, scenario: Scenario) -> anyhow::Result<f64> {
-    let sample = post_launch(ctx, launch, scenario)?;
+fn launch_scenario(
+    ctx: &RunCtx,
+    launch: &mut Launch,
+    scenario: Scenario,
+    daemon_pid: Option<i32>,
+) -> anyhow::Result<Measured> {
+    let measured = post_launch(ctx, launch, scenario, daemon_pid)?;
     launch.completed = true;
-    Ok(sample)
+    Ok(measured)
 }
 
 /// The scenario mechanics after the launch needle.
-fn post_launch(ctx: &RunCtx, launch: &mut Launch, scenario: Scenario) -> anyhow::Result<f64> {
+fn post_launch(
+    ctx: &RunCtx,
+    launch: &mut Launch,
+    scenario: Scenario,
+    daemon_pid: Option<i32>,
+) -> anyhow::Result<Measured> {
     match scenario {
-        Scenario::ColdStart | Scenario::WarmStart | Scenario::OpenSession => Ok(launch.first_ms),
+        Scenario::ColdStart | Scenario::WarmStart | Scenario::OpenSession => {
+            Ok(Measured::single(launch.first))
+        }
         Scenario::AgentsView => agents_view_populate(ctx, &mut launch.child),
         Scenario::AgentsViewWarm => {
             // The first populate warms the daemon's in-process scan cache;
@@ -375,13 +478,21 @@ fn post_launch(ctx: &RunCtx, launch: &mut Launch, scenario: Scenario) -> anyhow:
                 .join("failed-streams")
                 .join("agents-view-warm-second.bin");
             let mut second = Launch::spawn(ctx, &socket, None, FIRST_PAINT_NEEDLE, dump)?;
-            let sample = agents_view_populate(ctx, &mut second.child)?;
+            let measured = agents_view_populate(ctx, &mut second.child)?;
             second.completed = true;
-            Ok(sample)
+            Ok(measured)
         }
         Scenario::SessionSwitch => switch_to_target_b(ctx, &mut launch.child),
         Scenario::AtCompletion => at_completion(ctx, &mut launch.child),
-        Scenario::ColdReady | Scenario::WarmReady => Ok(launch.ready_ms.unwrap_or(launch.first_ms)),
+        Scenario::TranscriptPaging => transcript_paging(ctx, &mut launch.child),
+        Scenario::TranscriptTop => transcript_top(ctx, &mut launch.child),
+        Scenario::IdleCost => idle::measure(
+            &mut launch.child,
+            daemon_pid.expect("launch pre-starts the idle-cost daemon"),
+        ),
+        Scenario::ColdReady | Scenario::WarmReady => {
+            Ok(Measured::single(launch.ready.unwrap_or(launch.first)))
+        }
     }
 }
 
@@ -390,8 +501,8 @@ fn post_launch(ctx: &RunCtx, launch: &mut Launch, scenario: Scenario) -> anyhow:
 struct Launch {
     child: PtyChild,
     socket: PathBuf,
-    first_ms: f64,
-    ready_ms: Option<f64>,
+    first: Mark,
+    ready: Option<Mark>,
     spawned: Instant,
     liveness: Duration,
     /// Where the raw pty stream lands when the launch does NOT complete (the
@@ -434,10 +545,13 @@ impl Launch {
             "the first paint"
         };
         let mut launch = Self {
-            first_ms: 0.0,
+            first: Mark {
+                ms: 0.0,
+                gap_ms: 0.0,
+            },
             child,
             socket: socket.to_path_buf(),
-            ready_ms: None,
+            ready: None,
             spawned: started,
             liveness: ctx.liveness,
             stream_dump: Some(stream_dump),
@@ -449,7 +563,7 @@ impl Launch {
             what,
             started + ctx.liveness,
         )?;
-        launch.first_ms = started.elapsed().as_secs_f64() * 1000.0;
+        launch.first = Mark::since(&launch.child, started);
         Ok(launch)
     }
 
@@ -461,7 +575,7 @@ impl Launch {
             "the attach pill",
             self.spawned + self.liveness,
         )?;
-        self.ready_ms = Some(self.spawned.elapsed().as_secs_f64() * 1000.0);
+        self.ready = Some(Mark::since(&self.child, self.spawned));
         Ok(())
     }
 }
@@ -485,22 +599,28 @@ impl Drop for Launch {
 /// cell diffs, so the byte stream cannot see it — the screen model does).
 /// The count includes the TUI's own fresh session (rendered as one more
 /// inactive row).
-fn agents_view_populate(ctx: &RunCtx, child: &mut PtyChild) -> anyhow::Result<f64> {
+fn agents_view_populate(ctx: &RunCtx, child: &mut PtyChild) -> anyhow::Result<Measured> {
     let started = Instant::now();
     child.write(b"\x1b[D")?;
+    child.wait_screen("the first roster row", started + ctx.liveness, |screen| {
+        roster_counts(screen).is_some_and(|(loaded, _)| loaded >= 1)
+    })?;
+    let first_paint = millis(started.elapsed());
     wait_roster(ctx, child, ctx.manifest.markers.roster_inactive + 1)?;
-    Ok(started.elapsed().as_secs_f64() * 1000.0)
+    Ok(Measured {
+        first_paint: Some(first_paint),
+        ..Measured::single(Mark::since(child, started))
+    })
 }
 
-/// The agents view opens on its first catalog page: the `Inactive (N)`
-/// heading counts the loaded rows and the `M older sessions not loaded`
-/// footer the rest, so the page is settled once both account for every
-/// expected session. An unpaged roster has no footer.
-fn roster_settled(screen: &str, expected: usize) -> bool {
+/// The agents view's roster accounting: the `Inactive (N)` heading counts
+/// the loaded rows and the `M older sessions not loaded` footer the rest
+/// (an unpaged roster has no footer). `None` while no roster is on screen.
+fn roster_counts(screen: &str) -> Option<(usize, usize)> {
     let loaded = screen
         .split_once("Inactive (")
         .and_then(|(_, rest)| rest.split_once(')'))
-        .and_then(|(number, _)| number.parse::<usize>().ok());
+        .and_then(|(number, _)| number.parse::<usize>().ok())?;
     let unloaded = screen
         .lines()
         .find_map(|line| {
@@ -508,7 +628,13 @@ fn roster_settled(screen: &str, expected: usize) -> bool {
             number.parse::<usize>().ok()
         })
         .unwrap_or(0);
-    loaded.is_some_and(|loaded| loaded + unloaded == expected)
+    Some((loaded, unloaded))
+}
+
+/// The first catalog page is settled once the loaded and not-yet-loaded
+/// counts account for every expected session.
+fn roster_settled(screen: &str, expected: usize) -> bool {
+    roster_counts(screen).is_some_and(|(loaded, unloaded)| loaded + unloaded == expected)
 }
 
 fn wait_roster(ctx: &RunCtx, child: &mut PtyChild, expected: usize) -> anyhow::Result<Instant> {
@@ -522,8 +648,10 @@ fn wait_roster(ctx: &RunCtx, child: &mut PtyChild, expected: usize) -> anyhow::R
 /// From the opened session A: open the agents view, uniquely filter to
 /// switch-b, and time enter -> B's transcript marker. The `zq` token in
 /// switch-b's name matches no other row (no generated text carries the
-/// letter z), so Enter always drills THE row.
-fn switch_to_target_b(ctx: &RunCtx, child: &mut PtyChild) -> anyhow::Result<f64> {
+/// letter z), so Enter always drills THE row. (No first-paint mark: the
+/// agents view stays up until B's first chat frame, which already carries
+/// the marker.)
+fn switch_to_target_b(ctx: &RunCtx, child: &mut PtyChild) -> anyhow::Result<Measured> {
     child.write(b"\x1b[D")?;
     // Wait the settled roster before typing: keys racing the scan flood
     // were the CI-runner failure (the query echoed nothing). The resumed
@@ -548,14 +676,14 @@ fn switch_to_target_b(ctx: &RunCtx, child: &mut PtyChild) -> anyhow::Result<f64>
         "the switch-b transcript",
         Instant::now() + ctx.liveness,
     )?;
-    Ok(started.elapsed().as_secs_f64() * 1000.0)
+    Ok(Measured::single(Mark::since(child, started)))
 }
 
 /// The `@` completion: the trigger is the `@` keystroke alone; the needle
 /// is the first painted completion menu row (the menu lists the project
 /// tree's entries — `src/` is a top-level dir of the generated project
 /// that the pre-menu screen never contains).
-fn at_completion(ctx: &RunCtx, child: &mut PtyChild) -> anyhow::Result<f64> {
+fn at_completion(ctx: &RunCtx, child: &mut PtyChild) -> anyhow::Result<Measured> {
     let started = Instant::now();
     child.write(b"@")?;
     // The menu lists the project tree's entries — `src/` is a top-level
@@ -566,7 +694,72 @@ fn at_completion(ctx: &RunCtx, child: &mut PtyChild) -> anyhow::Result<f64> {
         "the completion menu row",
         Instant::now() + ctx.liveness,
     )?;
-    Ok(started.elapsed().as_secs_f64() * 1000.0)
+    Ok(Measured::single(Mark::since(child, started)))
+}
+
+/// From the resumed tail: PAGES PageUps, each timed to the first frame whose
+/// topmost block ordinal is above the previous frame's.
+fn transcript_paging(ctx: &RunCtx, child: &mut PtyChild) -> anyhow::Result<Measured> {
+    wait_ordinal_frame(ctx, child)?;
+    let first = topmost_ordinal(&child.screen_text());
+    let mut pages = Vec::with_capacity(PAGES);
+    for page in 1..=PAGES {
+        let before = topmost_ordinal(&child.screen_text())
+            .with_context(|| format!("no block ordinal on screen before page {page}"))?;
+        let started = Instant::now();
+        child.write(PAGE_UP)?;
+        child.wait_screen(
+            &format!("page {page} above block ordinal {before}"),
+            started + ctx.liveness,
+            |screen| topmost_ordinal(screen).is_some_and(|top| top < before),
+        )?;
+        pages.push(Mark::since(child, started));
+    }
+    println!(
+        "transcript-paging: topmost block ordinal {first:?} -> {:?}",
+        topmost_ordinal(&child.screen_text())
+    );
+    Ok(Measured {
+        settled: pages.iter().map(|page| page.ms).collect(),
+        worst_gap: pages.iter().map(|page| page.gap_ms).reduce(f64::max),
+        ..Measured::default()
+    })
+}
+
+/// The top key -> the first frame showing block ordinal 0. The head is never
+/// in the attach tail, so the TUI fetches it from the daemon.
+fn transcript_top(ctx: &RunCtx, child: &mut PtyChild) -> anyhow::Result<Measured> {
+    wait_ordinal_frame(ctx, child)?;
+    let started = Instant::now();
+    child.write(VIEWPORT_TOP)?;
+    child.wait_screen(
+        "the session's first block",
+        started + ctx.liveness,
+        |screen| topmost_ordinal(screen) == Some(0),
+    )?;
+    Ok(Measured::single(Mark::since(child, started)))
+}
+
+fn wait_ordinal_frame(ctx: &RunCtx, child: &mut PtyChild) -> anyhow::Result<Instant> {
+    child.wait_screen(
+        "an ordinal-tagged transcript frame",
+        Instant::now() + ctx.liveness,
+        |screen| topmost_ordinal(screen).is_some(),
+    )
+}
+
+/// The smallest block ordinal on screen is the topmost block.
+fn topmost_ordinal(screen: &str) -> Option<u64> {
+    screen
+        .match_indices(corpus::ORDINAL_PREFIX)
+        .filter_map(|(at, prefix)| {
+            let digits = &screen[at + prefix.len()..];
+            let end = digits
+                .find(|c: char| !c.is_ascii_digit())
+                .unwrap_or(digits.len());
+            digits[..end].parse().ok()
+        })
+        .min()
 }
 
 /// The per-run isolated socket path.
@@ -735,14 +928,16 @@ fn restore(ctx: &RunCtx) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// The result object for one scenario's samples.
-fn build_result(ctx: &RunCtx, scenario: Scenario, samples: Vec<f64>) -> BenchResult {
-    let (median_ms, p95_ms) = stats(&samples);
+/// The result object for one scenario's runs (settled marks pooled).
+fn build_result(ctx: &RunCtx, scenario: Scenario, runs: Vec<Measured>) -> BenchResult {
+    let mut samples: Vec<f64> = runs.iter().flat_map(|run| run.settled.clone()).collect();
+    samples.sort_by(f64::total_cmp);
+    let (median_ms, p95_ms, _) = stats(&samples);
     BenchResult {
         schema: 1,
         scenario,
         profile: crate::report::profile_key(ctx.manifest.profile),
-        runs: samples.len(),
+        runs: runs.len(),
         median_ms,
         p95_ms,
         samples_ms: samples,
@@ -755,11 +950,27 @@ fn build_result(ctx: &RunCtx, scenario: Scenario, samples: Vec<f64>) -> BenchRes
             child_sessions: ctx.manifest.counts.child_sessions,
             archive: ctx.manifest.counts.archive,
         },
+        first_paint: series(runs.iter().map(|run| run.first_paint).collect()),
+        worst_gap: series(runs.iter().map(|run| run.worst_gap).collect()),
+        wakeups: runs.iter().map(|run| run.wakeups).collect(),
     }
 }
 
-/// Median + p95 over the samples.
-fn stats(samples: &[f64]) -> (f64, f64) {
+/// The series when every run measured it.
+fn series(samples: Option<Vec<f64>>) -> Option<Series> {
+    let mut samples = samples?;
+    samples.sort_by(f64::total_cmp);
+    let (median_ms, p95_ms, max_ms) = stats(&samples);
+    Some(Series {
+        samples_ms: samples,
+        median_ms,
+        p95_ms,
+        max_ms,
+    })
+}
+
+/// Median, p95, and max over the samples.
+fn stats(samples: &[f64]) -> (f64, f64, f64) {
     let mut sorted = samples.to_vec();
     sorted.sort_by(f64::total_cmp);
     let median = if sorted.len() % 2 == 1 {
@@ -768,7 +979,11 @@ fn stats(samples: &[f64]) -> (f64, f64) {
         (sorted[sorted.len() / 2 - 1] + sorted[sorted.len() / 2]) / 2.0
     };
     let p95_index = ((sorted.len() as f64 - 1.0) * 0.95).ceil() as usize;
-    (median, sorted[p95_index.min(sorted.len() - 1)])
+    (
+        median,
+        sorted[p95_index.min(sorted.len() - 1)],
+        sorted[sorted.len() - 1],
+    )
 }
 
 fn needle_of(scenario: Scenario, ctx: &RunCtx) -> String {
@@ -794,12 +1009,188 @@ fn needle_of(scenario: Scenario, ctx: &RunCtx) -> String {
             ctx.manifest.markers.switch_b.needle
         ),
         Scenario::AtCompletion => "the first @ completion menu row".to_string(),
+        Scenario::TranscriptPaging => format!(
+            "per PageUp ({PAGES} per run) on the huge session: the first frame whose topmost block ordinal is above the previous frame's"
+        ),
+        Scenario::TranscriptTop => {
+            "the top key on the huge session -> the first frame showing its first block (ordinal 0)"
+                .to_string()
+        }
+        Scenario::IdleCost => format!(
+            "CPU ms of the owned daemon, its descendants, and the TUI over a {}s idle window after ready",
+            IDLE_WINDOW.as_secs()
+        ),
     }
 }
 
 fn write_result(result: &BenchResult, path: &Path) -> anyhow::Result<()> {
     let json = serde_json::to_string_pretty(result)?;
     std::fs::write(path, json).with_context(|| format!("write {}", path.display()))
+}
+
+/// idle-cost: processes are found from the owned pids down (/proc
+/// children), never by name.
+#[cfg(target_os = "linux")]
+mod idle {
+    use std::collections::BTreeMap;
+    use std::time::Instant;
+
+    use anyhow::Context;
+
+    use super::{Measured, PtyChild, IDLE_WINDOW};
+
+    /// utime+stime (clock ticks) and context switches summed over threads.
+    #[derive(Debug, Clone, Copy, Default)]
+    struct Usage {
+        ticks: u64,
+        switches: u64,
+    }
+
+    pub(super) fn measure(child: &mut PtyChild, daemon: i32) -> anyhow::Result<Measured> {
+        let roots = [daemon, child.pid()];
+        let before = snapshot(&roots);
+        child.drain_until(Instant::now() + IDLE_WINDOW)?;
+        let after = snapshot(&roots);
+        anyhow::ensure!(
+            after.contains_key(&daemon),
+            "the daemon exited inside the idle window"
+        );
+        // A process that exited inside the window is gone from `after`, so
+        // its share is not counted.
+        let delta = after.iter().fold(Usage::default(), |sum, (pid, end)| {
+            let start = before.get(pid).copied().unwrap_or_default();
+            Usage {
+                ticks: sum.ticks + end.ticks.saturating_sub(start.ticks),
+                switches: sum.switches + end.switches.saturating_sub(start.switches),
+            }
+        });
+        let ticks_per_second = nix::unistd::sysconf(nix::unistd::SysconfVar::CLK_TCK)?
+            .context("CLK_TCK is defined on Linux")?;
+        let cpu_ms = delta.ticks as f64 * 1000.0 / ticks_per_second as f64;
+        println!(
+            "idle-cost: {cpu_ms:.0}ms CPU, {} context switches, {} processes",
+            delta.switches,
+            after.len()
+        );
+        Ok(Measured {
+            settled: vec![cpu_ms],
+            wakeups: Some(delta.switches),
+            ..Measured::default()
+        })
+    }
+
+    /// Every live process under `roots` (inclusive) with its counters.
+    fn snapshot(roots: &[i32]) -> BTreeMap<i32, Usage> {
+        let mut usage = BTreeMap::new();
+        let mut stack = roots.to_vec();
+        while let Some(pid) = stack.pop() {
+            let Some(counters) = read_usage(pid) else {
+                continue;
+            };
+            usage.insert(pid, counters);
+            stack.extend(children(pid));
+        }
+        usage
+    }
+
+    fn read_usage(pid: i32) -> Option<Usage> {
+        let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+        Some(Usage {
+            ticks: live_ticks(&stat)?,
+            switches: tasks(pid)
+                .filter_map(|tid| {
+                    std::fs::read_to_string(format!("/proc/{pid}/task/{tid}/status")).ok()
+                })
+                .map(|status| status_switches(&status))
+                .sum(),
+        })
+    }
+
+    /// utime + stime (stat fields 14 and 15, counted after the comm, which
+    /// may contain spaces and parentheses); `None` for an unreaped zombie,
+    /// whose stat file outlives it.
+    fn live_ticks(stat: &str) -> Option<u64> {
+        let (_, fields) = stat.rsplit_once(')')?;
+        let mut fields = fields.split_whitespace();
+        if fields.next()? == "Z" {
+            return None;
+        }
+        let mut fields = fields.skip(10);
+        let utime: u64 = fields.next()?.parse().ok()?;
+        let stime: u64 = fields.next()?.parse().ok()?;
+        Some(utime + stime)
+    }
+
+    fn status_switches(status: &str) -> u64 {
+        status
+            .lines()
+            .filter_map(|line| {
+                let (key, value) = line.split_once(':')?;
+                matches!(
+                    key,
+                    "voluntary_ctxt_switches" | "nonvoluntary_ctxt_switches"
+                )
+                .then(|| value.trim().parse::<u64>().ok())?
+            })
+            .sum()
+    }
+
+    fn tasks(pid: i32) -> impl Iterator<Item = String> {
+        std::fs::read_dir(format!("/proc/{pid}/task"))
+            .into_iter()
+            .flatten()
+            .filter_map(|entry| Some(entry.ok()?.file_name().to_string_lossy().into_owned()))
+    }
+
+    /// The direct children of every thread of `pid`.
+    fn children(pid: i32) -> Vec<i32> {
+        tasks(pid)
+            .filter_map(|tid| {
+                std::fs::read_to_string(format!("/proc/{pid}/task/{tid}/children")).ok()
+            })
+            .flat_map(|list| {
+                list.split_whitespace()
+                    .filter_map(|child| child.parse().ok())
+                    .collect::<Vec<i32>>()
+            })
+            .collect()
+    }
+
+    #[cfg(test)]
+    mod tests {
+        #[test]
+        fn counters_parse_from_proc_text() {
+            let stat =
+                "4242 (pa worker (x)) S 1 4242 4242 0 -1 4194560 900 0 0 0 31 7 0 0 20 0 9 0";
+            assert_eq!(super::live_ticks(stat), Some(38));
+            assert_eq!(super::live_ticks(&stat.replacen(") S", ") Z", 1)), None);
+            let status = "Name:\tprime-agent\nvoluntary_ctxt_switches:\t120\nnonvoluntary_ctxt_switches:\t5\n";
+            assert_eq!(super::status_switches(status), 125);
+        }
+
+        #[test]
+        fn the_snapshot_reads_real_proc_counters_down_to_descendants() {
+            let mut child = std::process::Command::new("/bin/cat")
+                .stdin(std::process::Stdio::piped())
+                .spawn()
+                .expect("spawn the mock descendant");
+            let own = std::process::id() as i32;
+            let seen = super::snapshot(&[own]);
+            let _ = child.kill();
+            let _ = child.wait();
+            assert!(seen.contains_key(&(child.id() as i32)), "{seen:?}");
+            assert!(seen[&own].switches > 0);
+        }
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+mod idle {
+    use super::{Measured, PtyChild};
+
+    pub(super) fn measure(_child: &mut PtyChild, _daemon: i32) -> anyhow::Result<Measured> {
+        anyhow::bail!("idle-cost reads /proc and runs on Linux only")
+    }
 }
 
 #[cfg(test)]
@@ -863,7 +1254,11 @@ mod tests {
             Scenario::ColdStart,
         ] {
             let measured = corpus_for(scenario, &cold, &warm);
-            let result = build_result(measured, scenario, vec![1.0, 2.0]);
+            let run = Measured {
+                settled: vec![1.0],
+                ..Measured::default()
+            };
+            let result = build_result(measured, scenario, vec![run]);
             let expected = if scenario == Scenario::ColdStart {
                 &cold
             } else {
@@ -982,10 +1377,17 @@ mod tests {
             }
             std::fs::write(&sidecar, "written by the mock scenario")?;
             launches.push(index);
-            Ok(index as f64)
+            Ok(Measured {
+                settled: vec![index as f64],
+                ..Measured::default()
+            })
         })
         .expect("sample the mock scenario");
-        assert_eq!((launches, samples), (vec![0, 1, 2], vec![1.0, 2.0]));
+        let samples: Vec<Vec<f64>> = samples.into_iter().map(|run| run.settled).collect();
+        assert_eq!(
+            (launches, samples),
+            (vec![0, 1, 2], vec![vec![1.0], vec![2.0]])
+        );
     }
 
     #[test]
@@ -1022,11 +1424,8 @@ mod tests {
         ctx.liveness = Duration::from_secs(10);
         let (sample, launched) = launch(&ctx, Scenario::WarmStart, 0)
             .expect("the daemon must drain its measured UI connection before exit");
-        assert!(sample >= 0.0);
-        assert!(
-            launched.ready_ms.is_some(),
-            "the actual mock paint/attach ran"
-        );
+        assert!(sample.settled[0] >= 0.0);
+        assert!(launched.ready.is_some(), "the actual mock paint/attach ran");
         assert_eq!(
             std::fs::read_to_string(run_socket(&ctx, 0).with_extension("drained"))
                 .expect("the mock daemon reached normal drain completion"),

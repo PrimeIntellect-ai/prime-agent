@@ -194,6 +194,7 @@ pub(crate) fn spawn_child(
                 marker: None,
                 parent_session: Some(parent_file.display().to_string()),
                 rlm_depth: None,
+                ordinals: false,
             },
             rng,
         )?;

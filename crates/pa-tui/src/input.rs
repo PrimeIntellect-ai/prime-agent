@@ -66,6 +66,9 @@ pub(crate) enum ReaderInput {
     Event(Event),
     Mouse(crate::mouse::MouseEvent),
     BurstPaste(String),
+    /// The end of one terminal write: every input of the chunk was delivered before it. Not sent
+    /// while the kitty probe shares crossterm's reader lock (the write boundary is unknown then).
+    ChunkEnd,
 }
 
 /// Start the terminal input reader: whole terminal writes that look like
@@ -114,8 +117,11 @@ where
             // costs no wakeups. Two bounded exceptions: a held sequence's flush deadline, and the
             // Kitty setup and its answer window: an indefinite park before the first draw
             // would hold crossterm's reader lock and prevent the deferred probe from reading replies.
+            // While the probe shares the lock, a zero-timeout poll can miss it and end the drain
+            // mid-write: a round marks its chunk end only when no probe ran around it.
+            let probe_pending = crate::enhanced_keys::kitty_probe_pending();
             let timeout = guard.poll_deadline(Instant::now()).or_else(|| {
-                if thread_waker.is_none() || crate::enhanced_keys::kitty_probe_pending() {
+                if thread_waker.is_none() || probe_pending {
                     Some(Duration::from_millis(POLL_TIMEOUT_MS))
                 } else {
                     None
@@ -123,7 +129,9 @@ where
             });
             match crossterm::event::poll_opt(timeout) {
                 Ok(false) => {
-                    if !forward(guard.flush_expired(Instant::now()), &mut on_input) {
+                    let outputs = guard.flush_expired(Instant::now());
+                    let whole = !probe_pending && !crate::enhanced_keys::kitty_probe_pending();
+                    if !forward_chunk(outputs, whole, &mut on_input) {
                         return;
                     }
                 }
@@ -158,7 +166,8 @@ where
                     for event in events {
                         outputs.extend(guard.feed(event, Instant::now()));
                     }
-                    if !forward(outputs, &mut on_input) {
+                    let whole = !probe_pending && !crate::enhanced_keys::kitty_probe_pending();
+                    if !forward_chunk(outputs, whole, &mut on_input) {
                         return;
                     }
                 }
@@ -171,6 +180,20 @@ where
         stop,
         waker,
     });
+}
+
+/// [`forward`] one drained round, then mark its end with [`ReaderInput::ChunkEnd`] when the round
+/// is a `whole` terminal write (an empty round delivers nothing). Returns `false` when the surface
+/// stopped the reader.
+fn forward_chunk(
+    outputs: Vec<GuardOutput>,
+    whole: bool,
+    on_input: &mut dyn FnMut(ReaderInput) -> bool,
+) -> bool {
+    if outputs.is_empty() {
+        return true;
+    }
+    forward(outputs, on_input) && (!whole || on_input(ReaderInput::ChunkEnd))
 }
 
 /// Deliver one drained round to the surface: a whole-write burst that reconstructs to marker-less
@@ -700,6 +723,29 @@ mod tests {
         assert_eq!(
             collect_forwarded(outputs),
             vec![ReaderInput::BurstPaste("x\ry".into())]
+        );
+    }
+
+    #[test]
+    fn a_forwarded_chunk_ends_with_its_marker() {
+        let outputs = vec![
+            GuardOutput::Event(key(KeyCode::Char('/'), KeyModifiers::NONE)),
+            GuardOutput::Event(key(KeyCode::Char('l'), KeyModifiers::NONE)),
+            GuardOutput::Event(key(KeyCode::Enter, KeyModifiers::NONE)),
+        ];
+        let mut inputs = Vec::new();
+        assert!(forward_chunk(outputs, true, &mut |input| {
+            inputs.push(input);
+            true
+        }));
+        assert_eq!(
+            inputs,
+            vec![
+                ReaderInput::Event(key(KeyCode::Char('/'), KeyModifiers::NONE)),
+                ReaderInput::Event(key(KeyCode::Char('l'), KeyModifiers::NONE)),
+                ReaderInput::Event(key(KeyCode::Enter, KeyModifiers::NONE)),
+                ReaderInput::ChunkEnd,
+            ]
         );
     }
 

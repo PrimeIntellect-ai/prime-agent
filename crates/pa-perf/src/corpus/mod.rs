@@ -5,6 +5,8 @@
 pub(crate) mod artifacts;
 pub(crate) mod rows;
 
+pub use rows::ORDINAL_PREFIX;
+
 use std::path::{Path, PathBuf};
 
 use anyhow::Context;
@@ -293,6 +295,8 @@ pub fn generate(options: &CorpusOptions) -> anyhow::Result<Manifest> {
                 marker: marker.clone(),
                 parent_session: None,
                 rlm_depth: Some(0),
+                // The huge session is the transcript-paging target.
+                ordinals: index == 0,
             },
             &mut rng,
         )?;
@@ -378,6 +382,7 @@ pub fn generate(options: &CorpusOptions) -> anyhow::Result<Manifest> {
                 marker: None,
                 parent_session: None,
                 rlm_depth: Some(0),
+                ordinals: false,
             },
             &mut rng,
         )?;

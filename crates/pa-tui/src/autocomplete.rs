@@ -779,6 +779,12 @@ impl CombinedAutocompleteProvider {
         }
     }
 
+    /// Start building the `@` file index in the background, so the first `@` query can
+    /// already answer from memory.
+    pub fn start_file_index(&self) {
+        self.file_index.start_build(&self.paths.base);
+    }
+
     /// Replace the hidden-command set (the caller recomputes model
     /// eligibility on every model switch).
     pub fn set_hidden_commands(&mut self, hidden: std::collections::HashSet<String>) {
@@ -898,11 +904,7 @@ impl AutocompleteProvider for CombinedAutocompleteProvider {
         let line: Vec<char> = lines.get(cursor_line)?.chars().collect();
         let before: Vec<char> = line[..cursor_col.min(line.len())].to_vec();
         if let Some(at_prefix) = extract_at_prefix(&before) {
-            return Some(SuggestionLookup::Searching(fuzzy_file_search::spawn(
-                &self.paths.base,
-                self.file_index.clone(),
-                at_prefix,
-            )));
+            return fuzzy_file_search::lookup(&self.paths.base, &self.file_index, at_prefix);
         }
         if !force {
             if let Some(context) = get_slash_command_context(lines, cursor_line, cursor_col) {

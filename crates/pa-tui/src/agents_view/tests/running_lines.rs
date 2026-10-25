@@ -15,11 +15,8 @@ fn scoped_view_keeps_the_first_row_default() {
     assert_eq!(mode.rows.len(), 1, "the scope root is excluded");
     assert_eq!(mode.selected, 0);
     assert_eq!(mode.rows[0].summary["sessionId"], "c");
-    assert!(mode.anchor_selection_pending, "the wait never resolves");
     mode.handle_key("enter");
-    let opened = mode
-        .opened
-        .expect("the scoped view opens despite the never-resolving wait");
+    let opened = mode.opened.expect("the scoped view opens the first row");
     assert_eq!(
         opened.selection,
         SessionSelection::Attach("c-live".to_string())

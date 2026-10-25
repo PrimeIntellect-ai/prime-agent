@@ -223,9 +223,10 @@ async fn run_interactive_surface(
     view.code_block_indent = options.code_block_indent.clone();
     // The file-completion provider browses the SESSION cwd, not the process cwd: the completion
     // menu must browse the directory the user sees.
-    view.editor.set_autocomplete_provider(Box::new(
-        crate::autocomplete::CombinedAutocompleteProvider::from_registry(options.cwd.clone()),
-    ));
+    let provider =
+        crate::autocomplete::CombinedAutocompleteProvider::from_registry(options.cwd.clone());
+    provider.start_file_index();
+    view.editor.set_autocomplete_provider(Box::new(provider));
     view.editor.set_keybindings(options.keybindings.clone());
     view.show_images = options.show_images;
     if let Some(settings) = &options.client_settings {
@@ -534,6 +535,9 @@ async fn run_interactive_surface(
                             }
                             opening_dirty = true;
                         }
+                        // A write boundary carries no input: the echo continues, and queued
+                        // typed-ahead materializes on the run loop's tick after the open.
+                        UiInput::InputChunkEnd => {}
                         other => {
                             echoing = false;
                             pending.push_back(other);
@@ -992,7 +996,10 @@ async fn run_interactive_surface(
                     sender.send((Instant::now(), renderer.headless_renders()))?;
                     continue;
                 }
-                session.dirty = true;
+                let chunk_end = matches!(input, UiInput::InputChunkEnd);
+                if !chunk_end {
+                    session.dirty = true;
+                }
                 match input {
                     UiInput::Key(key) => {
                         session.stop_selection_auto_scroll();
@@ -1116,10 +1123,10 @@ async fn run_interactive_surface(
                     UiInput::Mouse(event) => {
                         session.handle_mouse(event, &mut view);
                     }
-                    // The headless plan's pause step: the queued keystroke batch ahead of this
-                    // barrier is fully handled, so the parked suggestions materialize now — the
-                    // same state the terminal loop's 50 ms idle tick produces.
-                    UiInput::SettleIdle => {
+                    // The headless plan's pause step or the end of a terminal write: the queued
+                    // keystroke batch ahead of this barrier is fully handled, so the parked
+                    // suggestions materialize now (into this input's inline paint on a terminal).
+                    UiInput::SettleIdle | UiInput::InputChunkEnd => {
                         session.materialize_editor_autocomplete(&mut view);
                     }
                     UiInput::Submit(text) => {
@@ -1165,7 +1172,10 @@ async fn run_interactive_surface(
                 // Paint the handled input in this iteration: the select below can otherwise wait
                 // out its 50ms tick before the next draw, felt as keystroke-to-render lag. A
                 // handoff paints nothing: the next surface owns the pane.
-                if let Some(renderer) = renderer.is_terminal_mut() {
+                if let Some(renderer) = renderer
+                    .is_terminal_mut()
+                    .filter(|_| !chunk_end || session.dirty)
+                {
                     if !session.open_agents_view && session.pending_selection.is_none() {
                         // The inline paint must reflect tray state the handled key just armed (the
                         // Ctrl+C exit hint): the refresh below the select only reaches the frame

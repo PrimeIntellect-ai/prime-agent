@@ -22,7 +22,8 @@ vt100 = "0.15"
 # pty + poll for the bench harness: the same nix version the workspace
 # already resolves for pa-core/pa-cli.
 [target.'cfg(unix)'.dependencies]
-nix = { version = "0.29", features = ["term", "signal", "process", "fs", "poll"] }
+# `feature` provides sysconf(CLK_TCK) for idle-cost's /proc tick counts.
+nix = { version = "0.29", features = ["term", "signal", "process", "fs", "poll", "feature"] }
 
 [dependencies.pa-types]
 path = "../pa-types"

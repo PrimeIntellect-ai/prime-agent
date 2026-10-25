@@ -993,13 +993,13 @@ impl TurnRunner {
                     let payload = serde_json::to_vec(&outbound).unwrap_or_default();
                     direct_payloads.push(payload);
                 }
-                drop(core);
-                // Direct frames go out immediately (flushing the parked update
-                // first, preserving event-sequence order); a pure-update batch
-                // stays parked for the flusher.
+                // Direct frames go out while their sequence still owns the
+                // store lock, so another row cannot overtake them.
+                // Flush the parked update first; pure updates stay parked.
                 if !direct_payloads.is_empty() {
                     turn_coalescer.send_direct(&direct_payloads, &events);
                 }
+                drop(core);
                 // The waiting response must observe the frames'
                 // sequences and resolves only after the idle flip.
                 if let Some(result) = done_result {

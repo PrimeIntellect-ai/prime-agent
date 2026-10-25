@@ -232,7 +232,8 @@ pub(crate) fn is_always_on_adaptive_thinking_model(model_id: &str) -> bool {
         || model_id.contains("opus-5.5")
 }
 
-/// Check if a model supports adaptive thinking (Opus 4.6+, Sonnet 4.6+).
+/// Check if a model supports adaptive thinking (Opus 4.6+, Sonnet 4.6+, Haiku 5+). Haiku 5.x
+/// rejects `thinking: {type: "enabled", budget_tokens}` with a 400, like the other 5.x families.
 pub(crate) fn supports_adaptive_thinking(model_id: &str) -> bool {
     model_id.contains("opus-4-6")
         || model_id.contains("opus-4.6")
@@ -244,6 +245,7 @@ pub(crate) fn supports_adaptive_thinking(model_id: &str) -> bool {
         || model_id.contains("sonnet-4-6")
         || model_id.contains("sonnet-4.6")
         || model_id.contains("sonnet-5")
+        || model_id.contains("haiku-5")
         || model_id.contains("fable-5")
         || model_id.contains("mythos-5")
         || model_id.contains("mythos-preview")

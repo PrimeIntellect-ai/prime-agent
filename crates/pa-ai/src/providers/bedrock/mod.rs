@@ -22,8 +22,8 @@ use crate::event_stream::{
 };
 use crate::providers::bedrock::auth::{resolve_credentials, resolve_endpoint, sigv4_headers};
 use crate::providers::bedrock::convert::{
-    convert_messages, convert_tool_config, map_stop_reason, map_thinking_level_to_effort,
-    supports_always_on_adaptive_thinking, BedrockToolChoice,
+    convert_messages, convert_tool_config, get_model_match_candidates, map_stop_reason,
+    map_thinking_level_to_effort, supports_always_on_adaptive_thinking, BedrockToolChoice,
 };
 pub(crate) use crate::providers::bedrock::convert::{
     is_anthropic_claude_model, supports_adaptive_thinking,
@@ -324,6 +324,16 @@ fn build_additional_model_request_fields(model: &Model, options: &BedrockOptions
     let reasoning = options.reasoning?;
     if !model.reasoning {
         return None;
+    }
+
+    if reasoning == ModelThinkingLevel::Off {
+        // Haiku 5.x thinks by default when the request carries no `thinking` field, so "off" has to
+        // say so explicitly, as the Anthropic route does.
+        let thinks_by_default = is_anthropic_claude_model(model)
+            && get_model_match_candidates(&model.id, Some(&model.name))
+                .iter()
+                .any(|candidate| candidate.contains("haiku-5"));
+        return thinks_by_default.then(|| json!({ "thinking": { "type": "disabled" } }));
     }
 
     if is_anthropic_claude_model(model) {
@@ -719,7 +729,7 @@ pub fn stream_simple_bedrock(
             context,
             Some(&BedrockOptions {
                 base,
-                reasoning: None,
+                reasoning: Some(ModelThinkingLevel::Off),
                 ..Default::default()
             }),
         );
@@ -997,6 +1007,59 @@ mod tests {
             &test_model("us.anthropic.claude"),
             &options
         ));
+    }
+
+    /// Haiku 5.x thinks by default, so thinking off must send `thinking: {type: "disabled"}` on
+    /// Bedrock, as the Anthropic route does. Haiku 4.5 does not think unasked and gets no field.
+    #[tokio::test]
+    async fn thinking_off_disables_haiku_5_default_thinking() {
+        for (id, name, expected) in [
+            (
+                "us.anthropic.claude-haiku-5-5-v1",
+                "Claude Haiku 5.5",
+                json!({ "thinking": { "type": "disabled" } }),
+            ),
+            (
+                "us.anthropic.claude-haiku-4-5-v1",
+                "Claude Haiku 4.5",
+                Value::Null,
+            ),
+        ] {
+            let model = Model {
+                name: name.into(),
+                // A closed local port: the payload hook below cancels the request before it sends.
+                base_url: "http://127.0.0.1:9".into(),
+                ..test_model(id)
+            };
+            let captured = std::sync::Arc::new(std::sync::Mutex::new(None));
+            let signal = tokio_util::sync::CancellationToken::new();
+            let options = SimpleStreamOptions {
+                base: StreamOptions {
+                    signal: Some(signal.clone()),
+                    on_payload: Some(std::sync::Arc::new({
+                        let captured = std::sync::Arc::clone(&captured);
+                        move |payload: Value, _model: &Model| {
+                            *captured.lock().unwrap() = Some(payload);
+                            signal.cancel();
+                            None
+                        }
+                    })),
+                    ..Default::default()
+                },
+                reasoning: Some(ModelThinkingLevel::Off),
+                thinking_budgets: None,
+            };
+            let context = Context {
+                system_prompt: None,
+                messages: Vec::new(),
+                tools: None,
+            };
+            stream_simple_bedrock(&model, &context, Some(&options))
+                .collect()
+                .await;
+            let payload = captured.lock().unwrap().take().expect("payload captured");
+            assert_eq!(payload["additionalModelRequestFields"], expected, "{id}");
+        }
     }
 
     fn test_model(id: &str) -> Model {

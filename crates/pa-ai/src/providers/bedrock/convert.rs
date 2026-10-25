@@ -12,7 +12,7 @@ use crate::types::{
 };
 use crate::utils_inner::sanitize_unicode::sanitize_surrogates;
 
-fn get_model_match_candidates(model_id: &str, model_name: Option<&str>) -> Vec<String> {
+pub(crate) fn get_model_match_candidates(model_id: &str, model_name: Option<&str>) -> Vec<String> {
     let mut values = vec![model_id.to_string()];
     if let Some(name) = model_name {
         values.push(name.to_string());
@@ -30,7 +30,7 @@ fn get_model_match_candidates(model_id: &str, model_name: Option<&str>) -> Vec<S
         .collect()
 }
 
-/// Adaptive thinking support (Opus 4.6+, Sonnet 4.6).
+/// Adaptive thinking support (Opus 4.6+, Sonnet 4.6+, Haiku 5+).
 pub fn supports_adaptive_thinking(model_id: &str, model_name: Option<&str>) -> bool {
     get_model_match_candidates(model_id, model_name)
         .iter()
@@ -41,6 +41,7 @@ pub fn supports_adaptive_thinking(model_id: &str, model_name: Option<&str>) -> b
                 || s.contains("opus-5")
                 || s.contains("sonnet-4-6")
                 || s.contains("sonnet-5")
+                || s.contains("haiku-5")
                 || s.contains("fable-5")
                 || s.contains("mythos-5")
                 || s.contains("mythos-preview")
@@ -400,6 +401,24 @@ pub fn map_stop_reason(reason: Option<&str>) -> crate::types::StopReason {
         Some("max_tokens" | "model_context_window_exceeded") => StopReason::Length,
         Some("tool_use") => StopReason::ToolUse,
         _ => StopReason::Error,
+    }
+}
+
+#[cfg(test)]
+mod supports_adaptive_thinking_tests {
+    use super::supports_adaptive_thinking;
+
+    /// Discussion #3710: Haiku 5.x rejects budget-based thinking, so it must take the adaptive path.
+    #[test]
+    fn bedrock_haiku_5_uses_adaptive_thinking() {
+        assert!(supports_adaptive_thinking(
+            "us.anthropic.claude-haiku-5-5-v1",
+            Some("Claude Haiku 5.5")
+        ));
+        assert!(!supports_adaptive_thinking(
+            "us.anthropic.claude-haiku-4-5-v1",
+            Some("Claude Haiku 4.5")
+        ));
     }
 }
 

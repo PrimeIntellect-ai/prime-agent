@@ -40,8 +40,9 @@ use create::{active_session_id_of, worker_server_capabilities};
 // session_summary/SummaryInputs serve the in-crate test modules only, so allow the unused import.
 #[allow(unused_imports)]
 pub(crate) use summary::{
-    compact_action_label, emit_worker_event_with, persist_custom_row, push_roster_delta,
-    session_snapshot, session_summary, RosterPushContext, SummaryInputs,
+    broadcast_custom_row_locked, compact_action_label, emit_worker_event_locked,
+    emit_worker_event_with, persist_custom_row, push_roster_delta, session_snapshot,
+    session_summary, RosterPushContext, SummaryInputs,
 };
 use turn::TurnRunner;
 
@@ -921,8 +922,8 @@ fn emit_refinement_row(
     review_session_id: &str,
     message: &Value,
 ) -> bool {
+    let mut core = core.lock().unwrap();
     {
-        let mut core = core.lock().unwrap();
         let Some(store) = core.store.as_mut() else {
             return false;
         };
@@ -943,16 +944,7 @@ fn emit_refinement_row(
             }),
         );
     }
-    emit_worker_event_with(
-        core,
-        events,
-        json!({ "type": "message_start", "message": message }),
-    );
-    emit_worker_event_with(
-        core,
-        events,
-        json!({ "type": "message_end", "message": message }),
-    );
+    broadcast_custom_row_locked(&mut core, events, message);
     true
 }
 
