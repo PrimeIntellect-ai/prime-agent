@@ -547,13 +547,13 @@ fn a_bare_invocation_of_a_close_tagged_body_still_floors() {
     assert_eq!(assistant_texts(&events), vec!["ok"]);
 }
 
-/// The branch summary call carries the built session's conversation id
-/// (opencode rejects a request without `x-opencode-session`). The faux
-/// registry is process-global, so the whole test holds `FAUX_TEST_LOCK`;
-/// the recorder registration replaces the script's provider for the
-/// summary call.
+/// The branch summary call carries the request's durable session id even
+/// when no core session is built (a `/tree` summary right after a resume
+/// races the create's background build). The faux registry is
+/// process-global, so the test holds `FAUX_TEST_LOCK`; the recorder
+/// registration replaces the script's provider for the summary call.
 #[test]
-fn the_branch_summary_call_carries_the_built_session_id() {
+fn an_unbuilt_engine_branch_summary_carries_the_request_session_id() {
     use crate::engine::SessionEngine as _;
     let _faux = FAUX_TEST_LOCK
         .lock()
@@ -575,20 +575,8 @@ fn the_branch_summary_call_carries_the_built_session_id() {
         queued_steering_probe: None,
     })
     .unwrap();
-    let model = engine.resolve_model().expect("faux model");
-    let session_id = engine.runtime.block_on(async {
-        engine
-            .ensure_core_session_async(&model)
-            .await
-            .expect("build");
-        let session = engine.session.lock().await;
-        session
-            .as_deref()
-            .expect("built session")
-            .session
-            .session_id()
-            .await
-    });
+    engine.resolve_model().expect("faux model");
+    assert!(engine.session.blocking_lock().is_none(), "no session built");
     let recorder = pa_ai::faux::register_faux_provider(pa_ai::faux::RegisterFauxProviderOptions {
         api: Some("faux".to_string()),
         provider: Some("faux".to_string()),
@@ -629,6 +617,7 @@ fn the_branch_summary_call_carries_the_built_session_id() {
             }],
             custom_instructions: None,
             replace_instructions: false,
+            session_id: "durable-session".to_string(),
         },
         &pa_agent::abort::AbortController::new().signal(),
     );
@@ -640,8 +629,5 @@ fn the_branch_summary_call_carries_the_built_session_id() {
         ),
         "{outcome:?}"
     );
-    assert_eq!(*seen.lock().unwrap(), [Some(session_id)]);
-    engine
-        .runtime
-        .block_on(async { engine.retire_session_runtime().await });
+    assert_eq!(*seen.lock().unwrap(), [Some("durable-session".to_string())]);
 }
