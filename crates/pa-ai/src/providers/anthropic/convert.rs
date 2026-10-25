@@ -68,29 +68,6 @@ pub(crate) fn convert_content_blocks(content: &[UserOrToolContent]) -> Value {
     json!(blocks)
 }
 
-/// Merge the user turn at `position` into the user turn before it, when a skipped assistant turn
-/// left the two back to back.
-fn merge_user_turns_at(params: &mut Vec<Value>, position: usize) {
-    let is_user = |message: Option<&Value>| {
-        message
-            .and_then(|message| message.get("role"))
-            .and_then(Value::as_str)
-            == Some("user")
-    };
-    if position == 0 || !is_user(params.get(position - 1)) || !is_user(params.get(position)) {
-        return;
-    }
-    let as_blocks = |content: Value| match content {
-        Value::Array(blocks) => blocks,
-        Value::String(text) => vec![json!({ "type": "text", "text": text })],
-        other => vec![other],
-    };
-    let mut next = params.remove(position);
-    let mut merged = as_blocks(params[position - 1]["content"].take());
-    merged.extend(as_blocks(next["content"].take()));
-    params[position - 1]["content"] = Value::Array(merged);
-}
-
 // Long by design: mirrors the provider's stream shape.
 #[allow(clippy::too_many_lines)]
 pub fn convert_messages(
@@ -101,8 +78,6 @@ pub fn convert_messages(
 ) -> Vec<Value> {
     let mut params: Vec<Value> = Vec::new();
     let requires_thinking_signature = get_anthropic_compat(model).requires_thinking_signature;
-    // `params` positions where an assistant turn with nothing to replay was skipped.
-    let mut skipped_assistant_turns: Vec<usize> = Vec::new();
     let transformed = crate::providers::transform_messages::transform_messages_with_normalizer(
         &context.messages,
         model,
@@ -231,10 +206,6 @@ pub fn convert_messages(
                     }
                 }
                 if blocks.is_empty() {
-                    // Skipping the turn can put two user turns back to back (a Claude turn
-                    // cut off by `max_tokens` mid-thinking has nothing left to replay); they
-                    // are merged below.
-                    skipped_assistant_turns.push(params.len());
                     index += 1;
                     continue;
                 }
@@ -268,10 +239,6 @@ pub fn convert_messages(
             }
         }
         index += 1;
-    }
-
-    for &position in skipped_assistant_turns.iter().rev() {
-        merge_user_turns_at(&mut params, position);
     }
 
     // Add cache_control to the last user message to cache conversation history.
@@ -393,9 +360,9 @@ mod tests {
         serde_json::from_value(model).expect("model json")
     }
 
-    /// The request messages for a user prompt, one same-model assistant turn of `blocks` that
-    /// stopped on `stop_reason`, and a follow-up prompt.
-    fn convert(model: &Model, blocks: &Value, stop_reason: &str) -> Vec<Value> {
+    /// The request messages for a user prompt, one same-model assistant turn of `blocks`, and a
+    /// follow-up prompt.
+    fn convert(model: &Model, blocks: &Value) -> Vec<Value> {
         let messages: Vec<Message> = serde_json::from_value(json!([
             {"role": "user", "content": "rebuild", "timestamp": 1},
             {
@@ -405,7 +372,7 @@ mod tests {
                     "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0, "totalTokens": 0,
                     "cost": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0, "total": 0}
                 },
-                "stopReason": stop_reason, "timestamp": 2
+                "stopReason": "stop", "timestamp": 2
             },
             {"role": "user", "content": "again", "timestamp": 3}
         ]))
@@ -419,7 +386,7 @@ mod tests {
     }
 
     fn assistant_turn(model: &Model, blocks: &Value) -> Value {
-        convert(model, blocks, "stop")
+        convert(model, blocks)
             .into_iter()
             .find(|message| message["role"] == "assistant")
             .unwrap_or(Value::Null)
@@ -462,24 +429,6 @@ mod tests {
                 model.id
             );
         }
-    }
-
-    /// A Claude turn cut off by `max_tokens` mid-thinking has nothing left to replay; its
-    /// neighbouring user turns merge instead of going out back to back.
-    #[test]
-    fn a_dropped_thinking_only_turn_leaves_no_back_to_back_user_turns() {
-        let params = convert(
-            &claude(),
-            &json!([{"type": "thinking", "thinking": "Half a thou"}]),
-            "length",
-        );
-        assert_eq!(
-            params,
-            vec![json!({"role": "user", "content": [
-                {"type": "text", "text": "rebuild"},
-                {"type": "text", "text": "again"}
-            ]})]
-        );
     }
 
     /// Signed thinking still replays as a `thinking` block with its signature.
