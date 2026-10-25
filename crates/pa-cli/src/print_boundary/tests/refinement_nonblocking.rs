@@ -396,12 +396,16 @@ async fn a_failed_print_run_still_drains_an_in_flight_refine() {
         .unwrap();
     engine.session.agent().wait_for_idle().await;
     // The next run fails at its start: its prompt wait returns the error.
+    let failed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let listener_failed = failed.clone();
     let _failing = engine
         .session
         .agent()
-        .subscribe(|event, _signal| {
+        .subscribe(move |event, _signal| {
+            let failed = listener_failed.clone();
             Box::pin(async move {
                 if matches!(event, pa_agent::types::AgentEvent::AgentStart) {
+                    failed.store(true, std::sync::atomic::Ordering::SeqCst);
                     anyhow::bail!("listener failed");
                 }
                 Ok(())
@@ -447,12 +451,18 @@ async fn a_failed_print_run_still_drains_an_in_flight_refine() {
         &options,
         &root_node,
     ));
-    // The paused clock fires this sleep only once the runtime idles: the run
-    // is blocked on the held planner, so the planner may finish.
+    // The paused clock fires this sleep only once the runtime idles. Past the
+    // failed prompt nothing but the held planner can block the run, so an idle
+    // run is waiting on it in the drain and may release it. An idle before the
+    // failure would let the plan commit early, so it fails the test instead.
     let result = tokio::select! {
         biased;
         result = &mut run => result,
         () = tokio::time::sleep(std::time::Duration::from_secs(3600)) => {
+            assert!(
+                failed.load(std::sync::atomic::Ordering::SeqCst),
+                "the run idled before the prompt failed"
+            );
             release.notify_one();
             run.await
         }
