@@ -240,9 +240,13 @@ pub struct ExecuteOptions {
 
 /// The error raised when a new cell cannot start because the previously
 /// interrupted cell is still running.
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, Default, thiserror::Error)]
 #[error("{KERNEL_BUSY_AFTER_INTERRUPT_MESSAGE}")]
-pub struct KernelBusyAfterInterruptError;
+pub struct KernelBusyAfterInterruptError {
+    /// The blocked cell was abandoned: the host settled it as aborted, so its
+    /// own kernel will never report it done and no wait can clear it.
+    pub abandoned: bool,
+}
 
 /// A typed request from Python code running in the kernel to the host.
 #[derive(Debug, Clone)]

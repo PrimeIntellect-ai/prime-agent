@@ -13,7 +13,7 @@ use crate::kernel::bootstrap::KernelPythonSkill;
 use crate::kernel::provisioner::{
     IpythonKernelProvisioner as KernelProvisioner, IpythonKernelProvisionerOptions,
 };
-use crate::kernel::shared::HostRequestHandlers;
+use crate::kernel::shared::{HostRequestHandlers, KernelBusyAfterInterruptError};
 use crate::session::manager::SessionManager;
 use crate::skills::{get_python_skill_runtime_info, Skill};
 use crate::tools::ipython::{
@@ -402,7 +402,17 @@ impl KernelExecutor for KernelManagerExecutor {
                     },
                 )
                 .await
-                .map_err(KernelExecError::Other)?;
+                .map_err(
+                    |error| match error.downcast::<KernelBusyAfterInterruptError>() {
+                        Ok(busy) => KernelExecError::BusyAfterInterrupt(
+                            crate::tools::ipython::KernelBusyAfterInterruptError {
+                                message: busy.to_string(),
+                                abandoned: busy.abandoned,
+                            },
+                        ),
+                        Err(other) => KernelExecError::Other(other),
+                    },
+                )?;
             Ok(convert_execute_result(result))
         })
     }

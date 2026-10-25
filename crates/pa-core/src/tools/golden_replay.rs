@@ -336,6 +336,8 @@ struct MockKernel {
 enum MockOutcome {
     Ok(Box<ExecuteResult>),
     Busy,
+    /// The blocked cell was abandoned by its host (an aborted cell): no wait clears it.
+    BusyAbandoned,
 }
 
 #[derive(Clone)]
@@ -382,6 +384,12 @@ impl KernelExecutor for MockKernel {
             MockOutcome::Ok(result) => Ok(*result),
             MockOutcome::Busy => Err(KernelExecError::BusyAfterInterrupt(
                 KernelBusyAfterInterruptError::default(),
+            )),
+            MockOutcome::BusyAbandoned => Err(KernelExecError::BusyAfterInterrupt(
+                KernelBusyAfterInterruptError {
+                    abandoned: true,
+                    ..KernelBusyAfterInterruptError::default()
+                },
             )),
         };
         Box::pin(std::future::ready(item))
@@ -567,6 +575,53 @@ async fn golden_ipython_group_matches_ts() {
         checked += 1;
     }
     assert_eq!(checked, corpus["caseCount"].as_u64().expect("caseCount"));
+}
+
+/// Regression: a cell the host settled as aborted never reports itself done, so
+/// a surface with no choice dialog must restart the kernel instead of handing
+/// the busy error to every later cell (the wedge a blocking `cargo test` child
+/// left behind in a Windows session).
+#[tokio::test]
+async fn headless_busy_after_an_abandoned_cell_restarts_the_kernel() {
+    let kernel = Arc::new(MockKernel {
+        executions: Mutex::new(vec![
+            MockOutcome::BusyAbandoned,
+            MockOutcome::Ok(Box::new(ExecuteResult {
+                stdout: "ok\n".to_string(),
+                ..ExecuteResult::default()
+            })),
+        ]),
+        exec_calls: AtomicUsize::new(0),
+        next_index: AtomicUsize::new(0),
+    });
+    let provisioner = Arc::new(MockProvisioner {
+        kernel,
+        ensure_calls: AtomicUsize::new(0),
+        kill_calls: AtomicUsize::new(0),
+    });
+    let options = IpythonToolOptions {
+        provisioner: provisioner.clone(),
+        ui: None,
+        on_late_sent_agent_message: None,
+    };
+
+    let result = ipython::execute_ipython(&options, "print(\"ok\")", None, None, None)
+        .await
+        .expect("a headless session restarts instead of reporting the busy error");
+
+    assert_eq!(
+        provisioner.kill_calls.load(Ordering::SeqCst),
+        1,
+        "the abandoned cell's kernel must be killed exactly once"
+    );
+    assert_eq!(
+        result.details.as_ref().expect("details")["kernelRestarted"],
+        serde_json::json!(true)
+    );
+    assert_eq!(
+        result.content[0].as_text().expect("text block"),
+        format!("{}\n\nok\n", ipython::kernel_restart_notice())
+    );
 }
 
 #[test]

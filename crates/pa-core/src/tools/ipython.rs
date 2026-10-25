@@ -107,6 +107,9 @@ pub fn sent_agent_message_json(
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KernelBusyAfterInterruptError {
     pub message: String,
+    /// The blocked cell was abandoned (its host settled it as aborted), so no
+    /// wait can clear it: only a restart frees the kernel.
+    pub abandoned: bool,
 }
 
 impl std::fmt::Display for KernelBusyAfterInterruptError {
@@ -119,6 +122,7 @@ impl Default for KernelBusyAfterInterruptError {
     fn default() -> Self {
         Self {
             message: "The Python kernel is still running the previously interrupted cell. Wait and try again, or kill the kernel to start fresh.".to_string(),
+            abandoned: false,
         }
     }
 }
@@ -301,17 +305,28 @@ async fn execute_with_busy_kernel_choice(
                 if !err.is_busy_after_interrupt() || aborted {
                     return Err(err);
                 }
-                // No UI (headless): cancel immediately.
-                let Some(ui) = ui else {
-                    return Err(err);
+                // An abandoned cell never reports itself done, so waiting cannot
+                // clear it. With a UI the user picks; without one (headless, or a
+                // surface with no choice dialog) nobody can answer, so restart
+                // once instead of handing this error to every later cell.
+                let abandoned = matches!(
+                    &err,
+                    KernelExecError::BusyAfterInterrupt(busy) if busy.abandoned
+                );
+                let choice = match ui {
+                    Some(ui) => {
+                        ui.select(
+                            &busy_kernel_prompt(),
+                            &[BUSY_KERNEL_WAIT_CHOICE, BUSY_KERNEL_KILL_CHOICE],
+                            execute.signal.as_ref(),
+                        )
+                        .await
+                    }
+                    None if abandoned && !kernel_restarted => {
+                        Some(BUSY_KERNEL_KILL_CHOICE.to_string())
+                    }
+                    None => None,
                 };
-                let choice = ui
-                    .select(
-                        &busy_kernel_prompt(),
-                        &[BUSY_KERNEL_WAIT_CHOICE, BUSY_KERNEL_KILL_CHOICE],
-                        execute.signal.as_ref(),
-                    )
-                    .await;
                 match choice.as_deref() {
                     Some(BUSY_KERNEL_WAIT_CHOICE) => {
                         on_working_message(Some("Waiting for Python kernel..."));

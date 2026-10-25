@@ -3,10 +3,10 @@
 
 use super::{
     anyhow, json, lock, parse_sent_agent_message, AbortSignal, ActiveExecution, Arc, AsyncWriteExt,
-    Duration, ExecuteResult, ExecuteStatus, Inner, Instant, InternalExecuteResult, KernelState,
-    LateSentAgentMessageCallback, Value, AGENT_MESSAGE_DISPLAY_MIME,
-    KERNEL_BUSY_AFTER_INTERRUPT_MESSAGE, KERNEL_BUSY_INTERRUPT_INTERVAL_MS,
-    KERNEL_BUSY_REUSE_WAIT_MS, MAX_BACKGROUND_OUTPUT_CHARS, MAX_LATE_SENT_AGENT_MESSAGE_HANDLERS,
+    Duration, ExecuteResult, ExecuteStatus, Inner, Instant, InternalExecuteResult,
+    KernelBusyAfterInterruptError, KernelState, LateSentAgentMessageCallback, Value,
+    AGENT_MESSAGE_DISPLAY_MIME, KERNEL_BUSY_INTERRUPT_INTERVAL_MS, KERNEL_BUSY_REUSE_WAIT_MS,
+    MAX_BACKGROUND_OUTPUT_CHARS, MAX_LATE_SENT_AGENT_MESSAGE_HANDLERS,
 };
 use std::fmt::Write as _;
 
@@ -100,10 +100,17 @@ impl Inner {
                 }
             }
         }
-        if lock(&self.guarded).active_execution.is_some() {
-            return Err(anyhow!("{KERNEL_BUSY_AFTER_INTERRUPT_MESSAGE}"));
-        }
-        Ok(())
+        let Some(execution) = lock(&self.guarded).active_execution.clone() else {
+            return Ok(());
+        };
+        // Only an abandoned cell is hopeless: the host settled it as aborted, so
+        // its kernel never reports it done, and a cell blocked inside synchronous
+        // work never runs the interrupt handler either. Say so, so the caller can
+        // restart instead of repeating this error forever. A cell still owned by
+        // its caller keeps the plain message.
+        Err(anyhow::Error::new(KernelBusyAfterInterruptError {
+            abandoned: execution.was_abandoned(),
+        }))
     }
 
     fn notify_active_execution_idle(&self) {
@@ -328,6 +335,34 @@ fn humanize_ms(ms: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn active_execution(status: ExecuteStatus, settled: bool) -> Arc<ActiveExecution> {
+        Arc::new(ActiveExecution {
+            request_id: "req".to_string(),
+            started: Instant::now(),
+            max_chars: 1024,
+            opts: crate::kernel::shared::ExecuteOptions::default(),
+            namespace_code: true,
+            restores_namespace: false,
+            buffers: std::sync::Mutex::new(crate::kernel::manager::ExecBuffers {
+                status,
+                settled,
+                ..crate::kernel::manager::ExecBuffers::default()
+            }),
+            result_tx: std::sync::Mutex::new(None),
+            cell_started: std::sync::Mutex::new(None),
+        })
+    }
+
+    #[test]
+    fn only_a_settled_aborted_execution_reads_as_abandoned() {
+        // The host gave up on the cell and the kernel never reported it done.
+        assert!(active_execution(ExecuteStatus::Aborted, true).was_abandoned());
+        // Still running under its own caller: the busy wait can still clear it.
+        assert!(!active_execution(ExecuteStatus::Ok, false).was_abandoned());
+        // Settled ok: the cell finished, and its done frame clears it.
+        assert!(!active_execution(ExecuteStatus::Ok, true).was_abandoned());
+    }
 
     #[test]
     fn humanize_ms_pads_the_millisecond_remainder() {
