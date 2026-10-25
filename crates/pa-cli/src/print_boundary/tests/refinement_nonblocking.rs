@@ -376,6 +376,101 @@ async fn a_print_refine_command_is_tracked_by_the_disposal_drain() {
     pa_ai::registry::unregister_api_providers("test-held-refinement-host");
 }
 
+/// Every print exit path runs the disposal drain: a `/refine` still planning
+/// when a later prompt fails through `?` must land its outcome row before the
+/// run returns — the session drop would abort it.
+#[tokio::test(start_paused = true)]
+async fn a_failed_print_run_still_drains_an_in_flight_refine() {
+    let _faux = FAUX_TEST_LOCK.lock().await;
+    let (engine, dir, model) = faux_engine_with_settings(
+        json!({ "responses": [{"text": "seed"}] }),
+        json!({ "compaction": {"enabled": false}, "autoRefine": {"enabled": true, "compact": true, "cooldownMs": 0} }),
+        None,
+    )
+    .await;
+    let engine = Arc::new(engine);
+    engine
+        .session
+        .prompt("seed", pa_core::session_engine::PromptOptions::default())
+        .await
+        .unwrap();
+    engine.session.agent().wait_for_idle().await;
+    // The next run fails at its start: its prompt wait returns the error.
+    let _failing = engine
+        .session
+        .agent()
+        .subscribe(|event, _signal| {
+            Box::pin(async move {
+                if matches!(event, pa_agent::types::AgentEvent::AgentStart) {
+                    anyhow::bail!("listener failed");
+                }
+                Ok(())
+            })
+        })
+        .await;
+    let release = Arc::new(tokio::sync::Notify::new());
+    pa_ai::registry::register_api_provider(
+        Arc::new(HeldPlanner {
+            started: Arc::new(tokio::sync::Notify::new()),
+            release: release.clone(),
+            reply: r#"{"summary":"background note","edits":[]}"#,
+        }),
+        Some("test-held-refinement-host"),
+    );
+    let mut planner_model = model.clone();
+    planner_model.api = "test-held-refinement-host".to_string();
+    let options = crate::mode::RunOptions {
+        app_mode: crate::mode::AppMode::Print,
+        config: crate::mode::RuntimeConfig {
+            cwd: dir.path().to_path_buf(),
+            agent_dir: dir.path().join("agent"),
+            ..Default::default()
+        },
+        session: crate::mode::SessionOptions::default(),
+        messages: vec!["/refine".to_string(), "next".to_string()],
+        file_args: Vec::new(),
+        daemon_socket: None,
+        list_models: None,
+        initial_message: None,
+        initial_images: Vec::new(),
+        verbose: false,
+        offline: true,
+        agents_view_requested: false,
+        attach_agent: None,
+    };
+    let root_node =
+        crate::print_rlm::root_node(&options, &SessionManager::in_memory(dir.path()), None);
+    let mut run = std::pin::pin!(crate::print_runtime::run_prompts_and_emit(
+        &engine,
+        &planner_model,
+        None,
+        &options,
+        &root_node,
+    ));
+    // The paused clock fires this sleep only once the runtime idles: the run
+    // is blocked on the held planner, so the planner may finish.
+    let result = tokio::select! {
+        biased;
+        result = &mut run => result,
+        () = tokio::time::sleep(std::time::Duration::from_secs(3600)) => {
+            release.notify_one();
+            run.await
+        }
+    };
+    let error = result.expect_err("the failed prompt fails the run");
+    assert!(error.contains("listener failed"), "{error}");
+    let outcomes = refine_rows(&engine)
+        .await
+        .into_iter()
+        .filter(|row| row.custom_type == "refinement_outcome")
+        .count();
+    assert_eq!(
+        outcomes, 1,
+        "the /refine outcome row landed before the run returned"
+    );
+    pa_ai::registry::unregister_api_providers("test-held-refinement-host");
+}
+
 /// One `refine.status` round trip through the engine's turn-boundary
 /// handler registration.
 async fn refine_status(engine: &SessionEngine) -> serde_json::Value {
