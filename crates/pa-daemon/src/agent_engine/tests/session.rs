@@ -491,3 +491,102 @@ fn a_bare_invocation_of_a_close_tagged_body_still_floors() {
     );
     assert_eq!(assistant_texts(&events), vec!["ok"]);
 }
+
+/// The branch summary call carries the built session's conversation id
+/// (opencode rejects a request without `x-opencode-session`). The faux
+/// registry is process-global, so the whole test holds `FAUX_TEST_LOCK`;
+/// the recorder registration replaces the script's provider for the
+/// summary call.
+#[test]
+fn the_branch_summary_call_carries_the_built_session_id() {
+    use crate::engine::SessionEngine as _;
+    let _faux = FAUX_TEST_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let dir = tempfile::TempDir::new().unwrap();
+    let engine = AgentSessionEngine::new(AgentEngineConfig {
+        cwd: dir.path().to_path_buf(),
+        agent_dir: dir.path().join("agent"),
+        provider: None,
+        model: None,
+        api_key: None,
+        thinking: None,
+        session_dir: None,
+        session_file: None,
+        faux_script: Some(json!({ "engine": "faux", "responses": [{ "text": "ok" }] }).to_string()),
+        supervisor_link: None,
+        telemetry_disabled: Some(true),
+        cron_store: None,
+        queued_steering_probe: None,
+    })
+    .unwrap();
+    let model = engine.resolve_model().expect("faux model");
+    let session_id = engine.runtime.block_on(async {
+        engine
+            .ensure_core_session_async(&model)
+            .await
+            .expect("build");
+        let session = engine.session.lock().await;
+        session
+            .as_deref()
+            .expect("built session")
+            .session
+            .session_id()
+            .await
+    });
+    let recorder = pa_ai::faux::register_faux_provider(pa_ai::faux::RegisterFauxProviderOptions {
+        api: Some("faux".to_string()),
+        provider: Some("faux".to_string()),
+        ..Default::default()
+    });
+    let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let sink = std::sync::Arc::clone(&seen);
+    recorder.set_responses(vec![pa_ai::faux::FauxResponseStep::Factory(
+        std::sync::Arc::new(
+            move |_context: &pa_types::ai::Context,
+                  options: Option<&pa_ai::types::StreamOptions>,
+                  _call: u64,
+                  _model: &pa_types::ai::Model| {
+                sink.lock()
+                    .unwrap()
+                    .push(options.and_then(|options| options.session_id.clone()));
+                Ok(pa_ai::faux::faux_assistant_text_message(
+                    "## Goal\nexplore the tree",
+                    pa_ai::faux::FauxAssistantMessageOptions::default(),
+                ))
+            },
+        ),
+    )]);
+    let outcome = engine.run_branch_summary(
+        crate::engine::BranchSummaryRequest {
+            entries: vec![pa_types::session::FileEntry::Message {
+                message: pa_types::session::AgentMessage::User(pa_types::ai::UserMessage {
+                    content: pa_types::ai::UserContent::Text("explore the widget".to_string()),
+                    timestamp: 0,
+                    rest: Map::default(),
+                }),
+                base: pa_types::session::EntryBase {
+                    id: Some("e0".to_string()),
+                    parent_id: None,
+                    timestamp: Some("2024-01-01T00:00:00.000Z".to_string()),
+                    rest: Map::default(),
+                },
+            }],
+            custom_instructions: None,
+            replace_instructions: false,
+        },
+        &pa_agent::abort::AbortController::new().signal(),
+    );
+    recorder.unregister();
+    assert!(
+        matches!(
+            outcome,
+            crate::engine::BranchSummaryOutcome::Complete { .. }
+        ),
+        "{outcome:?}"
+    );
+    assert_eq!(*seen.lock().unwrap(), [Some(session_id)]);
+    engine
+        .runtime
+        .block_on(async { engine.retire_session_runtime().await });
+}
