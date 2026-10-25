@@ -529,30 +529,16 @@ async fn run_stream(
             headers.push((name.clone(), value.clone()));
         }
     } else {
-        // Resolution may run the profile's credential_process, so it honours the request's signal
-        // and timeout; leaving the select drops the resolution, which kills a stalled process.
+        // Resolution may run the profile's credential_process, so it honours the request's signal;
+        // leaving the select drops the resolution, which kills a stalled process.
         let cancelled = async {
             match &options.base.signal {
                 Some(signal) => signal.cancelled().await,
                 None => std::future::pending().await,
             }
         };
-        let timed_out = async {
-            match options.base.timeout_ms {
-                Some(timeout_ms) => {
-                    tokio::time::sleep(std::time::Duration::from_millis(timeout_ms)).await;
-                    timeout_ms
-                }
-                None => std::future::pending().await,
-            }
-        };
         let credentials = tokio::select! {
             () = cancelled => return Err(ProviderError::Aborted),
-            timeout_ms = timed_out => {
-                return Err(ProviderError::Message(format!(
-                    "AWS credential resolution exceeded the {timeout_ms}ms timeout"
-                )))
-            }
             credentials = resolve_credentials(options.profile.as_deref()) => credentials,
         }
         .ok_or_else(|| {
