@@ -500,10 +500,6 @@ pub fn is_gemini3_pro_model(model_id: &str) -> bool {
     regex_is_match(model_id, r"gemini-3(?:\.\d+)?-pro")
 }
 
-pub fn is_gemini3_flash_model(model_id: &str) -> bool {
-    regex_is_match(model_id, r"gemini-3(?:\.\d+)?-flash")
-}
-
 fn regex_is_match(model_id: &str, pattern: &str) -> bool {
     let regex = regex::Regex::new(pattern).expect("static regex");
     regex.is_match(&model_id.to_lowercase())
@@ -550,10 +546,9 @@ pub fn get_disabled_thinking_config(model: &Model) -> Value {
             return json!({ "thinkingLevel": level.as_str() });
         }
     }
-    // Without a map, by family: Gemini 3 Flash / Flash-Lite and Gemma 4 go down to MINIMAL (Gemma
-    // 4 has no LOW); Gemini 3.1 Pro and newer generations take LOW, which every level-based Gemini
-    // accepts.
-    if is_gemini3_flash_model(&model.id) || is_gemma4_model(&model.id) {
+    // Without a map, Gemma 4 goes down to MINIMAL (it has no LOW); every other level-based Gemini
+    // takes LOW, which they all accept.
+    if is_gemma4_model(&model.id) {
         return json!({ "thinkingLevel": "MINIMAL" });
     }
     json!({ "thinkingLevel": "LOW" })
@@ -583,11 +578,8 @@ pub fn get_thinking_level(
         };
     }
     match effort {
-        // Only Gemini 3 Flash / Flash-Lite (and Gemma 4, above) are known to take MINIMAL; newer
-        // map-less generations get LOW, which every level-based Gemini accepts.
-        ModelThinkingLevel::Minimal if is_gemini3_flash_model(model_id) => {
-            GoogleThinkingLevel::Minimal
-        }
+        // Only Gemma 4 (above) takes MINIMAL without a map; LOW is accepted by every level-based
+        // Gemini.
         ModelThinkingLevel::Minimal | ModelThinkingLevel::Low => GoogleThinkingLevel::Low,
         ModelThinkingLevel::Medium => GoogleThinkingLevel::Medium,
         _ => GoogleThinkingLevel::High,
@@ -660,7 +652,33 @@ mod tests {
     #[test]
     fn gemini3_classification() {
         assert!(is_gemini3_pro_model("gemini-3-pro-preview"));
-        assert!(is_gemini3_flash_model("Gemini-3.1-Flash"));
         assert!(!is_gemini3_pro_model("gemini-2.5-pro"));
+    }
+
+    /// Without a level map, Gemini Flash takes LOW for off and minimal: 3.7/3.8 Flash have no
+    /// MINIMAL, and LOW is accepted by every Flash.
+    #[test]
+    fn mapless_gemini_flash_takes_low_for_off_and_minimal() {
+        for id in ["gemini-3.7-flash", "gemini-3-flash-preview"] {
+            let model = serde_json::from_value::<Model>(json!({
+                "id": id, "name": id,
+                "api": "google-vertex", "provider": "google-vertex",
+                "baseUrl": "https://{location}-aiplatform.googleapis.com",
+                "reasoning": true, "input": ["text"],
+                "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0 },
+                "contextWindow": 1_048_576, "maxTokens": 65_536
+            }))
+            .unwrap();
+            assert_eq!(
+                get_disabled_thinking_config(&model),
+                json!({ "thinkingLevel": "LOW" }),
+                "{id}"
+            );
+            assert_eq!(
+                get_thinking_level(crate::types::ModelThinkingLevel::Minimal, &model),
+                GoogleThinkingLevel::Low,
+                "{id}"
+            );
+        }
     }
 }
