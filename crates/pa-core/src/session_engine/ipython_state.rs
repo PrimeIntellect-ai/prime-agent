@@ -715,6 +715,37 @@ mod tests {
         registration.unregister();
     }
 
+    /// Discussion #3745: once the cut moves past a notice, the summarizer request leaves it out;
+    /// stacked copies in an old session would otherwise overflow that request.
+    #[tokio::test]
+    async fn the_summarizer_request_holds_no_notice() {
+        let seen: std::sync::Arc<std::sync::Mutex<Vec<String>>> = std::sync::Arc::default();
+        let registration = faux_registration(vec![
+            recording_step(seen.clone(), "the first compaction summary"),
+            recording_step(seen.clone(), "the second compaction summary"),
+        ]);
+        let model = registration.get_model();
+        let probe = ScriptedProbe::running(None, Some(vec!["v".to_string()]));
+        let (engine, _agent) = session_with_probe(probe).await;
+        let outcome = compact_once(&engine, &model).await.unwrap();
+        assert!(matches!(outcome, CompactOutcome::Ran(_)));
+        for text in ["first follow-up", "second follow-up"] {
+            engine
+                .session_handle()
+                .lock()
+                .await
+                .append_message(user_turn(text))
+                .unwrap();
+        }
+        let outcome = compact_once(&engine, &model).await.unwrap();
+        assert!(matches!(outcome, CompactOutcome::Ran(_)));
+        let requests = seen.lock().unwrap().clone();
+        assert_eq!(requests.len(), 2);
+        assert!(requests[1].contains("first follow-up"));
+        assert!(!requests[1].contains("[python-state]"));
+        registration.unregister();
+    }
+
     #[tokio::test]
     async fn back_to_back_compact_without_a_kernel_still_skips() {
         let registration = faux_registration(vec![pa_ai::faux::FauxResponseStep::Message(

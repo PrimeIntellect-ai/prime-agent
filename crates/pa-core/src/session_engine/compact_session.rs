@@ -69,7 +69,9 @@ fn message_from_entry(entry: &FileEntry) -> Option<AgentMessage> {
             _ => Some(message.clone()),
         },
         FileEntry::CustomMessage { payload, .. } => {
-            if payload.custom_type == "harness_digest" {
+            if payload.custom_type == "harness_digest"
+                || payload.custom_type == super::ipython_state::IPYTHON_STATE_CUSTOM_TYPE
+            {
                 return None;
             }
             Some(AgentMessage::Custom(pa_types::session::CustomMessage {
