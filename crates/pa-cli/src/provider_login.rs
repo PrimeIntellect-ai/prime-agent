@@ -16,10 +16,11 @@ use pa_tui::provider_auth::{
 };
 
 /// The subscription login providers (every flow ported).
-const SUBSCRIPTION_PROVIDERS: [(&str, &str); 4] = [
+const SUBSCRIPTION_PROVIDERS: [(&str, &str); 5] = [
     ("anthropic", "Anthropic (Claude Pro/Max)"),
     ("github-copilot", "GitHub Copilot"),
     ("openai-codex", "ChatGPT Plus/Pro (Codex Subscription)"),
+    ("meta", "Meta (Muse subscription)"),
     ("xai", "xAI (Grok)"),
 ];
 
@@ -38,6 +39,7 @@ const BUILT_IN_PROVIDER_DISPLAY_NAMES: &[(&str, &str)] = &[
     ("groq", "Groq"),
     ("huggingface", "Hugging Face"),
     ("kimi-coding", "Kimi For Coding"),
+    ("meta", "Meta"),
     ("mistral", "Mistral"),
     ("minimax", "MiniMax"),
     ("minimax-cn", "MiniMax (China)"),
@@ -609,6 +611,31 @@ fn login_blocking_on_panel(
                 },
                 |runtime| {
                     runtime.block_on(crate::subscription_login::run_github_copilot_login(
+                        &agent_dir,
+                        &provider_row.name,
+                        &pa_ai::oauth::ReqwestProviderHttp::new(),
+                        &crate::subscription_login::PanelSubscriptionLoginUi::new(
+                            panel,
+                            &provider_row.id,
+                        ),
+                    ))
+                },
+            );
+    }
+    // The Meta (Muse subscription) login.
+    if provider_row.id == pa_core::auth::META_PROVIDER_ID {
+        return tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_or_else(
+                |error: std::io::Error| {
+                    ProviderAuthOutcome::Error(format!(
+                        "Failed to login to {}: {error}",
+                        provider_row.name
+                    ))
+                },
+                |runtime| {
+                    runtime.block_on(crate::subscription_login::run_meta_login(
                         &agent_dir,
                         &provider_row.name,
                         &pa_ai::oauth::ReqwestProviderHttp::new(),

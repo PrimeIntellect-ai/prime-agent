@@ -468,6 +468,150 @@ compat: Some(RawCompat {
         compat: None,
     },
     RawModel {
+        provider: "meta",
+        id: "muse-spark-1.1",
+        name: "Muse Spark 1.1",
+        api: "openai-responses",
+        base_url: "https://api.meta.ai/v1",
+        reasoning: true,
+        thinking_levels: &[
+                (crate::types::ModelThinkingLevel::Off, None),
+                (crate::types::ModelThinkingLevel::Minimal, Some("minimal")),
+                (crate::types::ModelThinkingLevel::Low, Some("low")),
+                (crate::types::ModelThinkingLevel::Medium, Some("medium")),
+                (crate::types::ModelThinkingLevel::High, Some("high")),
+                (crate::types::ModelThinkingLevel::Xhigh, Some("xhigh")),
+                (crate::types::ModelThinkingLevel::Max, None),
+        ],
+        input: &[crate::types::ModelInput::Text, crate::types::ModelInput::Image],
+        cost: (1.25, 4.25, 0.15, 0.0),
+        context_window: 1_048_576,
+        max_tokens: 131_072,
+        featured: None,
+        headers: &[],
+        compat: None,
+    },
+    RawModel {
+        provider: "meta",
+        id: "muse-spark-1.2",
+        name: "Muse Spark 1.2",
+        api: "openai-responses",
+        base_url: "https://api.meta.ai/v1",
+        reasoning: true,
+        thinking_levels: &[
+                (crate::types::ModelThinkingLevel::Off, None),
+                (crate::types::ModelThinkingLevel::Minimal, Some("minimal")),
+                (crate::types::ModelThinkingLevel::Low, Some("low")),
+                (crate::types::ModelThinkingLevel::Medium, Some("medium")),
+                (crate::types::ModelThinkingLevel::High, Some("high")),
+                (crate::types::ModelThinkingLevel::Xhigh, Some("xhigh")),
+                (crate::types::ModelThinkingLevel::Max, None),
+        ],
+        input: &[crate::types::ModelInput::Text, crate::types::ModelInput::Image],
+        cost: (1.25, 4.25, 0.15, 0.0),
+        context_window: 1_048_576,
+        max_tokens: 131_072,
+        featured: None,
+        headers: &[],
+        compat: None,
+    },
+    RawModel {
+        provider: "meta",
+        id: "muse-spark-1.2-contributor",
+        name: "Muse Spark 1.2 Contributor",
+        api: "openai-responses",
+        base_url: "https://api.meta.ai/v1",
+        reasoning: true,
+        thinking_levels: &[
+                (crate::types::ModelThinkingLevel::Off, None),
+                (crate::types::ModelThinkingLevel::Minimal, Some("minimal")),
+                (crate::types::ModelThinkingLevel::Low, Some("low")),
+                (crate::types::ModelThinkingLevel::Medium, Some("medium")),
+                (crate::types::ModelThinkingLevel::High, Some("high")),
+                (crate::types::ModelThinkingLevel::Xhigh, Some("xhigh")),
+                (crate::types::ModelThinkingLevel::Max, None),
+        ],
+        input: &[crate::types::ModelInput::Text, crate::types::ModelInput::Image],
+        cost: (0.1, 0.2, 0.002, 0.0),
+        context_window: 1_048_576,
+        max_tokens: 131_072,
+        featured: None,
+        headers: &[],
+        compat: None,
+    },
+    RawModel {
+        provider: "meta",
+        id: "muse-spark-1.3",
+        name: "Muse Spark 1.3",
+        api: "openai-responses",
+        base_url: "https://api.meta.ai/v1",
+        reasoning: true,
+        thinking_levels: &[
+                (crate::types::ModelThinkingLevel::Off, None),
+                (crate::types::ModelThinkingLevel::Minimal, Some("minimal")),
+                (crate::types::ModelThinkingLevel::Low, Some("low")),
+                (crate::types::ModelThinkingLevel::Medium, Some("medium")),
+                (crate::types::ModelThinkingLevel::High, Some("high")),
+                (crate::types::ModelThinkingLevel::Xhigh, Some("xhigh")),
+                (crate::types::ModelThinkingLevel::Max, Some("max")),
+        ],
+        input: &[crate::types::ModelInput::Text, crate::types::ModelInput::Image],
+        cost: (1.25, 4.25, 0.15, 0.0),
+        context_window: 1_048_576,
+        max_tokens: 131_072,
+        featured: None,
+        headers: &[],
+        compat: None,
+    },
+    RawModel {
+        provider: "meta",
+        id: "muse-spark-1.3-contributor",
+        name: "Muse Spark 1.3 Contributor",
+        api: "openai-responses",
+        base_url: "https://api.meta.ai/v1",
+        reasoning: true,
+        thinking_levels: &[
+                (crate::types::ModelThinkingLevel::Off, None),
+                (crate::types::ModelThinkingLevel::Minimal, Some("minimal")),
+                (crate::types::ModelThinkingLevel::Low, Some("low")),
+                (crate::types::ModelThinkingLevel::Medium, Some("medium")),
+                (crate::types::ModelThinkingLevel::High, Some("high")),
+                (crate::types::ModelThinkingLevel::Xhigh, Some("xhigh")),
+                (crate::types::ModelThinkingLevel::Max, None),
+        ],
+        input: &[crate::types::ModelInput::Text, crate::types::ModelInput::Image],
+        cost: (0.1, 0.2, 0.002, 0.0),
+        context_window: 1_048_576,
+        max_tokens: 131_072,
+        featured: None,
+        headers: &[],
+        compat: None,
+    },
+    RawModel {
+        provider: "meta",
+        id: "muse-wonder-1.0",
+        name: "Muse Wonder",
+        api: "openai-responses",
+        base_url: "https://api.meta.ai/v1",
+        reasoning: true,
+        thinking_levels: &[
+                (crate::types::ModelThinkingLevel::Off, None),
+                (crate::types::ModelThinkingLevel::Minimal, Some("minimal")),
+                (crate::types::ModelThinkingLevel::Low, Some("low")),
+                (crate::types::ModelThinkingLevel::Medium, Some("medium")),
+                (crate::types::ModelThinkingLevel::High, Some("high")),
+                (crate::types::ModelThinkingLevel::Xhigh, Some("xhigh")),
+                (crate::types::ModelThinkingLevel::Max, Some("max")),
+        ],
+        input: &[crate::types::ModelInput::Text, crate::types::ModelInput::Image],
+        cost: (4.0, 20.0, 0.2, 0.0),
+        context_window: 1_048_576,
+        max_tokens: 131_072,
+        featured: None,
+        headers: &[],
+        compat: None,
+    },
+    RawModel {
         provider: "minimax",
         id: "MiniMax-M2.7",
         name: "MiniMax-M2.7",
@@ -4481,12 +4625,12 @@ mod tests {
     #[test]
     fn catalog_loads_at_the_ts_fallback_scale() {
         let providers = get_providers();
-        assert_eq!(providers.len(), 32, "the TS fallback provider list");
+        assert_eq!(providers.len(), 33, "the TS fallback provider list");
         let total: usize = providers
             .iter()
             .map(|provider| get_models(provider).len())
             .sum();
-        assert_eq!(total, 152, "the TS fallback model list");
+        assert_eq!(total, 158, "the TS fallback model list");
         assert_eq!(
             get_models("prime-inference").len(),
             110,
@@ -4509,8 +4653,8 @@ mod tests {
         }
         assert_eq!(
             tuples.len(),
-            43,
-            "42 public transport tuples + Prime Inference"
+            44,
+            "43 public transport tuples + Prime Inference"
         );
     }
 

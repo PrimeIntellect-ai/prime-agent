@@ -1,12 +1,13 @@
 //! The built-in subscription providers' OAuth integration: the stored `openai-codex`, `anthropic`,
-//! `github-copilot`, and `xai` credentials refresh at their token endpoints when they expire; every
-//! other provider serves its access token until expiry.
+//! `github-copilot`, `meta`, and `xai` credentials refresh at their token endpoints when they
+//! expire; every other provider serves its access token until expiry.
 
 use std::sync::Arc;
 
 use pa_ai::oauth::{
-    refresh_anthropic_token, refresh_github_copilot_token, refresh_openai_codex_token,
-    refresh_xai_token, CodexHttp, ProviderHttp, ReqwestCodexHttp, ReqwestProviderHttp,
+    refresh_anthropic_token, refresh_github_copilot_token, refresh_meta_token,
+    refresh_openai_codex_token, refresh_xai_token, CodexHttp, ProviderHttp, ReqwestCodexHttp,
+    ReqwestProviderHttp,
 };
 
 use crate::auth::types::{AuthCredential, AuthStorageData};
@@ -19,6 +20,8 @@ pub const ANTHROPIC_PROVIDER_ID: &str = "anthropic";
 pub const GITHUB_COPILOT_PROVIDER_ID: &str = "github-copilot";
 /// The xAI (Grok) subscription provider id.
 pub const XAI_PROVIDER_ID: &str = "xai";
+/// The Meta (Muse subscription) provider id.
+pub const META_PROVIDER_ID: &str = "meta";
 
 /// The AI library's oauth registry as the auth storage's default
 /// integration.
@@ -167,7 +170,26 @@ impl ProviderOAuth {
                             audience_mode: None,
                         })
                     }
-                    // The match arms cover the four subscription ids;
+                    META_PROVIDER_ID => {
+                        // The stored identity token mints a fresh 24-hour Model API key.
+                        let credentials = runtime
+                            .block_on(refresh_meta_token(provider_http.as_ref(), &refresh_token))
+                            .ok()?;
+                        Some(AuthCredential::Oauth {
+                            access: credentials.access,
+                            refresh: Some(credentials.refresh),
+                            expires: credentials.expires,
+                            account_id: None,
+                            enterprise_url: None,
+                            endpoint: None,
+                            token_endpoint: None,
+                            client_id: None,
+                            resource: None,
+                            issuer: None,
+                            audience_mode: None,
+                        })
+                    }
+                    // The match arms cover the five subscription ids;
                     // `refresh` never dispatches another.
                     _ => None,
                 };
@@ -194,6 +216,7 @@ impl crate::auth::OAuthIntegration for ProviderOAuth {
                 | ANTHROPIC_PROVIDER_ID
                 | GITHUB_COPILOT_PROVIDER_ID
                 | XAI_PROVIDER_ID
+                | META_PROVIDER_ID
         ) {
             return None;
         }
@@ -312,7 +335,7 @@ mod tests {
         }
     }
 
-    /// The scripted endpoints for the four subscription refreshes.
+    /// The scripted endpoints for the five subscription refreshes.
     fn integrations() -> std::sync::Arc<ProviderOAuth> {
         let mut codex = HashMap::new();
         codex.insert(
@@ -359,6 +382,16 @@ mod tests {
                     "access_token": "grok-access",
                     "refresh_token": "grok-refresh",
                     "expires_in": 3600,
+                })
+                .to_string(),
+            },
+        );
+        providers.insert(
+            "https://api.meta.ai/muse-code/key".to_string(),
+            ProviderHttpResponse {
+                status: 200,
+                body: serde_json::json!({
+                    "api_key": "meta-key-2",
                 })
                 .to_string(),
             },
@@ -470,6 +503,26 @@ mod tests {
             panic!("the stored credential is OAuth");
         };
         assert_eq!(refresh.as_deref(), Some("grok-refresh"));
+        assert!(expires > 1, "the fresh expiry landed");
+    }
+
+    #[test]
+    fn an_expired_meta_credential_mints_a_fresh_key_and_resolves() {
+        let mut auth =
+            storage_with_credential(META_PROVIDER_ID, &expired_credential(META_PROVIDER_ID));
+        let api_key = auth
+            .get_api_key(META_PROVIDER_ID)
+            .expect("the minted Model API key resolves");
+        assert_eq!(api_key, "meta-key-2");
+        let stored = auth.get_all().credential(META_PROVIDER_ID).unwrap();
+        let AuthCredential::Oauth {
+            refresh, expires, ..
+        } = stored
+        else {
+            panic!("the stored credential is OAuth");
+        };
+        // The identity token stays the refresh source; the minted key is the access.
+        assert_eq!(refresh.as_deref(), Some("r-old"));
         assert!(expires > 1, "the fresh expiry landed");
     }
 

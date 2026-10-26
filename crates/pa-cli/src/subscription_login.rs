@@ -1,5 +1,5 @@
 //! The subscription logins (TS `showLoginDialog` over the `anthropic`,
-//! `githubCopilot`, and `xai` providers), rendered through the inline auth
+//! `githubCopilot`, `meta`, and `xai` providers), rendered through the inline auth
 //! panel. Cancellation (#2770): each flow checks the cancel flag between poll
 //! steps and before the credential write.
 
@@ -8,12 +8,13 @@ use std::path::Path;
 use std::pin::Pin;
 
 use pa_ai::oauth::{
-    login_anthropic, login_github_copilot, login_xai, AnthropicCredentials, OAuthLoginUi,
-    OAuthPrompt, ProviderHttp, ANTHROPIC_LOGIN_CANCELLED, COPILOT_LOGIN_CANCELLED,
-    XAI_LOGIN_CANCELLED,
+    login_anthropic, login_github_copilot, login_meta, login_xai, AnthropicCredentials,
+    OAuthLoginUi, OAuthPrompt, ProviderHttp, ANTHROPIC_LOGIN_CANCELLED, COPILOT_LOGIN_CANCELLED,
+    META_LOGIN_CANCELLED, XAI_LOGIN_CANCELLED,
 };
 use pa_core::auth::{
-    AuthCredential, AuthStorage, ANTHROPIC_PROVIDER_ID, GITHUB_COPILOT_PROVIDER_ID, XAI_PROVIDER_ID,
+    AuthCredential, AuthStorage, ANTHROPIC_PROVIDER_ID, GITHUB_COPILOT_PROVIDER_ID,
+    META_PROVIDER_ID, XAI_PROVIDER_ID,
 };
 use pa_tui::auth_panel::{AuthPanelHandle, PastePromptTone, PasteStyle};
 use pa_tui::provider_auth::ProviderAuthOutcome;
@@ -254,6 +255,54 @@ pub(crate) async fn run_xai_login(
     login_status(agent_dir, provider_name)
 }
 
+/// The Meta (Muse subscription) flow: the minted Model API key stores as
+/// the access token, the identity token as the refresh (expiry refresh is a
+/// fresh mint).
+pub(crate) async fn run_meta_login(
+    agent_dir: &Path,
+    provider_name: &str,
+    http: &dyn ProviderHttp,
+    ui: &dyn OAuthLoginUi,
+) -> ProviderAuthOutcome {
+    let credentials = match login_meta(http, ui).await {
+        Ok(credentials) => credentials,
+        Err(message) if message == META_LOGIN_CANCELLED => {
+            return ProviderAuthOutcome::Cancelled;
+        }
+        Err(message) => {
+            return ProviderAuthOutcome::Error(format!(
+                "Failed to login to {provider_name}: {message}"
+            ));
+        }
+    };
+    if ui.is_cancelled() {
+        return ProviderAuthOutcome::Cancelled;
+    }
+    let mut auth = AuthStorage::create(agent_dir);
+    auth.set(
+        META_PROVIDER_ID,
+        AuthCredential::Oauth {
+            access: credentials.access,
+            refresh: Some(credentials.refresh),
+            expires: credentials.expires,
+            account_id: None,
+            enterprise_url: None,
+            endpoint: None,
+            token_endpoint: None,
+            client_id: None,
+            resource: None,
+            issuer: None,
+            audience_mode: None,
+        },
+    );
+    if let Some(error) = auth.drain_errors().pop() {
+        return ProviderAuthOutcome::Error(format!(
+            "Failed to login to {provider_name}: could not save the login: {error}"
+        ));
+    }
+    login_status(agent_dir, provider_name)
+}
+
 /// The oauth status row.
 fn login_status(agent_dir: &Path, provider_name: &str) -> ProviderAuthOutcome {
     ProviderAuthOutcome::Status(format!(
@@ -408,6 +457,26 @@ mod tests {
             )
     }
 
+    /// The Meta happy flow's scripted endpoints.
+    fn meta_http() -> ScriptedHttp {
+        ScriptedHttp::new()
+            .queue(
+                "https://auth.meta.com/oidc/device/authorization/",
+                vec![ScriptedHttp::entry(
+                    200,
+                    r#"{"device_code":"dev-1","user_code":"ABCD-1234","verification_uri_complete":"https://auth.meta.com/oidc/device?user_code=ABCD-1234","interval":0,"expires_in":900}"#,
+                )],
+            )
+            .queue(
+                "https://auth.meta.com/oidc/device/token/",
+                vec![ScriptedHttp::entry(200, r#"{"access_token":"meta-identity"}"#)],
+            )
+            .queue(
+                "https://api.meta.ai/muse-code/key",
+                vec![ScriptedHttp::entry(200, r#"{"api_key":"meta-key-1"}"#)],
+            )
+    }
+
     fn agent_dir(dir: &tempfile::TempDir) -> std::path::PathBuf {
         let agent = dir.path().join("agent");
         std::fs::create_dir_all(&agent).expect("agent dir");
@@ -492,6 +561,50 @@ mod tests {
         assert_eq!(auth.get_api_key("xai"), Some("grok-access".to_string()));
     }
 
+    #[tokio::test]
+    async fn the_meta_login_stores_the_minted_key_and_reports_the_ts_status() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let agent = agent_dir(&dir);
+        let http = meta_http();
+        let ui = ScriptedUi::new();
+        let before_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(i64::MAX, |elapsed| elapsed.as_millis() as i64);
+        match run_meta_login(&agent, "Meta (Muse subscription)", &http, &ui).await {
+            ProviderAuthOutcome::Status(message) => {
+                assert_eq!(
+                    message,
+                    format!(
+                        "Logged in to Meta (Muse subscription). Credentials saved to {}",
+                        agent.join("auth.json").display()
+                    )
+                );
+            }
+            other => panic!("expected the logged-in status, got {other:?}"),
+        }
+        // The packaged auth.json wire shape: the minted Model API key as the
+        // access, the identity token as the refresh.
+        let document: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(agent.join("auth.json")).unwrap())
+                .unwrap();
+        let stored = &document["meta"];
+        assert_eq!(stored["type"], "oauth");
+        assert_eq!(stored["access"], "meta-key-1");
+        assert_eq!(stored["refresh"], "meta-identity");
+        // The expiry is `now + 24 hours` (the pi agent's key lifetime).
+        let expires = stored["expires"].as_i64().expect("the expiry is numeric");
+        let after_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as i64;
+        assert!(
+            expires >= before_ms + 86_400_000 && expires <= after_ms + 86_400_000,
+            "the expiry lands one day out: {expires} vs {before_ms}..{after_ms}"
+        );
+        let mut auth = AuthStorage::create(&agent);
+        assert_eq!(auth.get_api_key("meta"), Some("meta-key-1".to_string()));
+    }
+
     /// The Anthropic login's store step: the credential's wire shape
     /// under the provider id (the flow is covered in pa-ai).
     #[test]
@@ -571,6 +684,15 @@ mod tests {
                     .to_string()
             )
         );
+        let http = ScriptedHttp::new();
+        let ui = ScriptedUi::new();
+        assert_eq!(
+            run_meta_login(&agent, "Meta (Muse subscription)", &http, &ui).await,
+            ProviderAuthOutcome::Error(
+                "Failed to login to Meta (Muse subscription): Meta OAuth request failed. Check your connection and try again."
+                    .to_string()
+            )
+        );
     }
 
     #[tokio::test]
@@ -598,5 +720,35 @@ mod tests {
             )),
         );
         assert_eq!(expired.get_api_key("xai"), Some("grok-access".to_string()));
+    }
+
+    #[tokio::test]
+    async fn the_meta_credential_round_trips_and_refreshes() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let agent = agent_dir(&dir);
+        let http = meta_http();
+        let ui = ScriptedUi::new();
+        run_meta_login(&agent, "Meta (Muse subscription)", &http, &ui).await;
+        // Reload through the default integration (the daemon's path): an unexpired credential
+        // resolves its minted Model API key.
+        let mut auth = AuthStorage::create(&agent);
+        assert_eq!(auth.get_api_key("meta"), Some("meta-key-1".to_string()));
+        // An expired credential mints a fresh key through the integration's scripted endpoint.
+        let mut data = auth.get_all();
+        if let Some(document) = data.0.get_mut("meta") {
+            document["expires"] = serde_json::json!(1);
+        }
+        let refresh_http = ScriptedHttp::new().queue(
+            "https://api.meta.ai/muse-code/key",
+            vec![ScriptedHttp::entry(200, r#"{"api_key":"meta-key-2"}"#)],
+        );
+        let mut expired = AuthStorage::in_memory_without_env(
+            &data,
+            Arc::new(pa_core::auth::ProviderOAuth::with_transports(
+                Arc::new(pa_ai::oauth::ReqwestCodexHttp::new()),
+                Arc::new(refresh_http),
+            )),
+        );
+        assert_eq!(expired.get_api_key("meta"), Some("meta-key-2".to_string()));
     }
 }

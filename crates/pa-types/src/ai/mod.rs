@@ -78,6 +78,7 @@ pub enum KnownProvider {
     OpencodeGo,
     #[serde(rename = "kimi-coding")]
     KimiCoding,
+    Meta,
     #[serde(rename = "cloudflare-workers-ai")]
     CloudflareWorkersAi,
     #[serde(rename = "cloudflare-ai-gateway")]

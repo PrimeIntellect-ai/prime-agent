@@ -30,6 +30,7 @@ pub fn get_api_key_env_vars(provider: &str) -> Option<Vec<&'static str>> {
                 "fireworks" => "FIREWORKS_API_KEY",
                 "opencode" | "opencode-go" => "OPENCODE_API_KEY",
                 "kimi-coding" => "KIMI_API_KEY",
+                "meta" => "META_API_KEY",
                 "cloudflare-workers-ai" | "cloudflare-ai-gateway" => "CLOUDFLARE_API_KEY",
                 "xiaomi" => "XIAOMI_API_KEY",
                 "xiaomi-token-plan-cn" => "XIAOMI_TOKEN_PLAN_CN_API_KEY",
@@ -129,6 +130,7 @@ mod tests {
             get_api_key_env_vars("anthropic").unwrap(),
             vec!["ANTHROPIC_OAUTH_TOKEN", "ANTHROPIC_API_KEY"]
         );
+        assert_eq!(get_api_key_env_vars("meta").unwrap(), vec!["META_API_KEY"]);
         assert!(get_api_key_env_vars("unknown-provider").is_none());
     }
 }

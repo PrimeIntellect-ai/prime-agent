@@ -35,6 +35,7 @@ pub fn provider_category(provider: Option<&str>) -> String {
         "mistral",
         "groq",
         "xai",
+        "meta",
     ];
     categories
         .iter()

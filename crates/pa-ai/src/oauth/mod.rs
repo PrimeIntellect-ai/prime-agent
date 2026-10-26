@@ -1,12 +1,13 @@
-//! The subscription OAuth flows: Codex, Anthropic, GitHub Copilot, and
-//! xAI. Transport-agnostic: the Codex flow issues its token requests
-//! through [`CodexHttp`], the other three through [`ProviderHttp`];
+//! The subscription OAuth flows: Codex, Anthropic, GitHub Copilot, Meta,
+//! and xAI. Transport-agnostic: the Codex flow issues its token requests
+//! through [`CodexHttp`], the other four through [`ProviderHttp`];
 //! tests script the endpoints.
 
 mod anthropic;
 mod anthropic_callback;
 mod callback;
 mod github_copilot;
+mod meta;
 mod openai_codex;
 mod pkce;
 mod provider_http;
@@ -21,6 +22,10 @@ pub use callback::CodexCallbackServer;
 pub use github_copilot::{
     get_github_copilot_base_url, login_github_copilot, refresh_github_copilot_token,
     CopilotCredentials, LOGIN_CANCELLED as COPILOT_LOGIN_CANCELLED,
+};
+pub use meta::{
+    login_meta, refresh_meta_token, MetaCredentials,
+    API_KEY_LIFETIME_MS as META_API_KEY_LIFETIME_MS, LOGIN_CANCELLED as META_LOGIN_CANCELLED,
 };
 pub use openai_codex::{
     login_openai_codex, refresh_openai_codex_token, CodexLoginUi, OAuthCredentials,

@@ -235,6 +235,7 @@ pub const PROVIDER_CATEGORIES: &[&str] = &[
     "mistral",
     "groq",
     "xai",
+    "meta",
     "custom",
     "unknown",
 ];

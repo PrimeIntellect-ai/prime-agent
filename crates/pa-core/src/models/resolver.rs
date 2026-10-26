@@ -28,6 +28,7 @@ pub fn default_model_per_provider(provider: &str) -> Option<&'static str> {
         "huggingface" => "moonshotai/Kimi-K2.6",
         "fireworks" => "accounts/fireworks/models/kimi-k2p6",
         "kimi-coding" => "kimi-for-coding",
+        "meta" => "muse-spark-1.3",
         "cloudflare-workers-ai" => "@cf/moonshotai/kimi-k2.6",
         "cloudflare-ai-gateway" => "claude-sonnet-4.5",
         "xiaomi" | "xiaomi-token-plan-cn" | "xiaomi-token-plan-ams" | "xiaomi-token-plan-sgp" => {
