@@ -452,35 +452,9 @@ mod tests {
         assert!(!engine.accept_goal(&json!({"type":"decision_api.decision","seq":9}).to_string()));
     }
 
-    /// The intake parse: the request must carry an integer seq, and the
-    /// message-sourced goal reaches the state through the seam.
-    #[test]
-    fn a_decision_request_reads_the_message_sourced_goal() {
-        let dir = tempfile::tempdir().unwrap();
-        let engine = engine(dir.path());
-        let request = json!({
-            "seq": 7,
-            "state": {"observation": 1},
-            "questions": {"action": {
-                "type": "choice", "criteria": {"left": "go left", "right": "go right"}
-            }}
-        });
-        assert!(engine.accept_goal(
-            &json!({
-                "type":"decision_api.goal","seq":2,"goal":"follow the target"
-            })
-            .to_string()
-        ));
-        // The goal flows through latest_goal into the served state; the
-        // request itself stays untouched until the serve call.
-        assert_eq!(engine.latest_goal().as_deref(), Some("follow the target"));
-        assert_eq!(request["seq"], json!(7));
-    }
-
     /// The goal channel, pinned: a non-object state is wrapped so the goal
-    /// still reaches the model — the pre-fix code only injected into an
-    /// object state and silently dropped the goal for every other shape
-    /// the shared path accepts (a request with no state passes through).
+    /// still reaches the model; a request without a state passes through
+    /// with nothing to carry the goal.
     #[test]
     fn a_non_object_state_is_wrapped_so_the_goal_reaches_the_model() {
         let mut request = json!({ "state": "the target moved left" });
@@ -549,12 +523,9 @@ mod tests {
         assert_eq!(engine.latest_goal().as_deref(), Some("turn left"));
     }
 
-    /// The cancellation recheck, pinned: the decision call is bounded
-    /// (7c42a30), so `run_prompt` regains control when it returns and must
-    /// recheck `aborted()` before either reply reaches the parent — the
-    /// pre-fix code checked cancellation only before the call, so a turn
-    /// cancelled mid-serve still sent the tagged `decision_api.decision`
-    /// reply (a stale decision or its failure) to the parent.
+    /// The cancellation recheck, pinned: the decision call is bounded,
+    /// so `run_prompt` regains control when it returns and must recheck
+    /// `aborted()` before either reply reaches the parent.
     #[test]
     fn a_cancellation_during_the_decision_call_sends_no_reply() {
         let dir = tempfile::tempdir().unwrap();
