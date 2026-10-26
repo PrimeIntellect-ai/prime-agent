@@ -657,7 +657,7 @@ mod tests {
         );
     }
 
-    /// The cached-authorization regression: a private Prime Inference model
+    /// The cached-authorization contract: a private Prime Inference model
     /// whose team authorization lives in the on-disk cache must resolve —
     /// the fresh registry adopts the cache before `get_available()` gates
     /// unauthorized private models out of the reference match.
@@ -979,8 +979,8 @@ mod tests {
              right"
         );
 
-        // The good path: a fenced reply with an out-of-range confidence and
-        // a non-finite share, both normalized by the decision path.
+        // The good path: a fenced reply with an out-of-range confidence,
+        // normalized by the decision path.
         let seen = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
         let seen_writer = std::sync::Arc::clone(&seen);
         registration.set_responses(vec![pa_ai::faux::FauxResponseStep::Factory(
