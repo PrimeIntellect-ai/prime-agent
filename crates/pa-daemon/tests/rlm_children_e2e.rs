@@ -598,10 +598,9 @@ async fn rlm_children_spawn_roster_collect_delete_end_to_end() {
 /// A decision child (`rlm.spawn kind="decision"`) spawns through the real
 /// supervisor on the settings decision model and runs the decision engine:
 /// the protocol prompt settles as the engine's ready answer, never an
-/// agent turn. Regression: the durable create command must ride the
-/// `decisionChild` flag to the worker's launch env — a dropped flag
-/// respawns the decision child as a regular agent session whose turn
-/// fails on the decision model.
+/// agent turn. The durable create command must ride the `decisionChild`
+/// flag to the worker's launch env — a dropped flag respawns the child as
+/// a regular agent session whose turn fails on the decision model.
 #[tokio::test]
 async fn a_decision_child_spawn_runs_the_decision_engine_end_to_end() {
     let dir = tempfile::TempDir::new().expect("temp dir");
@@ -717,9 +716,7 @@ async fn a_decision_child_spawn_runs_the_decision_engine_end_to_end() {
     assert_eq!(roster_summary["parentActiveSessionId"], "parent-active-id");
     // The spawn admission recorded the durable ledger edge: recovery
     // after parent replacement and the nonresident wake resolve the
-    // decision child through it (regression: the admission gate used to
-    // admit only subagent-kind children, so a decision child's edge
-    // never reached the ledger).
+    // decision child through it.
     let ledger =
         pa_daemon::rlm_ledger::RlmSpawnLedger::new(&agent_dir, &agent_dir.join("sessions"), |_| {});
     let edge = ledger
@@ -766,9 +763,7 @@ fn try_read_supervisor_line(client: &mut Client, deadline: Instant) -> Option<Va
 /// A decision child publishes its live roster activity: its worker runs
 /// the roster push queue and the activity watch like any other engine
 /// family, so a roster subscriber sees the child's turn transitions
-/// without a separate summary pull (regression: the decision branch
-/// built `RosterPushQueue::disabled()`, so a decision child's roster row
-/// stayed stale until the next pull refreshed it).
+/// without a separate summary pull.
 #[tokio::test]
 async fn a_decision_child_pushes_roster_deltas_to_subscribers() {
     let dir = tempfile::TempDir::new().expect("temp dir");
