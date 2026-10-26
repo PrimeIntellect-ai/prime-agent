@@ -365,23 +365,56 @@ fn normalize(text: &str, sandbox_roots: &[&Path]) -> String {
     // Docs paths in login guidance resolve to each binary's own install dir
     // (package dir); compare the shape, not the installation location.
     text = normalize_docs_paths(&text);
-    // The `prompt` dump command is a Rust-first addition the TS product has
-    // not adopted yet; normalize its help rows out so the rest of the command
-    // surface still compares equal. When the TS product adopts the command,
-    // drop this normalizer.
-    text = normalize_prompt_command_rows(&text);
+    // Rust-first commands the TS product has not adopted yet; normalize their
+    // help rows out so the rest of the command surface still compares equal.
+    // When the TS product adopts a command, drop it from `RUST_FIRST_COMMANDS`.
+    text = normalize_command_rows(&text);
+    // `doctor` (human mode) prints a tailscale detection fact the TS binary
+    // does not have yet; strip that line too.
+    text = normalize_tailscale_doctor_line(&text);
     normalize_versions(&text)
 }
 
-/// Remove the `prompt` command row from top-level help (the Rust binary
-/// lists a command the TS binary does not have yet).
-fn normalize_prompt_command_rows(text: &str) -> String {
-    text.lines()
-        .filter(|line| {
+/// The command names only the Rust binary lists today.
+const RUST_FIRST_COMMANDS: &[&str] = &["prompt", "telemetry", "tailscale"];
+
+/// Normalize a `Commands:` help block: drop the Rust-first rows and re-align
+/// each remaining row's name/summary gap. A Rust-first command whose name is
+/// longer than every TS command widens the shared padding for the WHOLE list,
+/// so the row gap must be normalized, not just the extra row removed.
+fn normalize_command_rows(text: &str) -> String {
+    let mut out: Vec<String> = Vec::new();
+    let mut in_commands = false;
+    for line in text.lines() {
+        if line == "Commands:" {
+            in_commands = true;
+            out.push(line.to_string());
+            continue;
+        }
+        if in_commands && line.trim().is_empty() {
+            in_commands = false;
+        }
+        if in_commands {
             let trimmed = line.trim_start();
-            !(trimmed.starts_with("prompt")
-                && trimmed.contains("Print the assembled system prompt"))
-        })
+            let name = trimmed.split_whitespace().next().unwrap_or_default();
+            if RUST_FIRST_COMMANDS.contains(&name) {
+                continue;
+            }
+            if let Some((name, summary)) = trimmed.split_once("  ") {
+                out.push(format!("  {}  {}", name.trim_end(), summary.trim_start()));
+                continue;
+            }
+        }
+        out.push(line.to_string());
+    }
+    out.join("\n")
+}
+
+/// Remove the tailscale `doctor` fact line (a Rust-first detection fact the TS
+/// binary does not print yet).
+fn normalize_tailscale_doctor_line(text: &str) -> String {
+    text.lines()
+        .filter(|line| !line.trim_start().starts_with("tailscale: "))
         .collect::<Vec<_>>()
         .join("\n")
 }

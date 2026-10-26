@@ -97,6 +97,26 @@ pub fn is_executable(path: &Path) -> bool {
     path.is_file()
 }
 
+/// True when the current process can execute the file (`access(2)` `X_OK`
+/// semantics: the uid/gid classes that apply to this process decide, not
+/// just any execute bit in the mode). The mode-only [`is_executable`]
+/// accepts a file whose only execute bit belongs to an unrelated group,
+/// which this process would fail to spawn with permission denied.
+#[cfg(unix)]
+#[must_use]
+pub fn is_executable_by_process(path: &Path) -> bool {
+    nix::unistd::access(path, nix::unistd::AccessFlags::X_OK).is_ok()
+}
+
+/// Windows arm of [`is_executable_by_process`]: NTFS ACLs carry the access
+/// decision at `CreateProcess` time (no Unix execute classes exist), so the
+/// resolution check stays the mode probe.
+#[cfg(not(unix))]
+#[must_use]
+pub fn is_executable_by_process(path: &Path) -> bool {
+    is_executable(path)
+}
+
 /// True when the current process may read and write the file (access(2)
 /// semantics: real/effective uid checks, not just the file mode).
 #[cfg(unix)]
@@ -199,6 +219,34 @@ pub fn create_dir_all_private(path: &Path) -> std::io::Result<()> {
 pub fn create_dir_all_private(path: &Path) -> std::io::Result<()> {
     // Windows: inherited ACLs apply; see the ACL note above.
     std::fs::create_dir_all(path)
+}
+
+#[cfg(all(test, unix))]
+mod unix_tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    /// The process-access execute probe follows `access(2)`: our own
+    /// executable file passes it, a mode without execute bits fails it, and
+    /// a missing path is not executable. (The mode-bit-vs-process gap - a
+    /// candidate executable only by an unrelated group - is pinned
+    /// end-to-end by `pa-cli`'s `resolve_tailscale_binary` tests.)
+    #[test]
+    fn the_process_execute_probe_follows_access_semantics() {
+        let dir = std::env::temp_dir().join(format!("pa-perms-x-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let file = dir.join("probe.sh");
+        std::fs::write(&file, "#!/bin/sh\n").expect("write");
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+        assert!(is_executable(&file));
+        assert!(is_executable_by_process(&file));
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o644)).expect("chmod");
+        assert!(!is_executable(&file));
+        assert!(!is_executable_by_process(&file));
+        assert!(!is_executable_by_process(&dir.join("missing")));
+        let _ = std::fs::remove_file(&file);
+        let _ = std::fs::remove_dir(&dir);
+    }
 }
 
 #[cfg(all(test, windows))]
