@@ -63,10 +63,25 @@ pub struct GoalDriver {
     /// durable `no_progress_turn_ms` so a restart never re-counts the same corpse.
     counted_no_progress_turn_ms: Option<i64>,
     /// Goal tokens of the billed rows (compactions, branch summaries,
-    /// `model_usage` calls) the session's store appended since the last
-    /// accounting ([`Self::billed_row_recorder`]); the next accounted turn
-    /// charges them. In-memory only.
+    /// `model_usage` calls) and RLM child usage attributions the session's
+    /// store appended since the last accounting ([`Self::billed_row_recorder`]);
+    /// the next accounted turn charges them, or the mint consult when they
+    /// cross the budget. In-memory only.
     billed_tokens: std::sync::Arc<std::sync::atomic::AtomicU64>,
+}
+
+/// The state a budget crossing persists.
+fn budget_limited(goal: GoalState) -> GoalState {
+    let reason = goal
+        .token_budget
+        .map(|budget| format!("Reached {budget} token goal budget"));
+    GoalState {
+        active: false,
+        status: GoalStatus::BudgetLimited,
+        last_reason: reason,
+        last_error: None,
+        ..goal
+    }
 }
 
 fn now_millis() -> u64 {
@@ -329,9 +344,10 @@ impl GoalDriver {
         Ok(())
     }
 
-    /// Count one billed row's call toward the goal: the session's store
-    /// reports each row it appends here, and the next accounted assistant
-    /// turn charges the sum (the store's append cannot take the driver lock).
+    /// Count one billed row's call (or one attributed child usage batch)
+    /// toward the goal: the session's store reports each row it appends
+    /// here, and the next accounted assistant turn charges the sum (the
+    /// store's append cannot take the driver lock).
     pub fn billed_row_recorder(&self) -> impl Fn(&pa_types::ai::Usage) + Send + Sync + 'static {
         let billed_tokens = std::sync::Arc::clone(&self.billed_tokens);
         move |usage| {
@@ -379,20 +395,7 @@ impl GoalDriver {
             .token_budget
             .is_some_and(|budget| next_goal.tokens_used >= budget);
         let persisted = if budget_reached {
-            let token_budget = next_goal.token_budget;
-            let budget_reason = token_budget
-                .map(|budget| format!("Reached {budget} token goal budget"))
-                .unwrap_or_default();
-            self.set_state(
-                session,
-                GoalState {
-                    active: false,
-                    status: GoalStatus::BudgetLimited,
-                    last_reason: Some(budget_reason),
-                    last_error: None,
-                    ..next_goal
-                },
-            )
+            self.set_state(session, budget_limited(next_goal))
         } else {
             self.set_state(session, next_goal)
         };
@@ -569,6 +572,9 @@ impl GoalDriver {
         if self.state.status != GoalStatus::Active || self.state.objective.is_none() {
             return Ok(None);
         }
+        if self.charge_pending_budget_crossing(session)? {
+            return Ok(None);
+        }
         // SANCTIONED DIVERGENCE (the 402 diagnosis, operator ruling): the
         // mint checks progress. TS mints whenever the goal is Active; here
         // the just-settled turn gates the mint.
@@ -624,6 +630,37 @@ impl GoalDriver {
             self.mark_continuation_pending();
         }
         Ok(message)
+    }
+
+    /// Charge the pending tokens when they reach the budget. Children's spend
+    /// lands between the parent's turns, so the mint consult stops the goal
+    /// instead of minting one more turn; below the budget they stay pending
+    /// for the next accounted turn.
+    fn charge_pending_budget_crossing(
+        &mut self,
+        session: &mut SessionManager,
+    ) -> anyhow::Result<bool> {
+        let pending = self.billed_tokens.load(std::sync::atomic::Ordering::SeqCst);
+        if self
+            .state
+            .token_budget
+            .is_none_or(|budget| self.state.tokens_used + pending < budget)
+        {
+            return Ok(false);
+        }
+        let pending = self
+            .billed_tokens
+            .swap(0, std::sync::atomic::Ordering::SeqCst);
+        let limited = budget_limited(GoalState {
+            tokens_used: self.state.tokens_used + pending,
+            ..self.state.clone()
+        });
+        if let Err(error) = self.set_state(session, limited) {
+            self.billed_tokens
+                .fetch_add(pending, std::sync::atomic::Ordering::SeqCst);
+            return Err(error);
+        }
+        Ok(true)
     }
 
     /// Defer the continuation while descendant RLM work is unsettled: the
