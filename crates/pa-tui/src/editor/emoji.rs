@@ -42,16 +42,22 @@ impl Editor {
     /// Whether text after `before` on the cursor line sits in a fenced
     /// code block or an open backtick span.
     fn in_code(&self, before: &[char]) -> bool {
-        let is_fence = |line: &String| {
-            let trimmed = line.trim_start();
-            trimmed.starts_with("```") || trimmed.starts_with("~~~")
+        let fence = |line: &str| {
+            ["```", "~~~"]
+                .into_iter()
+                .find(|marker| line.trim_start().starts_with(marker))
         };
-        let fences_above = self.lines[..self.cursor_line]
-            .iter()
-            .filter(|line| is_fence(line))
-            .count();
-        fences_above % 2 == 1
-            || is_fence(&self.lines[self.cursor_line])
+        // A fence closes only on its own marker, as in the markdown renderer.
+        let mut open = None;
+        for line in &self.lines[..self.cursor_line] {
+            match (open, fence(line)) {
+                (None, Some(marker)) => open = Some(marker),
+                (Some(opener), Some(marker)) if opener == marker => open = None,
+                _ => {}
+            }
+        }
+        open.is_some()
+            || fence(&self.lines[self.cursor_line]).is_some()
             || before.iter().filter(|c| **c == '`').count() % 2 == 1
     }
 
@@ -182,6 +188,7 @@ mod tests {
             "`:heart:",
             "```\n:heart:",
             "~~~\n:heart:",
+            "~~~\n```\n:heart:",
             "https://example.com/:heart:",
             "10:30:",
             "a:heart:",
