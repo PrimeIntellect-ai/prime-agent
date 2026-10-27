@@ -74,6 +74,7 @@ impl SupervisorChildSessionsInner {
         depth: u32,
         model: &str,
         thinking: Option<&str>,
+        decision_child: bool,
         cwd: &str,
         session_dir: &Path,
         // The parent's in-flight turn request the child anchors to (TS
@@ -90,15 +91,9 @@ impl SupervisorChildSessionsInner {
             "rlmDepth": depth,
             "rlmMaxDepth": identity.rlm_max_depth,
         });
-        // The decision child's runtime kind reaches the worker through the
-        // create config: it builds the decision engine instead of the agent
-        // engine.
-        if runtime_metadata
-            .as_ref()
-            .and_then(|metadata| metadata.get("kind"))
-            .and_then(Value::as_str)
-            == Some("decision")
-        {
+        // The decision flag's one durable home: the create key, from which
+        // descriptor.rs derives the worker's launch env.
+        if decision_child {
             config["decisionChild"] = json!(true);
         }
         if let Some((provider, id)) = model.split_once('/') {
@@ -192,6 +187,7 @@ impl SupervisorChildSessionsInner {
                 depth,
                 model,
                 thinking,
+                /*decision_child*/ false,
                 cwd,
                 session_dir,
                 /*spawned_by_request_id*/ None,

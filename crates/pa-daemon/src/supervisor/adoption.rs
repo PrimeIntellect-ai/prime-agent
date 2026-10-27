@@ -731,13 +731,7 @@ impl Supervisor {
         let Some(metadata) = runtime_metadata else {
             return Ok(());
         };
-        // A decision child keeps its subagent identity: the same ledger
-        // edge recovers it after parent replacement and resolves it once
-        // nonresident.
-        if !matches!(
-            metadata.get("kind").and_then(Value::as_str),
-            Some("subagent" | "decision")
-        ) {
+        if metadata.get("kind").and_then(Value::as_str) != Some("subagent") {
             return Ok(());
         }
         let child_id = metadata

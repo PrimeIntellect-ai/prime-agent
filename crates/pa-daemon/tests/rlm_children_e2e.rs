@@ -711,8 +711,8 @@ async fn a_decision_child_spawn_runs_the_decision_engine_end_to_end() {
     });
     assert_eq!(roster_summary["rlmDepth"], 1);
     // The decision child keeps its subagent parent edge: the create arm
-    // extracts the runtime identity for the decision kind too, so the
-    // child's summary (and every reply route off it) reaches the parent.
+    // extracts the runtime identity, so the child's summary (and every
+    // reply route off it) reaches the parent.
     assert_eq!(roster_summary["parentActiveSessionId"], "parent-active-id");
     // The spawn admission recorded the durable ledger edge: recovery
     // after parent replacement and the nonresident wake resolve the
@@ -737,6 +737,26 @@ async fn a_decision_child_spawn_runs_the_decision_engine_end_to_end() {
         "the edge names the parent session file for recovery"
     );
     assert_eq!(edge.name, "system-1", "the edge carries the spawn name");
+    // The decision flag has exactly one durable home — the persisted create
+    // command's `decisionChild` key — while the runtime metadata carries the
+    // ordinary subagent identity every lifecycle gate accepts.
+    let descriptor_dir = pa_daemon::descriptor::descriptor_dir(&agent_dir, &socket);
+    let create = std::fs::read_dir(&descriptor_dir)
+        .expect("the worker descriptor dir")
+        .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+        .filter(|path| path.extension().is_some_and(|ext| ext == "json"))
+        .find_map(|path| {
+            let value: Value = serde_json::from_str(&std::fs::read_to_string(path).ok()?).ok()?;
+            (value["createCommand"]["runtimeMetadata"]["rlmChildId"]
+                == handle.rlm_child_id.as_str())
+            .then_some(value)
+        })
+        .expect("the decision child's persisted worker descriptor");
+    assert_eq!(create["createCommand"]["decisionChild"], json!(true));
+    assert_eq!(
+        create["createCommand"]["runtimeMetadata"]["kind"], "subagent",
+        "the decision flag never rides the runtime metadata"
+    );
 }
 
 /// A bounded read of one supervisor line: `None` means no line arrived
