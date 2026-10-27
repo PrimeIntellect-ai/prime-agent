@@ -721,10 +721,7 @@ fn remap_legacy_parent(payload: &mut serde_json::Value, restored_ids: &BTreeMap<
     else {
         return;
     };
-    if !matches!(
-        metadata.get("kind").and_then(serde_json::Value::as_str),
-        Some("subagent" | "decision")
-    ) {
+    if metadata.get("kind").and_then(serde_json::Value::as_str) != Some("subagent") {
         return;
     }
     let Some(old_parent) = metadata.remove("parentActiveSessionId") else {
@@ -1271,21 +1268,6 @@ mod tests {
         assert_eq!(
             payload,
             json!({ "runtimeMetadata": { "kind": "subagent", "rlmChildId": "child" }})
-        );
-    }
-
-    #[test]
-    fn decision_child_metadata_remaps_the_parent_handle_like_a_subagent() {
-        let mut payload = json!({ "runtimeMetadata": {
-            "kind": "decision", "parentActiveSessionId": "old-parent", "rlmChildId": "child"
-        }});
-        remap_legacy_parent(
-            &mut payload,
-            &BTreeMap::from([("old-parent".into(), "new-parent".into())]),
-        );
-        assert_eq!(
-            payload["runtimeMetadata"]["parentActiveSessionId"], "new-parent",
-            "a decision child's parent edge is remapped after an update"
         );
     }
 
