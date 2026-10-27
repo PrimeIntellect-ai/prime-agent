@@ -13,7 +13,7 @@
 
 //! Verifiers for the live catalog wiring: the credentialed refresh lands the account's private
 //! `internal/*` models, the catalog-repo (layer A) entries, and live pricing; without credentials
-//! the compiled fallback serves unchanged. Everything runs against a scripted loopback server.
+//! the public compiled fallback remains available. Everything runs against loopback servers.
 
 mod common;
 
@@ -164,23 +164,26 @@ fn pi_payload(repriced_id: &str, repriced_input: f64) -> String {
 async fn refresh_lands_live_pricing_private_models_and_layer_a_entries() {
     let agent_dir = tempfile::tempdir().unwrap();
     let bundled_dir = tempfile::tempdir().unwrap();
-    let pi = pi_payload("z-ai/glm-5.3", 7.0);
-    let server = common::MockServer::start(vec![
-        // Layer A (unauthenticated provider catalog).
-        common::ok_json(
-            &json!({ "schemaVersion": 1, "models": [
-                layer_a_entry(LAYER_A_PROBE_ID, 1.25),
-            ]})
-            .to_string(),
-            None,
-        ),
-        // Layer B (credentialed public Prime Inference).
-        common::ok_json(&pi.clone(), None),
-        // The private-authorization fetch.
-        common::ok_json(&pi, None),
-    ])
+    let provider_server = common::MockServer::start(vec![common::ok_json(
+        &json!({ "schemaVersion": 1, "models": [
+            layer_a_entry(LAYER_A_PROBE_ID, 1.25),
+        ]})
+        .to_string(),
+        None,
+    )])
     .await;
-    install_mock_catalog(agent_dir.path(), bundled_dir.path(), &server);
+    let pi_server = common::MockServer::start(vec![common::ok_json(
+        &pi_payload("z-ai/glm-5.3", 7.0),
+        None,
+    )])
+    .await;
+    let catalog = ModelCatalog::with_urls(
+        Some(agent_dir.path().join("models")),
+        Some(bundled_dir.path().to_path_buf()),
+        &provider_server.url("/catalog"),
+        &pi_server.url("/api/v1"),
+    );
+    install_catalog(&agent_dir.path().join("models.json"), Arc::new(catalog));
 
     let mut registry = ModelRegistry::create(
         prime_auth("test-key", "team-1"),
@@ -204,7 +207,7 @@ async fn refresh_lands_live_pricing_private_models_and_layer_a_entries() {
             .any(|model| model.id == "anthropic/live-only-model"),
         "live-only public entry"
     );
-    // The private entitlement, visible because the authorized set adopted it.
+    // The private entitlement comes from the authenticated snapshot.
     let private = all
         .iter()
         .find(|model| model.id == "internal/glm-5.3-fast")
@@ -216,19 +219,27 @@ async fn refresh_lands_live_pricing_private_models_and_layer_a_entries() {
         .iter()
         .any(|model| model.id == "internal/glm-5.3-fast"));
 
-    // Exactly the three fetches (layer A, layer B, private lane).
-    let requests = server.recorded_requests();
-    assert_eq!(requests.len(), 3, "got {}: {requests:#?}", requests.len());
-    // Layer A is unauthenticated.
-    assert!(requests[0].contains("GET /catalog"));
-    assert!(!requests[0].to_lowercase().contains("authorization:"));
-    // The credentialed fetches carry Bearer + team (TS parity).
-    for request in &requests[1..] {
-        let head = request.to_lowercase();
-        assert!(head.contains("get /api/v1/models"), "{request}");
-        assert!(head.contains("authorization: bearer test-key"), "{request}");
-        assert!(head.contains("x-prime-team-id: team-1"), "{request}");
-    }
+    // Each independently routed catalog fetches exactly once.
+    let provider_requests = provider_server.recorded_requests();
+    assert_eq!(provider_requests.len(), 1);
+    assert!(provider_requests[0].contains("GET /catalog"));
+    assert!(!provider_requests[0]
+        .to_lowercase()
+        .contains("authorization:"));
+    let pi_requests = pi_server.recorded_requests();
+    assert_eq!(pi_requests.len(), 1);
+    let head = pi_requests[0].to_lowercase();
+    assert!(head.contains("get /api/v1/models"), "{}", pi_requests[0]);
+    assert!(
+        head.contains("authorization: bearer test-key"),
+        "{}",
+        pi_requests[0]
+    );
+    assert!(
+        head.contains("x-prime-team-id: team-1"),
+        "{}",
+        pi_requests[0]
+    );
 }
 
 #[tokio::test]
@@ -274,7 +285,7 @@ async fn startup_refresh_warms_the_process_shared_catalog() {
 }
 
 #[tokio::test]
-async fn without_credentials_the_compiled_fallback_serves_unchanged() {
+async fn without_credentials_only_the_public_compiled_fallback_is_served() {
     let agent_dir = tempfile::tempdir().unwrap();
     let bundled_dir = tempfile::tempdir().unwrap();
     let server =
@@ -301,7 +312,7 @@ async fn without_credentials_the_compiled_fallback_serves_unchanged() {
     assert_eq!(glm.cost.input.as_f64(), compiled_glm.cost.input.as_f64());
     assert!(!all.iter().any(|model| model.id == LAYER_A_PROBE_ID));
     assert!(!all.iter().any(|model| model.id == "internal/glm-5.3-fast"));
-    assert!(all.iter().any(|model| model.id == "internal/glm-5.2-fast"));
+    assert!(!all.iter().any(|model| model.id == "internal/glm-5.2-fast"));
     assert!(!registry
         .get_available()
         .iter()

@@ -657,7 +657,6 @@ pub(crate) async fn build_headless_engine_with(
     let auth = pa_core::auth::AuthStorage::create(&config.agent_dir);
     let mut registry =
         pa_core::models::ModelRegistry::create(auth, config.agent_dir.join("models.json"));
-    registry.load_private_authorization_from_cache();
     let model = match embedding {
         HeadlessEmbedding::Child(overrides) => match &overrides.lane {
             ChildLane::Real(model) => (**model).clone(),
@@ -955,7 +954,6 @@ fn headless_image_model_router(
             let auth = pa_core::auth::AuthStorage::create(&decide_agent_dir);
             let mut registry =
                 pa_core::models::ModelRegistry::create(auth, decide_agent_dir.join("models.json"));
-            registry.load_private_authorization_from_cache();
             let available: Vec<pa_types::ai::Model> =
                 registry.get_available().into_iter().cloned().collect();
             // Route acceptance uses the same resolved-auth result the arm path
@@ -999,7 +997,6 @@ fn headless_image_model_router(
                 let auth = pa_core::auth::AuthStorage::create(&agent_dir);
                 let mut registry =
                     pa_core::models::ModelRegistry::create(auth, agent_dir.join("models.json"));
-                registry.load_private_authorization_from_cache();
                 let resolved_auth = registry
                     .get_api_key_and_headers(&resolved.model, resolved.model.headers.as_ref());
                 let target = pa_core::session_engine::provider_adapter::ProviderTarget {

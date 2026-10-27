@@ -35,7 +35,7 @@ fn in_memory_loads_built_in_catalog() {
     assert!(registry
         .get_all()
         .iter()
-        .any(|m| m.id == "internal/glm-5.2-fast"));
+        .all(|model| !is_private_prime_inference_model(model)));
 }
 
 /// TS `755-configured-max-tokens.test.ts`: built-in catalog models stay
@@ -287,6 +287,29 @@ fn a_missing_or_corrupt_cache_falls_back_to_the_bundled_catalog() {
         .iter()
         .any(|model| model.provider == "prime-inference"));
     assert!(registry.get_error().is_some());
+}
+
+#[test]
+fn legacy_private_cache_cannot_grant_internal_models() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("prime-inference-private-models.json"),
+        serde_json::json!({
+            "fingerprint": "legacy",
+            "refreshedAt": 1,
+            "data": [{"id": "internal/legacy-only"}]
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let auth = auth_without_env(&serde_json::json!({
+        "prime-inference": {"type": "api_key", "key": "sk-legacy"}
+    }));
+    let registry = ModelRegistry::create(auth, dir.path().join("models.json"));
+    assert!(!registry
+        .get_all()
+        .iter()
+        .any(|model| model.id == "internal/legacy-only"));
 }
 
 #[test]

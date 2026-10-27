@@ -1,6 +1,9 @@
 //! Private Prime Inference models and the private-model id predicate.
 
-use pa_types::ai::{CompatKind, Model, ModelCompat, ModelCost};
+use pa_types::ai::Model;
+#[cfg(test)]
+use pa_types::ai::{CompatKind, ModelCompat, ModelCost};
+#[cfg(test)]
 use pa_types::JsNumber;
 
 pub const PRIME_INFERENCE_BASE_URL: &str = "https://api.pinference.ai/api/v1";
@@ -19,10 +22,11 @@ pub fn is_private_prime_inference_model(model: &Model) -> bool {
     model.provider == "prime-inference" && is_private_prime_inference_model_id(&model.id)
 }
 
-/// The bundled private model table. Private route templates matter: the public
-/// provider default carries request shapes the private endpoint rejects.
+/// An explicit private route fixture for resolver fallback tests. Production
+/// never grants access from a bundled private model.
+#[cfg(test)]
 #[must_use]
-pub fn private_prime_inference_models() -> Vec<Model> {
+pub(crate) fn private_prime_inference_models() -> Vec<Model> {
     vec![Model {
         id: "internal/glm-5.2-fast".to_string(),
         name: "GLM 5.2 Fast".to_string(),

@@ -14,13 +14,6 @@ use crate::auth::types::{AuthCredential, PRIME_INFERENCE_PROVIDER_ID};
 use super::catalog_chain;
 use super::custom::{apply_model_override, load_custom_models, merge_compat, CustomModelsResult};
 use super::prime_inference::is_private_prime_inference_model;
-use super::private_auth::{
-    fetch_authorized_private_prime_inference_models, is_offline_mode_enabled,
-    private_prime_authorization_fingerprint, read_private_prime_authorization_cache,
-    write_private_prime_authorization_cache, PrivatePrimeAuthorizationCache,
-    PRIVATE_BACKGROUND_TIMEOUT_MS, PRIVATE_MODEL_TIMEOUT_MS,
-    PRIVATE_PRIME_AUTHORIZATION_CACHE_TTL_MS,
-};
 
 /// Request-auth bits a provider can configure in models.json.
 #[derive(Debug, Clone, Default)]
@@ -91,8 +84,6 @@ pub struct ModelRegistry {
     model_request_headers: HashMap<String, BTreeMap<String, String>>,
     explicit_private_ids: HashSet<String>,
     authorized_private_ids: HashSet<String>,
-    authorized_private_models: Vec<Model>,
-    authorized_team_id: Option<String>,
     /// The process-shared live catalog chain (`catalog_chain::catalog_for`);
     /// `resolve()` sources built-ins from it.
     catalog: std::sync::Arc<pa_models::ModelCatalog>,
@@ -180,8 +171,6 @@ impl ModelRegistry {
             model_request_headers: HashMap::new(),
             explicit_private_ids: HashSet::new(),
             authorized_private_ids: HashSet::new(),
-            authorized_private_models: Vec::new(),
-            authorized_team_id: None,
             catalog,
         };
         registry.load_models();
@@ -315,66 +304,12 @@ impl ModelRegistry {
         })
     }
 
-    /// Reload built-in + custom models and provider request configs from disk,
-    /// adopting the on-disk private Prime Inference authorization cache without
-    /// network access. Sync callers must call this before `get_available`.
-    pub fn load_private_authorization_from_cache(&mut self) {
-        let api_key = self.auth.get_api_key(PRIME_INFERENCE_PROVIDER_ID);
-        let team_headers = self.auth.get_provider_headers(PRIME_INFERENCE_PROVIDER_ID);
-        let team_id = team_headers
-            .as_ref()
-            .and_then(|headers| headers.get("X-Prime-Team-ID").cloned());
-        let (Some(api_key), Some(team_id)) = (api_key, team_id) else {
-            return;
-        };
-        let fingerprint = private_prime_authorization_fingerprint(&api_key, &team_id);
-        let Some(models_json_path) = self.models_json_path.clone() else {
-            return;
-        };
-        let Some(PrivatePrimeAuthorizationCache {
-            fingerprint: cached_fingerprint,
-            models,
-            ..
-        }) = read_private_prime_authorization_cache(&models_json_path)
-        else {
-            return;
-        };
-        if cached_fingerprint != fingerprint {
-            return;
-        }
-        self.authorized_private_models = models;
-        self.authorized_private_ids = self
-            .authorized_private_models
-            .iter()
-            .map(|model| model.id.clone())
-            .collect();
-        self.authorized_team_id = Some(team_id);
-        self.load_models();
-    }
-
     pub fn refresh(&mut self) {
         self.provider_request_configs.clear();
         self.model_request_headers.clear();
         self.explicit_private_ids.clear();
         self.load_error = None;
         self.auth.reload();
-        // Direct refreshes invalidate changed auth immediately but preserve
-        // same-team stale recovery.
-        let team_id = self
-            .auth
-            .get_provider_headers(PRIME_INFERENCE_PROVIDER_ID)
-            .and_then(|headers| headers.get("X-Prime-Team-ID").cloned());
-        let stale_status = matches!(
-            self.auth
-                .get_auth_status(PRIME_INFERENCE_PROVIDER_ID)
-                .source,
-            Some(crate::auth::types::AuthSource::Stale)
-        );
-        if !stale_status || team_id.is_none() || team_id != self.authorized_team_id {
-            self.authorized_private_ids.clear();
-            self.authorized_private_models.clear();
-            self.authorized_team_id = None;
-        }
         self.load_models();
     }
 
@@ -394,18 +329,13 @@ impl ModelRegistry {
             .map(|model| model.id.clone())
             .collect();
 
-        // Private models: bundled table + authorized set, deduped by id.
-        let mut private_models: HashMap<String, Model> = HashMap::new();
-        for model in super::private_auth::get_private_prime_inference_models() {
-            private_models.insert(model.id.clone(), model);
-        }
-        for model in &self.authorized_private_models {
-            private_models.insert(model.id.clone(), model.clone());
-        }
-
         let credentials = self.prime_credentials();
-        let mut built_in = self.load_built_in_models(&result, credentials.as_ref());
-        built_in.extend(private_models.into_values());
+        let built_in = self.load_built_in_models(&result, credentials.as_ref());
+        self.authorized_private_ids = built_in
+            .iter()
+            .filter(|model| is_private_prime_inference_model(model))
+            .map(|model| model.id.clone())
+            .collect();
         self.models = Self::merge_custom_models(built_in, result.models);
         self.apply_subscription_model_adaptations();
     }
@@ -588,16 +518,14 @@ impl ModelRegistry {
         built_in
     }
 
-    /// Reload local state and refresh entitlements (live catalog + private
-    /// auth). Both fetches are awaited, so the resolved catalog reflects
-    /// them when the call returns.
+    /// Reload local state and refresh both provider and authenticated Prime
+    /// Inference catalog sources. The resolved catalog reflects them on return.
     pub async fn refresh_available_models(&mut self) -> Vec<Model> {
         self.refresh_available_models_forced(false).await
     }
 
     /// [`ModelRegistry::refresh_available_models`] with the refresh trigger's
-    /// gating: forced triggers (startup, auth change) skip the hourly catalog
-    /// gate, picker-open keeps it; private authorization keeps its own gating.
+    /// gating: startup, picker opens, and auth changes skip the hourly gate.
     pub async fn refresh_available_models_with_trigger(
         &mut self,
         trigger: pa_models::RefreshTrigger,
@@ -605,185 +533,16 @@ impl ModelRegistry {
         self.refresh_available_models_forced(trigger.forced()).await
     }
 
-    /// The awaited refresh body: reload, the gated-or-forced chain fetch, the
-    /// private-authorization refresh, then the auth-filtered catalog.
+    /// Reload the active credentials, refresh both catalog sources, and
+    /// resolve available models from their validated snapshots.
     async fn refresh_available_models_forced(&mut self, force: bool) -> Vec<Model> {
-        let previous_ids = self.authorized_private_ids.clone();
-        let previous_team = self.authorized_team_id.clone();
-        let previous_models = self.authorized_private_models.clone();
         self.refresh();
         let credentials = self.prime_credentials();
         self.catalog
             .refresh_with_credentials(force, credentials.as_ref())
             .await;
         self.load_models();
-        self.refresh_private_prime_inference_authorization(
-            previous_ids,
-            previous_team,
-            previous_models,
-        )
-        .await;
         self.get_available().into_iter().cloned().collect()
-    }
-
-    #[allow(clippy::too_many_lines)]
-    async fn refresh_private_prime_inference_authorization(
-        &mut self,
-        previous_ids: HashSet<String>,
-        previous_team: Option<String>,
-        previous_models: Vec<Model>,
-    ) {
-        let api_key = self.auth.get_api_key(PRIME_INFERENCE_PROVIDER_ID);
-        let team_headers = self.auth.get_provider_headers(PRIME_INFERENCE_PROVIDER_ID);
-        let team_id = team_headers
-            .as_ref()
-            .and_then(|headers| headers.get("X-Prime-Team-ID").cloned());
-        let Some(api_key) = api_key else {
-            return self.clear_private_authorization();
-        };
-        let (Some(team_headers), Some(team_id)) = (team_headers, team_id) else {
-            return self.clear_private_authorization();
-        };
-
-        let fingerprint = private_prime_authorization_fingerprint(&api_key, &team_id);
-        if let Some(cache_path) = self.models_json_path.clone() {
-            let cached = read_private_prime_authorization_cache(&cache_path);
-            if let Some(PrivatePrimeAuthorizationCache {
-                fingerprint: cached_fingerprint,
-                models,
-                refreshed_at,
-                ..
-            }) = cached
-            {
-                if cached_fingerprint == fingerprint {
-                    self.authorized_private_models.clone_from(&models);
-                    self.authorized_private_ids =
-                        models.iter().map(|model| model.id.clone()).collect();
-                    self.authorized_team_id = Some(team_id.clone());
-                    self.load_models();
-                    let fresh =
-                        now_millis() - refreshed_at < PRIVATE_PRIME_AUTHORIZATION_CACHE_TTL_MS;
-                    if is_offline_mode_enabled() || fresh {
-                        return;
-                    }
-                    return self
-                        .background_private_refresh(
-                            api_key,
-                            team_headers,
-                            team_id,
-                            fingerprint,
-                            cache_path,
-                        )
-                        .await;
-                }
-            }
-        }
-        if is_offline_mode_enabled() {
-            return self.clear_private_authorization();
-        }
-
-        let public_ids = self.public_prime_inference_ids();
-        let fetched = fetch_authorized_private_prime_inference_models(
-            self.catalog.prime_inference_base_url(),
-            &api_key,
-            &team_headers,
-            &public_ids,
-            PRIVATE_MODEL_TIMEOUT_MS,
-        )
-        .await;
-        if let Ok(authorized) = fetched {
-            self.authorized_private_ids = authorized
-                .models
-                .iter()
-                .map(|model| model.id.clone())
-                .collect();
-            self.authorized_private_models
-                .clone_from(&authorized.models);
-            self.authorized_team_id = Some(team_id);
-            self.load_models();
-            if let Some(cache_path) = self.models_json_path.clone() {
-                write_private_prime_authorization_cache(
-                    &cache_path,
-                    &PrivatePrimeAuthorizationCache {
-                        fingerprint,
-                        items: authorized.items,
-                        models: authorized.models,
-                        refreshed_at: now_millis(),
-                    },
-                );
-            }
-        } else {
-            // Fetch failed: keep previous state for the same team.
-            self.authorized_private_ids = previous_ids;
-            self.authorized_private_models = previous_models;
-            self.authorized_team_id = previous_team;
-            self.load_models();
-        }
-    }
-
-    async fn background_private_refresh(
-        &mut self,
-        api_key: String,
-        team_headers: HashMap<String, String>,
-        team_id: String,
-        fingerprint: String,
-        cache_path: PathBuf,
-    ) {
-        let public_ids = self.public_prime_inference_ids();
-        let Ok(authorized) = fetch_authorized_private_prime_inference_models(
-            self.catalog.prime_inference_base_url(),
-            &api_key,
-            &team_headers,
-            &public_ids,
-            PRIVATE_BACKGROUND_TIMEOUT_MS,
-        )
-        .await
-        else {
-            return;
-        };
-        // Apply only if the credentials did not change while fetching.
-        if private_prime_authorization_fingerprint(&api_key, &team_id) != fingerprint {
-            return;
-        }
-        self.authorized_private_ids = authorized
-            .models
-            .iter()
-            .map(|model| model.id.clone())
-            .collect();
-        self.authorized_private_models
-            .clone_from(&authorized.models);
-        self.authorized_team_id = Some(team_id);
-        self.load_models();
-        write_private_prime_authorization_cache(
-            &cache_path,
-            &PrivatePrimeAuthorizationCache {
-                fingerprint,
-                items: authorized.items,
-                models: authorized.models,
-                refreshed_at: now_millis(),
-            },
-        );
-    }
-
-    /// The public Prime Inference ids the resolved catalog serves (the
-    /// live-or-offline snapshot): the private-authorization fetch skips
-    /// these and reports only the account's private entitlements.
-    fn public_prime_inference_ids(&self) -> HashSet<String> {
-        self.models
-            .iter()
-            .filter(|model| {
-                model.provider == PRIME_INFERENCE_PROVIDER_ID
-                    && !is_private_prime_inference_model(model)
-            })
-            .map(|model| model.id.clone())
-            .collect()
-    }
-
-    fn clear_private_authorization(&mut self) {
-        self.authorized_private_ids.clear();
-        self.authorized_private_models.clear();
-        self.authorized_team_id = None;
-        self.load_models();
     }
 
     fn is_authorized_private_model(&self, model: &Model) -> bool {
@@ -875,12 +634,6 @@ impl ModelRegistry {
             error: None,
         }
     }
-}
-
-fn now_millis() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |duration| duration.as_millis() as u64)
 }
 
 #[cfg(test)]

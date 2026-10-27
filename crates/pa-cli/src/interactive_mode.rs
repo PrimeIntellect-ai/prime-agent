@@ -452,9 +452,8 @@ fn build_tui_options(
     // A startup snapshot of the available models drives the `/model` picker
     // (entitlement refreshes run daemon-side); models.json custom models too.
     let auth = pa_core::auth::AuthStorage::create(&config.agent_dir);
-    let mut registry =
+    let registry =
         pa_core::models::ModelRegistry::create(auth, config.agent_dir.join("models.json"));
-    registry.load_private_authorization_from_cache();
     let catalog: Vec<pa_types::ai::Model> = registry.get_available().into_iter().cloned().collect();
     let configured_providers: std::collections::HashSet<String> =
         catalog.iter().map(|model| model.provider.clone()).collect();

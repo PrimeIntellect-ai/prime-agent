@@ -720,11 +720,10 @@ impl RlmSubagentHost for InlineHost {
                 )
                 .map_err(|error| anyhow::anyhow!("{error:#}"))?;
                 let auth = pa_core::auth::AuthStorage::create(&config.agent_dir);
-                let mut registry = pa_core::models::ModelRegistry::create(
+                let registry = pa_core::models::ModelRegistry::create(
                     auth,
                     config.agent_dir.join("models.json"),
                 );
-                registry.load_private_authorization_from_cache();
                 let all: Vec<Model> = registry.get_all().to_vec();
                 let resolved =
                     pa_core::models::resolve_cli_model(/*cli_provider*/ None, &selector, &all);
