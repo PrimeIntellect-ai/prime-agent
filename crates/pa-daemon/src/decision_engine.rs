@@ -18,8 +18,8 @@ use crate::agent_messaging::{FamilyIdentity, LinkAgentMessageController};
 use crate::async_safe_runtime::AsyncSafeRuntime;
 use crate::engine::{
     AssistantSnapshot, BranchSummaryOutcome, BranchSummaryRequest, CompactionOutcome,
-    CompactionRequest, EngineEvent, PromptRequest, SessionEngine, SideQuestionOutcome,
-    SideQuestionRequest,
+    CompactionRequest, EngineEvent, PromptRequest, RlmSessionIdentity, SessionEngine,
+    SideQuestionOutcome, SideQuestionRequest,
 };
 use pa_core::session_engine::agent_messaging::{
     AgentFamilyRelationship, AgentMessageController, AgentMessageSendInput,
@@ -44,6 +44,19 @@ impl Default for StoredGoal {
     }
 }
 
+/// The stored goal beside the session file: `None` when no store exists or
+/// the read fails (a first boot, a torn write).
+fn read_goal_store(path: &std::path::Path) -> Option<StoredGoal> {
+    let value: Value = serde_json::from_str(&std::fs::read_to_string(path).ok()?).ok()?;
+    Some(StoredGoal {
+        seq: value["seq"].as_i64()?,
+        goal: value
+            .get("goal")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+    })
+}
+
 /// The decision child's engine.
 pub struct DecisionEngine {
     /// The decision model resolved once at engine start, or the actionable
@@ -57,8 +70,12 @@ pub struct DecisionEngine {
     sender: Arc<LinkAgentMessageController>,
     /// The sender's identity source: the worker's session summary.
     own_summary: Arc<Mutex<Option<Value>>>,
+    /// The goal's durable home beside the session file, set at the create's
+    /// identity handoff; `None` before the worker's create arrives.
+    goal_store: Mutex<Option<std::path::PathBuf>>,
     /// The engine's own runtime: the decision call and the reply send are
-    /// async, `run_prompt` is not.
+    /// async, `run_prompt` is not — a current-thread runtime serves every
+    /// `block_on` (the engine spawns nothing).
     runtime: AsyncSafeRuntime,
 }
 
@@ -97,7 +114,8 @@ impl DecisionEngine {
             goals: Arc::new(Mutex::new(StoredGoal::default())),
             protocol: Mutex::new(None),
             sender,
-            runtime: AsyncSafeRuntime::new_multi_thread().expect("decision engine runtime"),
+            goal_store: Mutex::new(None),
+            runtime: AsyncSafeRuntime::new_current_thread().expect("decision engine runtime"),
         }
     }
 
@@ -118,7 +136,23 @@ impl DecisionEngine {
         let goal = goal.get("goal").and_then(Value::as_str).map(str::to_string);
         let mut stored = self.goals.lock().unwrap_or_else(PoisonError::into_inner);
         if seq > stored.seq {
-            *stored = StoredGoal { seq, goal };
+            let updated = StoredGoal { seq, goal };
+            // The passivation contract: a newer goal is durable before it
+            // is live, so a revived child serves the parent's latest goal
+            // instead of an empty input. The write is best-effort — the
+            // in-memory goal stays ahead of a failed one.
+            if let Some(store) = self
+                .goal_store
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .as_ref()
+            {
+                let _ = std::fs::write(
+                    store,
+                    json!({ "seq": updated.seq, "goal": updated.goal }).to_string(),
+                );
+            }
+            *stored = updated;
         }
         true
     }
@@ -262,6 +296,43 @@ impl SessionEngine for DecisionEngine {
             .own_summary
             .lock()
             .unwrap_or_else(PoisonError::into_inner) = Some(summary);
+    }
+
+    /// The create's identity handoff: the session file names the goal's
+    /// durable home, and a stored goal re-seeds the input (the revived
+    /// child of a passivated worker keeps the parent's latest goal under
+    /// the same seq contract).
+    fn configure_rlm_identity(&self, identity: RlmSessionIdentity) -> anyhow::Result<()> {
+        let store = identity
+            .session_file
+            .as_deref()
+            .map(std::path::Path::new)
+            .and_then(std::path::Path::parent)
+            .map(|dir| dir.join("decision-goal.json"));
+        if let Some(store) = store {
+            if let Some(stored) = read_goal_store(&store) {
+                let mut goals = self.goals.lock().unwrap_or_else(PoisonError::into_inner);
+                if stored.seq > goals.seq {
+                    *goals = stored;
+                }
+            }
+            *self
+                .goal_store
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner) = Some(store);
+        }
+        Ok(())
+    }
+
+    /// The whole-worker gate passes: the engine holds no kernel, no cron,
+    /// and no RLM children of its own, and its one memory-only input — the
+    /// goal — is durable beside the session file. The worker-side idle
+    /// fences (attachment, queued lanes, live bash) stay the whole gate,
+    /// so an idle decision child passivates instead of staying resident.
+    fn can_passivate_worker(
+        &self,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send + '_>> {
+        Box::pin(std::future::ready(true))
     }
 
     fn run_side_question(
@@ -550,6 +621,53 @@ mod tests {
             &goal(3, "turn left")
         ));
         assert_eq!(engine.latest_goal().as_deref(), Some("turn left"));
+    }
+
+    /// The passivation contract, pinned: the whole-worker gate passes on
+    /// the current-thread runtime `block_on` needs, and the parent's goal
+    /// is durable — a fresh engine over the same session file (the revived
+    /// child of a passivated worker) re-seeds the latest goal under the
+    /// same seq contract.
+    #[test]
+    fn a_decision_child_passivates_and_its_goal_survives_the_revival() {
+        let dir = tempfile::tempdir().unwrap();
+        let child = engine(dir.path());
+        let goal = |seq: i64, text: &str| {
+            json!({"type":"decision_api.goal","seq":seq,"goal":text}).to_string()
+        };
+        // The whole-worker gate: an idle decision child passivates instead
+        // of staying resident, on the single worker thread `block_on`
+        // needs (the engine spawns nothing).
+        assert!(child
+            .runtime
+            .block_on(crate::engine::SessionEngine::can_passivate_worker(&child)));
+        assert_eq!(child.runtime.metrics().num_workers(), 1);
+        // The create's identity handoff names the goal's durable home.
+        let identity = RlmSessionIdentity {
+            rlm_depth: 1,
+            rlm_max_depth: None,
+            cwd: None,
+            session_id: None,
+            session_file: Some(
+                dir.path()
+                    .join("session.jsonl")
+                    .to_string_lossy()
+                    .into_owned(),
+            ),
+            thinking: None,
+            child_script: None,
+            semantic_spawn: None,
+        };
+        child.configure_rlm_identity(identity.clone()).unwrap();
+        assert!(child.accept_goal(&goal(3, "follow the target")));
+        // The revival: a fresh engine replays the create over the same
+        // session file and re-seeds the parent's latest goal.
+        let revived = engine(dir.path());
+        revived.configure_rlm_identity(identity).unwrap();
+        assert_eq!(revived.latest_goal().as_deref(), Some("follow the target"));
+        // The seq contract survives the revival: an older goal still loses.
+        assert!(revived.accept_goal(&goal(1, "stale")));
+        assert_eq!(revived.latest_goal().as_deref(), Some("follow the target"));
     }
 
     /// The cancellation recheck, pinned: the decision call is bounded,
