@@ -84,7 +84,7 @@ fn session_row(
             .is_some_and(|items| !items.is_empty())
     });
     let kind = match value_str(&runtime, "kind") {
-        Some("subagent") => UpdateRosterSessionKind::Subagent,
+        Some("subagent" | "decision") => UpdateRosterSessionKind::Subagent,
         _ => UpdateRosterSessionKind::TopLevel,
     };
     let session_file = value_str(data, "sessionFile")
@@ -511,6 +511,19 @@ mod tests {
             process_start_id: Some("42/7".into()),
             generation: "sup:42".into(),
         }
+    }
+
+    #[test]
+    fn a_decision_child_row_is_rostered_as_a_subagent() {
+        let dir = tempfile::tempdir().unwrap();
+        let sessions_dir = dir.path().join("sessions");
+        let snapshot = worker_snapshot(&sessions_dir, "c1", "decision", Some("p1"), 1, None);
+        let row = session_row(&snapshot, &HashSet::new()).unwrap();
+        assert_eq!(
+            row.kind,
+            UpdateRosterSessionKind::Subagent,
+            "a decision child rides the subagent lifecycle in the update roster"
+        );
     }
 
     #[test]
