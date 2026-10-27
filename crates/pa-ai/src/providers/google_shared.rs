@@ -649,6 +649,71 @@ mod tests {
         assert!(map_google_stop_reason("NEW_THING").is_err());
     }
 
+    /// `rlm.end_turn()` ends runs on a tool result, so a replayed turn can
+    /// be [user, assistant(tool call), tool result, user] with NO assistant
+    /// message between the tool result and the next user turn. The
+    /// functionResponse rides its own user turn with the matched name and
+    /// output, and the following user message survives as its own turn.
+    #[test]
+    fn ended_turn_shape_replays_user_directly_after_tool_result() {
+        let model = serde_json::from_value::<Model>(json!({
+            "id": "gemini-2.5-pro", "name": "Gemini 2.5 Pro",
+            "api": "google-generative-ai", "provider": "google",
+            "baseUrl": "https://generativelanguage.googleapis.com/v1beta",
+            "reasoning": true, "input": ["text"],
+            "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0 },
+            "contextWindow": 1_048_576, "maxTokens": 32_768
+        }))
+        .unwrap();
+        let messages: Vec<crate::types::Message> = serde_json::from_value(json!([
+            {"role": "user", "content": "hi", "timestamp": 1},
+            {
+                "role": "assistant",
+                "content": [
+                    {"type": "toolCall", "id": "call-1", "name": "python_repl",
+                     "arguments": {"code": "await rlm.end_turn()"}}
+                ],
+                "api": "google-generative-ai", "provider": "google", "model": "gemini-2.5-pro",
+                "usage": {
+                    "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0, "totalTokens": 0,
+                    "cost": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0, "total": 0}
+                },
+                "stopReason": "toolUse", "timestamp": 2
+            },
+            {
+                "role": "toolResult", "toolCallId": "call-1", "toolName": "python_repl",
+                "content": [{"type": "text", "text": "turn ended"}],
+                "isError": false, "timestamp": 3
+            },
+            {"role": "user", "content": "next turn", "timestamp": 4}
+        ]))
+        .expect("messages json");
+        let context = Context {
+            system_prompt: None,
+            messages,
+            tools: None,
+        };
+        let contents = convert_messages(&model, &context);
+        assert_eq!(contents.len(), 4);
+        assert_eq!(contents[0]["role"], "user");
+        assert_eq!(contents[1]["role"], "model");
+        assert_eq!(
+            contents[1]["parts"][0]["functionCall"]["name"],
+            json!("python_repl")
+        );
+        assert_eq!(contents[2]["role"], "user");
+        assert_eq!(
+            contents[2]["parts"][0]["functionResponse"]["name"],
+            json!("python_repl")
+        );
+        assert_eq!(
+            contents[2]["parts"][0]["functionResponse"]["response"]["output"],
+            json!("turn ended")
+        );
+        assert_eq!(contents[3]["role"], "user");
+        assert_eq!(contents[3]["parts"][0]["text"], json!("next turn"));
+    }
+
     #[test]
     fn gemini3_classification() {
         assert!(is_gemini3_pro_model("gemini-3-pro-preview"));
