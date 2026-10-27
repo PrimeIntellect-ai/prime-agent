@@ -181,9 +181,9 @@ async def end_turn() -> dict[str, Any]:
 
     The host marks the executing cell, the cell's tool result confirms the
     turn ended, and no further assistant response is streamed for the run.
-    Other tool calls in the same message still execute first. Raises when
-    the host has not registered the handler (a foreign harness): the call
-    never silently no-ops.
+    Other tool calls in the same message still execute first. Raises where
+    the host does not support the call (a foreign harness): it never
+    silently no-ops.
     """
     return await host_request("rlm.end_turn", {})
 
