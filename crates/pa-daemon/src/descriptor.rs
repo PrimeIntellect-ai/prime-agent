@@ -100,6 +100,18 @@ pub fn worker_launch_env(
     if let Some(script) = script {
         env.insert(crate::worker::WORKER_SCRIPT_ENV.to_string(), script);
     }
+    if descriptor
+        .create_command
+        .rest
+        .get("refineChild")
+        .and_then(Value::as_bool)
+        == Some(true)
+    {
+        env.insert(
+            crate::worker::WORKER_REFINE_CHILD_ENV.to_string(),
+            "1".to_string(),
+        );
+    }
     if let Some(orphan_journal_path) = &descriptor.orphan_process_journal_path {
         env.insert(
             pa_core::kernel::orphan_journal::ORPHAN_PROCESS_JOURNAL_ENV.to_string(),

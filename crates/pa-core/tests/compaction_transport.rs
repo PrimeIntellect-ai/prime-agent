@@ -1,11 +1,10 @@
-//! Synthetic-provider regressions for summary and refinement request controls and cancellation.
+//! Synthetic-provider regressions for summary request controls and cancellation.
 use std::time::Duration;
 
 use pa_core::session_engine::branch_summarization::{
     generate_branch_summary, GenerateBranchSummaryOptions, DEFAULT_BRANCH_RESERVE_TOKENS,
 };
 use pa_core::session_engine::compaction_exec::complete_summary_call;
-use pa_core::session_engine::refine::default_refiner_call;
 use pa_types::session::{AgentMessage, EntryBase, FileEntry};
 use serde_json::{json, Value};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -219,24 +218,6 @@ async fn branch_summary_respects_mandatory_thinking() {
         .as_deref()
         .unwrap_or_default()
         .contains("summary"));
-    assert_eq!(request.await.unwrap()["enable_thinking"], json!(true));
-    assert!(server.await.unwrap());
-}
-
-#[tokio::test]
-async fn refiner_call_respects_mandatory_thinking() {
-    let (model, request, server) = mock_summary(Reply::Complete).await;
-    let reply = default_refiner_call(
-        Some("synthetic-key".into()),
-        None,
-        "synthetic-session".into(),
-    )(model, "system", "prompt".into())
-    .await
-    .unwrap();
-    assert!(matches!(
-        reply.content.as_slice(),
-        [pa_types::ai::AssistantContentBlock::Text(text)] if text.text == "summary"
-    ));
     assert_eq!(request.await.unwrap()["enable_thinking"], json!(true));
     assert!(server.await.unwrap());
 }

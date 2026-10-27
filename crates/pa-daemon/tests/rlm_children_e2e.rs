@@ -234,6 +234,7 @@ fn spawn_request(name: &str, prompt: &str) -> RlmSpawnRequest {
         thinking: None,
         cwd: None,
         spawned_by_request_id: None,
+        refine_child: false,
         factory: None,
     }
 }

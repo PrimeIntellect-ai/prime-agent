@@ -570,8 +570,12 @@ impl Worker {
                 // the goal-continue branch defers to that turn's boundary instead of
                 // interleaving before it.
                 let engine = std::sync::Arc::clone(&self.engine);
-                let refined = if goal_continue_scheduled {
-                    Ok(None)
+                // The round is the refinement child's spawn — fire-and-wake;
+                // the child's proposal applies on its reply's arrival (the
+                // reply's wake emits the outcome rows and the
+                // `refine_complete` event).
+                let spawned = if goal_continue_scheduled {
+                    Ok(())
                 } else {
                     tokio::task::spawn_blocking(move || engine.consume_compact_auto_refine())
                         .await
@@ -579,43 +583,12 @@ impl Worker {
                             Err(anyhow::anyhow!("auto-refinement task failed: {error}"))
                         })
                 };
-                match refined {
-                    Ok(Some(result)) => {
-                        let outcome_row =
-                            pa_core::session_engine::refine::create_refinement_outcome_message(
-                                &result,
-                            );
-                        if let Ok(value) = serde_json::to_value(
-                            pa_types::session::AgentMessage::Custom(outcome_row),
-                        ) {
-                            self.emit_custom_row(&value);
-                        }
-                        if result.applied_edits.iter().any(|edit| edit.applied) {
-                            let notice =
-                                pa_core::session_engine::refine::create_refinement_notice_message(
-                                    &result,
-                                    pa_core::session_engine::refine::RefinementSource::Auto,
-                                );
-                            if let Ok(value) = serde_json::to_value(
-                                pa_types::session::AgentMessage::Custom(notice),
-                            ) {
-                                self.emit_custom_row(&value);
-                            }
-                        }
-                        crate::user_bash::emit_session_event_frame(
-                            &self.core,
-                            &self.events,
-                            crate::worker::refine_complete_event(&result),
-                        );
-                    }
-                    Ok(None) => {}
-                    Err(error) => {
-                        eprintln!("pa-daemon: auto-refinement after compaction failed: {error:#}");
-                        self.emit_worker_event(json!({
-                            "type": "refine_failed",
-                            "error": format!("{error:#}"),
-                        }));
-                    }
+                if let Err(error) = spawned {
+                    eprintln!("pa-daemon: auto-refinement after compaction failed: {error:#}");
+                    self.emit_worker_event(json!({
+                        "type": "refine_failed",
+                        "error": format!("{error:#}"),
+                    }));
                 }
                 response_success(None, "compact", Some(run.result))
             }

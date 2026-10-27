@@ -100,8 +100,34 @@ class RlmSubagentRegistryTest(unittest.TestCase):
     def test_requires_an_explicit_child_name(self) -> None:
         host_request = AsyncMock()
         with patch.object(rlm_module, "host_request", host_request):
-            with self.assertRaisesRegex(TypeError, r"missing 1 required keyword-only argument: 'name'"):
+            with self.assertRaisesRegex(TypeError, r"spawn\(\) missing a non-empty child name"):
                 asyncio.run(rlm_module.rlm.spawn("check the API"))
+        host_request.assert_not_awaited()
+
+    def test_spawns_an_unnamed_refine_child_with_the_kind(self) -> None:
+        host_request = AsyncMock(
+            return_value={
+                "rlm_child_id": "sub-a1b2c3d4",
+                "name": "subagent-check-api-a1b2c3d4",
+                "session_dir": "/tmp/parent/sub-a1b2c3d4",
+                "model": "provider/model",
+            }
+        )
+        with patch.object(rlm_module, "host_request", host_request):
+            result = asyncio.run(
+                rlm_module.rlm.spawn("refinement.request {}", kind="refine")
+            )
+        host_request.assert_awaited_once_with(
+            "rlm.run",
+            {"prompt": "refinement.request {}", "kwargs": {"kind": "refine"}},
+        )
+        self.assertEqual(result.rlm_child_id, "sub-a1b2c3d4")
+
+        # Any other kind is refused before the host call.
+        host_request.reset_mock()
+        with patch.object(rlm_module, "host_request", host_request):
+            with self.assertRaisesRegex(TypeError, 'kind must be "refine" when given'):
+                asyncio.run(rlm_module.rlm.spawn("p", name="w", kind="oracle"))
         host_request.assert_not_awaited()
 
     def test_rejects_calling_rlm_directly_with_spawn_guidance(self) -> None:

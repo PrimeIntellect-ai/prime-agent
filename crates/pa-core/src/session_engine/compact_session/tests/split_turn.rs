@@ -529,6 +529,7 @@ fn semantic_fixture(dir: &std::path::Path) -> (SemanticEdgeIdentity, Arc<Semanti
         ledger_path: Some(dir.join(SEMANTIC_EDGES_LEDGER_FILENAME)),
         parent_session_id: None,
         spawned_by_request_id: None,
+        refine_child: false,
     };
     let recorder = Arc::new(SemanticEdgeRecorder::open(identity.clone()));
     (identity, recorder)
@@ -663,6 +664,7 @@ async fn a_split_turn_compaction_commits_both_summary_slices_before_its_entry() 
             session_id: "compact-session".to_string(),
             parent_session_id: None,
             spawned_by_request_id: None,
+            refine_child: false,
         })
     );
     let compaction_id = begun_compaction_id(&events);
@@ -777,6 +779,7 @@ async fn an_aborted_compaction_fails_its_slices_and_records_cancelled() {
                 session_id: "compact-session".to_string(),
                 parent_session_id: None,
                 spawned_by_request_id: None,
+                refine_child: false,
             },
             LedgerEvent::CompactionBegun {
                 compaction_id: compaction_id.clone(),

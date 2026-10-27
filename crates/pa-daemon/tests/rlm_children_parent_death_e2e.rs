@@ -785,6 +785,7 @@ fn a_spawned_child_ledger_names_its_spawning_request_and_the_parent_records_the_
             session_id: child_session_id.clone(),
             parent_session_id: Some(parent_session_id),
             spawned_by_request_id: Some(spawning_request.clone()),
+            refine_child: false,
         })
     );
     let child_last_committed = child_ledger

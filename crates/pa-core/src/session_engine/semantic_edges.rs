@@ -82,6 +82,11 @@ pub enum SemanticEdgeLedgerEvent {
         parent_session_id: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         spawned_by_request_id: Option<String>,
+        /// The registered session is a refinement child
+        /// (`rlm.spawn kind="refine"`); older ledger lines read as
+        /// `false`.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        refine_child: bool,
     },
     RequestStarted {
         request_id: String,
@@ -154,6 +159,9 @@ pub struct SemanticEdgeIdentity {
     pub ledger_path: Option<PathBuf>,
     pub parent_session_id: Option<String>,
     pub spawned_by_request_id: Option<String>,
+    /// The session is a refinement child (`rlm.spawn kind="refine"`):
+    /// its registered ledger line carries the kind.
+    pub refine_child: bool,
 }
 
 /// A minted id (TS `mintId`: `randomUUID().replaceAll("-", "")`, 32
@@ -254,6 +262,7 @@ impl SemanticEdgeRecorder {
                         session_id: identity.session_id.clone(),
                         parent_session_id: identity.parent_session_id.clone(),
                         spawned_by_request_id: identity.spawned_by_request_id.clone(),
+                        refine_child: identity.refine_child,
                     },
                 );
             }

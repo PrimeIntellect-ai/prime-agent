@@ -127,7 +127,8 @@ pub fn session_command_failure_row(command: &SessionSlashCommand, error: &str) -
 }
 
 /// The durable result row (`session_slash_command_result`).
-fn slash_command_result(
+#[must_use]
+pub fn slash_command_result(
     command: &SessionSlashCommand,
     content: String,
     success: bool,
@@ -253,7 +254,10 @@ async fn execute_compact(
     Ok(())
 }
 
-/// `/refine`: run the refinement and record the applied-edit count.
+/// `/refine`: the mechanical rollback applies inline (no model pass); the
+/// planning refinement is the refinement child's — a daemon `rlm.spawn
+/// kind="refine"` child — so this layer only refuses without the daemon and
+/// leaves the spawn to the daemon-backed session command hosts.
 async fn execute_refine(
     engine: &SessionEngine,
     params: &mut SessionCommandParams<'_>,
@@ -266,14 +270,21 @@ async fn execute_refine(
         instructions: options.instructions,
         rollback_id: options.rollback_id,
     };
+    if refine_options.rollback_id.is_none() {
+        // The rollback is the one mechanical path (no model pass, no
+        // child); every planning refinement is a spawned child, so a
+        // session without the daemon refuses the command.
+        return Err(
+            "The refine command requires a daemon-backed session: the refinement child is a spawned session, and this session has no RLM child runtime."
+                .to_string(),
+        );
+    }
     let result = match engine
         .session
-        .refine(
+        .run_rollback_refinement(
             &refine_options,
             RefinementSource::User,
-            params.model,
-            params.api_key.take(),
-            params.global_harness_dir.clone(),
+            &params.global_harness_dir,
         )
         .await
     {

@@ -2,11 +2,10 @@
 //! engine, and settles the result.
 use super::{
     checkpoint_queue_recovery, compact_action_label, create_daemon_event_meta,
-    emit_refinement_event_for_session, emit_refinement_row, gather_delivery_batch, json, oneshot,
-    session_snapshot, AssistantSnapshot, DaemonOutbound, EngineEvent, EventPump, Lane, Map, Notify,
-    OutboundFrame, PromptRequest, QueueCheckpoint, QueuedItem, Result, SessionActionSnapshot,
-    SessionCore, SessionEngine, TurnSettle, Value, WorkerRecoveryJournal,
-    ABORTED_TURN_SETTLE_ERROR,
+    emit_refinement_event_for_session, gather_delivery_batch, json, oneshot, session_snapshot,
+    AssistantSnapshot, DaemonOutbound, EngineEvent, EventPump, Lane, Map, Notify, OutboundFrame,
+    PromptRequest, QueueCheckpoint, QueuedItem, Result, SessionActionSnapshot, SessionCore,
+    SessionEngine, TurnSettle, Value, WorkerRecoveryJournal, ABORTED_TURN_SETTLE_ERROR,
 };
 
 use std::sync::{Arc, Mutex};
@@ -1181,9 +1180,11 @@ impl TurnRunner {
                 let _ = done.send(result.clone());
             }
         }
-        // The compact-trigger review services off the settle as a
-        // background round: the queued next prompt's admission never
-        // waits on it.
+        // The compact-trigger round services off the settle as a
+        // background task: the queued next prompt's admission never waits
+        // on it. The round is the refinement child's spawn — fire-and-wake;
+        // the child's proposal applies on its reply's arrival (the reply's
+        // wake emits the outcome rows and the `refine_complete` event).
         {
             let engine = review_engine;
             let core = Arc::clone(&self.core);
@@ -1193,14 +1194,14 @@ impl TurnRunner {
                 // The round takes the engine's session mutex on the blocking
                 // pool, never on this async task: a `blocking_lock` from the
                 // runtime thread deadlocks.
-                let refined = tokio::task::spawn_blocking(move || {
+                let spawned = tokio::task::spawn_blocking(move || {
                     pa_core::session_engine::compaction_trace::trace(
-                        "autorefine.review_started",
+                        "autorefine.round_started",
                         &serde_json::Value::Null,
                     );
                     let outcome = engine.consume_compact_auto_refine();
                     pa_core::session_engine::compaction_trace::trace(
-                        "autorefine.review_done",
+                        "autorefine.round_done",
                         &serde_json::json!({ "ran": outcome.is_ok() }),
                     );
                     outcome
@@ -1209,49 +1210,14 @@ impl TurnRunner {
                 .unwrap_or_else(|error| {
                     Err(anyhow::anyhow!("auto-refinement task failed: {error}"))
                 });
-                match refined {
-                    Ok(Some(result)) => {
-                        // The outcome row and the model-facing notice (when edits
-                        // applied) persist like the `/refine` command's rows, fenced on
-                        // the serviced session.
-                        let outcome_row =
-                            pa_core::session_engine::refine::create_refinement_outcome_message(
-                                &result,
-                            );
-                        if let Ok(value) = serde_json::to_value(
-                            pa_types::session::AgentMessage::Custom(outcome_row),
-                        ) {
-                            emit_refinement_row(&core, &events, &review_session_id, &value);
-                        }
-                        if result.applied_edits.iter().any(|edit| edit.applied) {
-                            let notice =
-                                pa_core::session_engine::refine::create_refinement_notice_message(
-                                    &result,
-                                    pa_core::session_engine::refine::RefinementSource::Auto,
-                                );
-                            if let Ok(value) = serde_json::to_value(
-                                pa_types::session::AgentMessage::Custom(notice),
-                            ) {
-                                emit_refinement_row(&core, &events, &review_session_id, &value);
-                            }
-                        }
-                        emit_refinement_event_for_session(
-                            &core,
-                            &events,
-                            &review_session_id,
-                            crate::worker::refine_complete_event(&result),
-                        );
-                    }
-                    Ok(None) => {}
-                    Err(error) => {
-                        eprintln!("pa-daemon: auto-refinement after compaction failed: {error:#}");
-                        emit_refinement_event_for_session(
-                            &core,
-                            &events,
-                            &review_session_id,
-                            json!({ "type": "refine_failed", "error": format!("{error:#}") }),
-                        );
-                    }
+                if let Err(error) = spawned {
+                    eprintln!("pa-daemon: auto-refinement after compaction failed: {error:#}");
+                    emit_refinement_event_for_session(
+                        &core,
+                        &events,
+                        &review_session_id,
+                        json!({ "type": "refine_failed", "error": format!("{error:#}") }),
+                    );
                 }
             });
         }

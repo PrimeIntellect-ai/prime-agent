@@ -9,12 +9,50 @@ use super::{
 
 pub const REFINEMENT_SYSTEM_PROMPT: &str = "You are Prime Agent's /refine continual harness subsystem.\n\nYour job is to improve the editable continual harness state from the current trajectory.\nThis is similar in spirit to context compaction, but instead of summarizing the\nconversation you emit precise Create, Update, or Delete edits to reusable state.\nThe continual harness is the persistent, editable set of prompt notes, memories,\nskills, and subagent specs that lets Prime Agent improve reusable behavior\noutside the token history.\nUse \"continual harness\" for that persistent artifact layer; keep \"RLM\" for the\nruntime, Python REPL kernel, and native call interface that executes those artifacts.\n\nContinual harness components:\n- prompt: supplemental prompt notes only. The base system prompt is immutable and MUST NOT be rewritten.\n- memory: durable facts, decisions, failures, preferences, and outcomes.\n- skill: installed Python REPL skill. Skill create/update edits MUST include a `reference` object with `{\"type\":\"python\"}`, a Python import, and a callable or call pattern; they also MUST include an `arguments` object describing accepted inputs, required fields, defaults, and constraints. Use `{}` for `arguments` only when the Python callable truly needs no external inputs. Include the RLM-native call form `await <skill_import>(...)`.\n- subagent: reusable delegation specs, including purpose, instructions, and when to invoke. Include the RLM-native call form: compose a concise task prompt and spawn with `handle = await rlm.spawn(\"sub-task\", name=\"worker\")`; admission returns immediately with `rlm_child_id`, `name`, `session_dir`, and `model`, never the child's answer. Results arrive only through explicit `agent_message` replies or files; children reply with `await agent_message.send(message, receiver_role=\"parent\")`. Use `await rlm.list_subagents()` to recover direct child handles and `await agent_message.send(..., receiver_role=\"child\", receiver_name=handle.name)` for follow-ups. Do not invent wrappers like `run_subagent(...)`.\n- factory: declarative state-machine workflow specs of subagent states. The spec lives in `arguments.machine` (the original DAG sugar in `arguments.dag` compiles to machine form; pass exactly one form). The kernel validator (`rlm.factory`) enforces the full machine semantics at write time: run a stored factory with `await rlm.factory.run('<id>')`, watch with `await rlm.factory.status(run_id)`, stop with `await rlm.factory.stop(run_id)`, and resume an escalate-paused run with `await rlm.factory.resume(run_id)`.\n\nScope and persistence policy:\n- The default editable continual harness store is local to the current Prime Agent session. Use it for session-specific progress, active task state, current-run coordination notes, temporary blockers, and project facts that should not affect other sessions.\n- A caller may explicitly request global refinement. Global edits must be stable cross-session lessons, durable user preferences, reusable skills/subagents, or tool/environment facts that should affect future sessions.\n- Entry ids in the harness overview may carry a display-only `local:` or `global:` prefix. Always use the bare id (no prefix) in edits.\n- All edits in one refinement apply only to the requested scope's store. During a local refinement, global entries are read-only context: never propose update or delete edits for them; create a local entry instead when a session-specific override is genuinely needed.\n- Project/workspace-specific lessons may be persisted globally only when the title, path, or content explicitly names the project/workspace and the lesson is likely to be reused in future sessions for that project. Prefer local edits when the lesson only belongs in the current conversation.\n- Use memory for declarative facts and preferences, skill for repeatable procedures exposed as Python calls, prompt for narrow behavioral policy addendums, and subagent for reusable delegation roles.\n- Create or update the smallest relevant component: repeated delegation roles should become subagent specs, repeated procedures should become skills, durable facts/preferences should become memories, and narrow behavioral policies should become prompt addendums.\n- When an edit is persisted, include metadata such as `{\"scope\":\"local\"}` or `{\"scope\":\"global\"}` when that helps future review understand the intended blast radius.\n\nUse the trajectory, current continual harness state, and prior refinement history. Prefer\nsmall evidence-backed edits. If prior refinements caused issues, rollback or\nreplace the faulty editable entries. Never edit source files directly. Output\nJSON only with this exact shape:\n\n{\n  \"summary\": \"one sentence\",\n  \"rationale\": \"why these edits are justified by trajectory evidence\",\n  \"expectedOutcome\": \"what should improve and how to validate it\",\n  \"edits\": [\n    {\n      \"action\": \"create|update|delete\",\n      \"kind\": \"prompt|memory|skill|subagent|factory\",\n      \"id\": \"stable id for update/delete, optional for create\",\n      \"title\": \"required for create/update except delete\",\n      \"content\": \"required for create/update except delete\",\n      \"path\": \"optional grouping path\",\n      \"reference\": {\"type\": \"python\", \"import\": \"package.module\", \"callable\": \"function_name\", \"call_pattern\": \"await function_name(...)\"},\n      \"arguments\": {\"name\": {\"type\": \"string\", \"required\": true, \"description\": \"accepted input\"}},\n      \"metadata\": {},\n      \"reason\": \"why this edit is useful\"\n    }\n  ]\n}";
 
-pub const AUTO_REFINE_REVIEW_SYSTEM_PROMPT: &str = "You are Prime Agent's automatic /refine review gate.\n\nDecide whether this checkpoint should run /refine. Auto /refine writes local continual harness state by default, so approve when the trajectory contains evidence useful to this session's future turns.\nReject one-off noise, unsupported hypotheses, and transient tool outputs. Ask for global refinement only for durable cross-session lessons or explicitly project-qualified lessons likely to be reused in future sessions.\n\nReturn JSON only:\n{\n  \"shouldRefine\": true|false,\n  \"rationale\": \"short reason\",\n  \"instructions\": \"optional concise instructions for /refine if shouldRefine is true\"\n}";
+/// Trim the conversation tail so the spawn request fits the child model's
+/// context window: the conversation keeps its newest tail (binary search on
+/// the kept length, front-trimmed with the omission marker). The request
+/// carries no output clamp — the child's turn derives its own budget.
+#[must_use]
+pub fn trim_conversation_to_context(
+    context_window: u64,
+    request_head: &str,
+    conversation: &str,
+) -> String {
+    let overhead = request_head.len() as u64 + REFINEMENT_REQUEST_OVERHEAD_BYTES;
+    let budget = context_window.saturating_sub(overhead).max(1);
+    if conversation.len() as u64 <= budget {
+        return conversation.to_string();
+    }
+    let fits = |length: usize| -> bool {
+        let omitted = "[Earlier conversation omitted to fit the model context.]".len();
+        (length as u64 + omitted as u64) <= budget
+    };
+    let mut low = 0usize;
+    let mut high = conversation.len();
+    while low < high {
+        let length = (low + high).div_ceil(2);
+        if fits(length) {
+            low = length;
+        } else {
+            high = length - 1;
+        }
+    }
+    let start = conversation.len() - low;
+    // Never split a UTF-8 sequence (the TS surrogate skip).
+    let mut start = start.min(conversation.len());
+    while start < conversation.len() && !conversation.is_char_boundary(start) {
+        start += 1;
+    }
+    format!(
+        "[Earlier conversation omitted to fit the model context.]\n{}",
+        &conversation[start..]
+    )
+}
 
-/// Output caps (reasoning off shares the model's output budget with JSON).
-pub const REFINEMENT_MAX_OUTPUT_TOKENS: u64 = 32_000;
-pub const AUTO_REFINE_REVIEW_MAX_OUTPUT_TOKENS: u64 = 4_096;
-pub const REFINEMENT_CONTEXT_OVERHEAD_TOKENS: u64 = 1_024;
+/// Rough fixed headroom for the request envelope around the trimmed
+/// conversation (the JSON keys, the sections, and the system prompt).
+const REFINEMENT_REQUEST_OVERHEAD_BYTES: u64 = 4_096;
 
 pub const TRUNCATED_JSON_ERROR: &str = "the model stopped before completing its JSON object. This usually means the output budget was exhausted; retry with a smaller request.";
 
@@ -562,73 +600,6 @@ fn kind_name(kind: RefinementKind) -> &'static str {
         RefinementKind::Subagent => "subagent",
         RefinementKind::Factory => "factory",
     }
-}
-
-/// Byte-based input token bound (one token per UTF-8 byte).
-fn refinement_input_token_bound(text: &str) -> u64 {
-    text.len() as u64
-}
-
-/// Fit the refinement request into the model context: trim conversation from
-/// the front (binary search) and clamp output tokens.
-///
-/// # Errors
-///
-/// Error when even the trimmed prompt leaves no room for output tokens.
-pub fn refinement_request(
-    model: &pa_types::ai::Model,
-    system_prompt: &str,
-    conversation_text: &str,
-    build_prompt: &dyn Fn(&str) -> String,
-    output_reserve: u64,
-) -> anyhow::Result<(u64, String)> {
-    let system_reserve =
-        refinement_input_token_bound(system_prompt) + REFINEMENT_CONTEXT_OVERHEAD_TOKENS;
-    let input_budget = model.context_window.saturating_sub(
-        model
-            .max_tokens
-            .min(output_reserve)
-            .min(model.context_window / 2),
-    );
-    let mut user_prompt = build_prompt(conversation_text);
-    if system_reserve + refinement_input_token_bound(&user_prompt) > input_budget
-        && !conversation_text.is_empty()
-    {
-        let prompt_for_length = |length: usize| -> String {
-            let start = conversation_text.len().saturating_sub(length);
-            // Avoid splitting a UTF-8 sequence (the TS surrogate skip).
-            let mut start = start.min(conversation_text.len());
-            while start < conversation_text.len() && !conversation_text.is_char_boundary(start) {
-                start += 1;
-            }
-            build_prompt(&format!(
-                "[Earlier conversation omitted to fit the model context.]\n{}",
-                &conversation_text[start..]
-            ))
-        };
-        let mut low = 0usize;
-        let mut high = conversation_text.len();
-        while low < high {
-            let length = (low + high).div_ceil(2);
-            if system_reserve + refinement_input_token_bound(&prompt_for_length(length))
-                <= input_budget
-            {
-                low = length;
-            } else {
-                high = length - 1;
-            }
-        }
-        user_prompt = prompt_for_length(low);
-    }
-    let max_tokens = model.max_tokens.min(
-        model
-            .context_window
-            .saturating_sub(system_reserve + refinement_input_token_bound(&user_prompt)),
-    );
-    if max_tokens == 0 {
-        anyhow::bail!("Refinement prompt leaves no room for output in the model's context window; retry with a smaller request.");
-    }
-    Ok((max_tokens, user_prompt))
 }
 
 #[cfg(test)]

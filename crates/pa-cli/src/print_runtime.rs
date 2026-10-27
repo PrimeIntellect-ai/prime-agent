@@ -791,6 +791,7 @@ pub(crate) async fn build_headless_engine_with(
                     ),
                     parent_session_id: overrides.semantic_parent_session_id.clone(),
                     spawned_by_request_id: overrides.spawned_by_request_id.clone(),
+                    refine_child: false,
                 },
             ),
             Some(pa_core::session_engine::provider_adapter::map_thinking_level(overrides.thinking)),
@@ -805,6 +806,7 @@ pub(crate) async fn build_headless_engine_with(
                     ),
                     parent_session_id: None,
                     spawned_by_request_id: None,
+                    refine_child: false,
                 },
             ),
             Some(resolve_thinking_level(config, &model)),
@@ -1620,7 +1622,7 @@ async fn run_prompts_and_emit(
             .map_err(|error| format!("{error:#}"))?;
         engine.session.agent().wait_for_idle().await;
         boundary
-            .run_at_settled_turn(engine, model, api_key.clone(), global_harness_dir.clone())
+            .run_at_settled_turn(engine, model, api_key.clone())
             .await?;
         goal.drive_boundary(
             engine,
@@ -1656,9 +1658,6 @@ async fn run_prompts_and_emit(
         if let Some(subscription) = unsubscribe {
             subscription.unsubscribe().await;
         }
-        boundary
-            .drain_compact_auto_refine_at_disposal(engine, model, api_key, global_harness_dir)
-            .await;
         return Ok(1);
     }
     // The #2270 fix: print waits for RLM quiescence — every admitted
@@ -1782,11 +1781,6 @@ async fn run_prompts_and_emit(
         eprintln!("{stderr}");
         exit_code = 1;
     }
-    // The disposal order: the exit code first, then the teardown drains a
-    // compact-trigger auto-refine no later boundary consumed.
-    boundary
-        .drain_compact_auto_refine_at_disposal(engine, model, api_key, global_harness_dir)
-        .await;
     Ok(exit_code)
 }
 
