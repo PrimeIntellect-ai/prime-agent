@@ -284,6 +284,11 @@ impl DecisionEngine {
 }
 
 impl SessionEngine for DecisionEngine {
+    /// The decision engine consumes the parent's tagged messages: the
+    /// worker resolves the sender's parent edge for it alone.
+    fn routes_decision_events(&self) -> bool {
+        true
+    }
     /// Consume the parent's tagged goal messages: no turn, newest seq
     /// wins. The goal input is parent-authoritative: a sibling's, a
     /// child's, or an unaffiliated sender's goal tags never reach it —

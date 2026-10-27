@@ -30,12 +30,17 @@ mod scripted;
 
 /// The turn behavior a worker session runs.
 pub trait SessionEngine: Send + Sync {
+    /// Whether the engine consumes Decision API events: the worker
+    /// resolves the sender's parent edge only for these engines.
+    fn routes_decision_events(&self) -> bool {
+        false
+    }
     /// Consume one tagged Decision API message without starting a turn:
     /// the decision child consumes the parent's `decision_api.goal`
     /// messages into its goal input. Engines without a decision loop use
-    /// normal message routing. `relationship` is the sender's fully
-    /// resolved edge to this session (`None` for an unaffiliated sender):
-    /// the consuming engine authorizes the sender by it.
+    /// normal message routing. `relationship` is the sender's parent edge,
+    /// resolved only for engines that route decision events (`None`
+    /// otherwise): the consuming engine authorizes the sender by it.
     fn route_decision_api_event(
         &self,
         _relationship: Option<AgentFamilyRelationship>,
