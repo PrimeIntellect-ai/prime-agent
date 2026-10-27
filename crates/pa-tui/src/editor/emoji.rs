@@ -15,8 +15,9 @@ impl Editor {
     }
 
     /// The `:name` token ending at `col` on the cursor line: its start
-    /// column and the name. The colon must start a word (`a:b:c` and
-    /// `std::fmt` never match), and code spans and fences are skipped.
+    /// column and the name. The colon must start a word (`a:b:c`,
+    /// `std::fmt` and URL paths never match), and code spans and fences
+    /// are skipped.
     fn shortcode_token(&self, col: usize) -> Option<(usize, String)> {
         if !self.emoji_shortcodes {
             return None;
@@ -27,7 +28,9 @@ impl Editor {
         if name.is_empty() || name.contains(char::is_whitespace) {
             return None;
         }
-        if colon > 0 && (before[colon - 1].is_alphanumeric() || before[colon - 1] == ':') {
+        if colon > 0
+            && (before[colon - 1].is_alphanumeric() || matches!(before[colon - 1], ':' | '/'))
+        {
             return None;
         }
         if self.in_code(&before[..colon]) {
@@ -39,7 +42,10 @@ impl Editor {
     /// Whether text after `before` on the cursor line sits in a fenced
     /// code block or an open backtick span.
     fn in_code(&self, before: &[char]) -> bool {
-        let is_fence = |line: &String| line.trim_start().starts_with("```");
+        let is_fence = |line: &String| {
+            let trimmed = line.trim_start();
+            trimmed.starts_with("```") || trimmed.starts_with("~~~")
+        };
         let fences_above = self.lines[..self.cursor_line]
             .iter()
             .filter(|line| is_fence(line))
@@ -63,6 +69,20 @@ impl Editor {
         let result = self.replace_before_cursor(start, emoji.as_str());
         self.lines = result.lines;
         self.set_cursor_col(result.cursor_col);
+    }
+
+    /// Apply an emoji menu item to the shortcode token at the cursor. The
+    /// menu stays open across cursor motions, so the token is found again
+    /// here; with no token at the cursor the buffer stays unchanged.
+    pub(super) fn apply_emoji_completion(&self, emoji: &str) -> CompletionResult {
+        match self.shortcode_token(self.cursor_col) {
+            Some((start, _)) => self.replace_before_cursor(start, emoji),
+            None => CompletionResult {
+                lines: self.lines.clone(),
+                cursor_line: self.cursor_line,
+                cursor_col: self.cursor_col,
+            },
+        }
     }
 
     /// The `:na` token at the cursor that opens the emoji menu.
@@ -100,7 +120,7 @@ impl Editor {
     }
 
     /// The cursor line with `start..cursor` replaced by `text`.
-    pub(super) fn replace_before_cursor(&self, start: usize, text: &str) -> CompletionResult {
+    fn replace_before_cursor(&self, start: usize, text: &str) -> CompletionResult {
         let line = &self.lines[self.cursor_line];
         let mut lines = self.lines.clone();
         lines[self.cursor_line] = format!(
@@ -161,6 +181,8 @@ mod tests {
         for text in [
             "`:heart:",
             "```\n:heart:",
+            "~~~\n:heart:",
+            "https://example.com/:heart:",
             "10:30:",
             "a:heart:",
             "std::ok:",
@@ -186,5 +208,15 @@ mod tests {
         e.materialize_autocomplete();
         e.handle_input("tab");
         assert_eq!(e.get_text(), "❤️");
+
+        // The menu stays open across cursor motions; accepting with no
+        // shortcode at the cursor leaves the text alone.
+        let mut e = editor();
+        type_text(&mut e, "hello :hear");
+        e.materialize_autocomplete();
+        e.handle_input("home");
+        assert!(e.is_showing_autocomplete());
+        e.handle_input("tab");
+        assert_eq!(e.get_text(), "hello :hear");
     }
 }
