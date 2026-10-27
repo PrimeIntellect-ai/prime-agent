@@ -569,9 +569,10 @@ async fn assert_clear_queue_bounces(restore_queue: bool) {
 
 /// The Decision API goal routing at the deliver seam, pinned: the
 /// parent's tagged goal is consumed into the decision engine's goal
-/// input without starting a turn, while a sibling's ceiling goal routes
-/// as an ordinary message — it can never poison the seq against the
-/// parent's later goals.
+/// input without starting a turn — by the live active id or the durable
+/// session id, the only two ids the parent edge matches — while a
+/// sibling's ceiling goal routes as an ordinary message; it can never
+/// poison the seq against the parent's later goals.
 #[tokio::test]
 async fn deliver_routes_only_the_parents_decision_goals() {
     // The worker builds plain first: the engine swap needs ownership
@@ -610,6 +611,7 @@ async fn deliver_routes_only_the_parents_decision_goals() {
         "token".to_string(),
     ));
     worker.core.lock().unwrap().parent_active_session_id = Some("parent-active".to_string());
+    worker.core.lock().unwrap().parent_session_id = Some("parent-durable".to_string());
     let worker = std::sync::Arc::new(worker);
     let goal = |seq: i64, text: &str| {
         json!({"type":"decision_api.goal","seq":seq,"goal":text}).to_string()
@@ -670,7 +672,9 @@ async fn deliver_routes_only_the_parents_decision_goals() {
         )],
         "the sibling's goal tags route as an ordinary message"
     );
-    // The parent's later goal is still consumed after the ceiling attempt.
+    // The parent's later goal is still consumed after the ceiling
+    // attempt, identified by the durable session id this time (the live
+    // id here matches no parent edge).
     let parent_again = worker
         .dispatch(
             "worker_deliver_message",
@@ -678,7 +682,8 @@ async fn deliver_routes_only_the_parents_decision_goals() {
                 "targetActiveSessionId": "target-session",
                 "message": goal(2, "turn left"),
                 "sender": {
-                    "activeSessionId": "parent-active",
+                    "sessionId": "parent-durable",
+                    "activeSessionId": "another-live",
                     "sessionName": "parent",
                     "runtimeKind": "top-level",
                 },
