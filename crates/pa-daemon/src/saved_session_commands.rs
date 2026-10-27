@@ -194,7 +194,7 @@ pub(crate) fn capture_saved_session_delete(
     } else {
         None
     };
-    let known_child = known_runtime_kind == Some("subagent")
+    let known_child = matches!(known_runtime_kind, Some("subagent" | "decision"))
         || deleted_info
             .as_ref()
             .is_some_and(|info| info.parent_session_path.is_some() || info.rlm_depth > 0);
@@ -1071,6 +1071,39 @@ mod tombstone_usage_tests {
         assert!(
             ledger.edges(true).unwrap().is_empty(),
             "no edges, no tombstone"
+        );
+    }
+
+    #[test]
+    fn a_known_decision_child_delete_tombstones_the_edge() {
+        let root = temp_dir("decision-del");
+        let agent_dir = root.join("agent");
+        let sessions_dir = agent_dir.join("sessions");
+        std::fs::create_dir_all(&sessions_dir).unwrap();
+        let ledger = crate::rlm_ledger::RlmSpawnLedger::new(&agent_dir, &sessions_dir, |_| {});
+        ledger
+            .append_spawn(&crate::rlm_ledger::RlmSpawnInput {
+                child_id: "sub-9".into(),
+                parent: sessions_dir.join("p.jsonl").to_string_lossy().into(),
+                child: sessions_dir.join("d.jsonl").to_string_lossy().into(),
+                depth: 1,
+                name: "w".into(),
+            })
+            .unwrap();
+        let capture = capture_saved_session_delete(
+            &sessions_dir.join("d.jsonl").to_string_lossy(),
+            Some("decision"),
+        );
+        assert!(
+            matches!(capture, SavedDeleteCapture::Child { .. }),
+            "a known decision child is never positively top-level"
+        );
+        tombstone_saved_session_delete_captured(&agent_dir, &sessions_dir, &capture);
+        let edges = ledger.edges(true).unwrap();
+        assert_eq!(
+            edges[0].deleted,
+            Some(crate::rlm_ledger::RlmLedgerDeleteReason::User),
+            "the decision child's edge is tombstoned, not left live"
         );
     }
 
