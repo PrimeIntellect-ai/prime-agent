@@ -144,7 +144,9 @@ impl DecisionEngine {
     /// Send one tagged reply to the parent through the supervisor link:
     /// the target is the parent id the worker already knows — the durable
     /// parent edge in its pushed session summary — so a reply never
-    /// fetches the family roster just to find it.
+    /// fetches the family roster just to find it. The reply rides the
+    /// follow-up lane: it lands as a queued row the parent reads at its
+    /// next wake instead of steering (interrupting) its running turn.
     fn send_reply(&self, message: &Value) -> anyhow::Result<()> {
         let summary = self
             .own_summary
@@ -164,6 +166,7 @@ impl DecisionEngine {
                     target,
                     message,
                     receiver_role: Some(AgentFamilyRelationship::Parent),
+                    delivery_mode: Some("follow_up"),
                 })
                 .await
                 .map(|_| ())
@@ -578,10 +581,12 @@ mod tests {
         );
     }
 
-    /// The reply target, pinned: a reply routes to the parent id the
+    /// The reply route, pinned: a reply routes to the parent id the
     /// worker already knows — the pushed summary's `parentActiveSessionId`
     /// — and never fetches the family roster to find it; a child without
-    /// a parent edge fails fast without touching the link.
+    /// a parent edge fails fast without touching the link. The reply also
+    /// rides the follow-up lane: a decision never steers (interrupts) the
+    /// parent's running turn.
     #[cfg(unix)]
     #[test]
     fn a_reply_targets_the_known_parent_id_never_the_roster() {
@@ -684,6 +689,10 @@ mod tests {
                 "every leg of the reply must target the worker's known parent id"
             );
         }
+        assert_eq!(
+            captured[1]["deliveryMode"], "follow_up",
+            "a decision reply must queue behind the parent's work, never steer it"
+        );
     }
 
     /// The engine-start resolution, pinned: the decision model resolves

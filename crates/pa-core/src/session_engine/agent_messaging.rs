@@ -80,6 +80,10 @@ pub struct AgentMessageSendInput {
     pub target: String,
     pub message: String,
     pub receiver_role: Option<AgentFamilyRelationship>,
+    /// The target lane's delivery mode: `Some("follow_up")` queues the
+    /// message behind the target's current work instead of steering it;
+    /// `None` is the default steer delivery.
+    pub delivery_mode: Option<&'static str>,
 }
 
 #[derive(Debug, Clone)]
@@ -431,6 +435,7 @@ pub fn register_agent_message_host_handlers<C: AgentMessageController + 'static>
                                 target: member.id.clone(),
                                 message: message.clone(),
                                 receiver_role: Some(member.relationship),
+                                delivery_mode: None,
                             })
                             .await;
                         receipts.push(match result {
@@ -518,6 +523,7 @@ pub fn register_agent_message_host_handlers<C: AgentMessageController + 'static>
                         target: member.id.clone(),
                         message: message.clone(),
                         receiver_role: Some(role),
+                        delivery_mode: None,
                     })
                     .await?;
                 Ok(receipt_value(&receipt))
