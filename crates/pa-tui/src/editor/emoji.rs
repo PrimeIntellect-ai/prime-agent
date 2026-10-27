@@ -1,6 +1,5 @@
-//! Emoji shortcodes: a typed `:name:` with a known GitHub shortcode becomes
-//! its emoji, and a typed `:na` lists the matching emoji in the
-//! autocomplete menu.
+//! Emoji shortcodes: a typed `:na` lists the emoji whose GitHub shortcodes
+//! match in the autocomplete menu, and accepting an item inserts the emoji.
 
 use super::text_utils::{char_prefix, char_suffix};
 use super::Editor;
@@ -59,22 +58,6 @@ impl Editor {
         open.is_some()
             || fence(&self.lines[self.cursor_line]).is_some()
             || before.iter().filter(|c| **c == '`').count() % 2 == 1
-    }
-
-    /// Replace the `:name:` the just-typed colon closed with its emoji;
-    /// one undo restores the typed shortcode.
-    pub(super) fn convert_emoji_shortcode(&mut self) {
-        let Some((start, name)) = self.shortcode_token(self.cursor_col - 1) else {
-            return;
-        };
-        let Some(emoji) = emojis::get_by_shortcode(&name) else {
-            return;
-        };
-        self.push_undo_snapshot();
-        self.last_action = None;
-        let result = self.replace_before_cursor(start, emoji.as_str());
-        self.lines = result.lines;
-        self.set_cursor_col(result.cursor_col);
     }
 
     /// Apply an emoji menu item to the shortcode token at the cursor. The
@@ -152,6 +135,8 @@ mod tests {
         editor
     }
 
+    /// Type key by key, materializing suggestions after each key as the
+    /// host loop does once the input queue drains.
     fn type_text(editor: &mut Editor, text: &str) {
         for c in text.chars() {
             match c {
@@ -159,71 +144,60 @@ mod tests {
                 ' ' => editor.handle_input("space"),
                 c => editor.handle_input(&c.to_string()),
             }
+            editor.materialize_autocomplete();
         }
     }
 
     #[test]
-    fn the_closing_colon_converts_a_known_shortcode() {
-        let mut e = editor();
-        type_text(&mut e, "hi :heart");
-        assert_eq!(e.get_text(), "hi :heart");
-        type_text(&mut e, ":");
-        assert_eq!(e.get_text(), "hi ❤️");
-        e.handle_input("ctrl+-");
-        assert_eq!(
-            e.get_text(),
-            "hi :heart:",
-            "one undo restores the shortcode"
-        );
-
-        e.set_emoji_shortcodes(false);
-        e.set_text("");
-        type_text(&mut e, ":heart:");
-        assert_eq!(e.get_text(), ":heart:", "the setting turns conversion off");
-    }
-
-    #[test]
-    fn code_and_non_shortcodes_stay_as_typed() {
-        for text in [
-            "`:heart:",
-            "```\n:heart:",
-            "~~~\n:heart:",
-            "~~~\n```\n:heart:",
-            "https://example.com/:heart:",
-            "10:30:",
-            "a:heart:",
-            "std::ok:",
-            ":notanemoji:",
+    fn two_name_chars_at_a_word_start_outside_code_open_the_emoji_menu() {
+        for (text, opens) in [
+            (":he", true),
+            (":h", false),
+            ("a:he", false),
+            ("std::he", false),
+            ("https://example.com/:he", false),
+            ("`:he", false),
+            ("```\n:he", false),
+            ("~~~\n```\n:he", false),
         ] {
             let mut e = editor();
             type_text(&mut e, text);
-            assert_eq!(e.get_text(), text);
+            let kind = e.autocomplete_state().and_then(|state| state.kind);
+            assert_eq!(kind == Some(SuggestionKind::Emoji), opens, "{text:?}");
         }
     }
 
     #[test]
-    fn two_name_chars_at_a_word_start_open_the_emoji_menu() {
-        for (text, opens) in [(":h", false), ("a:he", false), (":hear", true)] {
-            let mut e = editor();
-            type_text(&mut e, text);
-            e.materialize_autocomplete();
-            let kind = e.autocomplete_state().and_then(|state| state.kind);
-            assert_eq!(kind == Some(SuggestionKind::Emoji), opens, "{text}");
-        }
+    fn only_accepting_from_the_menu_inserts_the_emoji() {
         let mut e = editor();
         type_text(&mut e, ":hear");
-        e.materialize_autocomplete();
-        e.handle_input("tab");
+        e.handle_input("enter");
         assert_eq!(e.get_text(), "❤️");
+        e.handle_input("ctrl+-");
+        assert_eq!(e.get_text(), ":hear", "one undo restores the typed text");
+
+        // A closing colon or a space keeps the text and dismisses the menu.
+        for text in [":heart:", ":heart "] {
+            let mut e = editor();
+            type_text(&mut e, text);
+            assert_eq!(e.get_text(), text);
+            assert!(!e.is_showing_autocomplete(), "{text:?}");
+        }
 
         // The menu stays open across cursor motions; accepting with no
         // shortcode at the cursor leaves the text alone.
         let mut e = editor();
         type_text(&mut e, "hello :hear");
-        e.materialize_autocomplete();
         e.handle_input("home");
         assert!(e.is_showing_autocomplete());
-        e.handle_input("tab");
+        e.handle_input("enter");
         assert_eq!(e.get_text(), "hello :hear");
+
+        let mut e = Editor::new();
+        type_text(&mut e, ":hear");
+        assert!(
+            !e.is_showing_autocomplete(),
+            "the setting turns the menu off"
+        );
     }
 }

@@ -245,7 +245,7 @@ pub fn settings_menu_rows(current: &SettingsCurrentValues) -> Vec<SettingsMenuRo
         SettingsMenuRow {
             id: "emoji-shortcodes",
             label: "Emoji shortcodes",
-            description: "Turn :name: shortcodes typed in the editor into emoji",
+            description: "Suggest emoji when typing :name in the editor",
             current: current.emoji_shortcodes.to_string(),
             values: Some(bool_value()),
             submenu: None,

@@ -285,6 +285,16 @@ impl Editor {
             self.cancel_autocomplete();
             return;
         }
+        // The emoji menu lives only as long as its `:name` token: a closing
+        // colon or a space dismisses it instead of asking the provider anew.
+        let emoji_menu = self
+            .autocomplete
+            .as_ref()
+            .is_some_and(|s| s.kind == Some(crate::autocomplete::SuggestionKind::Emoji));
+        if emoji_menu && self.emoji_query().is_none() {
+            self.cancel_autocomplete();
+            return;
+        }
         if self.autocomplete.is_some() {
             let force = self.autocomplete.as_ref().is_some_and(|s| s.forced);
             self.request_autocomplete(force, false);

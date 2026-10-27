@@ -366,7 +366,7 @@ pub struct Settings {
     pub editor_padding_x: Option<u64>,
     pub autocomplete_max_visible: Option<u64>,
     pub show_hardware_cursor: Option<bool>,
-    /// Typed `:name:` shortcodes in the prompt editor become emoji (unset means on).
+    /// Typing `:name` in the prompt editor suggests matching emoji (unset means on).
     pub emoji_shortcodes: Option<bool>,
     pub markdown: Option<MarkdownSettings>,
     pub warnings: Option<WarningSettings>,
