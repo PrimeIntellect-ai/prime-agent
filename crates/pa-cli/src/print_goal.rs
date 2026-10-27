@@ -597,7 +597,7 @@ impl PrintGoalSurface {
         boundary: &mut crate::print_boundary::TurnBoundary,
         model: &pa_types::ai::Model,
         api_key: Option<String>,
-        global_harness_dir: std::path::PathBuf,
+        _global_harness_dir: std::path::PathBuf,
         message: &CustomMessage,
     ) -> Result<(), String> {
         let label = compact_rlm_text(&custom_message_text(message), 160);
@@ -614,7 +614,7 @@ impl PrintGoalSurface {
             .map_err(|error| format!("{error:#}"))?;
         engine.session.agent().wait_for_idle().await;
         boundary
-            .run_at_settled_turn(engine, model, api_key.clone(), global_harness_dir)
+            .run_at_settled_turn(engine, model, api_key.clone())
             .await?;
         if let Some(error_message) =
             crate::headless_autonomous::latest_assistant_error(engine).await
@@ -638,7 +638,7 @@ impl PrintGoalSurface {
         boundary: &mut crate::print_boundary::TurnBoundary,
         model: &pa_types::ai::Model,
         api_key: Option<String>,
-        global_harness_dir: std::path::PathBuf,
+        _global_harness_dir: std::path::PathBuf,
         message: &CustomMessage,
     ) -> Result<(), String> {
         // The queued goal turn's run completes its admission: the held continuation
@@ -657,9 +657,7 @@ impl PrintGoalSurface {
             .map_err(|error| format!("{error:#}"))?;
         engine.session.agent().wait_for_idle().await;
         self.emit_action_drained().await;
-        boundary
-            .run_at_settled_turn(engine, model, api_key, global_harness_dir)
-            .await?;
+        boundary.run_at_settled_turn(engine, model, api_key).await?;
         Ok(())
     }
 }
@@ -938,7 +936,7 @@ mod tests {
                 .unwrap();
             self.engine.session.agent().wait_for_idle().await;
             boundary
-                .run_at_settled_turn(&self.engine, &self.model, None, self.harness_dir.clone())
+                .run_at_settled_turn(&self.engine, &self.model, None)
                 .await
                 .unwrap();
             self.surface

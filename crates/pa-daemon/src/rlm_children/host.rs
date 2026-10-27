@@ -127,7 +127,10 @@ impl RlmSubagentHost for SupervisorChildSessions {
                     "rlm.spawn",
                 )?;
                 let mut runtime_metadata = json!({
-                    "kind": "subagent",
+                    // The refine child (`rlm.spawn kind="refine"`): its
+                    // worker boots the refinement protocol instead of the
+                    // agent engine.
+                    "kind": if request.refine_child { "refine" } else { "subagent" },
                     "rlmChildId": child_id,
                     "parentActiveSessionId": this.parent_active_session_id,
                     "rlmDepth": identity.rlm_depth + 1,
@@ -253,8 +256,14 @@ impl RlmSubagentHost for SupervisorChildSessions {
             // continuation request reaches the provider first (see
             // `wait_turn_done`). A spawn admitted while the parent is idle
             // (a background kernel task, e.g. a factory run) has no turn
-            // to wait for.
-            let spawning_turn = {
+            // to wait for. The refinement child skips the wait either way:
+            // its one prompt is a planning pass, never a turn contending
+            // with the parent's provider continuation — and `/refine`
+            // fires off-turn too, where the wait would idle the child for
+            // its whole budget.
+            let spawning_turn = if request.refine_child {
+                None
+            } else {
                 let turn = *this.parent_turn.borrow();
                 turn.running.then_some(turn.completed)
             };

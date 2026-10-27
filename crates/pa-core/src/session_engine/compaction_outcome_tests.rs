@@ -280,34 +280,25 @@ fn refine_assistant_row(error: bool) -> SessionAgentMessage {
     })
 }
 
-fn refine_plan_call(plan: &'static str) -> crate::refinement::executor::RefinerFn {
-    Box::new(move |_model, _system, _prompt| {
-        Box::pin(async move {
-            Ok(pa_types::ai::AssistantMessage {
-                content: vec![pa_types::ai::AssistantContentBlock::Text(
-                    pa_types::ai::TextContent {
-                        text: plan.to_string(),
-                        text_signature: None,
-                        rest: serde_json::Map::default(),
-                    },
-                )],
-                api: "openai-completions".to_string(),
-                provider: "test".to_string(),
-                model: "m".to_string(),
-                response_model: None,
-                response_id: None,
-                diagnostics: None,
-                usage: pa_types::ai::Usage::default(),
-                stop_reason: pa_types::ai::StopReason::Stop,
-                stop_reason_raw: None,
-                error_message: None,
-                timestamp: 0,
-                rest: serde_json::Map::default(),
-            })
-        })
-    })
+async fn run_child_refine(
+    session: &AgentSession,
+    reply: &'static str,
+    global_dir: &std::path::Path,
+) -> anyhow::Result<crate::refinement::RefinementResult> {
+    // The two halves of the child flow driven directly: the parent-side
+    // prepare (the baseline capture), then the wake-side apply over the
+    // child's proposal reply.
+    let (prepared, _) = session
+        .prepare_refinement(
+            &refine::RefineOptions::default(),
+            &session_ai_model(),
+            global_dir,
+        )
+        .await?;
+    session
+        .apply_child_refinement(prepared, reply, refine::RefinementSource::User, global_dir)
+        .await
 }
-
 const APPLIED_PLAN: &str = r#"{"summary":"note it","rationale":"repeated","expectedOutcome":"recall","edits":[{"action":"create","kind":"memory","id":"m1","title":"Tactic","content":"Use tactic A"}]}"#;
 const EMPTY_PLAN: &str = r#"{"summary":"bench","edits":[]}"#;
 
@@ -387,14 +378,7 @@ fn custom_types(messages: &[AgentMessage]) -> Vec<String> {
 async fn refine_pushed_live_context_matches_a_full_rebuild_byte_for_byte() {
     let (session, tmp) = refine_test_session().await;
     let global_dir = tmp.path().join("harness");
-    let result = session
-        .refine_with_refiner(
-            &refine::RefineOptions::default(),
-            refine::RefinementSource::User,
-            &session_ai_model(),
-            refine_plan_call(APPLIED_PLAN),
-            global_dir,
-        )
+    let result = run_child_refine(&session, APPLIED_PLAN, &global_dir)
         .await
         .unwrap();
     assert!(result.applied_edits.iter().any(|edit| edit.applied));
@@ -419,14 +403,7 @@ async fn refine_pushed_live_context_matches_a_full_rebuild_byte_for_byte() {
 async fn refine_with_an_empty_plan_pushes_only_the_outcome_row() {
     let (session, tmp) = refine_test_session().await;
     let global_dir = tmp.path().join("harness");
-    let result = session
-        .refine_with_refiner(
-            &refine::RefineOptions::default(),
-            refine::RefinementSource::User,
-            &session_ai_model(),
-            refine_plan_call(EMPTY_PLAN),
-            global_dir,
-        )
+    let result = run_child_refine(&session, EMPTY_PLAN, &global_dir)
         .await
         .unwrap();
     assert!(result.applied_edits.iter().all(|edit| !edit.applied));
@@ -453,24 +430,10 @@ async fn sequential_refines_push_exactly_their_own_rows() {
     let global_dir = tmp.path().join("harness");
     let first = r#"{"summary":"one","edits":[{"action":"create","kind":"memory","id":"m1","title":"A","content":"a"}]}"#;
     let second = r#"{"summary":"two","edits":[{"action":"create","kind":"memory","id":"m2","title":"B","content":"b"}]}"#;
-    session
-        .refine_with_refiner(
-            &refine::RefineOptions::default(),
-            refine::RefinementSource::User,
-            &session_ai_model(),
-            refine_plan_call(first),
-            global_dir.clone(),
-        )
+    run_child_refine(&session, first, &global_dir)
         .await
         .unwrap();
-    session
-        .refine_with_refiner(
-            &refine::RefineOptions::default(),
-            refine::RefinementSource::User,
-            &session_ai_model(),
-            refine_plan_call(second),
-            global_dir,
-        )
+    run_child_refine(&session, second, &global_dir)
         .await
         .unwrap();
     let candidate = session.agent().state().await.messages;
@@ -506,14 +469,7 @@ async fn refine_factory_edits_follow_the_agent_dir_opt_in_setting() {
     // disabled message; opted in, the same proposal applies.
     let (mut session, tmp) = refine_test_session().await;
     let global_dir = tmp.path().join("harness");
-    let refused = session
-        .refine_with_refiner(
-            &refine::RefineOptions::default(),
-            refine::RefinementSource::User,
-            &session_ai_model(),
-            refine_plan_call(FACTORY_PLAN),
-            global_dir.clone(),
-        )
+    let refused = run_child_refine(&session, FACTORY_PLAN, &global_dir)
         .await
         .unwrap();
     assert!(!refused.applied_edits[0].applied);
@@ -530,14 +486,7 @@ async fn refine_factory_edits_follow_the_agent_dir_opt_in_setting() {
     )
     .unwrap();
     session.set_agent_dir(agent_dir);
-    let applied = session
-        .refine_with_refiner(
-            &refine::RefineOptions::default(),
-            refine::RefinementSource::User,
-            &session_ai_model(),
-            refine_plan_call(FACTORY_PLAN),
-            global_dir,
-        )
+    let applied = run_child_refine(&session, FACTORY_PLAN, &global_dir)
         .await
         .unwrap();
     assert!(applied.applied_edits[0].applied);
@@ -573,14 +522,7 @@ async fn refine_keeps_the_retry_drop_instead_of_resurrecting_the_error_row() {
         "the error row is dropped from the live context"
     );
     let global_dir = tmp.path().join("harness");
-    session
-        .refine_with_refiner(
-            &refine::RefineOptions::default(),
-            refine::RefinementSource::User,
-            &session_ai_model(),
-            refine_plan_call(APPLIED_PLAN),
-            global_dir,
-        )
+    run_child_refine(&session, APPLIED_PLAN, &global_dir)
         .await
         .unwrap();
     // The push preserves the live list: the dropped error row stays
@@ -606,78 +548,79 @@ async fn refine_keeps_the_retry_drop_instead_of_resurrecting_the_error_row() {
 }
 
 #[tokio::test]
-async fn refinement_and_auto_review_send_the_session_request_identity() {
-    let (mut session, tmp) = refine_test_session().await;
-    std::fs::write(
-        tmp.path().join("auth.json"),
-        serde_json::json!({
-            "prime-inference": {
-                "type": "api_key",
-                "key": "test-key",
-                "primeTeam": { "teamId": "team-1", "name": "Test Team" }
-            }
-        })
-        .to_string(),
-    )
-    .unwrap();
-    session.set_auxiliary_model_context(
-        crate::session_engine::auxiliary_model::AuxiliaryModelContext {
-            cwd: tmp.path().to_path_buf(),
-            agent_dir: tmp.path().to_path_buf(),
-        },
-    );
-    let expected = session.session_id().await;
-    let registration =
-        pa_ai::faux::register_faux_provider(pa_ai::faux::RegisterFauxProviderOptions {
-            provider: Some("prime-inference".to_string()),
-            ..Default::default()
-        });
-    let observed = Arc::new(std::sync::Mutex::new(Vec::new()));
-    let step = |text: &'static str| {
-        let observed = Arc::clone(&observed);
-        pa_ai::faux::FauxResponseStep::Factory(Arc::new(move |_, options, _, _| {
-            observed.lock().unwrap().push((
-                options.and_then(|o| o.session_id.clone()),
-                options.and_then(|o| o.transport),
-                options
-                    .and_then(|o| o.headers.as_ref())
-                    .and_then(|headers| headers.get("X-Prime-Team-ID").cloned()),
-            ));
-            Ok(pa_ai::faux::faux_assistant_text_message(
-                text,
-                pa_ai::faux::FauxAssistantMessageOptions::default(),
-            ))
-        }))
-    };
-    registration.set_responses(vec![
-        step(EMPTY_PLAN),
-        step(r#"{"shouldRefine":false,"rationale":"fixture"}"#),
-    ]);
-    let model = registration.get_model();
-    let global = tmp.path().join("harness");
-    session
-        .refine(
+async fn a_kernel_write_between_prepare_and_apply_rejects_the_stale_edit() {
+    // The apply freshness: the wake-side apply re-reads the target
+    // harness state from disk; an entry the kernel rewrote while the
+    // child planned is rejected against the prepare-time baseline,
+    // never clobbered.
+    let (session, tmp) = refine_test_session().await;
+    let global_dir = tmp.path().join("harness");
+    let (prepared, _) = session
+        .prepare_refinement(
             &refine::RefineOptions::default(),
-            refine::RefinementSource::User,
-            &model,
-            None,
-            global.clone(),
+            &session_ai_model(),
+            &global_dir,
         )
         .await
         .unwrap();
-    session
-        .review_compact_auto_refine(&model, None, &global, 5, 0)
+    // The concurrent kernel write: the session's local harness store
+    // gains the entry the child's proposal then edits.
+    let local_dir = refine::local_harness_state_dir(&*session.session.lock().await);
+    crate::refinement::update_harness_state(
+        &local_dir,
+        crate::refinement::HarnessScope::Local,
+        |state| {
+            state
+                .entries
+                .get_mut(&crate::refinement::RefinementKind::Memory)
+                .unwrap()
+                .insert(
+                    "m1".to_string(),
+                    crate::refinement::HarnessEntry {
+                        id: "m1".to_string(),
+                        kind: crate::refinement::RefinementKind::Memory,
+                        title: "Kernel's own".to_string(),
+                        content: "the kernel wrote this while the child planned".to_string(),
+                        path: "/m/m1".to_string(),
+                        scope: Some(crate::refinement::HarnessScope::Local),
+                        reference: serde_json::Map::default(),
+                        arguments: serde_json::Map::default(),
+                        metadata: serde_json::Map::default(),
+                        source: "kernel".to_string(),
+                        created_at: String::new(),
+                        updated_at: String::new(),
+                        version: 3,
+                    },
+                );
+        },
+    )
+    .unwrap();
+    // The child's reply updates the entry the kernel wrote: the
+    // freshly re-read state no longer matches the prepare-time baseline,
+    // so the edit rejects instead of clobbering the kernel's version.
+    let stale = session
+        .apply_child_refinement(
+            prepared,
+            r#"{"summary":"s","rationale":"r","edits":[{"action":"update","kind":"memory","id":"m1","title":"Tactic","content":"Use tactic A"}]}"#,
+            refine::RefinementSource::User,
+            &global_dir,
+        )
         .await
         .unwrap();
+    assert!(
+        !stale.applied_edits[0].applied,
+        "the stale edit applied: {stale:?}"
+    );
     assert_eq!(
-        *observed.lock().unwrap(),
-        vec![
-            (
-                Some(expected),
-                Some(pa_ai::types::Transport::Sse),
-                Some("team-1".to_string())
-            );
-            2
-        ]
+        stale.applied_edits[0].error.as_deref(),
+        Some("entry changed during refinement planning"),
+        "the stale rejection names the contract: {stale:?}"
+    );
+    let reloaded =
+        crate::refinement::load_harness_state(&local_dir, crate::refinement::HarnessScope::Local);
+    assert_eq!(
+        reloaded.entries[&crate::refinement::RefinementKind::Memory]["m1"].title,
+        "Kernel's own",
+        "the kernel's concurrent write survived, never clobbered"
     );
 }

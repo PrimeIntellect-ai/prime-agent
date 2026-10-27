@@ -1,17 +1,17 @@
-//! The refinement executor: plan a refinement (rollback or LLM pass), re-read the harness store,
-//! apply the proposal, and record the result.
+//! The refinement executor: the refinement child's planning surface (the
+//! spawn request envelope and the model prompt), the proposal parse, the
+//! rollback plan, and the apply machinery. The model pass itself runs in
+//! the refinement child — a daemon `rlm.spawn kind="refine"` child — so
+//! this module owns no provider call.
 
 use super::planner::{
-    apply_refinement_proposal, parse_proposal, refinement_request, rollback_proposal, ApplyOptions,
-    RefinementProposal, AUTO_REFINE_REVIEW_MAX_OUTPUT_TOKENS, AUTO_REFINE_REVIEW_SYSTEM_PROMPT,
-    REFINEMENT_MAX_OUTPUT_TOKENS, REFINEMENT_SYSTEM_PROMPT,
+    apply_refinement_proposal, rollback_proposal, trim_conversation_to_context, ApplyOptions,
+    RefinementProposal,
 };
 use super::{
-    infer_refinement_result_scope, merge_refinement_history, HarnessScope, HarnessState,
-    RefinementKind, RefinementResult, REFINEMENT_KINDS,
+    infer_refinement_result_scope, HarnessScope, HarnessState, RefinementKind, RefinementResult,
+    REFINEMENT_KINDS,
 };
-use pa_types::ai::{AssistantMessage, StopReason};
-use pa_types::session::AgentMessage;
 
 #[derive(Debug, Default, Clone)]
 pub struct RefineOptions {
@@ -124,27 +124,6 @@ pub fn history_for_prompt(history: &[RefinementResult]) -> String {
         .join("\n\n")
 }
 
-/// Model-call seam (test seam over pa-ai completion): takes the request
-/// model (output budget pre-clamped), the call's system prompt, and the
-/// user prompt; returns the reply text.
-pub type RefinerFn = Box<
-    dyn FnOnce(
-            pa_types::ai::Model,
-            &'static str,
-            String,
-        ) -> std::pin::Pin<
-            Box<dyn std::future::Future<Output = anyhow::Result<AssistantMessage>> + Send>,
-        > + Send,
->;
-
-#[must_use]
-pub fn merge_refinement_result_history(
-    global: &[RefinementResult],
-    session: &[RefinementResult],
-) -> Vec<RefinementResult> {
-    merge_refinement_history(global, session)
-}
-
 fn action_name(action: super::RefinementAction) -> &'static str {
     match action {
         super::RefinementAction::Create => "create",
@@ -173,134 +152,148 @@ fn kind_value(name: &str) -> RefinementKind {
     }
 }
 
-/// Serialize the conversation for the refine prompt, tail-capped.
-fn conversation_text(messages: &[AgentMessage], cap: usize) -> String {
-    let serialized = crate::session_engine::compaction_utils::serialize_conversation(messages);
-    let chars: Vec<char> = serialized.chars().collect();
-    if chars.len() <= cap {
-        serialized
-    } else {
-        chars[chars.len() - cap..].iter().collect()
-    }
+/// The refinement child's spawn request tag: the JSON envelope the child's
+/// engine parses off its first prompt.
+pub const REFINEMENT_REQUEST_TYPE: &str = "refinement.request";
+
+/// One refinement child's spawn request: everything the child needs to run
+/// the planning pass itself. The harness state is NOT snapshotted here —
+/// the child reads the state dirs and the refinement history from disk
+/// through the carried paths.
+#[derive(Debug, Clone)]
+pub struct RefinementRequest {
+    /// Global (`true`) or local (`false`) refinement scope.
+    pub global: bool,
+    /// Caller-supplied instructions, when any.
+    pub instructions: Option<String>,
+    /// The parent's local harness state dir (the session's own store).
+    pub local_harness_dir: Option<String>,
+    /// The agent dir's global harness state dir.
+    pub global_harness_dir: String,
+    /// The parent's session file (the in-session refinement history).
+    pub parent_session_file: Option<String>,
 }
 
-/// Produce a refinement proposal (rollback, or the LLM pass) without mutating
-/// any harness state. Callers re-read the harness file before applying because
-/// the LLM call can take many seconds.
-///
-/// # Errors
-///
-/// Error on an unknown rollback id, a failed request build or LLM call, or an unparseable reply.
-pub async fn plan_refinement(
-    messages: &[AgentMessage],
+/// Build the refinement child's spawn prompt: the JSON request envelope
+/// carrying the conversation trimmed to the child model's context window.
+#[must_use]
+pub fn refinement_spawn_prompt(
+    request: &RefinementRequest,
+    context_window: u64,
+    conversation: &str,
+) -> String {
+    let mut envelope = serde_json::json!({
+        "type": REFINEMENT_REQUEST_TYPE,
+        "scope": if request.global { "global" } else { "local" },
+        "globalHarnessDir": request.global_harness_dir,
+    });
+    if let Some(instructions) = &request.instructions {
+        envelope["instructions"] = serde_json::json!(instructions);
+    }
+    if let Some(dir) = &request.local_harness_dir {
+        envelope["localHarnessDir"] = serde_json::json!(dir);
+    }
+    if let Some(file) = &request.parent_session_file {
+        envelope["parentSessionFile"] = serde_json::json!(file);
+    }
+    // The trim needs the envelope's own head room: serialize it once with
+    // the conversation slot empty, then trim the conversation against the
+    // model's window minus that head.
+    let mut head = envelope.clone();
+    head["conversation"] = serde_json::json!("");
+    let request_head = head.to_string();
+    let trimmed = trim_conversation_to_context(context_window, &request_head, conversation);
+    envelope["conversation"] = serde_json::json!(trimmed);
+    serde_json::to_string(&envelope).unwrap_or_default()
+}
+
+/// The refinement child's model prompt: the harness overview, the history,
+/// the conversation, and the scope policy — the sections the planning pass
+/// answers with its proposal JSON.
+#[must_use]
+pub fn refinement_user_prompt(
     state: &HarnessState,
     history: &[RefinementResult],
-    model: &pa_types::ai::Model,
+    conversation: &str,
     options: &RefineOptions,
-    refine_call: RefinerFn,
-) -> anyhow::Result<RefinementPlan> {
-    let id = generate_refinement_id();
-    if let Some(rollback_id) = &options.rollback_id {
-        let Some(target) = history.iter().find(|item| &item.id == rollback_id) else {
-            anyhow::bail!("Refinement {rollback_id} not found");
-        };
-        let fallback_scope = if options.global {
-            HarnessScope::Global
-        } else {
-            HarnessScope::Local
-        };
-        return Ok(RefinementPlan {
-            proposal: rollback_proposal(target),
-            id,
-            rollback_of: Some(target.id.clone()),
-            rollback_scope: Some(infer_refinement_result_scope(target).unwrap_or(fallback_scope)),
-        });
-    }
-
-    let conversation_text = conversation_text(messages, 80_000);
+) -> String {
     let scope_instruction = if options.global {
         "Requested refinement scope: global. Only propose stable cross-session continual harness edits, durable user preferences, reusable skills/subagents, or explicitly project-qualified facts that should affect future Prime Agent sessions. Do not persist session-only progress, temporary blockers, or current-run coordination globally."
     } else {
         "Requested refinement scope: local. Prefer local continual harness edits for current task progress, temporary blockers, current-run coordination, and project facts that are not clearly reusable across Prime Agent sessions. Global entries in the overview are read-only context: do not propose update or delete edits for them; create a local entry instead if an override is needed."
     };
-    let build_prompt = |conversation: &str| -> String {
-        let mut sections = vec![
-            format!(
-                "<current_harness_state>\n{}\n</current_harness_state>",
-                overview_for_prompt(state)
-            ),
-            format!(
-                "<refinement_history>\n{}\n</refinement_history>",
-                history_for_prompt(history)
-            ),
-            format!("<conversation>\n{conversation}\n</conversation>"),
-            format!("<scope_policy>\n{scope_instruction}\n</scope_policy>"),
-        ];
-        if let Some(instructions) = &options.instructions {
-            sections.push(format!(
-                "<user_refine_instructions>\n{instructions}\n</user_refine_instructions>"
-            ));
-        }
-        sections.push(
-            "Return only JSON edits. If no useful edit is justified, return an empty edits array with a rationale."
-                .to_string(),
-        );
-        sections.join("\n\n")
-    };
-    let (request_max_tokens, user_prompt) = refinement_request(
-        model,
-        super::planner::REFINEMENT_SYSTEM_PROMPT,
-        &conversation_text,
-        &build_prompt,
-        REFINEMENT_MAX_OUTPUT_TOKENS,
-    )?;
-    let mut request_model = model.clone();
-    request_model.max_tokens = request_max_tokens.min(REFINEMENT_MAX_OUTPUT_TOKENS);
-
-    let max_tokens = request_model.max_tokens;
-    let reply = refine_call(request_model, REFINEMENT_SYSTEM_PROMPT, user_prompt).await?;
-    let text = reply_text(&reply, max_tokens, "Refinement failed")?;
-    Ok(RefinementPlan {
-        proposal: parse_proposal(&text).map_err(anyhow::Error::msg)?,
-        id,
-        rollback_of: None,
-        rollback_scope: None,
-    })
+    let mut sections = vec![
+        format!(
+            "<current_harness_state>\n{}\n</current_harness_state>",
+            overview_for_prompt(state)
+        ),
+        format!(
+            "<refinement_history>\n{}\n</refinement_history>",
+            history_for_prompt(history)
+        ),
+        format!("<conversation>\n{conversation}\n</conversation>"),
+        format!("<scope_policy>\n{scope_instruction}\n</scope_policy>"),
+    ];
+    if let Some(instructions) = &options.instructions {
+        sections.push(format!(
+            "<user_refine_instructions>\n{instructions}\n</user_refine_instructions>"
+        ));
+    }
+    sections.push(
+        "Return only JSON edits. If no useful edit is justified, return an empty edits array with a rationale."
+            .to_string(),
+    );
+    sections.join("\n\n")
 }
 
-/// The text of a side call's reply. A reply cut off at its output limit or
-/// failed by the provider is an error that says so, never parsed as JSON.
-fn reply_text(reply: &AssistantMessage, max_tokens: u64, failure: &str) -> anyhow::Result<String> {
-    match reply.stop_reason {
-        StopReason::Length => anyhow::bail!(
-            "{failure}: the model hit its output limit ({max_tokens} tokens, {}/{})",
-            reply.provider,
-            reply.model
-        ),
-        StopReason::Error => anyhow::bail!(
-            "{failure}: {}",
-            reply.error_message.as_deref().unwrap_or("Unknown error")
-        ),
-        StopReason::Stop | StopReason::ToolUse | StopReason::Aborted => {}
-    }
-    Ok(reply
-        .content
-        .iter()
-        .filter_map(|block| match block {
-            pa_types::ai::AssistantContentBlock::Text(text) => Some(text.text.clone()),
-            _ => None,
-        })
-        .collect::<Vec<_>>()
-        .join("\n"))
+/// Parse the planning pass's proposal out of the model reply text.
+///
+/// # Errors
+///
+/// Human-readable parse error: no JSON object, an invalid candidate, or a
+/// truncated reply.
+pub fn parse_child_proposal(text: &str) -> anyhow::Result<RefinementProposal> {
+    super::planner::parse_proposal(text).map_err(anyhow::Error::msg)
+}
+
+/// The mechanical rollback plan: no model pass, only the inversion of the
+/// target refinement's applied edits. `Ok(None)` when `rollback_id` is
+/// absent; the caller runs the planning child instead.
+///
+/// # Errors
+///
+/// Error on an unknown rollback id.
+pub fn rollback_plan(
+    history: &[RefinementResult],
+    options: &RefineOptions,
+) -> anyhow::Result<Option<RefinementPlan>> {
+    let id = generate_refinement_id();
+    let Some(rollback_id) = &options.rollback_id else {
+        return Ok(None);
+    };
+    let Some(target) = history.iter().find(|item| &item.id == rollback_id) else {
+        anyhow::bail!("Refinement {rollback_id} not found");
+    };
+    let fallback_scope = if options.global {
+        HarnessScope::Global
+    } else {
+        HarnessScope::Local
+    };
+    Ok(Some(RefinementPlan {
+        proposal: rollback_proposal(target),
+        id,
+        rollback_of: Some(target.id.clone()),
+        rollback_scope: Some(infer_refinement_result_scope(target).unwrap_or(fallback_scope)),
+    }))
 }
 
 /// Apply a plan to the (re-read) harness state. `factory_enabled` is the
 /// `factory.enabled` opt-in (default off), resolved by the caller
-/// immediately before this call — after the planning request — so the
+/// immediately before this call — after the planning pass — so the
 /// synchronous apply always decides on the current setting, never a
 /// pre-request snapshot: while it is off, factory create/update edits
-/// refuse with the one disabled message, the same gate the kernel-side
-/// factory writers raise.
+/// refuse with the one disabled message, the same gate the
+/// kernel-side factory writers raise.
 pub fn apply_refinement_plan(
     state: &mut HarnessState,
     plan: RefinementPlan,
@@ -326,221 +319,9 @@ pub fn apply_refinement_plan(
     )
 }
 
-#[derive(Debug, Default, Clone, PartialEq)]
-pub struct AutoRefineReview {
-    pub should_refine: bool,
-    pub rationale: String,
-    pub instructions: Option<String>,
-}
-
-pub struct AutoRefineReviewContext {
-    pub reason: String,
-    pub turns_since_last_review: u32,
-}
-
-fn parse_auto_refine_review(text: &str) -> anyhow::Result<AutoRefineReview> {
-    let value = super::planner::extract_json_object(text).map_err(anyhow::Error::msg)?;
-    let record = value.as_object().cloned().unwrap_or_default();
-    Ok(AutoRefineReview {
-        should_refine: record.get("shouldRefine") == Some(&serde_json::Value::Bool(true)),
-        rationale: record
-            .get("rationale")
-            .and_then(|value| value.as_str())
-            .unwrap_or("No rationale provided.")
-            .to_string(),
-        instructions: record
-            .get("instructions")
-            .and_then(|value| value.as_str())
-            .map(std::string::ToString::to_string),
-    })
-}
-
-/// The automatic /refine review gate.
-///
-/// # Errors
-///
-/// Error on a failed request build or LLM call, or an unparseable reply.
-pub async fn review_auto_refine(
-    messages: &[AgentMessage],
-    state: &HarnessState,
-    history: &[RefinementResult],
-    model: &pa_types::ai::Model,
-    context: &AutoRefineReviewContext,
-    review_call: RefinerFn,
-) -> anyhow::Result<AutoRefineReview> {
-    let conversation_text = conversation_text(messages, 40_000);
-    let build_prompt = |conversation: &str| -> String {
-        [
-            format!(
-                "<trigger>\n{}; {} assistant turns since last auto-refine review\n</trigger>",
-                context.reason, context.turns_since_last_review
-            ),
-            format!(
-                "<current_harness_state>\n{}\n</current_harness_state>",
-                overview_for_prompt(state)
-            ),
-            format!(
-                "<refinement_history>\n{}\n</refinement_history>",
-                history_for_prompt(history)
-            ),
-            format!("<conversation>\n{conversation}\n</conversation>"),
-            "Return shouldRefine=true when the trajectory contains evidence useful to this session's future turns. Prefer local harness edits for current task progress, temporary blockers, and current-run coordination. Ask for global refinement only for durable cross-session lessons or explicitly project-qualified lessons likely to be reused in future sessions.".to_string(),
-        ]
-        .join("\n\n")
-    };
-    let (request_max_tokens, user_prompt) = refinement_request(
-        model,
-        AUTO_REFINE_REVIEW_SYSTEM_PROMPT,
-        &conversation_text,
-        &build_prompt,
-        AUTO_REFINE_REVIEW_MAX_OUTPUT_TOKENS,
-    )?;
-    let mut request_model = model.clone();
-    request_model.max_tokens = request_max_tokens.min(AUTO_REFINE_REVIEW_MAX_OUTPUT_TOKENS);
-    let max_tokens = request_model.max_tokens;
-    let reply = review_call(request_model, AUTO_REFINE_REVIEW_SYSTEM_PROMPT, user_prompt).await?;
-    parse_auto_refine_review(&reply_text(
-        &reply,
-        max_tokens,
-        "Auto-refine review failed",
-    )?)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use pa_types::ai::{AssistantContentBlock, TextContent};
-
-    fn text_message(text: &str) -> AssistantMessage {
-        AssistantMessage {
-            content: vec![AssistantContentBlock::Text(TextContent {
-                text: text.to_string(),
-                text_signature: None,
-                rest: serde_json::Map::default(),
-            })],
-            api: "openai-completions".to_string(),
-            provider: "test".to_string(),
-            model: "m".to_string(),
-            response_model: None,
-            response_id: None,
-            diagnostics: None,
-            usage: pa_types::ai::Usage::default(),
-            stop_reason: pa_types::ai::StopReason::Stop,
-            stop_reason_raw: None,
-            error_message: None,
-            timestamp: 0,
-            rest: serde_json::Map::default(),
-        }
-    }
-
-    fn seam(text: &str) -> RefinerFn {
-        let text = text.to_string();
-        Box::new(move |_model, _system, _prompt| {
-            let text = text;
-            Box::pin(async move { Ok(text_message(&text)) })
-        })
-    }
-
-    #[tokio::test]
-    async fn review_and_plan_carry_their_own_system_prompts() {
-        let model = test_model();
-        // The review seam records its system prompt in a shared cell.
-        let review_systems: std::sync::Arc<std::sync::Mutex<Vec<&'static str>>> =
-            std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
-        let review_recorder = std::sync::Arc::clone(&review_systems);
-        let review_call: RefinerFn = Box::new(move |_model, system, _prompt| {
-            review_recorder.lock().unwrap().push(system);
-            Box::pin(async move {
-                Ok(text_message(
-                    r#"{"shouldRefine": false, "rationale": "no"}"#,
-                ))
-            })
-        });
-        let review = review_auto_refine(
-            &[],
-            &super::super::empty_harness_state(),
-            &[],
-            &model,
-            &AutoRefineReviewContext {
-                reason: "compact".to_string(),
-                turns_since_last_review: 0,
-            },
-            review_call,
-        )
-        .await
-        .unwrap();
-        assert!(!review.should_refine);
-        assert_eq!(
-            *review_systems.lock().unwrap(),
-            vec![AUTO_REFINE_REVIEW_SYSTEM_PROMPT]
-        );
-        let plan_systems: std::sync::Arc<std::sync::Mutex<Vec<&'static str>>> =
-            std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
-        let plan_recorder = std::sync::Arc::clone(&plan_systems);
-        let reply = r#"{"summary":"s","edits":[]}"#.to_string();
-        let plan_call: RefinerFn = Box::new(move |_model, system, _prompt| {
-            plan_recorder.lock().unwrap().push(system);
-            let reply = reply;
-            Box::pin(async move { Ok(text_message(&reply)) })
-        });
-        let state = super::super::empty_harness_state();
-        plan_refinement(
-            &[],
-            &state,
-            &[],
-            &model,
-            &RefineOptions::default(),
-            plan_call,
-        )
-        .await
-        .unwrap();
-        assert_eq!(
-            *plan_systems.lock().unwrap(),
-            vec![REFINEMENT_SYSTEM_PROMPT]
-        );
-    }
-
-    /// A cut-off or failed reply reports its stop instead of a JSON parse
-    /// error on its partial text.
-    #[tokio::test]
-    async fn a_cut_off_or_failed_reply_reports_why() {
-        let stopped = |stop_reason: StopReason| -> RefinerFn {
-            Box::new(move |_model, _system, _prompt| {
-                Box::pin(async move {
-                    Ok(AssistantMessage {
-                        stop_reason,
-                        error_message: Some("max_tokens is too large".to_string()),
-                        ..text_message(r#"{"summary": "cut"#)
-                    })
-                })
-            })
-        };
-        let (state, model) = (super::super::empty_harness_state(), test_model());
-        let options = RefineOptions::default();
-        let plan = plan_refinement(
-            &[],
-            &state,
-            &[],
-            &model,
-            &options,
-            stopped(StopReason::Length),
-        );
-        let ctx = AutoRefineReviewContext {
-            reason: "checkpoint".to_string(),
-            turns_since_last_review: 1,
-        };
-        let review = review_auto_refine(&[], &state, &[], &model, &ctx, stopped(StopReason::Error));
-        assert_eq!(
-            [
-                plan.await.err().unwrap().to_string(),
-                review.await.err().unwrap().to_string()
-            ],
-            [
-                "Refinement failed: the model hit its output limit (8000 tokens, test/m)",
-                "Auto-refine review failed: max_tokens is too large",
-            ]
-        );
-    }
 
     #[test]
     fn refinement_ids_are_canonical() {
@@ -582,30 +363,16 @@ mod tests {
         assert_eq!(history_for_prompt(&[]), "No prior refinement history.");
     }
 
-    #[tokio::test]
-    async fn plan_parses_proposal_and_rolls_back() {
-        let state = super::super::empty_harness_state();
-        let reply = r#"{"summary":"note it","rationale":"seen twice","expectedOutcome":"recall","edits":[{"action":"create","kind":"memory","id":"m2","title":"Note","content":"value"}]}"#;
-        let plan = plan_refinement(
-            &[],
-            &state,
-            &[],
-            &test_model(),
-            &RefineOptions::default(),
-            seam(reply),
-        )
-        .await
-        .unwrap();
-        assert_eq!(plan.proposal.summary, "note it");
-        assert_eq!(plan.proposal.edits.len(), 1);
-        let mut history_state = state.clone();
-        let result = apply_refinement_proposal(
+    #[test]
+    fn rollback_plan_inverts_the_target_or_refuses() {
+        let mut history_state = super::super::empty_harness_state();
+        let result = super::super::planner::apply_refinement_proposal(
             &mut history_state,
             &RefinementProposal {
                 summary: "add".to_string(),
                 ..Default::default()
             },
-            ApplyOptions {
+            super::super::planner::ApplyOptions {
                 id: "refine_target".to_string(),
                 rollback_of: None,
                 scope: Some(HarnessScope::Local),
@@ -613,95 +380,104 @@ mod tests {
                 factory_enabled: false,
             },
         );
-        let rollback = plan_refinement(
-            &[],
-            &state,
+        let plan = rollback_plan(
             &[result],
-            &test_model(),
             &RefineOptions {
                 rollback_id: Some("refine_target".to_string()),
                 ..Default::default()
             },
-            seam("{}"),
         )
-        .await
-        .unwrap();
-        assert_eq!(rollback.rollback_of.as_deref(), Some("refine_target"));
-        assert_eq!(rollback.proposal.edits.len(), 0); // the seeded result applied no edits, so nothing inverts
-        let missing = plan_refinement(
+        .unwrap()
+        .expect("the rollback plan exists");
+        assert_eq!(plan.rollback_of.as_deref(), Some("refine_target"));
+        assert_eq!(plan.proposal.edits.len(), 0); // the seeded result applied no edits, so nothing inverts
+        let missing = rollback_plan(
             &[],
-            &state,
-            &[],
-            &test_model(),
             &RefineOptions {
                 rollback_id: Some("nope".to_string()),
                 ..Default::default()
             },
-            seam("{}"),
-        )
-        .await;
+        );
         assert!(missing.is_err());
+        assert!(rollback_plan(&[], &RefineOptions::default())
+            .unwrap()
+            .is_none());
     }
 
-    #[tokio::test]
-    async fn auto_refine_review_parses_verdict() {
+    #[test]
+    fn spawn_prompt_trims_the_conversation_to_the_model_window() {
+        let request = RefinementRequest {
+            global: false,
+            instructions: Some("prefer small edits".to_string()),
+            local_harness_dir: Some("/local/harness".to_string()),
+            global_harness_dir: "/global/harness".to_string(),
+            parent_session_file: Some("/sessions/parent.jsonl".to_string()),
+        };
+        let conversation = "x".repeat(200_000);
+        let prompt = refinement_spawn_prompt(&request, 100_000, &conversation);
+        let parsed: serde_json::Value = serde_json::from_str(&prompt).unwrap();
+        assert_eq!(parsed["type"], REFINEMENT_REQUEST_TYPE);
+        assert_eq!(parsed["scope"], "local");
+        assert_eq!(parsed["instructions"], "prefer small edits");
+        assert_eq!(parsed["localHarnessDir"], "/local/harness");
+        assert_eq!(parsed["globalHarnessDir"], "/global/harness");
+        assert_eq!(parsed["parentSessionFile"], "/sessions/parent.jsonl");
+        let carried = parsed["conversation"].as_str().unwrap();
+        assert!(carried.starts_with("[Earlier conversation omitted to fit the model context.]"));
+        // The byte budget: the head plus the carried tail stays inside the window.
+        assert!((carried.len() as u64) < 100_000);
+        // A short conversation rides whole, with no omission marker.
+        let whole = refinement_spawn_prompt(&request, 100_000, "short conversation");
+        let parsed: serde_json::Value = serde_json::from_str(&whole).unwrap();
+        assert_eq!(parsed["conversation"], "short conversation");
+    }
+
+    #[test]
+    fn user_prompt_carries_the_sections() {
         let state = super::super::empty_harness_state();
-        let review = review_auto_refine(
-            &[],
+        let prompt = refinement_user_prompt(
             &state,
             &[],
-            &test_model(),
-            &AutoRefineReviewContext {
-                reason: "checkpoint".to_string(),
-                turns_since_last_review: 4,
+            "the conversation",
+            &RefineOptions {
+                global: false,
+                instructions: Some("focus on the build failure".to_string()),
+                rollback_id: None,
             },
-            seam(r#"{"shouldRefine":true,"rationale":"pattern seen","instructions":"note the tactic"}"#),
-        )
-        .await
-        .unwrap();
-        assert!(review.should_refine);
-        assert_eq!(review.rationale, "pattern seen");
-        assert_eq!(review.instructions.as_deref(), Some("note the tactic"));
-        let rejected = review_auto_refine(
-            &[],
+        );
+        assert!(prompt.contains("<current_harness_state>"));
+        assert!(prompt.contains("No prior refinement history."));
+        assert!(prompt.contains("<conversation>\nthe conversation\n</conversation>"));
+        assert!(prompt.contains("Requested refinement scope: local"));
+        assert!(prompt.contains("<user_refine_instructions>\nfocus on the build failure"));
+        assert!(prompt.ends_with(
+            "Return only JSON edits. If no useful edit is justified, return an empty edits array with a rationale."
+        ));
+        let global = refinement_user_prompt(
             &state,
             &[],
-            &test_model(),
-            &AutoRefineReviewContext {
-                reason: "checkpoint".to_string(),
-                turns_since_last_review: 1,
+            "c",
+            &RefineOptions {
+                global: true,
+                ..Default::default()
             },
-            seam(r#"{"shouldRefine":false}"#),
-        )
-        .await
-        .unwrap();
-        assert!(!rejected.should_refine);
-        assert_eq!(rejected.rationale, "No rationale provided.");
-        assert_eq!(rejected.instructions, None);
+        );
+        assert!(global.contains("Requested refinement scope: global"));
     }
 
-    fn test_model() -> pa_types::ai::Model {
-        pa_types::ai::Model {
-            id: "test".to_string(),
-            name: "test".to_string(),
-            api: "openai-completions".to_string(),
-            provider: "test".to_string(),
-            base_url: "https://example.invalid".to_string(),
-            reasoning: false,
-            thinking_level_map: None,
-            input: vec![],
-            cost: pa_types::ai::ModelCost {
-                input: 0.0.into(),
-                output: 0.0.into(),
-                cache_read: 0.0.into(),
-                cache_write: 0.0.into(),
-            },
-            context_window: 100_000,
-            max_tokens: 8_000,
-            max_tokens_explicit: false,
-            featured: None,
-            headers: None,
-            compat: None,
-        }
+    #[test]
+    fn child_proposals_parse_or_error() {
+        let proposal = parse_child_proposal(
+            r#"{"summary":"note it","rationale":"seen twice","expectedOutcome":"recall","edits":[{"action":"create","kind":"memory","id":"m2","title":"Note","content":"value"}]}"#,
+        )
+        .unwrap();
+        assert_eq!(proposal.summary, "note it");
+        assert_eq!(proposal.edits.len(), 1);
+        assert_eq!(
+            parse_child_proposal(r#"{"summary":"cut","edits":[{"action":"cre"#)
+                .unwrap_err()
+                .to_string(),
+            super::super::planner::TRUNCATED_JSON_ERROR
+        );
     }
 }

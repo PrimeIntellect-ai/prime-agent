@@ -25,6 +25,7 @@ fn identity(session_id: &str) -> (SemanticEdgeIdentity, TempDir) {
         ledger_path: Some(dir.path().join(super::SEMANTIC_EDGES_LEDGER_FILENAME)),
         parent_session_id: Some("parent-session".to_string()),
         spawned_by_request_id: Some("parent-request".to_string()),
+        refine_child: false,
     };
     (identity, dir)
 }
@@ -40,6 +41,7 @@ fn session_registered(session_id: &str) -> SemanticEdgeLedgerEvent {
         session_id: session_id.to_string(),
         parent_session_id: Some("parent-session".to_string()),
         spawned_by_request_id: Some("parent-request".to_string()),
+        refine_child: false,
     }
 }
 

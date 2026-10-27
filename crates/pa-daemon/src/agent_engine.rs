@@ -224,6 +224,14 @@ pub struct AgentSessionEngine {
     link: Arc<crate::supervisor_link::SupervisorLink>,
     /// Supervisor-backed RLM children; `None` for standalone workers.
     pub(crate) children: Option<Arc<SupervisorChildSessions>>,
+    /// The in-flight refinement child (`rlm.spawn kind="refine"`): what the
+    /// parent prepared before the child's model pass, keyed by the child's
+    /// ids for the child-reply wake.
+    pub(crate) refine_flight: std::sync::Mutex<Option<crate::refine_children::RefineChildFlight>>,
+    /// Serializes refinement-child admissions: the dead-round release, the
+    /// in-flight check, the prepare, and the flight's record run as one
+    /// atomic spawn, so concurrent callers cannot double-spawn.
+    pub(crate) refine_spawn_lock: tokio::sync::Mutex<()>,
     /// The worker-installed summary-delta sink, adopted onto every built
     /// session. `None` without a worker pump.
     compaction_summary_sink:

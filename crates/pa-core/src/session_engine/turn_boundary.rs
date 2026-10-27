@@ -378,12 +378,13 @@ impl TurnBoundaryRequests {
     }
 }
 
-/// One turn-boundary consumption: the outcomes the host runtime persists and broadcasts;
-/// `Err` rows surface like the TS failed-compaction / `refine_failed` events.
+/// One turn-boundary consumption: the outcome the host runtime persists
+/// and broadcasts; `Err` rows surface like the TS failed-compaction
+/// events. The pending refinement no longer consumes here — the
+/// daemon-backed boundary spawns the refinement child with it.
 #[derive(Debug)]
 pub struct TurnBoundaryConsumption {
     pub compaction: Option<anyhow::Result<super::compact_session::CompactOutcome>>,
-    pub refinement: Option<anyhow::Result<crate::refinement::RefinementResult>>,
 }
 
 impl SessionEngine {
@@ -413,53 +414,17 @@ impl SessionEngine {
         })
     }
 
-    /// Consume a pending model-requested refinement at a turn boundary;
-    /// taken regardless of outcome, so a failed run is not silently re-run.
-    pub async fn consume_pending_refinement(
-        &self,
-        model: &pa_types::ai::Model,
-        api_key: Option<String>,
-        global_harness_dir: std::path::PathBuf,
-    ) -> Option<anyhow::Result<crate::refinement::RefinementResult>> {
-        let pending = self.turn_boundary.take_refine().await?;
-        let options = super::refine::RefineOptions {
-            global: pending.global,
-            instructions: pending.instructions,
-            rollback_id: None,
-        };
-        Some(
-            self.session
-                .refine(
-                    &options,
-                    super::refine::RefinementSource::SelfRefine,
-                    model,
-                    api_key,
-                    global_harness_dir,
-                )
-                .await,
-        )
-    }
-
-    /// Consume pending turn-boundary requests after a settled turn: compaction
-    /// first, then refinement; the pieces are exposed separately for hosts that
-    /// mirror the TS sequencing (the overflow arm interleaves).
+    /// Consume pending turn-boundary requests after a settled turn. Only the
+    /// compaction consumes here; the pending refinement belongs to the
+    /// daemon-backed boundary, which spawns the refinement child with it.
     pub async fn consume_turn_boundary_requests(
         &self,
         model: &pa_types::ai::Model,
         api_key: Option<String>,
-        global_harness_dir: std::path::PathBuf,
         abort: Option<&pa_agent::abort::AbortSignal>,
     ) -> TurnBoundaryConsumption {
-        let mut consumption = TurnBoundaryConsumption {
-            compaction: None,
-            refinement: None,
-        };
-        consumption.compaction = self
-            .consume_pending_compaction(model, api_key.clone(), abort)
-            .await;
-        consumption.refinement = self
-            .consume_pending_refinement(model, api_key, global_harness_dir)
-            .await;
+        let mut consumption = TurnBoundaryConsumption { compaction: None };
+        consumption.compaction = self.consume_pending_compaction(model, api_key, abort).await;
         consumption
     }
 }

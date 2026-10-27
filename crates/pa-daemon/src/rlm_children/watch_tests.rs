@@ -429,6 +429,7 @@ async fn spawn_child(sessions: &SupervisorChildSessions) -> RlmSpawnHandle {
             model: None,
             thinking: None,
             cwd: None,
+            refine_child: false,
             spawned_by_request_id: None,
             factory: None,
         })
@@ -1866,6 +1867,7 @@ fn seeded_parent_recorder() -> (
         session_id: "parent-lead".to_string(),
         parent_session_id: None,
         spawned_by_request_id: None,
+        refine_child: false,
     };
     let started = SemanticEdgeLedgerEvent::RequestStarted {
         request_id: "parent-request-1".to_string(),
@@ -1886,6 +1888,7 @@ fn seeded_parent_recorder() -> (
         ledger_path: Some(ledger_path.clone()),
         parent_session_id: None,
         spawned_by_request_id: None,
+        refine_child: false,
     }));
     (recorder, ledger_path, dir)
 }

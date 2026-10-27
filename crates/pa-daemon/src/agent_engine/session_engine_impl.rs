@@ -314,10 +314,20 @@ impl SessionEngine for AgentSessionEngine {
     /// The `compact` command path: the compact-trigger auto-refine round
     /// runs after the compaction answered (the same gated body as the
     /// boundaries).
-    fn consume_compact_auto_refine(
-        &self,
-    ) -> anyhow::Result<Option<pa_core::refinement::RefinementResult>> {
+    fn consume_compact_auto_refine(&self) -> anyhow::Result<()> {
         self.consume_compact_auto_refine_round()
+    }
+
+    /// The refine child's reply wake: the in-flight child's proposal (or
+    /// its failure envelope) applies here.
+    fn route_refine_child_reply(
+        &self,
+        sender_active_session_id: &str,
+        message: &str,
+    ) -> crate::engine::RefineChildReplyRoute<'_> {
+        let sender = sender_active_session_id.to_string();
+        let message = message.to_string();
+        Box::pin(async move { self.consume_refine_child_reply(&sender, &message).await })
     }
 
     /// The worker's live session summary, rendered into the sender identity block.
@@ -915,6 +925,10 @@ impl SessionEngine for AgentSessionEngine {
                     .semantic_spawn
                     .as_ref()
                     .and_then(|spawn| spawn.spawned_by_request_id.clone()),
+                refine_child: identity
+                    .semantic_spawn
+                    .as_ref()
+                    .is_some_and(|spawn| spawn.refine_child),
             }
         });
         *self
@@ -1231,15 +1245,15 @@ impl SessionEngine for AgentSessionEngine {
         })
     }
 
-    fn run_refinement(
+    fn run_rollback_refinement(
         &self,
         options: pa_core::session_engine::refine::RefineOptions,
     ) -> anyhow::Result<Value> {
+        // The one mechanical path (no model pass, no child): the rollback
+        // applies inline through the existing apply machinery.
         let model = self.resolve_model()?;
         self.ensure_core_session(&model)?;
-        let api_key = self.resolve_request_api_key(&model);
         let global_harness_dir = self.config.agent_dir.clone();
-        // The lock covers the clone only; the model call below must not ride it.
         let core = self
             .session
             .blocking_lock()
@@ -1247,17 +1261,26 @@ impl SessionEngine for AgentSessionEngine {
             .expect("session built by ensure_core_session");
         let result = self.runtime.block_on(async {
             core.session
-                .refine(
+                .run_rollback_refinement(
                     &options,
                     pa_core::session_engine::refine::RefinementSource::User,
-                    &model,
-                    api_key,
-                    global_harness_dir,
+                    &global_harness_dir,
                 )
                 .await
         })?;
         serde_json::to_value(&result)
             .map_err(|error| anyhow::anyhow!("refinement result conversion failed: {error}"))
+    }
+
+    fn spawn_refinement_child(
+        &self,
+        options: pa_core::session_engine::refine::RefineOptions,
+        source: pa_core::session_engine::refine::RefinementSource,
+    ) -> anyhow::Result<String> {
+        // Fire-and-wake: the spawn returns once the child is admitted; the
+        // child's proposal applies on its reply's arrival.
+        self.runtime
+            .block_on(async { self.spawn_refine_child(&options, source).await })
     }
 
     fn rlm_max_depth_status(&self) -> Value {

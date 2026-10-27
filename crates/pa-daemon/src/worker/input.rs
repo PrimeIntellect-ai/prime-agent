@@ -243,7 +243,7 @@ impl Worker {
     /// Agent-to-agent delivery: render the `[agent-message from ...]` prompt and queue
     /// it on the requested lane with the `agent_message` custom row (the turn renders
     /// the collapsed card). Answers `queued` when running, else `delivered`.
-    pub(crate) fn handle_worker_deliver_message(&self, payload: &Value) -> DaemonResponse {
+    pub(crate) async fn handle_worker_deliver_message(&self, payload: &Value) -> DaemonResponse {
         if let Err(response) = self.require_created("worker_deliver_message") {
             return response;
         }
@@ -251,6 +251,100 @@ impl Worker {
             .get("message")
             .and_then(Value::as_str)
             .unwrap_or_default();
+        let sender = payload.get("sender").cloned().unwrap_or(Value::Null);
+        // The in-flight refine child's reply is consumed by the engine
+        // BEFORE the generic agent-message gates (the length cap, the
+        // pause hold, the suspend hold): the proposal is machine-authored
+        // — bounded only by the child's own turn budget — and the wake
+        // applies regardless of the parent's interactive state
+        // (fire-and-wake); a gate rejection would lose the child's only
+        // answer.
+        let sender_active_session_id = sender
+            .get("activeSessionId")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        if let Some(outcome) = self
+            .engine
+            .route_refine_child_reply(&sender_active_session_id, message)
+            .await
+        {
+            // The consumed reply is the child's reply for the settle
+            // watcher's no-reply notice.
+            if !sender_active_session_id.is_empty() {
+                self.engine.mark_child_reply(&sender_active_session_id);
+            }
+            // The response receipt's target summary: composed under the
+            // core lock and RELEASED before the outcome rows emit — the
+            // emissions take the lock themselves, so the guard must not
+            // ride into them.
+            let target = {
+                let (core, inputs) = self.summary_inputs();
+                let summary = self.summary_locked(&core, inputs);
+                let mut target = json!({
+                    "activeSessionId": summary.active_session_id.clone().unwrap_or_default(),
+                    "sessionId": summary.session_id,
+                    "runtimeKind": summary
+                        .runtime_kind
+                        .clone()
+                        .unwrap_or_else(|| "top-level".to_string()),
+                });
+                if let Some(name) = summary.session_name.filter(|name| !name.is_empty()) {
+                    target["sessionName"] = json!(name);
+                }
+                target
+            };
+            match outcome {
+                Ok((result, source)) => {
+                    // The refinement's durable rows: the TUI outcome, plus
+                    // the model-facing notice when edits applied.
+                    let outcome_row =
+                        pa_core::session_engine::refine::create_refinement_outcome_message(&result);
+                    if let Ok(value) =
+                        serde_json::to_value(pa_types::session::AgentMessage::Custom(outcome_row))
+                    {
+                        self.emit_custom_row(&value);
+                    }
+                    if result.applied_edits.iter().any(|edit| edit.applied) {
+                        let notice =
+                            pa_core::session_engine::refine::create_refinement_notice_message(
+                                &result, source,
+                            );
+                        if let Ok(value) =
+                            serde_json::to_value(pa_types::session::AgentMessage::Custom(notice))
+                        {
+                            self.emit_custom_row(&value);
+                        }
+                    }
+                    crate::user_bash::emit_session_event_frame(
+                        &self.core,
+                        &self.events,
+                        crate::worker::refine_complete_event(&result),
+                    );
+                }
+                Err(error) => {
+                    eprintln!("pa-daemon: the refinement child's reply failed to apply: {error:#}");
+                    self.emit_worker_event(json!({
+                        "type": "refine_failed",
+                        "error": format!("{error:#}"),
+                    }));
+                }
+            }
+            return response_success(
+                None,
+                "worker_deliver_message",
+                Some(json!({
+                    "id": pa_core::session_engine::agent_messaging::create_agent_session_message_id(),
+                    "source": AGENT_MESSAGE_SOURCE,
+                    "target": target,
+                    "from": sender,
+                    "message": message,
+                    "deliveryMode": "steer",
+                    "deliveryStatus": "delivered",
+                    "deliveredAt": crate::util::now_iso(),
+                })),
+            );
+        }
         if let Err(error) =
             pa_core::session_engine::agent_messaging::normalize_agent_session_message(message)
         {
@@ -276,7 +370,6 @@ impl Worker {
                 );
             }
         }
-        let sender = payload.get("sender").cloned().unwrap_or(Value::Null);
         // A delivery from one of this session's RLM children counts as the
         // child's reply: the settle watcher withholds the no-reply notice.
         if let Some(child) = sender
