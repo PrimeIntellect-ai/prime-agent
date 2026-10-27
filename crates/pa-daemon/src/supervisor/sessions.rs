@@ -618,7 +618,7 @@ impl Supervisor {
         }
         // TS `createRlmSubagentRuntime` (#2396): the sibling name is held under a daemon-wide
         // reservation for the whole admission, so a same-name sibling landing mid-admission
-        // fails closed. Only a subagent- or decision-kind create reserves; the binding owns the guard.
+        // fails closed. Only a `kind: "subagent"` create reserves; the binding owns the guard.
         let _name_reservation = self.reserve_subagent_create_name(command)?;
         if let DaemonCommand::Create {
             name: Some(name), ..
@@ -728,10 +728,7 @@ impl Supervisor {
         let (Some(name), Some(metadata)) = (name, runtime_metadata) else {
             return Ok(None);
         };
-        if !matches!(
-            metadata.get("kind").and_then(Value::as_str),
-            Some("subagent" | "decision")
-        ) {
+        if metadata.get("kind").and_then(Value::as_str) != Some("subagent") {
             return Ok(None);
         }
         // The child's scope keys the reservation exactly like a rename's: `[depth, parent,
@@ -966,26 +963,6 @@ mod tests {
             agent_dir: dir.join("agent"),
         })
         .expect("supervisor")
-    }
-
-    #[test]
-    fn a_decision_child_create_reserves_the_spawn_name() {
-        let dir = tempfile::TempDir::new().expect("temp dir");
-        let supervisor = Arc::new(supervisor(dir.path()));
-        let create: DaemonCommand = serde_json::from_value(json!({
-            "type": "create",
-            "name": "decision-worker",
-            "runtimeMetadata": { "kind": "decision", "rlmDepth": 1 },
-        }))
-        .expect("create command");
-
-        let reservation = supervisor
-            .reserve_subagent_create_name(&create)
-            .expect("the reservation check itself cannot fail");
-        assert!(
-            reservation.is_some(),
-            "a decision child's create reserves the spawn name like a subagent's"
-        );
     }
 
     #[tokio::test(start_paused = true)]

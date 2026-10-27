@@ -147,8 +147,12 @@ impl RlmSubagentHost for SupervisorChildSessions {
                     request.cwd.as_deref(),
                     "rlm.spawn",
                 )?;
+                // Every spawned child — a decision child included —
+                // presents the subagent runtime identity; the decision
+                // flag's one durable home is the create command's
+                // `decisionChild` key.
                 let mut runtime_metadata = json!({
-                    "kind": if request.decision_child { "decision" } else { "subagent" },
+                    "kind": "subagent",
                     "rlmChildId": child_id,
                     "parentActiveSessionId": this.parent_active_session_id,
                     "rlmDepth": identity.rlm_depth + 1,
@@ -166,6 +170,7 @@ impl RlmSubagentHost for SupervisorChildSessions {
                         identity.rlm_depth + 1,
                         &model,
                         thinking,
+                        request.decision_child,
                         &cwd.to_string_lossy(),
                         &child_dir,
                         request.spawned_by_request_id.as_deref(),
