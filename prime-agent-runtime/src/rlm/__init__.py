@@ -712,6 +712,9 @@ class _RLMNamespace:
     async def collect(self, targets: Any = None, *, timeout_ms: int = 0) -> list[RLMChildResult]:
         return await collect(targets, timeout_ms=timeout_ms)
 
+    async def end_turn(self) -> dict[str, Any]:
+        return await end_turn()
+
     factory = _RLMFactoryNamespace()
 
     def __call__(self, *args: Any, **kwargs: Any) -> Any:
@@ -756,6 +759,7 @@ __all__ = [
     "bash",
     "delete_subagent",
     "emit",
+    "end_turn",
     "find_models",
     "get_harness_state",
     "harness",
