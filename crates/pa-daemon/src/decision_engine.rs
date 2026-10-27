@@ -207,23 +207,33 @@ impl DecisionEngine {
     }
 
     /// The transcript row pair for an answer: the assistant update and the
-    /// final message.
-    fn answer_rows(provider: &str, model: &str, text: &str) -> (EngineEvent, EngineEvent) {
+    /// final message. The decision's usage rides both rows — the final
+    /// message is the row the cost ledger bills, and a row without usage
+    /// reads as a free call.
+    fn answer_rows(
+        provider: &str,
+        model: &str,
+        text: &str,
+        usage: &Value,
+    ) -> (EngineEvent, EngineEvent) {
         let now = crate::util::now_ms();
-        (
-            EngineEvent::AssistantUpdate {
-                message: AssistantSnapshot::Wire(json!({
-                    "role": "assistant", "content": "",
-                    "provider": provider, "model": model,
-                    "timestamp": now,
-                })),
-                stream_event: None,
-            },
-            EngineEvent::AssistantMessage(json!({
-                "role": "assistant", "content": text,
+        let row = |content: &str| {
+            let mut row = json!({
+                "role": "assistant", "content": content,
                 "provider": provider, "model": model,
                 "timestamp": now,
-            })),
+            });
+            if usage.is_object() {
+                row["usage"] = usage.clone();
+            }
+            row
+        };
+        (
+            EngineEvent::AssistantUpdate {
+                message: AssistantSnapshot::Wire(row("")),
+                stream_event: None,
+            },
+            EngineEvent::AssistantMessage(row(text)),
         )
     }
 }
@@ -332,8 +342,12 @@ impl SessionEngine for DecisionEngine {
             .is_some_and(|value| value.get("questions").is_some());
         if !is_request {
             *self.protocol.lock().unwrap_or_else(PoisonError::into_inner) = Some(raw);
-            let (update, message) =
-                Self::answer_rows("decision", "system-1", "Decision child ready.");
+            let (update, message) = Self::answer_rows(
+                "decision",
+                "system-1",
+                "Decision child ready.",
+                &Value::Null,
+            );
             for event in [update, message] {
                 if !emit(event) {
                     emit(cancelled());
@@ -382,7 +396,8 @@ impl SessionEngine for DecisionEngine {
                     unreachable!("a served decision implies the engine resolved its model");
                 };
                 let (provider, model) = resolved.provider_and_id();
-                let (update, final_message) = Self::answer_rows(provider, model, &text);
+                let (update, final_message) =
+                    Self::answer_rows(provider, model, &text, &envelope["usage"]);
                 for event in [update, final_message.clone()] {
                     if !emit(event) {
                         emit(cancelled());
@@ -581,22 +596,14 @@ mod tests {
         );
     }
 
-    /// The reply route, pinned: a reply routes to the parent id the
-    /// worker already knows — the pushed summary's `parentActiveSessionId`
-    /// — and never fetches the family roster to find it; a child without
-    /// a parent edge fails fast without touching the link. The reply also
-    /// rides the follow-up lane: a decision never steers (interrupts) the
-    /// parent's running turn.
-    #[cfg(unix)]
-    #[test]
-    fn a_reply_targets_the_known_parent_id_never_the_roster() {
-        let dir = tempfile::tempdir().unwrap();
-        let socket = dir.path().join("supervisor.sock");
-        // A stub supervisor records every command it answers: the direct
-        // ticket leg, then the supervisor-routed send.
+    /// A stub supervisor over `socket`: it answers each command on its own
+    /// connection — the direct-transport probe fails, the
+    /// supervisor-routed send delivers — and records every command it
+    /// answers.
+    fn stub_supervisor(socket: &std::path::Path) -> Arc<Mutex<Vec<Value>>> {
         let commands: Arc<Mutex<Vec<Value>>> = Arc::new(Mutex::new(Vec::new()));
         let stub_commands = Arc::clone(&commands);
-        let stub_socket = socket.clone();
+        let stub_socket = socket.to_path_buf();
         std::thread::spawn(move || {
             use std::io::{BufRead, Write};
             let Ok(listener) = std::os::unix::net::UnixListener::bind(&stub_socket) else {
@@ -647,6 +654,21 @@ mod tests {
                     .unwrap();
             }
         });
+        commands
+    }
+
+    /// The reply route, pinned: a reply routes to the parent id the
+    /// worker already knows — the pushed summary's `parentActiveSessionId`
+    /// — and never fetches the family roster to find it; a child without
+    /// a parent edge fails fast without touching the link. The reply also
+    /// rides the follow-up lane: a decision never steers (interrupts) the
+    /// parent's running turn.
+    #[cfg(unix)]
+    #[test]
+    fn a_reply_targets_the_known_parent_id_never_the_roster() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("supervisor.sock");
+        let commands = stub_supervisor(&socket);
         let engine = DecisionEngine::new(
             dir.path(),
             dir.path(),
@@ -692,6 +714,122 @@ mod tests {
         assert_eq!(
             captured[1]["deliveryMode"], "follow_up",
             "a decision reply must queue behind the parent's work, never steer it"
+        );
+    }
+
+    /// The cost-ledger contract, pinned: a served decision's answer row
+    /// carries the completion's usage, so the child-usage ledger bills the
+    /// decision — a row without usage reads as a free call in the parent's
+    /// totals and /context.
+    #[cfg(unix)]
+    #[test]
+    fn a_served_decision_bills_in_the_cost_ledger() {
+        // A private api name: the faux provider registry is global, so a
+        // shared name would race the other tests' response queues.
+        let registration =
+            pa_ai::faux::register_faux_provider(pa_ai::faux::RegisterFauxProviderOptions {
+                api: Some("faux-decision-ledger".to_string()),
+                provider: Some("fixture-decisions".to_string()),
+                models: Some(vec![pa_ai::faux::FauxModelDefinition {
+                    id: "decision-model".to_string(),
+                    input: Some(vec![pa_types::ai::ModelInput::Text]),
+                    ..Default::default()
+                }]),
+                ..Default::default()
+            });
+        registration.set_responses(vec![pa_ai::faux::FauxResponseStep::Message(
+            pa_ai::faux::faux_assistant_text_message(
+                r#"{"action": {"choice": "left"}}"#,
+                pa_ai::faux::FauxAssistantMessageOptions::default(),
+            ),
+        )]);
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("settings.json"),
+            json!({ "decisionApi": { "systemOneModel": "decision-model" } }).to_string(),
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("models.json"),
+            r#"{ "providers": { "fixture-decisions": {
+                "baseUrl": "https://fixture.example", "apiKey": "fixture-key",
+                "api": "faux-decision-ledger", "models": [
+                    { "id": "decision-model", "input": ["text"] }
+                ]
+            } } }"#,
+        )
+        .unwrap();
+        let socket = dir.path().join("supervisor.sock");
+        let _commands = stub_supervisor(&socket);
+        let engine = DecisionEngine::new(
+            dir.path(),
+            dir.path(),
+            Arc::new(crate::supervisor_link::SupervisorLink::new(socket)),
+            "decision-child".to_string(),
+            "token".to_string(),
+        );
+        engine.set_session_summary(json!({ "parentActiveSessionId": "parent-live-1" }));
+        let body = json!({
+            "seq": 7,
+            "state": {"observation": 1},
+            "questions": {"action": {
+                "type": "choice",
+                "criteria": {"left": "go left", "right": "go right"}
+            }}
+        });
+        let request = PromptRequest {
+            message: body.to_string(),
+            images: Vec::new(),
+            source: "user".to_string(),
+            agent_message_id: None,
+            custom_message: None,
+            batch: Vec::new(),
+        };
+        let mut events: Vec<EngineEvent> = Vec::new();
+        engine.run_prompt(0, request, &|| false, &mut |event| {
+            events.push(event);
+            true
+        });
+        // The reply delivered through the stub supervisor, so the turn
+        // settles done and its answer row exists.
+        assert!(
+            matches!(events.last(), Some(EngineEvent::Done(Ok(())))),
+            "the served decision must settle: {events:?}"
+        );
+        let answer = events
+            .iter()
+            .rev()
+            .find_map(|event| match event {
+                EngineEvent::AssistantMessage(message) => Some(message),
+                _ => None,
+            })
+            .expect("a served decision emits its answer row");
+        let usage = &answer["usage"];
+        assert!(
+            usage["input"].as_u64().is_some_and(|input| input > 0),
+            "the answer row must carry the completion's usage: {answer}"
+        );
+        assert!(
+            usage["output"].as_u64().is_some_and(|output| output > 0),
+            "the answer row must carry the completion's usage: {answer}"
+        );
+        // The row bills: stored the way the turn loop persists message
+        // rows, the child-usage ledger attributes the decision's cost
+        // instead of skipping the row.
+        let entry = crate::session_store::SessionEntry {
+            type_: "message".to_string(),
+            id: "d1".to_string(),
+            parent_id: None,
+            timestamp: "2026-10-27T00:00:00.000Z".to_string(),
+            fields: json!({ "message": answer }),
+        };
+        let (batches, _) =
+            crate::rlm_child_usage::child_usage_batches(std::slice::from_ref(&entry), 0);
+        assert_eq!(batches.len(), 1, "a decision must bill in the cost ledger");
+        assert_eq!(
+            batches[0].1.input,
+            usage["input"].as_u64().unwrap(),
+            "the ledger must bill the completion's usage"
         );
     }
 
