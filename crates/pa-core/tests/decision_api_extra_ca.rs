@@ -7,7 +7,7 @@
 use std::ffi::OsString;
 use std::sync::Arc;
 
-use pa_core::session_engine::decision_api::serve_decision_request;
+use pa_core::session_engine::decision_api::{resolve_decision_model, serve_decision_request};
 use rcgen::{BasicConstraints, CertificateParams, IsCa, Issuer, KeyPair};
 use serde_json::json;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -140,7 +140,9 @@ async fn the_systemone_transport_trusts_node_extra_ca_certs() {
     let request = json!({ "state": {"observation": 1}, "questions": { "action": {
         "type": "choice", "criteria": {"left": "go left", "right": "go right"}
     } } });
-    let answer = serve_decision_request(request, dir.path(), dir.path())
+    let resolved =
+        resolve_decision_model(dir.path(), dir.path()).expect("the fixture decision model");
+    let answer = serve_decision_request(request, &resolved)
         .await
         .expect("the systemone transport must trust NODE_EXTRA_CA_CERTS");
     assert_eq!(answer["answers"]["action"]["choice"], "left", "{answer}");

@@ -466,8 +466,8 @@ impl Worker {
             // session (scripted or not) runs the agent engine family.
             let engine: std::sync::Arc<dyn SessionEngine> =
                 std::sync::Arc::new(crate::decision_engine::DecisionEngine::new(
-                    std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")),
-                    config.agent_dir.clone(),
+                    &std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")),
+                    &config.agent_dir,
                     std::sync::Arc::clone(&roster_link),
                     config.active_session_id.clone(),
                     worker_token.clone(),

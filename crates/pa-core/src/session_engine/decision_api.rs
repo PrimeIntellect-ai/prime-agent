@@ -182,7 +182,7 @@ fn unusable_message(reference: &str) -> String {
 
 /// The resolved decision model with its request auth: the settings reference
 /// resolved through the registry exactly like `imageModel` routing.
-struct ResolvedDecisionModel {
+pub struct ResolvedDecisionModel {
     model: pa_types::ai::Model,
     api_key: Option<String>,
     headers: Option<BTreeMap<String, String>>,
@@ -193,12 +193,27 @@ impl ResolvedDecisionModel {
     fn label(&self) -> String {
         format!("{}/{}", self.model.provider, self.model.id)
     }
+
+    /// The transcript-row halves: the provider and the model id.
+    #[must_use]
+    pub fn provider_and_id(&self) -> (&str, &str) {
+        (&self.model.provider, &self.model.id)
+    }
 }
 
 /// Resolve `decisionApi.systemOneModel` through the model registry:
 /// the reference must match an available (authenticated) model, and its
-/// request auth comes from the registry's merged resolution.
-fn resolve_decision_model(cwd: &Path, agent_dir: &Path) -> Result<ResolvedDecisionModel, String> {
+/// request auth comes from the registry's merged resolution. The decision
+/// engine calls this once at engine start and reuses the result for every
+/// decision.
+///
+/// # Errors
+///
+/// Returns the unset/unresolvable-setting refusal.
+pub fn resolve_decision_model(
+    cwd: &Path,
+    agent_dir: &Path,
+) -> Result<ResolvedDecisionModel, String> {
     let settings = crate::settings::SettingsManager::create(cwd, agent_dir);
     let reference = settings
         .settings()
@@ -536,24 +551,22 @@ pub fn decision_model_selector(cwd: &Path, agent_dir: &Path) -> Result<String, S
     resolve_decision_model(cwd, agent_dir).map(|resolved| resolved.label())
 }
 
-/// Serve one decision request: validate the request body, resolve the
-/// settings model through the registry, and run one provider completion.
-/// The decision child's engine routes every message through this path.
+/// Serve one decision request with an already-resolved decision model:
+/// validate the request body, then run one provider completion. The
+/// decision engine resolves the model once at start and passes it here,
+/// so the decision path never re-reads settings or rebuilds the registry.
 ///
 /// # Errors
 ///
-/// Returns the request, setting, resolution, or provider failure as an
-/// actionable message.
+/// Returns the request or provider failure as an actionable message.
 pub async fn serve_decision_request(
     request: Value,
-    cwd: &Path,
-    agent_dir: &Path,
+    resolved: &ResolvedDecisionModel,
 ) -> anyhow::Result<Value> {
     let Value::Object(request) = request else {
         bail!("a decision request needs a request object");
     };
     let request = parse_decision_request(request)?;
-    let resolved = resolve_decision_model(cwd, agent_dir).map_err(anyhow::Error::msg)?;
     if !request.images.is_empty() && !resolved.model.input.contains(&ModelInput::Image) {
         bail!(
             "{} does not accept image input, so decisions cannot carry images. Drop \
@@ -561,7 +574,7 @@ pub async fn serve_decision_request(
             resolved.label()
         );
     }
-    serve_decision(&resolved, &request).await
+    serve_decision(resolved, &request).await
 }
 
 #[cfg(test)]
@@ -572,7 +585,8 @@ mod tests {
 
     /// Serve one decision synchronously over the fixture dirs.
     async fn decide(request: Value, dir: &Path) -> anyhow::Result<Value> {
-        serve_decision_request(request, dir, dir).await
+        let resolved = resolve_decision_model(dir, dir).map_err(anyhow::Error::msg)?;
+        serve_decision_request(request, &resolved).await
     }
 
     /// A fixture agent dir: settings.json naming the decision model and a
