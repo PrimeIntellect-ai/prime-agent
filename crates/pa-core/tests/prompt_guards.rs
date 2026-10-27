@@ -184,9 +184,11 @@ const KERNEL_LOCAL_TOKENS: &[&str] = &[
     "mcp.describe_tool",
 ];
 
-/// The harness-state API of the vendored runtime (`rlm.harness` CRUD and
-/// `rlm.get_harness_state`). Update together with the runtime sidecar.
+/// The vendored runtime's harness-state API (`rlm.harness` CRUD and
+/// `rlm.get_harness_state`) plus its sanctioned terminal turn call
+/// (`rlm.end_turn`). Update together with the runtime sidecar.
 const HARNESS_TOKENS: &[&str] = &[
+    "rlm.end_turn",
     "rlm.harness.create_memory",
     "rlm.harness.update_memory",
     "rlm.harness.delete_memory",
@@ -642,5 +644,56 @@ fn usage_layer_ends_turns_on_the_done_notification_not_an_await_rule() {
     assert!(
         USAGE_LAYER.contains("end the turn and collect the result on the done notification"),
         "the no-polling rule keeps the collect-on-notice turn-end contract"
+    );
+}
+
+// The sanctioned terminal call
+
+/// The turn-end contract names both sanctioned endings. #3410 sanctioned
+/// text-only turns and forbade placeholder/no-op tool calls; `rlm.end_turn()`
+/// adds the programmatic ending for models whose native convention ends
+/// assistant messages with a tool call. The scan is structural, following
+/// the #3511 convention: every usage-layer bullet that sanctions or
+/// forbids a turn-ending pattern (the #3410 pair) must name the sanctioned
+/// verb, and the core layer's `rlm.end_turn` bullet must register it as
+/// ending the turn. Removing the verb from either surface — or deleting a
+/// bullet so the scan goes vacuous — fails here.
+#[test]
+fn turn_end_contract_names_the_sanctioned_end_turn_verb() {
+    let core_bullets = CORE_LAYER
+        .lines()
+        .filter(|line| line.trim_start().starts_with("- `rlm.end_turn"));
+    let mut registered = 0;
+    for bullet in core_bullets {
+        assert!(
+            bullet.contains("ends the turn"),
+            "the core layer documents rlm.end_turn but the bullet does not register it as ending the turn"
+        );
+        registered += 1;
+    }
+    assert_eq!(
+        registered, 1,
+        "the core layer must document exactly one rlm.end_turn bullet"
+    );
+
+    // The #3410 turn-end bullets: the text-only sanction and the no-op
+    // prohibition. Each must carry the sanctioned verb alongside the
+    // text ending.
+    let mut checked = 0;
+    for bullet in USAGE_LAYER.lines().filter(|line| line.starts_with("- ")) {
+        let sanctions_or_forbids_endings =
+            bullet.contains("text-only") || bullet.contains("no-op tool call");
+        if !sanctions_or_forbids_endings {
+            continue;
+        }
+        assert!(
+            bullet.contains("rlm.end_turn()"),
+            "the turn-end bullet must name the sanctioned end-turn verb: {bullet}"
+        );
+        checked += 1;
+    }
+    assert!(
+        checked >= 2,
+        "the #3410 turn-end bullets (text-only sanction, no-op prohibition) must stay present"
     );
 }

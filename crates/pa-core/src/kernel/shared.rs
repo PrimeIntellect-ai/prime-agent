@@ -73,6 +73,14 @@ pub const BASH_COMMAND_DISPLAY_MIME: &str = "application/vnd.prime-agent.bash-co
 /// default on its presence.
 pub const BASH_COMPLETED_REQUEST_TYPE: &str = "bash.completed";
 
+/// The kernel host request that ends the turn from inside a cell
+/// (`rlm.end_turn()`). The manager answers it by marking the executing
+/// cell's result, so the turn ends once the batch settles; a host that
+/// registered its own handler wins instead. Without any handler the
+/// request answers with the generic not-available error, so the call
+/// raises in the kernel instead of silently no-opping.
+pub const END_TURN_REQUEST_TYPE: &str = "rlm.end_turn";
+
 pub const EXECUTE_STATUS_OK: &str = "ok";
 pub const EXECUTE_STATUS_ERROR: &str = "error";
 pub const EXECUTE_STATUS_ABORTED: &str = "aborted";
@@ -208,6 +216,9 @@ pub struct ExecuteResult {
     pub bash_commands: Option<KernelBashCommands>,
     /// Output that arrived without this cell's id (user threads, other cells' leftovers, raw fd writes).
     pub background_output: Option<String>,
+    /// The cell called the sanctioned `rlm.end_turn()`: the host marked
+    /// this execution, and the turn ends once the batch settles.
+    pub ended_turn: bool,
     pub status: ExecuteStatus,
     pub error: Option<KernelError>,
     pub duration_ms: u64,

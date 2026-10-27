@@ -5,7 +5,7 @@
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock, Weak};
 use std::time::{Duration, Instant};
 
 use std::io::Write;
@@ -21,14 +21,15 @@ use crate::kernel::orphan_journal;
 use crate::kernel::protocol::{parse_event, Event, Request, REPL_PROTOCOL_VERSION};
 use crate::kernel::shared::FACTORY_ACTIVITY_ACTIONS;
 use crate::kernel::shared::{
-    parse_attachment_display, parse_diff_display, parse_sent_agent_message, ExecuteOptions,
-    ExecuteResult, ExecuteStatus, HostRequestPayload, KernelAttachment, KernelBashCommands,
-    KernelDiffDisplay, KernelError, KernelManagerOptions, KernelSentAgentMessage,
-    KernelShutdownOptions, LateSentAgentMessageCallback, StreamName, AGENT_MESSAGE_DISPLAY_MIME,
-    ATTACHMENT_DISPLAY_MIME, BASH_ACTIVITY_DISPLAY_MIME, BASH_COMMAND_DISPLAY_MIME,
-    DEFAULT_MAX_OUTPUT_CHARS, DEFAULT_SNAPSHOT_DEBOUNCE_MS, DIFF_DISPLAY_MIME,
-    FACTIVITY_SETTLE_TIMEOUT_MS, FACTIVITY_WATCH_TIMEOUT_MS_CAP, HOST_REQUEST_SHUTDOWN_TIMEOUT_MS,
-    KERNEL_ABORT_GRACE_MS, KERNEL_BUSY_AFTER_INTERRUPT_MESSAGE, KERNEL_BUSY_INTERRUPT_INTERVAL_MS,
+    host_handler, parse_attachment_display, parse_diff_display, parse_sent_agent_message,
+    ExecuteOptions, ExecuteResult, ExecuteStatus, HostRequestPayload, KernelAttachment,
+    KernelBashCommands, KernelDiffDisplay, KernelError, KernelManagerOptions,
+    KernelSentAgentMessage, KernelShutdownOptions, LateSentAgentMessageCallback, StreamName,
+    AGENT_MESSAGE_DISPLAY_MIME, ATTACHMENT_DISPLAY_MIME, BASH_ACTIVITY_DISPLAY_MIME,
+    BASH_COMMAND_DISPLAY_MIME, DEFAULT_MAX_OUTPUT_CHARS, DEFAULT_SNAPSHOT_DEBOUNCE_MS,
+    DIFF_DISPLAY_MIME, END_TURN_REQUEST_TYPE, FACTIVITY_SETTLE_TIMEOUT_MS,
+    FACTIVITY_WATCH_TIMEOUT_MS_CAP, HOST_REQUEST_SHUTDOWN_TIMEOUT_MS, KERNEL_ABORT_GRACE_MS,
+    KERNEL_BUSY_AFTER_INTERRUPT_MESSAGE, KERNEL_BUSY_INTERRUPT_INTERVAL_MS,
     KERNEL_BUSY_REUSE_WAIT_MS, KERNEL_SHUTDOWN_TIMEOUT_MS, KERNEL_STDERR_LOG_BUDGET_MARKER,
     MAX_ATTACHMENT_DATA_CHARS, MAX_BACKGROUND_OUTPUT_CHARS, MAX_KERNEL_STDERR_CHARS,
     MAX_KERNEL_STDERR_LOG_BYTES, MAX_LATE_SENT_AGENT_MESSAGE_HANDLERS,
@@ -97,6 +98,8 @@ struct ExecBuffers {
     background_output_truncated: bool,
     error: Option<KernelError>,
     status: ExecuteStatus,
+    /// The cell called `rlm.end_turn()`; the host request handler marks it.
+    ended_turn: bool,
     done_fields: Option<Value>,
     settled: bool,
 }
@@ -136,6 +139,7 @@ impl InternalExecuteResult {
                 sent_agent_messages: None,
                 bash_commands: None,
                 background_output: None,
+                ended_turn: false,
                 status: ExecuteStatus::Aborted,
                 error: None,
                 duration_ms: started.elapsed().as_millis() as u64,
@@ -371,6 +375,20 @@ struct StderrLog {
 }
 
 impl Inner {
+    /// Mark the active execution as turn-ending: the `rlm.end_turn` host
+    /// request settles synchronously here, and the flag rides the settled
+    /// [`ExecuteResult`] so the ipython tool maps it to a terminating
+    /// batch result. Nothing is queued and no wake fires — the turn ends
+    /// when the cell's own result does.
+    pub(crate) fn end_active_turn(&self) -> anyhow::Result<()> {
+        let execution = lock(&self.guarded)
+            .active_execution
+            .clone()
+            .ok_or_else(|| anyhow!("rlm.end_turn has no running cell to end the turn for"))?;
+        lock(&execution.buffers).ended_turn = true;
+        Ok(())
+    }
+
     /// Fire the embedding's background-work settlement notice: the settlement is already recorded,
     /// so a host-callback panic neither breaks the kernel event path nor aborts the teardown.
     fn notify_background_work_settled(&self) {
@@ -417,8 +435,41 @@ use requests::{append_truncated, describe_failure, HeadTailBuffer, Signal};
 // Public API
 
 impl ReplKernelManager {
+    /// The manager's own `rlm.end_turn` handler (the sanctioned turn-end
+    /// lane): the kernel ends its turn through the same host-request
+    /// registry every other programmatic call uses. The closure late-binds
+    /// a weak self — the registry lives inside `Inner`, which does not
+    /// exist yet — and a host that registered its own handler wins.
+    fn register_end_turn_handler(
+        options: &mut KernelManagerOptions,
+        slot: &Arc<OnceLock<Weak<Inner>>>,
+    ) {
+        if options.host_handlers.get(END_TURN_REQUEST_TYPE).is_some() {
+            return;
+        }
+        let bound = Arc::clone(slot);
+        options.host_handlers.register(
+            END_TURN_REQUEST_TYPE,
+            host_handler(move |_payload| {
+                let bound = Arc::clone(&bound);
+                Box::pin(async move {
+                    let inner = bound
+                        .get()
+                        .and_then(Weak::upgrade)
+                        .ok_or_else(|| anyhow!("rlm.end_turn is not available in this session"))?;
+                    inner.end_active_turn()?;
+                    Ok(json!({ "endedTurn": true }))
+                })
+            }),
+        );
+    }
+
     #[must_use]
-    pub fn new(options: KernelManagerOptions) -> Self {
+    pub fn new(mut options: KernelManagerOptions) -> Self {
+        // Late-bound weak self for the end-turn handler; filled right after
+        // `Inner` exists, long before any kernel can send the request.
+        let end_turn_self: Arc<OnceLock<Weak<Inner>>> = Arc::new(OnceLock::new());
+        Self::register_end_turn_handler(&mut options, &end_turn_self);
         let inner = Arc::new(Inner {
             options,
             freshness_stat_probe: std::sync::atomic::AtomicBool::new(false),
@@ -469,6 +520,7 @@ impl ReplKernelManager {
             stderr_closed_flag: AtomicBool::new(false),
             stderr_log: Mutex::new(None),
         });
+        let _ = end_turn_self.set(Arc::downgrade(&inner));
         Self { inner }
     }
 
