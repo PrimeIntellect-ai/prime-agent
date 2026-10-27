@@ -64,8 +64,6 @@ pub struct DecisionEngine {
     model: Result<ResolvedDecisionModel, String>,
     /// The latest goal message; shared with the worker's routing seam.
     goals: Arc<Mutex<StoredGoal>>,
-    /// The spawn's protocol prompt (the child's decision instructions).
-    protocol: Mutex<Option<String>>,
     /// The tagged-reply sender over the supervisor link.
     sender: Arc<LinkAgentMessageController>,
     /// The sender's identity source: the worker's session summary.
@@ -112,7 +110,6 @@ impl DecisionEngine {
             model,
             own_summary,
             goals: Arc::new(Mutex::new(StoredGoal::default())),
-            protocol: Mutex::new(None),
             sender,
             goal_store: Mutex::new(None),
             runtime: AsyncSafeRuntime::new_current_thread().expect("decision engine runtime"),
@@ -404,15 +401,14 @@ impl SessionEngine for DecisionEngine {
             emit(cancelled());
             return;
         }
-        let raw = Self::raw_message(&request).to_string();
         // A decision request carries "questions"; anything else is the
-        // spawn's protocol prompt (the child's decision instructions).
-        let parsed: Option<Value> = serde_json::from_str(&raw).ok();
+        // spawn prompt — the engine keeps no prompt state, so it settles
+        // with the ready answer below.
+        let parsed: Option<Value> = serde_json::from_str(Self::raw_message(&request)).ok();
         let is_request = parsed
             .as_ref()
             .is_some_and(|value| value.get("questions").is_some());
         if !is_request {
-            *self.protocol.lock().unwrap_or_else(PoisonError::into_inner) = Some(raw);
             let (update, message) = Self::answer_rows(
                 "decision",
                 "system-1",
@@ -712,6 +708,45 @@ mod tests {
             Some(&EngineEvent::Done(Err("prompt cancelled".to_string()))),
             "the cancelled turn must not settle with a decision outcome: {events:?}"
         );
+    }
+
+    /// The spawn prompt's path, pinned: a message that is not a decision
+    /// request never reaches the decision call — the turn settles with
+    /// the ready answer alone, and the engine keeps no prompt state to
+    /// store it in.
+    #[test]
+    fn a_spawn_prompt_settles_with_the_ready_answer() {
+        let dir = tempfile::tempdir().unwrap();
+        let engine = engine(dir.path());
+        let request = PromptRequest {
+            message: "You are the decision child: answer requests with the action tag.".to_string(),
+            images: Vec::new(),
+            source: "user".to_string(),
+            agent_message_id: None,
+            custom_message: None,
+            batch: Vec::new(),
+        };
+        let aborted = || false;
+        let mut events: Vec<EngineEvent> = Vec::new();
+        engine.run_prompt(0, request, &aborted, &mut |event| {
+            events.push(event);
+            true
+        });
+        let settled = events.pop();
+        assert_eq!(
+            settled,
+            Some(EngineEvent::Done(Ok(()))),
+            "the spawn prompt must settle ready, not with a decision outcome: {events:?}"
+        );
+        // The ready answer is the only assistant content on the turn.
+        let answered: Vec<&str> = events
+            .iter()
+            .filter_map(|event| match event {
+                EngineEvent::AssistantMessage(row) => row["content"].as_str(),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(answered, ["Decision child ready."]);
     }
 
     /// A stub supervisor over `socket`: it answers each command on its own
