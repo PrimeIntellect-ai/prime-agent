@@ -110,6 +110,11 @@ impl Supervisor {
                 ) {
                     return response_success(Some(command_id), type_name, None);
                 }
+                // The pushed summary is the FULL live summary: cache it for
+                // the list path (the roster row below stores the slim
+                // classified projection). Same critical section as the gate,
+                // so accept order is apply order.
+                *resident.summary_snapshot.lock().unwrap() = Some(summary.clone());
                 let entry = roster.write_summary(summary.clone(), Some(&resident.worker_id), None);
                 // The worker's root slot can swap to a new durable
                 // session: the superseded row must not present as live.
@@ -189,6 +194,11 @@ impl Supervisor {
                 if !roster.accept_roster_pull(&resident.worker_id, &instance, counter) {
                     return None;
                 }
+                // The pulled summary is the FULL live summary: cache it for
+                // the list path (the roster row below stores the slim
+                // classified projection). Same critical section as the gate,
+                // so accept order is apply order.
+                *resident.summary_snapshot.lock().unwrap() = Some(summary.clone());
                 let entry = roster.write_summary(summary.clone(), Some(&resident.worker_id), None);
                 // The pull sees the same root-slot swap: the superseded
                 // row retires, and the identity follow re-binds.

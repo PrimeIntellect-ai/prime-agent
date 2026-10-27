@@ -218,9 +218,32 @@ fn supervisor_end_to_end_scripted_session_lifecycle() {
     );
     assert_eq!(final_answer["data"]["text"], "hello from scripted");
 
-    client.send_command("l2", &serde_json::json!({ "type": "list" }));
-    let list = client.read_response("l2");
-    let sessions = list["data"]["sessions"].as_array().expect("sessions");
+    // The list serves the resident's cached summary (TS supervisor parity: no
+    // per-list worker round-trip), so the turn's usage converges through the
+    // roster pipeline's turn-end delta. Wait for that observable readiness
+    // instead of racing the push, then assert the full wire shape.
+    let usage_deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let sessions = loop {
+        client.send_command("l2", &serde_json::json!({ "type": "list" }));
+        let list = client.read_response("l2");
+        let sessions = list["data"]["sessions"]
+            .as_array()
+            .expect("sessions")
+            .clone();
+        if sessions.len() == 1
+            && sessions[0]["usage"]["inputTokens"]
+                .as_u64()
+                .unwrap_or_default()
+                > 0
+        {
+            break sessions;
+        }
+        assert!(
+            std::time::Instant::now() < usage_deadline,
+            "the turn's usage never reached the list row"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    };
     assert_eq!(sessions.len(), 1);
     assert_eq!(sessions[0]["id"], session_id.as_str());
     // Session-summary fields match the TS `SessionSummary` wire shape.
