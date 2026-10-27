@@ -371,6 +371,18 @@ fn finite_or_none(value: f64) -> Option<f64> {
 /// the reply envelope carries the answers (Prime Inference's hosted clef).
 const SYSTEMONE_API: &str = "systemone";
 
+/// Cancels the provider's detached task when the decision serve drops its
+/// reader — its own timeout, or a caller aborting the race — so the
+/// orphaned request releases its response and its connection instead of
+/// running on.
+struct CancelOnDrop(tokio_util::sync::CancellationToken);
+
+impl Drop for CancelOnDrop {
+    fn drop(&mut self) {
+        self.0.cancel();
+    }
+}
+
 /// Serve one decision request with the resolved model: one non-streaming
 /// completion, parsed into the decision envelope. Structured-decision
 /// (`api: "systemone"`) models speak the native protocol; every other model
@@ -383,10 +395,10 @@ async fn serve_decision(
         return serve_systemone(resolved, request).await;
     }
     let context = build_decision_context(request);
-    // The token cancels the provider's detached task when the bound drops
-    // this reader, so the orphaned request releases its response and its
-    // connection instead of running on.
+    // The request's cancellation token: the guard above cancels it when
+    // this serve drops, wherever the drop comes from.
     let signal = tokio_util::sync::CancellationToken::new();
+    let _cancel_on_drop = CancelOnDrop(signal.clone());
     let options = pa_ai::types::SimpleStreamOptions::from_base(pa_ai::types::StreamOptions {
         max_tokens: Some(DECISION_MAX_TOKENS),
         timeout_ms: Some(DECISION_TIMEOUT_MS),
@@ -409,10 +421,6 @@ async fn serve_decision(
     {
         result.map_err(|error| anyhow!("the decision model request failed: {error:?}"))?
     } else {
-        // Dropping the completion future drops only this reader; the
-        // token tells the detached provider task to stop and release
-        // the response and its connection.
-        signal.cancel();
         bail!("the decision model request timed out");
     };
     match response.stop_reason {
