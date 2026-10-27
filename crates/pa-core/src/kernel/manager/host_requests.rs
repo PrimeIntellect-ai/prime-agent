@@ -2,7 +2,7 @@
 //! (harness/goal/etc.) and their settle/exit waits.
 
 use super::{
-    anyhow, json, lock, Arc, Duration, HostRequestPayload, Inner, Value,
+    anyhow, json, lock, Arc, Duration, HostRequestPayload, Inner, Value, END_TURN_REQUEST_TYPE,
     MAX_HANDLED_HOST_REQUEST_IDS,
 };
 
@@ -61,15 +61,26 @@ impl Inner {
             .and_then(Value::as_str)
             .filter(|t| !t.is_empty())
             .ok_or_else(|| anyhow!("host request payload must have a string type"))?;
-        let handler = self
-            .options
-            .host_handlers
-            .get(request_type)
-            .ok_or_else(|| {
-                anyhow!("host request type \"{request_type}\" is not available in this session")
-            })?
-            .clone();
-        handler(HostRequestPayload { data: data.clone() }).await
+        if let Some(handler) = self.options.host_handlers.get(request_type).cloned() {
+            return handler(HostRequestPayload { data: data.clone() }).await;
+        }
+        if request_type == END_TURN_REQUEST_TYPE {
+            // The manager's own answer for the sanctioned turn-end request
+            // when no host handler owns it (the registry wins otherwise):
+            // mark the executing cell, and the flag rides the settled result
+            // so the turn ends once the batch settles — nothing is queued
+            // and no wake fires. A harness without this manager answers the
+            // generic error below, so the call raises in its kernels.
+            let execution = lock(&self.guarded)
+                .active_execution
+                .clone()
+                .ok_or_else(|| anyhow!("rlm.end_turn has no running cell to end the turn for"))?;
+            lock(&execution.buffers).ended_turn = true;
+            return Ok(json!({ "endedTurn": true }));
+        }
+        Err(anyhow!(
+            "host request type \"{request_type}\" is not available in this session"
+        ))
     }
 
     /// Wait (bounded) for the in-flight host request tasks to settle.
