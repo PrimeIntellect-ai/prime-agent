@@ -600,6 +600,7 @@ mod tests {
     /// connection — the direct-transport probe fails, the
     /// supervisor-routed send delivers — and records every command it
     /// answers.
+    #[cfg(unix)]
     fn stub_supervisor(socket: &std::path::Path) -> Arc<Mutex<Vec<Value>>> {
         let commands: Arc<Mutex<Vec<Value>>> = Arc::new(Mutex::new(Vec::new()));
         let stub_commands = Arc::clone(&commands);
