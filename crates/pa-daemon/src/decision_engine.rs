@@ -14,7 +14,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 use anyhow::anyhow;
 use serde_json::{json, Value};
 
-use crate::agent_messaging::LinkAgentMessageController;
+use crate::agent_messaging::{FamilyIdentity, LinkAgentMessageController};
 use crate::async_safe_runtime::AsyncSafeRuntime;
 use crate::engine::{
     AssistantSnapshot, BranchSummaryOutcome, BranchSummaryRequest, CompactionOutcome,
@@ -141,19 +141,27 @@ impl DecisionEngine {
             .unwrap_or(&request.message)
     }
 
-    /// Send one tagged reply to the parent through the supervisor link.
+    /// Send one tagged reply to the parent through the supervisor link:
+    /// the target is the parent id the worker already knows — the durable
+    /// parent edge in its pushed session summary — so a reply never
+    /// fetches the family roster just to find it.
     fn send_reply(&self, message: &Value) -> anyhow::Result<()> {
+        let summary = self
+            .own_summary
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone();
+        // Only the parent edge names the target; the identity's own id is
+        // unused here.
+        let target = FamilyIdentity::from_summary(summary.as_ref(), "")
+            .parent_active_session_id
+            .ok_or_else(|| anyhow!("the decision child has no parent id in its session summary"))?;
         let sender = Arc::clone(&self.sender);
         let message = message.to_string();
         self.runtime.block_on(async move {
-            let family = sender.family().await?;
-            let parent = family
-                .into_iter()
-                .find(|member| member.relationship == AgentFamilyRelationship::Parent)
-                .ok_or_else(|| anyhow!("the decision child has no parent in its family roster"))?;
             sender
                 .send_agent_message(AgentMessageSendInput {
-                    target: parent.id,
+                    target,
                     message,
                     receiver_role: Some(AgentFamilyRelationship::Parent),
                 })
@@ -568,6 +576,114 @@ mod tests {
             Some(&EngineEvent::Done(Err("prompt cancelled".to_string()))),
             "the cancelled turn must not settle with a decision outcome: {events:?}"
         );
+    }
+
+    /// The reply target, pinned: a reply routes to the parent id the
+    /// worker already knows — the pushed summary's `parentActiveSessionId`
+    /// — and never fetches the family roster to find it; a child without
+    /// a parent edge fails fast without touching the link.
+    #[cfg(unix)]
+    #[test]
+    fn a_reply_targets_the_known_parent_id_never_the_roster() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("supervisor.sock");
+        // A stub supervisor records every command it answers: the direct
+        // ticket leg, then the supervisor-routed send.
+        let commands: Arc<Mutex<Vec<Value>>> = Arc::new(Mutex::new(Vec::new()));
+        let stub_commands = Arc::clone(&commands);
+        let stub_socket = socket.clone();
+        std::thread::spawn(move || {
+            use std::io::{BufRead, Write};
+            let Ok(listener) = std::os::unix::net::UnixListener::bind(&stub_socket) else {
+                return;
+            };
+            for _ in 0..2 {
+                let Ok((stream, _)) = listener.accept() else {
+                    return;
+                };
+                let Ok(mut writer) = stream.try_clone() else {
+                    return;
+                };
+                let mut reader = std::io::BufReader::new(stream);
+                writer
+                    .write_all(
+                        b"{\"type\":\"daemon_hello\",\"protocol\":{\"name\":\"prime-agent.daemon\",\"version\":7}}\n",
+                    )
+                    .unwrap();
+                let mut line = String::new();
+                if reader.read_line(&mut line).unwrap() == 0 {
+                    return;
+                }
+                let envelope: Value = match serde_json::from_str(line.trim()) {
+                    Ok(envelope) => envelope,
+                    Err(_) => return,
+                };
+                let id = envelope["id"].as_str().unwrap_or_default().to_string();
+                let command = envelope["command"].clone();
+                stub_commands.lock().unwrap().push(command.clone());
+                // No direct transport: the send falls back to the
+                // supervisor route, which answers with a receipt.
+                let response = match command["type"].as_str().unwrap_or_default() {
+                    "get_worker_peer_transport" => json!({
+                        "id": id, "command": "get_worker_peer_transport",
+                        "success": false, "error": "no direct transport",
+                    }),
+                    other => json!({
+                        "id": id, "command": other, "success": true,
+                        "data": {
+                            "id": "m1",
+                            "target": { "activeSessionId": command["targetActiveSessionId"] },
+                            "deliveryStatus": "delivered",
+                        },
+                    }),
+                };
+                writer
+                    .write_all(format!("{response}\n").as_bytes())
+                    .unwrap();
+            }
+        });
+        let engine = DecisionEngine::new(
+            dir.path(),
+            dir.path(),
+            Arc::new(crate::supervisor_link::SupervisorLink::new(socket)),
+            "decision-child".to_string(),
+            "token".to_string(),
+        );
+        // No pushed summary: no known parent id, so the reply fails fast —
+        // the roster fetch the old path made would dial the link first.
+        let error = engine
+            .send_reply(&json!({"type": "decision_api.decision", "seq": 1}))
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("no parent id"),
+            "a missing parent edge must fail on the known id: {error:#}"
+        );
+        assert!(
+            commands.lock().unwrap().is_empty(),
+            "no command may reach the supervisor before the parent id is known"
+        );
+        engine.set_session_summary(json!({
+            "parentActiveSessionId": "parent-live-1",
+            "parentSessionId": "parent-persisted-1",
+        }));
+        engine
+            .send_reply(&json!({"type": "decision_api.decision", "seq": 2}))
+            .expect("the reply must deliver through the stub supervisor");
+        let captured = commands.lock().unwrap().clone();
+        assert_eq!(
+            captured
+                .iter()
+                .map(|command| command["type"].as_str().unwrap_or_default())
+                .collect::<Vec<_>>(),
+            ["get_worker_peer_transport", "send_message"],
+            "the reply must route straight to the known parent id, never a roster fetch"
+        );
+        for command in &captured {
+            assert_eq!(
+                command["targetActiveSessionId"], "parent-live-1",
+                "every leg of the reply must target the worker's known parent id"
+            );
+        }
     }
 
     /// The engine-start resolution, pinned: the decision model resolves
