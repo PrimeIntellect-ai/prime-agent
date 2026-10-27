@@ -11,9 +11,7 @@ pub mod shell;
 
 pub use fs::fsync;
 pub use lock_dir::{lock_exclusive, try_lock_exclusive, unlock_file, LockDir};
-pub use perms::{
-    file_mode, is_executable, is_readable_writable, restrict_dir, restrict_file, set_private_mode,
-};
+pub use perms::{file_mode, is_executable, restrict_dir, restrict_file, set_private_mode};
 pub use process::{
     kill_pid, kill_process_group_or_pid, normalized_exit_code, pid_exists, set_new_process_group,
     set_no_window, termination_signal, Signal,
