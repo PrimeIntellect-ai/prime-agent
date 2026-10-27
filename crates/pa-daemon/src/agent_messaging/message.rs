@@ -264,7 +264,7 @@ impl LinkAgentMessageController {
             &ticket,
             &input.message,
             &self.sender_block(),
-            None,
+            input.delivery_mode,
         )
         .await
         {
@@ -309,6 +309,7 @@ impl LinkAgentMessageController {
                     "message": input.message,
                     "fromActiveSessionId": self.active_session_id,
                     "agentOrigin": true,
+                    "deliveryMode": input.delivery_mode,
                 }),
                 std::time::Duration::from_secs(30),
             )
