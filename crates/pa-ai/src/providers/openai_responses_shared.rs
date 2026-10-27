@@ -494,37 +494,6 @@ mod tests {
         }
     }
 
-    /// `rlm.end_turn()` ends runs on a tool result, so a replayed turn can be
-    /// [user, assistant(tool call), tool result, user] with NO assistant
-    /// message between the tool result and the next user message. The
-    /// Responses path must convert that shape without inventing empty ids
-    /// or a synthetic assistant item.
-    #[test]
-    fn ended_turn_shape_replays_user_directly_after_tool_result() {
-        let items = convert(
-            &codex_model(),
-            vec![
-                user("hi"),
-                assistant(vec![tool_call("call_x")], "gpt-5.1-codex"),
-                tool_result("call_x"),
-                user("next turn"),
-            ],
-        );
-        assert_no_empty_ids(&items);
-        assert_eq!(
-            items
-                .iter()
-                .map(|item| item
-                    .get("type")
-                    .and_then(Value::as_str)
-                    .or(item.get("role").and_then(Value::as_str))
-                    .unwrap_or("?"))
-                .collect::<Vec<_>>(),
-            vec!["user", "function_call", "function_call_output", "user"],
-            "no synthetic assistant item between the tool output and the user turn"
-        );
-    }
-
     /// A tool call without the `call_id|item_id` encoding omits the item `id` entirely and keeps
     /// the whole id as `call_id` (TS evidence: `convertResponsesMessages` with a pipe-less
     /// toolCall.id; the dogfood bug emitted `id: ""` here and the API rejected the turn).

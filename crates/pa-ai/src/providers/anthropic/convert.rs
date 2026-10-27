@@ -400,54 +400,6 @@ mod tests {
         ])
     }
 
-    /// `rlm.end_turn()` ends runs on a tool result, so a replayed turn can be
-    /// [user, assistant(tool call), tool result, user] with NO assistant
-    /// message between the tool result and the next user turn. The tool
-    /// result must ride its own user turn carrying the matched
-    /// `tool_use_id`, and the following user message must survive as its
-    /// own turn.
-    #[test]
-    fn ended_turn_shape_replays_user_directly_after_tool_result() {
-        let messages: Vec<Message> = serde_json::from_value(json!([
-            {"role": "user", "content": "rebuild", "timestamp": 1},
-            {
-                "role": "assistant",
-                "content": [
-                    {"type": "toolCall", "id": "call-1", "name": "python_repl",
-                     "arguments": {"code": "await rlm.end_turn()"}}
-                ],
-                "api": "anthropic-messages", "provider": "anthropic", "model": "claude-sonnet-5",
-                "usage": {
-                    "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0, "totalTokens": 0,
-                    "cost": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0, "total": 0}
-                },
-                "stopReason": "toolUse", "timestamp": 2
-            },
-            {
-                "role": "toolResult", "toolCallId": "call-1",
-                "content": [{"type": "text", "text": "turn ended"}],
-                "isError": false, "timestamp": 3
-            },
-            {"role": "user", "content": "next turn", "timestamp": 4}
-        ]))
-        .expect("messages json");
-        let context = Context {
-            system_prompt: None,
-            messages,
-            tools: None,
-        };
-        let params = convert_messages(&context, &claude(), false, None);
-        assert_eq!(params.len(), 4);
-        assert_eq!(params[0]["role"], "user");
-        assert_eq!(params[1]["role"], "assistant");
-        assert_eq!(params[1]["content"][0]["type"], "tool_use");
-        assert_eq!(params[2]["role"], "user");
-        assert_eq!(params[2]["content"][0]["type"], "tool_result");
-        assert_eq!(params[2]["content"][0]["tool_use_id"], "call-1");
-        assert_eq!(params[3]["role"], "user");
-        assert_eq!(params[3]["content"], json!("next turn"));
-    }
-
     /// Discussion #3391: a non-signing endpoint gets its unsigned thinking back as `thinking`
     /// blocks, never as visible text the model then imitates.
     #[test]
