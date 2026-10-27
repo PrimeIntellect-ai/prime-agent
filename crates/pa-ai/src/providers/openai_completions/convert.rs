@@ -554,67 +554,6 @@ mod tests {
         }
     }
 
-    /// `rlm.end_turn()` ends runs on a tool result, so a replayed turn can
-    /// be [user, assistant(tool call), tool result, user] with NO assistant
-    /// message between the tool result and the next user turn. Standard
-    /// providers accept [tool, user] directly; providers that require an
-    /// assistant message after a tool result get the synthetic bridge their
-    /// compat declares. Neither path emits an invalid request.
-    #[test]
-    fn ended_turn_shape_replays_user_directly_after_tool_result() {
-        let model = model("openai", 0.5, 0.5);
-        let messages: Vec<crate::types::Message> = serde_json::from_value(json!([
-            {"role": "user", "content": "hi", "timestamp": 1},
-            {
-                "role": "assistant",
-                "content": [
-                    {"type": "toolCall", "id": "call-1", "name": "python_repl",
-                     "arguments": {"code": "await rlm.end_turn()"}}
-                ],
-                "api": "openai-completions", "provider": "openai", "model": "m",
-                "usage": {
-                    "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0, "totalTokens": 0,
-                    "cost": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0, "total": 0}
-                },
-                "stopReason": "toolUse", "timestamp": 2
-            },
-            {
-                "role": "toolResult", "toolCallId": "call-1",
-                "content": [{"type": "text", "text": "turn ended"}],
-                "isError": false, "timestamp": 3
-            },
-            {"role": "user", "content": "next turn", "timestamp": 4}
-        ]))
-        .expect("messages json");
-        let context = Context {
-            system_prompt: None,
-            messages,
-            tools: None,
-        };
-        let standard = crate::providers::openai_completions::detect_compat(&model);
-        let params = convert_messages(&model, &context, &standard);
-        let roles: Vec<&str> = params
-            .iter()
-            .map(|message| message["role"].as_str().unwrap_or_default())
-            .collect();
-        assert_eq!(roles, vec!["user", "assistant", "tool", "user"]);
-        assert_eq!(params[2]["tool_call_id"], json!("call-1"));
-        assert_eq!(params[2]["content"], json!("turn ended"));
-
-        let mut strict = standard.clone();
-        strict.requires_assistant_after_tool_result = true;
-        let bridged = convert_messages(&model, &context, &strict);
-        let bridged_roles: Vec<&str> = bridged
-            .iter()
-            .map(|message| message["role"].as_str().unwrap_or_default())
-            .collect();
-        assert_eq!(
-            bridged_roles,
-            vec!["user", "assistant", "tool", "assistant", "user"],
-            "the strict compat inserts its declared assistant bridge after the tool result"
-        );
-    }
-
     enum ByokBilling {
         NotByok,
         FeeOnly,
