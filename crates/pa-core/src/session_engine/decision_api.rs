@@ -440,6 +440,9 @@ async fn serve_decision(
     let answer = parse_decision_answer(&reply, &request.criteria)?;
     Ok(json!({
         "model": resolved.label(),
+        // The completion's usage rides the envelope so the decision child's
+        // answer rows bill in the cost ledger, like the chat path's rows.
+        "usage": response.usage,
         "answers": { "action": answer },
     }))
 }
@@ -531,9 +534,12 @@ async fn serve_systemone(
         .ok_or_else(|| anyhow!("the decision model's reply has no \"answers\" object: {raw}"))?;
     let answer = parse_decision_answer(&answers.to_string(), &request.criteria)?;
     // The envelope reports the resolved model's label, never the
-    // endpoint's bare id.
+    // endpoint's bare id. The endpoint's usage, when it carries one,
+    // rides along so the decision child's answer rows bill in the cost
+    // ledger.
     Ok(json!({
         "model": resolved.label(),
+        "usage": parsed.get("usage").cloned().unwrap_or(Value::Null),
         "answers": { "action": answer },
     }))
 }
@@ -1260,6 +1266,8 @@ mod tests {
         let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         let envelope = json!({
             "model": "fixture-decisions/systemone-model",
+            "usage": {"input": 11, "output": 7, "cacheRead": 0, "cacheWrite": 0,
+                       "totalTokens": 18, "cost": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0, "total": 0.002}},
             "answers": {"action": {"choice": "left", "confidence": 0.9, "probabilities": {"left": 0.9, "right": 0.1}}}
         });
         systemone_fixture(dir.path(), envelope.clone(), std::sync::Arc::clone(&seen))
@@ -1271,6 +1279,9 @@ mod tests {
         let answer = decide(request, dir.path()).await.unwrap();
         assert_eq!(answer["model"], "fixture-decisions/systemone-model");
         assert_eq!(answer["answers"]["action"]["choice"], "left", "{answer}");
+        // The endpoint's usage rides the envelope, so the decision child's
+        // answer rows can bill in the cost ledger.
+        assert_eq!(answer["usage"]["input"], 11, "{answer}");
         assert_eq!(
             answer["answers"]["action"]["probabilities"]["left"], 0.9,
             "the per-option probabilities ride the envelope: {answer}"
