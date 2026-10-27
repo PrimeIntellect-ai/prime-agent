@@ -1,13 +1,14 @@
 //! The Decision API child engine (`rlm.spawn kind="decision"`): a spawned
 //! session whose every message is one decision request, answered by a
 //! single decision model call — the registry-resolved
-//! `decisionApi.systemOneModel` model over the shared decision path
-//! (`pa_core::session_engine::decision_api`). The parent's tagged goal
-//! messages route into the engine's goal input (the newest seq wins; an
-//! older goal never overwrites a newer one), and each answer returns to
-//! the parent as a tagged `decision_api.decision` message.
+//! `decisionApi.systemOneModel` model (resolved once at engine start)
+//! over the shared decision path (`pa_core::session_engine::decision_api`).
+//! The parent's tagged goal messages route into the engine's goal input
+//! (the newest seq wins; an older goal never overwrites a newer one), and
+//! each answer returns to the parent as a tagged `decision_api.decision`
+//! message.
 
-use std::path::PathBuf;
+use std::path::Path;
 use std::sync::{Arc, Mutex, PoisonError};
 
 use anyhow::anyhow;
@@ -23,6 +24,7 @@ use crate::engine::{
 use pa_core::session_engine::agent_messaging::{
     AgentFamilyRelationship, AgentMessageController, AgentMessageSendInput,
 };
+use pa_core::session_engine::decision_api::ResolvedDecisionModel;
 use pa_core::session_engine::side_question::SideQuestionSink;
 
 /// One stored goal: the seq contract lives in the routing seam — a goal with
@@ -44,8 +46,9 @@ impl Default for StoredGoal {
 
 /// The decision child's engine.
 pub struct DecisionEngine {
-    cwd: PathBuf,
-    agent_dir: PathBuf,
+    /// The decision model resolved once at engine start, or the actionable
+    /// refusal every decision answers with.
+    model: Result<ResolvedDecisionModel, String>,
     /// The latest goal message; shared with the worker's routing seam.
     goals: Arc<Mutex<StoredGoal>>,
     /// The spawn's protocol prompt (the child's decision instructions).
@@ -69,8 +72,8 @@ impl DecisionEngine {
     /// Panics when the engine runtime cannot start.
     #[must_use]
     pub fn new(
-        cwd: PathBuf,
-        agent_dir: PathBuf,
+        cwd: &Path,
+        agent_dir: &Path,
         link: Arc<crate::supervisor_link::SupervisorLink>,
         active_session_id: String,
         worker_token: String,
@@ -83,10 +86,14 @@ impl DecisionEngine {
             Arc::clone(&own_summary),
             None,
         ));
+        // The decision model resolves once here, at engine start: the
+        // hot path of the control loop never re-reads settings or
+        // rebuilds the registry; a failed resolution keeps its
+        // actionable refusal for every decision.
+        let model = pa_core::session_engine::decision_api::resolve_decision_model(cwd, agent_dir);
         Self {
+            model,
             own_summary,
-            cwd,
-            agent_dir,
             goals: Arc::new(Mutex::new(StoredGoal::default())),
             protocol: Mutex::new(None),
             sender,
@@ -173,24 +180,19 @@ impl DecisionEngine {
     }
 
     /// Serve one decision request message: inject the latest goal into the
-    /// state, then run the shared decision path (the registry resolution
-    /// and one provider completion).
+    /// state, then run the shared decision path (one provider completion)
+    /// with the engine-start resolution.
     fn serve(&self, mut request: Value) -> anyhow::Result<Value> {
         if let Some(goal) = self.latest_goal() {
             Self::inject_goal(&mut request, &goal);
         }
-        let cwd = self.cwd.clone();
-        let agent_dir = self.agent_dir.clone();
-        self.runtime.block_on(async move {
-            pa_core::session_engine::decision_api::serve_decision_request(request, &cwd, &agent_dir)
-                .await
-        })
-    }
-
-    /// The child's resolved model label (the transcript rows).
-    fn model_label(&self) -> String {
-        pa_core::session_engine::decision_api::decision_model_selector(&self.cwd, &self.agent_dir)
-            .unwrap_or_default()
+        let resolved = match self.model.as_ref() {
+            Ok(resolved) => resolved,
+            Err(refusal) => return Err(anyhow!(refusal.clone())),
+        };
+        self.runtime.block_on(
+            pa_core::session_engine::decision_api::serve_decision_request(request, resolved),
+        )
     }
 
     /// The transcript row pair for an answer: the assistant update and the
@@ -340,11 +342,6 @@ impl SessionEngine for DecisionEngine {
         if let Some(body) = body.as_object_mut() {
             body.remove("seq");
         }
-        let model_label = self.model_label();
-        let (provider, model) = model_label.split_once('/').map_or_else(
-            || ("decision".to_string(), "system-1".to_string()),
-            |(provider, model)| (provider.to_string(), model.to_string()),
-        );
         let result = self.serve(body);
         // Cancellation can arrive while the bounded decision call runs:
         // either reply - the decision or its failure - must not reach the
@@ -358,7 +355,7 @@ impl SessionEngine for DecisionEngine {
                 let reply = json!({
                     "type": "decision_api.decision",
                     "seq": seq,
-                    "model": envelope.get("model").cloned().unwrap_or(json!(model_label)),
+                    "model": envelope["model"].clone(),
                     "decision": envelope["answers"]["action"].clone(),
                 });
                 if let Err(error) = self.send_reply(&reply) {
@@ -368,7 +365,13 @@ impl SessionEngine for DecisionEngine {
                     return;
                 }
                 let text = envelope["answers"].to_string();
-                let (update, final_message) = Self::answer_rows(&provider, &model, &text);
+                // A served decision implies the engine-start resolution;
+                // its halves label the transcript rows.
+                let Some(resolved) = self.model.as_ref().ok() else {
+                    unreachable!("a served decision implies the engine resolved its model");
+                };
+                let (provider, model) = resolved.provider_and_id();
+                let (update, final_message) = Self::answer_rows(provider, model, &text);
                 for event in [update, final_message.clone()] {
                     if !emit(event) {
                         emit(cancelled());
@@ -419,8 +422,8 @@ mod tests {
             std::path::PathBuf::new(),
         ));
         DecisionEngine::new(
-            dir.to_path_buf(),
-            dir.to_path_buf(),
+            dir,
+            dir,
             link,
             "decision-child".to_string(),
             "token".to_string(),
@@ -565,5 +568,118 @@ mod tests {
             Some(&EngineEvent::Done(Err("prompt cancelled".to_string()))),
             "the cancelled turn must not settle with a decision outcome: {events:?}"
         );
+    }
+
+    /// The engine-start resolution, pinned: the decision model resolves
+    /// once when the engine starts, so a settings rewrite mid-session
+    /// never re-resolves — later decisions keep serving the start-time
+    /// model.
+    #[test]
+    fn the_decision_model_resolves_once_at_engine_start() {
+        // A private api name: the faux provider registry is global, so a
+        // shared name would race the other tests' response queues.
+        let served: std::sync::Arc<std::sync::Mutex<Vec<String>>> =
+            std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let served_writer = std::sync::Arc::clone(&served);
+        let recording: pa_ai::faux::FauxResponseFactory = std::sync::Arc::new(
+            move |_context: &pa_ai::types::Context,
+                  _options: Option<&pa_ai::types::StreamOptions>,
+                  _call: u64,
+                  model: &pa_types::ai::Model| {
+                served_writer.lock().unwrap().push(model.id.clone());
+                Ok(pa_ai::faux::faux_assistant_text_message(
+                    r#"{"action": {"choice": "left"}}"#,
+                    pa_ai::faux::FauxAssistantMessageOptions::default(),
+                ))
+            },
+        );
+        let registration =
+            pa_ai::faux::register_faux_provider(pa_ai::faux::RegisterFauxProviderOptions {
+                api: Some("faux-decision-engine".to_string()),
+                provider: Some("fixture-decisions".to_string()),
+                models: Some(vec![
+                    pa_ai::faux::FauxModelDefinition {
+                        id: "first-model".to_string(),
+                        input: Some(vec![pa_types::ai::ModelInput::Text]),
+                        ..Default::default()
+                    },
+                    pa_ai::faux::FauxModelDefinition {
+                        id: "second-model".to_string(),
+                        input: Some(vec![pa_types::ai::ModelInput::Text]),
+                        ..Default::default()
+                    },
+                ]),
+                ..Default::default()
+            });
+        registration.set_responses(vec![
+            pa_ai::faux::FauxResponseStep::Factory(std::sync::Arc::clone(&recording)),
+            pa_ai::faux::FauxResponseStep::Factory(recording),
+        ]);
+        let dir = tempfile::tempdir().unwrap();
+        let write_settings = |reference: &str| {
+            std::fs::write(
+                dir.path().join("settings.json"),
+                json!({ "decisionApi": { "systemOneModel": reference } }).to_string(),
+            )
+            .unwrap();
+        };
+        std::fs::write(
+            dir.path().join("models.json"),
+            r#"{ "providers": { "fixture-decisions": {
+                "baseUrl": "https://fixture.example", "apiKey": "fixture-key",
+                "api": "faux-decision-engine", "models": [
+                    { "id": "first-model", "input": ["text"] },
+                    { "id": "second-model", "input": ["text"] }
+                ]
+            } } }"#,
+        )
+        .unwrap();
+        write_settings("fixture-decisions/first-model");
+        let engine = engine(dir.path());
+        let decide = |engine: &DecisionEngine| {
+            let body = json!({
+                "seq": 7,
+                "state": {"observation": 1},
+                "questions": {"action": {
+                    "type": "choice",
+                    "criteria": {"left": "go left", "right": "go right"}
+                }}
+            });
+            let request = PromptRequest {
+                message: body.to_string(),
+                images: Vec::new(),
+                source: "user".to_string(),
+                agent_message_id: None,
+                custom_message: None,
+                batch: Vec::new(),
+            };
+            let mut events: Vec<EngineEvent> = Vec::new();
+            engine.run_prompt(0, request, &|| false, &mut |event| {
+                events.push(event);
+                true
+            });
+            events
+        };
+        let first = decide(&engine);
+        // The settings now name the other model; a per-decision
+        // resolution would pick it up, the engine-start one never does.
+        write_settings("fixture-decisions/second-model");
+        let second = decide(&engine);
+        assert_eq!(
+            *served.lock().unwrap(),
+            ["first-model", "first-model"],
+            "the engine must keep its start-time model across a settings rewrite"
+        );
+        // Both decisions served end to end; the stub link cannot deliver
+        // the reply, which is each turn's deterministic settle.
+        for events in [first, second] {
+            let Some(EngineEvent::Done(Err(error))) = events.last() else {
+                panic!("each decision turn must settle: {events:?}");
+            };
+            assert!(
+                error.starts_with("the decision reply could not reach the parent"),
+                "{events:?}"
+            );
+        }
     }
 }

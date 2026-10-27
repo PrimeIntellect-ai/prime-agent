@@ -601,8 +601,8 @@ async fn deliver_routes_only_the_parents_decision_goals() {
     // durable parent edge is the create-time runtime metadata's.
     let agent_dir = worker.config.agent_dir.clone();
     worker.engine = std::sync::Arc::new(crate::decision_engine::DecisionEngine::new(
-        agent_dir.clone(),
-        agent_dir,
+        &agent_dir,
+        &agent_dir,
         std::sync::Arc::new(crate::supervisor_link::SupervisorLink::new(
             std::path::PathBuf::new(),
         )),
