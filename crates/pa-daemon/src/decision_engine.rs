@@ -224,7 +224,7 @@ impl DecisionEngine {
     /// Serve one decision request message: inject the latest goal into the
     /// state, then run the shared decision path (one provider completion)
     /// with the engine-start resolution.
-    fn serve(&self, mut request: Value) -> anyhow::Result<Value> {
+    fn serve(&self, mut request: Value, aborted: &dyn Fn() -> bool) -> anyhow::Result<Value> {
         if let Some(goal) = self.latest_goal() {
             Self::inject_goal(&mut request, &goal);
         }
@@ -232,9 +232,23 @@ impl DecisionEngine {
             Ok(resolved) => resolved,
             Err(refusal) => return Err(anyhow!(refusal.clone())),
         };
-        self.runtime.block_on(
-            pa_core::session_engine::decision_api::serve_decision_request(request, resolved),
-        )
+        self.runtime.block_on(async {
+            // The worker's cancel flag is a plain sync probe with no async
+            // wake, so the bounded decision call races a short-interval
+            // poll of it: an abort lands mid-call instead of after the
+            // whole 30 s (the retry sleep's abort-aware wait).
+            tokio::select! {
+                result = pa_core::session_engine::decision_api::serve_decision_request(
+                    request,
+                    resolved,
+                ) => result,
+                () = async {
+                    while !aborted() {
+                        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                    }
+                } => Err(anyhow!("the decision call was aborted")),
+            }
+        })
     }
 
     /// The transcript row pair for an answer: the assistant update and the
@@ -434,7 +448,7 @@ impl SessionEngine for DecisionEngine {
         if let Some(body) = body.as_object_mut() {
             body.remove("seq");
         }
-        let result = self.serve(body);
+        let result = self.serve(body, aborted);
         // Cancellation can arrive while the bounded decision call runs:
         // either reply - the decision or its failure - must not reach the
         // parent once the turn is cancelled.
@@ -707,6 +721,137 @@ mod tests {
             events.last(),
             Some(&EngineEvent::Done(Err("prompt cancelled".to_string()))),
             "the cancelled turn must not settle with a decision outcome: {events:?}"
+        );
+    }
+
+    /// The abort interrupt, pinned: the bounded decision call races the
+    /// worker's cancel flag, so an abort landing mid-call frees the turn
+    /// without waiting out the decision bound, cancels the in-flight
+    /// provider request, and settles cancelled with no reply to the
+    /// parent.
+    #[cfg(unix)]
+    #[test]
+    fn an_abort_mid_call_interrupts_the_bounded_serve() {
+        // A private api name: the faux provider registry is global, so a
+        // shared name would race the other decision tests' response queues.
+        let registration =
+            pa_ai::faux::register_faux_provider(pa_ai::faux::RegisterFauxProviderOptions {
+                api: Some("faux-decision-abort".to_string()),
+                provider: Some("fixture-decisions".to_string()),
+                models: Some(vec![pa_ai::faux::FauxModelDefinition {
+                    id: "decision-model".to_string(),
+                    input: Some(vec![pa_types::ai::ModelInput::Text]),
+                    ..Default::default()
+                }]),
+                // The paced answer holds the stream far past the decision
+                // bound, the way a slow completion does.
+                tokens_per_second: Some(0.1),
+                ..Default::default()
+            });
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("settings.json"),
+            json!({ "decisionApi": { "systemOneModel": "decision-model" } }).to_string(),
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("models.json"),
+            r#"{ "providers": { "fixture-decisions": {
+                "baseUrl": "https://fixture.example", "apiKey": "fixture-key",
+                "api": "faux-decision-abort", "models": [
+                    { "id": "decision-model", "input": ["text"] }
+                ]
+            } } }"#,
+        )
+        .unwrap();
+        let socket = dir.path().join("supervisor.sock");
+        let commands = stub_supervisor(&socket);
+        let engine = DecisionEngine::new(
+            dir.path(),
+            dir.path(),
+            Arc::new(crate::supervisor_link::SupervisorLink::new(socket)),
+            "decision-child".to_string(),
+            "token".to_string(),
+        );
+        engine.set_session_summary(json!({ "parentActiveSessionId": "parent-live-1" }));
+        // The abort flips from inside the provider request: the factory
+        // runs once the call has begun — past the pre-call check — while
+        // the pacing holds the answer past every bound.
+        let flip = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let captured = Arc::new(std::sync::Mutex::new(
+            Option::<tokio_util::sync::CancellationToken>::None,
+        ));
+        let flip_writer = Arc::clone(&flip);
+        let capture_writer = Arc::clone(&captured);
+        registration.set_responses(vec![pa_ai::faux::FauxResponseStep::Factory(
+            std::sync::Arc::new(
+                move |_context: &pa_ai::types::Context,
+                      options: Option<&pa_ai::types::StreamOptions>,
+                      _call: u64,
+                      _model: &pa_types::ai::Model| {
+                    *capture_writer.lock().unwrap() =
+                        options.and_then(|options| options.signal.clone());
+                    flip_writer.store(true, std::sync::atomic::Ordering::SeqCst);
+                    Ok(pa_ai::faux::faux_assistant_text_message(
+                        r#"{"action": {"choice": "left"}}"#,
+                        pa_ai::faux::FauxAssistantMessageOptions::default(),
+                    ))
+                },
+            ),
+        )]);
+        let body = json!({
+            "seq": 7,
+            "state": {},
+            "questions": {"action": {
+                "type": "choice", "criteria": { "left": "go left", "right": "go right" }
+            }}
+        });
+        let request = PromptRequest {
+            message: body.to_string(),
+            images: Vec::new(),
+            source: "user".to_string(),
+            agent_message_id: None,
+            custom_message: None,
+            batch: Vec::new(),
+        };
+        let started = std::time::Instant::now();
+        let mut events: Vec<EngineEvent> = Vec::new();
+        engine.run_prompt(
+            0,
+            request,
+            &|| flip.load(std::sync::atomic::Ordering::SeqCst),
+            &mut |event| {
+                events.push(event);
+                true
+            },
+        );
+        let elapsed = started.elapsed();
+        // The interrupt beats the 30 s decision bound by orders of
+        // magnitude; a check-after-serve alone holds the turn for the
+        // whole call.
+        assert!(
+            elapsed < std::time::Duration::from_secs(10),
+            "an abort mid-call must interrupt the bounded serve, held {elapsed:?}"
+        );
+        assert_eq!(
+            events.last(),
+            Some(&EngineEvent::Done(Err("prompt cancelled".to_string()))),
+            "the interrupted turn settles cancelled: {events:?}"
+        );
+        assert!(
+            commands.lock().unwrap().is_empty(),
+            "a cancelled decision must not reply to the parent"
+        );
+        // The interrupted call cancels its provider request instead of
+        // running on detached: the token the factory captured flipped.
+        let signal = captured
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("the decision request carries a cancellation token");
+        assert!(
+            signal.is_cancelled(),
+            "the interrupt must cancel the in-flight provider request"
         );
     }
 
