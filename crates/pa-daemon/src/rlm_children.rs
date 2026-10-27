@@ -189,6 +189,9 @@ struct ChildRecord {
     /// The terminal notice was claimed: exactly one of the settle watcher,
     /// the delete path, or a late natural settle delivers it.
     notice_delivered: bool,
+    /// A factory state's child: the factory reads its settle through
+    /// collect, so no terminal notice reaches the parent conversation.
+    factory: bool,
     /// The task prompt was admitted; never settle a pre-prompt child (it
     /// is idle with an empty queue by construction).
     prompt_admitted: bool,
@@ -773,6 +776,7 @@ impl SupervisorChildSessions {
                 live_observation: None,
                 direct_observation: Arc::new(Mutex::new(())),
                 notice_delivered: false,
+                factory: false,
                 prompt_admitted: true,
                 error: None,
                 closed_by_parent: false,

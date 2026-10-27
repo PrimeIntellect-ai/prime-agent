@@ -348,6 +348,7 @@ mod tests {
                     rlm_subagent_host: None,
                     rlm_usage_store: None,
                     progress_note_emit: None,
+                    factory_child: false,
                     daemonless: true,
                     rlm_depth: None,
                     model_info: Some(model.clone()),

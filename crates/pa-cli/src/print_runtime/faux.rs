@@ -163,6 +163,7 @@ pub(crate) async fn build_faux_engine_with(
             rlm_usage_store: None,
             progress_note_emit: None,
             rlm_depth,
+            factory_child: false,
             daemonless: true,
             model_info: Some(model.clone()),
             // A Rust-only verification harness: no background kernel boot in tests.
