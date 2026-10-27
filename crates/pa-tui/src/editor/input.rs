@@ -167,7 +167,8 @@ impl Editor {
                     // selection collapses with it.
                     self.selection_anchor = None;
                     let (cl, cc) = (self.cursor_line, self.cursor_col);
-                    let result = self.apply_completion(&item);
+                    let kind = self.autocomplete.as_ref().and_then(|s| s.kind);
+                    let result = self.apply_completion(&item, kind);
                     let completed_noop = result.lines == self.lines
                         && result.cursor_line == cl
                         && result.cursor_col == cc;

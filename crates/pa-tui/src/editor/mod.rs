@@ -10,6 +10,7 @@ use wrap::{parse_paste_marker, segment_with_markers};
 
 mod autocomplete;
 mod click;
+mod emoji;
 mod input;
 mod kill_ring;
 mod layout;
@@ -124,6 +125,9 @@ pub struct Editor {
     /// The in-flight `@` file search with the editor state it answers: a
     /// result that lands after the lines or cursor moved is dropped.
     autocomplete_search: Option<AutocompleteSearch>,
+    /// Typed `:name:` shortcodes become emoji (the host enables it from
+    /// the `emojiShortcodes` setting).
+    emoji_shortcodes: bool,
     events: Vec<EditorEvent>,
 }
 
@@ -180,6 +184,7 @@ impl Editor {
             autocomplete: None,
             pending_autocomplete: None,
             autocomplete_search: None,
+            emoji_shortcodes: false,
             events: Vec::new(),
         }
     }
@@ -564,6 +569,9 @@ impl Editor {
         let (before, after) = split_at_char(&line, self.cursor_col);
         self.lines[self.cursor_line] = format!("{before}{ch}{after}");
         self.set_cursor_col(self.cursor_col + ch.chars().count());
+        if ch == ":" {
+            self.convert_emoji_shortcode();
+        }
         self.emit(EditorEvent::Changed(self.get_text()));
         self.maybe_autocomplete_after_insert(ch);
     }
