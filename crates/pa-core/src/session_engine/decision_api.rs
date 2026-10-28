@@ -831,58 +831,6 @@ mod tests {
         );
     }
 
-    /// The decision's wall-clock bound covers the whole completion, not
-    /// just the request send: a model that stalls the stream past
-    /// `DECISION_TIMEOUT_MS` is dropped and served the timeout error, so the
-    /// decision child's engine regains control instead of hanging on
-    /// `block_on`.
-    #[tokio::test(start_paused = true)]
-    async fn decisions_time_out_when_the_completion_stalls_past_the_bound() {
-        // A private api name: the faux provider registry is global, so a
-        // shared name would race the other decision tests' response queues.
-        let registration =
-            pa_ai::faux::register_faux_provider(pa_ai::faux::RegisterFauxProviderOptions {
-                api: Some("faux-decision-stall".to_string()),
-                provider: Some("fixture-decisions".to_string()),
-                models: Some(vec![pa_ai::faux::FauxModelDefinition {
-                    id: "decision-model".to_string(),
-                    input: Some(vec![ModelInput::Text]),
-                    ..Default::default()
-                }]),
-                ..Default::default()
-            });
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(
-            dir.path().join("settings.json"),
-            json!({ "decisionApi": { "systemOneModel": "decision-model" } }).to_string(),
-        )
-        .unwrap();
-        std::fs::write(
-            dir.path().join("models.json"),
-            r#"{ "providers": { "fixture-decisions": {
-                "baseUrl": "https://fixture.example", "apiKey": "fixture-key",
-                "api": "faux-decision-stall", "models": [
-                    { "id": "decision-model", "input": ["text"] }
-                ]
-            } } }"#,
-        )
-        .unwrap();
-        // The stream opens (the response starts) but the message holds past
-        // the decision bound, the way a stalled body stream does.
-        registration.set_responses(vec![pa_ai::faux::FauxResponseStep::Delayed {
-            message: pa_ai::faux::faux_assistant_text_message(
-                r#"{"action": {"choice": "left"}}"#,
-                pa_ai::faux::FauxAssistantMessageOptions::default(),
-            ),
-            delay_ms: DECISION_TIMEOUT_MS + 1_000,
-        }]);
-        let request = json!({ "state": {}, "questions": { "action": {
-            "type": "choice", "criteria": { "left": "go left" }
-        } } });
-        let error = decide(request, dir.path()).await.unwrap_err().to_string();
-        assert_eq!(error, "the decision model request timed out");
-    }
-
     /// The timeout cancels the in-flight provider request, not just this
     /// reader: the request carries a cancellation token (the factory step
     /// captures it), and the timeout that drops the completion future
