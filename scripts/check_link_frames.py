@@ -135,8 +135,9 @@ def capture(binary, kind, case, width, root):
                 targets = set(re.findall(r'\x1b\]8;[^;]*;([^\x07\x1b]*)(?:\x07|\x1b\\)',
                                          bytes(terminal.raw).decode('utf-8', errors='replace'))) - {''}
                 result['osc8_targets'] = sorted(targets)
-                result['target_check'] = (TARGETS <= targets if case['hyperlinks']
-                                          else TARGETS.isdisjoint(targets))
+                # Pinned TS hyperlink() always emits OSC8 metadata. Legacy
+                # terminals ignore it; capability controls the visible bracket.
+                result['target_check'] = TARGETS <= targets
                 result['exit_code'] = terminal.process.poll()
                 os.close(terminal.master)
         finally:

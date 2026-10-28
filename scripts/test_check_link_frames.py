@@ -6,6 +6,13 @@ from lifecycle_lib import DockScreen
 
 
 class LinkParityGuards(unittest.TestCase):
+    def test_cell_size_query_is_answered_without_masking_unknown_queries(self):
+        screen = DockScreen(width=80)
+        self.assertEqual(screen.feed(b'\x1b[16t'), [b'\x1b[6;16;8t'])
+        self.assertEqual(screen.unsupported_terminal, [])
+        screen.feed(b'\x1b[17t')
+        self.assertEqual(screen.unsupported_terminal, ['\x1b[17t'])
+
     def test_missing_targets_or_process_cleanup_cannot_pass(self):
         item = {'executed': True, 'cleanup_verified': True, 'target_check': True,
                 'frames': {'paint': [[['x', {'4': True}]]]}}
