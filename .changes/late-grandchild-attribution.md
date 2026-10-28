@@ -1,1 +1,0 @@
-- A parent session's usage totals now include a grandchild's spend that lands after the parent already read the child's spawning turn. Before, that spend was dropped from the parent's totals, so long-running grandchildren were undercounted.

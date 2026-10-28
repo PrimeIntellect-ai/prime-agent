@@ -1,1 +1,0 @@
-- `/refine` and automatic refinement work again with Prime Inference team billing: they sent no team header and failed with "Refiner did not return a JSON object".

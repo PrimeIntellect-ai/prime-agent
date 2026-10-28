@@ -1,1 +1,0 @@
-- Kernel: `rlm.factory.run(...)`, `rlm.factory.help()`, and every other `rlm` namespace call keep working after a cell runs `import rlm`, and `dir(rlm.harness)` now lists the harness methods.

@@ -3,6 +3,21 @@
 Release notes for Prime Agent. Historical TypeScript release notes are
 recorded in the [TypeScript changelog](https://github.com/PrimeIntellect-ai/prime-agent/blob/v0.9.8/packages/coding-agent/CHANGELOG.md).
 
+## [0.10.2] - 2026-10-28
+
+- The static usage layer no longer tells agents to await commands before ending the turn: since #3580 daemonless sessions also wake on a queued `[bash-done]` turn, every session kind has completion notifications, and the no-polling rule (end the turn and collect the result on the done notification) is the one turn-end contract.
+- Agents view: leaving a session now returns the focus to that session's row, even after `/switch`, `/new`, `/fork`, or `/resume` in the chat, and when the row loads late.
+- `tool_execution_end` events on the RPC stream and in `--mode json` print output carry `isError` again, as the TypeScript version emitted them.
+- Azure OpenAI Responses requests no longer fail with 404 on the v1 API: they now post to `<resource>/openai/v1/responses?api-version=v1` with the deployment as the request's `model`, instead of a `/deployments/<name>/responses` route Azure does not serve. A different `AZURE_OPENAI_API_VERSION` (for example `preview`, or a dated version against a custom `/openai` base URL) is sent as the `api-version` query instead, and an empty one falls back to `v1`.
+- A `!` command or a model `bash` tool call whose shell dies from a signal (for example a crash, an OOM kill or `kill`) now reports 128 + the signal number as its exit code, so the model is told it failed, like the TypeScript version.
+- Prime Inference models dropped from the model catalog because the server sent no specs for them are now named in a log warning.
+- Kernel: `rlm.factory.run(...)`, `rlm.factory.help()`, and every other `rlm` namespace call keep working after a cell runs `import rlm`, and `dir(rlm.harness)` now lists the harness methods.
+- Factory machines can loop back into an entry state: an entry state may now declare inputs as long as all of them are optional. Its first entry binds the null sentinel, and a later entry through a transition binds the real output, so an investigate/verify loop no longer needs a duplicate re-investigate state. A required input on an entry state is still rejected, with a message saying it must be optional.
+- A parent session's usage totals now include a grandchild's spend that lands after the parent already read the child's spawning turn. Before, that spend was dropped from the parent's totals, so long-running grandchildren were undercounted.
+- Reopening a saved session now publishes its passive subagents before the first Agents view snapshot, even when worker registration is delayed or the opening client disconnects.
+- A subagent spawned while its parent has no turn running (for example a factory run resumed between turns) now gets its task prompt at once instead of up to 60 s later. A parent turn aborted by a manual compaction or tree move no longer leaves later spawns waiting for that bound either.
+- `/refine` and automatic refinement work again with Prime Inference team billing: they sent no team header and failed with "Refiner did not return a JSON object".
+
 ## [0.10.1] - 2026-10-21
 
 - A corrupted line in the RLM spawn ledger is now skipped and logged instead of failing every ledger read, so session listings and new subagent spawns keep working.
