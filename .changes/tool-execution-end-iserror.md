@@ -1,1 +1,0 @@
-- `tool_execution_end` events on the RPC stream and in `--mode json` print output carry `isError` again, as the TypeScript version emitted them.

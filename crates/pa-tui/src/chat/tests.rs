@@ -160,7 +160,7 @@ fn row_runs(row: &Line) -> Vec<(String, Style)> {
 
 #[test]
 fn user_block_keeps_the_link_affordance() {
-    crate::hyperlinks::set_hyperlinks_override(Some(true));
+    crate::hyperlinks::set_hyperlinks_override(Some(false));
     let (bg, body, _, _, _) = user_block_styles();
     let link_url = bg.patch(theme().fg_style(ThemeColor::MdLinkUrl));
     let rows = render_user_block("see [docs](https://x.dev/a)", &theme(), "  ", 60);

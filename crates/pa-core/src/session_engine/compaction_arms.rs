@@ -401,7 +401,7 @@ impl AgentSession {
             options,
             source,
             model,
-            refine::default_refiner_call(api_key, self.session_id().await),
+            self.refiner_call(model, api_key).await?,
             global_harness_dir,
         )
         .await
