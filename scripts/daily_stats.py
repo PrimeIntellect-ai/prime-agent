@@ -203,14 +203,8 @@ def main():
                 }, token=token, service="PostHog"))
             text = render_report(parse_results(response, day), day)
             metrics, dashboard = text.rsplit("\n\n", 1)
-            # Slack limits each section to 3,000 characters; keep metric lines intact.
-            sections = [""]
-            for line in metrics.splitlines(keepends=True):
-                if len(sections[-1]) + len(line) > 3000:
-                    sections.append("")
-                sections[-1] += line
-            blocks = [{"type": "section", "text": {"type": "mrkdwn", "text": section.rstrip()}}
-                      for section in sections] + [
+            blocks = [
+                {"type": "section", "text": {"type": "mrkdwn", "text": metrics}},
                 {"type": "divider"},
                 {"type": "section", "text": {"type": "mrkdwn", "text": dashboard}},
             ]

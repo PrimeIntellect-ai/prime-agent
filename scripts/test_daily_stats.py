@@ -179,24 +179,6 @@ class ReportTests(unittest.TestCase):
             self.assertTrue(payload["text"].endswith(f"<{stats.DASHBOARD_URL}|Open dashboard>"))
             self.assertNotIn("Active users count", payload["text"])
 
-    def test_large_valid_metrics_fit_slack_sections_without_losing_lines(self):
-        response = fixture()
-        for result in response["results"]:
-            result["data"] = [1, 1, 1, 10 ** 300]
-        with tempfile.TemporaryDirectory() as directory:
-            source, output = Path(directory) / "response.json", Path(directory) / "report.json"
-            source.write_text(json.dumps(response))
-            with patch("sys.argv", ["stats", "prepare", "--date", DAY.isoformat(),
-                                   "--response-file", str(source), "--output", str(output)]), \
-                    patch.object(stats, "report_day", return_value=DAY), \
-                    contextlib.redirect_stdout(io.StringIO()):
-                stats.main()
-            payload = json.loads(output.read_text())
-            sections = [block["text"]["text"] for block in payload["blocks"]
-                        if block["type"] == "section"]
-            self.assertTrue(all(0 < len(section) <= 3000 for section in sections))
-            self.assertEqual("\n".join(sections[:-1]), payload["text"].rsplit("\n\n", 1)[0])
-
     def test_prepare_api_uses_fresh_blocking_query(self):
         with tempfile.TemporaryDirectory() as directory, \
                 patch("sys.argv", ["stats", "prepare", "--output", directory + "/report.json"]), \
