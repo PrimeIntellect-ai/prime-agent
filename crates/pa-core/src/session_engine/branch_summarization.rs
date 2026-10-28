@@ -111,7 +111,9 @@ fn get_message_from_entry(entry: &FileEntry) -> Option<AgentMessage> {
             _ => Some(message.clone()),
         },
         FileEntry::CustomMessage { payload, .. } => {
-            if payload.custom_type == "harness_digest" {
+            if payload.custom_type == "harness_digest"
+                || payload.custom_type == super::ipython_state::IPYTHON_STATE_CUSTOM_TYPE
+            {
                 return None;
             }
             Some(AgentMessage::Custom(pa_types::session::CustomMessage {
@@ -573,6 +575,33 @@ mod tests {
             enabled_request.is_empty(),
             "the enabled legacy budget path selects no older rows"
         );
+    }
+
+    #[test]
+    fn branch_summary_request_skips_python_state_notices() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut session = crate::session::manager::SessionManager::in_memory(tmp.path());
+        session.append_message(user("explore the widget")).unwrap();
+        session
+            .append_custom_message(
+                super::super::ipython_state::IPYTHON_STATE_CUSTOM_TYPE,
+                pa_types::ai::UserContent::Text(super::super::ipython_state::notice_content(
+                    None,
+                    Some(&["stacked_kernel_var".to_string()]),
+                )),
+                /*display*/ false,
+                None,
+            )
+            .unwrap();
+        let (messages, _) =
+            build_branch_summary_request(session.retained_entries(), 0, None, false);
+        let text = match &messages[0] {
+            AgentMessage::User(user) => user.content.text(),
+            _ => panic!("expected a user message"),
+        };
+        assert!(text.contains("explore the widget"));
+        assert!(!text.contains("[python-state]"));
+        assert!(!text.contains("stacked_kernel_var"));
     }
 
     #[test]

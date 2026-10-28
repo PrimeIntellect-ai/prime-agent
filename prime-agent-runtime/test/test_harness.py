@@ -1342,6 +1342,9 @@ class HarnessStateTest(unittest.TestCase):
             reloaded = HarnessState(Path(temp_dir) / "harness_state.json")
             self.assertEqual(reloaded.get("memory", "session_note").content, "persisted")
 
+    def test_dir_of_module_harness_lists_state_methods(self) -> None:
+        self.assertIn("delete_factory", dir(package_harness))
+
     def test_module_harness_without_env_raises_on_local_writes_and_reads_work(self) -> None:
         previous_local = os.environ.get("RLM_HARNESS_STATE_DIR")
         previous_session = os.environ.get("RLM_SESSION_DIR")
@@ -1689,7 +1692,9 @@ class HarnessRefinementsSettingTests(unittest.TestCase):
 
     def test_disabled_refinements_refuse_factory_runs_before_launch(self):
         import asyncio
-        from rlm import factory
+        import importlib
+
+        factory = importlib.import_module("rlm.factory")
 
         with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {"PRIME_AGENT_CODING_AGENT_DIR": tmp}):
             settings = Path(tmp) / "settings.json"
