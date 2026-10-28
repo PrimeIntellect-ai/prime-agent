@@ -1071,6 +1071,68 @@ async fn recent_messages_resolves_by_name_and_reports_the_envelope() {
     assert_eq!(error.to_string(), "agent ghost is not reachable");
 }
 
+/// The display reader keeps a custom row's stored ISO timestamp. Its
+/// public observe preview must preserve that timestamp as epoch milliseconds.
+#[tokio::test]
+async fn recent_messages_preserves_custom_transcript_timestamps() {
+    let mut store = crate::session_store::SessionFile::create("/fixture", None, 0);
+    store.append_message(&json!({"role": "user", "content": "hello", "timestamp": 13}));
+    store.append_entry(
+        "custom_message",
+        json!({
+            "customType": "agent_message", "content": "notice", "display": true,
+        }),
+    );
+    store.entries.last_mut().unwrap().timestamp = "2004-07-21T00:47:44.465Z".to_string();
+    let transcript = store
+        .session_messages(-10, 10, |_| true, &std::collections::HashSet::new())
+        .unwrap()
+        .into_reply();
+    let messages: Vec<Value> = transcript["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|row| row["message"].clone())
+        .collect();
+    let dir = tempfile::TempDir::new().unwrap();
+    let socket = dir.path().join("sup.sock");
+    spawn_fake_supervisor(socket.clone(), json!({
+        "sessions": [
+            {"activeSessionId": "aaa111", "sessionId": "sess-a"},
+            {"activeSessionId": "ddd444", "sessionId": "sess-d", "sessionName": "kid",
+             "runtimeKind": "subagent", "parentActiveSessionId": "aaa111", "parentSessionId": "sess-a"},
+        ],
+        "messagesByActiveSessionId": {"ddd444": messages},
+    }), None).await;
+    let recent = observe_controller(socket)
+        .recent_messages("kid", 10, 90)
+        .await
+        .unwrap();
+    assert_eq!(
+        recent.messages,
+        vec![
+            AgentObserveMessagePreview {
+                index: 0,
+                role: "user".into(),
+                timestamp: Some(13),
+                text: "hello".into(),
+                truncated: false,
+                tool_calls: Vec::new(),
+                custom_type: None,
+            },
+            AgentObserveMessagePreview {
+                index: 1,
+                role: "custom".into(),
+                timestamp: Some(1_090_370_864_465),
+                text: "notice".into(),
+                truncated: false,
+                tool_calls: Vec::new(),
+                custom_type: Some("agent_message".into()),
+            },
+        ]
+    );
+}
+
 #[tokio::test]
 async fn recent_messages_reads_a_degraded_live_sibling_but_not_a_foreign_stub() {
     let dir = tempfile::TempDir::new().unwrap();
