@@ -7,6 +7,7 @@ use pa_types::ai::{UserContent, UserMessage};
 use pa_types::session::{AgentMessage, CustomMessage, FileEntry};
 use serde_json::json;
 
+use super::auxiliary_model::AuxiliaryModelContext;
 use super::AgentSession;
 use crate::refinement::executor::{
     apply_refinement_plan, plan_refinement, review_auto_refine, AutoRefineReview,
@@ -713,9 +714,11 @@ pub(crate) enum AutoRefineRound {
     Ran(RefinementResult),
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn review_compact_refinement(
     session: &tokio::sync::Mutex<SessionManager>,
     branch_state: &std::sync::Mutex<super::auto_refine_trigger::CompactAutoRefineState>,
+    auxiliary: Option<AuxiliaryModelContext>,
     model: &pa_types::ai::Model,
     api_key: Option<String>,
     global_harness_dir: &Path,
@@ -752,7 +755,7 @@ async fn review_compact_refinement(
             reason: AUTO_REFINE_COMPACT_REASON.to_string(),
             turns_since_last_review,
         },
-        default_refiner_call(api_key.clone(), session_id),
+        session_refiner_call(auxiliary, model, api_key, session_id).await?,
     )
     .await?;
     if !review.should_refine {
@@ -770,6 +773,28 @@ async fn review_compact_refinement(
         return Ok(None);
     }
     Ok(Some(review))
+}
+
+/// The refiner model call on the session model, with the merged request
+/// headers (the Prime team header) the session's own requests send.
+pub(super) async fn session_refiner_call(
+    auxiliary: Option<AuxiliaryModelContext>,
+    model: &pa_types::ai::Model,
+    api_key: Option<String>,
+    session_id: String,
+) -> anyhow::Result<crate::refinement::executor::RefinerFn> {
+    let (api_key, headers) = match auxiliary {
+        Some(context) => {
+            let model = model.clone();
+            let routed = tokio::task::spawn_blocking(move || {
+                super::auxiliary_model::session_fallback_with_headers(&context, &model, api_key)
+            })
+            .await?;
+            (routed.api_key, routed.headers)
+        }
+        None => (api_key, None),
+    };
+    Ok(default_refiner_call(api_key, headers, session_id))
 }
 
 impl AgentSession {
@@ -796,6 +821,7 @@ impl AgentSession {
             review_compact_refinement(
                 &self.session,
                 &self.compact_auto_refine,
+                self.auxiliary_model.clone(),
                 model,
                 api_key,
                 global_harness_dir,
@@ -823,6 +849,7 @@ impl AgentSession {
         let flight = self.compaction_flight.clone();
         let in_flight = self.refinements_in_flight.clone();
         let branch_state = self.compact_auto_refine.clone();
+        let auxiliary = self.auxiliary_model.clone();
         let agent_dir = self.agent_dir.clone();
         let cancel = self.refinement_signal();
         tokio::spawn(async move {
@@ -830,6 +857,7 @@ impl AgentSession {
                 review_compact_refinement(
                     &session,
                     &branch_state,
+                    auxiliary.clone(),
                     &model,
                     api_key.clone(),
                     &global_harness_dir,
@@ -851,6 +879,7 @@ impl AgentSession {
                 rollback_id: None,
             };
             let session_id = session.lock().await.get_session_id().to_string();
+            let refiner = session_refiner_call(auxiliary, &model, api_key, session_id).await?;
             run_refinement(
                 session,
                 agent,
@@ -861,7 +890,7 @@ impl AgentSession {
                 options,
                 RefinementSource::Auto,
                 model,
-                default_refiner_call(api_key, session_id),
+                refiner,
                 global_harness_dir,
             )
             .await
@@ -894,7 +923,13 @@ impl AgentSession {
             options,
             RefinementSource::Auto,
             model.clone(),
-            default_refiner_call(api_key, self.session_id().await),
+            session_refiner_call(
+                self.auxiliary_model.clone(),
+                model,
+                api_key,
+                self.session_id().await,
+            )
+            .await?,
             global_harness_dir,
         )
         .await
@@ -906,10 +941,10 @@ impl AgentSession {
 #[must_use]
 pub fn default_refiner_call(
     api_key: Option<String>,
+    headers: Option<std::collections::BTreeMap<String, String>>,
     session_id: String,
 ) -> crate::refinement::executor::RefinerFn {
     Box::new(move |model, system_prompt, prompt| {
-        let api_key = api_key;
         Box::pin(async move {
             let context = pa_types::ai::Context {
                 system_prompt: Some(system_prompt.to_string()),
@@ -923,6 +958,7 @@ pub fn default_refiner_call(
             let mut stream_options =
                 pa_ai::types::SimpleStreamOptions::from_base(pa_ai::types::StreamOptions {
                     api_key,
+                    headers: headers.map(|headers| headers.into_iter().collect()),
                     session_id: Some(session_id),
                     // One-off prompts ride SSE: they keep the conversation id (cache key,
                     // opencode routing) but never take or replace the session's Codex

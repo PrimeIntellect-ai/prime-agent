@@ -406,8 +406,11 @@ impl AgentSession {
         let in_flight = self.refinements_in_flight.clone();
         let cancel = self.refinement_signal();
         let agent_dir = self.agent_dir.clone();
+        let auxiliary = self.auxiliary_model.clone();
         tokio::spawn(async move {
             let session_id = session.lock().await.get_session_id().to_string();
+            let refiner =
+                refine::session_refiner_call(auxiliary, &model, api_key, session_id).await?;
             refine::run_refinement(
                 session,
                 agent,
@@ -418,7 +421,7 @@ impl AgentSession {
                 options,
                 source,
                 model,
-                refine::default_refiner_call(api_key, session_id),
+                refiner,
                 global_harness_dir,
             )
             .await
