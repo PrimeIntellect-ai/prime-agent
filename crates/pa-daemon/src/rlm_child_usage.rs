@@ -95,6 +95,8 @@ fn late_attribution(
         .iter()
         .take(from)
         .rposition(|row| row.id == target_id)?;
+    // A late row must use the same target eligibility as an in-window folded completion.
+    assistant_usage(&entries[target])?;
     let usage = serde_json::from_value(entry.fields.get("childUsage")?.clone()).ok()?;
     Some((usage, target))
 }
