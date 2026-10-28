@@ -7040,6 +7040,24 @@ class FactoryPythonStateTest(_ExecutorTestCase):
             finally:
                 await rlm_module.rlm.factory.stop(result["run_id"])
 
+    @async_test
+    async def test_executor_failure_stops_its_python_processes(self) -> None:
+        self.store_machine({"states": [{"id": "slow", "entry": True, "python": self.py("slow")}]})
+        with patch.object(self.executor, "_wait_python", side_effect=RuntimeError("host failed")):
+            result = await self.start()
+            run = self.executor._runs[result["run_id"]]
+            instance = run.states["slow"].entries[0].instances[0]
+            process = instance.process
+            try:
+                await run.task
+                self.assertEqual(
+                    (run.state, instance.status, process.proc.returncode is not None),
+                    ("failed", "cancelled", True),
+                )
+            finally:
+                if process.proc.returncode is None:
+                    await process.stop()
+
 
 # ---------------------------------------------------------------------------
 # Graph and watch (the fused machine view + the bounded wait)

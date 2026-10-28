@@ -3724,9 +3724,8 @@ class FactoryExecutor:
         # there, but the executor treats its slot as released.
         instance.status = "cancelled"
 
-    async def _cancel_running(self, run: FactoryRun) -> None:
-        from . import delete_subagent
-
+    async def _cancel_python(self, run: FactoryRun) -> None:
+        """Stop executor-owned calls when the run stops or its control lane fails."""
         for state_id in run.order:
             state = run.states[state_id]
             for entry in state.entries:
@@ -3736,7 +3735,15 @@ class FactoryExecutor:
                         instance.status = "cancelled"
                         await process.stop()
                         self._event(run, "cancelled", node=state_id, entry=entry.index, instance=instance.index)
-                        continue
+
+    async def _cancel_running(self, run: FactoryRun) -> None:
+        from . import delete_subagent
+
+        await self._cancel_python(run)
+        for state_id in run.order:
+            state = run.states[state_id]
+            for entry in state.entries:
+                for instance in entry.instances:
                     if instance.status != "running" or instance.child_id is None:
                         continue
                     child_id = instance.child_id
@@ -3847,6 +3854,9 @@ class FactoryExecutor:
             self._event(run, "executor_error", error=f"{type(exc).__name__}: {exc}")
             if run.state == "running":
                 run.state = "failed"
+                # Child agents remain supervisor-owned; these subprocesses
+                # have no owner or deadline enforcer after this lane exits.
+                await self._cancel_python(run)
                 try:
                     await self._milestone(run, "failed", f"executor error: {exc}")
                 except Exception:
