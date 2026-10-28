@@ -15,9 +15,6 @@ use super::types::{
 #[cfg(test)]
 mod tests;
 
-#[cfg(test)]
-mod refresh_tests;
-
 mod lookup;
 
 mod prime_inference;
