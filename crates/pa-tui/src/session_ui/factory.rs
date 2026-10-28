@@ -436,6 +436,8 @@ impl super::SessionUi {
                         | crate::agents_view::StatusTone::Error => {
                             if let Some(factory_view) = view.factory_view.as_mut() {
                                 factory_view.set_error(Some(message));
+                            } else {
+                                self.toast(&message, view);
                             }
                         }
                     }
