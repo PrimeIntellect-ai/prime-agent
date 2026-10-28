@@ -123,6 +123,8 @@ pub struct RlmSpawnInput {
 #[derive(Debug, Clone, PartialEq)]
 pub struct DeletedChildUsage {
     pub child_id: String,
+    /// Canonical file identity: child ids may be reused for another file.
+    pub child_file: String,
     pub name: String,
     pub factory: Option<RlmFactoryTag>,
     pub usage: crate::session_usage::SessionUsageSummary,
@@ -294,6 +296,18 @@ fn fold_records(records: Vec<LedgerRecord>, keep: impl Fn(&str) -> bool) -> Repl
                 }
             }
             _ => {}
+        }
+    }
+    for (at, edge) in state.edges.iter().enumerate() {
+        if edge.deleted.is_some() {
+            continue;
+        }
+        if let Some(id) = Path::new(&edge.parent).file_stem() {
+            state
+                .children_by_parent_id
+                .entry(id.to_string_lossy().into_owned())
+                .or_default()
+                .push(at);
         }
     }
     state
@@ -631,6 +645,86 @@ impl RlmSpawnLedger {
         Ok(children)
     }
 
+    /// Seed and replay the ledger ahead of its first reader; a failed
+    /// replay is left to that reader, which reports it.
+    pub(crate) fn warm(&self) {
+        if self.seed_once().is_ok() {
+            drop(self.replay_cached());
+        }
+    }
+
+    /// The live family below `roots`, walked through the replay's parent
+    /// index: the cost follows the families' size, not the ledger's. Each
+    /// call re-resolves the endpoints it visits (restore, relocation,
+    /// deletion, and symlink retargets append no ledger row). A node's
+    /// children are the live edges recorded under its durable session id -
+    /// that of its canonical path or of the path it was reached by - whose
+    /// resolved parent is the node itself. Edges carry canonical endpoints,
+    /// in walk order; each descendant appears once.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the ledger replay fails (an oversized ledger)
+    /// or a prior panic poisoned the artifact index lock.
+    pub(crate) fn family_edges(
+        &self,
+        roots: impl IntoIterator<Item = PathBuf>,
+    ) -> Result<Vec<RlmLedgerEdge>> {
+        self.seed_once()?;
+        let state = self.replay_cached()?;
+        let mut resolver = LivePathResolver::new(
+            self.agent_dir.clone(),
+            self.canonical_sessions_dir.clone(),
+            &state.artifact_index,
+        );
+        let mut visited = HashSet::new();
+        let mut queue = Vec::new();
+        for root in roots {
+            let node = canonical_session_path(&root);
+            if visited.insert(node.clone()) {
+                queue.push((node, root));
+            }
+        }
+        let mut edges = Vec::new();
+        while let Some((node, reached_by)) = queue.pop() {
+            let mut ids = vec![node.file_stem()];
+            if reached_by.file_stem() != node.file_stem() {
+                ids.push(reached_by.file_stem());
+            }
+            for id in ids.into_iter().flatten() {
+                let Some(indices) = state
+                    .children_by_parent_id
+                    .get(id.to_string_lossy().as_ref())
+                else {
+                    continue;
+                };
+                for &at in indices {
+                    let edge = &state.edges[at];
+                    let Some(parent) = resolver.resolve(&edge.parent)? else {
+                        continue;
+                    };
+                    if canonical_session_path(&parent) != node {
+                        continue;
+                    }
+                    let Some(child) = resolver.resolve(&edge.child)? else {
+                        continue;
+                    };
+                    let child = canonical_session_path(&child);
+                    if !visited.insert(child.clone()) {
+                        continue;
+                    }
+                    edges.push(RlmLedgerEdge {
+                        parent: node.to_string_lossy().into_owned(),
+                        child: child.to_string_lossy().into_owned(),
+                        ..edge.clone()
+                    });
+                    queue.push((child, PathBuf::from(&edge.child)));
+                }
+            }
+        }
+        Ok(edges)
+    }
+
     fn fold_deleted_children(&self, edges: &[RlmLedgerEdge]) -> DeletedChildrenByParent {
         use crate::session_usage::{ModelUsageSummary, SessionUsageSummary};
         let canonical = |path: &str| {
@@ -764,6 +858,7 @@ impl RlmSpawnLedger {
                     let edge = edge_by_path.get(child)?;
                     Some(DeletedChildUsage {
                         child_id: edge.child_id.clone(),
+                        child_file: child.clone(),
                         name: edge.name.clone(),
                         factory: edge.factory.clone(),
                         usage,

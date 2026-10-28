@@ -1162,7 +1162,7 @@ async fn a_create_while_shutting_down_is_refused() {
         rest: Map::default(),
     };
     let refused = supervisor
-        .launch_worker(&create, None)
+        .launch_worker(&create, None, RosterFamilySeedOwner::Registration)
         .await
         .err()
         .expect("the shutting-down supervisor accepted a create");
@@ -1428,7 +1428,7 @@ async fn first_signal_drains_a_settling_turn_and_rejects_new_work() {
         "the first signal must start the drain"
     );
     let refused = supervisor
-        .launch_worker(&create, None)
+        .launch_worker(&create, None, RosterFamilySeedOwner::Registration)
         .await
         .err()
         .expect("a create during the drain must be rejected");
@@ -2549,4 +2549,49 @@ proptest! {
             Ok(())
         })?;
     }
+}
+
+#[tokio::test]
+async fn a_restarted_supervisors_registration_seeds_the_roster_family() {
+    let (dir, supervisor, root_file, child_file) =
+        crate::supervisor_roster_seed::tests::roster_fixture().await;
+    let agent_dir = dir.join("agent");
+    crate::supervisor_roster_seed::tests::append_family_edge(
+        &agent_dir,
+        &agent_dir.join("sessions"),
+        "sub-9",
+        &root_file,
+        &child_file,
+    );
+    crate::supervisor_roster_seed::tests::register_root_worker(&supervisor, "w-root", &root_file)
+        .await;
+    let command = DaemonCommand::WorkerRegister {
+        id: None,
+        active_session_id: "w-root".to_string(),
+        session_id: None,
+        socket_path: "/tmp/none.sock".to_string(),
+        worker_instance_id: String::new(),
+        token: "w-root-token".to_string(),
+        pid: 4242,
+        rest: Map::default(),
+    };
+    let registered = supervisor
+        .handle_worker_register("r1", "worker_register", &command)
+        .await;
+    assert!(registered.success, "registration refused: {registered:?}");
+    assert_eq!(
+        registered.data.expect("registration response")["epoch"],
+        1,
+        "the re-registration is the first under the restarted supervisor"
+    );
+    crate::supervisor_roster_seed::tests::drain_pending_seeds_for_tests(&supervisor).await;
+    let row = crate::supervisor_roster_seed::tests::roster_row_for_child(&supervisor, "sub-9");
+    assert_eq!(row.summary["rlmChildId"], "sub-9");
+    assert_eq!(
+        row.summary["parentSessionPath"],
+        root_file.to_string_lossy().to_string()
+    );
+    assert_eq!(row.summary["runtimeKind"], "subagent");
+    assert_eq!(row.worker_id, None, "the seeded row, never a worker's");
+    let _ = std::fs::remove_dir_all(&dir);
 }

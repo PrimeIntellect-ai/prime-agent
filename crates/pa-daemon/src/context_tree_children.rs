@@ -27,6 +27,7 @@ const ELLIPSIS: &str = "...";
 #[derive(Debug, Default)]
 pub struct ContextLedger {
     tombstoned: HashMap<PathBuf, HashSet<String>>,
+    tombstoned_files: HashSet<PathBuf>,
     deleted: HashMap<PathBuf, Vec<crate::rlm_ledger::DeletedChildUsage>>,
     factory: HashMap<PathBuf, crate::rlm_ledger::RlmFactoryTag>,
 }
@@ -37,6 +38,13 @@ impl ContextLedger {
     pub fn read(ledger: &crate::rlm_ledger::RlmSpawnLedger) -> Self {
         let mut facts = Self::default();
         let (edges, deleted) = ledger.edges_with_deleted_children().unwrap_or_default();
+        // A reused path with a live edge bills as live, like the ledger's
+        // deleted-spend fold; an older tombstone must not hide its new owner.
+        let live_files: HashSet<PathBuf> = edges
+            .iter()
+            .filter(|edge| edge.deleted.is_none())
+            .map(|edge| crate::lease::canonical_session_path(Path::new(&edge.child)))
+            .collect();
         // Replay order: the last edge at a child session file decides its tag.
         for edge in edges {
             let child = crate::lease::canonical_session_path(Path::new(&edge.child));
@@ -45,6 +53,10 @@ impl ContextLedger {
                 None => facts.factory.remove(&child),
             };
             if edge.deleted.is_some() {
+                let file = crate::lease::canonical_session_path(Path::new(&edge.child));
+                if !live_files.contains(&file) {
+                    facts.tombstoned_files.insert(file);
+                }
                 facts
                     .tombstoned
                     .entry(crate::lease::canonical_session_path(Path::new(
@@ -66,6 +78,12 @@ impl ContextLedger {
             .get(&crate::lease::canonical_session_path(parent_file))
             .cloned()
             .unwrap_or_default()
+    }
+
+    /// Whether this exact session file was tombstoned; called on the blocking walk.
+    pub(crate) fn is_tombstoned_file(&self, path: &Path) -> bool {
+        self.tombstoned_files
+            .contains(&crate::lease::canonical_session_path(path))
     }
 
     /// Set a child node's `factory` run tag from the ledger edge of its
@@ -113,7 +131,7 @@ impl ContextLedger {
                 // Its own id namespace: a live child reusing the id must
                 // never collide with (or invalidate) the deleted spend.
                 let mut node = json!({
-                    "id": format!("deleted:{}", child.child_id),
+                    "id": format!("deleted:{}", child.child_file),
                     "label": child.name,
                     "status": "deleted",
                     "deleted": true,
@@ -186,6 +204,19 @@ pub fn load_context_tree_child(
     registry: &ModelRegistry,
     ledger: &ContextLedger,
 ) -> Option<Value> {
+    load_context_tree_child_with_path(artifacts_root, child_dir, registry, ledger)
+        .filter(|(path, _)| !ledger.is_tombstoned_file(path))
+        .map(|(_, node)| node)
+}
+
+/// The node and the exact file it read, so a stale live roster snapshot
+/// can be fenced against durable tombstones without hiding a reused id.
+pub(crate) fn load_context_tree_child_with_path(
+    artifacts_root: &Path,
+    child_dir: &Path,
+    registry: &ModelRegistry,
+    ledger: &ContextLedger,
+) -> Option<(PathBuf, Value)> {
     // The newest VALID session file: artifact dirs carry sibling `.jsonl`
     // files that are not sessions, so candidates are tried newest-first.
     let store = newest_session_files(child_dir)
@@ -244,7 +275,7 @@ pub fn load_context_tree_child(
     );
     children.extend(ledger.deleted_nodes(&store.path));
     node["children"] = Value::Array(children);
-    Some(node)
+    Some((store.path, node))
 }
 
 /// Build the nodes for every persisted child dir of one session (TS

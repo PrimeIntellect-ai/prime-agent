@@ -1,0 +1,1 @@
+- A subagent spawned while its parent has no turn running (for example a factory run resumed between turns) now gets its task prompt at once instead of up to 60 s later. A parent turn aborted by a manual compaction or tree move no longer leaves later spawns waiting for that bound either.

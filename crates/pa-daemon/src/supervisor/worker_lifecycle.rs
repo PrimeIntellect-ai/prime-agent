@@ -18,6 +18,12 @@ use super::{
 use crate::lease::is_process_alive;
 use crate::protocol::{response_failure, response_success, DaemonResponse};
 
+/// Which admission path publishes a fresh worker's passive family.
+pub(crate) enum RosterFamilySeedOwner {
+    Create,
+    Registration,
+}
+
 impl Supervisor {
     /// Complete a tombstoned stop for a worker encountered at adoption: adoption
     /// finishes the stop, never adopts the worker as healthy. The `archive_on_stop`
@@ -101,6 +107,7 @@ impl Supervisor {
         self: &Arc<Self>,
         create: &DaemonCommand,
         owner_client_id: Option<String>,
+        family_seed_owner: RosterFamilySeedOwner,
     ) -> Result<(Arc<ResidentWorker>, Value)> {
         let DaemonCommand::Create {
             session_path,
@@ -351,6 +358,11 @@ impl Supervisor {
         };
         let descriptor_path = self.descriptor_dir.join(format!("{worker_id}.json"));
         let resident = ResidentWorker::new(worker_id.clone(), descriptor, descriptor_path.clone());
+        // Claim before registration can observe the newly inserted resident.
+        resident.roster_family_seed_owned_by_create.store(
+            matches!(family_seed_owner, RosterFamilySeedOwner::Create),
+            Ordering::SeqCst,
+        );
         // TS stores `worker.launchEnv` before the spawn.
         resident.set_launch_env(client_launch_env);
         // Register the resident before spawning: the worker's boot self-registration must
