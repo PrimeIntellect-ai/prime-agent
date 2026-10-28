@@ -1,0 +1,1 @@
+- `await rlm.decide(state, actions)` returns one fast decision from the new `decisionModel` setting (a `systemone` model such as `prime-inference/cloudflare/clef`) as one awaited kernel call, billed to the session; see docs/rlm-decide.md.

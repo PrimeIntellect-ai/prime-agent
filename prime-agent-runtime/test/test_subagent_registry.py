@@ -119,6 +119,29 @@ class RlmSubagentRegistryTest(unittest.TestCase):
         with patch.object(type(rlm_module.rlm), "session", session, create=True):
             self.assertIs(rlm_module.session, session)
 
+    def test_decide_sends_one_host_request_and_parses_the_decision(self) -> None:
+        repl = importlib.import_module("rlm.repl")
+        decision = {
+            "choice": "right",
+            "confidence": 0.9127,
+            "probabilities": {"left": 0.0289, "right": 0.9418, "wait": 0.0293},
+            "model": "prime-inference/cloudflare/clef",
+        }
+        actions = {"left": "ball to the left", "right": "ball to the right", "wait": "ball above"}
+        host = AsyncMock(return_value={"status": "ok", "result": decision})
+
+        with patch.object(repl, "host_request", host):
+            result = asyncio.run(rlm_module.rlm.decide({"goal": "catch"}, actions))
+
+        host.assert_awaited_once_with(
+            {"state": {"goal": "catch"}, "actions": actions, "instructions": None, "images": None, "type": "rlm.decide"}
+        )
+        self.assertEqual(result, rlm_module.RLMDecision(**decision))
+        host.return_value = {"status": "error", "error": "decisionModel is not set in settings.json."}
+        with patch.object(repl, "host_request", host):
+            with self.assertRaisesRegex(RuntimeError, "decisionModel is not set"):
+                asyncio.run(rlm_module.rlm.decide({}, actions))
+
     def test_finds_authenticated_models_through_host(self) -> None:
         host_request = AsyncMock(
             return_value={
