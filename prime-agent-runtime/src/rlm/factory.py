@@ -3733,6 +3733,8 @@ class FactoryExecutor:
                     if instance.status == "running" and instance.process is not None:
                         process, instance.process = instance.process, None
                         instance.status = "cancelled"
+                        if entry.status == "running":
+                            entry.status = "cancelled"
                         await process.stop()
                         self._event(run, "cancelled", node=state_id, entry=entry.index, instance=instance.index)
 

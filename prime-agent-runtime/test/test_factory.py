@@ -7051,8 +7051,8 @@ class FactoryPythonStateTest(_ExecutorTestCase):
             try:
                 await run.task
                 self.assertEqual(
-                    (run.state, instance.status, process.proc.returncode is not None),
-                    ("failed", "cancelled", True),
+                    (run.state, run.states["slow"].entries[0].status, instance.status, process.proc.returncode is not None),
+                    ("failed", "cancelled", "cancelled", True),
                 )
             finally:
                 if process.proc.returncode is None:
