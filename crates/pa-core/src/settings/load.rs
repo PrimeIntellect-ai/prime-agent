@@ -34,7 +34,7 @@ const KNOWN_FIELDS: &[&str] = &[
     "retry",
     "providerBackupModel",
     "imageModel",
-    "decisionApi",
+    "decisionModel",
     "autonomous",
     "shellPath",
     "quietStartup",
