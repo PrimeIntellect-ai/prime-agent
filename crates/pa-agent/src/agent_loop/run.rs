@@ -87,7 +87,20 @@ pub(crate) async fn run_loop(
                 )
                 .await;
                 match gate {
-                    Ok(PostTurnResult::Completed(())) => {}
+                    Ok(PostTurnResult::Completed(rows)) => {
+                        for message in rows {
+                            emit(AgentEvent::MessageStart {
+                                message: message.clone(),
+                            })
+                            .await?;
+                            emit(AgentEvent::MessageEnd {
+                                message: message.clone(),
+                            })
+                            .await?;
+                            current_context.messages.push(message.clone());
+                            new_messages.push(message);
+                        }
+                    }
                     // Same settlement as an abort during the provider request.
                     Ok(PostTurnResult::Aborted) => {
                         let message = create_aborted_assistant_message(config, None);
@@ -405,29 +418,32 @@ async fn admit_batch(
         return Ok(messages);
     }
     match before_input_batch(&messages, config, signal).await {
-        Ok(()) => Ok(messages),
+        Ok(rows) => Ok(messages.into_iter().chain(rows).collect()),
         Err(error) if error.downcast_ref::<super::InputRejected>().is_some() => Ok(Vec::new()),
         Err(error) => Err(error),
     }
 }
 
+/// Run the input gate; returns the rows it admits after the batch.
 pub(crate) async fn before_input_batch(
     messages: &[AgentMessage],
     config: &AgentLoopConfig,
     signal: Option<&AbortSignal>,
-) -> anyhow::Result<()> {
-    if let Some(before_input) = &config.before_input {
-        race_with_abort(
-            before_input(
-                messages.to_vec(),
-                config.model.clone(),
-                signal.cloned().unwrap_or_default(),
-            ),
-            signal,
-        )
-        .await?;
+) -> anyhow::Result<Vec<AgentMessage>> {
+    match &config.before_input {
+        Some(before_input) => {
+            race_with_abort(
+                before_input(
+                    messages.to_vec(),
+                    config.model.clone(),
+                    signal.cloned().unwrap_or_default(),
+                ),
+                signal,
+            )
+            .await
+        }
+        None => Ok(Vec::new()),
     }
-    Ok(())
 }
 
 pub(crate) fn clone_context(context: &AgentContext) -> AgentContext {

@@ -206,7 +206,7 @@ fn spawn_signal_handlers(
             // The shutdown broadcast already prevents another replacement.
             drop(replacement);
             if let Some(hook) = engine.session_end_hook() {
-                hook().await;
+                hook(pa_core::session_engine::engine::SessionEndReason::Other).await;
             }
             terminate_writer.drain_bounded().await;
             exit_with(SIGTERM_EXIT);
@@ -236,7 +236,7 @@ fn spawn_signal_handlers(
             // The shutdown broadcast already prevents another replacement.
             drop(replacement);
             if let Some(hook) = engine.session_end_hook() {
-                hook().await;
+                hook(pa_core::session_engine::engine::SessionEndReason::Other).await;
             }
             hangup_writer.drain_bounded().await;
             exit_with(SIGHUP_EXIT);
@@ -294,7 +294,7 @@ async fn serve_stdin(state: Arc<commands::RpcState>) -> i32 {
     }
     let engine = state.session.handle().await.engine.clone();
     if let Some(hook) = engine.session_end_hook() {
-        hook().await;
+        hook(pa_core::session_engine::engine::SessionEndReason::Other).await;
     }
     state.writer.drain().await;
     0

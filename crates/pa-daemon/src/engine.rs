@@ -202,10 +202,12 @@ pub trait SessionEngine: Send + Sync {
     fn on_turn_done(&self) {}
 
     /// Run the bounded, advisory end hooks for the live root session. Call only
-    /// after session work settles, without retaining transport or session locks.
-    /// Detachment and runtime replacement do not end the session here.
+    /// after session work settles, without retaining transport or session locks:
+    /// at shutdown/kill and before a whole-session replacement retires the
+    /// runtime. Detachment does not end the session.
     fn end_session_hooks(
         &self,
+        _reason: pa_core::session_engine::engine::SessionEndReason,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + '_>> {
         Box::pin(std::future::ready(()))
     }

@@ -192,6 +192,7 @@ impl SessionEngine for AgentSessionEngine {
 
     fn end_session_hooks(
         &self,
+        reason: pa_core::session_engine::engine::SessionEndReason,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + '_>> {
         Box::pin(async move {
             let hook = {
@@ -201,7 +202,7 @@ impl SessionEngine for AgentSessionEngine {
                     .and_then(pa_core::session_engine::engine::SessionEngine::session_end_hook)
             };
             if let Some(hook) = hook {
-                hook().await;
+                hook(reason).await;
             }
         })
     }

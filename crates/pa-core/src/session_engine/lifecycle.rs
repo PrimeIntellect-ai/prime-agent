@@ -15,6 +15,8 @@ const STARTUP: u8 = 1;
 const RESUME: u8 = 2;
 const COMPACT: u8 = 4;
 const INITIAL_START: u8 = STARTUP | RESUME;
+/// Claude Code's cap on hook output injected into context.
+const CONTEXT_LIMIT_CHARS: usize = 10_000;
 
 // Claim one event before awaiting, so a compact mark arriving during its
 // command remains pending. Cancellation or a dropped future restores the claim.
@@ -35,6 +37,8 @@ pub(super) struct LifecycleHooks {
     runtime: Arc<crate::hooks::HookRuntime>,
     identity: Arc<Identity>,
     pending_start: AtomicU8,
+    /// The initial `SessionStart` gate completed: `SessionEnd` may pair with it.
+    started: std::sync::atomic::AtomicBool,
     deferred_rows: OnceLock<Arc<Mutex<Vec<pa_types::session::CustomMessage>>>>,
 }
 
@@ -47,6 +51,7 @@ impl LifecycleHooks {
             runtime,
             identity,
             pending_start: AtomicU8::new(STARTUP),
+            started: std::sync::atomic::AtomicBool::new(false),
             deferred_rows: OnceLock::new(),
         }
     }
@@ -80,17 +85,40 @@ impl LifecycleHooks {
     }
 
     fn common(&self, event: &str, model: &str) -> Value {
-        json!({
+        let mut input = json!({
             "session_id": self.identity.session_id,
             "cwd": self.identity.cwd,
             "transcript_path": self.identity.transcript_path,
             "hook_event_name": event,
             "model": model,
             "permission_mode": "default",
-        })
+        });
+        self.identity.tag_agent(&mut input);
+        input
     }
 
-    pub async fn start(&self, model: &str, signal: AbortSignal) -> anyhow::Result<()> {
+    /// Whether the session reached its `SessionStart` gate.
+    pub fn started(&self) -> bool {
+        self.started.load(Ordering::Acquire)
+    }
+
+    /// Subagents run tool and prompt hooks only. Session lifecycle events
+    /// (`SessionStart`, `Stop`, `PreCompact`, `SessionEnd`) stay with the root,
+    /// as Codex reports subagent lifecycle through separate events.
+    fn subagent(&self) -> bool {
+        self.identity.agent_id.is_some()
+    }
+
+    /// Run pending `SessionStart` events; returns their model-context rows.
+    pub async fn start(
+        &self,
+        model: &str,
+        signal: AbortSignal,
+    ) -> anyhow::Result<Vec<AgentMessage>> {
+        let mut rows = Vec::new();
+        if self.subagent() {
+            return Ok(rows);
+        }
         // At most the initial event and one compact event per gate. A new
         // compact mark racing its own dispatch remains for the next gate.
         for mask in [INITIAL_START, COMPACT] {
@@ -117,6 +145,7 @@ impl LifecycleHooks {
             // Completed stop decisions consume only this event. Other pending
             // lifecycle work remains available to the next admitted prompt.
             claim.event = 0;
+            self.started.store(true, Ordering::Release);
             if let Some(reason) = outcome.stop.or(outcome.deny) {
                 return Err(self
                     .reject("SessionStart hook stopped the request", reason)
@@ -125,8 +154,27 @@ impl LifecycleHooks {
             if let Some(message) = outcome.message {
                 tracing::warn!(%message, "session-start hook message");
             }
+            if let Some(context) = outcome.context {
+                rows.push(self.context_row("SessionStart", &context).await);
+            }
         }
-        Ok(())
+        Ok(rows)
+    }
+
+    /// A model-visible context row, capped like Claude Code's hook context.
+    async fn context_row(&self, event: &str, context: &str) -> AgentMessage {
+        let mut text: String = context.chars().take(CONTEXT_LIMIT_CHARS).collect();
+        if text.len() < context.len() {
+            text.push_str("\n[hook context truncated]");
+            self.runtime
+                .report(format!(
+                    "{event} hook context exceeded {CONTEXT_LIMIT_CHARS} characters and was truncated."
+                ))
+                .await;
+        }
+        let row = super::messages::create_hook_context_message(event, &text);
+        super::session_message_to_loop(&pa_types::session::AgentMessage::Custom(row))
+            .expect("custom rows convert to loop messages")
     }
 
     pub fn input(
@@ -134,7 +182,7 @@ impl LifecycleHooks {
         messages: Vec<AgentMessage>,
         model: String,
         signal: AbortSignal,
-    ) -> impl std::future::Future<Output = anyhow::Result<()>> + Send {
+    ) -> impl std::future::Future<Output = anyhow::Result<Vec<AgentMessage>>> + Send {
         // Admission already took these rows from the deferred mailbox. Restore
         // them on veto, cancellation or dropped detached admission, ahead of any
         // notices that arrived while commands were running.
@@ -150,10 +198,10 @@ impl LifecycleHooks {
                 .collect(),
         };
         async move {
-            self.start(&model, signal.clone()).await?;
+            let mut rows = self.start(&model, signal.clone()).await?;
             if !self.runtime.might_run("UserPromptSubmit") {
                 deferred.rows.clear();
-                return Ok(());
+                return Ok(rows);
             }
             for message in messages {
                 let AgentMessage::Standard(Message::User(user)) = message else {
@@ -190,9 +238,12 @@ impl LifecycleHooks {
                 if let Some(message) = outcome.message {
                     tracing::warn!(%message, "prompt hook message");
                 }
+                if let Some(context) = outcome.context {
+                    rows.push(self.context_row("UserPromptSubmit", &context).await);
+                }
             }
             deferred.rows.clear();
-            Ok(())
+            Ok(rows)
         }
     }
 
@@ -209,7 +260,7 @@ impl LifecycleHooks {
         active: bool,
         signal: AbortSignal,
     ) -> anyhow::Result<Vec<AgentMessage>> {
-        if !self.runtime.might_run("Stop") {
+        if self.subagent() || !self.runtime.might_run("Stop") {
             return Ok(Vec::new());
         }
         let text = message
@@ -287,7 +338,7 @@ impl super::AgentSession {
         let Some(hooks) = &self.lifecycle_hooks else {
             return Ok(());
         };
-        if !hooks.runtime.might_run("PreCompact") {
+        if hooks.subagent() || !hooks.runtime.might_run("PreCompact") {
             return Ok(());
         }
         let mut input = hooks.common("PreCompact", &model.id);

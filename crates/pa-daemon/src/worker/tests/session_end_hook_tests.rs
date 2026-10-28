@@ -10,6 +10,7 @@ struct EndHookEngine {
     entered: Arc<tokio::sync::Notify>,
     release: Arc<tokio::sync::Notify>,
     calls: Arc<std::sync::atomic::AtomicUsize>,
+    reasons: Arc<Mutex<Vec<pa_core::session_engine::engine::SessionEndReason>>>,
 }
 
 impl SessionEngine for EndHookEngine {
@@ -58,6 +59,7 @@ impl SessionEngine for EndHookEngine {
 
     fn end_session_hooks(
         &self,
+        reason: pa_core::session_engine::engine::SessionEndReason,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + '_>> {
         Box::pin(async move {
             {
@@ -71,6 +73,7 @@ impl SessionEngine for EndHookEngine {
                 );
             }
             self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.reasons.lock().unwrap().push(reason);
             self.entered.notify_one();
             self.release.notified().await;
         })
@@ -89,6 +92,7 @@ async fn session_end_hooks_are_awaited_unlocked_on_close_but_not_detach() {
             entered: Arc::clone(&entered),
             release: Arc::clone(&release),
             calls: Arc::clone(&calls),
+            reasons: Arc::default(),
         });
         Arc::get_mut(&mut worker)
             .expect("unique worker fixture")
@@ -114,4 +118,32 @@ async fn session_end_hooks_are_awaited_unlocked_on_close_but_not_detach() {
         assert!(response.success, "{response:?}");
         assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
+}
+
+/// A whole-session replacement ends the replaced session before its runtime
+/// retires, so every `SessionStart` gets a `SessionEnd`.
+#[tokio::test]
+async fn replacement_ends_the_replaced_session_with_its_reason() {
+    use pa_core::session_engine::engine::SessionEndReason;
+    let mut worker = created_dispatch_worker().await;
+    let release = Arc::new(tokio::sync::Notify::new());
+    let reasons = Arc::new(Mutex::new(Vec::new()));
+    let hook_engine = Arc::new(EndHookEngine {
+        core: Arc::clone(&worker.core),
+        entered: Arc::new(tokio::sync::Notify::new()),
+        release: Arc::clone(&release),
+        calls: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        reasons: Arc::clone(&reasons),
+    });
+    Arc::get_mut(&mut worker)
+        .expect("unique worker fixture")
+        .engine = hook_engine;
+    for reason in [SessionEndReason::Clear, SessionEndReason::Other] {
+        release.notify_one();
+        worker.teardown_for_replacement(reason).await.unwrap();
+    }
+    assert_eq!(
+        *reasons.lock().unwrap(),
+        [SessionEndReason::Clear, SessionEndReason::Other]
+    );
 }

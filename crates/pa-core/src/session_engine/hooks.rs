@@ -22,11 +22,14 @@ pub(super) struct ToolHooks {
 }
 
 impl ToolHooks {
+    /// `agent_id` is set for an `rlm.spawn` subagent: its tool and prompt
+    /// events carry Codex's optional `agent_id`/`agent_type` fields.
     pub fn new(
         cwd: PathBuf,
         agent_dir: PathBuf,
         session_id: String,
         transcript_path: Option<String>,
+        agent_id: Option<String>,
     ) -> Self {
         let runtime = Arc::new(HookRuntime::new(cwd.clone(), agent_dir));
         // A pre-run compaction has its own lifecycle identity; AgentStart
@@ -37,6 +40,7 @@ impl ToolHooks {
             session_id,
             transcript_path,
             run_id: Arc::clone(&run_id),
+            agent_id,
         });
         let lifecycle = Arc::new(super::lifecycle::LifecycleHooks::new(
             Arc::clone(&runtime),
@@ -44,14 +48,19 @@ impl ToolHooks {
         ));
         let finish_runtime = Arc::clone(&runtime);
         let finish_identity = Arc::clone(&identity);
-        let finish: super::engine::SessionEndHook = Arc::new(move || {
+        let finish_lifecycle = Arc::clone(&lifecycle);
+        let finish: super::engine::SessionEndHook = Arc::new(move |reason| {
             let runtime = Arc::clone(&finish_runtime);
-            let input = json!({
-                "hook_event_name": "SessionEnd",
-                "session_id": finish_identity.session_id,
-                "transcript_path": finish_identity.transcript_path,
-                "cwd": finish_identity.cwd,
-                "reason": "other",
+            // A session that never reached its SessionStart gate has nothing
+            // to end; closing still stops observers and admission.
+            let input = finish_lifecycle.started().then(|| {
+                json!({
+                    "hook_event_name": "SessionEnd",
+                    "session_id": finish_identity.session_id,
+                    "transcript_path": finish_identity.transcript_path,
+                    "cwd": finish_identity.cwd,
+                    "reason": reason.as_str(),
+                })
             });
             Box::pin(async move { runtime.finish(input).await })
         });
@@ -147,9 +156,22 @@ pub(super) struct Identity {
     pub session_id: String,
     pub transcript_path: Option<String>,
     pub run_id: Arc<RwLock<String>>,
+    /// The subagent's own session id; `None` for a root session.
+    pub agent_id: Option<String>,
 }
 
+/// Codex's `agent_type` for an `rlm.spawn` subagent.
+pub(super) const SUBAGENT_TYPE: &str = "rlm";
+
 impl Identity {
+    /// Add the optional subagent fields; root sessions omit them.
+    pub fn tag_agent(&self, input: &mut Value) {
+        if let Some(agent_id) = &self.agent_id {
+            input["agent_id"] = json!(agent_id);
+            input["agent_type"] = json!(SUBAGENT_TYPE);
+        }
+    }
+
     fn input(
         &self,
         event: &str,
@@ -174,6 +196,7 @@ impl Identity {
             "tool_use_id": call.id,
         });
         input["tool_input"] = args;
+        self.tag_agent(&mut input);
         input
     }
 }
@@ -186,7 +209,6 @@ mod tests {
     use pa_agent::agent::{Agent, AgentInitialState, AgentOptions};
     use pa_agent::scripted::ScriptedProvider;
     use pa_agent::types::{AgentMessage, Message, Model};
-    use sha2::{Digest, Sha256};
 
     use crate::session_engine::tool_bridge::bridge_tool;
     use crate::tools::tool_definition::{ToolDefinition, ToolExecutionResult};
@@ -212,8 +234,7 @@ mod tests {
             .unwrap(),
         )
         .unwrap();
-        trust_fixture(&cwd, &agent_dir);
-        let hooks = ToolHooks::new(cwd, agent_dir, "session-test".into(), None);
+        let hooks = ToolHooks::new(cwd, agent_dir, "session-test".into(), None, None);
         *hooks.run_id.write().unwrap() = "actual-run".into();
         let executed = Arc::new(AtomicBool::new(false));
         let execution_flag = Arc::clone(&executed);
@@ -288,25 +309,6 @@ mod tests {
         assert_eq!(call.arguments, json!({"original": true}));
     }
 
-    fn trust_fixture(cwd: &std::path::Path, agent_dir: &std::path::Path) {
-        let source = agent_dir.join("hooks.json").canonicalize().unwrap();
-        let cwd = cwd.canonicalize().unwrap();
-        let mut hash = Sha256::new();
-        hash.update(source.as_os_str().as_encoded_bytes());
-        hash.update([0]);
-        hash.update(cwd.as_os_str().as_encoded_bytes());
-        hash.update([0]);
-        hash.update(std::fs::read(source).unwrap());
-        std::fs::write(
-            agent_dir.join("hook-trust.json"),
-            serde_json::to_vec(
-                &json!({"version": 1, "trusted": [format!("{:x}", hash.finalize())]}),
-            )
-            .unwrap(),
-        )
-        .unwrap();
-    }
-
     #[tokio::test]
     async fn observer_receives_original_result_without_returning_an_override() {
         let directory = tempfile::tempdir().unwrap();
@@ -323,8 +325,7 @@ mod tests {
             .unwrap(),
         )
         .unwrap();
-        trust_fixture(&cwd, &agent_dir);
-        let hooks = ToolHooks::new(cwd.clone(), agent_dir, "session-test".into(), None);
+        let hooks = ToolHooks::new(cwd.clone(), agent_dir, "session-test".into(), None, None);
         *hooks.run_id.write().unwrap() = "run-observed".into();
         let provider = Arc::new(ScriptedProvider::new(Model::unknown()));
         provider.push_text_turn("model output");
@@ -409,8 +410,8 @@ mod tests {
                     .unwrap(),
                 )
                 .unwrap();
-                trust_fixture(&cwd, &agent_dir);
-                let hooks = ToolHooks::new(cwd.clone(), agent_dir, "alias-session".into(), None);
+                let hooks =
+                    ToolHooks::new(cwd.clone(), agent_dir, "alias-session".into(), None, None);
                 let executed = Arc::new(AtomicBool::new(false));
                 let execution_flag = Arc::clone(&executed);
                 // Use the real bridge's alias resolution, without a live Python kernel.

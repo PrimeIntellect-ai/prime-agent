@@ -47,15 +47,24 @@ pub type GetSystemPromptFn = Arc<dyn Fn() -> String + Send + Sync>;
 pub struct InputRejected(pub String);
 
 /// Gates an external input batch before any of its rows enter context or persistence.
-/// Returns [`InputRejected`] to veto the batch.
+/// Returns [`InputRejected`] to veto the batch. Rows it returns are admitted
+/// right after the batch (for example hook-supplied model context).
 pub type BeforeInputFn = Arc<
-    dyn Fn(Vec<AgentMessage>, Model, AbortSignal) -> crate::BoxFut<'static, anyhow::Result<()>>
+    dyn Fn(
+            Vec<AgentMessage>,
+            Model,
+            AbortSignal,
+        ) -> crate::BoxFut<'static, anyhow::Result<Vec<AgentMessage>>>
         + Send
         + Sync,
 >;
-/// Deferred session initialization at a cancellable model boundary.
-pub type BeforeModelFn =
-    Arc<dyn Fn(Model, AbortSignal) -> crate::BoxFut<'static, anyhow::Result<()>> + Send + Sync>;
+/// Deferred session initialization at a cancellable model boundary. Rows it
+/// returns enter context before the model request.
+pub type BeforeModelFn = Arc<
+    dyn Fn(Model, AbortSignal) -> crate::BoxFut<'static, anyhow::Result<Vec<AgentMessage>>>
+        + Send
+        + Sync,
+>;
 /// Consulted only on a natural final stop ([`Continuation::NaturalStop`]).
 /// The boolean says a stop-hook continuation has already run in this root run.
 pub type FinalStopFn = Arc<

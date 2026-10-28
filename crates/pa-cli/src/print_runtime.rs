@@ -246,7 +246,7 @@ async fn rpc_mode_main(options: &RunOptions) -> Result<i32, String> {
             .await
         {
             if let Some(hook) = parts.engine.session_end_hook() {
-                hook().await;
+                hook(pa_core::session_engine::engine::SessionEndReason::Other).await;
             }
             return Err(format!("{error:#}"));
         }
@@ -457,7 +457,7 @@ async fn print_mode_main(
     // Settle descendant teardown on every exit before the root's final hook.
     crate::print_rlm::dispose_inline_subagents(&root_node).await;
     if let Some(hook) = engine.session_end_hook() {
-        hook().await;
+        hook(pa_core::session_engine::engine::SessionEndReason::Other).await;
     }
     result
 }

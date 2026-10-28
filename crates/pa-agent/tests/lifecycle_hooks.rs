@@ -103,7 +103,7 @@ async fn queued_inputs_and_stop_feedback_are_gated_but_internal_continuation_is_
                         None
                     }
                 }));
-            Box::pin(async { Ok(()) })
+            Box::pin(async { Ok(Vec::new()) })
         })),
         get_continuation_messages: Some(Arc::new(move |_, _| {
             let decision = if continuation_count.fetch_add(1, Ordering::SeqCst) == 0 {
@@ -317,7 +317,7 @@ async fn rejected_queued_batch_is_dropped_and_the_run_completes() {
                 if queued {
                     Err(rejected("queued input rejected"))
                 } else {
-                    Ok(())
+                    Ok(Vec::new())
                 }
             })
         })),
@@ -369,4 +369,32 @@ async fn abort_during_stop_work_keeps_the_finished_run() {
         Some(AgentMessage::Standard(Message::Assistant(assistant)))
             if assistant.stop_reason == pa_agent::types::StopReason::Stop
     ));
+}
+
+/// Rows the input gate returns (hook context) follow the admitted batch into
+/// context; rows the model gate returns enter before the model request.
+#[tokio::test]
+async fn gate_rows_enter_context_after_the_batch() {
+    let provider = Arc::new(ScriptedProvider::new(Model::unknown()));
+    provider.push_text_turn("answer");
+    let agent = Agent::new(AgentOptions {
+        stream_fn: Some(provider.stream_fn()),
+        before_input: Some(Arc::new(|_, _, _| {
+            Box::pin(async { Ok(vec![user("input context")]) })
+        })),
+        before_model: Some(Arc::new(|_, _| {
+            Box::pin(async { Ok(vec![user("model context")]) })
+        })),
+        ..Default::default()
+    });
+    agent.prompt("question").await.unwrap();
+    let call = &provider.calls()[0];
+    let texts: Vec<String> = call
+        .messages
+        .iter()
+        .map(|message| format!("{message:?}"))
+        .collect();
+    let position = |needle: &str| texts.iter().position(|text| text.contains(needle)).unwrap();
+    assert!(position("question") < position("input context"));
+    assert!(position("input context") < position("model context"));
 }

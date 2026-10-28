@@ -337,7 +337,12 @@ impl Worker {
         // are one critical section against a concurrent replacement.
         let _replacement_gate = self.replacement_gate.lock().await;
         // A failed retire fails the command with the old runtime already torn down.
-        if let Err(error) = self.teardown_for_replacement().await {
+        let reason = if command == "new_session" {
+            pa_core::session_engine::engine::SessionEndReason::Clear
+        } else {
+            pa_core::session_engine::engine::SessionEndReason::Other
+        };
+        if let Err(error) = self.teardown_for_replacement(reason).await {
             return response_failure(None, command, &format!("{error:#}"), None);
         }
         if let Some(cwd) = target.cwd.as_deref() {

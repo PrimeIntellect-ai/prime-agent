@@ -742,7 +742,9 @@ impl Worker {
         self.await_session_work_settled().await;
         // The session-ended finalization runs AFTER the awaited settle: the
         // ended-run accounting includes the aborted turn, never a pending response.
-        self.engine.end_session_hooks().await;
+        self.engine
+            .end_session_hooks(pa_core::session_engine::engine::SessionEndReason::Other)
+            .await;
         self.engine.archive_session_telemetry().await;
         // The session's kernel dies with the session: the worker keeps the engine
         // object, so the #235 engine-drop teardown cannot run yet — dispose explicitly.

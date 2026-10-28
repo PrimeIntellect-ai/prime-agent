@@ -236,13 +236,19 @@ impl AgentSessionEngine {
                                             let _ = tx.send(EngineEvent::UserMessage(value));
                                         }
                                     }
-                                    // Hook diagnostics are the core's display-only rows:
-                                    // the worker persists and frames them like any other
-                                    // durable custom row. Other custom rows keep their
+                                    // Hook diagnostics (display-only) and hook context
+                                    // (model-visible) are core-made rows: the worker
+                                    // persists and frames them like any other durable
+                                    // custom row. Other custom rows keep their
                                     // host-owned representation.
                                     pa_agent::types::AgentMessage::Custom(custom)
-                                        if custom.payload.get("customType").and_then(Value::as_str)
-                                            == Some(pa_core::session_engine::messages::HOOK_NOTICE_CUSTOM_TYPE) =>
+                                        if matches!(
+                                            custom.payload.get("customType").and_then(Value::as_str),
+                                            Some(
+                                                pa_core::session_engine::messages::HOOK_NOTICE_CUSTOM_TYPE
+                                                    | pa_core::session_engine::messages::HOOK_CONTEXT_CUSTOM_TYPE
+                                            )
+                                        ) =>
                                     {
                                         if let Some(value) = session_wire_value(agent_message) {
                                             let _ = tx.send(EngineEvent::CustomMessage(value));

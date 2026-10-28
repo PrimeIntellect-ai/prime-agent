@@ -4,7 +4,6 @@ use std::sync::Arc;
 use pa_agent::scripted::ScriptedProvider;
 use pa_agent::types::Model;
 use serde_json::{json, Value};
-use sha2::{Digest, Sha256};
 
 use super::engine::{create_session, SessionEngineConfig};
 use super::{PromptOptions, SessionAgentMessage};
@@ -25,26 +24,6 @@ impl Fixture {
         let source = agent_dir.join("hooks.json");
         let bytes = serde_json::to_vec(document).unwrap();
         std::fs::write(&source, &bytes).unwrap();
-        let mut digest = Sha256::new();
-        digest.update(
-            source
-                .canonicalize()
-                .unwrap()
-                .as_os_str()
-                .as_encoded_bytes(),
-        );
-        digest.update([0]);
-        digest.update(cwd.canonicalize().unwrap().as_os_str().as_encoded_bytes());
-        digest.update([0]);
-        digest.update(bytes);
-        std::fs::write(
-            agent_dir.join("hook-trust.json"),
-            serde_json::to_vec(&json!({
-                "version": 1, "trusted": [format!("{:x}", digest.finalize())]
-            }))
-            .unwrap(),
-        )
-        .unwrap();
         Self {
             _directory: directory,
             cwd,
@@ -176,7 +155,10 @@ async fn denied_prompt_restores_deferred_custom_rows_for_the_next_accepted_turn(
 }
 
 #[tokio::test]
-async fn subagent_excludes_every_lifecycle_hook_even_with_shared_trusted_configuration() {
+/// A subagent runs the tool and prompt hooks (so a `PreToolUse` policy cannot be
+/// bypassed through rlm.spawn), tagged with Codex's agent fields; session
+/// lifecycle events stay with the root.
+async fn subagent_runs_tool_and_prompt_hooks_but_not_session_lifecycle() {
     let mut hook_map = serde_json::Map::new();
     for event in [
         "SessionStart",
@@ -210,9 +192,8 @@ async fn subagent_excludes_every_lifecycle_hook_even_with_shared_trusted_configu
         )
         .await
         .unwrap();
-    parent.session_end_hook().unwrap()().await;
+    parent.session_end_hook().unwrap()(super::engine::SessionEndReason::Other).await;
     let path = fixture.cwd.join("observed.jsonl");
-    let baseline = std::fs::read(&path).unwrap();
     let child_provider = Arc::new(ScriptedProvider::new(Model::unknown()));
     child_provider.push_tool_call_turn(None, vec![("child-call", "echo", json!({}))]);
     child_provider.push_text_turn("child");
@@ -241,9 +222,36 @@ async fn subagent_excludes_every_lifecycle_hook_even_with_shared_trusted_configu
         parent.session.session_id().await,
         child.session.session_id().await
     );
-    assert_eq!(std::fs::read(&path).unwrap(), baseline);
-    let names = events(&path)
-        .into_iter()
+    // The PostToolUse observer is asynchronous: wait for its line.
+    let child_events = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            let all = events(&path);
+            if all.len() >= 8 {
+                break all;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("child hook events");
+    let child_events = &child_events[5..];
+    let mut names = child_events
+        .iter()
+        .map(|event| event["hook_event_name"].as_str().unwrap().to_owned())
+        .collect::<Vec<_>>();
+    names.sort();
+    assert_eq!(names, ["PostToolUse", "PreToolUse", "UserPromptSubmit"]);
+    let child_id = child.session.session_id().await;
+    for event in child_events {
+        assert_eq!(event["agent_type"], "rlm", "{event}");
+        assert_eq!(event["agent_id"], json!(child_id), "{event}");
+    }
+    let parent_events = events(&path);
+    assert!(parent_events[..5]
+        .iter()
+        .all(|event| event.get("agent_id").is_none()));
+    let names = parent_events[..5]
+        .iter()
         .map(|event| event["hook_event_name"].as_str().unwrap().to_owned())
         .collect::<Vec<_>>();
     assert_eq!(
@@ -278,8 +286,14 @@ async fn hooks_use_host_durable_identity_instead_of_in_memory_mirror_id() {
         parent_session_id: None,
         spawned_by_request_id: None,
     });
+    provider.push_text_turn("started");
     let engine = create_session(config).await.unwrap();
-    engine.session_end_hook().unwrap()().await;
+    // SessionEnd pairs with a session that reached its SessionStart gate.
+    engine
+        .prompt("start", PromptOptions::default())
+        .await
+        .unwrap();
+    engine.session_end_hook().unwrap()(super::engine::SessionEndReason::Clear).await;
     let observed: Value =
         serde_json::from_slice(&std::fs::read(fixture.cwd.join("ended.json")).unwrap()).unwrap();
     assert_eq!(observed["session_id"], "host-durable-session");

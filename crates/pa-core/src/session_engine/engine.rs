@@ -108,9 +108,31 @@ pub struct SessionEngineConfig {
     pub on_late_sent_agent_message: Option<crate::tools::ipython::LateSentAgentMessageHandler>,
 }
 
+/// Why a session ended, reported as the `SessionEnd` hook's `reason`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SessionEndReason {
+    /// The session was replaced by a fresh one (`new_session`), Codex's `clear`.
+    Clear,
+    /// Every other close: shutdown, kill, passivation, switch, import, fork.
+    Other,
+}
+
+impl SessionEndReason {
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Clear => "clear",
+            Self::Other => "other",
+        }
+    }
+}
+
 /// Cloneable graceful-close work. Hosts copy the handle while selecting their
-/// engine, release all session locks, then await it before exiting the runtime.
-pub type SessionEndHook = Arc<dyn Fn() -> pa_agent::BoxFut<'static, ()> + Send + Sync>;
+/// engine, release all session locks, then await it before exiting or
+/// replacing the runtime. It runs only for a session whose `SessionStart` gate
+/// ran, so every `SessionStart` has one matching `SessionEnd`.
+pub type SessionEndHook =
+    Arc<dyn Fn(SessionEndReason) -> pa_agent::BoxFut<'static, ()> + Send + Sync>;
 
 pub struct SessionEngine {
     session_end_hook: Option<SessionEndHook>,
@@ -220,20 +242,24 @@ pub async fn create_session(mut config: SessionEngineConfig) -> anyhow::Result<S
     };
     // Construction is inert: configuration and commands are deferred until a
     // tool boundary. Opening or restoring a session never starts hook work.
-    // Subagents stay excluded until their external identity contract is wired.
-    let tool_hooks = (config.rlm_depth.unwrap_or(0) == 0).then(|| {
-        super::hooks::ToolHooks::new(
+    // Subagents run tool and prompt hooks too, tagged with Codex's
+    // `agent_id`/`agent_type`, so a policy cannot be bypassed via rlm.spawn.
+    let is_subagent = config.rlm_depth.unwrap_or(0) > 0;
+    let tool_hooks = {
+        // Daemon mirrors are in-memory managers with a fresh local id;
+        // the host supplies the durable session identity for its ledger.
+        let session_id = config.semantic_edges.as_ref().map_or_else(
+            || session_manager.get_session_id().to_string(),
+            |identity| identity.session_id.clone(),
+        );
+        Some(super::hooks::ToolHooks::new(
             cwd.clone(),
             config.agent_dir.clone(),
-            // Daemon mirrors are in-memory managers with a fresh local id;
-            // the host supplies the durable session identity for its ledger.
-            config.semantic_edges.as_ref().map_or_else(
-                || session_manager.get_session_id().to_string(),
-                |identity| identity.session_id.clone(),
-            ),
+            session_id.clone(),
             conversation_log.clone(),
-        )
-    });
+            is_subagent.then_some(session_id),
+        ))
+    };
     let (settings, trace_consent) =
         crate::agent_traces::ContinuousTraceUpload::load_settings(&cwd, &config.agent_dir);
     // Resolve the kernel shell once, before any side effects: an invalid
@@ -731,7 +757,7 @@ pub async fn create_session(mut config: SessionEngineConfig) -> anyhow::Result<S
             Arc::new(move |users, model: pa_agent::types::Model, signal| {
                 let lifecycle = Arc::clone(&lifecycle);
                 Box::pin(lifecycle.input(users, model.id, signal))
-                    as pa_agent::BoxFut<'static, anyhow::Result<()>>
+                    as pa_agent::BoxFut<'static, anyhow::Result<Vec<pa_agent::types::AgentMessage>>>
             }) as pa_agent::agent_loop::BeforeInputFn
         }),
         before_model: tool_hooks.as_ref().map(|hooks| {
@@ -739,7 +765,7 @@ pub async fn create_session(mut config: SessionEngineConfig) -> anyhow::Result<S
             Arc::new(move |model: pa_agent::types::Model, signal| {
                 let lifecycle = Arc::clone(&lifecycle);
                 Box::pin(async move { lifecycle.start(&model.id, signal).await })
-                    as pa_agent::BoxFut<'static, anyhow::Result<()>>
+                    as pa_agent::BoxFut<'static, anyhow::Result<Vec<pa_agent::types::AgentMessage>>>
             }) as pa_agent::agent_loop::BeforeModelFn
         }),
         final_stop: tool_hooks.as_ref().map(|hooks| {
@@ -1008,7 +1034,11 @@ pub async fn create_session(mut config: SessionEngineConfig) -> anyhow::Result<S
             allowed_models: factory_allowed_models,
         });
     Ok(SessionEngine {
-        session_end_hook: tool_hooks.as_ref().map(|hooks| Arc::clone(&hooks.finish)),
+        // SessionEnd belongs to the root; a subagent's close is not session end.
+        session_end_hook: tool_hooks
+            .as_ref()
+            .filter(|_| !is_subagent)
+            .map(|hooks| Arc::clone(&hooks.finish)),
         session,
         skills: resources.skills,
         skill_diagnostics: resources.skill_diagnostics,

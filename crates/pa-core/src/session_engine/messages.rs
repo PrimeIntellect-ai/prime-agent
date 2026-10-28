@@ -34,6 +34,9 @@ pub const MCP_CONNECTION_OUTCOME_CUSTOM_TYPE: &str = "mcp_connection_outcome";
 /// failed or timed-out command, a hook `systemMessage`): shown to the user,
 /// never model context.
 pub const HOOK_NOTICE_CUSTOM_TYPE: &str = "hook_notice";
+/// Model context a `SessionStart` or `UserPromptSubmit` hook supplied
+/// (`additionalContext` or plain stdout): durable, shown, and model-visible.
+pub const HOOK_CONTEXT_CUSTOM_TYPE: &str = "hook_context";
 pub const HEARTBEAT_PROMPT_CUSTOM_TYPE: &str = "heartbeat_prompt";
 /// The durable row a detached kernel bash completion admits as the
 /// woken turn's injected prompt.
@@ -158,6 +161,20 @@ pub fn create_hook_notice_message(text: &str) -> pa_types::session::CustomMessag
         content: UserContent::Text(text.to_string()),
         display: true,
         details: None,
+        timestamp: now_millis(),
+        rest: serde_json::Map::default(),
+    }
+}
+
+/// The durable, model-visible row of hook-supplied context, labelled with the
+/// event that produced it.
+#[must_use]
+pub fn create_hook_context_message(event: &str, text: &str) -> pa_types::session::CustomMessage {
+    pa_types::session::CustomMessage {
+        custom_type: HOOK_CONTEXT_CUSTOM_TYPE.to_string(),
+        content: UserContent::Text(format!("{event} hook context:\n{text}")),
+        display: true,
+        details: Some(serde_json::json!({ "hookEventName": event })),
         timestamp: now_millis(),
         rest: serde_json::Map::default(),
     }
@@ -523,6 +540,12 @@ mod tests {
             converted.is_empty(),
             "outcome row must not convert to LLM context"
         );
+    }
+
+    #[test]
+    fn hook_context_row_is_model_context() {
+        let message = create_hook_context_message("SessionStart", "project facts");
+        assert_eq!(convert_to_llm(&[AgentMessage::Custom(message)]).len(), 1);
     }
 
     #[test]
