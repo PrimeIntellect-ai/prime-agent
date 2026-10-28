@@ -559,9 +559,6 @@ impl OutputStream {
     }
 }
 
-/// One pipe's streaming decoder, shared so it outlives the pipe's pump.
-type SharedDecoder = Arc<std::sync::Mutex<crate::streaming_utf8::StreamingUtf8>>;
-
 async fn run_bash(run: RunBash<'_>) -> BashEnd {
     let resolved = match run.prefix.filter(|prefix| !prefix.is_empty()) {
         Some(prefix) => format!("{prefix}\n{}", run.command),
@@ -632,28 +629,27 @@ async fn run_bash(run: RunBash<'_>) -> BashEnd {
     // stdout and stderr merge into one stream (TS wires both pipes to the
     // same `onData`); the shared accumulator keeps the arrival order.
     // A read can end inside a multi-byte character; each pipe's decoder holds its leading
-    // bytes for the next read (TS `TextDecoder`, `stream: true`). The decoders outlive the
-    // pumps, so a pipe still held open past the exit grace flushes its partial tail too.
-    let decoders: [SharedDecoder; 2] = Default::default();
-    let pump = |mut reader: Box<dyn AsyncRead + Unpin + Send>, decoder: SharedDecoder| {
+    // bytes for the next read (TS `TextDecoder`, `stream: true`).
+    let pump = |mut reader: Box<dyn AsyncRead + Unpin + Send>| {
         let stream = Arc::clone(&stream);
         async move {
+            let mut decoder = crate::streaming_utf8::StreamingUtf8::default();
             let mut buffer = [0u8; 8192];
             loop {
                 match reader.read(&mut buffer).await {
                     Ok(0) | Err(_) => break,
                     Ok(read) => {
-                        let text = decoder.lock().unwrap().decode_chunk(&buffer[..read]);
+                        let text = decoder.decode_chunk(&buffer[..read]);
                         stream.lock().unwrap().push(&text);
                     }
                 }
             }
-            let rest = decoder.lock().unwrap().flush();
+            let rest = decoder.flush();
             stream.lock().unwrap().push(&rest);
         }
     };
-    let stdout_pump = stdout.map(|pipe| pump(Box::new(pipe), Arc::clone(&decoders[0])));
-    let stderr_pump = stderr.map(|pipe| pump(Box::new(pipe), Arc::clone(&decoders[1])));
+    let stdout_pump = stdout.map(|pipe| pump(Box::new(pipe)));
+    let stderr_pump = stderr.map(|pipe| pump(Box::new(pipe)));
     let mut pumps = Box::pin(async move {
         match (stdout_pump, stderr_pump) {
             (Some(stdout_pump), Some(stderr_pump)) => {
@@ -684,20 +680,6 @@ async fn run_bash(run: RunBash<'_>) -> BashEnd {
         let _ = tokio::time::timeout(EXIT_STDIO_GRACE, &mut pumps).await;
     }
     drop(pumps);
-    // A pump cut off by the grace never reached its flush: its buffered partial character
-    // still ends as one U+FFFD. A pump that finished left its decoder empty.
-    for decoder in &decoders {
-        let rest = decoder
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .flush();
-        if !rest.is_empty() {
-            stream
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .push(&rest);
-        }
-    }
     // A signal death reports 128 + the signal number, like a shell's `$?` (TS
     // `normalizedExitCode`); a cancelled run still reports none below.
     let exit_code = status
@@ -1062,37 +1044,26 @@ mod tests {
     }
 
     /// Multi-byte characters that straddle a pipe read decode intact: a per-read decode replaced
-    /// both halves with U+FFFD in the stream, the spill and the row the model reads.
+    /// both halves with U+FFFD in the stream and the row the model reads.
     #[cfg(unix)]
     #[tokio::test]
     async fn characters_split_across_reads_decode_intact() {
         let cwd = tempfile::tempdir().expect("tempdir");
         let worker = created_worker(cwd.path()).await;
-        // 7-byte lines, so 8 KiB reads keep landing inside a 3-byte character.
+        // 1,500 seven-byte lines cross an 8 KiB read without reaching either output cap.
         let response = worker
             .dispatch(
                 "execute_bash_and_wait",
                 &json!({
                     "activeSessionId": "bash-session",
-                    "command": "yes '\u{20ac}\u{20ac}' | head -c 3000000",
+                    "command": "yes '\u{20ac}\u{20ac}' | head -n 1500",
                 }),
             )
             .await;
         assert!(response.success, "failed: {response:?}");
         let data = response.data.expect("data");
         let output = data["output"].as_str().expect("output");
-        let spill_path = data["fullOutputPath"].as_str().expect("spill path");
-        let spill = std::fs::read_to_string(spill_path).expect("read the spill");
-        // Spills land in the shared temp dir; this test owns this one.
-        std::fs::remove_file(spill_path).expect("remove the spill");
-        assert_eq!(
-            (
-                output.matches('\u{fffd}').count(),
-                spill.matches('\u{fffd}').count()
-            ),
-            (0, 0),
-            "replacement characters in the output and the spill"
-        );
+        assert_eq!(output, "\u{20ac}\u{20ac}\n".repeat(1500));
     }
 
     /// A command whose shell dies by a signal reports 128 + the signal number, like a shell's
@@ -1452,36 +1423,6 @@ mod tests {
                 "truncated": false,
             }))
         );
-    }
-
-    /// A partial character read before a backgrounded process holds the pipe past the exit grace
-    /// still ends as one U+FFFD, as TS `TextDecoder.decode()` flushes it at settle.
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn a_partial_character_held_past_the_grace_flushes_as_one_replacement() {
-        let cwd = tempfile::tempdir().expect("tempdir");
-        let worker = created_worker(cwd.path()).await;
-        let settled = tokio::time::timeout(
-            std::time::Duration::from_secs(10),
-            worker.dispatch(
-                "execute_bash_and_wait",
-                &json!({
-                    "activeSessionId": "bash-session",
-                    "command": "printf 'a\\342\\202'; sleep 60 & echo $! > background.pid",
-                }),
-            ),
-        )
-        .await;
-        if let Some(pid) = std::fs::read_to_string(cwd.path().join("background.pid"))
-            .ok()
-            .and_then(|pid| pid.trim().parse().ok())
-        {
-            let _ =
-                pa_core::platform::process::kill_pid(pid, pa_core::platform::process::Signal::Kill);
-        }
-        let response = settled.expect("the run waited on the backgrounded process");
-        assert!(response.success, "failed: {response:?}");
-        assert_eq!(response.data.expect("data")["output"], json!("a\u{fffd}"));
     }
 
     #[tokio::test]

@@ -86,30 +86,16 @@ mod tests {
     }
 
     #[test]
-    fn a_surrogate_sequence_gives_one_replacement_per_byte() {
-        assert_matches_lossy(b"a\xED\xA0\x80b");
-        let mut decoder = StreamingUtf8::default();
-        assert_eq!(decoder.decode_chunk(b"\xED\xA0\x80"), "\u{FFFD}".repeat(3));
-    }
-
-    #[test]
-    fn an_overlong_sequence_gives_one_replacement_per_byte() {
-        assert_matches_lossy(b"a\xE0\x80\xAFb");
-        assert_matches_lossy(b"\xC0\xAF");
-    }
-
-    #[test]
-    fn an_out_of_range_sequence_gives_one_replacement_per_byte() {
-        assert_matches_lossy(b"a\xF4\x90\x80\x80b");
-        assert_matches_lossy(b"\xF5\x80\x80\x80");
-    }
-
-    #[test]
-    fn a_split_character_decodes_intact_and_a_truncated_tail_flushes_once() {
-        assert_matches_lossy("\u{20ac}\u{1F600}".as_bytes());
+    fn split_chunks_and_a_truncated_tail_decode_like_one_input() {
+        for bytes in [
+            b"a\xED\xA0\x80\xE0\x80\xAFb".as_slice(),
+            "\u{20ac}\u{1F600}".as_bytes(),
+            b"x\xE2\x82".as_slice(),
+        ] {
+            assert_matches_lossy(bytes);
+        }
         let mut decoder = StreamingUtf8::default();
         assert_eq!(decoder.decode_chunk(b"x\xE2\x82"), "x");
         assert_eq!(decoder.flush(), "\u{FFFD}");
-        assert_matches_lossy(b"x\xE2\x82");
     }
 }

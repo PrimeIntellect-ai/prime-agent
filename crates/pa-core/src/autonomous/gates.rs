@@ -14,7 +14,7 @@ use super::{
 /// Output cap for gate results surfaced in continuation text.
 const MAX_GATE_OUTPUT_CHARS: usize = 6000;
 /// Output cap for gate child processes (both streams combined per stream).
-const MAX_CHILD_PROCESS_OUTPUT_CHARS: usize = 1024 * 1024;
+const MAX_CHILD_PROCESS_OUTPUT_BYTES: usize = 1024 * 1024;
 /// Timeout for the git commands that capture a worktree snapshot.
 const SNAPSHOT_TIMEOUT_MS: u64 = 10_000;
 
@@ -462,7 +462,7 @@ pub async fn run_gate_command(
 /// decoded once at the end, so a character split across two reads survives.
 async fn read_pipe_capped<R: tokio::io::AsyncRead + Unpin>(mut pipe: Option<R>) -> (String, bool) {
     use tokio::io::AsyncReadExt;
-    let cap = MAX_CHILD_PROCESS_OUTPUT_CHARS;
+    let cap = MAX_CHILD_PROCESS_OUTPUT_BYTES;
     let mut kept: Vec<u8> = Vec::new();
     let mut truncated = false;
     let mut buffer = [0u8; 8192];
@@ -723,12 +723,12 @@ mod tests {
 
     #[tokio::test]
     async fn the_cap_never_cuts_inside_a_character() {
-        let mut output = "a".repeat(MAX_CHILD_PROCESS_OUTPUT_CHARS - 1);
+        let mut output = "a".repeat(MAX_CHILD_PROCESS_OUTPUT_BYTES - 1);
         output.push_str("\u{e9}\u{e9}");
         let captured = read_pipe_capped(Some(std::io::Cursor::new(output.into_bytes()))).await;
         assert_eq!(
             captured,
-            ("a".repeat(MAX_CHILD_PROCESS_OUTPUT_CHARS - 1), true)
+            ("a".repeat(MAX_CHILD_PROCESS_OUTPUT_BYTES - 1), true)
         );
     }
 }
