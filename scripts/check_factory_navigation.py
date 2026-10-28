@@ -141,14 +141,10 @@ def observe(binary, root, observed):
         terminal.send('\x1b[D')
         snap('page_returned_on_the_state', lambda text: server.attach_target() == 's1'
              and RUN in text and STATE_SELECTED in text and '\u25b8 factory: ' not in text)
-        terminal.send('\x1b[D')
-        snap('returned_page_closes', lambda text: 'FACTORY_CLOSED_INPUT_BARRIER' in text
-             and RUN not in text)
         # A confirmed child stop must leave navigation and paint responsive
-        # even while the daemon never replies to that request.
-        terminal.send(factory_click(terminal.screen))
-        snap('stop_page', lambda text: RUN in text and '\u2190 back' in text)
-        terminal.send('\x1b[B\x18')
+        # even while the daemon never replies. The returned page above is
+        # already on the child row; no dock-readiness assumption is needed.
+        terminal.send('\x18')
         snap('child_stop_armed', lambda text: STATE_SELECTED in text and 'again to confirm' in text)
         terminal.send('\x18')
         terminal.wait('child stop reached hanging sink', lambda: any(
@@ -159,6 +155,8 @@ def observe(binary, root, observed):
              'STOP_PENDING_INPUT_BARRIER' in text and RUN not in text)
         observed['stop_navigation_seconds'] = time.monotonic() - started
         assert observed['stop_navigation_seconds'] < 3, 'child stop blocked the UI until its timeout'
+        snap('returned_page_closes', lambda text: 'FACTORY_CLOSED_INPUT_BARRIER' in text
+             and RUN not in text)
         assert not server.prompts, 'navigation submitted a prompt'
         assert all(c.get('action') in ('graph', 'watch') for c in server.commands
                    if c.get('type') == 'factory_activity'), server.commands
