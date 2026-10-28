@@ -97,60 +97,6 @@ pub fn is_executable(path: &Path) -> bool {
     path.is_file()
 }
 
-/// True when the current process may read and write the file (access(2)
-/// semantics: real/effective uid checks, not just the file mode).
-#[cfg(unix)]
-#[must_use]
-pub fn is_readable_writable(path: &Path) -> bool {
-    nix::unistd::access(
-        path,
-        nix::unistd::AccessFlags::R_OK | nix::unistd::AccessFlags::W_OK,
-    )
-    .is_ok()
-}
-
-#[cfg(not(unix))]
-#[must_use]
-pub fn is_readable_writable(path: &Path) -> bool {
-    // Windows: a create-open probe is the equivalent permission test.
-    OpenOptions::new().read(true).write(true).open(path).is_ok()
-}
-
-/// True when the current user may read the file, mirroring Node
-/// `fs.access(path, R_OK)` error-code semantics used by the edit preview.
-///
-/// # Errors
-///
-/// The metadata I/O error, or EACCES when the permission bits deny a read.
-#[cfg(unix)]
-pub fn is_readable(path: &Path) -> Result<(), std::io::Error> {
-    use std::os::unix::fs::{MetadataExt, PermissionsExt};
-    let metadata = std::fs::metadata(path)?;
-    // Root on Linux can read files regardless of permission bits; mirror
-    // access(2)'s effective-uid check via the permission bits plus euid.
-    let mode = metadata.permissions().mode();
-    let readable = (mode & 0o004) != 0
-        || ((mode & 0o040) != 0 && metadata.uid() == nix::unistd::Uid::effective().as_raw())
-        || ((mode & 0o400) != 0 && metadata.uid() == nix::unistd::Uid::effective().as_raw());
-    if readable {
-        Ok(())
-    } else {
-        Err(std::io::Error::from_raw_os_error(13))
-    }
-}
-
-/// Windows arm of [`is_readable`]: a read open probe is the equivalent
-/// permission test.
-///
-/// # Errors
-///
-/// Returns the open error when the file cannot be opened for reading.
-#[cfg(not(unix))]
-pub fn is_readable(path: &Path) -> Result<(), std::io::Error> {
-    // Windows: a read open probe is the equivalent permission test.
-    std::fs::File::open(path).map(|_| ())
-}
-
 /// Set the private mode on an already-open file (`fchmod`): exact bits despite
 /// the umask; tightens a pre-existing loose file.
 ///
@@ -206,15 +152,13 @@ mod windows_tests {
     use super::*;
 
     #[test]
-    fn restriction_is_a_no_op_and_probes_match_open_semantics() {
+    fn restriction_is_a_no_op() {
         let dir = std::env::temp_dir().join(format!("pa-perms-{}", std::process::id()));
         std::fs::create_dir_all(&dir).expect("temp dir");
         let file = dir.join("probe.txt");
         std::fs::write(&file, "x").expect("write");
         assert!(restrict_file(&file).is_ok());
         assert!(restrict_dir(&dir).is_ok());
-        assert!(is_readable_writable(&file));
-        assert!(is_readable(&file).is_ok());
         let _ = std::fs::remove_file(&file);
         let _ = std::fs::remove_dir(&dir);
     }
