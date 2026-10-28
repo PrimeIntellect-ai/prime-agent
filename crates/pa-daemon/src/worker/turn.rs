@@ -1027,8 +1027,9 @@ impl TurnRunner {
                 }
             }
             emitting_prefix_rows.set(false);
-            // Sample the worker-owned leaf in memory before accepted rows
-            // persist. The engine stays lazy and the accepted event stays first.
+            // Sample the worker-owned leaf in memory before the turn runs: the
+            // lazy engine restores context through it. Accepted user rows
+            // persist only after core admission, inside the run.
             let (file_backed, prompt_context_leaf) = {
                 let core = core.lock().unwrap();
                 core.store.as_ref().map_or((false, None), |store| {

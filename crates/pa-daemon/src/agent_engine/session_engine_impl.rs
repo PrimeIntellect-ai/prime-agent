@@ -3,11 +3,11 @@
 //! turn state machine, and the export/telemetry reads.
 
 use super::{
-    artifact_reference, json, map_thinking_level, now_millis, AgentSessionEngine, Arc,
-    BranchSummaryOutcome, BranchSummaryRequest, BranchSummaryRun, CompactionOutcome,
-    CompactionRequest, CompactionRun, EngineEvent, EngineModelSelection, ParentIdentity,
-    PromptContextBoundary, PromptRequest, ProviderTarget, SessionEngine, SideQuestionOutcome,
-    SideQuestionRequest, StartupScope, TurnPrompt, Value, DEFAULT_RLM_MAX_DEPTH,
+    artifact_reference, json, map_thinking_level, AgentSessionEngine, Arc, BranchSummaryOutcome,
+    BranchSummaryRequest, BranchSummaryRun, CompactionOutcome, CompactionRequest, CompactionRun,
+    EngineEvent, EngineModelSelection, ParentIdentity, PromptContextBoundary, PromptRequest,
+    ProviderTarget, SessionEngine, SideQuestionOutcome, SideQuestionRequest, StartupScope,
+    TurnPrompt, Value, DEFAULT_RLM_MAX_DEPTH,
 };
 
 impl SessionEngine for AgentSessionEngine {
@@ -959,17 +959,6 @@ impl SessionEngine for AgentSessionEngine {
             .prompt_context_boundary
             .lock()
             .expect("prompt context boundary lock") = None;
-        self.runtime.block_on(async {
-            let core = self.session.lock().await.clone();
-            if let Some(core) = core {
-                core.session
-                    .shared_persistence()
-                    .lock()
-                    .await
-                    .replay_admitted_user_rows(Vec::new())
-                    .expect("clearing admitted rows cannot fail");
-            }
-        });
         if let Some(children) = &self.children {
             children.notify_turn_done();
         }
@@ -1396,53 +1385,17 @@ impl SessionEngine for AgentSessionEngine {
             }
             None => None,
         };
-        // The accepted turn row: an injected custom row replaces the user
-        // message; the plain turn records the accepted row, images after.
-        let accepted = if let Some(custom) = &request.custom_message {
-            EngineEvent::CustomMessage(custom.clone())
-        } else {
-            let mut content = vec![json!({ "type": "text", "text": request.message })];
-            for image in &request.images {
-                let mut block = match serde_json::to_value(image) {
-                    Ok(Value::Object(block)) => Value::Object(block),
-                    _ => continue,
-                };
-                if let Some(object) = block.as_object_mut() {
-                    object.insert("type".to_string(), json!("image"));
-                }
-                content.push(block);
-            }
-            EngineEvent::UserMessage(json!({
-                "role": "user",
-                "content": content,
-                "timestamp": now_millis(),
-            }))
-        };
-        if !emit(accepted) {
+        // Injected custom rows retain their existing host-owned representation.
+        // User rows are emitted from the core's admitted MessageEnd events:
+        // persisting them here would record prompts that fail before admission
+        // and make a fresh lazy engine mistake this submission for restored
+        // conversation history.
+        if request
+            .custom_message
+            .as_ref()
+            .is_some_and(|custom| !emit(EngineEvent::CustomMessage(custom.clone())))
+        {
             return;
-        }
-        // The batched co-delivery rows: one accepted user row per batched
-        // message, in delivery order, already expanded above.
-        for row in &request.batch {
-            let text = row.text.clone();
-            let mut content = vec![json!({ "type": "text", "text": text })];
-            for image in &row.images {
-                let mut block = match serde_json::to_value(image) {
-                    Ok(Value::Object(block)) => Value::Object(block),
-                    _ => continue,
-                };
-                if let Some(object) = block.as_object_mut() {
-                    object.insert("type".to_string(), json!("image"));
-                }
-                content.push(block);
-            }
-            if !emit(EngineEvent::UserMessage(json!({
-                "role": "user",
-                "content": content,
-                "timestamp": now_millis(),
-            }))) {
-                return;
-            }
         }
         let turn_prompt = match injected {
             Some(custom) => TurnPrompt::Injected(custom),
