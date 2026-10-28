@@ -371,8 +371,8 @@ async fn failed_hooks_report_their_event_and_command_once() {
         notices,
         [
             "PreToolUse hook failed, operation unchanged: command exited with status 1: lint broke\ncommand: cat >/dev/null; echo lint broke >&2; exit 1",
-            "PreToolUse hook message: lint is slow",
             "PreToolUse hook failed, operation unchanged: timed out after 1s\ncommand: cat >/dev/null; sleep 5",
+            "PreToolUse hook message: lint is slow",
         ]
     );
 }
