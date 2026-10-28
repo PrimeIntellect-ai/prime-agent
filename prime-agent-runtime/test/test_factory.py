@@ -6941,6 +6941,39 @@ class FactoryPythonStateTest(_ExecutorTestCase):
         self.assertIsNotNone(process.proc.returncode)
         self.assertEqual(instance.status, "cancelled")
 
+    @async_test
+    async def test_a_python_deadline_is_not_delayed_by_a_running_child(self) -> None:
+        self.executor = FactoryExecutor(harness=self.harness)
+        factory_module._DEFAULT_EXECUTOR = self.executor
+        self.store_machine({
+            "run": {"failure_policy": "continue"},
+            "states": [
+                state("work", entry=True),
+                {"id": "slow", "entry": True, "python": self.py("slow"), "budget_ms": 300},
+            ],
+        })
+        collecting = asyncio.Event()
+        never_settles = asyncio.Event()
+
+        async def collect_running_child(targets, *, timeout_ms):
+            collecting.set()
+            try:
+                await asyncio.wait_for(never_settles.wait(), timeout_ms / 1000)
+            except asyncio.TimeoutError:
+                return []
+            raise AssertionError("the child never settles")
+
+        with patch.object(rlm_module, "collect", collect_running_child):
+            result = await self.start()
+            process = self.executor._runs[result["run_id"]].states["slow"].entries[0].instances[0].process
+            try:
+                await asyncio.wait_for(collecting.wait(), 1)
+                # Bound failure well below the ordinary 2-second child poll.
+                await asyncio.wait_for(process.proc.wait(), 1)
+                self.assertIsNotNone(process.proc.returncode)
+            finally:
+                await rlm_module.rlm.factory.stop(result["run_id"])
+
 
 # ---------------------------------------------------------------------------
 # Graph and watch (the fused machine view + the bounded wait)

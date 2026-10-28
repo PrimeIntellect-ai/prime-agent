@@ -3868,8 +3868,13 @@ class FactoryExecutor:
             children = [item for item in in_flight if item[2].child_id is not None]
             python_calls = [item for item in in_flight if item[2].process is not None]
             if children:
+                # A child poll must not postpone a concurrent Python call's deadline.
+                timeout_ms = POLL_TIMEOUT_MS
+                if python_calls:
+                    nearest = min(instance.deadline for _, _, instance in python_calls)
+                    timeout_ms = min(timeout_ms, max(0, math.ceil((nearest - self._now_fn()) * 1000)))
                 results = await collect(
-                    [instance.child_id for _, _, instance in children], timeout_ms=POLL_TIMEOUT_MS
+                    [instance.child_id for _, _, instance in children], timeout_ms=timeout_ms
                 )
                 settled = {entry.rlm_child_id: entry for entry in results if entry.settled}
                 for state, entry, instance in children:
