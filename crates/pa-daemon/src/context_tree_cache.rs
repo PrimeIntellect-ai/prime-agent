@@ -374,13 +374,16 @@ fn walk_children(
             excluded_snapshots.insert(snapshot_key(child));
             continue;
         }
-        let mut node = loaded.map(|(_, node)| node).unwrap_or_else(|| {
-            json!({
-                "ownUsage": empty_usage(),
-                "totalUsage": empty_usage(),
-                "children": [],
-            })
-        });
+        let mut node = loaded.map_or_else(
+            || {
+                json!({
+                    "ownUsage": empty_usage(),
+                    "totalUsage": empty_usage(),
+                    "children": [],
+                })
+            },
+            |(_, node)| node,
+        );
         node["id"] = child.get("id").cloned().unwrap_or(Value::Null);
         node["label"] = child.get("label").cloned().unwrap_or(Value::Null);
         node["status"] = child.get("status").cloned().unwrap_or(Value::Null);
