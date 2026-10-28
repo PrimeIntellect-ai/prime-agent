@@ -25,6 +25,8 @@ impl CompactionCancellation {
         CompactionOperation(controller)
     }
 
+    // Only the unix SIGTERM/SIGHUP handlers close it; Windows has no such exit.
+    #[cfg_attr(not(unix), allow(dead_code))]
     pub(crate) fn close(&self) {
         self.closed.store(true, Ordering::Release);
         self.abort();
