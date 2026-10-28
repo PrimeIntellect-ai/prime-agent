@@ -192,12 +192,13 @@ pub fn agent_event_json(event: &AgentEvent) -> Option<serde_json::Value> {
             tool_call_id,
             tool_name,
             result,
-            ..
+            is_error,
         } => serde_json::json!({
             "type": "tool_execution_end",
             "toolCallId": tool_call_id,
             "toolName": tool_name,
             "result": json_round_trip(result).unwrap_or(serde_json::Value::Null),
+            "isError": is_error,
         }),
     };
     Some(value)
@@ -254,6 +255,32 @@ mod tests {
             serde_json::json!({"type": "text_delta", "contentIndex": 0, "delta": "first reply"})
         );
     }
+    /// `tool_execution_end` carries the tool's error flag, as the TS agent loop emits it
+    /// (`{ type, toolCallId, toolName, result, isError }`).
+    #[test]
+    fn tool_execution_end_json_carries_the_error_flag() {
+        use pa_agent::types::AgentToolResult;
+        for (result, is_error) in [
+            (AgentToolResult::text("ok"), false),
+            (AgentToolResult::error("synthetic failure"), true),
+        ] {
+            let expected = serde_json::json!({
+                "type": "tool_execution_end",
+                "toolCallId": "call-1",
+                "toolName": "bash",
+                "result": serde_json::to_value(&result).expect("result json"),
+                "isError": is_error,
+            });
+            let event = AgentEvent::ToolExecutionEnd {
+                tool_call_id: "call-1".to_string(),
+                tool_name: "bash".to_string(),
+                result,
+                is_error,
+            };
+            assert_eq!(agent_event_json(&event), Some(expected));
+        }
+    }
+
     #[test]
     fn assistant_message_event_wire_shapes_match_ts() {
         let message = partial(Vec::new());

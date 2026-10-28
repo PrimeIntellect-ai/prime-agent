@@ -268,22 +268,23 @@ fn nested_anchor_expands_its_ancestors() {
 }
 
 #[test]
-fn carried_selection_wins_over_the_entry_anchor() {
+fn a_scoped_reopen_expands_a_nested_anchor_outside_the_carried_branch() {
     let mut mode = AgentsViewMode::new(AgentsViewOptions {
         socket_path: PathBuf::from("/tmp/agents-view-test.sock"),
         cwd: PathBuf::from("/tmp"),
         session_dir: None,
         theme: "prime".to_string(),
         version: "0.0.0".to_string(),
-        anchor_session_id: Some("s2".to_string()),
-        scope: None,
-        query: None,
-        expanded_ancestors: Vec::new(),
-        selected_row_identity: None,
-        selected_key: Some(crate::agents_view_forest::SelectionKey {
-            session_id: Some("s1".to_string()),
-            active_session_id: Some("s1-live".to_string()),
+        anchor_session_id: Some("g".to_string()),
+        scope: Some(AgentsViewScope {
+            session_id: Some("p".to_string()),
+            active_session_id: Some("p-live".to_string()),
+            session_name: Some("p name".to_string()),
         }),
+        query: None,
+        expanded_ancestors: vec!["p".to_string(), "d".to_string()],
+        selected_row_identity: None,
+        selected_key: None,
         status_message: None,
         keybindings: crate::keybindings::KeybindingsManager::new(),
         show_hardware_cursor: false,
@@ -291,10 +292,92 @@ fn carried_selection_wins_over_the_entry_anchor() {
         create_config: serde_json::json!({}),
     });
     mode.roster = vec![
+        roster_entry("p", "idle", &parent_summary("p")),
+        roster_entry("c", "running", &child_summary("c", "p", "worker one")),
+        roster_entry("g", "running", &child_summary("g", "c", "grandchild")),
+        roster_entry("d", "running", &child_summary("d", "p", "worker two")),
+        roster_entry("e", "running", &child_summary("e", "d", "other grandchild")),
+    ];
+    mode.rebuild_rows();
+    assert_eq!(mode.rows[mode.selected].summary["sessionId"], "g");
+    assert!(!mode.anchor_selection_pending);
+}
+
+/// A reopened view: anchored on the session just left, carrying the row the previous run opened.
+fn returning_mode(
+    anchor: &str,
+    selected_row_identity: String,
+    selected_key: crate::agents_view_forest::SelectionKey,
+) -> AgentsViewMode {
+    AgentsViewMode::new(AgentsViewOptions {
+        socket_path: PathBuf::from("/tmp/agents-view-test.sock"),
+        cwd: PathBuf::from("/tmp"),
+        session_dir: None,
+        theme: "prime".to_string(),
+        version: "0.0.0".to_string(),
+        anchor_session_id: Some(anchor.to_string()),
+        scope: None,
+        query: None,
+        expanded_ancestors: Vec::new(),
+        selected_row_identity: Some(selected_row_identity),
+        selected_key: Some(selected_key),
+        status_message: None,
+        keybindings: crate::keybindings::KeybindingsManager::new(),
+        show_hardware_cursor: false,
+        incident_notice_state: None,
+        create_config: serde_json::json!({}),
+    })
+}
+
+#[test]
+fn the_left_session_wins_over_a_stale_carried_selection() {
+    let mut mode = returning_mode(
+        "s2",
+        "file:/x/s1.jsonl".to_string(),
+        crate::agents_view_forest::SelectionKey {
+            session_id: Some("s1".to_string()),
+            active_session_id: Some("s1-live".to_string()),
+        },
+    );
+    mode.roster = vec![
         roster_entry("s1", "idle", &parent_summary("s1")),
         roster_entry("s2", "idle", &parent_summary("s2")),
     ];
     mode.rebuild_rows();
-    assert_eq!(mode.rows[mode.selected].summary["sessionId"], "s1");
+    assert_eq!(mode.rows[mode.selected].summary["sessionId"], "s2");
     assert!(!mode.anchor_selection_pending);
+}
+
+#[test]
+fn a_round_trip_returns_to_the_origin_when_its_row_lands_late() {
+    let mut first = mode_with_anchor(
+        Some("s2"),
+        vec![
+            roster_entry("s1", "idle", &parent_summary("s1")),
+            roster_entry("s2", "idle", &parent_summary("s2")),
+        ],
+    );
+    first.handle_key("enter");
+    let opened = first.opened.expect("the origin opens");
+    assert_eq!(
+        opened.selection,
+        SessionSelection::Attach("s2-live".to_string())
+    );
+    let mut back = returning_mode("s2", opened.selected_row_identity, opened.selected_key);
+    back.roster = vec![roster_entry("s1", "idle", &parent_summary("s1"))];
+    back.rebuild_rows();
+    back.apply_roster_update(
+        vec![
+            roster_entry("s3", "running", &parent_summary("s3")),
+            roster_entry("s2", "idle", &parent_summary("s2")),
+        ],
+        Vec::new(),
+        false,
+    );
+    assert_eq!(back.rows[back.selected].summary["sessionId"], "s2");
+    back.handle_key("enter");
+    assert_eq!(
+        back.opened.expect("the origin reopens").selection,
+        SessionSelection::Attach("s2-live".to_string())
+    );
 }

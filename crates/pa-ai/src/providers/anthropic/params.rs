@@ -146,3 +146,78 @@ pub(crate) fn build_params(
 
     Value::Object(params)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::build_params;
+    use crate::providers::anthropic::{AnthropicEffort, AnthropicOptions};
+    use crate::types::{
+        zero_model_cost, Context, Message, Model, ModelInput, UserMessage, UserMessageContent,
+    };
+    use serde_json::{json, Map};
+
+    fn thinking_params(model_id: &str) -> (serde_json::Value, serde_json::Value) {
+        let model = Model {
+            id: model_id.into(),
+            name: model_id.into(),
+            api: "anthropic-messages".into(),
+            provider: "anthropic".into(),
+            base_url: "https://api.anthropic.com".into(),
+            reasoning: true,
+            thinking_level_map: None,
+            input: vec![ModelInput::Text],
+            cost: zero_model_cost(),
+            context_window: 200_000,
+            max_tokens: 64_000,
+            max_tokens_explicit: false,
+            featured: None,
+            headers: None,
+            compat: None,
+        };
+        let context = Context {
+            system_prompt: None,
+            messages: vec![Message::User(UserMessage {
+                content: UserMessageContent::Text("Hi".into()),
+                timestamp: 1,
+                rest: Map::default(),
+            })],
+            tools: None,
+        };
+        let options = AnthropicOptions {
+            thinking_enabled: Some(true),
+            thinking_budget_tokens: Some(2048),
+            effort: Some(AnthropicEffort::Medium),
+            ..Default::default()
+        };
+        let params = build_params(&model, &context, false, Some(&options), None);
+        (params["thinking"].clone(), params["output_config"].clone())
+    }
+
+    /// Discussion #3710: Haiku 5.x rejects `thinking.type: "enabled"` with a 400 and needs
+    /// adaptive thinking with an effort, in both the dashed and dotted id spellings.
+    #[test]
+    fn haiku_5_requests_adaptive_thinking() {
+        for model_id in ["claude-haiku-5-5", "claude-haiku-5.5"] {
+            assert_eq!(
+                thinking_params(model_id),
+                (
+                    json!({ "type": "adaptive", "display": "summarized" }),
+                    json!({ "effort": "medium" }),
+                ),
+                "{model_id}"
+            );
+        }
+    }
+
+    /// Haiku 4.5 still takes budget-based thinking.
+    #[test]
+    fn haiku_4_5_keeps_budget_thinking() {
+        assert_eq!(
+            thinking_params("claude-haiku-4-5"),
+            (
+                json!({ "type": "enabled", "budget_tokens": 2048, "display": "summarized" }),
+                serde_json::Value::Null,
+            )
+        );
+    }
+}

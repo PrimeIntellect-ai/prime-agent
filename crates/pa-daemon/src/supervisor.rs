@@ -57,6 +57,7 @@ pub(crate) use routing::{
 };
 
 // Called only by the supervision sibling module and in-file tests; lib-target unused.
+pub(crate) use worker_lifecycle::RosterFamilySeedOwner;
 #[allow(unused_imports)]
 use worker_lifecycle::{probe_worker_socket, worker_connect_deadline};
 
@@ -343,6 +344,16 @@ impl Supervisor {
                     .await;
                 let count = catalog.resolve(credentials.as_ref()).len();
                 supervisor.note_catalog_refresh(count);
+            });
+        }
+        // The first open's family walk reads the spawn ledger: replay it
+        // while that open's worker launches, not on its reply path.
+        {
+            let supervisor = Arc::clone(&self);
+            tokio::spawn(async move {
+                if let Ok(ledger) = supervisor.rlm_spawn_ledger_for(None).await {
+                    drop(tokio::task::spawn_blocking(move || ledger.warm()).await);
+                }
             });
         }
         socket::prepare_socket_path(&self.options.socket_path).await?;

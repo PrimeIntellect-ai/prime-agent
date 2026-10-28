@@ -138,6 +138,8 @@ pub struct StreamRequestOptions {
     pub max_tokens: Option<u64>,
     pub reasoning: ThinkingLevel,
     pub session_id: Option<String>,
+    /// The requested provider transport; `None` leaves it to the provider.
+    pub transport: Option<crate::types::Transport>,
     /// The requested provider service tier; `None` means no tier request.
     pub service_tier: Option<crate::types::ServiceTier>,
     pub api_key: Option<String>,
@@ -156,6 +158,7 @@ impl std::fmt::Debug for StreamRequestOptions {
             .field("max_tokens", &self.max_tokens)
             .field("reasoning", &self.reasoning)
             .field("session_id", &self.session_id)
+            .field("transport", &self.transport)
             .field("service_tier", &self.service_tier)
             .field("api_key", &self.api_key.as_ref().map(|_| "<set>"))
             .field("signal", &self.signal)
@@ -173,6 +176,7 @@ impl Default for StreamRequestOptions {
             max_tokens: None,
             reasoning: ThinkingLevel::Off,
             session_id: None,
+            transport: None,
             service_tier: None,
             api_key: None,
             signal: crate::abort::AbortSignal::never(),

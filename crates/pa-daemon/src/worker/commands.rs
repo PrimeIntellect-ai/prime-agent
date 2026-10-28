@@ -227,7 +227,10 @@ impl Worker {
 
     /// `navigate_tree` with the reload's announcement: announced before the
     /// response reaches the client, so surfaces never show the pre-navigation goal.
+    /// The whole navigation runs under the queued-work pause (TS
+    /// `_navigateTree`'s `acquireQueuedWorkPause` + `waitForIdle`).
     async fn handle_navigate_tree(&self, payload: &Value) -> DaemonResponse {
+        let _queued_work = self.hold_queued_work_pause("navigate");
         let response = self.tree_navigation.navigate_tree(payload).await;
         if response.success {
             if let Some(goal) = self.engine.goal_update_after_rebuild() {
@@ -812,8 +815,8 @@ impl Worker {
         // commands run concurrently, so a second lock scope here could
         // interleave another command's writes between the name and its
         // notice, ordering the notice against a contradicted name history.
-        // The broadcast (the client frames) runs after the lock drops, in
-        // the `session_info_changed` order TS emits.
+        // The frames share that lock so a compaction cannot include the
+        // notice before its broadcast; `session_info_changed` still comes first.
         let renamed_notice = previous
             .as_deref()
             .filter(|previous| *previous != name)
@@ -836,19 +839,19 @@ impl Worker {
         if let Some(notice) = renamed_notice.as_ref() {
             persist_custom_row(&mut core, notice);
         }
+        // `session_info_changed` makes every attached client re-read the name.
+        super::emit_worker_event_locked(
+            &mut core,
+            &self.events,
+            serde_json::json!({ "type": "session_info_changed", "name": name }),
+        );
+        if let Some(notice) = renamed_notice.as_ref() {
+            super::broadcast_custom_row_locked(&mut core, &self.events, notice);
+        }
         drop(core);
-        // `session_info_changed` makes every attached client re-read
-        // the name.
-        self.emit_worker_event(serde_json::json!({
-            "type": "session_info_changed",
-            "name": name,
-        }));
         // The sender identity follows the live name.
         if let Ok(summary_value) = serde_json::to_value(&summary) {
             self.engine.set_session_summary(summary_value);
-        }
-        if let Some(notice) = renamed_notice.as_ref() {
-            self.broadcast_custom_row(notice);
         }
         response_success(
             None,

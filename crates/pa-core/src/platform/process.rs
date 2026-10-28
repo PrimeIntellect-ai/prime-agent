@@ -413,9 +413,10 @@ pub async fn wait_for_exit(pid: u32) -> std::io::Result<()> {
         Err(error) if error.raw_os_error() == Some(libc::ESRCH) => return Ok(()),
         Err(error) => return Err(error),
     };
-    // SAFETY: `open_pidfd` returned a fresh descriptor this call owns
-    // (and closes on drop, on every path).
-    let fd = AsyncFd::with_interest(unsafe { OwnedFd::from_raw_fd(fd) }, Interest::READABLE)?;
+    // SAFETY: `open_pidfd` returned a fresh descriptor this call owns; the
+    // `AsyncFd` owns the `OwnedFd`, so it stays open and unchanged until drop.
+    let fd =
+        unsafe { AsyncFd::register_with_interest(OwnedFd::from_raw_fd(fd), Interest::READABLE) }?;
     // Every wake is confirmed by a zero-timeout poll (AsyncFd readiness
     // can be spurious).
     loop {
@@ -495,7 +496,8 @@ pub async fn wait_for_exit(pid: u32) -> std::io::Result<()> {
             };
         }
     }
-    let kq = AsyncFd::with_interest(kq, Interest::READABLE)?;
+    // SAFETY: the `AsyncFd` owns `kq`, so it stays open and unchanged until drop.
+    let kq = unsafe { AsyncFd::register_with_interest(kq, Interest::READABLE) }?;
     // Only the exit knote is registered, so a drained event is the exit.
     loop {
         let mut ready = kq.readable().await?;
@@ -574,6 +576,16 @@ pub fn termination_signal(status: &std::process::ExitStatus) -> Option<i32> {
 pub fn termination_signal(_status: &std::process::ExitStatus) -> Option<i32> {
     // Windows terminations surface as exit codes, not signals.
     None
+}
+
+/// A child's exit code as a shell's `$?` reports it: the status code, or
+/// 128 + the signal number when a signal killed it (TS `normalizedExitCode`).
+/// Without the mapping a signal death carries no code and reads as success.
+#[must_use]
+pub fn normalized_exit_code(status: &std::process::ExitStatus) -> Option<i32> {
+    status
+        .code()
+        .or_else(|| termination_signal(status).map(|signal| 128 + signal))
 }
 
 /// The kernel32 termination surface for [`kill_pid`], hand-declared (repo

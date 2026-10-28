@@ -45,14 +45,34 @@ pub struct Report {
 #[must_use]
 pub fn report(results: &[BenchResult], baseline: &Baseline) -> Report {
     let mut rows = Vec::new();
+    let mut notes = Vec::new();
     let mut regressions = Vec::new();
     for result in results {
         let key = format!("{}/{}", key_of(result.scenario), result.profile);
         let median = result.median_ms;
+        let first_paint = result
+            .first_paint
+            .as_ref()
+            .map_or("—".to_string(), |series| {
+                format!("{:.1}", series.median_ms)
+            });
+        let worst_gap = result.worst_gap.as_ref().map_or("—".to_string(), |series| {
+            format!("{:.1} / {:.1}", series.p95_ms, series.max_ms)
+        });
+        if let Some(wakeups) = &result.wakeups {
+            let mut sorted = wakeups.clone();
+            sorted.sort_unstable();
+            notes.push(format!(
+                "- {key}: {median:.0} ms CPU, {} context switches (median of {} run(s); {})",
+                sorted[sorted.len() / 2],
+                sorted.len(),
+                result.needle
+            ));
+        }
+        let p95 = result.p95_ms;
         let Some(entry) = baseline.entries.get(&key) else {
             rows.push(format!(
-                "| {} | {median:.1} | {:.1} | — | — | (no baseline) |",
-                key, result.p95_ms
+                "| {key} | {median:.1} | {p95:.1} | {first_paint} | {worst_gap} | — | — | (no baseline) |"
             ));
             continue;
         };
@@ -66,17 +86,19 @@ pub fn report(results: &[BenchResult], baseline: &Baseline) -> Report {
             format!("{:+.0}%", delta * 100.0)
         };
         rows.push(format!(
-            "| {} | {median:.1} | {:.1} | {:.1} | {:+.0}% | {verdict} |",
-            key,
-            result.p95_ms,
+            "| {key} | {median:.1} | {p95:.1} | {first_paint} | {worst_gap} | {:.1} | {:+.0}% | {verdict} |",
             entry.median_ms,
             delta * 100.0
         ));
     }
-    let markdown = format!(
-        "| scenario/profile | median ms | p95 ms | baseline ms | delta | verdict |\n|---|---|---|---|---|---|\n{}",
+    let mut markdown = format!(
+        "| scenario/profile | median ms | p95 ms | first-paint median ms | worst gap ms (p95 / max) | baseline ms | delta | verdict |\n|---|---|---|---|---|---|---|---|\n{}",
         rows.join("\n")
     );
+    if !notes.is_empty() {
+        markdown.push_str("\n\n");
+        markdown.push_str(&notes.join("\n"));
+    }
     Report {
         markdown,
         regressions,

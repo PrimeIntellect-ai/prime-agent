@@ -12,7 +12,7 @@ use crate::types::{
 };
 use crate::utils_inner::sanitize_unicode::sanitize_surrogates;
 
-fn get_model_match_candidates(model_id: &str, model_name: Option<&str>) -> Vec<String> {
+pub(crate) fn get_model_match_candidates(model_id: &str, model_name: Option<&str>) -> Vec<String> {
     let mut values = vec![model_id.to_string()];
     if let Some(name) = model_name {
         values.push(name.to_string());
@@ -30,7 +30,7 @@ fn get_model_match_candidates(model_id: &str, model_name: Option<&str>) -> Vec<S
         .collect()
 }
 
-/// Adaptive thinking support (Opus 4.6+, Sonnet 4.6).
+/// Adaptive thinking support (Opus 4.6+, Sonnet 4.6+, Haiku 5+).
 pub fn supports_adaptive_thinking(model_id: &str, model_name: Option<&str>) -> bool {
     get_model_match_candidates(model_id, model_name)
         .iter()
@@ -41,6 +41,7 @@ pub fn supports_adaptive_thinking(model_id: &str, model_name: Option<&str>) -> b
                 || s.contains("opus-5")
                 || s.contains("sonnet-4-6")
                 || s.contains("sonnet-5")
+                || s.contains("haiku-5")
                 || s.contains("fable-5")
                 || s.contains("mythos-5")
                 || s.contains("mythos-preview")
@@ -80,8 +81,27 @@ pub fn supports_prompt_caching(model: &Model) -> bool {
         return std::env::var("AWS_BEDROCK_FORCE_CACHE").as_deref() == Ok("1");
     }
     candidates.iter().any(|s| {
-        s.contains("-4-") || s.contains("claude-3-7-sonnet") || s.contains("claude-3-5-haiku")
+        s.contains("-4-")
+            || s.contains("claude-3-7-sonnet")
+            || s.contains("claude-3-5-haiku")
+            || claude_generation(s).is_some_and(|generation| generation >= 5)
     })
+}
+
+/// The generation number in a `claude-<family>-<generation>` id (`claude-opus-5-5` is 5), so Claude 5
+/// and later models are recognised without listing each release.
+fn claude_generation(candidate: &str) -> Option<u32> {
+    ["fable", "mythos", "opus", "sonnet", "haiku"]
+        .iter()
+        .find_map(|family| {
+            let marker = format!("claude-{family}-");
+            let start = candidate.find(&marker)? + marker.len();
+            let digits: String = candidate[start..]
+                .chars()
+                .take_while(char::is_ascii_digit)
+                .collect();
+            digits.parse().ok()
+        })
 }
 
 pub fn supports_thinking_signature(model: &Model) -> bool {
@@ -404,6 +424,24 @@ pub fn map_stop_reason(reason: Option<&str>) -> crate::types::StopReason {
 }
 
 #[cfg(test)]
+mod supports_adaptive_thinking_tests {
+    use super::supports_adaptive_thinking;
+
+    /// Discussion #3710: Haiku 5.x rejects budget-based thinking, so it must take the adaptive path.
+    #[test]
+    fn bedrock_haiku_5_uses_adaptive_thinking() {
+        assert!(supports_adaptive_thinking(
+            "us.anthropic.claude-haiku-5-5-v1",
+            Some("Claude Haiku 5.5")
+        ));
+        assert!(!supports_adaptive_thinking(
+            "us.anthropic.claude-haiku-4-5-v1",
+            Some("Claude Haiku 4.5")
+        ));
+    }
+}
+
+#[cfg(test)]
 mod supports_always_on_adaptive_thinking_tests {
     use super::supports_always_on_adaptive_thinking;
 
@@ -425,5 +463,58 @@ mod supports_always_on_adaptive_thinking_tests {
             "us.anthropic.claude-opus-5-v1",
             Some("Claude Opus 5")
         ));
+    }
+}
+
+#[cfg(test)]
+mod prompt_caching_gate_tests {
+    use super::*;
+
+    fn model_with_id(id: &str) -> Model {
+        Model {
+            id: id.into(),
+            name: id.into(),
+            api: crate::providers::bedrock::API_BEDROCK_CONVERSE_STREAM.to_string(),
+            provider: "amazon-bedrock".into(),
+            base_url: "https://bedrock-runtime.us-west-2.amazonaws.com".into(),
+            reasoning: true,
+            thinking_level_map: None,
+            input: vec![crate::types::ModelInput::Text],
+            cost: crate::types::zero_model_cost(),
+            context_window: 200_000,
+            max_tokens: 8192,
+            max_tokens_explicit: false,
+            featured: None,
+            headers: None,
+            compat: None,
+        }
+    }
+
+    #[test]
+    fn claude_5_and_later_get_cache_points_like_the_4_family() {
+        for id in [
+            "global.anthropic.claude-sonnet-5-5",
+            "global.anthropic.claude-opus-5-5",
+            "global.anthropic.claude-opus-5",
+            "us.anthropic.claude-sonnet-5",
+            "global.anthropic.claude-fable-5-1",
+            "us.anthropic.claude-opus-5-5-v1:0",
+            "us.anthropic.claude-opus-4-6-v1",
+            "global.anthropic.claude-haiku-4-5-20251001-v1:0",
+            "global.anthropic.claude-opus-10-0",
+        ] {
+            assert!(supports_prompt_caching(&model_with_id(id)), "{id}");
+        }
+    }
+
+    #[test]
+    fn older_claude_ids_still_do_not() {
+        for id in [
+            "anthropic.claude-3-haiku-20240307-v1:0",
+            "anthropic.claude-v2:1",
+            "anthropic.claude-3-5-sonnet-20240620-v1:0",
+        ] {
+            assert!(!supports_prompt_caching(&model_with_id(id)), "{id}");
+        }
     }
 }

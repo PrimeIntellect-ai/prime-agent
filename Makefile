@@ -77,10 +77,11 @@ RUNTIME_DIR ?=
 RUNTIME_FLAG = $(if $(RUNTIME_DIR),--runtime-dir $(RUNTIME_DIR),)
 
 # Bundled catalog assets (catalog spec §3.2 layer 2): generated at build
-# time, never committed. CI generates the offline fixture snapshot (it passes
-# the full packer gates: >= 42 transport tuples, >= 68 services) so builds
-# never depend on the catalog repo being reachable; CATALOG_ASSETS_MODE=network
-# switches the dry-runs to the live fetch for packaging parity.
+# time, never committed. Release and continuous CI ship the live catalog
+# (--network) at one prime-agent-catalog commit per run (`bundle_catalog.py
+# resolve-ref`). The local dry-runs default to the offline fixture snapshot
+# (it passes the full packer gates); CATALOG_ASSETS_MODE=network switches
+# them to the live fetch of the catalog's main.
 CATALOG_ASSETS_DIR = target/catalog-assets
 CATALOG_ASSETS_MODE ?= fixture
 CATALOG_ASSETS_FLAG = --catalog-assets $(CATALOG_ASSETS_DIR)
@@ -104,8 +105,7 @@ RELEASE_PACKAGE_BUILD = :
 RELEASE_PACKAGE_FLAGS =
 endif
 
-# Live-catalog asset generation (network fetch; packaging parity with the
-# TS release flow — CI itself uses the fixture snapshot for reliability).
+# Live-catalog asset generation (network fetch; what release CI ships).
 catalog-assets:
 	python3 scripts/release/bundle_catalog.py generate --network --out $(CATALOG_ASSETS_DIR)
 

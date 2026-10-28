@@ -44,17 +44,24 @@ fn find_parent_index(
     by_key: &HashMap<String, usize>,
     index: usize,
 ) -> Option<usize> {
-    let mut keys = parent_reference_keys(&records[index]);
-    if let Some(saved) = &records[index].saved {
+    parent_keys(&records[index])
+        .iter()
+        .find_map(|key| by_key.get(key).copied())
+        .filter(|parent| *parent != index)
+}
+
+/// Every parent-reference key of one record: daemon summary keys first, then the saved catalog's
+/// parent path.
+fn parent_keys(record: &UnifiedRecord) -> Vec<String> {
+    let mut keys = parent_reference_keys(record);
+    if let Some(saved) = &record.saved {
         if let Some(parent_path) = saved.get("parentSessionPath").and_then(Value::as_str) {
             if !parent_path.is_empty() {
                 keys.push(crate::agents_view_state::file_identity(parent_path));
             }
         }
     }
-    keys.iter()
-        .find_map(|key| by_key.get(key).copied())
-        .filter(|parent| *parent != index)
+    keys
 }
 
 /// The parent-reference keys of one record's daemon summary.
@@ -305,6 +312,32 @@ pub fn scope_ancestors(records: &[UnifiedRecord], scope: &AgentsViewScope) -> Ve
         current = parent;
     }
     ancestors
+}
+
+/// Whether `anchor` sits in the subtree of the session `root`. `None` while the record set cannot
+/// tell: the anchor is unknown, or its parent chain ends on a parent that has not loaded yet.
+pub(crate) fn subtree_contains(
+    records: &[UnifiedRecord],
+    root: &str,
+    anchor: &AgentsViewScope,
+) -> Option<bool> {
+    let index = build_record_index(records);
+    let mut current = scope_root_index(records, anchor)?;
+    let mut visited: HashSet<usize> = HashSet::new();
+    while visited.insert(current) {
+        if summary_for_record(&records[current])
+            .get("sessionId")
+            .and_then(Value::as_str)
+            == Some(root)
+        {
+            return Some(true);
+        }
+        if parent_keys(&records[current]).is_empty() {
+            return Some(false);
+        }
+        current = find_parent_index(records, &index.by_key, current)?;
+    }
+    None
 }
 
 /// Whether the session has direct children on the record set.

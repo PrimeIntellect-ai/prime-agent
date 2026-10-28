@@ -139,8 +139,10 @@ pub type SummaryDeltaSink = std::sync::Arc<dyn Fn(&str) + Send + Sync>;
 /// Returns an error when the summarizer wire call fails, when its reply
 /// stops with an error, a tool call, or an abort, or when its joined text
 /// is empty (all labeled with `failure`).
+#[allow(clippy::too_many_arguments)] // Each summary carries its owning conversation and request metadata.
 pub async fn complete_summary_call(
     model: &pa_types::ai::Model,
+    session_id: &str,
     api_key: Option<String>,
     headers: Option<std::collections::BTreeMap<String, String>>,
     max_tokens: u64,
@@ -169,6 +171,10 @@ pub async fn complete_summary_call(
         pa_ai::types::SimpleStreamOptions::from_base(pa_ai::types::StreamOptions {
             signal: Some(cancel),
             max_tokens: Some(max_tokens),
+            session_id: Some(session_id.to_string()),
+            // One-off prompts ride SSE: they keep the conversation id (cache key, opencode routing)
+            // but never take or replace the session's Codex WebSocket and its continuation.
+            transport: Some(pa_ai::types::Transport::Sse),
             api_key,
             headers: headers.map(|headers| headers.into_iter().collect()),
             ..Default::default()
