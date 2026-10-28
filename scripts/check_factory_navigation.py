@@ -38,8 +38,13 @@ STATE_SELECTED = '\u25b8 \u25cf work'
 
 
 class FactorySupervisor(Supervisor):
+    def extra_command(self, command, response):
+        return command.get('type') == 'cancel_rlm_child'
+
     def send(self, sock, data):
         data = copy.deepcopy(data)
+        if data.get('type') == 'response' and data.get('command') == 'cancel_rlm_child':
+            return  # A real socket sink that never replies to the confirmed stop.
         if data.get('type') == 'daemon_hello':
             data['serverCapabilities'] = ['session_input_admission', 'factory_activity']
         if data.get('type') == 'response' and data.get('command') == 'factory_activity':
@@ -139,6 +144,21 @@ def observe(binary, root, observed):
         terminal.send('\x1b[D')
         snap('returned_page_closes', lambda text: 'FACTORY_CLOSED_INPUT_BARRIER' in text
              and RUN not in text)
+        # A confirmed child stop must leave navigation and paint responsive
+        # even while the daemon never replies to that request.
+        terminal.send(factory_click(terminal.screen))
+        snap('stop_page', lambda text: RUN in text and '\u2190 back' in text)
+        terminal.send('\x1b[B\x18')
+        snap('child_stop_armed', lambda text: STATE_SELECTED in text and 'again to confirm' in text)
+        terminal.send('\x18')
+        terminal.wait('child stop reached hanging sink', lambda: any(
+            c.get('type') == 'cancel_rlm_child' for c in server.commands), server)
+        started = time.monotonic()
+        terminal.send('\x1b[DSTOP_PENDING_INPUT_BARRIER')
+        snap('child_stop_does_not_block_navigation', lambda text:
+             'STOP_PENDING_INPUT_BARRIER' in text and RUN not in text)
+        observed['stop_navigation_seconds'] = time.monotonic() - started
+        assert observed['stop_navigation_seconds'] < 3, 'child stop blocked the UI until its timeout'
         assert not server.prompts, 'navigation submitted a prompt'
         assert all(c.get('action') in ('graph', 'watch') for c in server.commands
                    if c.get('type') == 'factory_activity'), server.commands
