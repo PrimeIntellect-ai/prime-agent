@@ -324,4 +324,29 @@ mod tests {
         assert_eq!(user_origin, ChildUsageOrigin::DirectUser);
         assert_eq!((folded.input, folded.output), (12, 3));
     }
+
+    #[test]
+    fn late_attributions_preserve_target_exclusions() {
+        for stop_reason in ["error", "aborted"] {
+            let entries = vec![
+                spawn_kickoff_row("c0", "ship the lane"),
+                assistant_row("a1", &captured_usage(130, 13, 110, 0.03), stop_reason),
+                row(
+                    "child_usage_attributed",
+                    "g1",
+                    json!({"targetId": "a1", "origin": "spawn_task",
+                           "childUsage": captured_usage(30, 3, 33, 0.01),
+                           "aggregateUsage": captured_usage(130, 13, 110, 0.03)}),
+                ),
+            ];
+            // The existing exclusion must not depend on whether the target was read earlier.
+            for from in [0, 2] {
+                assert_eq!(
+                    child_usage_batches(&entries, from),
+                    (Vec::new(), entries.len()),
+                    "{stop_reason} target, cursor {from}"
+                );
+            }
+        }
+    }
 }
