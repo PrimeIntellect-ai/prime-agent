@@ -114,7 +114,8 @@ def capture(binary, kind, case, width, root):
         command = [str(binary), '--daemon-socket', str(server.path)]
         terminal = FrameTerminal(command, root, env, width)
         scope.register(terminal.process, command)
-        needle = '-' + str(case['startLine']) + ' '
+        # Both real renderers place the line number before the change sign.
+        needle = str(case['startLine']) + ' - '
         for index, (phase, expanded) in enumerate([
             ('overview', False), ('details', True), ('all', True), ('overview_again', False)]):
             barrier = f'FRAME{index}'
