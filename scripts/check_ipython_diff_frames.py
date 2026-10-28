@@ -79,6 +79,17 @@ def region(screen, path):
     return result
 
 
+class FrameSupervisor(Supervisor):
+    def extra_command(self, command, response):
+        if command.get('type') == 'get_tool_definition' and command.get('name') == 'ipython':
+            # Pinned TS daemon-mode returns {toolDefinition: undefined} for
+            # a replay-only tool absent from the active registry. JSON omits
+            # that field; the actual client uses its built-in replay renderer.
+            response['data'] = {}
+            return True
+        return False
+
+
 class FrameTerminal(Terminal):
     def __init__(self, command, root, env, width):
         self.master, slave = pty.openpty()
@@ -103,7 +114,7 @@ def capture(binary, kind, case, width, root):
     if kind == 'ts':
         assert hello.get('appVersion') == '0.9.8', hello
         assert hello.get('runtime', {}).get('buildId') == TS_COMMIT, hello
-    server = Supervisor(root / 'ui.sock', hello, 'edit-diff-frames', root)
+    server = FrameSupervisor(root / 'ui.sock', hello, 'edit-diff-frames', root)
     server.messages = messages(kind, case)
     scope = OwnedProcesses(binary, root, server.path)
     terminal = None

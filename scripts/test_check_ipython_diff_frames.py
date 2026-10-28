@@ -1,6 +1,6 @@
 import unittest
 
-from check_ipython_diff_frames import END, region
+from check_ipython_diff_frames import END, FrameSupervisor, region
 from lifecycle_lib import DockScreen
 
 
@@ -26,6 +26,15 @@ class EditFrameCaptureTests(unittest.TestCase):
                 colored.feed(('    ╰─ parity.py +1 -1\r\n-1 x\x1b[' + sgr
                               + 'm   \x1b[0m\r\n' + END).encode())
                 self.assertNotEqual(region(colored, 'parity.py'), region(plain, 'parity.py'))
+
+    def test_only_the_actual_replay_tool_lookup_is_handled(self):
+        server = FrameSupervisor.__new__(FrameSupervisor)
+        response = {'data': {'stale': True}}
+        self.assertTrue(server.extra_command({'type': 'get_tool_definition', 'name': 'ipython'}, response))
+        self.assertEqual(response, {'data': {}})
+        response = {'success': False, 'error': 'unknown'}
+        self.assertFalse(server.extra_command({'type': 'unrelated_command', 'name': 'ipython'}, response))
+        self.assertEqual(response, {'success': False, 'error': 'unknown'})
 
     def test_missing_frame_boundary_cannot_be_compared_as_empty(self):
         screen = DockScreen(width=80)
