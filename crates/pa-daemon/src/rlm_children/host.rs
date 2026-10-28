@@ -243,12 +243,20 @@ impl RlmSubagentHost for SupervisorChildSessions {
             let child_active_session_id = created.active_session_id.clone();
             let child_session_file = created.session_file.clone();
             let child_log_id = child_id.clone();
-            // Capture the current turn boundary before detaching: spawn
-            // admission happens mid-turn, so the parent's continuation
-            // request reaches the provider first (see `wait_turn_done`).
-            let turn_generation = *this.turn_done.subscribe().borrow();
+            // Capture the spawning turn before detaching: a spawn admitted
+            // mid-turn prompts after that turn completes, so the parent's
+            // continuation request reaches the provider first (see
+            // `wait_turn_done`). A spawn admitted while the parent is idle
+            // (a background kernel task, e.g. a factory run) has no turn
+            // to wait for.
+            let spawning_turn = {
+                let turn = *this.parent_turn.borrow();
+                turn.running.then_some(turn.completed)
+            };
             tokio::spawn(async move {
-                watcher_this.wait_turn_done(turn_generation).await;
+                if let Some(generation) = spawning_turn {
+                    watcher_this.wait_turn_done(generation).await;
+                }
                 // The parent closed before the prompt admitted: the
                 // child is closed with it, so the detached task prompt
                 // never fires.

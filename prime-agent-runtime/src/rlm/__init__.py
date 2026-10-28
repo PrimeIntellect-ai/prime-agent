@@ -574,6 +574,9 @@ class _HarnessProxy:
     def __getattr__(self, name: str) -> Any:
         return getattr(self._resolve(), name)
 
+    def __dir__(self) -> list[str]:
+        return sorted({*super().__dir__(), *(name for name in dir(self._resolve()) if not name.startswith("_"))})
+
     def __repr__(self) -> str:
         return repr(self._resolve())
 
@@ -704,6 +707,7 @@ class _RLMNamespace:
 
 rlm = _RLMNamespace()
 harness = _harness_state
+factory = rlm.factory
 
 
 class _NotCallableModule(types.ModuleType):
@@ -755,6 +759,4 @@ def __getattr__(name: str) -> Any:  # noqa: D401 - module-level lazy attr hook
         from . import mcp_base
 
         return getattr(mcp_base, name)
-    if name == "run":
-        raise AttributeError(_RENAMED_RUN_MESSAGE)
-    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    return getattr(rlm, name)

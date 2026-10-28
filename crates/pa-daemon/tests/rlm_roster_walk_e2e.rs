@@ -24,7 +24,7 @@
 #![cfg(unix)]
 
 use std::io::{BufRead, BufReader, Write};
-use std::os::unix::net::UnixStream;
+use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
@@ -79,6 +79,146 @@ fn spawn_daemon(socket: &Path, agent_dir: &Path) -> Daemon {
         std::thread::sleep(Duration::from_millis(20));
     }
     panic!("supervisor socket never appeared");
+}
+
+fn drain_boot_seed(socket: &Path) {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let (mut client, hello) = Client::connect(socket);
+        if hello["updateResume"]["complete"] == true {
+            // Restore completion follows adoption, which has already enqueued the boot seed.
+            let subscribed =
+                client.send_command("boot-seed", &json!({ "type": "roster_subscribe" }));
+            assert_eq!(subscribed["success"], true, "{subscribed}");
+            return;
+        }
+        assert!(Instant::now() < deadline, "boot adoption never settled");
+        std::thread::yield_now();
+    }
+}
+
+/// Gate registration requests while other worker-to-supervisor traffic keeps flowing.
+struct RegistrationGate {
+    socket: PathBuf,
+    release: std::sync::Arc<(std::sync::Mutex<Option<bool>>, std::sync::Condvar)>,
+    observed: std::sync::mpsc::Receiver<()>,
+    registered: std::sync::mpsc::Receiver<()>,
+    streams: std::sync::Arc<std::sync::Mutex<Vec<UnixStream>>>,
+    stopped: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+impl RegistrationGate {
+    fn bind(socket: &Path, backend: &Path) -> Self {
+        std::fs::rename(socket, backend).expect("move supervisor socket behind gate");
+        let listener = UnixListener::bind(socket).expect("bind registration gate");
+        let release = std::sync::Arc::new((std::sync::Mutex::new(None), std::sync::Condvar::new()));
+        let (observed_tx, observed) = std::sync::mpsc::channel();
+        let (registered_tx, registered) = std::sync::mpsc::channel();
+        let streams = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let stopped = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let owned_streams = std::sync::Arc::clone(&streams);
+        let stop = std::sync::Arc::clone(&stopped);
+        let gate = std::sync::Arc::clone(&release);
+        let backend = backend.to_path_buf();
+        let thread = std::thread::spawn(move || {
+            let mut connections = Vec::new();
+            for incoming in listener.incoming() {
+                let mut worker = incoming.expect("accept worker link");
+                if stop.load(std::sync::atomic::Ordering::SeqCst) {
+                    break;
+                }
+                let mut daemon = UnixStream::connect(&backend).expect("connect backend");
+                {
+                    let mut streams = owned_streams.lock().unwrap();
+                    streams.push(worker.try_clone().unwrap());
+                    streams.push(daemon.try_clone().unwrap());
+                }
+                if stop.load(std::sync::atomic::Ordering::SeqCst) {
+                    break;
+                }
+                let gate = std::sync::Arc::clone(&gate);
+                let observed = observed_tx.clone();
+                let registered = registered_tx.clone();
+                connections.push(std::thread::spawn(move || {
+                    let mut daemon_reader = BufReader::new(daemon.try_clone().unwrap());
+                    let mut worker_reader = BufReader::new(worker.try_clone().unwrap());
+                    let mut line = String::new();
+                    if daemon_reader.read_line(&mut line).unwrap_or(0) == 0
+                        || worker.write_all(line.as_bytes()).is_err()
+                    {
+                        return;
+                    }
+                    line.clear();
+                    if worker_reader.read_line(&mut line).unwrap_or(0) == 0 {
+                        return;
+                    }
+                    let request: Value = serde_json::from_str(&line).expect("worker envelope");
+                    let registration = request["command"]["type"] == "worker_register";
+                    if registration {
+                        let _ = observed.send(());
+                        let (state, changed) = &*gate;
+                        let released = changed
+                            .wait_while(state.lock().unwrap(), |state| state.is_none())
+                            .unwrap();
+                        if *released != Some(true) {
+                            return;
+                        }
+                    }
+                    if daemon.write_all(line.as_bytes()).is_err() {
+                        return;
+                    }
+                    let request_id = request["id"].clone();
+                    let upstream = std::thread::spawn(move || {
+                        let _ = std::io::copy(&mut worker_reader, &mut daemon);
+                    });
+                    loop {
+                        line.clear();
+                        if daemon_reader.read_line(&mut line).unwrap_or(0) == 0
+                            || worker.write_all(line.as_bytes()).is_err()
+                        {
+                            break;
+                        }
+                        let response: Value =
+                            serde_json::from_str(&line).expect("backend response");
+                        if registration && response["id"] == request_id {
+                            let _ = registered.send(());
+                        }
+                    }
+                    let _ = worker.shutdown(std::net::Shutdown::Both);
+                    let _ = upstream.join();
+                }));
+            }
+            for connection in connections {
+                let _ = connection.join();
+            }
+        });
+        Self {
+            socket: socket.to_path_buf(),
+            release,
+            observed,
+            registered,
+            streams,
+            stopped,
+            thread: Some(thread),
+        }
+    }
+}
+
+impl Drop for RegistrationGate {
+    fn drop(&mut self) {
+        self.stopped
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        *self.release.0.lock().unwrap() = Some(false);
+        self.release.1.notify_all();
+        let _ = UnixStream::connect(&self.socket);
+        for stream in self.streams.lock().unwrap().iter() {
+            let _ = stream.shutdown(std::net::Shutdown::Both);
+        }
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
 }
 
 struct Client {
@@ -479,4 +619,125 @@ async fn subscribe_after_spawn_then_shutdown_seeds_the_passive_child() {
         .find(|entry| entry["agentId"] == json!(parent_session_id))
         .expect("parent still resident");
     assert_eq!(parent_entry["summary"]["activeSessionId"], parent_active_id);
+}
+
+#[test]
+fn open_resume_publishes_the_family_in_the_first_subscribe_snapshot() {
+    let dir = tempfile::TempDir::new().expect("temp dir");
+    let socket = dir.path().join("daemon.sock");
+    let agent_dir = dir.path().join("agent");
+    std::fs::create_dir_all(&agent_dir).expect("agent dir");
+    let (root_path, live) = write_synthetic_family(&agent_dir, 2);
+    assert_eq!(live, 2, "two passive ledger children");
+    let _daemon = spawn_daemon(&socket, &agent_dir);
+    drain_boot_seed(&socket);
+    let backend = dir.path().join("backend.sock");
+    let registration = RegistrationGate::bind(&socket, &backend);
+    let (mut client, hello) = Client::connect(&backend);
+    assert_eq!(hello["type"], "daemon_hello");
+
+    let root_session_path = root_path.to_string_lossy().to_string();
+    let created = client.send_command(
+        "c1",
+        &json!({
+            "type": "create",
+            "sessionPath": root_session_path,
+            "config": { "cwd": dir.path().to_string_lossy() },
+        }),
+    );
+    assert_eq!(created["success"], true, "resume create failed: {created}");
+    let root_active_id = created["data"]["activeSessionId"]
+        .as_str()
+        .expect("root active session id")
+        .to_string();
+
+    registration
+        .observed
+        .recv_timeout(Duration::from_secs(10))
+        .expect("worker registration is held before daemon dispatch");
+    let subscribed = client.send_command("r1", &json!({ "type": "roster_subscribe" }));
+    assert_eq!(
+        subscribed["success"], true,
+        "subscribe failed: {subscribed}"
+    );
+    let snapshot = subscribed["data"]["roster"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    for child_id in ["sub-0000", "sub-0001"] {
+        let entry = snapshot
+            .iter()
+            .find(|entry| entry["summary"]["rlmChildId"] == json!(child_id))
+            .unwrap_or_else(|| {
+                panic!("child {child_id} missing from the FIRST snapshot: {snapshot:?}")
+            });
+        assert_eq!(entry["summary"]["runtimeKind"], "subagent");
+        assert_eq!(
+            entry["summary"]["parentSessionPath"],
+            root_session_path.as_str(),
+            "the family edge keys the seeded row to the root"
+        );
+        assert_eq!(
+            entry["summary"]["sessionName"],
+            child_id.replace("sub-", "worker-")
+        );
+    }
+    let root_entry = snapshot
+        .iter()
+        .find(|entry| entry["summary"]["activeSessionId"] == json!(root_active_id.as_str()))
+        .expect("the reopened root's own row in the same snapshot");
+    assert_eq!(root_entry["status"], "idle");
+    *registration.release.0.lock().unwrap() = Some(true);
+    registration.release.1.notify_all();
+    registration
+        .registered
+        .recv_timeout(Duration::from_secs(10))
+        .expect("late registration completed");
+    let repeated = client.send_command("r2", &json!({ "type": "roster_subscribe" }));
+    let repeated_rows = repeated["data"]["roster"].as_array().unwrap();
+    assert_eq!(
+        repeated_rows.len(),
+        snapshot.len(),
+        "registration adds no duplicate rows"
+    );
+}
+
+#[test]
+fn a_disconnected_create_still_seeds_its_family_before_registration() {
+    let dir = tempfile::TempDir::new().expect("temp dir");
+    let socket = dir.path().join("daemon.sock");
+    let backend = dir.path().join("backend.sock");
+    let agent_dir = dir.path().join("agent");
+    std::fs::create_dir_all(&agent_dir).expect("agent dir");
+    let (root, _) = write_synthetic_family(&agent_dir, 1);
+    let _daemon = spawn_daemon(&socket, &agent_dir);
+    drain_boot_seed(&socket);
+    let registration = RegistrationGate::bind(&socket, &backend);
+    let (mut opener, _) = Client::connect(&backend);
+    let create = json!({
+        "type": "create",
+        "sessionPath": root.to_string_lossy(),
+        "config": { "cwd": dir.path().to_string_lossy() },
+    });
+    opener.send(&json!({
+        "type": "command",
+        "id": "disconnected-create",
+        "protocol": { "name": "prime-agent.daemon", "version": 7 },
+        "command": create,
+    }));
+    drop(opener);
+    registration
+        .observed
+        .recv_timeout(Duration::from_secs(10))
+        .expect("detached create launched its worker; registration is held");
+    let (mut observer, _) = Client::connect(&backend);
+    // The same-file open joins the first create through its completed family seed.
+    let reopened = observer.send_command("c2", &create);
+    assert_eq!(reopened["success"], true, "{reopened}");
+    let snapshot = observer.send_command("s2", &json!({ "type": "roster_subscribe" }));
+    assert!(snapshot["data"]["roster"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|row| { row["summary"]["rlmChildId"] == "sub-0000" }));
 }
