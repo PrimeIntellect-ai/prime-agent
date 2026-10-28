@@ -31,6 +31,7 @@ from typing import Any, TypeVar
 
 from . import host_request
 from .mcp_base import (
+    _EXPIRY_SKEW_SECONDS,
     McpToolError,
     _parse_result,
     _read_auth,
@@ -929,7 +930,7 @@ async def _auth_identity(server: str, config: dict[str, Any]) -> str:
         provider = f"mcp:{server}"
         cred = _bound_auth(provider, config)
         expires = (cred or {}).get("expires")
-        if isinstance(expires, (int, float)) and expires <= time.time() * 1000 + 30_000:
+        if isinstance(expires, (int, float)) and expires <= time.time() * 1000 + _EXPIRY_SKEW_SECONDS * 1000:
             try:
                 await host_request("mcp.refresh", {"server": server})
             except Exception as exc:
