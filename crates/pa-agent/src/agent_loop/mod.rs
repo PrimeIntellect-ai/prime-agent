@@ -56,7 +56,7 @@ pub type BeforeInputFn = Arc<
 /// Deferred session initialization at a cancellable model boundary.
 pub type BeforeModelFn =
     Arc<dyn Fn(Model, AbortSignal) -> crate::BoxFut<'static, anyhow::Result<()>> + Send + Sync>;
-/// Consulted only on a natural final stop, after the host continuation policy.
+/// Consulted only on a natural final stop ([`Continuation::NaturalStop`]).
 /// The boolean says a stop-hook continuation has already run in this root run.
 pub type FinalStopFn = Arc<
     dyn Fn(
@@ -67,9 +67,6 @@ pub type FinalStopFn = Arc<
         + Send
         + Sync,
 >;
-
-/// Read-only host ownership check, refreshed after potentially long stop work.
-pub type StopHookEligibilityFn = Arc<dyn Fn() -> crate::BoxFut<'static, bool> + Send + Sync>;
 
 /// Resolves an API key dynamically for each LLM call.
 pub type GetApiKeyFn =
@@ -91,12 +88,25 @@ pub type ShouldStopBeforeTurnFn = Arc<dyn Fn() -> bool + Send + Sync>;
 pub type PollMessagesFn =
     Arc<dyn Fn() -> crate::BoxFut<'static, anyhow::Result<Vec<AgentMessage>>> + Send + Sync>;
 
-/// Returns continuation messages when the agent would otherwise stop.
+/// The host's decision when the agent would otherwise stop.
+#[derive(Debug)]
+pub enum Continuation {
+    /// Rows the loop runs as the next turn of this run.
+    Messages(Vec<AgentMessage>),
+    /// The host owns this boundary (queued input, compaction, goal or
+    /// background work): the run ends without the final Stop hook.
+    Held,
+    /// A genuine natural stop: the final Stop hook may run.
+    NaturalStop,
+}
+
+/// Decides how the agent continues when it would otherwise stop. Without one,
+/// every stop is natural.
 pub type GetContinuationMessagesFn = Arc<
     dyn Fn(
             GetContinuationMessagesContext,
             AbortSignal,
-        ) -> crate::BoxFut<'static, anyhow::Result<Vec<AgentMessage>>>
+        ) -> crate::BoxFut<'static, anyhow::Result<Continuation>>
         + Send
         + Sync,
 >;
@@ -174,9 +184,6 @@ pub struct AgentLoopConfig {
     pub before_input: Option<BeforeInputFn>,
     pub before_model: Option<BeforeModelFn>,
     pub final_stop: Option<FinalStopFn>,
-    /// Cheap feature gate before querying host ownership or cloning a response.
-    pub final_stop_enabled: Option<ShouldStopBeforeTurnFn>,
-    pub stop_hook_eligibility: Option<StopHookEligibilityFn>,
 }
 
 impl AgentLoopConfig {
@@ -208,8 +215,6 @@ impl AgentLoopConfig {
             before_input: None,
             before_model: None,
             final_stop: None,
-            final_stop_enabled: None,
-            stop_hook_eligibility: None,
         }
     }
 

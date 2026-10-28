@@ -28,7 +28,8 @@ append; `BeforeModelFn` supports deferred initialization. Both receive the activ
 run's cancellation signal and execute outside agent state locks. Submitted batch
 metadata includes custom rows so an embedding can restore deferred bookkeeping
 when admission is refused. Internal continuation rows retain separate provenance.
-`FinalStopFn` runs after the normal continuation policy and allows one feedback
-continuation per run. The host's async `StopHookEligibilityFn` is rechecked after
-external work; `final_stop_enabled` avoids ownership queries when unused. These
+`FinalStopFn` runs only when the host's continuation hook reports
+`Continuation::NaturalStop` (a missing hook means every stop is natural;
+`Continuation::Held` means the host owns the boundary) and allows one feedback
+continuation per run. These
 are additive provider-independent callback APIs, not process execution facilities.

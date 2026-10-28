@@ -726,11 +726,6 @@ pub async fn create_session(mut config: SessionEngineConfig) -> anyhow::Result<S
             .set_deferred_rows(Arc::clone(&boot_notice_rows));
     }
     let agent = Agent::new(AgentOptions {
-        final_stop_enabled: tool_hooks.as_ref().map(|hooks| {
-            let runtime = Arc::clone(&hooks.runtime);
-            Arc::new(move || runtime.might_run("Stop"))
-                as pa_agent::agent_loop::ShouldStopBeforeTurnFn
-        }),
         before_input: tool_hooks.as_ref().map(|hooks| {
             let lifecycle = Arc::clone(&hooks.lifecycle);
             Arc::new(move |users, model: pa_agent::types::Model, signal| {

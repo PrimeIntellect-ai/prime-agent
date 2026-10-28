@@ -15,7 +15,7 @@ use super::abort::{
 };
 use super::response::stream_assistant_response;
 use super::tools::execute_tool_calls;
-use super::{AgentEventSink, AgentLoopConfig};
+use super::{AgentEventSink, AgentLoopConfig, Continuation};
 
 // Direct port of the TS turn loop.
 #[allow(clippy::too_many_lines)]
@@ -281,18 +281,18 @@ pub(crate) async fn run_loop(
         if should_stop_before_turn!() {
             break;
         }
-        let continuation_messages_result = match last_turn.clone() {
+        let continuation_result = match last_turn.clone() {
             Some(context) => {
-                let continuation_op: crate::BoxFut<'static, anyhow::Result<Vec<AgentMessage>>> =
+                let continuation_op: crate::BoxFut<'static, anyhow::Result<Continuation>> =
                     match config.get_continuation_messages.as_ref() {
                         Some(hook) => hook(context, signal.cloned().unwrap_or_default()),
-                        None => Box::pin(async { Ok(Vec::new()) }),
+                        None => Box::pin(async { Ok(Continuation::NaturalStop) }),
                     };
                 settle_post_turn(race_with_abort(continuation_op, signal), signal).await?
             }
-            None => PostTurnResult::Completed(Vec::new()),
+            None => PostTurnResult::Completed(Continuation::Held),
         };
-        let continuation_messages = match continuation_messages_result {
+        let natural_stop = match continuation_result {
             PostTurnResult::Aborted => {
                 emit(AgentEvent::AgentEnd {
                     messages: new_messages.clone(),
@@ -300,86 +300,77 @@ pub(crate) async fn run_loop(
                 .await?;
                 return Ok(());
             }
-            PostTurnResult::Completed(messages) => messages,
+            PostTurnResult::Completed(Continuation::Messages(messages)) if !messages.is_empty() => {
+                pending_messages = messages;
+                continue;
+            }
+            PostTurnResult::Completed(Continuation::Messages(_) | Continuation::Held) => false,
+            PostTurnResult::Completed(Continuation::NaturalStop) => true,
         };
-        if !continuation_messages.is_empty() {
-            pending_messages = continuation_messages;
-            continue;
-        }
 
-        if let (Some(final_stop), Some(context)) = (&config.final_stop, &last_turn) {
-            if config
-                .final_stop_enabled
-                .as_ref()
-                .is_none_or(|enabled| enabled())
-            {
-                // Stop commands can run for minutes, so an abort here is a
-                // normal action: it ends the finished run cleanly.
-                let boundary = settle_post_turn(
-                    async {
-                        if !stop_hook_eligible(config, signal).await? {
-                            return Ok(StopBoundary::Finish);
-                        }
-                        let continuation = race_with_abort(
-                            final_stop(
-                                context.message.clone(),
-                                stop_hook_active,
-                                signal.cloned().unwrap_or_default(),
-                            ),
-                            signal,
-                        )
-                        .await?;
-                        crate::abort::throw_if_aborted_signal(signal)?;
-                        // Commands may take time. Input that arrived meanwhile
-                        // still owns the boundary before a hook continuation.
-                        if should_stop_before_turn!() {
-                            return Ok(StopBoundary::Finish);
-                        }
-                        let mut arrived = poll_messages_unless_aborted(
-                            config.get_steering_messages.as_ref(),
-                            signal,
-                        )
-                        .await?;
-                        if arrived.is_empty() {
-                            arrived = poll_messages_unless_aborted(
-                                config.get_follow_up_messages.as_ref(),
-                                signal,
-                            )
+        // Only a natural stop reaches the final Stop hook: a held boundary
+        // belongs to the host's own pending work.
+        if let (true, Some(final_stop), Some(context)) =
+            (natural_stop, &config.final_stop, &last_turn)
+        {
+            // Stop commands can run for minutes, so an abort here is a
+            // normal action: it ends the finished run cleanly.
+            let boundary = settle_post_turn(
+                async {
+                    let continuation = race_with_abort(
+                        final_stop(
+                            context.message.clone(),
+                            stop_hook_active,
+                            signal.cloned().unwrap_or_default(),
+                        ),
+                        signal,
+                    )
+                    .await?;
+                    crate::abort::throw_if_aborted_signal(signal)?;
+                    // Commands may take time. Input that arrived meanwhile
+                    // still owns the boundary before a hook continuation.
+                    if should_stop_before_turn!() {
+                        return Ok(StopBoundary::Finish);
+                    }
+                    let mut arrived =
+                        poll_messages_unless_aborted(config.get_steering_messages.as_ref(), signal)
                             .await?;
-                        }
-                        let arrived = admit_batch(arrived, config, signal).await?;
-                        if !arrived.is_empty() {
-                            return Ok(StopBoundary::Input(arrived));
-                        }
-                        if stop_hook_active
-                            || continuation.is_empty()
-                            || !stop_hook_eligible(config, signal).await?
-                        {
-                            return Ok(StopBoundary::Finish);
-                        }
-                        // Hook feedback is a new user submission; autonomous and
-                        // goal continuations above keep their internal provenance.
-                        let continuation = admit_batch(continuation, config, signal).await?;
-                        Ok(if continuation.is_empty() {
-                            StopBoundary::Finish
-                        } else {
-                            StopBoundary::Continuation(continuation)
-                        })
-                    },
-                    signal,
-                )
-                .await?;
-                match boundary {
-                    PostTurnResult::Aborted | PostTurnResult::Completed(StopBoundary::Finish) => {}
-                    PostTurnResult::Completed(StopBoundary::Input(messages)) => {
-                        pending_messages = messages;
-                        continue;
+                    if arrived.is_empty() {
+                        arrived = poll_messages_unless_aborted(
+                            config.get_follow_up_messages.as_ref(),
+                            signal,
+                        )
+                        .await?;
                     }
-                    PostTurnResult::Completed(StopBoundary::Continuation(messages)) => {
-                        stop_hook_active = true;
-                        pending_messages = messages;
-                        continue;
+                    let arrived = admit_batch(arrived, config, signal).await?;
+                    if !arrived.is_empty() {
+                        return Ok(StopBoundary::Input(arrived));
                     }
+                    if stop_hook_active || continuation.is_empty() {
+                        return Ok(StopBoundary::Finish);
+                    }
+                    // Hook feedback is a new user submission; autonomous and
+                    // goal continuations above keep their internal provenance.
+                    let continuation = admit_batch(continuation, config, signal).await?;
+                    Ok(if continuation.is_empty() {
+                        StopBoundary::Finish
+                    } else {
+                        StopBoundary::Continuation(continuation)
+                    })
+                },
+                signal,
+            )
+            .await?;
+            match boundary {
+                PostTurnResult::Aborted | PostTurnResult::Completed(StopBoundary::Finish) => {}
+                PostTurnResult::Completed(StopBoundary::Input(messages)) => {
+                    pending_messages = messages;
+                    continue;
+                }
+                PostTurnResult::Completed(StopBoundary::Continuation(messages)) => {
+                    stop_hook_active = true;
+                    pending_messages = messages;
+                    continue;
                 }
             }
         }
@@ -417,16 +408,6 @@ async fn admit_batch(
         Ok(()) => Ok(messages),
         Err(error) if error.downcast_ref::<super::InputRejected>().is_some() => Ok(Vec::new()),
         Err(error) => Err(error),
-    }
-}
-
-async fn stop_hook_eligible(
-    config: &AgentLoopConfig,
-    signal: Option<&AbortSignal>,
-) -> anyhow::Result<bool> {
-    match &config.stop_hook_eligibility {
-        Some(eligible) => race_with_abort(async { Ok(eligible().await) }, signal).await,
-        None => Ok(true),
     }
 }
 

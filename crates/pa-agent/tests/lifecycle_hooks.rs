@@ -5,6 +5,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use pa_agent::agent::{Agent, AgentOptions, AgentPromptInput};
+use pa_agent::agent_loop::Continuation;
 use pa_agent::scripted::ScriptedProvider;
 use pa_agent::types::{AgentMessage, Message, Model, UserContent, UserMessage};
 
@@ -105,12 +106,12 @@ async fn queued_inputs_and_stop_feedback_are_gated_but_internal_continuation_is_
             Box::pin(async { Ok(()) })
         })),
         get_continuation_messages: Some(Arc::new(move |_, _| {
-            let rows = if continuation_count.fetch_add(1, Ordering::SeqCst) == 0 {
-                vec![user("internal autonomous")]
+            let decision = if continuation_count.fetch_add(1, Ordering::SeqCst) == 0 {
+                Continuation::Messages(vec![user("internal autonomous")])
             } else {
-                Vec::new()
+                Continuation::NaturalStop
             };
-            Box::pin(async { Ok(rows) })
+            Box::pin(async { Ok(decision) })
         })),
         final_stop: Some(Arc::new(move |_, active, _| {
             active_sink.lock().unwrap().push(active);
@@ -178,9 +179,12 @@ async fn host_handoff_prevents_a_stop_hook_from_minting_a_turn() {
             invoked_sink.fetch_add(1, Ordering::SeqCst);
             Box::pin(async { Ok(vec![user("should not run")]) })
         })),
+        // The host holds the boundary (e.g. queued work), so the stop is not natural.
+        get_continuation_messages: Some(Arc::new(|_, _| {
+            Box::pin(async { Ok(Continuation::Held) })
+        })),
         ..Default::default()
     });
-    agent.set_stop_hook_eligibility(Some(Arc::new(|| Box::pin(async { false }))));
     agent.prompt("external").await.unwrap();
     assert_eq!(invoked.load(Ordering::SeqCst), 0);
     assert_eq!(provider.calls().len(), 1);
