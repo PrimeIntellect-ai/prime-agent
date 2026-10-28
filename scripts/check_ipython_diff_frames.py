@@ -108,6 +108,10 @@ def capture(binary, kind, case, width, root):
     env = env_for(root)
     env[TAG] = str(root)
     env['COLORTERM'] = 'truecolor'
+    settings_path = root / 'agent/settings.json'
+    settings = json.loads(settings_path.read_text())
+    settings['chatDetail'] = 'overview'
+    settings_path.write_text(json.dumps(settings))
     if kind == 'ts':
         env['PI_PACKAGE_DIR'] = str(binary.parent)
     hello = actual_hello(binary, root, env)
@@ -119,7 +123,7 @@ def capture(binary, kind, case, width, root):
     scope = OwnedProcesses(binary, root, server.path)
     terminal = None
     result = {'binary_sha256': digest(binary), 'hello': hello, 'frames': {},
-              'fixture_messages': server.messages}
+              'fixture_messages': server.messages, 'initial_chat_detail': 'overview'}
     try:
         command = [str(binary), '--daemon-socket', str(server.path)]
         terminal = FrameTerminal(command, root, env, width)
