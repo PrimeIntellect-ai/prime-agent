@@ -123,6 +123,8 @@ pub struct RlmSpawnInput {
 #[derive(Debug, Clone, PartialEq)]
 pub struct DeletedChildUsage {
     pub child_id: String,
+    /// Canonical file identity: child ids may be reused for another file.
+    pub child_file: String,
     pub name: String,
     pub factory: Option<RlmFactoryTag>,
     pub usage: crate::session_usage::SessionUsageSummary,
@@ -856,6 +858,7 @@ impl RlmSpawnLedger {
                     let edge = edge_by_path.get(child)?;
                     Some(DeletedChildUsage {
                         child_id: edge.child_id.clone(),
+                        child_file: child.clone(),
                         name: edge.name.clone(),
                         factory: edge.factory.clone(),
                         usage,

@@ -30,6 +30,8 @@ pub(crate) struct CachedWalk {
     live_nodes: HashMap<String, Value>,
     /// Persisted child dirs' nodes, in the walk's mtime order.
     persisted: Vec<Value>,
+    /// Exact roster identities whose files were tombstoned during this walk.
+    excluded_snapshots: HashSet<String>,
 }
 
 /// The per-worker context-tree cache: the data swap under a std mutex
@@ -108,7 +110,11 @@ impl ContextTreeCache {
                 .and_then(Value::as_str)
                 .unwrap_or_default();
             live_ids.insert(id.to_string());
-            if invalidated.contains(id) {
+            if invalidated.contains(id)
+                || cached
+                    .as_ref()
+                    .is_some_and(|walk| walk.excluded_snapshots.contains(&snapshot_key(snapshot)))
+            {
                 // A deletion that outran the roster removal: the row must not come back.
                 continue;
             }
@@ -266,7 +272,7 @@ impl ContextTreeCache {
                 })
                 .await;
                 match walk {
-                    Ok(Ok((mut live_nodes, mut persisted))) => {
+                    Ok(Ok(mut walk)) => {
                         let mut invalidated = cache
                             .invalidated
                             .lock()
@@ -274,8 +280,8 @@ impl ContextTreeCache {
                         // Deletions that landed while this walk ran must not be
                         // republished by the stale snapshot. The set drains here.
                         for child_id in invalidated.iter() {
-                            live_nodes.remove(child_id);
-                            persisted.retain(|node| {
+                            walk.live_nodes.remove(child_id);
+                            walk.persisted.retain(|node| {
                                 node.get("id").and_then(Value::as_str) != Some(child_id)
                             });
                         }
@@ -284,12 +290,8 @@ impl ContextTreeCache {
                             .state
                             .lock()
                             .unwrap_or_else(std::sync::PoisonError::into_inner);
-                        *state = Some(CachedWalk {
-                            computed_at: Instant::now(),
-                            session_id: session_id.clone(),
-                            live_nodes,
-                            persisted,
-                        });
+                        walk.computed_at = Instant::now();
+                        *state = Some(walk);
                     }
                     Ok(Err(error)) => {
                         eprintln!("context tree walk failed: {error:#}");
@@ -330,7 +332,7 @@ fn walk_children(
     session_id: &str,
     snapshots: &[Value],
     session_file: Option<&Path>,
-) -> Result<(HashMap<String, Value>, Vec<Value>)> {
+) -> Result<CachedWalk> {
     let registry = crate::state_getters::worker_model_registry(agent_dir);
     let artifacts_root = crate::context_tree_children::session_artifacts_dir(agent_dir);
     // User-deleted subagents' transcripts stay hidden at every depth and bill
@@ -352,25 +354,33 @@ fn walk_children(
     // Live children: the node carries the child's real usage and its
     // recursive grandchildren; the registry supplies the fresher identity.
     let mut live_nodes = HashMap::with_capacity(snapshots.len());
+    let mut excluded_snapshots = HashSet::new();
     for child in snapshots {
-        let mut node = child
+        let loaded = child
             .get("sessionDir")
             .and_then(Value::as_str)
             .and_then(|dir| {
-                crate::context_tree_children::load_context_tree_child(
+                crate::context_tree_children::load_context_tree_child_with_path(
                     &artifacts_root,
                     Path::new(dir),
                     &registry,
                     &ledger,
                 )
-            })
-            .unwrap_or_else(|| {
-                json!({
-                    "ownUsage": empty_usage(),
-                    "totalUsage": empty_usage(),
-                    "children": [],
-                })
             });
+        if loaded
+            .as_ref()
+            .is_some_and(|(path, _)| ledger.is_tombstoned_file(path))
+        {
+            excluded_snapshots.insert(snapshot_key(child));
+            continue;
+        }
+        let mut node = loaded.map(|(_, node)| node).unwrap_or_else(|| {
+            json!({
+                "ownUsage": empty_usage(),
+                "totalUsage": empty_usage(),
+                "children": [],
+            })
+        });
         node["id"] = child.get("id").cloned().unwrap_or(Value::Null);
         node["label"] = child.get("label").cloned().unwrap_or(Value::Null);
         node["status"] = child.get("status").cloned().unwrap_or(Value::Null);
@@ -391,7 +401,23 @@ fn walk_children(
     if let Some(session_file) = session_file {
         persisted.extend(ledger.deleted_nodes(session_file));
     }
-    Ok((live_nodes, persisted))
+    Ok(CachedWalk {
+        computed_at: Instant::now(),
+        session_id: session_id.to_string(),
+        live_nodes,
+        persisted,
+        excluded_snapshots,
+    })
+}
+
+/// Identity only: status and elapsed duration can change on a stale roster row.
+fn snapshot_key(snapshot: &Value) -> String {
+    json!([
+        snapshot.get("id"),
+        snapshot.get("activeSessionId"),
+        snapshot.get("sessionDir")
+    ])
+    .to_string()
 }
 
 #[cfg(test)]
@@ -407,6 +433,7 @@ mod tests {
         let cache = Arc::new(ContextTreeCache::new());
         *cache.state.lock().unwrap() = Some(CachedWalk {
             computed_at: Instant::now(),
+            excluded_snapshots: HashSet::new(),
             session_id: session_id.to_string(),
             live_nodes: live
                 .iter()
@@ -496,6 +523,7 @@ mod tests {
         // the child back at serve time.
         *cache.state.lock().unwrap() = Some(CachedWalk {
             computed_at: Instant::now(),
+            excluded_snapshots: HashSet::new(),
             session_id: "session-a".to_string(),
             live_nodes: [(
                 "child-live".to_string(),
@@ -548,6 +576,7 @@ mod tests {
         let cache = Arc::new(ContextTreeCache::new());
         *cache.state.lock().unwrap() = Some(CachedWalk {
             computed_at: Instant::now(),
+            excluded_snapshots: HashSet::new(),
             session_id: "session-a".to_string(),
             live_nodes: HashMap::new(),
             persisted: vec![json!({
@@ -672,8 +701,9 @@ mod tests {
         crate::stop_cleanup::append_deleted_child_usage_amendments(&ledger, &gone, "sub-gone")
             .expect("a deleted child");
 
-        let (live_nodes, persisted) =
-            walk_children(&agent_dir, "01a0root-0000", &[], Some(&root_file)).unwrap();
+        let walk = walk_children(&agent_dir, "01a0root-0000", &[], Some(&root_file)).unwrap();
+        let live_nodes = walk.live_nodes;
+        let persisted = walk.persisted;
         assert!(live_nodes.is_empty());
         let cost = |node: &Value| node["ownUsage"]["cost"]["total"].as_f64().unwrap();
         let by_id = |id: &str| {
@@ -684,7 +714,10 @@ mod tests {
         };
         assert_eq!(persisted.len(), 2, "{persisted:?}");
         assert_eq!(by_id("sub-live")["factory"], json!(tag));
-        let deleted = by_id("deleted:sub-gone");
+        let deleted = persisted
+            .iter()
+            .find(|node| node["deleted"] == json!(true))
+            .unwrap();
         assert_eq!(deleted["deleted"], json!(true));
         assert_eq!(
             deleted["factory"],
@@ -766,13 +799,46 @@ mod tests {
         .unwrap();
         let stale = json!({"id": "sub-old", "label": "old", "status": "completed",
             "sessionDir": child.parent().unwrap()});
-        let (live, deleted) = walk_children(agent_dir, "parent", &[stale], Some(&parent)).unwrap();
+        let walk = walk_children(
+            agent_dir,
+            "parent",
+            std::slice::from_ref(&stale),
+            Some(&parent),
+        )
+        .unwrap();
+        let live = &walk.live_nodes;
+        let deleted = &walk.persisted;
         assert!(
             live.is_empty(),
             "tombstone must hide stale roster row: {live:?}"
         );
         assert_eq!(deleted.len(), 1);
         assert_eq!(deleted[0]["totalUsage"]["cost"]["total"], json!(0.125));
+        let expected = walk.persisted.clone();
+        let cache = ContextTreeCache::new();
+        *cache.state.lock().unwrap() = Some(walk);
+        let mut changed_status = stale.clone();
+        changed_status["status"] = json!("cancelled");
+        changed_status["durationMs"] = json!(1234);
+        assert_eq!(
+            cache.serve_children(Some("parent"), &[changed_status]),
+            expected,
+            "cache overlay must not resurrect the usage-empty fallback either"
+        );
+        let mut reused = stale;
+        reused["activeSessionId"] = json!("new-runtime");
+        let served = cache.serve_children(Some("parent"), &[reused]);
+        assert_eq!(
+            served
+                .iter()
+                .map(|node| (node["id"].clone(), node["deleted"].clone()))
+                .collect::<Vec<_>>(),
+            vec![
+                (json!("sub-old"), Value::Null),
+                (expected[0]["id"].clone(), json!(true))
+            ],
+            "a new runtime reusing the child id remains visible"
+        );
     }
 
     /// A child id may identify distinct historical files under the same
@@ -813,7 +879,9 @@ mod tests {
             )
             .unwrap();
         }
-        let (_, nodes) = walk_children(agent_dir, "parent", &[], Some(&parent)).unwrap();
+        let nodes = walk_children(agent_dir, "parent", &[], Some(&parent))
+            .unwrap()
+            .persisted;
         assert_eq!(nodes.len(), 2);
         let ids: HashSet<&str> = nodes
             .iter()
