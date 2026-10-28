@@ -10,11 +10,13 @@ use std::sync::Arc;
 
 use serde_json::json;
 
-use crate::tools::edit_diff::generate_diff_string;
+mod diff;
+
 use crate::tools::tool_definition::{
     AbortSignal, ExecutionMode, OnUpdate, ToolContentBlock, ToolDefinition, ToolExecutionResult,
     ToolUpdate,
 };
+use diff::generate_diff_string;
 
 /// Mime types the model context accepts as images.
 pub const IMAGE_MIME_TYPES: [&str; 4] = ["image/jpeg", "image/png", "image/gif", "image/webp"];
@@ -484,7 +486,7 @@ pub async fn execute_ipython(
                     .unwrap_or(1);
                 json!({
                     "path": diff.path,
-                    "diff": generate_diff_string(&diff.old_str, &diff.new_str, 4, start_line).diff,
+                    "diff": generate_diff_string(&diff.old_str, &diff.new_str, 4, start_line),
                 })
             })
             .collect::<Vec<_>>());
