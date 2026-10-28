@@ -85,3 +85,10 @@ while input was still queued, and the app reader (`crates/pa-tui/src/input.rs`),
 terminal write per round until that poll says empty, split a pasted line at its first capital.
 Now a record that produces no event loops straight to the next one while the console still holds
 records; the timeout applies only when the buffer is empty. Upstream crossterm has the same code.
+
+# Alt+numpad characters are presses on Windows (2026-10-28)
+
+`src/event/sys/windows/parse.rs` receives a completed Alt+numpad character on the Alt key-up
+record. The inbox console also uses those records for pasted characters absent from the active
+keyboard layout. Report the character as a press, like the surrogate path, so consumers that drop
+key releases retain it. Ordinary key-up records still report releases.

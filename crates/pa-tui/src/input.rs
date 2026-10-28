@@ -152,8 +152,7 @@ where
             match crossterm::event::poll_opt(timeout) {
                 Ok(false) => {
                     let now = Instant::now();
-                    let mut rounds = coalescer.flush_expired(now);
-                    rounds.extend(coalescer.push_round(guard.flush_expired(now), now));
+                    let rounds = coalescer.push_round(guard.flush_expired(now), now);
                     let whole = !probe_pending && !crate::enhanced_keys::kitty_probe_pending();
                     if !forward_rounds(rounds, whole, &mut on_input) {
                         return;
@@ -1289,10 +1288,9 @@ mod tests {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         crate::enhanced_keys::set_kitty_active_for_tests(false);
-        let enter = GuardOutput::Event(key(KeyCode::Enter, KeyModifiers::NONE));
         let inputs = drive(
             WINDOWS_WINDOW,
-            vec![(0, windows_paste("ok")), (500, vec![enter])],
+            vec![(0, windows_paste("ok")), (500, windows_paste("\rx"))],
         );
         assert_eq!(
             inputs,
@@ -1300,6 +1298,7 @@ mod tests {
                 ReaderInput::Event(key(KeyCode::Char('o'), KeyModifiers::NONE)),
                 ReaderInput::Event(key(KeyCode::Char('k'), KeyModifiers::NONE)),
                 ReaderInput::Event(key(KeyCode::Enter, KeyModifiers::NONE)),
+                ReaderInput::Event(key(KeyCode::Char('x'), KeyModifiers::NONE)),
             ]
         );
     }
