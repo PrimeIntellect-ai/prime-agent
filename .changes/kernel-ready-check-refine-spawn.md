@@ -1,0 +1,1 @@
+- The kernel venv's runtime-ready check tracks the shipped `rlm.spawn` signature (`name` optional alongside `kind="refine"`): the stale check still pinned `name` as required, so every CI kernel boot rejected the runtime this tree itself installs and rebuilt the shared venv instead.
