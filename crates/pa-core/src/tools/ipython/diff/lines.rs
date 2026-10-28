@@ -2,6 +2,10 @@
 //! optimization) as the TS product vendors it (`Diff.diffLines`): diffs here must
 //! match the TypeScript product byte for byte. Only the display caller is retained.
 
+// Bound speculative Myers history. Beyond this budget, a whole-block
+// replacement preserves both texts without quadratic search memory.
+const MAX_DIFF_COMPONENTS: usize = 100_000;
+
 /// Tokenize a string the way jsdiff's `diffLines` does: split keeping `\n` / `\r\n` separators,
 /// drop a trailing empty element, and merge each newline into the preceding line token.
 fn jsdiff_line_tokenize(value: &str) -> Vec<String> {
@@ -219,6 +223,23 @@ impl DiffEngine<'_> {
 
             let mut diagonal_path = diag_start;
             while diagonal_path <= diag_end {
+                if self.components.len() >= MAX_DIFF_COMPONENTS {
+                    return [
+                        DiffPart {
+                            value: self.old_tokens.concat(),
+                            added: false,
+                            removed: true,
+                        },
+                        DiffPart {
+                            value: self.new_tokens.concat(),
+                            added: true,
+                            removed: false,
+                        },
+                    ]
+                    .into_iter()
+                    .filter(|part| !part.value.is_empty())
+                    .collect();
+                }
                 let remove_path = best_path.get(&(diagonal_path - 1)).copied();
                 let add_path = best_path.get(&(diagonal_path + 1)).copied();
 
@@ -295,4 +316,28 @@ pub(super) fn diff_lines(old_str: &str, new_str: &str) -> Vec<DiffPart> {
     engine.run()
 }
 
-// Diff string generation
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_large_replacement_has_a_bounded_whole_block_fallback() {
+        let old = (0..600).map(|n| format!("old-{n}\n")).collect::<String>() + "shared\n";
+        let new = (0..600).map(|n| format!("new-{n}\n")).collect::<String>() + "shared\n";
+        assert_eq!(
+            diff_lines(&old, &new),
+            vec![
+                DiffPart {
+                    value: old,
+                    added: false,
+                    removed: true
+                },
+                DiffPart {
+                    value: new,
+                    added: true,
+                    removed: false
+                },
+            ]
+        );
+    }
+}
