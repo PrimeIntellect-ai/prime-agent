@@ -150,6 +150,7 @@ pub fn wire_session_runtime(
         runtime.set_cron_mutation_hook(hook);
     }
     let runtime = Arc::new(runtime);
+    let cwd = session.get_cwd().to_path_buf();
     let session = Arc::new(tokio::sync::Mutex::new(session));
     let mut handlers = HostRequestHandlers::default();
     runtime.register_host_handlers(session.clone(), &mut handlers);
@@ -181,6 +182,12 @@ pub fn wire_session_runtime(
         rlm.progress_note_emit,
     ));
     register_rlm_host_handlers(&mut handlers, &rlm_bridge);
+    super::decision_api::register_decision_handler(
+        &mut handlers,
+        session.clone(),
+        cwd,
+        agent_dir.to_path_buf(),
+    );
     SessionKernelWiring {
         session,
         handlers,
