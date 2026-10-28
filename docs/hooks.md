@@ -19,12 +19,12 @@ appear to work.
 
 | Event | Current Codex contract | Prime Agent implementation |
 | --- | --- | --- |
-| `SessionStart` | Match `source`: `startup`, `resume`, `clear`, `compact`, `fork`. Text stdout or `hookSpecificOutput.additionalContext` supplies developer context. Common `continue: false` stops before the next model request. | Synchronous control gate, deferred until real work before the first model request. Sources `startup`, `resume`, `compact`; no `clear` or `fork` event is fabricated. Context/text output is unsupported (`additionalContext` is ignored with a notice). `continue: false` stops the request with a `hook_notice` row and the reason as the prompt error. Exit 2 is a callback failure, not a veto. |
-| `UserPromptSubmit` | Matcher ignored. Input includes `prompt`, `turn_id`. Text/context output supplements developer context; `decision: "block"` or exit 2 rejects the prompt. | Synchronous admission before user-message context/persistence, including queued user batches and Stop-hook continuations. In-run autonomous and goal continuation rows are not submissions and skip it; an autonomous continuation that a host held and later re-queues (daemon queue, print-mode follow-up) is admitted as an ordinary prompt and does pass through it. Block/exit 2 requires a nonempty reason. A rejection at run start ends the run with the reason as the prompt error and a `hook_notice` row; a rejected queued batch or Stop continuation is dropped with the notice and the run continues. Context output is ignored with a notice. |
+| `SessionStart` | Match `source`: `startup`, `resume`, `clear`, `compact`, `fork`. Text stdout or `hookSpecificOutput.additionalContext` supplies developer context. Common `continue: false` stops before the next model request. | Synchronous control gate, deferred until real work before the first model request. Sources `startup`, `resume`, `compact`; no `clear` or `fork` event is fabricated. Plain stdout or `hookSpecificOutput.additionalContext` becomes model context (see "Model context" below). `continue: false` stops the request with a `hook_notice` row and the reason as the prompt error. Exit 2 is a callback failure, not a veto. |
+| `UserPromptSubmit` | Matcher ignored. Input includes `prompt`, `turn_id`. Text/context output supplements developer context; `decision: "block"` or exit 2 rejects the prompt. | Synchronous admission before user-message context/persistence, including queued user batches and Stop-hook continuations. In-run autonomous and goal continuation rows are not submissions and skip it; an autonomous continuation that a host held and later re-queues (daemon queue, print-mode follow-up) is admitted as an ordinary prompt and does pass through it. Block/exit 2 requires a nonempty reason. A rejection at run start ends the run with the reason as the prompt error and a `hook_notice` row; a rejected queued batch or Stop continuation is dropped with the notice and the run continues. Plain stdout or `additionalContext` becomes model context that follows the admitted prompt. |
 | `PreToolUse` | Match canonical tool name and aliases. Input includes tool id, arguments and turn id. Supports deny, context and allow with replacement arguments. Plain stdout ignored. | Synchronous denial only: modern `permissionDecision: "deny"`, legacy `decision: "block"`, or exit 2. Deny/block and exit 2 require nonempty reasons. Any `updatedInput` rewrite blocks the call (the original input never runs in its place); `additionalContext` is ignored with a notice; `permissionDecision: "allow"` is a hook failure. Permissions remain unchanged. |
 | `PostToolUse` | Match tool name. Input adds `tool_response`. Synchronous block/exit 2 can replace the model-visible tool result, although effects already happened. Asynchronous handlers cannot control execution. | Requires `async: true`; observation only. No result replacement, approval, continuation or model-context injection. Raw tool output and durable transcripts remain unchanged. |
 | `Stop` | Matcher ignored. Input includes `stop_hook_active` and nullable `last_assistant_message`. Block/exit 2 creates a continuation user prompt; `continue: false` wins over continuation. Nonempty plain stdout invalid. | Runs only when the host's continuation policy reports a natural stop (no queued input, compaction, goal, autonomous or background work owns the boundary). An abort while it runs ends the finished run cleanly. Ordered block reasons become one persisted user continuation, admitted through UserPromptSubmit. One continuation per run; the next Stop has `stop_hook_active: true` and additional blocks are diagnosed and ignored. |
-| `SessionEnd` | Main session only; reason `other`; always synchronous, even with `async: true`. Advisory output. Timeout default 1 second, maximum 3 seconds. Client detachment is not session end. | Emitted when a root session's worker or process closes: explicit daemon session kill/stop, daemon-wide stop, idle passivation (on by default, 90 minutes after detach; the session can be resumed later), print completion/error, RPC EOF and RPC-handled SIGTERM/SIGHUP. It can fire for a session that never ran SessionStart. Session replacement inside a worker (`new_session`, `switch_session`, import, fork), detach, runtime rebuild and abrupt process death do not emit it. Concurrent callers join one bounded batch. Exit 0 ignores stdout; failures are advisory. |
+| `SessionEnd` | Main session only; reason `other`; always synchronous, even with `async: true`. Advisory output. Timeout default 1 second, maximum 3 seconds. Client detachment is not session end. | Paired with SessionStart: emitted once for a root session that reached its SessionStart gate, when its worker or process closes (daemon session kill/stop, daemon-wide stop, idle passivation, print completion/error, RPC EOF and RPC-handled SIGTERM/SIGHUP) or when the session is replaced. `new_session` reports `reason: "clear"`; switch, import, fork and every close report `other`. A session that never made a model request emits neither event. Detach, runtime rebuild and abrupt process death do not emit it. Concurrent callers join one bounded batch. Exit 0 ignores stdout; failures are advisory. |
 | `PreCompact` | Match trigger `manual` or `auto`; common JSON controls, no plain-text context; `continue: false` stops before compaction. | Synchronous gate inside the shared manual/automatic compaction entry, after eligibility and before the compaction flight lock, under the guards the host already holds for the summarizer. The host's compaction abort cancels it (daemon `abort_compaction`, shutdown and replacement; RPC `abort` and SIGTERM/SIGHUP). JSON `continue: false` vetoes; every nonzero exit is a callback failure. Successful compaction schedules SessionStart source `compact` before the next model call. |
 
 SessionStart stops the next model request; internally generated continuation rows may
@@ -124,10 +124,10 @@ display-only `hook_notice` transcript rows; they are never model context:
   observer, appears with the next admitted prompt. SessionEnd failures happen
   while the session closes and are not shown.
 
-An untrusted source reports its path and the fingerprint to trust, for example:
+An untrusted project source reports its path and the fingerprint to trust, for example:
 
 ```text
-Hooks skipped: /work/repo/.prime/hooks.json is not trusted for /work/repo. Trust covers the file's path and bytes and the session directory, so an edit or another directory needs a new entry. After reviewing it, add this fingerprint to /home/me/.prime/agent/hook-trust.json (see docs/hooks.md):
+Project hooks skipped: /work/repo/.prime/agent/hooks.json is not trusted. Trust covers the file's path and exact bytes, so any edit needs a new entry. After reviewing it, add this fingerprint to /home/me/.prime/agent/hook-trust.json (see docs/hooks.md):
 <sha256>
 ```
 
@@ -137,10 +137,8 @@ trust action or bypass flag. To calculate a fingerprint without changing trust:
 ```python
 import hashlib, os
 from pathlib import Path
-source = Path("/absolute/path/to/hooks.json").resolve(strict=True)
-cwd = Path("/absolute/session/working/directory").resolve(strict=True)
-print(hashlib.sha256(os.fsencode(source) + b"\0" + os.fsencode(cwd)
-                     + b"\0" + source.read_bytes()).hexdigest())
+source = Path("/absolute/path/to/repo/.prime/agent/hooks.json").resolve(strict=True)
+print(hashlib.sha256(os.fsencode(source) + b"\0" + source.read_bytes()).hexdigest())
 ```
 
 Matchers are regular expressions. Omitted, empty or `"*"` matches every
@@ -148,8 +146,10 @@ matched event value. UserPromptSubmit and Stop ignore matchers. SessionStart mat
 PreCompact trigger, SessionEnd reason, and tool events canonical tool name. Prime does not expand Codex tool aliases; match `Bash`, `edit` or `python_repl` as applicable. Hook commands run in the session working directory, which can
 be a repository subdirectory; absolute script paths are preferable.
 
-Both sources require explicit trust. The trust record is
-`<agent_dir>/hook-trust.json`, never repository configuration:
+The user source `<agent_dir>/hooks.json` needs no trust entry: it is the
+user's own configuration, like `settings.json`, and loads whenever it passes the
+file-safety checks below. A project source requires explicit trust. The trust
+record is `<agent_dir>/hook-trust.json`, never repository configuration:
 
 ```json
 {
@@ -158,9 +158,12 @@ Both sources require explicit trust. The trust record is
 }
 ```
 
-For both sources, the digest binds the canonical source path, a NUL separator,
-the canonical session cwd, another NUL separator, and the exact source bytes.
-Trust is deliberately specific to the execution directory, even for user hooks. On the next configuration load, editing a source invalidates its trust.
+A project digest binds the canonical source path, a NUL separator and the exact
+source bytes, so one entry covers every session directory and subdirectory of
+that checkout. Editing the file invalidates its trust on the next load. When the
+user and project sources resolve to the same file (for example a session started
+in `$HOME`, whose fallback project root holds `~/.prime/agent`), it loads once,
+as the user source.
 Configuration is an immutable per-session snapshot loaded at first lifecycle dispatch;
 reopen the session to load configuration or trust changes. This conservatively
 trusts the whole source rather than Codex's individual hook definitions.
@@ -169,17 +172,44 @@ scripts it invokes; review those scripts and their update process too.
 
 Untrusted sources are skipped with diagnostics in interactive, daemon, direct
 and headless execution. Headless execution cannot implicitly approve project
-hooks. A project cannot provide its own trust record. The trust file must be a regular
-file, not a symlink, and the agent directory must be outside the canonical
-project root. On Unix, both trust file and directory must belong to the current
-user and must not be group- or world-writable. Configuration sources also reject
+hooks. A project cannot provide its own trust record. The user source and the
+trust file must be regular files, not symlinks. On Unix, the user source, the
+trust file and the agent directory must belong to the current user and must not
+be group- or world-writable. Configuration sources also reject
 final-component symlinks. Files are opened nonblocking before checking regular-file
 metadata, so a FIFO cannot wait indefinitely for a writer. Hook trust never changes tool permissions.
 
 Unsupported events, handlers, matchers and fields skip only that part of a
 source, with a diagnostic; malformed JSON or an exceeded limit skips the source. An invalid project source cannot
-remove accepted user hooks. An invalid or unsafe shared trust record disables
-both sources. These failures leave normal runtime behavior unchanged.
+remove accepted user hooks. An invalid or unsafe trust record skips the project
+source; an unsafe agent directory disables hooks. These failures leave normal
+runtime behavior unchanged unless a loaded handler is `failClosed`.
+
+## Model context
+
+SessionStart and UserPromptSubmit can add model context, as in Codex and Claude
+Code: plain stdout on exit 0, or `hookSpecificOutput.additionalContext` in JSON.
+Prime records it as a durable, model-visible `hook_context` row labelled with its
+event (`SessionStart hook context:` / `UserPromptSubmit hook context:`), placed
+after the admitted prompt (SessionStart context from a later compaction restart
+goes before the next model request). Several handlers' context is joined in
+order. Each row is capped at 10,000 characters, Claude Code's limit; longer
+context is truncated with a `hook_notice`. A veto or stop discards that event's
+context. `hook_notice` rows stay display-only. `additionalContext` from other
+events is ignored with a notice.
+
+## Fail-closed handlers
+
+Neither Codex nor Claude Code has a per-handler fail-closed setting, so Prime
+adds `"failClosed": true` on a handler. When set on a gating event (PreToolUse,
+UserPromptSubmit, SessionStart, PreCompact), a handler that cannot decide (a
+timeout, a spawn or command failure, a nonzero exit other than a valid exit 2,
+or malformed or unsupported output) blocks the operation instead of passing
+through. The block reason is `a required <Event> hook could not decide
+(<failure>)`, and a `hook_notice` names the handler. It has no effect on
+PostToolUse and SessionEnd (observe-only) or Stop (whose block requests more
+work); setting it there loads the handler with a notice. Cancellation and
+shutdown never count as a failure.
 
 ## Wire contract
 
@@ -204,6 +234,7 @@ All payloads follow their event-specific schemas. Tool-event fields include:
 | `tool_use_id` | Tool invocation identifier, shared by its pre/post events. |
 | `tool_input` | Tool arguments. Bash supplies its string `command`. |
 | `tool_response` | Post event only: the original tool response. |
+| `agent_id`, `agent_type` | Subagent sessions only: the subagent's session id and `"rlm"`. Omitted for the root session; also present on UserPromptSubmit. |
 
 Lifecycle payloads use the following exact field sets; absent optional agent metadata
 is omitted. Every event includes `session_id`, `transcript_path`, `cwd` and
@@ -215,7 +246,7 @@ is omitted. Every event includes `session_id`, `transcript_path`, `cwd` and
 | UserPromptSubmit | `model`, `permission_mode`, `turn_id`, `prompt` |
 | Stop | `model`, `permission_mode`, `turn_id`, `stop_hook_active`, `last_assistant_message` |
 | PreCompact | `model`, `turn_id`, `trigger` |
-| SessionEnd | `reason: "other"` |
+| SessionEnd | `reason`: `"clear"` for `new_session`, otherwise `"other"` |
 
 SessionStart reports `resume` when restored conversation history is present; an
 empty restored session currently reports `startup`. There is no separate `clear`
@@ -332,8 +363,9 @@ Codex defaults most command hooks to 600 seconds and runs up to eight
 background hooks concurrently per session, with additional invocations queued.
 Prime Agent preserves the default timeout but imposes the additional finite
 limits above. Unsupported timeout values are skipped explicitly rather than
-silently clamped. Subagent sessions are
-excluded in this milestone; no fabricated parent session identity is emitted.
+silently clamped. Subagent sessions run
+the tool and prompt events with `agent_id`/`agent_type`; their `session_id` is
+the subagent's own session.
 
 ## Security-hook suitability and concrete gaps
 
@@ -347,7 +379,7 @@ policy and its hook definitions require a separate coverage assessment.
 | --- | --- |
 | Root-session model tools | PreToolUse sees prepared, schema-validated arguments and a supported nonempty deny prevents the executor from running. The original model call and denial remain in the transcript. CLI/daemon currently expose `python_repl`; a `Bash` matcher alone does not protect that surface. |
 | Operations inside an allowed Python cell | No separate hook for nested shell commands, file/network operations or kernel-host requests. The outer cell can be rejected as a whole; its later dynamic operations are not individually authorized by this API. Previously started background kernel work is not retroactively vetoed. |
-| Subagent model tools | All hooks are excluded at `rlm_depth > 0`, including PreToolUse. Parent-cell admission does not enforce a policy on the child's later calls. This exclusion is intentional and tested. |
+| Subagent model tools | `rlm.spawn` subagents run PreToolUse, PostToolUse and UserPromptSubmit with the same configuration, so a denial cannot be bypassed by delegating the call. Their payloads add Codex's optional `agent_id` (the subagent's session id) and `agent_type: "rlm"`. SessionStart, Stop, PreCompact and SessionEnd stay with the root session; Codex reports subagent lifecycle through SubagentStart/SubagentStop, which are not supported. |
 | Daemon user bash | `execute_bash` and `execute_bash_and_wait` route through `user_bash::run_bash`, which directly spawns the shell and does not enter the model-tool hook pipeline. A model-tool Bash matcher does not cover this separate user-command surface. |
 | Preparation and refused calls | Tool lookup, `prepare_arguments` and schema validation precede the hook. Unknown/invalid tool calls do not execute, but also do not produce Pre/Post hook audit events. An embedding's preparation callback is outside this veto boundary. |
 | Permissions and approvals | `permission_mode` is the fixed descriptive value `default`, not a live permission/sandbox policy. PermissionRequest and allow/rewrite controls are unsupported. The adapter can deny; it neither grants permissions nor adds an independent sandbox or approval system. Existing execution restrictions, where provided, remain necessary. |
@@ -358,20 +390,21 @@ hook veto. Missing/unreadable/invalid configuration or trust, mismatched
 fingerprints, regex execution errors, process spawn failure, timeout, input above
 1 MiB, malformed output (including JSON cut off at the 64 KiB output cap),
 unsupported fields, nonzero exits other than valid exit 2, and empty deny reasons
-leave the operation unchanged. A hook diagnostic reports failures, but there is no required
-policy mode, fail-closed option, or interactive/headless admission error for an
-unavailable security hook. Another successfully parsed handler can still deny.
+leave the operation unchanged, unless the handler sets `"failClosed": true` (see
+below). A hook diagnostic reports failures. A source that is missing, untrusted
+or invalid loads no handlers, so `failClosed` cannot apply to it. Another successfully parsed handler can still deny.
 Cancellation remains governed by the host's abort handling; a discarded hook
 outcome is not itself authorization to ignore cancellation.
 
-For example, exit 2 with empty stderr does not deny. A JSON denial that also
-carries `additionalContext` still denies (the context is ignored with a notice),
+For example, exit 2 with empty stderr does not deny unless the handler is
+`failClosed`. A PreToolUse JSON denial that also carries `additionalContext`
+still denies (the context is ignored with a notice),
 and any `updatedInput` blocks the call; other unsupported output fields fail the
 handler and do not partially apply a denial. Existing Codex/security scripts must be checked
 against the supported output subset before relying on them.
 
 **Trust approves execution of hook code, not mandatory enforcement of policy.**
-The source/cwd/bytes fingerprint and safe trust-file ownership prevent project
+The project path/bytes fingerprint and safe trust-file ownership prevent project
 configuration from silently authorizing itself. They do not pin external script
 contents, prevent an authorized user from removing/changing configuration, or
 make trust tamper-proof against the same OS user. Changes take effect only on the

@@ -24,7 +24,9 @@ from the original model call, so policy adapters can match executable aliases
 without rewriting call history.
 
 `BeforeInputFn` gates submitted batches before their message events or context
-append; `BeforeModelFn` supports deferred initialization. Both receive the active
+append, and may return rows (for example hook context) admitted after the batch;
+`BeforeModelFn` supports deferred initialization and may return rows admitted
+before the model request. Both receive the active
 run's cancellation signal and execute outside agent state locks. Submitted batch
 metadata includes custom rows so an embedding can restore deferred bookkeeping
 when admission is refused. Internal continuation rows retain separate provenance.
