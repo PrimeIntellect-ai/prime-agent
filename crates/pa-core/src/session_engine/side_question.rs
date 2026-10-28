@@ -193,6 +193,11 @@ pub async fn run_side_question(
         stream_fn: Some(stream_fn),
         before_tool_call: Some(before_tool_call),
         should_stop_after_turn: Some(should_stop_after_turn),
+        // TS `side-question.ts`: the side call keeps the parent's identity so it reads the main
+        // conversation's prompt cache, and rides SSE so it never takes the session's Codex
+        // socket or its continuation.
+        session_id: parent.session_id().map(str::to_string),
+        transport: Some(pa_agent::types::Transport::Sse),
         ..Default::default()
     }));
 
@@ -604,6 +609,49 @@ mod tests {
 
         // Side results never touch the parent history.
         assert_eq!(parent.state().await.messages.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn side_calls_keep_the_parent_identity_on_sse() {
+        let provider = Arc::new(ScriptedProvider::new(test_model()));
+        provider.push_text_turn("the side answer");
+        let parent = Arc::new(Agent::new(AgentOptions {
+            initial_state: AgentInitialState {
+                model: Some(test_model()),
+                ..Default::default()
+            },
+            session_id: Some("parent-session".to_string()),
+            ..Default::default()
+        }));
+        let observed = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let capture = Arc::clone(&observed);
+        let inner = provider.stream_fn();
+        let stream_fn: pa_agent::stream::StreamFn = Arc::new(move |model, context, options| {
+            capture
+                .lock()
+                .unwrap()
+                .push((options.session_id.clone(), options.transport));
+            inner(model, context, options)
+        });
+        let sink: SideQuestionSink = Arc::new(|_| true);
+        let result = run_side_question(
+            &parent,
+            stream_fn,
+            "what is the answer?",
+            &[],
+            &fast_retry_policy(),
+            &AbortSignal::never(),
+            &sink,
+        )
+        .await;
+        assert_eq!(result.status, SideQuestionStatus::Complete);
+        assert_eq!(
+            *observed.lock().unwrap(),
+            vec![(
+                Some("parent-session".to_string()),
+                Some(pa_agent::types::Transport::Sse)
+            )]
+        );
     }
 
     #[tokio::test]

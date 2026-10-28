@@ -147,7 +147,7 @@ impl TreeNavigation {
             .map(str::to_string);
 
         // Snapshot the tree state under one lock pass; the model call below runs without it.
-        let (target, old_leaf, entries) = {
+        let (target, old_leaf, entries, session_id) = {
             let core = self.core.lock().unwrap();
             let Some(store) = core.store.as_ref() else {
                 return response_failure(
@@ -167,7 +167,7 @@ impl TreeNavigation {
             };
             let old_leaf = store.leaf_id().map(str::to_string);
             let entries = store.entries().to_vec();
-            (target, old_leaf, entries)
+            (target, old_leaf, entries, store.session_id().to_string())
         };
         // No-op when already at the target (TS checks before pausing work).
         if Some(target_id) == old_leaf.as_deref() {
@@ -212,6 +212,7 @@ impl TreeNavigation {
                                 entries: collected.entries,
                                 custom_instructions,
                                 replace_instructions,
+                                session_id,
                             },
                             &signal,
                         )
@@ -569,6 +570,9 @@ impl Worker {
     /// fork file, retire the live runtime, swap the store, prewarm the replacement.
     /// Tree moves (`navigate_tree`) never run this teardown.
     pub(crate) async fn handle_fork(&self, payload: &Value) -> DaemonResponse {
+        // The pause spans settle and replacement: no steer admits on the
+        // branch being left.
+        let _queued_work = self.hold_queued_work_pause("fork");
         let (forked, selected_text) = match self.tree_navigation.prepare_fork(payload).await {
             Ok(prepared) => prepared,
             Err(response) => return response,

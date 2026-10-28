@@ -10,6 +10,7 @@ use serde_json::{json, Value};
 
 mod auth;
 mod convert;
+mod credential_process;
 mod events;
 mod eventstream;
 mod goaway;
@@ -22,8 +23,8 @@ use crate::event_stream::{
 };
 use crate::providers::bedrock::auth::{resolve_credentials, resolve_endpoint, sigv4_headers};
 use crate::providers::bedrock::convert::{
-    convert_messages, convert_tool_config, map_stop_reason, map_thinking_level_to_effort,
-    supports_always_on_adaptive_thinking, BedrockToolChoice,
+    convert_messages, convert_tool_config, get_model_match_candidates, map_stop_reason,
+    map_thinking_level_to_effort, supports_always_on_adaptive_thinking, BedrockToolChoice,
 };
 pub(crate) use crate::providers::bedrock::convert::{
     is_anthropic_claude_model, supports_adaptive_thinking,
@@ -326,6 +327,16 @@ fn build_additional_model_request_fields(model: &Model, options: &BedrockOptions
         return None;
     }
 
+    if reasoning == ModelThinkingLevel::Off {
+        // Haiku 5.x thinks by default when the request carries no `thinking` field, so "off" has to
+        // say so explicitly, as the Anthropic route does.
+        let thinks_by_default = is_anthropic_claude_model(model)
+            && get_model_match_candidates(&model.id, Some(&model.name))
+                .iter()
+                .any(|candidate| candidate.contains("haiku-5"));
+        return thinks_by_default.then(|| json!({ "thinking": { "type": "disabled" } }));
+    }
+
     if is_anthropic_claude_model(model) {
         // GovCloud Bedrock currently rejects the Claude thinking.display field. Omit it there until
         // the GovCloud Converse schema catches up.
@@ -486,12 +497,12 @@ async fn run_stream(
     }
 
     let (endpoint, region) = resolve_endpoint(model, &options);
-    let path_and_query = format!("/model/{}/converse-stream", encode_model_id(&model.id));
+    let path = format!("/model/{}/converse-stream", encode_model_id(&model.id));
     let host = url::Url::parse(&endpoint)
         .ok()
         .and_then(|url| url.host_str().map(str::to_string))
         .ok_or_else(|| ProviderError::Message(format!("Invalid Bedrock endpoint: {endpoint}")))?;
-    let url = format!("{endpoint}{path_and_query}");
+    let url = format!("{endpoint}{path}");
 
     let mut headers: Vec<(String, String)> = vec![
         ("content-type".into(), "application/json".into()),
@@ -528,13 +539,25 @@ async fn run_stream(
             headers.push((name.clone(), value.clone()));
         }
     } else {
-        let credentials = resolve_credentials(options.profile.as_deref()).ok_or_else(|| {
+        // Resolution may run the profile's credential_process, so it honours the request's signal;
+        // leaving the select drops the resolution, which kills a stalled process.
+        let cancelled = async {
+            match &options.base.signal {
+                Some(signal) => signal.cancelled().await,
+                None => std::future::pending().await,
+            }
+        };
+        let credentials = tokio::select! {
+            () = cancelled => return Err(ProviderError::Aborted),
+            credentials = resolve_credentials(options.profile.as_deref()) => credentials,
+        }
+        .ok_or_else(|| {
             ProviderError::Message("No AWS credentials available for Bedrock".to_string())
         })?;
         let (amz_date, authorization, security_token) = sigv4_headers(
             &crate::providers::bedrock::auth::SigV4Params {
                 method: "POST",
-                path_and_query: &path_and_query,
+                path: &path,
                 host: &host,
                 region: &region,
                 service: "bedrock",
@@ -719,7 +742,7 @@ pub fn stream_simple_bedrock(
             context,
             Some(&BedrockOptions {
                 base,
-                reasoning: None,
+                reasoning: Some(ModelThinkingLevel::Off),
                 ..Default::default()
             }),
         );
@@ -997,6 +1020,59 @@ mod tests {
             &test_model("us.anthropic.claude"),
             &options
         ));
+    }
+
+    /// Haiku 5.x thinks by default, so thinking off must send `thinking: {type: "disabled"}` on
+    /// Bedrock, as the Anthropic route does. Haiku 4.5 does not think unasked and gets no field.
+    #[tokio::test]
+    async fn thinking_off_disables_haiku_5_default_thinking() {
+        for (id, name, expected) in [
+            (
+                "us.anthropic.claude-haiku-5-5-v1",
+                "Claude Haiku 5.5",
+                json!({ "thinking": { "type": "disabled" } }),
+            ),
+            (
+                "us.anthropic.claude-haiku-4-5-v1",
+                "Claude Haiku 4.5",
+                Value::Null,
+            ),
+        ] {
+            let model = Model {
+                name: name.into(),
+                // A closed local port: the payload hook below cancels the request before it sends.
+                base_url: "http://127.0.0.1:9".into(),
+                ..test_model(id)
+            };
+            let captured = std::sync::Arc::new(std::sync::Mutex::new(None));
+            let signal = tokio_util::sync::CancellationToken::new();
+            let options = SimpleStreamOptions {
+                base: StreamOptions {
+                    signal: Some(signal.clone()),
+                    on_payload: Some(std::sync::Arc::new({
+                        let captured = std::sync::Arc::clone(&captured);
+                        move |payload: Value, _model: &Model| {
+                            *captured.lock().unwrap() = Some(payload);
+                            signal.cancel();
+                            None
+                        }
+                    })),
+                    ..Default::default()
+                },
+                reasoning: Some(ModelThinkingLevel::Off),
+                thinking_budgets: None,
+            };
+            let context = Context {
+                system_prompt: None,
+                messages: Vec::new(),
+                tools: None,
+            };
+            stream_simple_bedrock(&model, &context, Some(&options))
+                .collect()
+                .await;
+            let payload = captured.lock().unwrap().take().expect("payload captured");
+            assert_eq!(payload["additionalModelRequestFields"], expected, "{id}");
+        }
     }
 
     fn test_model(id: &str) -> Model {

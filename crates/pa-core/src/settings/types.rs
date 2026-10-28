@@ -254,50 +254,6 @@ pub struct TelemetrySettings {
     pub local_mirror: Option<bool>,
 }
 
-/// User-declared MCP server (settings `mcpServers` entry).
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "kebab-case")]
-pub enum McpServerConfig {
-    Http {
-        url: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        headers: Option<serde_json::Map<String, serde_json::Value>>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        bearer_token_env_var: Option<String>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        oauth: Option<bool>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        enabled: Option<bool>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        enabled_tools: Option<Vec<String>>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        disabled_tools: Option<Vec<String>>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        startup_timeout_ms: Option<u64>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        call_timeout_ms: Option<u64>,
-    },
-    Stdio {
-        command: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        args: Option<Vec<String>>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        cwd: Option<String>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        env: Option<serde_json::Map<String, serde_json::Value>>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        enabled: Option<bool>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        enabled_tools: Option<Vec<String>>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        disabled_tools: Option<Vec<String>>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        startup_timeout_ms: Option<u64>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        call_timeout_ms: Option<u64>,
-    },
-}
-
 /// The default per-cell watchdog budget for user `python_repl` cells: 60
 /// seconds.
 pub const DEFAULT_PYTHON_CELL_TIMEOUT_MS: u64 = 60_000;
