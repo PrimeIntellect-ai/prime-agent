@@ -36,6 +36,11 @@ pub(crate) enum FactoryUpdate {
         epoch: u64,
         message: String,
     },
+    ChildStop {
+        session: String,
+        message: String,
+        tone: crate::agents_view::StatusTone,
+    },
 }
 
 impl super::SessionUi {
@@ -117,7 +122,7 @@ impl super::SessionUi {
                 self.factory_control(view, "stop", run_id).await?;
             }
             Some(FactoryViewAction::StopChild { child_id, label }) => {
-                self.stop_factory_child(view, child_id, label).await;
+                self.stop_factory_child(child_id, label);
             }
             Some(FactoryViewAction::Resume { run_id }) => {
                 self.factory_control(view, "resume", run_id).await?;
@@ -161,33 +166,34 @@ impl super::SessionUi {
     /// treats the cancel as a failed attempt under the state's retries
     /// and failure policy. Success toasts; a no-effect or failed stop
     /// lands on the page's error line.
-    async fn stop_factory_child(&mut self, view: &mut AgentView, child_id: String, label: String) {
+    fn stop_factory_child(&mut self, child_id: String, label: String) {
         let action = crate::agents_view::DeleteAction::StopSubagent {
             active_session_id: self.active_session_id.clone(),
             child_id,
             name: label,
         };
-        let outcome = tokio::time::timeout(
-            Duration::from_millis(UI_REQUEST_TIMEOUT_MS),
-            crate::agents_view::execute_delete_action(&self.client, &action),
-        )
-        .await;
-        match outcome {
-            Ok((message, crate::agents_view::StatusTone::Muted)) => self.toast(&message, view),
-            Ok((message, _)) => {
-                if let Some(factory_view) = view.factory_view.as_mut() {
-                    factory_view.set_error(Some(message));
-                }
-            }
-            Err(_) => {
-                if let Some(factory_view) = view.factory_view.as_mut() {
-                    factory_view.set_error(Some(
-                        "timed out waiting for the Prime Agent daemon response".to_string(),
-                    ));
-                }
-            }
-        }
-        self.spawn_factory_refresh();
+        let client = self.client.clone();
+        let tx = self.factory_updates.clone();
+        let session = self.active_session_id.clone();
+        tokio::spawn(async move {
+            let (message, tone) = match tokio::time::timeout(
+                Duration::from_millis(UI_REQUEST_TIMEOUT_MS),
+                crate::agents_view::execute_delete_action(&client, &action),
+            )
+            .await
+            {
+                Ok(result) => result,
+                Err(_) => (
+                    "timed out waiting for the Prime Agent daemon response".to_string(),
+                    crate::agents_view::StatusTone::Error,
+                ),
+            };
+            let _ = tx.send(FactoryUpdate::ChildStop {
+                session,
+                message,
+                tone,
+            });
+        });
     }
 
     /// One orchestration action (stop/resume): bounded request, the
@@ -407,9 +413,6 @@ impl super::SessionUi {
     /// reports it on its error line instead of painting a fake empty
     /// state (the emptiness the view shows is real).
     pub(crate) fn apply_factory_update(&mut self, update: FactoryUpdate, view: &mut AgentView) {
-        // The slot frees on every delivery path; a queued tick fires next.
-        self.factory_refresh_in_flight = false;
-        let queued = std::mem::take(&mut self.factory_refresh_queued);
         let (session, epoch, payload) = match update {
             FactoryUpdate::Snapshot {
                 session,
@@ -421,7 +424,31 @@ impl super::SessionUi {
                 epoch,
                 message,
             } => (session, epoch, Err(message)),
+            FactoryUpdate::ChildStop {
+                session,
+                message,
+                tone,
+            } => {
+                if session == self.active_session_id {
+                    match tone {
+                        crate::agents_view::StatusTone::Muted => self.toast(&message, view),
+                        crate::agents_view::StatusTone::Warning
+                        | crate::agents_view::StatusTone::Error => {
+                            if let Some(factory_view) = view.factory_view.as_mut() {
+                                factory_view.set_error(Some(message));
+                            }
+                        }
+                    }
+                    self.dirty = true;
+                    self.spawn_factory_refresh();
+                }
+                return;
+            }
         };
+        // Only refresh deliveries release the refresh slot; child-stop
+        // results are independent of any snapshot currently in flight.
+        self.factory_refresh_in_flight = false;
+        let queued = std::mem::take(&mut self.factory_refresh_queued);
         if session != self.active_session_id || epoch != self.factory_list_epoch {
             if queued {
                 self.spawn_factory_refresh();
