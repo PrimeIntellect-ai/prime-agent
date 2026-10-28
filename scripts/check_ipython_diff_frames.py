@@ -171,6 +171,14 @@ def capture(binary, kind, case, width, root):
     return result
 
 
+def frames_equal(pair):
+    return bool(set(pair) == {'ts', 'rust'} and all(
+        item.get('executed') and item.get('cleanup_verified')
+        and item.get('exit_code') == 0
+        and not item.get('error') and not item.get('fixture_errors')
+        for item in pair.values()) and pair['ts']['frames'] == pair['rust']['frames'])
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--receipt', type=Path, required=True)
@@ -192,10 +200,7 @@ def main():
                         binary = Path(os.environ[f'PA_{kind.upper()}_BINARY']).resolve()
                         pair[kind] = capture(binary, kind, case, width,
                             Path(folder) / f'{key}-{kind}')
-                    receipt['comparisons'][key] = bool(all(
-                        item.get('executed') and item.get('cleanup_verified')
-                        and not item.get('error') and not item.get('fixture_errors')
-                        for item in pair.values()) and pair['ts']['frames'] == pair['rust']['frames'])
+                    receipt['comparisons'][key] = frames_equal(pair)
         receipt['verified'] = bool(receipt['comparisons'] and all(receipt['comparisons'].values()))
     except Exception as error:
         receipt['error'] = f'{type(error).__name__}: {error}'

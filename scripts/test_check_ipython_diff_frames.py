@@ -1,10 +1,21 @@
+import copy
 import unittest
 
-from check_ipython_diff_frames import END, FrameSupervisor, region
+from check_ipython_diff_frames import END, FrameSupervisor, frames_equal, region
 from lifecycle_lib import DockScreen
 
 
 class EditFrameCaptureTests(unittest.TestCase):
+    def test_a_crashed_or_unexited_ui_cannot_pass(self):
+        item = {'executed': True, 'cleanup_verified': True, 'exit_code': 0,
+                'frames': {'details': [[['x', {}]]]}}
+        pair = {'ts': copy.deepcopy(item), 'rust': copy.deepcopy(item)}
+        self.assertTrue(frames_equal(pair))
+        for code in (1, -11, None):
+            changed = copy.deepcopy(pair)
+            changed['rust']['exit_code'] = code
+            self.assertFalse(frames_equal(changed))
+
     def test_wide_cell_repaint_clears_and_styles_its_continuation(self):
         screen = DockScreen(width=8)
         screen.feed('ab界\r\x1b[41mX界'.encode())
