@@ -565,6 +565,7 @@ mod tests {
                 child: moved_at.to_string_lossy().to_string(),
                 depth: 1,
                 name: "moved".to_string(),
+                factory: None,
             })
             .unwrap();
 

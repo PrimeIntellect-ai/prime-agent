@@ -1106,6 +1106,7 @@ pub(crate) mod tests {
                 child: gone_child.to_string_lossy().to_string(),
                 depth: 1,
                 name: "gone".to_string(),
+                factory: None,
             })
             .expect("append spawn");
         ledger
@@ -1118,6 +1119,7 @@ pub(crate) mod tests {
                     output_tokens: 7,
                     cost: 0.5,
                 },
+                /*by_model*/ None,
             )
             .expect("append delete");
         let mut events = supervisor.events.subscribe();
