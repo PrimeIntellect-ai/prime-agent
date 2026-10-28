@@ -10,11 +10,22 @@ class EditFrameCaptureTests(unittest.TestCase):
         screen.feed(('    ╰─ parity.py +1 -1\r\n\x1b[41;7m-1 a b\x1b[0m\r\n'
                      + END).encode())
         rows = region(screen, 'parity.py')
-        self.assertEqual(''.join(cell[0] for cell in rows[0]), '    ╰─ parity.py +1 -1')
+        self.assertEqual(len(rows[0]), 80)
+        self.assertEqual(''.join(cell[0] for cell in rows[0]).rstrip(), '    ╰─ parity.py +1 -1')
         self.assertEqual(rows[1][4], [' ', {'bg': ['ansi', 41], '7': True}])
         changed = DockScreen(width=80)
         changed.feed(('    ╰─ parity.py +1 -1\r\n-1 a b\r\n' + END).encode())
         self.assertNotEqual(region(changed, 'parity.py'), rows)
+
+    def test_trailing_colored_blanks_cannot_compare_equal(self):
+        plain = DockScreen(width=80)
+        plain.feed(('    ╰─ parity.py +1 -1\r\n-1 x   \r\n' + END).encode())
+        for sgr in ('41', '31;7'):
+            with self.subTest(sgr=sgr):
+                colored = DockScreen(width=80)
+                colored.feed(('    ╰─ parity.py +1 -1\r\n-1 x\x1b[' + sgr
+                              + 'm   \x1b[0m\r\n' + END).encode())
+                self.assertNotEqual(region(colored, 'parity.py'), region(plain, 'parity.py'))
 
     def test_missing_frame_boundary_cannot_be_compared_as_empty(self):
         screen = DockScreen(width=80)

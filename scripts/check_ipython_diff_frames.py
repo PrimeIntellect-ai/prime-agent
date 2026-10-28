@@ -66,18 +66,16 @@ def region(screen, path):
         raise ValueError('complete edited-file frame is not visible')
     result = []
     for y in range(starts[0], ends[0]):
-        text = rows[y].rstrip()
+        text = rows[y]
         cells = []
         for x, char in enumerate(text):
             style = copy.deepcopy(screen.styles[y][x])
             # Foreground on a blank cell is invisible; background and inverse
             # remain visible and are compared. No geometry is normalized.
-            if char.isspace():
-                style = {key: value for key, value in style.items() if key in ('bg', '7')}
+            if char.isspace() and not any(style.get(key) for key in ('4', '7', '9')):
+                style = {key: value for key, value in style.items() if key == 'bg'}
             cells.append([char, style])
         result.append(cells)
-    while result and not result[-1]:
-        result.pop()
     return result
 
 
@@ -98,6 +96,7 @@ def capture(binary, kind, case, width, root):
     root.mkdir()
     env = env_for(root)
     env[TAG] = str(root)
+    env['COLORTERM'] = 'truecolor'
     if kind == 'ts':
         env['PI_PACKAGE_DIR'] = str(binary.parent)
     hello = actual_hello(binary, root, env)
