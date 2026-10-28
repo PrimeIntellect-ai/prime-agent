@@ -1,6 +1,6 @@
 //! Azure `OpenAI` Responses API streaming provider: deployment name resolution (options/env map),
-//! base-URL normalization with the /openai/v1 path, api-version query parameter, and the shared
-//! Responses stream processor.
+//! base-URL normalization with the /openai/v1 path, the `<base>/responses?api-version=<v>` route
+//! (deployment in the body), and the shared Responses stream processor.
 
 use std::collections::HashMap;
 
@@ -106,8 +106,7 @@ fn normalize_azure_base_url(base_url: &str) -> Result<String, String> {
         host.ends_with(".openai.azure.com") || host.ends_with(".cognitiveservices.azure.com");
     let normalized_path = url.path().trim_end_matches('/');
 
-    // Ensure Azure hosts have /openai/v1 as base path so the deployment URL resolves as
-    // <base>/deployments/<name>/responses?api-version=<v>.
+    // Ensure Azure hosts have /openai/v1 as base path so the request resolves as <base>/responses.
     if is_azure_host && (normalized_path.is_empty() || normalized_path == "/openai") {
         let mut normalized = url.clone();
         normalized.set_path("/openai/v1");
@@ -122,13 +121,23 @@ fn build_default_base_url(resource_name: &str) -> String {
     format!("https://{resource_name}.openai.azure.com/openai/v1")
 }
 
-fn resolve_azure_config(
+/// Resolves the Responses request URL. Azure's Responses API has no per-deployment route: the
+/// deployment travels as `model` in the body and the URL is `<base>/responses?api-version=<v>`.
+/// The query is always sent (`v1` by default), as the TS `AzureOpenAI` client did. Azure hosts
+/// are normalized to `/openai/v1`, where Azure documents only `v1` and `preview`; a dated version
+/// only reaches a `/openai` path on a non-Azure gateway base URL.
+fn resolve_responses_url(
     model: &Model,
     options: Option<&AzureOpenAIResponsesOptions>,
-) -> Result<(String, String), String> {
+) -> Result<String, String> {
     let api_version = options
         .and_then(|options| options.azure_api_version.clone())
-        .or_else(|| std::env::var("AZURE_OPENAI_API_VERSION").ok())
+        .filter(|value| !value.is_empty())
+        .or_else(|| {
+            std::env::var("AZURE_OPENAI_API_VERSION")
+                .ok()
+                .filter(|value| !value.is_empty())
+        })
         .unwrap_or_else(|| DEFAULT_AZURE_API_VERSION.to_string());
 
     let base_url = options
@@ -161,7 +170,9 @@ fn resolve_azure_config(
         );
     };
 
-    Ok((normalize_azure_base_url(&resolved_base_url)?, api_version))
+    let base_url = normalize_azure_base_url(&resolved_base_url)?;
+    let base_url = base_url.trim_end_matches('/');
+    Ok(format!("{base_url}/responses?api-version={api_version}"))
 }
 
 fn build_params(
@@ -318,8 +329,7 @@ async fn run_stream(
         .clone()
         .or_else(|| get_env_api_key(&model.provider))
         .unwrap_or_default();
-    let (base_url, api_version) =
-        resolve_azure_config(model, Some(&options)).map_err(ProviderError::Message)?;
+    let url = resolve_responses_url(model, Some(&options)).map_err(ProviderError::Message)?;
 
     let mut params = build_params(model, context, &options, &deployment_name);
     if let Some(on_payload) = &options.base.on_payload {
@@ -328,10 +338,6 @@ async fn run_stream(
         }
     }
 
-    let url = format!(
-        "{}/deployments/{deployment_name}/responses?api-version={api_version}",
-        base_url.trim_end_matches('/')
-    );
     let mut headers: Vec<(String, String)> = Vec::new();
     for (name, value) in model.headers.iter().flatten() {
         headers.push((name.clone(), value.clone()));
@@ -528,6 +534,61 @@ impl Provider for AzureOpenAIResponsesProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn url_for(base_url: Option<&str>, resource: Option<&str>, api_version: &str) -> String {
+        let model = serde_json::from_value::<Model>(json!({
+            "id": "gpt-5.6-terra", "name": "GPT-5.6 Terra",
+            "api": "azure-openai-responses", "provider": "azure-openai-responses",
+            "baseUrl": "", "reasoning": false, "input": ["text"],
+            "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0 },
+            "contextWindow": 128_000, "maxTokens": 16_384
+        }))
+        .unwrap();
+        let mut options = AzureOpenAIResponsesOptions::from_base(StreamOptions::default());
+        options.azure_base_url = base_url.map(str::to_string);
+        options.azure_resource_name = resource.map(str::to_string);
+        options.azure_api_version = Some(api_version.to_string());
+        resolve_responses_url(&model, Some(&options)).unwrap()
+    }
+
+    /// Discussion #3712: the v1 API posts to `<resource>/openai/v1/responses?api-version=v1` with
+    /// the deployment in the body (byte parity with the TS `AzureOpenAI` client); the old
+    /// `/deployments/<name>/responses` route 404s. An empty version falls back to `v1`, as in TS.
+    #[test]
+    fn v1_requests_post_to_the_responses_route() {
+        let expected = "https://res.openai.azure.com/openai/v1/responses?api-version=v1";
+        assert_eq!(
+            [
+                url_for(Some("https://res.openai.azure.com"), None, "v1"),
+                url_for(Some("https://res.openai.azure.com/openai/"), None, "v1"),
+                url_for(Some("https://res.openai.azure.com/openai/v1"), None, "v1"),
+                url_for(None, Some("res"), "v1"),
+                url_for(None, Some("res"), ""),
+            ],
+            [expected; 5].map(str::to_string)
+        );
+    }
+
+    /// Other versions ride the same query: `preview` on the v1 path, or a dated version against a
+    /// non-Azure gateway's `/openai` base.
+    #[test]
+    fn non_v1_versions_keep_the_api_version_query() {
+        assert_eq!(
+            [
+                url_for(Some("https://res.openai.azure.com"), None, "preview"),
+                url_for(
+                    Some("https://gateway.example.com/openai"),
+                    None,
+                    "2025-04-01-preview"
+                ),
+            ],
+            [
+                "https://res.openai.azure.com/openai/v1/responses?api-version=preview",
+                "https://gateway.example.com/openai/responses?api-version=2025-04-01-preview",
+            ]
+            .map(str::to_string)
+        );
+    }
 
     /// A `reasoning: false` model whose map addresses levels (the live catalog's
     /// `gpt-5.3-chat-latest` azure shape) is thinking-capable: the requested effort reaches the

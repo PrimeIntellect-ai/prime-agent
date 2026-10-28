@@ -193,20 +193,9 @@ impl Worker {
     /// Record one durable custom row and broadcast its `message_start`/`message_end`
     /// pair (rows the session appends outside a turn).
     pub(crate) fn emit_custom_row(&self, message: &Value) {
-        {
-            let mut core = self.core.lock().unwrap();
-            persist_custom_row(&mut core, message);
-        }
-        self.broadcast_custom_row(message);
-    }
-
-    /// Broadcast one recorded custom row's `message_start`/`message_end`
-    /// pair (the frames attached clients render for it). Runs OUTSIDE
-    /// the `core` lock: a caller that persisted the row under its own
-    /// lock scope broadcasts after releasing it.
-    pub(crate) fn broadcast_custom_row(&self, message: &Value) {
-        self.emit_worker_event(json!({ "type": "message_start", "message": message }));
-        self.emit_worker_event(json!({ "type": "message_end", "message": message }));
+        let mut core = self.core.lock().unwrap();
+        persist_custom_row(&mut core, message);
+        broadcast_custom_row_locked(&mut core, &self.events, message);
     }
 
     /// Sequence and broadcast one `session_event` for the queue projection.
@@ -289,12 +278,33 @@ pub(crate) fn persist_custom_row(
     }
 }
 
+/// Broadcast a persisted custom row without releasing its store lock: a
+/// compaction replacement cannot include the row before its live frames.
+pub(crate) fn broadcast_custom_row_locked(
+    core: &mut SessionCore,
+    events: &EventPump,
+    message: &Value,
+) {
+    for event_type in ["message_start", "message_end"] {
+        emit_worker_event_locked(
+            core,
+            events,
+            json!({ "type": event_type, "message": message }),
+        );
+    }
+}
+
 pub(crate) fn emit_worker_event_with(
     core: &Arc<Mutex<SessionCore>>,
     events: &Arc<EventPump>,
     event: Value,
 ) {
     let mut core = core.lock().unwrap();
+    emit_worker_event_locked(&mut core, events, event);
+}
+
+/// Sequence and enqueue an event while its caller still owns the session store lock.
+pub(crate) fn emit_worker_event_locked(core: &mut SessionCore, events: &EventPump, event: Value) {
     let sequence = core.last_event_sequence + 1;
     core.last_event_sequence = sequence;
     let meta = create_daemon_event_meta(
@@ -311,7 +321,6 @@ pub(crate) fn emit_worker_event_with(
         rest: Map::default(),
     };
     let payload = serde_json::to_vec(&outbound).unwrap_or_default();
-    drop(core);
     events.send(OutboundFrame::session_event(payload));
 }
 

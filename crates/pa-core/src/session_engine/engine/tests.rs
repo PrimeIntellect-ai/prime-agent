@@ -54,6 +54,15 @@ async fn engine_runs_tool_loop_and_persists() {
     let tmp = tempfile::tempdir().unwrap();
     let cwd = tmp.path().join("project");
     std::fs::create_dir_all(&cwd).unwrap();
+    // Every request of the session carries the session's identity (#3618: the
+    // Codex prompt cache key, session headers, and WebSocket reuse key on it).
+    let observed_ids: Arc<std::sync::Mutex<Vec<Option<String>>>> = Arc::default();
+    let capture_ids = Arc::clone(&observed_ids);
+    let inner_stream = provider.stream_fn();
+    let stream: pa_agent::stream::StreamFn = Arc::new(move |model, context, options| {
+        capture_ids.lock().unwrap().push(options.session_id.clone());
+        inner_stream(model, context, options)
+    });
     let engine = create_session(SessionEngineConfig {
         on_late_sent_agent_message: None,
         semantic_edges: None,
@@ -68,7 +77,7 @@ async fn engine_runs_tool_loop_and_persists() {
         mcp_manager: None,
         model: Some(model),
         thinking_level: None,
-        stream_fn: Some(provider.stream_fn()),
+        stream_fn: Some(stream),
         tools: vec![bridge_tool(echo_definition())],
         custom_system_prompt: None,
         prompt_guidelines: vec![],
@@ -109,6 +118,11 @@ async fn engine_runs_tool_loop_and_persists() {
     assert_eq!(outcome, PromptOutcome::Prompt);
     engine.session.agent().wait_for_idle().await;
 
+    let expected_session_id = engine.session.session_id().await;
+    assert_eq!(
+        *observed_ids.lock().unwrap(),
+        vec![Some(expected_session_id); 2]
+    );
     let state = engine.session.agent().state().await;
     assert!(state.messages.iter().any(|message| match message {
         pa_agent::types::AgentMessage::Standard(pa_agent::types::Message::ToolResult(result)) => {

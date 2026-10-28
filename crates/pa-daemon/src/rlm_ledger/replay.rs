@@ -158,6 +158,9 @@ pub(super) struct ReplayState {
     pub(super) index: HashMap<String, usize>,
     pub(super) artifact_index: OnceLock<Mutex<ArtifactIndex>>,
     pub(super) deleted_bucket: Mutex<Option<DeletedBucket>>,
+    /// Live edges by the durable session id (file-name stem) of their
+    /// recorded parent: the family walk's entry into the replay.
+    pub(super) children_by_parent_id: HashMap<String, Vec<usize>>,
 }
 
 /// Ledger rows are immutable within a replay, but file moves and transcript

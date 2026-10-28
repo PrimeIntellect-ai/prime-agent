@@ -1,8 +1,8 @@
 """Validation and compilation for factory specifications.
 
 A continual-harness ``factory`` entry stores a declarative state machine of
-subagent states in ``arguments["machine"]``: entry states (which declare
-no inputs), guarded transitions between states, and bounded re-entry
+subagent states in ``arguments["machine"]``: entry states (whose inputs
+are all optional), guarded transitions between states, and bounded re-entry
 (``max_entries``). The original DAG form in ``arguments["dag"]`` stays as
 sugar: it compiles to machine form (each node becomes a state entered
 once; a node's full effective dependency set compiles to ONE join
@@ -492,7 +492,7 @@ def validate_factory_machine(machine: Any) -> list[str]:
     Returns a list of human-readable error sentences; an empty list means
     the machine is valid. Rules: states are 1..1024 with unique slug ids and
     at least one entry state; every state requires a subagent and entry
-    states declare no inputs; resident states declare no outputs, foreach,
+    states declare only optional inputs; resident states declare no outputs, foreach,
     retries, or outgoing transitions; wait blocks are rejected (the watch host
     handlers arrive with the communication series); transitions reference
     existing states (self-loops are legal re-entry) and may carry one guard
@@ -597,16 +597,21 @@ def validate_factory_machine(machine: Any) -> list[str]:
             _is_int(state.get("max_entries")) and state.get("max_entries") >= STATE_MAX_ENTRIES_DEFAULT
         ):
             errors.append(f"state {state_id} max_entries must be an integer >= {STATE_MAX_ENTRIES_DEFAULT}")
-        if state.get("entry") is True and _port_list(state, "inputs"):
-            errors.append(f"entry state {state_id} cannot declare inputs")
-        # A REQUIRED self-input can never bind: the state's first entry needs
-        # its own prior settle, and no settle exists before an entry settles.
-        # Optional self-inputs are the loop form (the first entry binds the
-        # null sentinel, re-entries re-bind the previous settle), so only the
-        # required variant is rejected -- the machine-form mirror of the dag
-        # compiler's "node b cannot depend on itself" rule.
+        # A REQUIRED input can never bind on an entry state's first entry
+        # (admission has no upstream settle) nor on a self-input's first
+        # entry (no settle exists before an entry settles). Optional inputs
+        # are the loop form (the first entry binds the null sentinel, a
+        # later entry binds the real settle), so only the required variants
+        # are rejected -- the self-input check is the machine-form mirror of
+        # the dag compiler's "node b cannot depend on itself" rule.
         for inp in _port_list(state, "inputs"):
             if not isinstance(inp, dict) or inp.get("optional"):
+                continue
+            if state.get("entry") is True:
+                errors.append(
+                    f"entry state {state_id} input {inp.get('name')!r} must be optional: "
+                    "an entry state's first entry has no upstream settle to bind"
+                )
                 continue
             source = inp.get("from")
             if isinstance(source, str) and "." in source and source.partition(".")[0] == state_id:
@@ -5005,8 +5010,10 @@ the cap, fails to capture, and fails the producing state through its
 ## Authoring reference
 
 - **States**: 1 to 1024, unique ids matching `^[a-z0-9][a-z0-9-]{0,63}$`; at
-  least one state carries `"entry": true`, and entry states declare no
-  inputs. A state's `subagent` is a harness subagent entry id or title (its
+  least one state carries `"entry": true`. An entry state's inputs must all
+  be optional: its first entry binds the null sentinel, and a later entry
+  through a transition (a verify loop back into it) binds the real
+  settle. A state's `subagent` is a harness subagent entry id or title (its
   content is the prompt template; `metadata.model`/`metadata.thinking` are
   spawn settings) or an inline `{"prompt": ...}` object with optional
   `name`/`model`/`thinking`. The optional `name` labels the spawned

@@ -250,26 +250,9 @@ impl CompactionManager {
     /// Persist the post-compaction `ipython_state` row and broadcast its `message_start`/
     /// `message_end` pair (TS `appendCustomMessageEntry`).
     fn persist_and_emit_ipython_state(&self, message: &Value) {
-        {
-            let mut core = self.core.lock().unwrap();
-            if let Some(store) = core.store.as_mut() {
-                let _ = store.persist_entry(
-                    "custom_message",
-                    json!({
-                        "customType": message.get("customType").cloned().unwrap_or(Value::Null),
-                        "content": message.get("content").cloned().unwrap_or(Value::Null),
-                        "display": message.get("display").cloned().unwrap_or(Value::Bool(true)),
-                        "details": message.get("details").cloned().unwrap_or(Value::Null),
-                    }),
-                );
-            }
-        }
-        for event_type in ["message_start", "message_end"] {
-            let _ = self.emit_session_event(json!({
-                "type": event_type,
-                "message": message,
-            }));
-        }
+        let mut core = self.core.lock().unwrap();
+        crate::worker::persist_custom_row(&mut core, message);
+        crate::worker::broadcast_custom_row_locked(&mut core, &self.events, message);
     }
 
     /// Sequence and broadcast one compaction `session_event` frame.
@@ -290,8 +273,8 @@ impl CompactionManager {
             rest: Map::default(),
         };
         let payload = serde_json::to_vec(&outbound)?;
-        drop(core);
         self.events.send(OutboundFrame::session_event(payload));
+        drop(core);
         Ok(())
     }
 }
@@ -448,6 +431,76 @@ fn compaction_end_event(outcome: &CompactionOutcome, custom_instructions: Option
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn custom_rows_on_each_side_of_collapse_appear_once_in_wire_order() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("session.jsonl");
+        std::fs::write(
+            &path,
+            concat!(
+                r#"{"type":"session","id":"collapse-order","version":3,"timestamp":"2026-01-01T00:00:00.000Z","cwd":"/tmp"}"#,
+                "\n",
+            ),
+        )
+        .unwrap();
+        let worker = crate::worker::Worker::new(
+            crate::worker::WorkerConfig {
+                socket_path: dir.path().join("worker.sock"),
+                supervisor_socket_path: std::path::PathBuf::new(),
+                token: "token".to_string(),
+                worker_instance_id: String::new(),
+                active_session_id: "collapse-order".to_string(),
+                agent_dir: dir.path().join("agent"),
+                recovery_journal_path: dir.path().join("recovery.jsonl"),
+                script: Some(json!({ "responses": ["ack"] })),
+                telemetry_disabled: Some(true),
+            },
+            None,
+        );
+        worker.core.lock().unwrap().store =
+            Some(crate::session_store::SessionFile::open(&path).unwrap());
+        let mut subscription = worker.events.subscribe();
+        let row = |content| {
+            json!({
+                "role": "custom", "customType": "notice", "content": content,
+                "display": true, "details": null,
+            })
+        };
+        let before = row("before collapse");
+        let after = row("after collapse");
+        worker.emit_custom_row(&before);
+        let result = json!({ "summary": "collapsed history", "tokensBefore": 1234 });
+        worker
+            .compaction
+            .emit_session_event(compaction_end_success("manual", &result, false, None))
+            .unwrap();
+        worker.emit_custom_row(&after);
+        let frames: Vec<Value> = (0..5)
+            .map(|_| serde_json::from_slice(&subscription.try_recv().unwrap().payload).unwrap())
+            .collect();
+        let expected_events = [
+            json!({ "type": "message_start", "message": before }),
+            json!({ "type": "message_end", "message": before }),
+            json!({
+                "type": "compaction_end", "reason": "manual",
+                "result": { "summary": "collapsed history", "tokensBefore": 1234 },
+                "aborted": false, "willRetry": false,
+            }),
+            json!({ "type": "message_start", "message": after }),
+            json!({ "type": "message_end", "message": after }),
+        ];
+        let actual: Vec<Value> = frames.iter().map(|frame| frame["event"].clone()).collect();
+        assert_eq!(actual, expected_events);
+        let sequences: Vec<Value> = frames
+            .iter()
+            .map(|frame| frame["meta"]["sequence"].clone())
+            .collect();
+        assert_eq!(
+            sequences,
+            vec![json!(1), json!(2), json!(3), json!(4), json!(5)]
+        );
+    }
 
     #[test]
     fn compaction_result_value_mirrors_the_ts_datakeys() {

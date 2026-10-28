@@ -820,6 +820,46 @@ class ReplTest(unittest.TestCase):
             self.assertEqual(one(events, "done")["status"], "ok")
             self.assertEqual(one(events, "result")["text"], "'woken'")
 
+    def test_restore_never_reopens_pickled_file_handles(self):
+        # dill saves a file object as (name, mode) and its revival reopens the
+        # path with that mode: "w" truncated the user's file on every restore
+        # even when the handle was closed (discussion #3085).
+        sys.path.insert(0, SRC)
+        self.addCleanup(sys.path.remove, SRC)
+        from rlm import repl as repl_module
+
+        with tempfile.TemporaryDirectory() as tmp:
+            target = os.path.join(tmp, "notes.txt")
+            handle = open(target, "w")
+            handle.close()
+            with open(target, "w") as fh:
+                fh.write("precious")
+            # A handle nested in a container takes the same reconstructor.
+            ns = {"handle": handle, "nested": {"inner": [handle]}}
+            path = os.path.join(tmp, "state", "kernel-state.dill")
+            manifest_path = os.path.join(tmp, "state", "kernel-state.json")
+            result = repl_module._snapshot_state(
+                ns,
+                path,
+                manifest_path,
+                repl_module.DEFAULT_SNAPSHOT_MAX_BYTES,
+                repl_module.DEFAULT_SNAPSHOT_MAX_VARIABLE_BYTES,
+                False,
+            )
+            self.assertEqual(result["saved"], ["handle", "nested"])
+
+            restored_ns = {}
+            result = repl_module._restore_state(restored_ns, path)
+            self.assertEqual((result["restored"], result["failed"]), (["handle", "nested"], []))
+            with open(target) as fh:
+                self.assertEqual(fh.read(), "precious")
+            restored = restored_ns["handle"]
+            self.assertEqual((restored.name, restored.mode, restored.closed), (target, "w", True))
+            self.assertIsInstance(restored_ns["nested"]["inner"][0], repl_module._RestoredFileStub)
+            for call in (lambda: restored.write("x"), restored.read, restored.readline):
+                with self.assertRaisesRegex(ValueError, "closed file"):
+                    call()
+
     def test_stdin_eof_flushes_final_snapshot(self):
         # Host death (EOF, no shutdown request) must persist the namespace
         # tail that postdates the last explicit snapshot.

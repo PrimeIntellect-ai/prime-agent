@@ -114,7 +114,59 @@ impl InputPauseTable {
     }
 }
 
+/// The owner identity of a daemon-internal queued-work pause.
+const INTERNAL_PAUSE_OWNER: &str = "worker-internal";
+
+/// A held queued-work pause for one daemon-internal flow (TS
+/// `_navigateTree`'s `acquireQueuedWorkPause`): the runner parks queued input
+/// until the guard drops, which releases through the wire handler's lift.
+pub(crate) struct QueuedWorkPause<'a> {
+    worker: &'a Worker,
+    pause_id: String,
+}
+
 impl Worker {
+    /// Hold the queued-work pause for one daemon-internal flow. The lease
+    /// key carries a fresh uuid so concurrent flows hold distinct pauses.
+    pub(crate) fn hold_queued_work_pause(&self, purpose: &str) -> QueuedWorkPause<'_> {
+        let lease_key = format!("internal-{purpose}-{}", uuid::Uuid::new_v4());
+        let pause_id = self.input_pauses.acquire(
+            &self.config.active_session_id,
+            INTERNAL_PAUSE_OWNER,
+            &lease_key,
+        );
+        // The runner re-evaluates its admission gate and parks.
+        self.idle_notify.notify_waiters();
+        QueuedWorkPause {
+            worker: self,
+            pause_id,
+        }
+    }
+
+    /// One release lift shared by the wire handler and the internal guard:
+    /// every `Released` outcome wakes the runner and re-evaluates the owed
+    /// goal continuation.
+    fn release_session_pause(
+        &self,
+        pause_id: &str,
+        owner_client_id: &str,
+        active_session_id: &str,
+    ) -> ReleaseOutcome {
+        match self
+            .input_pauses
+            .release(pause_id, owner_client_id, active_session_id)
+        {
+            ReleaseOutcome::Released => {
+                self.work_notify.notify_one();
+                if let Some(engine) = self.agent_engine.as_ref() {
+                    engine.retry_owed_goal_continuation();
+                }
+                ReleaseOutcome::Released
+            }
+            other => other,
+        }
+    }
+
     /// `acquire_session_input_pause`: the pause id wire object `{ pauseId
     /// }`, with the dedupe on the identical lease.
     pub(crate) fn handle_acquire_session_input_pause(&self, payload: &Value) -> DaemonResponse {
@@ -170,20 +222,10 @@ impl Worker {
             .and_then(Value::as_str)
             .unwrap_or_default()
             .to_string();
-        match self
-            .input_pauses
-            .release(pause_id, &owner_client_id, &active_session_id)
-        {
-            ReleaseOutcome::Released => {
-                // The gate lifted: queued input admits again, and the held
-                // goal-continuation deferral re-evaluates.
-                self.work_notify.notify_one();
-                if let Some(engine) = self.agent_engine.as_ref() {
-                    engine.retry_owed_goal_continuation();
-                }
+        match self.release_session_pause(pause_id, &owner_client_id, &active_session_id) {
+            ReleaseOutcome::Released | ReleaseOutcome::Unknown => {
                 response_success(None, "release_session_input_pause", None)
             }
-            ReleaseOutcome::Unknown => response_success(None, "release_session_input_pause", None),
             ReleaseOutcome::OwnedByAnotherClient => response_failure(
                 None,
                 "release_session_input_pause",
@@ -199,6 +241,16 @@ impl Worker {
         if self.input_pauses.release_all_for_owner(owner_client_id) {
             self.work_notify.notify_one();
         }
+    }
+}
+
+impl Drop for QueuedWorkPause<'_> {
+    fn drop(&mut self) {
+        let _ = self.worker.release_session_pause(
+            &self.pause_id,
+            INTERNAL_PAUSE_OWNER,
+            &self.worker.config.active_session_id,
+        );
     }
 }
 

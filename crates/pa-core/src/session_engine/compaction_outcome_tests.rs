@@ -604,3 +604,80 @@ async fn refine_keeps_the_retry_drop_instead_of_resurrecting_the_error_row() {
         "the reference rebuild resurrects the dropped row; the push does not"
     );
 }
+
+#[tokio::test]
+async fn refinement_and_auto_review_send_the_session_request_identity() {
+    let (mut session, tmp) = refine_test_session().await;
+    std::fs::write(
+        tmp.path().join("auth.json"),
+        serde_json::json!({
+            "prime-inference": {
+                "type": "api_key",
+                "key": "test-key",
+                "primeTeam": { "teamId": "team-1", "name": "Test Team" }
+            }
+        })
+        .to_string(),
+    )
+    .unwrap();
+    session.set_auxiliary_model_context(
+        crate::session_engine::auxiliary_model::AuxiliaryModelContext {
+            cwd: tmp.path().to_path_buf(),
+            agent_dir: tmp.path().to_path_buf(),
+        },
+    );
+    let expected = session.session_id().await;
+    let registration =
+        pa_ai::faux::register_faux_provider(pa_ai::faux::RegisterFauxProviderOptions {
+            provider: Some("prime-inference".to_string()),
+            ..Default::default()
+        });
+    let observed = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let step = |text: &'static str| {
+        let observed = Arc::clone(&observed);
+        pa_ai::faux::FauxResponseStep::Factory(Arc::new(move |_, options, _, _| {
+            observed.lock().unwrap().push((
+                options.and_then(|o| o.session_id.clone()),
+                options.and_then(|o| o.transport),
+                options
+                    .and_then(|o| o.headers.as_ref())
+                    .and_then(|headers| headers.get("X-Prime-Team-ID").cloned()),
+            ));
+            Ok(pa_ai::faux::faux_assistant_text_message(
+                text,
+                pa_ai::faux::FauxAssistantMessageOptions::default(),
+            ))
+        }))
+    };
+    registration.set_responses(vec![
+        step(EMPTY_PLAN),
+        step(r#"{"shouldRefine":false,"rationale":"fixture"}"#),
+    ]);
+    let model = registration.get_model();
+    let global = tmp.path().join("harness");
+    session
+        .refine(
+            &refine::RefineOptions::default(),
+            refine::RefinementSource::User,
+            &model,
+            None,
+            global.clone(),
+        )
+        .await
+        .unwrap();
+    session
+        .review_compact_auto_refine(&model, None, &global, 5, 0)
+        .await
+        .unwrap();
+    assert_eq!(
+        *observed.lock().unwrap(),
+        vec![
+            (
+                Some(expected),
+                Some(pa_ai::types::Transport::Sse),
+                Some("team-1".to_string())
+            );
+            2
+        ]
+    );
+}

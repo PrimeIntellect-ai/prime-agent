@@ -351,6 +351,9 @@ pub struct BranchSummaryRequest {
     pub custom_instructions: Option<String>,
     /// Replace the default prompt instead of appending the custom focus.
     pub replace_instructions: bool,
+    /// The session's durable id: the summary call carries it like the main requests
+    /// (opencode rejects a request without `x-opencode-session`).
+    pub session_id: String,
 }
 
 /// One completed branch summary: the final summary text, the summarizer
