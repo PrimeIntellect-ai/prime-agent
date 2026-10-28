@@ -1,0 +1,1 @@
+- A submitted prompt is saved to the transcript only once the session admits it: a prompt template is recorded expanded, as the model received it, and a prompt that fails before admission (an unknown model, or a cancel that lands before the turn starts) no longer leaves a user row behind.

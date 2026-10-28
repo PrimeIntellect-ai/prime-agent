@@ -476,9 +476,9 @@ impl AgentSessionEngine {
                 shared_branch = branch;
             }
         }
-        // The worker persisted accepted rows while this lazy session built.
-        // Keep its whole durable window, but seed the loop only through the
-        // stable pre-admission leaf. Content/timestamps are never deduplicated.
+        // Keep the worker's whole durable window, but seed the loop only
+        // through the stable pre-admission leaf: rows the worker persisted
+        // after sampling it are not this prompt's history.
         let prompt_context_boundary = self
             .prompt_context_boundary
             .lock()
@@ -492,7 +492,6 @@ impl AgentSessionEngine {
                     .map(pa_core::session::window::WindowedSessionStore::entries)
             })
             .or(shared_branch.as_deref());
-        let mut admitted_user_ids = Vec::new();
         if std::env::var_os("PA_COMPACTION_TRACE").is_some() {
             pa_core::session_engine::compaction_trace::trace(
                 "daemon.lazy_restore_boundary",
@@ -512,26 +511,12 @@ impl AgentSessionEngine {
         let prompt_context = match prompt_context_boundary.as_ref() {
             Some(boundary) => {
                 let mut after_boundary = matches!(boundary, PromptContextBoundary::Empty);
-                if let Some(entries) = entries {
-                    for entry in entries {
-                        if after_boundary {
-                            if let Some(id) = entry.id().filter(|_| {
-                                matches!(
-                                    entry,
-                                    pa_types::session::FileEntry::Message {
-                                        message: pa_types::session::AgentMessage::User(_),
-                                        ..
-                                    }
-                                )
-                            }) {
-                                admitted_user_ids.push(id.to_string());
-                            }
-                        } else if matches!(boundary, PromptContextBoundary::Leaf(leaf)
-                            if entry.id() == Some(leaf.as_str()))
-                        {
-                            after_boundary = true;
-                        }
-                    }
+                if let PromptContextBoundary::Leaf(leaf) = boundary {
+                    after_boundary = entries.is_some_and(|entries| {
+                        entries
+                            .iter()
+                            .any(|entry| entry.id() == Some(leaf.as_str()))
+                    });
                 }
                 match boundary {
                     PromptContextBoundary::Leaf(leaf) => {
@@ -558,7 +543,6 @@ impl AgentSessionEngine {
                 &serde_json::json!({
                     "priorUserRows": prompt_context.as_ref().map(|messages| messages.iter().filter(|message|
                         matches!(message, pa_types::session::AgentMessage::User(_))).count()),
-                    "replayedUserRows": admitted_user_ids.len(),
                 }),
             );
         }
@@ -619,12 +603,6 @@ impl AgentSessionEngine {
         }
         if let Some(entries) = pending_branch {
             built.session.rebuild_branch_context(entries).await?;
-            built
-                .session
-                .shared_persistence()
-                .lock()
-                .await
-                .replay_admitted_user_rows(admitted_user_ids)?;
             if let Some(messages) = prompt_context {
                 built
                     .session
@@ -656,12 +634,6 @@ impl AgentSessionEngine {
             built.session.rebuild_branch_context(entries).await?;
             self.flush_pending_stale_goal_terminal().await;
         }
-        built
-            .session
-            .shared_persistence()
-            .lock()
-            .await
-            .replay_admitted_user_rows(admitted_user_ids)?;
         if let Some(messages) = prompt_context {
             built
                 .session
@@ -670,7 +642,7 @@ impl AgentSessionEngine {
                 .await;
         }
         self.restore_quota_park(built).await;
-        // The walk and replay allocated transient trees several times the
+        // The walk allocated transient trees several times the
         // retained size: release the freed heap.
         pa_types::memory_release::trim_freed_heap();
         self.finish_prompt_context_adoption(prompt_context_boundary.as_ref());

@@ -1012,10 +1012,9 @@ fn agent_engine_reports_model_resolution_failures() {
             true
         },
     );
-    assert_eq!(events.len(), 2);
-    assert!(matches!(&events[0], EngineEvent::UserMessage(_)));
-    let EngineEvent::Done(Err(error)) = &events[1] else {
-        panic!("expected error done");
+    // Resolution failed before core admission: no accepted user row is emitted.
+    let [EngineEvent::Done(Err(error))] = events.as_slice() else {
+        panic!("expected only the pre-admission error, got {events:?}");
     };
     assert!(error.contains("Unknown provider"));
 }
