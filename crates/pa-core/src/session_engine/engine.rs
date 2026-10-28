@@ -361,6 +361,13 @@ pub async fn create_session(mut config: SessionEngineConfig) -> anyhow::Result<S
     // The registration takes the shared manager: the inventory handlers
     // serve live views per request.
     crate::mcp::McpManager::register_host_handlers(&mcp_manager, &mut handlers);
+    super::decision_api::register_decision_handler(
+        &mut handlers,
+        wiring.session.clone(),
+        cwd.clone(),
+        config.agent_dir.clone(),
+        std::sync::Arc::clone(&session_counters),
+    );
     let turn_boundary = Arc::new(super::turn_boundary::TurnBoundaryRequests::new());
     let _ = turn_boundary
         .refinement_settings

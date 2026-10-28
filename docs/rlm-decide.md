@@ -29,6 +29,10 @@ Inference's `/systemone` endpoint). Declare the model in `~/.prime/agent/models.
 }
 ```
 
+The entry's `cost` block (USD per million tokens) is what each decision is billed
+from. A models.json definition replaces the catalog entry and its price, so an entry
+without `cost` bills $0.
+
 Then point the `decisionModel` setting at it in `~/.prime/agent/settings.json`:
 
 ```json

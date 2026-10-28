@@ -253,12 +253,14 @@ async fn post_systemone(
 
 /// Register `rlm.decide`: one awaited decision per kernel call. The model
 /// resolves on the first successful call and is reused for the session; a
-/// refusal is not cached, so a fixed setting works on the next call.
+/// refusal is not cached, so a fixed setting works on the next call. Each
+/// call counts as `feature_decide_{completed,failed}_count`.
 pub(crate) fn register_decision_handler(
     handlers: &mut HostRequestHandlers,
     session: Arc<tokio::sync::Mutex<SessionManager>>,
     cwd: PathBuf,
     agent_dir: PathBuf,
+    counters: Arc<super::telemetry::SessionCounters>,
 ) {
     let resolved = Arc::new(tokio::sync::OnceCell::<ResolvedDecisionModel>::new());
     handlers.register(
@@ -266,42 +268,53 @@ pub(crate) fn register_decision_handler(
         host_handler(move |payload| {
             let (session, resolved) = (Arc::clone(&session), Arc::clone(&resolved));
             let (cwd, agent_dir) = (cwd.clone(), agent_dir.clone());
+            let counters = Arc::clone(&counters);
             async move {
-                let resolved = resolved
-                    .get_or_try_init(|| async { resolve_decision_model(&cwd, &agent_dir) })
-                    .await?;
-                let body = systemone_body(&payload.data, &resolved.model)?;
-                let reply = post_systemone(resolved, &body).await?;
-                let mut usage = Usage {
-                    input: reply.usage.input_tokens,
-                    output: reply.usage.output_tokens,
-                    total_tokens: reply.usage.input_tokens + reply.usage.output_tokens,
-                    ..Usage::default()
-                };
-                pa_ai::models::calculate_cost(&resolved.model, &mut usage, None);
-                session.lock().await.append_custom_entry(
-                    DECISION_CUSTOM_TYPE,
-                    Some(json!({ "model": resolved.selector, "usage": usage })),
-                )?;
-                let actions = &body["questions"]["action"]["criteria"];
-                let SystemOneChoice {
-                    choice,
-                    confidence,
-                    mut probabilities,
-                } = reply.answers.action;
-                if actions.get(&choice).is_none() {
-                    bail!(
-                        "the decision model chose {choice:?}, which is not one of the requested \
-                         actions {actions}"
-                    );
+                let decision: anyhow::Result<Value> = async {
+                    let resolved = resolved
+                        .get_or_try_init(|| async { resolve_decision_model(&cwd, &agent_dir) })
+                        .await?;
+                    let body = systemone_body(&payload.data, &resolved.model)?;
+                    let reply = post_systemone(resolved, &body).await?;
+                    let mut usage = Usage {
+                        input: reply.usage.input_tokens,
+                        output: reply.usage.output_tokens,
+                        total_tokens: reply.usage.input_tokens + reply.usage.output_tokens,
+                        ..Usage::default()
+                    };
+                    pa_ai::models::calculate_cost(&resolved.model, &mut usage, None);
+                    session.lock().await.append_custom_entry(
+                        DECISION_CUSTOM_TYPE,
+                        Some(json!({ "model": resolved.selector, "usage": usage })),
+                    )?;
+                    let actions = &body["questions"]["action"]["criteria"];
+                    let SystemOneChoice {
+                        choice,
+                        confidence,
+                        mut probabilities,
+                    } = reply.answers.action;
+                    if actions.get(&choice).is_none() {
+                        bail!(
+                            "the decision model chose {choice:?}, which is not one of the \
+                             requested actions {actions}"
+                        );
+                    }
+                    probabilities.retain(|name, _| actions.get(name).is_some());
+                    Ok(serde_json::to_value(Decision {
+                        choice,
+                        confidence,
+                        probabilities,
+                        model: resolved.selector.clone(),
+                    })?)
                 }
-                probabilities.retain(|name, _| actions.get(name).is_some());
-                Ok(serde_json::to_value(Decision {
-                    choice,
-                    confidence,
-                    probabilities,
-                    model: resolved.selector.clone(),
-                })?)
+                .await;
+                let outcome = if decision.is_ok() {
+                    "completed"
+                } else {
+                    "failed"
+                };
+                counters.note_feature_outcome("decide", outcome);
+                decision
             }
         }),
     );
@@ -344,6 +357,7 @@ mod tests {
             Arc::clone(&session),
             dir.to_path_buf(),
             dir.to_path_buf(),
+            Arc::default(),
         );
         let handler = handlers.get("rlm.decide").unwrap().clone();
         (session, handler)
