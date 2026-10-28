@@ -668,7 +668,7 @@ async fn a_decision_child_spawn_runs_the_decision_engine_end_to_end() {
     let systemone = spawn_systemone_mock();
     std::fs::write(
         agent_dir.join("settings.json"),
-        json!({ "decisionApi": { "systemOneModel": "decision-fixture/clef" } }).to_string(),
+        json!({ "decisionModel": "decision-fixture/clef" }).to_string(),
     )
     .expect("write settings");
     std::fs::write(
