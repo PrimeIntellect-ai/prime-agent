@@ -39,7 +39,8 @@ use crate::print_runtime::{ChildEngineOverrides, ChildLane, FauxChildQueue, Head
 
 /// Everything a spawned child inherits from the print invocation: the
 /// invocation's own config (cwd, agent dir, prompt/skill paths) and the
-/// parsed faux script when the run is scripted.
+/// parsed faux script when the run is scripted. A child spawned with a
+/// `cwd` gets a copy carrying that cwd.
 pub(crate) struct PrintRecipe {
     pub options: crate::mode::RunOptions,
     pub faux: Option<Value>,
@@ -635,7 +636,21 @@ impl RlmSubagentHost for InlineHost {
             if node.depth >= node.max_depth {
                 return Err(rlm_depth_limit_error(node.depth, node.max_depth));
             }
-            let recipe = Arc::clone(&node.recipe);
+            let recipe = match request.cwd.as_deref() {
+                None => Arc::clone(&node.recipe),
+                Some(requested) => {
+                    let mut options = node.recipe.options.clone();
+                    options.config.cwd = pa_daemon::rlm_child_model::resolve_child_cwd(
+                        &options.config.cwd,
+                        Some(requested),
+                        "rlm.spawn",
+                    )?;
+                    Arc::new(PrintRecipe {
+                        options,
+                        faux: node.recipe.faux.clone(),
+                    })
+                }
+            };
             let config = &recipe.options.config;
             let child_id = format!("sub-{}", &uuid::Uuid::new_v4().simple().to_string()[..8]);
             let name = request.name.clone().unwrap_or_else(|| {
@@ -1276,6 +1291,7 @@ mod tests {
             name: Some("late".to_string()),
             model: None,
             thinking: None,
+            cwd: None,
             spawned_by_request_id: None,
         });
         std::future::poll_fn(|context| {

@@ -143,6 +143,8 @@ pub struct RlmSpawnRequest {
     pub model: Option<String>,
     /// Validated thinking level; the host checks model support.
     pub thinking: Option<String>,
+    /// Working directory; the host resolves relative paths against the session cwd.
+    pub cwd: Option<String>,
     /// The parent's in-flight turn request the spawn anchors to (TS
     /// `spawnedByRequestId`): `None` for a spawn outside an active run.
     pub spawned_by_request_id: Option<String>,
@@ -644,7 +646,7 @@ fn register_run(handlers: &mut HostRequestHandlers, bridge: &Arc<RlmHostBridge>)
 fn spawn_request_from_payload(prompt: &str, data: &Value) -> anyhow::Result<RlmSpawnRequest> {
     const OPERATION: &str = "rlm.spawn";
     let kwargs = kwargs_from_payload(data);
-    reject_unsupported_kwargs(&kwargs, OPERATION, &["name", "model", "thinking"])?;
+    reject_unsupported_kwargs(&kwargs, OPERATION, &["name", "model", "thinking", "cwd"])?;
     let name = optional_string_kwarg(&kwargs, "name", OPERATION)?;
     let name = normalize_requested_rlm_subagent_session_name(name, OPERATION)?;
     if let Some(name) = &name {
@@ -655,11 +657,13 @@ fn spawn_request_from_payload(prompt: &str, data: &Value) -> anyhow::Result<RlmS
     let thinking = optional_string_kwarg(&kwargs, "thinking", OPERATION)?;
     let thinking =
         normalize_requested_rlm_subagent_thinking_level(thinking, OPERATION)?.map(String::from);
+    let cwd = cwd_kwarg(&kwargs, OPERATION)?;
     Ok(RlmSpawnRequest {
         prompt: prompt.to_string(),
         name,
         model,
         thinking,
+        cwd,
         spawned_by_request_id: None,
     })
 }
@@ -696,17 +700,7 @@ fn register_create_session(handlers: &mut HostRequestHandlers, bridge: &Arc<RlmH
                 let thinking =
                     normalize_requested_rlm_subagent_thinking_level(thinking, OPERATION)?
                         .map(String::from);
-                let cwd = match kwargs.get("cwd") {
-                    None => None,
-                    Some(Value::String(cwd)) => {
-                        let cwd = cwd.trim();
-                        if cwd.is_empty() {
-                            anyhow::bail!("rlm.create_session cwd must be a non-empty string");
-                        }
-                        Some(cwd.to_string())
-                    }
-                    Some(_) => anyhow::bail!("rlm.create_session cwd must be a non-empty string"),
-                };
+                let cwd = cwd_kwarg(&kwargs, OPERATION)?;
                 let handle = host
                     .create_session(RlmCreateSessionRequest {
                         prompt: prompt.to_string(),
@@ -853,6 +847,14 @@ fn optional_string_kwarg<'a>(
         None | Some(Value::Null) => Ok(None),
         Some(Value::String(value)) => Ok(Some(value)),
         Some(_) => anyhow::bail!("{operation} {key} must be a string"),
+    }
+}
+
+fn cwd_kwarg(kwargs: &Map<String, Value>, operation: &str) -> anyhow::Result<Option<String>> {
+    match kwargs.get("cwd") {
+        None => Ok(None),
+        Some(Value::String(cwd)) if !cwd.trim().is_empty() => Ok(Some(cwd.trim().to_string())),
+        Some(_) => anyhow::bail!("{operation} cwd must be a non-empty string"),
     }
 }
 
@@ -1304,7 +1306,7 @@ mod tests {
             json!({
                 "type": "rlm.run",
                 "prompt": "ship the lane",
-                "kwargs": { "name": "worker", "model": "p/m", "thinking": "High" }
+                "kwargs": { "name": "worker", "model": "p/m", "thinking": "High", "cwd": "lanes/a" }
             }),
         )
         .await
@@ -1324,6 +1326,7 @@ mod tests {
         assert_eq!(requests[0].name.as_deref(), Some("worker"));
         assert_eq!(requests[0].model.as_deref(), Some("p/m"));
         assert_eq!(requests[0].thinking.as_deref(), Some("high"));
+        assert_eq!(requests[0].cwd.as_deref(), Some("lanes/a"));
         drop(requests);
 
         // Validation: prompt type, unsupported kwargs, name rules.

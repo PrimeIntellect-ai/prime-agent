@@ -1,7 +1,8 @@
 //! RLM child model resolution and roster text helpers: reference resolution against the
-//! credential-backed catalog, the spawn-time thinking-support check, plus the roster text caps.
+//! credential-backed catalog, the spawn-time thinking-support check, the requested child cwd,
+//! plus the roster text caps.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, bail, Result};
 use pa_ai::models::{get_supported_thinking_levels, thinking_level_from_str};
@@ -156,6 +157,26 @@ pub fn assert_thinking_supported(
     bail!(
         "Requested thinking level \"{level}\" is not supported by model \"{selector}\"; supported levels: {levels}"
     );
+}
+
+/// The directory a child starts in: a requested `cwd` resolves against the
+/// session cwd, otherwise the child shares the session cwd.
+///
+/// # Errors
+/// Returns an error naming `operation` when the requested directory does not exist.
+pub fn resolve_child_cwd(
+    session_cwd: &Path,
+    requested: Option<&str>,
+    operation: &str,
+) -> Result<PathBuf> {
+    let Some(requested) = requested else {
+        return Ok(session_cwd.to_path_buf());
+    };
+    let cwd = session_cwd.join(requested);
+    if !cwd.is_dir() {
+        bail!("{operation} cwd {} is not a directory", cwd.display());
+    }
+    Ok(cwd)
 }
 
 /// Rejection message for an unresolved model reference: the
