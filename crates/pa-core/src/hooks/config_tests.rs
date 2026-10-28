@@ -32,7 +32,6 @@ impl Fixture {
             .map(|source| {
                 fingerprint(
                     &source.canonicalize().unwrap(),
-                    &self.cwd.canonicalize().unwrap(),
                     &std::fs::read(source).unwrap(),
                 )
             })
@@ -62,30 +61,39 @@ fn exact_approval_enables_hooks_and_changes_revoke_it() {
     assert!(hooks[0].matches(Event::PreToolUse, "bash"));
     assert!(!hooks[0].matches(Event::PreToolUse, "edit"));
     assert!(!hooks[0].matches(Event::PostToolUse, "bash"));
+    // Trust binds the file, not the session directory: a subdirectory session
+    // of the same project loads it without another entry.
     let subdir = fixture.cwd.join("subdir");
     std::fs::create_dir(&subdir).unwrap();
-    assert!(load(&subdir, &fixture.agent).unwrap().hooks.is_empty());
+    assert_eq!(load(&subdir, &fixture.agent).unwrap().hooks.len(), 1);
     let mut changed = bytes;
     changed.push(b' ');
     std::fs::write(&fixture.source, changed).unwrap();
     assert!(load(&fixture.cwd, &fixture.agent).unwrap().hooks.is_empty());
 }
 
+/// The user source needs no trust entry; it is user-owned authority.
 #[test]
-fn project_local_trust_cannot_authorize_hooks() {
+fn user_source_loads_without_a_trust_entry() {
     let fixture = Fixture::new();
-    std::fs::write(&fixture.source, configuration()).unwrap();
-    let error = load(&fixture.cwd, &fixture.cwd.join(".prime"))
-        .err()
-        .unwrap();
-    let message = format!("{error:#}");
-    assert!(
-        message.starts_with(&format!(
-            "the agent directory {} is inside the project root",
-            fixture.cwd.canonicalize().unwrap().join(".prime").display()
-        )),
-        "{message}"
-    );
+    std::fs::write(fixture.agent.join("hooks.json"), configuration()).unwrap();
+    let loaded = load(&fixture.cwd, &fixture.agent).unwrap();
+    assert_eq!(loaded.hooks.len(), 1);
+    assert!(loaded.diagnostics.is_empty(), "{:?}", loaded.diagnostics);
+}
+
+/// A session started in $HOME (no Git root) has the agent directory inside its
+/// project root, so both sources name one file: it loads once, untrusted.
+#[test]
+fn home_session_loads_the_shared_source_once() {
+    let fixture = Fixture::new();
+    let home = fixture.agent.parent().unwrap().join("home");
+    let agent = home.join(".prime/agent");
+    std::fs::create_dir_all(&agent).unwrap();
+    std::fs::write(agent.join("hooks.json"), configuration()).unwrap();
+    let loaded = load(&home, &agent).unwrap();
+    assert_eq!(loaded.hooks.len(), 1);
+    assert!(loaded.diagnostics.is_empty(), "{:?}", loaded.diagnostics);
 }
 
 #[test]
@@ -94,18 +102,14 @@ fn untrusted_source_reports_its_path_and_fingerprint() {
     std::fs::write(&fixture.source, configuration()).unwrap();
     let loaded = load(&fixture.cwd, &fixture.agent).unwrap();
     let cwd = fixture.cwd.canonicalize().unwrap();
-    let digest = fingerprint(
-        &fixture.source.canonicalize().unwrap(),
-        &cwd,
-        &configuration(),
-    );
+    let digest = fingerprint(&fixture.source.canonicalize().unwrap(), &configuration());
     assert!(loaded.hooks.is_empty());
     let [diagnostic] = loaded.diagnostics.as_slice() else {
         panic!("one diagnostic: {:?}", loaded.diagnostics);
     };
     // The notice names the source, the trust file, and the exact fingerprint.
     assert!(diagnostic.starts_with(&format!(
-        "Hooks skipped: {} is not trusted",
+        "Project hooks skipped: {} is not trusted",
         cwd.join(".prime/agent/hooks.json").display()
     )));
     assert!(diagnostic.contains(
@@ -280,19 +284,29 @@ fn rejects_symlink_sources_and_symlink_trust() {
     let renamed = fixture.agent.join("trust-target.json");
     std::fs::rename(&trust, &renamed).unwrap();
     symlink(renamed, trust).unwrap();
-    assert!(load(&fixture.cwd, &fixture.agent).is_err());
+    // An unsafe trust record skips the project source it would authorize.
+    let loaded = load(&fixture.cwd, &fixture.agent).unwrap();
+    assert!(loaded.hooks.is_empty());
+    assert_eq!(loaded.diagnostics.len(), 1);
 }
 
 #[cfg(unix)]
 #[test]
-fn rejects_writable_trust_file_and_directory() {
+fn rejects_writable_trust_user_source_and_directory() {
     use std::os::unix::fs::PermissionsExt;
     let fixture = Fixture::new();
     std::fs::write(&fixture.source, configuration()).unwrap();
     fixture.approve(&[&fixture.source]);
     let trust = fixture.agent.join("hook-trust.json");
     std::fs::set_permissions(&trust, std::fs::Permissions::from_mode(0o666)).unwrap();
-    assert!(load(&fixture.cwd, &fixture.agent).is_err());
+    assert!(load(&fixture.cwd, &fixture.agent).unwrap().hooks.is_empty());
+    std::fs::set_permissions(&trust, std::fs::Permissions::from_mode(0o600)).unwrap();
+    // A writable user source would let another account plant hooks.
+    let user_source = fixture.agent.join("hooks.json");
+    std::fs::write(&user_source, configuration()).unwrap();
+    std::fs::set_permissions(&user_source, std::fs::Permissions::from_mode(0o666)).unwrap();
+    assert_eq!(load(&fixture.cwd, &fixture.agent).unwrap().hooks.len(), 1);
+    std::fs::remove_file(&user_source).unwrap();
     std::fs::set_permissions(&trust, std::fs::Permissions::from_mode(0o600)).unwrap();
     std::fs::set_permissions(&fixture.agent, std::fs::Permissions::from_mode(0o777)).unwrap();
     assert!(load(&fixture.cwd, &fixture.agent).is_err());

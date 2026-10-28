@@ -25,7 +25,8 @@ struct Specific {
     hook_event_name: String,
     permission_decision: Option<String>,
     permission_decision_reason: Option<String>,
-    /// Codex model context. Prime has no channel for it yet: ignored with a notice.
+    /// Codex model context: honored for `SessionStart` and `UserPromptSubmit`,
+    /// ignored with a notice elsewhere.
     additional_context: Option<String>,
     /// Codex input rewrite. Unsupported, so any rewrite blocks the call rather
     /// than running the input the hook tried to replace.
@@ -91,9 +92,11 @@ pub(super) fn parse(event: Event, output: CommandOutput) -> anyhow::Result<HookO
             Event::PreToolUse | Event::PostToolUse | Event::PreCompact => {
                 Ok(HookOutcome::default())
             }
-            Event::SessionStart | Event::UserPromptSubmit => bail!(
-                "plain-text developer context is not supported; return supported JSON controls"
-            ),
+            // As in Codex and Claude Code, plain stdout is model context.
+            Event::SessionStart | Event::UserPromptSubmit => Ok(HookOutcome {
+                context: Some(stdout.to_string()),
+                ..Default::default()
+            }),
             Event::Stop => bail!("Stop requires JSON output"),
             Event::SessionEnd => unreachable!("advisory output returned above"),
         };
@@ -124,11 +127,15 @@ pub(super) fn parse(event: Event, output: CommandOutput) -> anyhow::Result<HookO
             !matches!(event, Event::Stop | Event::PreCompact),
             "hookSpecificOutput is unsupported for this event"
         );
-        if specific.additional_context.is_some() {
-            outcome.notices.push(format!(
-                "{} hook additionalContext ignored: model context from hooks is not supported.",
-                event.name()
-            ));
+        if let Some(context) = specific.additional_context {
+            if matches!(event, Event::SessionStart | Event::UserPromptSubmit) {
+                outcome.context = Some(context);
+            } else {
+                outcome.notices.push(format!(
+                    "{} hook additionalContext ignored: only SessionStart and UserPromptSubmit add model context.",
+                    event.name()
+                ));
+            }
         }
         if specific.updated_input.is_some()
             && specific.permission_decision.as_deref() != Some("deny")
@@ -332,9 +339,7 @@ mod tests {
         ] {
             assert!(parse(Event::PreToolUse, output(value)).is_err());
         }
-        for event in [Event::SessionStart, Event::UserPromptSubmit, Event::Stop] {
-            assert!(parse(event, output("context")).is_err());
-        }
+        assert!(parse(Event::Stop, output("context")).is_err());
         for event in [Event::PreToolUse, Event::PostToolUse, Event::PreCompact] {
             assert_eq!(
                 parse(event, output("ignored")).unwrap(),
@@ -356,7 +361,7 @@ mod tests {
     /// Codex `PreToolUse` fields: context is ignored with a notice and never
     /// breaks a denial; any input rewrite blocks instead of failing open.
     #[test]
-    fn codex_context_is_ignored_and_input_rewrites_block() {
+    fn codex_context_reaches_session_events_and_input_rewrites_block() {
         let denied = parse(
             Event::PreToolUse,
             output(
@@ -369,7 +374,7 @@ mod tests {
             HookOutcome {
                 deny: Some("no".into()),
                 notices: vec![
-                    "PreToolUse hook additionalContext ignored: model context from hooks is not supported.".into()
+                    "PreToolUse hook additionalContext ignored: only SessionStart and UserPromptSubmit add model context.".into()
                 ],
                 ..Default::default()
             }
@@ -387,13 +392,21 @@ mod tests {
                 "{value}: {outcome:?}"
             );
         }
-        let context_only = parse(
-            Event::SessionStart,
-            output(r#"{"hookSpecificOutput":{"hookEventName":"SessionStart","additionalContext":"x"}}"#),
-        )
-        .unwrap();
-        assert_eq!(context_only.deny, None);
-        assert_eq!(context_only.notices.len(), 1);
+        for event in [Event::SessionStart, Event::UserPromptSubmit] {
+            let json = format!(
+                r#"{{"hookSpecificOutput":{{"hookEventName":"{}","additionalContext":"x"}}}}"#,
+                event.name()
+            );
+            for value in [json.as_str(), "x"] {
+                assert_eq!(
+                    parse(event, output(value)).unwrap(),
+                    HookOutcome {
+                        context: Some("x".into()),
+                        ..Default::default()
+                    }
+                );
+            }
+        }
     }
 
     #[test]

@@ -1,6 +1,5 @@
 //! Real daemon admission events feed the same durable sink as worker turns.
 use super::*;
-use sha2::{Digest, Sha256};
 
 #[test]
 fn hook_veto_keeps_primary_and_batch_out_of_durable_history() {
@@ -18,26 +17,6 @@ fn hook_veto_keeps_primary_and_batch_out_of_durable_history() {
         "UserPromptSubmit": [{"hooks": [{"type": "command", "command": "input=$(cat); case \"$input\" in *reject*) printf '%s' 'admission rejected' >&2; exit 2;; esac"}]}]
     }})).unwrap();
     std::fs::write(&source, &bytes).unwrap();
-    let mut digest = Sha256::new();
-    digest.update(
-        source
-            .canonicalize()
-            .unwrap()
-            .as_os_str()
-            .as_encoded_bytes(),
-    );
-    digest.update([0]);
-    digest.update(cwd.canonicalize().unwrap().as_os_str().as_encoded_bytes());
-    digest.update([0]);
-    digest.update(&bytes);
-    std::fs::write(
-        agent_dir.join("hook-trust.json"),
-        serde_json::to_vec(&json!({
-            "version": 1, "trusted": [format!("{:x}", digest.finalize())]
-        }))
-        .unwrap(),
-    )
-    .unwrap();
     let mut store = crate::session_store::SessionFile::create(cwd.to_str().unwrap(), None, 0);
     let path = dir.path().join("session.jsonl");
     store.set_path(path.clone());

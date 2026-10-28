@@ -9,33 +9,14 @@ fn input(event: &str) -> Value {
 
 #[cfg(unix)]
 fn fixture(config: &Value) -> (tempfile::TempDir, HookRuntime) {
-    use sha2::{Digest, Sha256};
     let dir = tempfile::tempdir().unwrap();
     let cwd = dir.path().join("project");
     let agent = dir.path().join("agent");
     std::fs::create_dir_all(&cwd).unwrap();
     std::fs::create_dir_all(&agent).unwrap();
     let source = agent.join("hooks.json");
-    let bytes = serde_json::to_vec(config).unwrap();
-    std::fs::write(&source, &bytes).unwrap();
-    let mut digest = Sha256::new();
-    digest.update(
-        source
-            .canonicalize()
-            .unwrap()
-            .as_os_str()
-            .as_encoded_bytes(),
-    );
-    digest.update([0]);
-    digest.update(cwd.canonicalize().unwrap().as_os_str().as_encoded_bytes());
-    digest.update([0]);
-    digest.update(&bytes);
-    std::fs::write(
-        agent.join("hook-trust.json"),
-        serde_json::to_vec(&json!({"version":1,"trusted":[format!("{:x}",digest.finalize())]}))
-            .unwrap(),
-    )
-    .unwrap();
+    std::fs::write(&source, serde_json::to_vec(config).unwrap()).unwrap();
+    // The user source needs no trust entry.
     let runtime = HookRuntime::new(cwd, agent);
     (dir, runtime)
 }
@@ -264,7 +245,7 @@ async fn session_end_is_joined_once_and_canceled_waiters_do_not_restart_it() {
     let runtime = Arc::new(runtime);
     let first_runtime = runtime.clone();
     let first = tokio::spawn(async move {
-        first_runtime.finish(input("SessionEnd")).await;
+        first_runtime.finish(Some(input("SessionEnd"))).await;
     });
     tokio::time::timeout(std::time::Duration::from_secs(2), async {
         while !runtime.state.cwd.join("started").exists() {
@@ -276,7 +257,7 @@ async fn session_end_is_joined_once_and_canceled_waiters_do_not_restart_it() {
     first.abort();
     let second_runtime = runtime.clone();
     let second = tokio::spawn(async move {
-        second_runtime.finish(input("SessionEnd")).await;
+        second_runtime.finish(Some(input("SessionEnd"))).await;
     });
     tokio::task::yield_now().await;
     assert!(!second.is_finished());
@@ -291,7 +272,7 @@ async fn session_end_is_joined_once_and_canceled_waiters_do_not_restart_it() {
         b"x"
     );
     assert!(runtime.state.cwd.join("finished").exists());
-    runtime.finish(input("SessionEnd")).await;
+    runtime.finish(Some(input("SessionEnd"))).await;
     assert_eq!(
         std::fs::read(runtime.state.cwd.join("count")).unwrap(),
         b"x"
@@ -305,7 +286,7 @@ async fn session_end_total_deadline_covers_multiple_command_waves() {
     let (_dir, runtime) = fixture(&json!({"hooks":{"SessionEnd":[{"hooks":handlers}]}}));
     tokio::time::timeout(
         std::time::Duration::from_secs(4),
-        runtime.finish(input("SessionEnd")),
+        runtime.finish(Some(input("SessionEnd"))),
     )
     .await
     .unwrap();
@@ -333,7 +314,7 @@ async fn finish_cancels_and_joins_synchronous_commands_before_end() {
     })
     .await
     .unwrap();
-    runtime.finish(input("SessionEnd")).await;
+    runtime.finish(Some(input("SessionEnd"))).await;
     assert_eq!(decision.await.unwrap(), HookOutcome::default());
     assert_eq!(*runtime.state.active.borrow(), 0);
     assert!(runtime.state.cwd.join("ended").exists());
@@ -391,9 +372,44 @@ async fn failed_hooks_report_their_event_and_command_once() {
         [
             "PreToolUse hook failed, operation unchanged: command exited with status 1: lint broke\ncommand: cat >/dev/null; echo lint broke >&2; exit 1",
             "PreToolUse hook message: lint is slow",
-            "PreToolUse hook timed out after 1s, operation unchanged\ncommand: cat >/dev/null; sleep 5",
+            "PreToolUse hook failed, operation unchanged: timed out after 1s\ncommand: cat >/dev/null; sleep 5",
         ]
     );
+}
+
+/// A `failClosed` gating handler that cannot decide (timeout, failed command,
+/// malformed output) blocks; the same failures without it pass through.
+#[cfg(unix)]
+#[tokio::test]
+async fn fail_closed_handlers_block_when_they_cannot_decide() {
+    for (command, timeout, failure) in [
+        ("cat >/dev/null; sleep 5", 1, "timed out after 1s"),
+        ("cat >/dev/null; exit 1", 5, "command exited with status 1"),
+        ("cat >/dev/null; printf '{'", 5, "EOF"),
+    ] {
+        let (_dir, runtime) = fixture(&json!({"hooks":{"PreToolUse":[{"hooks":[
+            {"type":"command","command":command,"timeout":timeout,"failClosed":true}
+        ]}]}}));
+        let reason = runtime
+            .evaluate(input("PreToolUse"), AbortSignal::default())
+            .await
+            .expect("a fail-closed failure denies");
+        assert!(
+            reason.starts_with("a required PreToolUse hook could not decide (")
+                && reason.contains(failure),
+            "{reason}"
+        );
+    }
+    // Observe-only events ignore it.
+    let (_dir, runtime) = fixture(&json!({"hooks":{"PostToolUse":[{"hooks":[
+        {"type":"command","command":"exit 1","async":true,"failClosed":true}
+    ]}]}}));
+    assert!(!runtime
+        .state
+        .config()
+        .await
+        .iter()
+        .any(|hook| hook.fail_closed));
 }
 
 #[cfg(unix)]
@@ -402,14 +418,14 @@ async fn untrusted_sources_are_reported_once_per_session() {
     let dir = tempfile::tempdir().unwrap();
     let cwd = dir.path().join("project");
     let agent = dir.path().join("agent");
-    std::fs::create_dir_all(&cwd).unwrap();
+    std::fs::create_dir_all(cwd.join(".prime/agent")).unwrap();
     std::fs::create_dir_all(&agent).unwrap();
     std::fs::write(
-        agent.join("hooks.json"),
+        cwd.join(".prime/agent/hooks.json"),
         br#"{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"true"}]}]}}"#,
     )
     .unwrap();
-    let runtime = HookRuntime::new(cwd, agent.clone());
+    let runtime = HookRuntime::new(cwd.clone(), agent.clone());
     let notices = recorded_notices(&runtime);
     for _ in 0..2 {
         runtime
@@ -420,8 +436,11 @@ async fn untrusted_sources_are_reported_once_per_session() {
     assert_eq!(notices.len(), 1, "{notices:?}");
     assert!(
         notices[0].starts_with(&format!(
-            "Hooks skipped: {} is not trusted for ",
-            agent.canonicalize().unwrap().join("hooks.json").display()
+            "Project hooks skipped: {} is not trusted.",
+            cwd.canonicalize()
+                .unwrap()
+                .join(".prime/agent/hooks.json")
+                .display()
         )),
         "{notices:?}"
     );
@@ -429,13 +448,13 @@ async fn untrusted_sources_are_reported_once_per_session() {
 
 #[cfg(unix)]
 #[tokio::test]
-async fn unsafe_trust_reports_that_hooks_are_disabled() {
+async fn unsafe_agent_directory_reports_that_hooks_are_disabled() {
     use std::os::unix::fs::PermissionsExt;
     let (_dir, runtime) = fixture(&json!({"hooks":{"Stop":[{"hooks":[
         {"type":"command","command":"true"}
     ]}]}}));
-    let trust = runtime.state.agent_dir.join("hook-trust.json");
-    std::fs::set_permissions(&trust, std::fs::Permissions::from_mode(0o666)).unwrap();
+    let trust = runtime.state.agent_dir.clone();
+    std::fs::set_permissions(&trust, std::fs::Permissions::from_mode(0o777)).unwrap();
     let notices = recorded_notices(&runtime);
     runtime
         .dispatch(input("Stop"), AbortSignal::default())

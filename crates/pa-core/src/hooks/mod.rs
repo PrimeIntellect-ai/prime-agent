@@ -21,6 +21,8 @@ pub(crate) struct HookOutcome {
     pub stop: Option<String>,
     pub continuation: Option<String>,
     pub message: Option<String>,
+    /// Model context from `SessionStart` or `UserPromptSubmit`, joined in order.
+    pub context: Option<String>,
     /// Non-fatal diagnostics about ignored output, shown once to the user.
     pub notices: Vec<String>,
 }
@@ -123,7 +125,7 @@ impl HookRuntime {
             return HookOutcome::default();
         };
         if event == Event::SessionEnd {
-            self.finish(input).await;
+            self.finish(Some(input)).await;
             return HookOutcome::default();
         }
         if self.ending.load(Ordering::Acquire) {
@@ -142,7 +144,8 @@ impl HookRuntime {
 
     /// Join one shared, bounded close operation. Dropping one waiter cannot restart
     /// hooks or let another close path exit while the first callback is running.
-    pub(crate) async fn finish(&self, input: Value) {
+    /// `None` closes (stops admission, cancels observers) without `SessionEnd`.
+    pub(crate) async fn finish(&self, input: Option<Value>) {
         let receiver = self
             .finished
             .get_or_init(|| async {
@@ -167,9 +170,11 @@ impl HookRuntime {
                                 break;
                             }
                         }
-                        state
-                            .dispatch(Event::SessionEnd, input, AbortSignal::default())
-                            .await;
+                        if let Some(input) = input {
+                            state
+                                .dispatch(Event::SessionEnd, input, AbortSignal::default())
+                                .await;
+                        }
                     };
                     if tokio::time::timeout_at(deadline, close).await.is_err() {
                         tracing::warn!("SessionEnd total deadline exceeded");
@@ -307,10 +312,16 @@ impl State {
             if let Some(message) = result.message {
                 append_bounded(&mut outcome.message, &message);
             }
+            if let Some(context) = result.context {
+                append_bounded(&mut outcome.context, &context);
+            }
         }
         if outcome.stop.is_some() {
             outcome.continuation = None;
             outcome.deny = None;
+        }
+        if outcome.deny.is_some() || outcome.stop.is_some() {
+            outcome.context = None;
         }
         outcome
     }
@@ -463,23 +474,46 @@ impl State {
                     .downcast_ref::<tokio::time::error::Elapsed>()
                     .is_none() =>
             {
-                tracing::warn!(%error, event, %command, "hook failed; operation unchanged");
-                self.notify(format!(
-                    "{event} hook failed, operation unchanged: {error:#}\ncommand: {command}"
-                ))
-                .await;
-                None
+                let failure = format!("{error:#}");
+                self.fail(hook, event, &command, &failure).await
             }
             Ok(Err(_)) | Err(_) => {
-                tracing::warn!(event, %command, "hook deadline exceeded; operation unchanged");
-                self.notify(format!(
-                    "{event} hook timed out after {}s, operation unchanged\ncommand: {command}",
-                    hook.timeout.as_secs()
-                ))
-                .await;
-                None
+                let failure = format!("timed out after {}s", hook.timeout.as_secs());
+                self.fail(hook, event, &command, &failure).await
             }
         }
+    }
+}
+
+impl State {
+    /// A hook that could not decide: fail open with a notice, or, for a
+    /// `failClosed` gating hook, block the operation with the failure as reason.
+    async fn fail(
+        &self,
+        hook: &ConfiguredHook,
+        event: &str,
+        command: &str,
+        failure: &str,
+    ) -> Option<HookOutcome> {
+        if hook.fail_closed {
+            tracing::warn!(event, %command, failure, "fail-closed hook failed; operation blocked");
+            self.notify(format!(
+                "{event} hook failed and is failClosed, so the operation was blocked: {failure}\ncommand: {command}"
+            ))
+            .await;
+            return Some(HookOutcome {
+                deny: Some(format!(
+                    "a required {event} hook could not decide ({failure})"
+                )),
+                ..Default::default()
+            });
+        }
+        tracing::warn!(event, %command, failure, "hook failed; operation unchanged");
+        self.notify(format!(
+            "{event} hook failed, operation unchanged: {failure}\ncommand: {command}"
+        ))
+        .await;
+        None
     }
 }
 

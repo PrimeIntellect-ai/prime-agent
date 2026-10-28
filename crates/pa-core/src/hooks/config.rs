@@ -1,4 +1,6 @@
-//! Bounded, immutable configuration snapshots. Trust is never read from a project file.
+//! Bounded, immutable configuration snapshots. The user source is
+//! self-authorizing; a project source needs a user trust entry, never one read
+//! from the project.
 use std::collections::BTreeMap;
 use std::io::Read;
 use std::path::Path;
@@ -79,6 +81,10 @@ struct Handler {
     timeout: Option<u64>,
     #[serde(default, rename = "async")]
     background: bool,
+    /// Prime extension (no Codex or Claude Code equivalent): a failure of
+    /// this handler blocks instead of passing through.
+    #[serde(default, rename = "failClosed")]
+    fail_closed: bool,
     #[serde(flatten)]
     unknown: BTreeMap<String, serde_json::Value>,
 }
@@ -97,7 +103,22 @@ pub(super) struct ConfiguredHook {
     pub event: Event,
     pub command: String,
     pub timeout: Duration,
+    /// A failure blocks the gated operation; set only on gating events.
+    pub fail_closed: bool,
     matcher: Option<Regex>,
+}
+
+impl Event {
+    /// Events whose hook can block an operation, so `failClosed` applies.
+    /// Stop is excluded: its block requests more work rather than a safety stop.
+    pub fn gates(self) -> bool {
+        match self {
+            Self::PreToolUse | Self::UserPromptSubmit | Self::SessionStart | Self::PreCompact => {
+                true
+            }
+            Self::PostToolUse | Self::Stop | Self::SessionEnd => false,
+        }
+    }
 }
 
 impl ConfiguredHook {
@@ -123,11 +144,11 @@ pub(super) struct Loaded {
     pub diagnostics: Vec<String>,
 }
 
-pub(super) fn fingerprint(source: &Path, cwd: &Path, bytes: &[u8]) -> String {
+/// Project trust binds the canonical source path and its exact bytes, so the
+/// same reviewed file is trusted from every directory and worktree session.
+pub(super) fn fingerprint(source: &Path, bytes: &[u8]) -> String {
     let mut hash = Sha256::new();
     hash.update(source.as_os_str().as_encoded_bytes());
-    hash.update([0]);
-    hash.update(cwd.as_os_str().as_encoded_bytes());
     hash.update([0]);
     hash.update(bytes);
     format!("{:x}", hash.finalize())
@@ -135,8 +156,11 @@ pub(super) fn fingerprint(source: &Path, cwd: &Path, bytes: &[u8]) -> String {
 
 #[derive(Clone, Copy)]
 enum SourceKind {
+    /// A project file: authorized only by a user trust entry.
     Configuration,
-    Trust,
+    /// User-owned authority (the user hook source or the trust record): it
+    /// must belong to the current user and not be group/world writable.
+    UserOwned,
 }
 
 #[cfg(unix)]
@@ -171,7 +195,7 @@ fn read_bounded(path: &Path, kind: SourceKind) -> anyhow::Result<Option<Vec<u8>>
         bail!("hook source must be a regular file");
     }
     #[cfg(unix)]
-    if matches!(kind, SourceKind::Trust) {
+    if matches!(kind, SourceKind::UserOwned) {
         validate_owner(&metadata, path)?;
     }
     #[cfg(not(unix))]
@@ -213,6 +237,7 @@ fn parse(bytes: &[u8], group_count: &mut usize) -> anyhow::Result<Parsed> {
     ignore_fields("configuration", document.unknown);
     let mut hooks = Vec::new();
     let mut skipped = Vec::new();
+    let mut ineffective = Vec::new();
     for (name, groups) in document.hooks {
         let Ok(event) = Event::parse(&name) else {
             skipped.push(format!("{name} hooks (unsupported event)"));
@@ -237,6 +262,7 @@ fn parse(bytes: &[u8], group_count: &mut usize) -> anyhow::Result<Parsed> {
             };
             for handler in group.hooks {
                 let unknown = handler.unknown;
+                let fail_closed = handler.fail_closed;
                 // An unsupported handler is skipped without discarding the
                 // rest of its source.
                 let accepted = (|| -> Result<_, String> {
@@ -273,10 +299,16 @@ fn parse(bytes: &[u8], group_count: &mut usize) -> anyhow::Result<Parsed> {
                 match accepted {
                     Ok((command, timeout)) => {
                         ignore_fields(&format!("{name} handler"), unknown);
+                        if fail_closed && !event.gates() {
+                            ineffective.push(format!(
+                                "failClosed has no effect on {name}, which cannot block"
+                            ));
+                        }
                         hooks.push(ConfiguredHook {
                             event,
                             command,
                             timeout,
+                            fail_closed: fail_closed && event.gates(),
                             matcher: matcher.clone(),
                         });
                         if hooks.len() > HANDLER_LIMIT {
@@ -289,6 +321,7 @@ fn parse(bytes: &[u8], group_count: &mut usize) -> anyhow::Result<Parsed> {
         }
     }
     notices.extend(skipped.into_iter().map(|part| format!("skipped {part}")));
+    notices.extend(ineffective);
     Ok(Parsed { hooks, notices })
 }
 
@@ -300,12 +333,11 @@ pub(super) fn load(cwd: &Path, agent_dir: &Path) -> anyhow::Result<Loaded> {
         .ancestors()
         .find(|path| path.join(".git").exists())
         .unwrap_or(&cwd);
-    let user_source = agent_dir.join("hooks.json");
     // Mirrors the user source `<agent-dir>/hooks.json` and the existing
     // project configuration directory `.prime/agent/`.
     let project_source = root.join(".prime/agent/hooks.json");
     // Missing files are normal. Avoid even reading trust in the common no-hooks case.
-    if !user_source.exists() && !project_source.exists() {
+    if !agent_dir.join("hooks.json").exists() && !project_source.exists() {
         return Ok(Loaded {
             hooks: Vec::new(),
             diagnostics: Vec::new(),
@@ -313,53 +345,76 @@ pub(super) fn load(cwd: &Path, agent_dir: &Path) -> anyhow::Result<Loaded> {
     }
     let agent_dir = agent_dir
         .canonicalize()
-        .context("hook trust directory unavailable")?;
-    if agent_dir.starts_with(root) {
-        bail!(
-            "the agent directory {} is inside the project root {}, and project-local agent directories cannot authorize hooks; start the session from a directory outside it",
-            agent_dir.display(),
-            root.display()
-        );
-    }
+        .context("hook agent directory unavailable")?;
+    // The agent directory authorizes the user source and holds project trust.
     #[cfg(unix)]
     validate_owner(&std::fs::metadata(&agent_dir)?, &agent_dir)?;
+    let user_source = agent_dir.join("hooks.json");
     let trust_path = agent_dir.join("hook-trust.json");
-    let trusted = match read_bounded(&trust_path, SourceKind::Trust)? {
-        Some(bytes) => {
-            let trust: Trust = serde_json::from_slice(&bytes)
-                .with_context(|| format!("invalid hook trust file {}", trust_path.display()))?;
-            if trust.version != 1 || trust.trusted.len() > 256 {
-                bail!("hook trust requires version 1 and at most 256 fingerprints");
-            }
-            trust.trusted
-        }
-        None => Vec::new(),
-    };
+    // A session whose project root holds the agent directory (for example
+    // one started in $HOME) resolves both sources to one file: load it once,
+    // as the user source.
+    let project_is_user_source = matches!(
+        (user_source.canonicalize(), project_source.canonicalize()),
+        (Ok(user), Ok(project)) if user == project
+    );
+    let mut trusted: Option<Vec<String>> = None;
     let mut group_count = 0;
     let mut result = Vec::new();
     let mut diagnostics = Vec::new();
-    for (source, project) in [(user_source, false), (project_source, true)] {
+    let sources = [(user_source, false), (project_source, true)];
+    for (source, project) in sources {
+        if project && project_is_user_source {
+            continue;
+        }
         // Commit a complete source only after all its checks pass. A project
         // file must never erase an already accepted user policy.
         let attempt = (|| -> anyhow::Result<_> {
-            let Some(bytes) = read_bounded(&source, SourceKind::Configuration)? else {
+            let kind = if project {
+                SourceKind::Configuration
+            } else {
+                SourceKind::UserOwned
+            };
+            let Some(bytes) = read_bounded(&source, kind)? else {
                 return Ok(None);
             };
-            let canonical_source = source.canonicalize()?;
-            if project && !canonical_source.starts_with(root) {
-                bail!("project hook source must remain inside the project");
-            }
-            let digest = fingerprint(&canonical_source, &cwd, &bytes);
-            if !trusted.contains(&digest) {
-                tracing::warn!(source = %source.display(), fingerprint = %digest,
-                    "hooks skipped: review exact source and add its fingerprint to user hook-trust.json (see docs/hooks.md)");
-                diagnostics.push(format!(
-                    "Hooks skipped: {} is not trusted for {}. Trust covers the file's path and bytes and the session directory, so an edit or another directory needs a new entry. After reviewing it, add this fingerprint to {} (see docs/hooks.md):\n{digest}",
-                    source.display(),
-                    cwd.display(),
-                    trust_path.display(),
-                ));
-                return Ok(None);
+            if project {
+                let canonical_source = source.canonicalize()?;
+                if !canonical_source.starts_with(root) {
+                    bail!("project hook source must remain inside the project");
+                }
+                // Read trust only when a project source exists.
+                let trusted = match &trusted {
+                    Some(trusted) => trusted,
+                    None => {
+                        trusted.insert(match read_bounded(&trust_path, SourceKind::UserOwned)? {
+                            Some(bytes) => {
+                                let trust: Trust =
+                                    serde_json::from_slice(&bytes).with_context(|| {
+                                        format!("invalid hook trust file {}", trust_path.display())
+                                    })?;
+                                if trust.version != 1 || trust.trusted.len() > 256 {
+                                    bail!(
+                                        "hook trust requires version 1 and at most 256 fingerprints"
+                                    );
+                                }
+                                trust.trusted
+                            }
+                            None => Vec::new(),
+                        })
+                    }
+                };
+                let digest = fingerprint(&canonical_source, &bytes);
+                if !trusted.contains(&digest) {
+                    tracing::warn!(source = %source.display(), fingerprint = %digest,
+                        "project hooks skipped: review the source and add its fingerprint to user hook-trust.json (see docs/hooks.md)");
+                    diagnostics.push(format!(
+                        "Project hooks skipped: {} is not trusted. Trust covers the file's path and exact bytes, so any edit needs a new entry. After reviewing it, add this fingerprint to {} (see docs/hooks.md):\n{digest}",
+                        source.display(),
+                        trust_path.display(),
+                    ));
+                    return Ok(None);
+                }
             }
             let mut candidate_groups = group_count;
             let parsed = parse(&bytes, &mut candidate_groups)?;
@@ -383,9 +438,9 @@ pub(super) fn load(cwd: &Path, agent_dir: &Path) -> anyhow::Result<Loaded> {
             Ok(None) => {}
             Err(error) => {
                 tracing::warn!(source = %source.display(), %error,
-                    "hook source skipped; other trusted sources remain active");
+                    "hook source skipped; other hook sources remain active");
                 diagnostics.push(format!(
-                    "Hooks skipped: {}: {error:#}. Other trusted hook sources remain active.",
+                    "Hooks skipped: {}: {error:#}. Other hook sources remain active.",
                     source.display()
                 ));
             }

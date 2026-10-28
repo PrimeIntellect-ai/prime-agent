@@ -4,7 +4,6 @@ use std::time::Duration;
 
 use pa_agent::agent::{Agent, AgentOptions};
 use serde_json::{json, Value};
-use sha2::{Digest, Sha256};
 
 use super::compact_session::{CompactOutcome, CompactionTrigger};
 use super::{AgentSession, SessionManager};
@@ -27,26 +26,6 @@ async fn fixture(command: &str, turns: usize) -> Fixture {
         serde_json::to_vec(&json!({"hooks": {"PreCompact": [{
             "hooks": [{"type": "command", "command": command, "timeout": 10}]
         }]}}))
-        .unwrap(),
-    )
-    .unwrap();
-    let mut hash = Sha256::new();
-    hash.update(
-        source
-            .canonicalize()
-            .unwrap()
-            .as_os_str()
-            .as_encoded_bytes(),
-    );
-    hash.update([0]);
-    hash.update(cwd.canonicalize().unwrap().as_os_str().as_encoded_bytes());
-    hash.update([0]);
-    hash.update(std::fs::read(&source).unwrap());
-    std::fs::write(
-        agent_dir.join("hook-trust.json"),
-        serde_json::to_vec(&json!({
-            "version": 1, "trusted": [format!("{:x}", hash.finalize())]
-        }))
         .unwrap(),
     )
     .unwrap();
@@ -83,7 +62,7 @@ async fn fixture(command: &str, turns: usize) -> Fixture {
         keep_recent_tokens: 12,
         ..Default::default()
     });
-    let hooks = super::hooks::ToolHooks::new(cwd, agent_dir, "compact-session".into(), None);
+    let hooks = super::hooks::ToolHooks::new(cwd, agent_dir, "compact-session".into(), None, None);
     *hooks.run_id.write().unwrap() = "compact-turn".into();
     session.lifecycle_hooks = Some(hooks.lifecycle);
     let provider = pa_ai::faux::register_faux_provider(pa_ai::faux::RegisterFauxProviderOptions {
