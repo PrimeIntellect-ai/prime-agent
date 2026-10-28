@@ -1,6 +1,6 @@
 //! Faithful port of jsdiff v9 `diffLines` (Myers O(ND) with the diagonal-bounds
-//! optimization) as the TS product vendors it (`Diff.diffLines`): diffs here must
-//! match the TypeScript product byte for byte. Only the display caller is retained.
+//! optimization) as the TS product vendors it (`Diff.diffLines`). Ordinary diffs
+//! match the TS algorithm; pathological searches use a bounded whole-block fallback.
 
 // Bound speculative Myers history. Beyond this budget, a whole-block
 // replacement preserves both texts without quadratic search memory.
@@ -322,8 +322,15 @@ mod tests {
 
     #[test]
     fn a_large_replacement_has_a_bounded_whole_block_fallback() {
-        let old = (0..600).map(|n| format!("old-{n}\n")).collect::<String>() + "shared\n";
-        let new = (0..600).map(|n| format!("new-{n}\n")).collect::<String>() + "shared\n";
+        use std::fmt::Write as _;
+
+        let (mut old, mut new) = (String::new(), String::new());
+        for n in 0..600 {
+            writeln!(old, "old-{n}").unwrap();
+            writeln!(new, "new-{n}").unwrap();
+        }
+        old.push_str("shared\n");
+        new.push_str("shared\n");
         assert_eq!(
             diff_lines(&old, &new),
             vec![
