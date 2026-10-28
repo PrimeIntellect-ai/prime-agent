@@ -311,25 +311,32 @@ fn build_decision_context(request: &DecisionRequest) -> pa_types::ai::Context {
     }
 }
 
-/// Parse the model's reply into the `answers.action` object: the choice must
-/// name one of the requested actions; confidence clamps to `0..=1`.
-fn parse_decision_answer(reply: &str, criteria: &[(String, String)]) -> anyhow::Result<Value> {
-    let actions: Vec<&str> = criteria.iter().map(|(name, _)| name.as_str()).collect();
-    let raw = reply.trim();
-    // The protocol asks for JSON only; tolerate a fenced or chatty reply by
-    // slicing to the outermost object before repair-parsing.
+/// The protocol asks for JSON only; tolerate a fenced or chatty reply by
+/// slicing to the outermost object before repair-parsing.
+fn parse_reply_json(raw: &str) -> anyhow::Result<Value> {
     let candidate = match (raw.find('{'), raw.rfind('}')) {
         (Some(start), Some(end)) if end > start => &raw[start..=end],
         _ => raw,
     };
-    let parsed = pa_ai::parse_json_with_repair(candidate).map_err(|error| {
-        anyhow!("the decision model's reply was not valid JSON ({error}): {raw}")
-    })?;
-    let Some(answer) = parsed.get("action").and_then(Value::as_object) else {
-        bail!("the decision model's reply has no \"action\" object: {raw}");
+    pa_ai::parse_json_with_repair(candidate)
+        .map_err(|error| anyhow!("the decision model's reply was not valid JSON ({error}): {raw}"))
+}
+
+/// Parse the model's reply into the `answers.action` object: the choice must
+/// name one of the requested actions; confidence clamps to `0..=1`.
+fn parse_decision_answer(reply: &str, criteria: &[(String, String)]) -> anyhow::Result<Value> {
+    decision_answer(&parse_reply_json(reply.trim())?, criteria)
+}
+
+/// Validate the parsed `answers` value into its `action` object: the choice
+/// must name one of the requested actions; confidence clamps to `0..=1`.
+fn decision_answer(answers: &Value, criteria: &[(String, String)]) -> anyhow::Result<Value> {
+    let actions: Vec<&str> = criteria.iter().map(|(name, _)| name.as_str()).collect();
+    let Some(answer) = answers.get("action").and_then(Value::as_object) else {
+        bail!("the decision model's reply has no \"action\" object: {answers}");
     };
     let Some(choice) = answer.get("choice").and_then(Value::as_str) else {
-        bail!("the decision model's reply has no \"action\".\"choice\" string: {raw}");
+        bail!("the decision model's reply has no \"action\".\"choice\" string: {answers}");
     };
     if !actions.contains(&choice) {
         bail!(
@@ -529,18 +536,11 @@ async fn serve_systemone(
         bail!("the decision model returned an empty reply");
     }
     let raw = reply.trim();
-    let candidate = match (raw.find('{'), raw.rfind('}')) {
-        (Some(start), Some(end)) if end > start => &raw[start..=end],
-        _ => raw,
-    };
-    let parsed = pa_ai::parse_json_with_repair(candidate).map_err(|error| {
-        anyhow!("the decision model's reply was not valid JSON ({error}): {raw}")
-    })?;
+    let parsed = parse_reply_json(raw)?;
     let answers = parsed
         .get("answers")
-        .cloned()
         .ok_or_else(|| anyhow!("the decision model's reply has no \"answers\" object: {raw}"))?;
-    let answer = parse_decision_answer(&answers.to_string(), &request.criteria)?;
+    let answer = decision_answer(answers, &request.criteria)?;
     // The envelope reports the resolved model's label, never the
     // endpoint's bare id. The endpoint's usage, when it carries one,
     // rides along so the decision child's answer rows bill in the cost
@@ -1308,6 +1308,30 @@ mod tests {
             body["images"],
             json!(["data:image/png;base64,AA=="]),
             "the images ride the protocol request"
+        );
+    }
+
+    /// The envelope's `answers` run the same validation as a chat-path
+    /// reply: a choice outside the requested criteria is refused, so the
+    /// systemone transport cannot pass an answer through unvalidated.
+    #[tokio::test]
+    async fn systemone_answers_run_the_shared_decision_validation() {
+        let dir = tempfile::tempdir().unwrap();
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let envelope = json!({
+            "model": "fixture-decisions/systemone-model",
+            "answers": {"action": {"choice": "up"}}
+        });
+        systemone_fixture(dir.path(), envelope, std::sync::Arc::clone(&seen))
+            .await
+            .unwrap();
+        let request = json!({ "state": {}, "questions": { "action": {
+            "type": "choice", "criteria": {"left": "go left", "right": "go right"}
+        } } });
+        let error = decide(request, dir.path()).await.unwrap_err().to_string();
+        assert!(
+            error.contains("chose"),
+            "the envelope's choice must be validated against the criteria: {error}"
         );
     }
 
