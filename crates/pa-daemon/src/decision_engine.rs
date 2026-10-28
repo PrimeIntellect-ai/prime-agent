@@ -907,12 +907,11 @@ mod tests {
     fn stub_supervisor(socket: &std::path::Path) -> Arc<Mutex<Vec<Value>>> {
         let commands: Arc<Mutex<Vec<Value>>> = Arc::new(Mutex::new(Vec::new()));
         let stub_commands = Arc::clone(&commands);
-        let stub_socket = socket.to_path_buf();
+        // Bind before returning so the engine's first connect cannot race
+        // the listener setup (a lost race fails the connect with ENOENT).
+        let listener = std::os::unix::net::UnixListener::bind(socket).unwrap();
         std::thread::spawn(move || {
             use std::io::{BufRead, Write};
-            let Ok(listener) = std::os::unix::net::UnixListener::bind(&stub_socket) else {
-                return;
-            };
             for _ in 0..2 {
                 let Ok((stream, _)) = listener.accept() else {
                     return;
