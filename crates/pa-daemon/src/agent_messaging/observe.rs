@@ -241,7 +241,11 @@ impl AgentObserveController for LinkAgentObserveController {
                         .and_then(Value::as_str)
                         .unwrap_or_default()
                         .to_string(),
-                    timestamp: message.get("timestamp").and_then(Value::as_u64),
+                    timestamp: message.get("timestamp").and_then(|value| {
+                        value
+                            .as_u64()
+                            .or_else(|| value.as_str().and_then(crate::util::iso_to_unix_ms))
+                    }),
                     text: truncate_chars(&full_text, max_chars),
                     truncated: full_text.chars().count() > max_chars,
                     tool_calls: Vec::new(),
