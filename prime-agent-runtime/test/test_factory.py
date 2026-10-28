@@ -50,6 +50,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import importlib
 import json
 import os
 import re
@@ -63,7 +64,6 @@ from typing import Any
 from unittest.mock import patch
 
 import rlm as rlm_module
-from rlm import factory as factory_module
 from rlm.factory import (
     ANSWER_BINDING_CAP,
     ANSWER_CAPTURE_CAP,
@@ -103,6 +103,8 @@ from rlm.factory import (
     validate_factory_spec,
 )
 from rlm.harness import HarnessState
+
+factory_module = importlib.import_module("rlm.factory")
 
 
 # ---------------------------------------------------------------------------
@@ -1171,18 +1173,28 @@ class ValidateFactoryMachineTest(unittest.TestCase):
                 repr(required),
             )
 
-    def test_entry_states_cannot_declare_inputs(self) -> None:
-        with_inputs = {
-            "states": [
-                state("src", entry=True, inputs=[{"name": "i", "type": "text", "from": "peer.o"}]),
-                state("peer", outputs=[{"name": "o", "type": "text"}]),
-            ],
-            "transitions": [{"from": "peer", "to": "src"}],
-        }
-        self.assertEqual(
-            validate_factory_machine(with_inputs),
-            ["entry state src cannot declare inputs"],
-        )
+    def test_entry_state_inputs_must_be_optional(self) -> None:
+        absent = object()  # sentinel: the optional key is omitted entirely
+
+        def with_inputs(optional: Any) -> dict[str, Any]:
+            inp: dict[str, Any] = {"name": "i", "type": "text", "from": "peer.o"}
+            if optional is not absent:
+                inp["optional"] = optional
+            return {
+                "states": [
+                    state("src", entry=True, inputs=[inp]),
+                    state("peer", outputs=[{"name": "o", "type": "text"}]),
+                ],
+                "transitions": [{"from": "src", "to": "peer"}, {"from": "peer", "to": "src"}],
+            }
+
+        self.assertEqual(validate_factory_machine(with_inputs(True)), [])
+        for required in (False, absent):
+            self.assertEqual(
+                validate_factory_machine(with_inputs(required)),
+                ["entry state src input 'i' must be optional: an entry state's first entry has no upstream settle to bind"],
+                repr(required),
+            )
         entry_without_inputs = {"states": [state("a", entry=True)], "transitions": []}
         self.assertEqual(validate_factory_machine(entry_without_inputs), [])
         # Compiled dags only mark dep-free nodes as entry states, so the rule
@@ -5864,6 +5876,60 @@ class FactoryExecutorTest(_ExecutorTestCase):
         self.assertEqual(status["usage"]["transitions_fired"], 3)
 
     @async_test
+    async def test_machine_loop_back_into_entry_state_binds_null_then_the_real_settle(self) -> None:
+        # investigate -> check -> investigate: the entry state's optional
+        # input binds null on admission and the checker's objections on the
+        # loop-back entry.
+        self.host.child_outcomes["child-1"] = {"status": "done", "answer": "FINDINGS-1"}
+        self.host.child_outcomes["child-2"] = {
+            "status": "done",
+            "answer": '```json\n{"verdict": {"approved": false, "objections": ["OBJ-A1"]}}\n```',
+        }
+        self.host.child_outcomes["child-3"] = {"status": "done", "answer": "FINDINGS-2"}
+        self.host.child_outcomes["child-4"] = {
+            "status": "done",
+            "answer": '```json\n{"verdict": {"approved": true, "objections": []}}\n```',
+        }
+        self.store_machine(
+            {
+                "states": [
+                    {
+                        "id": "investigate",
+                        "entry": True,
+                        "subagent": "worker",
+                        "inputs": [{"name": "verdict", "type": "json", "from": "check.verdict", "optional": True}],
+                        "outputs": [{"name": "findings", "type": "text"}],
+                        "max_entries": 3,
+                    },
+                    {
+                        "id": "check",
+                        "subagent": "worker",
+                        "inputs": [{"name": "findings", "type": "text", "from": "investigate.findings"}],
+                        "outputs": [{"name": "verdict", "type": "json"}],
+                        "max_entries": 3,
+                    },
+                ],
+                "transitions": [
+                    {"from": "investigate", "to": "check"},
+                    {
+                        "from": "check",
+                        "to": "investigate",
+                        "when": {"output": "verdict", "path": "approved", "op": "eq", "value": False},
+                    },
+                ],
+            }
+        )
+        result = await self.start()
+        status = await self.settle(result)
+        self.assertEqual(status["state"], "done")
+        prompts = [call["prompt"] for call in self.host.spawn_calls("investigate")]
+        self.assertEqual(len(prompts), 2)
+        self.assertIn("null", prompts[0])
+        self.assertNotIn("OBJ-A1", prompts[0])
+        self.assertIn("OBJ-A1", prompts[1])
+        self.assertEqual(self.state_report(status, "check")["entries_used"], 2)
+
+    @async_test
     async def test_machine_optional_foreach_over_expands_empty_then_the_real_settle(self) -> None:
         # Review finding (PR #3199): marking the foreach.over input
         # optional used to hit "foreach entry did not resolve its over
@@ -9184,6 +9250,7 @@ class FactoryRunFromLibraryTest(unittest.TestCase):
 
 _INSTALLED_LIBRARY_RUNNER = r"""
 import asyncio
+import importlib
 import json
 
 
@@ -9244,8 +9311,9 @@ class ScriptedHost:
 
 async def main():
     import rlm as rlm_module
-    import rlm.factory as factory_module
     from rlm.factory import FactoryExecutor
+
+    factory_module = importlib.import_module("rlm.factory")
 
     rlm_module.host_request = ScriptedHost()
 
