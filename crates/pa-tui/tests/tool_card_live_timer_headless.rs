@@ -41,6 +41,8 @@ enum Scenario {
     Quiet,
     /// A streamed call never receives its execution-start frame before turn end.
     Queued,
+    /// A completed call is repeated by a later streaming assistant update.
+    CompletedRestream,
     /// The bash straggler: the end frame is dropped, so the turn's settle
     /// freezes the card; then a late end frame and a late start (the
     /// retick probe) must both land on nothing.
@@ -167,6 +169,32 @@ impl MockSupervisor {
                                                 "id": "call_queued",
                                                 "name": "bash",
                                                 "arguments": { "command": "echo never started" },
+                                            }],
+                                        },
+                                    }),
+                                );
+                                event(&mut w, &json!({ "type": "turn_end" }));
+                                drain_barrier(&mut w);
+                            }
+                            Scenario::CompletedRestream => {
+                                tool_start(
+                                    &mut w,
+                                    "call_complete",
+                                    "bash",
+                                    &json!({ "command": "echo finished call output" }),
+                                );
+                                tool_end(&mut w, "call_complete", "bash", "finished call output");
+                                event(
+                                    &mut w,
+                                    &json!({
+                                        "type": "message_update",
+                                        "message": {
+                                            "role": "assistant",
+                                            "content": [{
+                                                "type": "toolCall",
+                                                "id": "call_complete",
+                                                "name": "bash",
+                                                "arguments": { "command": "echo finished call output" },
                                             }],
                                         },
                                     }),
@@ -804,5 +832,42 @@ fn a_queued_tool_card_settles_at_the_turn_boundary() {
     assert!(
         !settled.contains("queued"),
         "the queued state survived: {settled}"
+    );
+}
+
+/// Later assistant updates repeat completed tool IDs; turn end must keep their success.
+#[test]
+fn a_completed_tool_repeated_by_a_streaming_update_stays_successful() {
+    let dir = tempfile::TempDir::new().expect("temp dir");
+    let socket = dir.path().join("tui.sock");
+    let supervisor = MockSupervisor::bind(&socket, Scenario::CompletedRestream);
+    let handle = std::thread::spawn(move || supervisor.serve());
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .expect("tokio runtime");
+    let plan = HeadlessPlan {
+        steps: vec![
+            HeadlessStep::WaitRender {
+                needle: "late-probe-drained".to_string(),
+                timeout_ms: 5000,
+            },
+            HeadlessStep::WaitIdle { timeout_ms: 5000 },
+        ],
+        width: 100,
+        height: 40,
+    };
+    let outcome = runtime
+        .block_on(run_interactive(options(socket), UiMode::Headless(plan)))
+        .expect("interactive run");
+    handle.join().expect("mock supervisor finished");
+    let settled = outcome.frames.last().expect("the drained frame rendered");
+    assert!(
+        settled.contains("finished call output"),
+        "output lost: {settled}"
+    );
+    assert!(
+        settled.contains("bash \u{00b7} done"),
+        "completed call lost its success: {settled}"
     );
 }

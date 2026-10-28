@@ -49,16 +49,20 @@ pub fn settle_pending_tool_cards<S: std::hash::BuildHasher + Default>(
     text: &str,
 ) {
     for tool_call_id in pending.drain() {
-        // Every drained id records as aborted — late frames for a call
-        // that never created a card land on nothing the same way.
-        aborted.insert(tool_call_id.clone());
-        // The settle targets the newest card carrying the id; the older
-        // settled card keeps the previous sweep's result.
-        if let Some(index) = view
+        // Later message updates may repeat an already-completed call's id.
+        // Drain that stale pending entry without changing its final result.
+        let card_index = view
             .chat
             .iter()
-            .rposition(|entry| matches!(entry, ChatEntry::Tool(card) if card.id == tool_call_id))
-        {
+            .rposition(|entry| matches!(entry, ChatEntry::Tool(card) if card.id == tool_call_id));
+        if card_index.is_some_and(
+            |index| matches!(&view.chat[index], ChatEntry::Tool(card) if card.ended_at.is_some()),
+        ) {
+            continue;
+        }
+        // Calls without a card also record as aborted, blocking their late frames.
+        aborted.insert(tool_call_id.clone());
+        if let Some(index) = card_index {
             view.prepare_entry_mutation(index);
             if let Some(ChatEntry::Tool(card)) = view.chat.get_mut(index) {
                 // Keep any partial output when an abort or turn boundary settles the call.
