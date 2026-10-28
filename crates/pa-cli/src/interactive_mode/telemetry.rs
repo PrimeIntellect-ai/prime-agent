@@ -4,8 +4,7 @@
 //! standalone events remain their own (TS parity, plus upstream additions):
 //! `agent command used`, `tui ipython bash rendered` — the
 //! settled-shell-cell metric upstream #3307 tracks per render, kept intact
-//! from main — and `tui live tool timer`, the live-timer feature's
-//! adoption event (one per live tool call, tool category only).
+//! from main.
 
 use std::collections::BTreeMap;
 use std::sync::Mutex;
@@ -14,8 +13,7 @@ use super::{Future, PathBuf, Pin};
 
 /// The interactive client's telemetry: per-session-run adoption counters
 /// flushed with `tui exit`, plus the standalone events — the TS
-/// `agent command used`, the upstream #3307 `tui ipython bash rendered`,
-/// and `tui live tool timer` — each on a one-shot client. Telemetry must
+/// `agent command used`, the upstream #3307 `tui ipython bash rendered` — each on a one-shot client. Telemetry must
 /// never fail the session: opt-out or a broken install id drops the events.
 pub(super) struct CliInteractionTelemetry {
     pub(super) cwd: PathBuf,
@@ -174,20 +172,9 @@ impl pa_tui::interactive::InteractionTelemetry for CliInteractionTelemetry {
         })
     }
 
-    fn live_tool_timer_started(
-        &self,
-        tool_name: String,
-    ) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
-        Box::pin(async move {
-            let Some(client) = self.client() else {
-                return;
-            };
-            let category = pa_telemetry::ToolCategory::from_tool_name(&tool_name);
-            let mut properties = pa_telemetry::base_properties("interactive");
-            properties.set("tool_category", serde_json::Value::from(category.as_str()));
-            client.track("tui live tool timer", properties);
-            let _ = client.shutdown().await;
-        })
+    fn live_tool_timer_started(&self) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
+        self.count("tui_live_tool_timer_count");
+        Box::pin(std::future::ready(()))
     }
 
     fn scroll_used(

@@ -480,3 +480,19 @@ fn bash_minority_cell_stays_python() {
     );
     assert_eq!(bash_dominated_stats(&card), None);
 }
+
+#[test]
+fn an_aborted_cell_freezes_its_duration_from_card_timestamps() {
+    let now = std::time::Instant::now();
+    let mut card = cell_card("print('x')", Value::Null, true, false);
+    card.started_at = now.checked_sub(std::time::Duration::from_secs(4));
+    card.ended_at = now.checked_sub(std::time::Duration::from_secs(1));
+    card.aborted = true;
+    let first = render(&card, 0, Detail::Overview, &theme(), 100, true);
+    let later = render(&card, 10, Detail::Overview, &theme(), 100, true);
+    assert_eq!(
+        first, later,
+        "a settled timer never repaints a different duration"
+    );
+    assert!(text_of(&first[0]).contains("3.0s"), "got: {first:?}");
+}

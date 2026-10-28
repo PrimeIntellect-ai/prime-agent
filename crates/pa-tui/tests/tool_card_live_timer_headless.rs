@@ -39,6 +39,8 @@ struct MockSupervisor {
 enum Scenario {
     /// The quiet bash run: start, silent window, end, `turn_end`.
     Quiet,
+    /// A streamed call never receives its execution-start frame before turn end.
+    Queued,
     /// The bash straggler: the end frame is dropped, so the turn's settle
     /// freezes the card; then a late end frame and a late start (the
     /// retick probe) must both land on nothing.
@@ -81,6 +83,8 @@ impl MockSupervisor {
                 Err(_) => return,
             }
         };
+        // macOS inherits O_NONBLOCK from the listener on accept; the request loop blocks.
+        stream.set_nonblocking(false).expect("blocking mock stream");
         let mut writer = stream.try_clone().expect("clone mock socket");
         let mut reader = BufReader::new(stream);
 
@@ -150,6 +154,25 @@ impl MockSupervisor {
                                 std::thread::sleep(std::time::Duration::from_millis(TOOL_RUN_MS));
                                 tool_end(&mut w, "call_1", "bash", "ok");
                                 event(&mut w, &json!({ "type": "turn_end" }));
+                            }
+                            Scenario::Queued => {
+                                event(
+                                    &mut w,
+                                    &json!({
+                                        "type": "message_update",
+                                        "message": {
+                                            "role": "assistant",
+                                            "content": [{
+                                                "type": "toolCall",
+                                                "id": "call_queued",
+                                                "name": "bash",
+                                                "arguments": { "command": "echo never started" },
+                                            }],
+                                        },
+                                    }),
+                                );
+                                event(&mut w, &json!({ "type": "turn_end" }));
+                                drain_barrier(&mut w);
                             }
                             Scenario::Straggler => {
                                 tool_start(
@@ -663,7 +686,7 @@ fn a_lost_turns_card_settles_when_the_next_turn_starts() {
 
 /// The `python_repl` straggler: the summary's duration slot ticks while the
 /// cell runs, and at the settle it FREEZES on the run's honest duration
-/// (the settle result carries `durationMs`) instead of vanishing — the
+/// (from the card timestamps) instead of vanishing — the
 /// bash panel keeps its static `Took` row from the same timestamps, and
 /// the ipython summary keeps its duration segment.
 #[test]
@@ -715,8 +738,7 @@ fn a_python_repl_straggler_freezes_its_duration_slot() {
         outcome.frames[settle..].join("\n===")
     );
     // The frozen duration: the summary's last segment on the settled
-    // frame parses as the run's duration (a `durationMs` number), the
-    // same shape the kernel's `durationMs` always rendered.
+    // frame parses as the run's duration from the card timestamps.
     let settled = &outcome.frames[settle..];
     let with_duration = settled
         .iter()
@@ -745,5 +767,42 @@ fn a_python_repl_straggler_freezes_its_duration_slot() {
             || (duration_part.ends_with("ms")
                 && duration_part.trim_end_matches("ms").parse::<f64>().is_ok()),
         "the summary's duration slot freezes on the run's duration, not vanishes:\n{summary}"
+    );
+}
+
+/// A queued streamed call must settle even when execution never started.
+#[test]
+fn a_queued_tool_card_settles_at_the_turn_boundary() {
+    let dir = tempfile::TempDir::new().expect("temp dir");
+    let socket = dir.path().join("tui.sock");
+    let supervisor = MockSupervisor::bind(&socket, Scenario::Queued);
+    let handle = std::thread::spawn(move || supervisor.serve());
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .expect("tokio runtime");
+    let plan = HeadlessPlan {
+        steps: vec![
+            HeadlessStep::WaitRender {
+                needle: "late-probe-drained".to_string(),
+                timeout_ms: 5000,
+            },
+            HeadlessStep::WaitIdle { timeout_ms: 5000 },
+        ],
+        width: 100,
+        height: 40,
+    };
+    let outcome = runtime
+        .block_on(run_interactive(options(socket), UiMode::Headless(plan)))
+        .expect("interactive run");
+    handle.join().expect("mock supervisor finished");
+    let settled = outcome.frames.last().expect("the drained frame rendered");
+    assert!(
+        settled.contains("the turn ended before this call returned"),
+        "the queued call must settle: {settled}"
+    );
+    assert!(
+        !settled.contains("queued"),
+        "the queued state survived: {settled}"
     );
 }

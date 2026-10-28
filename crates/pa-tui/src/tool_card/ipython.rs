@@ -252,16 +252,16 @@ fn collapsed_line(
             format_duration(duration)
         };
         parts.push(vec![Span::styled(label, dim)]);
-    } else if let Some(started) = super::live_started(card) {
-        // The live timer (operator feature 2026-10-03): while the cell
-        // runs, the duration slot ticks the elapsed since the execution
-        // start (the loader spinner's repaints re-render this line), so
-        // the summary shows how long the cell has been running; the
-        // kernel's `durationMs` lands in the same slot when the cell
-        // settles — the exact duration the card always rendered.
-        let elapsed_ms = started.elapsed().as_millis() as f64;
-        parts.push(vec![Span::styled(format_duration(elapsed_ms), dim)]);
-        live_timer = true;
+    } else if let Some(started) = card
+        .started_at
+        .filter(|_| card.ended_at.is_none() || card.aborted)
+    {
+        let elapsed = card.ended_at.unwrap_or_else(std::time::Instant::now) - started;
+        parts.push(vec![Span::styled(
+            format_duration(elapsed.as_millis() as f64),
+            dim,
+        )]);
+        live_timer = card.ended_at.is_none();
     }
     if !card.result_partial {
         let error_name = details

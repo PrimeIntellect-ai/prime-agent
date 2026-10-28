@@ -505,16 +505,13 @@ impl SessionUi {
             TurnUpdate::TurnStarted => {
                 self.turn_active = true;
                 self.turn_error_shown = false;
-                // The calls the previous run left pending never end now:
-                // this turn starting is definitive — their turn is over
-                // and their late frames land on nothing — so their cards
-                // settle before the tracking drops, the same failed-frame
-                // settle bounded to the tracked ids (a card that only
-                // streamed keeps its output; a quiet one gets the settle
-                // error). Both stop ticking into this run's paints.
-                self.settle_straggler_cards(view);
-                // No card from a previous run settles on this one's failure.
-                self.pending_tools.clear();
+                // A new turn also settles leftovers from a lost turn-end frame.
+                crate::snapshot::settle_pending_tool_cards(
+                    view,
+                    &mut self.pending_tools,
+                    &mut self.aborted_tools,
+                    "the turn ended before this call returned",
+                );
                 self.aborted_tools.clear();
                 self.start_loader(view);
             }
@@ -571,7 +568,7 @@ impl SessionUi {
                     // pending-state reset or arrive without its own streamed frame).
                     self.pending_tools.insert(tool_call_id.clone());
                     Self::set_working_activity("Executing", false, view);
-                    self.track_live_tool_timer(&tool_name);
+                    self.track_live_tool_timer();
                 }
             }
             TurnUpdate::ToolExecutionUpdate {
@@ -614,12 +611,12 @@ impl SessionUi {
                 view.retry = None;
                 // The turn settled: the held bash cards stream into the transcript.
                 Self::flush_pending_bash(view);
-                // The turn's own settle: the calls this run still holds
-                // pending never got their end, and a live timer must not
-                // tick into the next run.
-                self.settle_straggler_cards(view);
-                // Stragglers never leak into the next run.
-                self.pending_tools.clear();
+                crate::snapshot::settle_pending_tool_cards(
+                    view,
+                    &mut self.pending_tools,
+                    &mut self.aborted_tools,
+                    "the turn ended before this call returned",
+                );
                 self.aborted_tools.clear();
                 // A provider failure already surfaced through the failed assistant message
                 // or the retry-exhausted banner; the turn result error is only a backstop.
@@ -1065,92 +1062,13 @@ impl SessionUi {
         false
     }
 
-    /// The calls the run still holds pending — a straggler's start frame
-    /// never got its end, so its live timer would tick into the next
-    /// run's paints and its header would keep spinning. Settled at two
-    /// boundaries: the turn's own `turn_end` (this run's stragglers) and
-    /// the next `turn_start` (a lost turn's leftovers, whose turn is
-    /// definitively over the moment the new one starts). Scoped to
-    /// `pending_tools`, the failed-frame sweep's own scope, so a later
-    /// turn never stamps a card it never tracked; both sweeps run before
-    /// the set clears. The settle closes the card the failed-frame way —
-    /// terminal, the settle instant, `aborted` (a late end frame lands on
-    /// nothing) — with the run's honest duration in `durationMs`: the
-    /// bash panel's static `Took` row and the ipython summary's duration
-    /// slot both freeze on it. A card that streamed a partial keeps its
-    /// output; a quiet straggler gets the settle error.
-    fn settle_straggler_cards(&self, view: &mut AgentView) {
-        let now = std::time::Instant::now();
-        let live: Vec<usize> = view
-            .chat
-            .iter()
-            .enumerate()
-            .filter_map(|(index, entry)| {
-                let ChatEntry::Tool(card) = entry else {
-                    return None;
-                };
-                if !self.pending_tools.contains(&card.id) {
-                    return None;
-                }
-                card.started_at?;
-                (card.ended_at.is_none()).then_some(index)
-            })
-            .collect();
-        for index in live {
-            view.prepare_entry_mutation(index);
-            if let Some(ChatEntry::Tool(card)) = view.chat.get_mut(index) {
-                let duration_ms = card
-                    .started_at
-                    .map(|started| now.duration_since(started).as_millis() as u64)
-                    .unwrap_or_default();
-                if card.result.is_none() {
-                    // A quiet straggler: the settle's own terminal result.
-                    card.result = Some(ToolResultView {
-                        content: vec![serde_json::json!({
-                            "type": "text",
-                            "text": "the turn ended before this call returned",
-                        })],
-                        details: serde_json::Value::Null,
-                        is_error: true,
-                    });
-                }
-                // A streamed partial keeps its output, but the card
-                // still closes as an ERROR: the turn cut the call off,
-                // so a terminal Done check would dress an interrupted
-                // call up as a success. Either way the card closes —
-                // terminal (non-partial), the freeze instant, and the
-                // aborted stamp that blocks late end frames.
-                if let Some(result) = card.result.as_mut() {
-                    result.is_error = true;
-                }
-                card.result_partial = false;
-                if let Some(result) = card.result.as_mut() {
-                    if result.details.is_null() {
-                        result.details = serde_json::json!({ "durationMs": duration_ms });
-                    } else if let Some(object) = result.details.as_object_mut() {
-                        object
-                            .entry("durationMs")
-                            .or_insert(serde_json::json!(duration_ms));
-                    }
-                }
-                card.ended_at = Some(now);
-                card.aborted = true;
-            }
-            view.mark_entry_stale(index);
-        }
-    }
-
-    /// `tui live tool timer`: a tool call started executing, so its running
-    /// card carries the live timer; once per live call (replayed cards never
-    /// take this path), and the tracker maps the name onto the fixed
-    /// category vocabulary — no tool name leaves the process.
-    fn track_live_tool_timer(&self, tool_name: &str) {
+    /// Count live timer starts with the session's other interaction counters.
+    fn track_live_tool_timer(&self) {
         let Some(telemetry) = self.telemetry.clone() else {
             return;
         };
-        let tool_name = tool_name.to_string();
         tokio::spawn(async move {
-            telemetry.live_tool_timer_started(tool_name).await;
+            telemetry.live_tool_timer_started().await;
         });
     }
 

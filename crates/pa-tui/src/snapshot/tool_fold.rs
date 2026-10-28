@@ -61,11 +61,13 @@ pub fn settle_pending_tool_cards<S: std::hash::BuildHasher + Default>(
         {
             view.prepare_entry_mutation(index);
             if let Some(ChatEntry::Tool(card)) = view.chat.get_mut(index) {
-                card.result = Some(ToolResultView {
+                // Keep any partial output when an abort or turn boundary settles the call.
+                let result = card.result.get_or_insert_with(|| ToolResultView {
                     content: vec![serde_json::json!({ "type": "text", "text": text })],
                     details: serde_json::Value::Null,
                     is_error: true,
                 });
+                result.is_error = true;
                 card.result_partial = false;
                 card.ended_at = Some(std::time::Instant::now());
                 card.aborted = true;

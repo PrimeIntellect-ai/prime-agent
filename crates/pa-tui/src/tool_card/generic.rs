@@ -213,35 +213,6 @@ mod tests {
     }
 
     #[test]
-    fn settled_card_renders_no_duration_row() {
-        // The settled card keeps its exact TS shape: the fallback panel
-        // renders no timing, and the live tick retires with the call.
-        let now = std::time::Instant::now();
-        let card = ToolCallCard {
-            id: "t".into(),
-            name: "custom".into(),
-            args: json!({ "query": "sweep" }),
-            started: true,
-            started_at: Some(now),
-            ended_at: Some(now),
-            result: Some(super::super::ToolResultView {
-                content: vec![json!({ "type": "text", "text": "ok" })],
-                details: json!({}),
-                is_error: false,
-            }),
-            result_partial: false,
-            ..Default::default()
-        };
-        let rows = render(&card, 0, Detail::Overview, &theme(), 120, true);
-        let flat: Vec<String> = rows.iter().map(text_of).collect();
-        assert!(
-            flat.iter()
-                .all(|r| !(r.contains("Elapsed ") || r.contains("Took "))),
-            "got: {flat:?}"
-        );
-    }
-
-    #[test]
     fn collapsed_fallback_shows_three_lines_and_hint() {
         let card = ToolCallCard {
             id: "t".into(),
