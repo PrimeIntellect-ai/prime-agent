@@ -132,6 +132,7 @@ fn systemone_body(data: &Value, model: &Model) -> anyhow::Result<Value> {
     });
     match data.get("images") {
         None | Some(Value::Null) => {}
+        Some(Value::Array(images)) if images.is_empty() => {}
         Some(Value::Array(images))
             if images.len() <= MAX_IMAGES
                 && images.iter().all(|image| {
@@ -272,7 +273,12 @@ pub(crate) fn register_decision_handler(
             async move {
                 let decision: anyhow::Result<Value> = async {
                     let resolved = resolved
-                        .get_or_try_init(|| async { resolve_decision_model(&cwd, &agent_dir) })
+                        .get_or_try_init(|| async move {
+                            tokio::task::spawn_blocking(move || {
+                                resolve_decision_model(&cwd, &agent_dir)
+                            })
+                            .await?
+                        })
                         .await?;
                     let body = systemone_body(&payload.data, &resolved.model)?;
                     let reply = post_systemone(resolved, &body).await?;
@@ -372,7 +378,7 @@ mod tests {
                 "actions": { "left": "ball to the left", "right": "ball to the right",
                              "wait": "ball above" },
                 "instructions": null,
-                "images": null,
+                "images": [],
             }),
         }
     }
