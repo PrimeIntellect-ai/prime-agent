@@ -1,4 +1,4 @@
-//! The Decision API's shared decision path: the `decisionApi.systemOneModel`
+//! The Decision API's shared decision path: the `decisionModel`
 //! settings reference resolved through the model registry exactly like
 //! `imageModel`, one decision request (state + one typed choice question)
 //! served in a single pass, and the answer protocol (choice, confidence,
@@ -50,7 +50,7 @@ fn parse_decision_request(
     if let Some(model) = request.remove("model") {
         if !model.is_null() {
             bail!(
-                "The decision model comes from the decisionApi.systemOneModel setting; the \
+                "The decision model comes from the decisionModel setting; the \
                  request carries no model (got {model})."
             );
         }
@@ -163,9 +163,9 @@ fn parse_image_data_url(url: &str) -> anyhow::Result<(String, String)> {
     Ok((mime.to_string(), data.to_string()))
 }
 
-/// The actionable refusal when `decisionApi.systemOneModel` is unset.
+/// The actionable refusal when `decisionModel` is unset.
 fn unconfigured_message() -> String {
-    "decisionApi.systemOneModel is not set in settings.json. Set it to the decision model \
+    "decisionModel is not set in settings.json. Set it to the decision model \
      reference (\"provider/model-id\" or a bare id), e.g. \"prime-inference/clef\"."
         .to_string()
 }
@@ -174,8 +174,8 @@ fn unconfigured_message() -> String {
 /// an available, authenticated model (the `imageModel` refusal shape).
 fn unusable_message(reference: &str) -> String {
     format!(
-        "decisionApi.systemOneModel \"{reference}\" could not be resolved to an available, \
-         authenticated model.\n\nFix the decisionApi.systemOneModel setting (settings.json) or \
+        "decisionModel \"{reference}\" could not be resolved to an available, \
+         authenticated model.\n\nFix the decisionModel setting (settings.json) or \
          authenticate the provider, then retry the decision."
     )
 }
@@ -201,7 +201,7 @@ impl ResolvedDecisionModel {
     }
 }
 
-/// Resolve `decisionApi.systemOneModel` through the model registry:
+/// Resolve `decisionModel` through the model registry:
 /// the reference must match an available (authenticated) model, and its
 /// request auth comes from the registry's merged resolution. The decision
 /// engine calls this once at engine start and reuses the result for every
@@ -217,9 +217,8 @@ pub fn resolve_decision_model(
     let settings = crate::settings::SettingsManager::create(cwd, agent_dir);
     let reference = settings
         .settings()
-        .decision_api
-        .as_ref()
-        .and_then(|decision| decision.system_one_model.clone())
+        .decision_model
+        .clone()
         .and_then(|reference| {
             let trimmed = reference.trim().to_string();
             (!trimmed.is_empty()).then_some(trimmed)
@@ -583,7 +582,7 @@ pub async fn serve_decision_request(
     if !request.images.is_empty() && !resolved.model.input.contains(&ModelInput::Image) {
         bail!(
             "{} does not accept image input, so decisions cannot carry images. Drop \
-             the images, or set decisionApi.systemOneModel to a vision-capable model.",
+             the images, or set decisionModel to a vision-capable model.",
             resolved.label()
         );
     }
@@ -606,11 +605,11 @@ mod tests {
     /// custom registry provider carrying it.
     fn fixture_agent_dir(
         dir: &Path,
-        decision_api: Option<&str>,
+        decision_model: Option<&str>,
         model_input: &str,
     ) -> anyhow::Result<()> {
-        let settings = match decision_api {
-            Some(model) => json!({ "decisionApi": { "systemOneModel": model } }),
+        let settings = match decision_model {
+            Some(model) => json!({ "decisionModel": model }),
             None => json!({}),
         };
         std::fs::write(dir.join("settings.json"), settings.to_string())?;
@@ -647,14 +646,14 @@ mod tests {
         fixture_agent_dir(dir.path(), None, r#"["text"]"#).unwrap();
         assert_eq!(
             error(request.clone()).await,
-            "decisionApi.systemOneModel is not set in settings.json. Set it to the decision model \
+            "decisionModel is not set in settings.json. Set it to the decision model \
              reference (\"provider/model-id\" or a bare id), e.g. \"prime-inference/clef\"."
         );
         fixture_agent_dir(dir.path(), Some("no-such/model"), r#"["text"]"#).unwrap();
         let refusal = error(request.clone()).await;
         assert!(
             refusal.starts_with(
-                "decisionApi.systemOneModel \"no-such/model\" could not be resolved to an \
+                "decisionModel \"no-such/model\" could not be resolved to an \
                  available, authenticated model."
             ),
             "{refusal}"
@@ -675,7 +674,7 @@ mod tests {
         .unwrap();
         std::fs::write(
             dir.path().join("settings.json"),
-            json!({ "decisionApi": { "systemOneModel": "decision-model" } }).to_string(),
+            json!({ "decisionModel": "decision-model" }).to_string(),
         )
         .unwrap();
         assert!(
@@ -693,8 +692,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(
             dir.path().join("settings.json"),
-            json!({ "decisionApi": { "systemOneModel": "prime-inference/internal/glm-5.2-fast" } })
-                .to_string(),
+            json!({ "decisionModel": "prime-inference/internal/glm-5.2-fast" }).to_string(),
         )
         .unwrap();
         std::fs::write(
@@ -782,7 +780,7 @@ mod tests {
         );
         assert_eq!(
             error(json!({ "state": {}, "model": "jev-latest" })).await,
-            "The decision model comes from the decisionApi.systemOneModel setting; the request \
+            "The decision model comes from the decisionModel setting; the request \
              carries no model (got \"jev-latest\")."
         );
         assert_eq!(
@@ -826,7 +824,7 @@ mod tests {
         assert_eq!(
             error,
             "fixture-decisions/decision-model does not accept image input, so decisions cannot \
-             carry images. Drop the images, or set decisionApi.systemOneModel to a \
+             carry images. Drop the images, or set decisionModel to a \
              vision-capable model."
         );
     }
@@ -857,7 +855,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(
             dir.path().join("settings.json"),
-            json!({ "decisionApi": { "systemOneModel": "decision-model" } }).to_string(),
+            json!({ "decisionModel": "decision-model" }).to_string(),
         )
         .unwrap();
         std::fs::write(
@@ -1035,8 +1033,7 @@ mod tests {
     fn write_systemone_registry(dir: &Path, base: &str) -> anyhow::Result<()> {
         std::fs::write(
             dir.join("settings.json"),
-            json!({ "decisionApi": { "systemOneModel": "fixture-decisions/systemone-model" } })
-                .to_string(),
+            json!({ "decisionModel": "fixture-decisions/systemone-model" }).to_string(),
         )?;
         std::fs::write(
             dir.join("models.json"),

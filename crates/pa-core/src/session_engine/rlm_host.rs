@@ -144,7 +144,7 @@ pub struct RlmSpawnRequest {
     /// Validated thinking level; the host checks model support.
     pub thinking: Option<String>,
     /// The decision-child spawn kind: `true` spawns the Decision API child
-    /// (the model comes from `decisionApi.systemOneModel`, and the child's
+    /// (the model comes from `decisionModel`, and the child's
     /// intake answers every message with one decision).
     pub decision_child: bool,
     /// Working directory; the host resolves relative paths against the session cwd.

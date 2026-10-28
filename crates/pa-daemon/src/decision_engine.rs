@@ -1,7 +1,7 @@
 //! The Decision API child engine (`rlm.spawn kind="decision"`): a spawned
 //! session whose every message is one decision request, answered by a
 //! single decision model call — the registry-resolved
-//! `decisionApi.systemOneModel` model (resolved once at engine start)
+//! `decisionModel` model (resolved once at engine start)
 //! over the shared decision path (`pa_core::session_engine::decision_api`).
 //! The parent's tagged goal messages route into the engine's goal input
 //! (the newest seq wins; an older goal never overwrites a newer one), and
@@ -756,7 +756,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(
             dir.path().join("settings.json"),
-            json!({ "decisionApi": { "systemOneModel": "decision-model" } }).to_string(),
+            json!({ "decisionModel": "decision-model" }).to_string(),
         )
         .unwrap();
         std::fs::write(
@@ -1049,7 +1049,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(
             dir.path().join("settings.json"),
-            json!({ "decisionApi": { "systemOneModel": "decision-model" } }).to_string(),
+            json!({ "decisionModel": "decision-model" }).to_string(),
         )
         .unwrap();
         std::fs::write(
@@ -1185,7 +1185,7 @@ mod tests {
         let write_settings = |reference: &str| {
             std::fs::write(
                 dir.path().join("settings.json"),
-                json!({ "decisionApi": { "systemOneModel": reference } }).to_string(),
+                json!({ "decisionModel": reference }).to_string(),
             )
             .unwrap();
         };
