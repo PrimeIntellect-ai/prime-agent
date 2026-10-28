@@ -63,5 +63,4 @@ pub mod settings;
 pub mod skills;
 pub mod slash_command_args;
 pub mod update;
-pub mod workspace_snapshot;
 pub use kernel::ReplKernelManager;
