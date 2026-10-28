@@ -729,6 +729,110 @@ mod tests {
         let _ = std::fs::remove_dir_all(&agent_dir);
     }
 
+    /// Roster removal may lag the ledger tombstone even after invalidation
+    /// has drained. A new walk must not bill the surviving snapshot again.
+    #[test]
+    fn a_tombstoned_roster_snapshot_never_reenters_the_context_walk() {
+        let root = tempfile::tempdir().unwrap();
+        let agent_dir = root.path();
+        let parent = agent_dir.join("sessions/parent.jsonl");
+        let child = agent_dir.join("session-artifacts/parent/sub-old/child.jsonl");
+        write_session(&parent, "parent", 0.5);
+        write_session(&child, "child", 0.125);
+        let ledger =
+            crate::rlm_ledger::RlmSpawnLedger::new(agent_dir, &agent_dir.join("sessions"), |_| {});
+        ledger
+            .append_spawn(&crate::rlm_ledger::RlmSpawnInput {
+                child_id: "sub-old".into(),
+                parent: parent.to_string_lossy().into(),
+                child: child.to_string_lossy().into(),
+                depth: 1,
+                name: "old".into(),
+                factory: None,
+            })
+            .unwrap();
+        ledger
+            .append_delete(
+                "sub-old",
+                &child.to_string_lossy(),
+                crate::rlm_ledger::RlmLedgerDeleteReason::User,
+            )
+            .unwrap();
+        crate::stop_cleanup::append_deleted_child_usage_amendments(
+            &ledger,
+            &child.to_string_lossy(),
+            "sub-old",
+        )
+        .unwrap();
+        let stale = json!({"id": "sub-old", "label": "old", "status": "completed",
+            "sessionDir": child.parent().unwrap()});
+        let (live, deleted) = walk_children(agent_dir, "parent", &[stale], Some(&parent)).unwrap();
+        assert!(
+            live.is_empty(),
+            "tombstone must hide stale roster row: {live:?}"
+        );
+        assert_eq!(deleted.len(), 1);
+        assert_eq!(deleted[0]["totalUsage"]["cost"]["total"], json!(0.125));
+    }
+
+    /// A child id may identify distinct historical files under the same
+    /// parent. Each billable tombstone needs a distinct context node id.
+    #[test]
+    #[allow(clippy::float_cmp)] // Exact binary fractions: the billable total must match.
+    fn deleted_context_nodes_distinguish_reused_child_ids() {
+        let root = tempfile::tempdir().unwrap();
+        let agent_dir = root.path();
+        let parent = agent_dir.join("sessions/parent.jsonl");
+        write_session(&parent, "parent", 0.5);
+        let ledger =
+            crate::rlm_ledger::RlmSpawnLedger::new(agent_dir, &agent_dir.join("sessions"), |_| {});
+        for (id, cost) in [("first", 0.125), ("second", 0.25)] {
+            let child = agent_dir.join(format!("session-artifacts/parent/{id}/{id}.jsonl"));
+            write_session(&child, id, cost);
+            ledger
+                .append_spawn(&crate::rlm_ledger::RlmSpawnInput {
+                    child_id: "reused".into(),
+                    parent: parent.to_string_lossy().into(),
+                    child: child.to_string_lossy().into(),
+                    depth: 1,
+                    name: id.into(),
+                    factory: None,
+                })
+                .unwrap();
+            ledger
+                .append_delete(
+                    "reused",
+                    &child.to_string_lossy(),
+                    crate::rlm_ledger::RlmLedgerDeleteReason::User,
+                )
+                .unwrap();
+            crate::stop_cleanup::append_deleted_child_usage_amendments(
+                &ledger,
+                &child.to_string_lossy(),
+                "reused",
+            )
+            .unwrap();
+        }
+        let (_, nodes) = walk_children(agent_dir, "parent", &[], Some(&parent)).unwrap();
+        assert_eq!(nodes.len(), 2);
+        let ids: HashSet<&str> = nodes
+            .iter()
+            .map(|node| node["id"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            ids.len(),
+            2,
+            "distinct tombstoned files share ids: {nodes:?}"
+        );
+        assert_eq!(
+            nodes
+                .iter()
+                .map(|node| node["totalUsage"]["cost"]["total"].as_f64().unwrap())
+                .sum::<f64>(),
+            0.375
+        );
+    }
+
     #[test]
     fn cold_cache_serves_live_rows_with_the_usage_fallback() {
         let cache = ContextTreeCache::new();
