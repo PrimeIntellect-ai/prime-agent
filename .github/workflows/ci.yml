@@ -344,6 +344,21 @@ jobs:
       - name: Bootstrap the kernel venv (ready before the kernel e2e units)
         if: steps.selection.outputs.units != '0'
         run: ./target/debug/prime-agent --prime-agent-bootstrap
+      - name: Prepare pinned TS edit-frame comparison binary
+        if: matrix.shard == 1 && steps.selection.outputs.units != '0' && hashFiles('scripts/check_ipython_diff_frames.py') != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          reference="${RUNNER_TEMP}/edit-frame-ts-reference"
+          mkdir -p "${reference}/package"
+          gh release download v0.9.8 --repo "${GITHUB_REPOSITORY}" \
+            --pattern prime-agent-0.9.8-linux-x64.tar.gz --dir "${reference}"
+          archive="${reference}/prime-agent-0.9.8-linux-x64.tar.gz"
+          echo "83fb09129bf78e3e60268212cd70932166591b15188caa70c1b0efbcc76235e2  ${archive}" | sha256sum --check
+          tar -xzf "${archive}" -C "${reference}/package"
+          echo "PA_TS_ARCHIVE=${archive}" >> "${GITHUB_ENV}"
+          echo "PA_TS_BINARY=${reference}/package/prime-agent" >> "${GITHUB_ENV}"
       # The real-binary lifecycle checks drive the debug binary through owned
       # daemons, PTYs and loopback providers only. One leg is enough.
       - name: Run the rust lifecycle checks
