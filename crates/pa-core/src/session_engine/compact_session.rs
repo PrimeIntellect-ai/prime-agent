@@ -78,7 +78,9 @@ fn message_from_entry(entry: &FileEntry) -> Option<AgentMessage> {
             _ => Some(message.clone()),
         },
         FileEntry::CustomMessage { payload, .. } => {
-            if payload.custom_type == "harness_digest" {
+            if payload.custom_type == "harness_digest"
+                || payload.custom_type == super::ipython_state::IPYTHON_STATE_CUSTOM_TYPE
+            {
                 return None;
             }
             Some(AgentMessage::Custom(pa_types::session::CustomMessage {
@@ -133,6 +135,7 @@ pub enum CompactOutcome {
 }
 
 pub(crate) struct CompactionAttempt {
+    session_id: String,
     /// The session leaf at prepare: the commit is valid while the active
     /// branch still grows through it with no compaction between.
     prefix_leaf: Option<String>,
@@ -217,6 +220,7 @@ pub(crate) fn prepare_attempt(
     let details: CompactionDetails =
         details_for(&file_op_messages, &entries, prev_compaction_index);
     Ok(CompactionAttempt {
+        session_id: session.get_session_id().to_string(),
         prefix_leaf,
         cut,
         previous_summary,
@@ -250,6 +254,7 @@ async fn summary_call_with_retry(
     compaction: Option<&super::semantic_edges::SemanticCompaction>,
     summary_headers: Option<std::collections::BTreeMap<String, String>>,
     model: &pa_types::ai::Model,
+    session_id: &str,
     api_key: Option<String>,
     max_tokens: u64,
     mut request: Vec<AgentMessage>,
@@ -260,6 +265,7 @@ async fn summary_call_with_retry(
         super::semantic_edges::summary_slice_call(compaction, summary_headers.clone(), |headers| {
             complete_summary_call(
                 model,
+                session_id,
                 api_key.clone(),
                 headers,
                 max_tokens,
@@ -285,7 +291,9 @@ async fn summary_call_with_retry(
         }
     }
     let retry = super::semantic_edges::summary_slice_call(compaction, summary_headers, |headers| {
-        complete_summary_call(model, api_key, headers, max_tokens, request, None, failure)
+        complete_summary_call(
+            model, session_id, api_key, headers, max_tokens, request, None, failure,
+        )
     })
     .await?;
     // Both attempts are wire calls, so both bill: the slice's usage is their sum.
@@ -403,6 +411,7 @@ pub(crate) async fn summarize_attempt(
             attempt.semantic_compaction.as_ref(),
             summary_headers.clone(),
             &model,
+            &attempt.session_id,
             api_key.clone(),
             history_max_tokens,
             request,
@@ -426,6 +435,7 @@ pub(crate) async fn summarize_attempt(
             attempt.semantic_compaction.as_ref(),
             summary_headers.clone(),
             &model,
+            &attempt.session_id,
             api_key.clone(),
             turn_prefix_max_tokens,
             request,

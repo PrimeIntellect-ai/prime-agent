@@ -30,8 +30,8 @@ the tarball and binaries.json. No network publishing happens here.
 
 `--catalog-assets <dir>` supplies the generated bundled catalog assets
 (scripts/release/bundle_catalog.py generates them); the packer hard-fails
-without VALIDATED assets (version gates + >= 42 transport tuples + >= 68
-services).
+without VALIDATED assets (version gates + the transport-tuple and service
+minimums in bundle_catalog.py).
 """
 
 import argparse

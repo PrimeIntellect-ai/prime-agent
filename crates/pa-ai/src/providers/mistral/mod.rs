@@ -21,6 +21,8 @@ use serde_json::{json, Value};
 
 mod convert;
 mod stream;
+#[cfg(test)]
+mod wire_tests;
 
 pub use stream::stream_mistral;
 
@@ -106,8 +108,12 @@ pub(crate) fn build_request_headers(
     options: &MistralOptions,
     api_key: &str,
 ) -> Vec<(String, String)> {
-    let mut headers: Vec<(String, String)> = Vec::new();
+    // The default authorization goes in first so model and caller headers replace it (header names
+    // compare case-insensitively) instead of shipping a second Authorization alongside theirs.
+    let mut headers: Vec<(String, String)> =
+        vec![("authorization".into(), format!("Bearer {api_key}"))];
     for (name, value) in model.headers.iter().flatten() {
+        headers.retain(|(existing, _)| !existing.eq_ignore_ascii_case(name));
         headers.push((name.clone(), value.clone()));
     }
     if let Some(options_headers) = &options.base.headers {
@@ -123,7 +129,6 @@ pub(crate) fn build_request_headers(
             headers.push(("x-affinity".into(), session_id.clone()));
         }
     }
-    headers.push(("authorization".into(), format!("Bearer {api_key}")));
     headers
 }
 
@@ -241,6 +246,73 @@ impl Provider for MistralConversationsProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// An explicit Authorization from the model or the caller (a custom provider's `authHeader:
+    /// true` puts one in the caller headers) replaces the default bearer header instead of
+    /// shipping beside it, whatever the header name's case.
+    #[test]
+    fn explicit_authorization_replaces_the_default() {
+        let authorizations = |model: &Model, caller: Option<&str>| {
+            let options = MistralOptions {
+                base: StreamOptions {
+                    headers: caller.map(|token| {
+                        std::collections::HashMap::from([(
+                            "Authorization".to_string(),
+                            format!("Bearer {token}"),
+                        )])
+                    }),
+                    ..Default::default()
+                },
+                ..Default::default()
+            };
+            build_request_headers(model, &options, "default-key")
+                .into_iter()
+                .filter(|(name, _)| name.eq_ignore_ascii_case("authorization"))
+                .collect::<Vec<_>>()
+        };
+        let mut model = Model {
+            id: "mistral-small-2603".into(),
+            name: "mistral-small".into(),
+            api: "mistral-conversations".into(),
+            provider: "mistral".into(),
+            base_url: "https://api.mistral.ai".into(),
+            reasoning: true,
+            thinking_level_map: None,
+            input: vec![crate::types::ModelInput::Text],
+            cost: crate::types::zero_model_cost(),
+            context_window: 128_000,
+            max_tokens: 8192,
+            max_tokens_explicit: false,
+            featured: None,
+            headers: None,
+            compat: None,
+        };
+        assert_eq!(
+            authorizations(&model, None),
+            vec![(
+                "authorization".to_string(),
+                "Bearer default-key".to_string()
+            )]
+        );
+        assert_eq!(
+            authorizations(&model, Some("caller-token")),
+            vec![(
+                "Authorization".to_string(),
+                "Bearer caller-token".to_string()
+            )]
+        );
+        model.headers = Some(std::collections::BTreeMap::from([(
+            "AUTHORIZATION".to_string(),
+            "Bearer model-token".to_string(),
+        )]));
+        assert_eq!(
+            authorizations(&model, None),
+            vec![(
+                "AUTHORIZATION".to_string(),
+                "Bearer model-token".to_string()
+            )]
+        );
+    }
 
     #[test]
     fn tool_choice_serializes() {

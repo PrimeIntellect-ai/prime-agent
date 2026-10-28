@@ -193,6 +193,9 @@ pub trait SessionEngine: Send + Sync {
     fn model_context_window(&self) -> Option<u64> {
         None
     }
+    /// The worker's turn loop started: engines hosting RLM children hold
+    /// the task prompts of children spawned from here until `on_turn_done`.
+    fn on_turn_start(&self) {}
     /// The worker's turn loop completed: engines hosting RLM children
     /// release prompt tasks spawned mid-turn, so the parent's continuation
     /// request always reaches the provider before a child's first turn.

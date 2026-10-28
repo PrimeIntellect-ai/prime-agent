@@ -747,6 +747,7 @@ impl SessionEngine for AgentSessionEngine {
         let entries = request.entries;
         let custom_instructions = request.custom_instructions;
         let replace_instructions = request.replace_instructions;
+        let session_id = request.session_id;
         // TS #2411: the branch summary resolves its model through the
         // `auxiliaryModel` setting, keeping its one-off prompt off the
         // prompt-cache prefix.
@@ -764,6 +765,7 @@ impl SessionEngine for AgentSessionEngine {
                     replace_instructions,
                     reserve_tokens,
                     auxiliary: Some(&auxiliary),
+                    session_id: Some(&session_id),
                 },
             )
             .await
@@ -958,6 +960,12 @@ impl SessionEngine for AgentSessionEngine {
             self.runtime.spawn(async move {
                 children.mark_replied(&child).await;
             });
+        }
+    }
+
+    fn on_turn_start(&self) {
+        if let Some(children) = &self.children {
+            children.notify_turn_started();
         }
     }
 

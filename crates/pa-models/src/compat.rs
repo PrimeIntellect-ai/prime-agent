@@ -30,6 +30,7 @@ const OPENAI_RESPONSES_KEYS: &[&str] = &["sendSessionIdHeader", "supportsLongCac
 const ANTHROPIC_MESSAGES_KEYS: &[&str] = &[
     "supportsEagerToolInputStreaming",
     "supportsLongCacheRetention",
+    "requiresThinkingSignature",
 ];
 
 const THINKING_FORMATS: &[&str] = &[
@@ -236,6 +237,10 @@ mod tests {
         assert!(is_model_compat(
             "anthropic-messages",
             Some(&compat(json!({"supportsEagerToolInputStreaming": true})))
+        ));
+        assert!(is_model_compat(
+            "anthropic-messages",
+            Some(&compat(json!({"requiresThinkingSignature": false})))
         ));
         assert!(!is_model_compat(
             "anthropic-messages",

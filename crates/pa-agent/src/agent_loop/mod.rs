@@ -162,6 +162,8 @@ pub struct AgentLoopConfig {
     pub max_tokens: Option<u64>,
     pub reasoning: ThinkingLevel,
     pub session_id: Option<String>,
+    /// The requested provider transport; `None` leaves it to the provider.
+    pub transport: Option<crate::types::Transport>,
     /// The requested service tier rides the loop config into every stream
     /// request; `None` until a host supplies one.
     pub service_tier: Option<crate::types::ServiceTier>,
@@ -197,6 +199,7 @@ impl AgentLoopConfig {
             max_tokens: None,
             reasoning: ThinkingLevel::Off,
             session_id: None,
+            transport: None,
             service_tier: None,
             convert_to_llm,
             transform_context: None,

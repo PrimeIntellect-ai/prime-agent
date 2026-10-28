@@ -321,6 +321,7 @@ impl TurnRunner {
         self.emit_turn_event(json!({ "type": "turn_start" }));
         // The pane reporter's run boundary (TS `agent_start`): working.
         self.herdr.lock().unwrap().run_started();
+        engine.on_turn_start();
 
         let prompt_index = {
             let core = self.core.lock().unwrap();
@@ -490,6 +491,11 @@ impl TurnRunner {
                     agent_end && (!core.steering.is_empty() || !core.follow_up.is_empty());
                 if agent_end && !more_queued {
                     engine.clear_progress_note();
+                }
+                // The turn boundary releases RLM child prompt tasks waiting on
+                // it, also when the abort gate below swallows the frame.
+                if matches!(event, EngineEvent::Done(_) | EngineEvent::DoneAborted) {
+                    engine.on_turn_done();
                 }
                 // Durable model cleanup is independent of visual abort-row
                 // suppression and emits no client-facing frame.
@@ -688,9 +694,6 @@ impl TurnRunner {
                 }
                 let done_result = match &event {
                     EngineEvent::Done(result) => {
-                        // The turn boundary releases RLM child prompt
-                        // tasks waiting on it.
-                        engine.on_turn_done();
                         pa_core::session_engine::compaction_trace::trace(
                             "turn.done_emitted",
                             &serde_json::json!({
@@ -704,10 +707,7 @@ impl TurnRunner {
                     }
                     // The aborted settle carries its classification
                     // structurally, not through the error text.
-                    EngineEvent::DoneAborted => {
-                        engine.on_turn_done();
-                        Some(TurnSettle::Aborted)
-                    }
+                    EngineEvent::DoneAborted => Some(TurnSettle::Aborted),
                     _ => None,
                 };
                 // One event may map to several wire frames (a custom row
@@ -998,13 +998,13 @@ impl TurnRunner {
                     let payload = serde_json::to_vec(&outbound).unwrap_or_default();
                     direct_payloads.push(payload);
                 }
-                drop(core);
-                // Direct frames go out immediately (flushing the parked update
-                // first, preserving event-sequence order); a pure-update batch
-                // stays parked for the flusher.
+                // Direct frames go out while their sequence still owns the
+                // store lock, so another row cannot overtake them.
+                // Flush the parked update first; pure updates stay parked.
                 if !direct_payloads.is_empty() {
                     turn_coalescer.send_direct(&direct_payloads, &events);
                 }
+                drop(core);
                 // The waiting response must observe the frames'
                 // sequences and resolves only after the idle flip.
                 if let Some(result) = done_result {
