@@ -5,6 +5,12 @@ from lifecycle_lib import DockScreen
 
 
 class EditFrameCaptureTests(unittest.TestCase):
+    def test_wide_cell_repaint_clears_and_styles_its_continuation(self):
+        screen = DockScreen(width=8)
+        screen.feed('ab界\r\x1b[41mX界'.encode())
+        self.assertEqual(screen.cells[0][:4], ['X', '界', ' ', ' '])
+        self.assertEqual(screen.styles[0][:3], [{'bg': ['ansi', 41]}] * 3)
+
     def test_capture_keeps_geometry_background_and_inverse(self):
         screen = DockScreen(width=80)
         screen.feed(('    ╰─ parity.py +1 -1\r\n\x1b[41;7m-1 a b\x1b[0m\r\n'
