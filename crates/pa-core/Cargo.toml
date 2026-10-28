@@ -45,11 +45,6 @@ ignore = "0.4"
 [dev-dependencies]
 tempfile = "3"
 proptest = { workspace = true }
-# The decision transport's extra-CA pin (tests/decision_api_extra_ca.rs):
-# a loopback TLS server whose leaf chains to a generated CA only
-# NODE_EXTRA_CA_CERTS knows (the pa-models custom_ca_extra_certs recipe).
-rcgen = { version = "0.14", default-features = false, features = ["pem", "ring"] }
-tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
 # The traces rate-gate test runs on paused tokio time (the 12s platform
 # interval auto-advances).
 tokio = { workspace = true, features = ["test-util"] }
