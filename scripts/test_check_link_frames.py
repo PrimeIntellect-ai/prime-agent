@@ -14,7 +14,7 @@ class LinkParityGuards(unittest.TestCase):
         self.assertEqual(screen.unsupported_terminal, ['\x1b[17t'])
 
     def test_missing_targets_or_process_cleanup_cannot_pass(self):
-        item = {'executed': True, 'cleanup_verified': True, 'target_check': True,
+        item = {'executed': True, 'cleanup_verified': True, 'target_check': True, 'exit_code': 0,
                 'frames': {'paint': [[['x', {'4': True}]]]}}
         pair = {'ts': copy.deepcopy(item), 'rust': copy.deepcopy(item)}
         self.assertTrue(frames_equal(pair))
@@ -27,8 +27,18 @@ class LinkParityGuards(unittest.TestCase):
             changed['rust'][field] = 'fixture failure'
             self.assertFalse(frames_equal(changed))
 
-    def test_text_styles_and_geometry_are_compared(self):
+    def test_a_crashed_or_unexited_ui_cannot_pass(self):
         item = {'executed': True, 'cleanup_verified': True, 'target_check': True,
+                'exit_code': 0, 'frames': {'paint': [[['x', {}]]]}}
+        pair = {'ts': copy.deepcopy(item), 'rust': copy.deepcopy(item)}
+        self.assertTrue(frames_equal(pair))
+        for code in (1, -11, None):
+            changed = copy.deepcopy(pair)
+            changed['rust']['exit_code'] = code
+            self.assertFalse(frames_equal(changed))
+
+    def test_text_styles_and_geometry_are_compared(self):
+        item = {'executed': True, 'cleanup_verified': True, 'target_check': True, 'exit_code': 0,
                 'frames': {'paint': [[['x', {'4': True}], [' ', {}]]]}}
         pair = {'ts': copy.deepcopy(item), 'rust': copy.deepcopy(item)}
         for cells in ([['y', {'4': True}], [' ', {}]],

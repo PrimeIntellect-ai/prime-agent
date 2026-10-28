@@ -153,6 +153,7 @@ def capture(binary, kind, case, width, root):
 def frames_equal(pair):
     return bool(set(pair) == {'ts', 'rust'} and all(
         item.get('executed') and item.get('cleanup_verified') and item.get('target_check')
+        and item.get('exit_code') == 0
         and not item.get('error') and not item.get('fixture_errors')
         for item in pair.values()) and pair['ts']['frames'] == pair['rust']['frames'])
 
