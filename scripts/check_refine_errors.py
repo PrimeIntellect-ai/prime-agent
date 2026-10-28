@@ -109,16 +109,21 @@ def observe(binary, root, case, receipt):
             else:
                 raise AssertionError('refine must report the fixture failure')
             assert len(server.requests) == 1, server.requests
+            receipt.update(actual_error=actual, ts_observed_error=TS_OBSERVED[case],
+                           parity_equal=actual == TS_OBSERVED[case])
             if case == 'length':
+                body = server.requests[0]['body']
+                budget = body.get('max_tokens', body.get('max_completion_tokens'))
+                assert isinstance(budget, int) and budget > 0, body
+                receipt['requested_output_tokens'] = budget
                 assert actual == ('Refinement failed: the model hit its output limit '
-                                  '(8000 tokens, prime-inference/parity-1)'), actual
+                                  f'({budget} tokens, prime-inference/parity-1)'), actual
             elif case == 'provider_error':
                 assert actual.startswith('Refinement failed: ') \
                     and 'fixture token budget invalid' in actual, actual
             else:
                 assert actual == 'Refiner did not return a JSON object', actual
-            receipt.update(actual_error=actual, ts_observed_error=TS_OBSERVED[case],
-                           parity_equal=actual == TS_OBSERVED[case], behavior_verified=True)
+            receipt['behavior_verified'] = True
         finally:
             receipt['http_requests'] = server.requests
             receipt['http_headers'] = server.received_headers
@@ -148,11 +153,17 @@ def main():
         with tempfile.TemporaryDirectory(prefix='pa-refine-errors-', dir='/tmp') as folder:
             for case in TS_OBSERVED:
                 observed = receipt['cases'][case] = {}
-                observe(binary, Path(folder) / case, case, observed)
-                assert observed.get('behavior_verified') and observed.get('cleanup_verified') \
-                    and observed.get('provider_stopped'), observed
-        receipt['verified'] = True
-        receipt['parity_equal'] = all(c['parity_equal'] for c in receipt['cases'].values())
+                try:
+                    observe(binary, Path(folder) / case, case, observed)
+                except Exception as error:
+                    observed['error'] = str(error)
+        receipt['verified'] = all(c.get('behavior_verified') and c.get('cleanup_verified')
+            and c.get('provider_stopped') and not c.get('error')
+            for c in receipt['cases'].values())
+        receipt['parity_equal'] = all(c.get('parity_equal') is True
+                                     for c in receipt['cases'].values())
+        if not receipt['verified']:
+            receipt['error'] = 'one or more output controls failed; see cases'
     except Exception as error:
         receipt['error'] = str(error)
     args.receipt.parent.mkdir(parents=True, exist_ok=True)
