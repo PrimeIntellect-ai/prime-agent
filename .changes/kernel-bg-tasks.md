@@ -1,0 +1,1 @@
+- A subagent that leaves an asyncio task running in its Python kernel (for example a polling loop started with `asyncio.create_task`) no longer loses that task when it goes idle: the kernel now stays loaded while such tasks run, as it already did for background `bash()` commands.

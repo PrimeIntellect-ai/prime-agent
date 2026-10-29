@@ -968,7 +968,7 @@ impl SessionEngine {
         self.kernel_provisioner_weak()
             .upgrade()
             .and_then(|provisioner| provisioner.manager())
-            .is_some_and(|manager| manager.has_background_work())
+            .is_some_and(|manager| manager.has_background_bash())
     }
 
     /// Expand a `/skill:<name>` submission into its `<skill>` block for

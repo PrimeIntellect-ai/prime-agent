@@ -147,6 +147,7 @@ impl AgentSessionEngine {
             queue_modes,
             autonomous_boundary: std::sync::Mutex::new(None),
             background_bash_probe: std::sync::Mutex::new(None),
+            background_work_probe: std::sync::Mutex::new(None),
             kernel_release_probe: std::sync::Mutex::new(None),
             registered_jobs_probe: std::sync::Mutex::new(None),
             session_file,
@@ -365,7 +366,7 @@ impl AgentSessionEngine {
                 agent: std::sync::Arc::clone(built.session.agent()),
                 session: Arc::downgrade(built),
             });
-        // The background-bash liveness probe: a deadlock-free read over the
+        // The background-bash and background-work liveness probes: deadlock-free reads over the
         // build's provisioner.
         let provisioner = built.kernel_provisioner_weak();
         *self
@@ -373,6 +374,16 @@ impl AgentSessionEngine {
             .lock()
             .expect("background bash probe lock") = Some(std::sync::Arc::new(move || {
             provisioner
+                .upgrade()
+                .and_then(|provisioner| provisioner.manager())
+                .is_some_and(|manager| manager.has_background_bash())
+        }));
+        let work_provisioner = built.kernel_provisioner_weak();
+        *self
+            .background_work_probe
+            .lock()
+            .expect("background work probe lock") = Some(std::sync::Arc::new(move || {
+            work_provisioner
                 .upgrade()
                 .and_then(|provisioner| provisioner.manager())
                 .is_some_and(|manager| manager.has_background_work())
@@ -775,6 +786,10 @@ impl AgentSessionEngine {
             .lock()
             .expect("background bash probe lock") = None;
         *self
+            .background_work_probe
+            .lock()
+            .expect("background work probe lock") = None;
+        *self
             .kernel_release_probe
             .lock()
             .expect("kernel release probe lock") = None;
@@ -822,6 +837,10 @@ impl AgentSessionEngine {
             .background_bash_probe
             .lock()
             .expect("background bash probe lock") = None;
+        *self
+            .background_work_probe
+            .lock()
+            .expect("background work probe lock") = None;
         *self
             .kernel_release_probe
             .lock()
