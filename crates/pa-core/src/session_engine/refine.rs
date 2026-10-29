@@ -488,6 +488,31 @@ pub(crate) enum AutoRefineRound {
 }
 
 impl AgentSession {
+    /// The refiner model call on the session model, with the merged request
+    /// headers (the Prime team header) the session's own requests send.
+    pub(super) async fn refiner_call(
+        &self,
+        model: &pa_types::ai::Model,
+        api_key: Option<String>,
+    ) -> anyhow::Result<crate::refinement::executor::RefinerFn> {
+        let (api_key, headers) = match self.auxiliary_model.clone() {
+            Some(context) => {
+                let model = model.clone();
+                let routed = tokio::task::spawn_blocking(move || {
+                    super::auxiliary_model::session_fallback_with_headers(&context, &model, api_key)
+                })
+                .await?;
+                (routed.api_key, routed.headers)
+            }
+            None => (api_key, None),
+        };
+        Ok(default_refiner_call(
+            api_key,
+            headers,
+            self.session_id().await,
+        ))
+    }
+
     /// The compact-trigger review: an LLM call over the conversation, the
     /// merged harness state, and the refinement history. `Ok(None)` is the
     /// decline; `Ok(Some(review))` a fresh approval.
@@ -536,7 +561,7 @@ impl AgentSession {
                 reason: AUTO_REFINE_COMPACT_REASON.to_string(),
                 turns_since_last_review,
             },
-            default_refiner_call(api_key.clone(), self.session_id().await),
+            self.refiner_call(model, api_key).await?,
         )
         .await?;
         if !review.should_refine {
@@ -614,10 +639,10 @@ impl AgentSession {
 #[must_use]
 pub fn default_refiner_call(
     api_key: Option<String>,
+    headers: Option<std::collections::BTreeMap<String, String>>,
     session_id: String,
 ) -> crate::refinement::executor::RefinerFn {
     Box::new(move |model, system_prompt, prompt| {
-        let api_key = api_key;
         Box::pin(async move {
             let context = pa_types::ai::Context {
                 system_prompt: Some(system_prompt.to_string()),
@@ -631,6 +656,7 @@ pub fn default_refiner_call(
             let mut stream_options =
                 pa_ai::types::SimpleStreamOptions::from_base(pa_ai::types::StreamOptions {
                     api_key,
+                    headers: headers.map(|headers| headers.into_iter().collect()),
                     session_id: Some(session_id),
                     // One-off prompts ride SSE: they keep the conversation id (cache key,
                     // opencode routing) but never take or replace the session's Codex

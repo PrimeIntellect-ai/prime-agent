@@ -95,6 +95,8 @@ pub(crate) struct ResidentWorker {
     pub(crate) worker_id: String,
     pub(crate) descriptor: Mutex<DaemonWorkerDescriptor>,
     pub(crate) descriptor_path: PathBuf,
+    /// Fresh creates seed their family before replying; adopted workers seed on registration.
+    pub(crate) roster_family_seed_owned_by_create: AtomicBool,
     /// The worker's command pump channel, bounded at
     /// [`crate::backpressure::WORKER_INFLIGHT_CAPACITY`]: admission precedes
     /// enqueue, so the queue and in-flight set share one bound.
@@ -177,6 +179,7 @@ impl ResidentWorker {
             worker_id,
             descriptor: Mutex::new(descriptor),
             descriptor_path,
+            roster_family_seed_owned_by_create: AtomicBool::new(false),
             cmd_tx: Mutex::new(None),
             inflight: Arc::new(tokio::sync::Semaphore::new(
                 crate::backpressure::WORKER_INFLIGHT_CAPACITY,
