@@ -5,7 +5,6 @@
 
 mod support;
 
-use std::io::{BufRead, BufReader};
 use std::os::unix::net::UnixListener;
 use std::path::PathBuf;
 
@@ -14,7 +13,7 @@ use pa_tui::interactive::{
 };
 use serde_json::{json, Value};
 
-use support::write_json;
+use support::{serve_connection, write_json, Request};
 
 const QUEUED_TEXT: &str = "queued while compacting";
 const SUMMARY_TEXT: &str = "the compacted summary";
@@ -113,50 +112,24 @@ impl MockSupervisor {
     /// `attach_frames` rides the wire right after the attach response.
     fn serve(self, attach_frames: &[Value]) -> Vec<String> {
         let (stream, _) = self.listener.accept().expect("accept mock client");
-        let mut writer = stream.try_clone().expect("clone mock socket");
-        let mut reader = BufReader::new(stream);
-
-        let hello = json!({
-            "type": "daemon_hello",
-            "protocol": { "name": "prime-agent.daemon", "version": 7 },
-            "serverCapabilities": [],
-            "clientId": "mock",
-        });
-        write_json(&mut writer, &hello);
-
         let mut commands = Vec::new();
-        let mut line = String::new();
-        loop {
-            line.clear();
-            match reader.read_line(&mut line) {
-                Ok(0) | Err(_) => break,
-                Ok(_) => {}
-            }
-            let Ok(envelope) = serde_json::from_str::<Value>(line.trim()) else {
-                continue;
-            };
-            let id = envelope.get("id").and_then(Value::as_str).unwrap_or("");
-            let command = envelope.get("command").cloned().unwrap_or(Value::Null);
-            let command_type = command
-                .get("type")
-                .and_then(Value::as_str)
-                .unwrap_or_default()
-                .to_string();
-            commands.push(command_type.clone());
-            match command_type.as_str() {
-                "create" => write_json(&mut writer, &create_response(id)),
+        serve_connection(stream, &[], |writer, Request { id, kind, .. }| {
+            commands.push(kind.to_string());
+            match kind {
+                "create" => write_json(writer, &create_response(id)),
                 "attach" => {
-                    write_json(&mut writer, &attach_response(id));
+                    write_json(writer, &attach_response(id));
                     for frame in attach_frames {
-                        write_json(&mut writer, frame);
+                        write_json(writer, frame);
                     }
                 }
                 // The PRE-FIX tree's rebuild fetch: the queued row is already
                 // persisted, so the fetched transcript contains it too.
-                "get_messages" => write_json(&mut writer, &raced_fetch_response(id)),
-                command => write_json(&mut writer, &generic_response(id, command)),
+                "get_messages" => write_json(writer, &raced_fetch_response(id)),
+                _ => return false,
             }
-        }
+            true
+        });
         commands
     }
 }
@@ -219,14 +192,6 @@ fn raced_fetch_response(id: &str) -> Value {
                 { "role": "user", "content": QUEUED_TEXT, "timestamp": 400 },
             ],
         },
-    })
-}
-
-/// The catch-all success envelope every other command answers with.
-fn generic_response(id: &str, command: &str) -> Value {
-    json!({
-        "type": "response", "id": id, "command": command,
-        "success": true, "data": {},
     })
 }
 

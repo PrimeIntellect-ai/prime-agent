@@ -11,7 +11,6 @@
 mod support;
 
 use std::collections::HashSet;
-use std::io::{BufRead, BufReader};
 use std::os::unix::net::UnixListener;
 use std::sync::{Arc, Mutex};
 
@@ -20,7 +19,7 @@ use pa_tui::interactive::{
 };
 use serde_json::{json, Value};
 
-use support::{options, write_json};
+use support::{options, serve_connection, write_json, Request};
 
 const TAIL: usize = 300;
 /// The window's page size and resident chunk count (the bound under test).
@@ -75,31 +74,9 @@ struct MockSupervisor {
 impl MockSupervisor {
     fn serve(self) {
         let (stream, _) = self.listener.accept().expect("accept");
-        let mut writer = stream.try_clone().expect("clone mock socket");
-        let mut reader = BufReader::new(stream);
-        write_json(
-            &mut writer,
-            &json!({
-                "type": "daemon_hello",
-                "protocol": { "name": "prime-agent.daemon", "version": 7 },
-                "serverCapabilities": [], "clientId": "mock",
-            }),
-        );
-        let mut line = String::new();
         let mut reloaded = false;
-        loop {
-            line.clear();
-            match reader.read_line(&mut line) {
-                Ok(0) | Err(_) => break,
-                Ok(_) => {}
-            }
-            let Ok(envelope) = serde_json::from_str::<Value>(line.trim()) else {
-                continue;
-            };
-            let id = envelope["id"].as_str().unwrap_or_default().to_string();
-            let command = envelope["command"].clone();
-            let kind = command["type"].as_str().unwrap_or_default().to_string();
-            let data = match kind.as_str() {
+        serve_connection(stream, &[], |writer, Request { id, kind, command }| {
+            let data = match kind {
                 "attach" => attach_data(),
                 "reload" => {
                     reloaded = true;
@@ -110,10 +87,10 @@ impl MockSupervisor {
                     self.pages.lock().unwrap().push(page.clone());
                     let paging = self.paging;
                     if paging.hold_newer && page["from"] == "start" && page.get("after").is_some() {
-                        continue;
+                        return true;
                     }
                     if paging.hold_older && page["from"] == "end" && page.get("before").is_some() {
-                        continue;
+                        return true;
                     }
                     if reloaded {
                         std::thread::sleep(std::time::Duration::from_millis(
@@ -123,10 +100,10 @@ impl MockSupervisor {
                             && command.get("historyLeafId").is_some()
                         {
                             write_json(
-                                &mut writer,
+                                writer,
                                 &json!({ "type": "response", "id": id, "command": kind, "success": false, "error": "History branch changed" }),
                             );
-                            continue;
+                            return true;
                         }
                     }
                     page_data(&page)
@@ -134,13 +111,14 @@ impl MockSupervisor {
                 "get_session_stats" => json!({
                     "contextUsage": { "tokens": 1200, "contextWindow": 200_000 }, "cost": 0.01,
                 }),
-                _ => json!({}),
+                _ => return false,
             };
             write_json(
-                &mut writer,
+                writer,
                 &json!({ "type": "response", "id": id, "command": kind, "success": true, "data": data }),
             );
-        }
+            true
+        });
     }
 }
 

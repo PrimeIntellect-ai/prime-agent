@@ -30,7 +30,10 @@ use pa_tui::interactive::{
 };
 use serde_json::{json, Value};
 
-use support::{attach_response, options, write_json, write_session_event};
+use support::{
+    attach_response, create_response, options, session_stats_response, write_json,
+    write_session_event,
+};
 
 /// Tall enough that the whole 20-row bash preview plus its status rows fit the window.
 const TALL_PLAN_HEIGHT: u16 = 64;
@@ -148,39 +151,13 @@ impl MockSupervisor {
                     .to_string();
                 match command_type.as_str() {
                     "create" => {
-                        write_json(
-                            &mut writer,
-                            &json!({
-                                "type": "response",
-                                "id": id,
-                                "command": "create",
-                                "success": true,
-                                "data": {
-                                    "activeSessionId": "s1",
-                                    "id": "s1",
-                                    "sessionId": "sess-1",
-                                    "sessionFile": "/tmp/sess-1.jsonl",
-                                },
-                            }),
-                        );
+                        write_json(&mut writer, &create_response(id));
                     }
                     "attach" => {
                         write_json(&mut writer, &attach_response(id, "bash session"));
                     }
                     "get_session_stats" => {
-                        write_json(
-                            &mut writer,
-                            &json!({
-                                "type": "response",
-                                "id": id,
-                                "command": "get_session_stats",
-                                "success": true,
-                                "data": {
-                                    "contextUsage": { "tokens": 1200, "contextWindow": 200_000 },
-                                    "cost": 0.01,
-                                },
-                            }),
-                        );
+                        write_json(&mut writer, &session_stats_response(id));
                     }
                     "prompt" => {
                         write_json(

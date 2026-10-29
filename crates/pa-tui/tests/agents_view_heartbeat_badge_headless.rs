@@ -9,25 +9,15 @@
 mod support;
 
 use std::io::{BufReader, Write};
-use std::os::unix::net::{UnixListener, UnixStream};
+use std::os::unix::net::UnixStream;
 use std::time::Duration;
 
 use pa_tui::agents_view::{AgentsHeadlessPlan, AgentsStep, AgentsViewUiMode};
 use serde_json::{json, Value};
 
-use support::{read_line, view_options};
-
-struct MockSupervisor {
-    listener: UnixListener,
-}
+use support::{read_line, view_options, MockSupervisor};
 
 impl MockSupervisor {
-    fn bind(socket: &std::path::Path) -> Self {
-        MockSupervisor {
-            listener: UnixListener::bind(socket).expect("bind mock socket"),
-        }
-    }
-
     /// Serve one agents-view connection: hello, then the command loop.
     /// The first `heartbeats_list` answer is empty and pushes the
     /// daemon-global `heartbeats_changed` broadcast, so the badge can

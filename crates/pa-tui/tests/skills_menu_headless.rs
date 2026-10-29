@@ -20,7 +20,6 @@
 
 mod support;
 
-use std::io::{BufRead, BufReader};
 use std::os::unix::net::UnixListener;
 use std::path::PathBuf;
 
@@ -30,7 +29,10 @@ use pa_tui::interactive::{
 };
 use serde_json::{json, Value};
 
-use support::{attach_response, write_json, write_session_event};
+use support::{
+    attach_response, create_response, detach_response, serve_connection, session_stats_response,
+    write_json, write_session_event, Request,
+};
 
 struct MockSupervisor {
     listener: UnixListener,
@@ -49,58 +51,16 @@ impl MockSupervisor {
 
     fn serve(self) {
         let (stream, _) = self.listener.accept().expect("accept");
-        let write_stream = stream.try_clone().expect("clone mock socket");
-        let mut writer = write_stream;
-        let mut reader = BufReader::new(stream);
-
-        let hello = json!({
-            "type": "daemon_hello",
-            "protocol": { "name": "prime-agent.daemon", "version": 7 },
-            "serverCapabilities": [],
-            "clientId": "mock",
-        });
-        write_json(&mut writer, &hello);
-
-        let mut line = String::new();
-        loop {
-            line.clear();
-            match reader.read_line(&mut line) {
-                Ok(0) | Err(_) => break,
-                Ok(_) => {}
-            }
-            let Ok(envelope) = serde_json::from_str::<Value>(line.trim()) else {
-                continue;
-            };
-            let id = envelope.get("id").and_then(Value::as_str).unwrap_or("");
-            let command = envelope.get("command").cloned().unwrap_or(Value::Null);
-            let command_type = command
-                .get("type")
-                .and_then(Value::as_str)
-                .unwrap_or_default()
-                .to_string();
-            match command_type.as_str() {
+        serve_connection(stream, &[], |writer, Request { id, kind, command }| {
+            match kind {
                 "create" => {
-                    write_json(
-                        &mut writer,
-                        &json!({
-                            "type": "response",
-                            "id": id,
-                            "command": "create",
-                            "success": true,
-                            "data": {
-                                "activeSessionId": "s1",
-                                "id": "s1",
-                                "sessionId": "sess-1",
-                                "sessionFile": "/tmp/sess-1.jsonl",
-                            },
-                        }),
-                    );
+                    write_json(writer, &create_response(id));
                 }
                 "get_commands" => {
                     // TS `createAgentConnectionCommands`: the skills ride the command catalog as
                     // `skill:<name>` entries with their description and source info.
                     write_json(
-                        &mut writer,
+                        writer,
                         &json!({
                             "type": "response",
                             "id": id,
@@ -126,41 +86,21 @@ impl MockSupervisor {
                     );
                 }
                 "attach" => {
-                    write_json(&mut writer, &attach_response(id, "skills session"));
+                    write_json(writer, &attach_response(id, "skills session"));
                 }
                 "get_session_stats" => {
-                    write_json(
-                        &mut writer,
-                        &json!({
-                            "type": "response",
-                            "id": id,
-                            "command": "get_session_stats",
-                            "success": true,
-                            "data": {
-                                "contextUsage": { "tokens": 1200, "contextWindow": 200_000 },
-                                "cost": 0.01,
-                            },
-                        }),
-                    );
+                    write_json(writer, &session_stats_response(id));
                 }
                 "detach" => {
-                    write_json(
-                        &mut writer,
-                        &json!({
-                            "type": "response",
-                            "id": id,
-                            "command": "detach",
-                            "success": true,
-                        }),
-                    );
+                    write_json(writer, &detach_response(id));
                 }
                 "prompt" => {
                     {
                         let mut requests = self.prompt_requests.lock().expect("prompt recorder");
-                        requests.push(command.clone());
+                        requests.push(command);
                     }
                     write_json(
-                        &mut writer,
+                        writer,
                         &json!({
                             "type": "response",
                             "id": id,
@@ -170,16 +110,16 @@ impl MockSupervisor {
                     );
                     // A minimal streamed turn: a wrongly-sent prompt still settles (a regression
                     // fails on the recorder, not on a wedged settle gate).
-                    write_session_event(&mut writer, &json!({ "type": "turn_start" }));
+                    write_session_event(writer, &json!({ "type": "turn_start" }));
                     write_session_event(
-                        &mut writer,
+                        writer,
                         &json!({
                             "type": "message_start",
                             "message": { "role": "user", "content": "asked" },
                         }),
                     );
                     write_session_event(
-                        &mut writer,
+                        writer,
                         &json!({
                             "type": "message_end",
                             "message": {
@@ -189,22 +129,12 @@ impl MockSupervisor {
                             },
                         }),
                     );
-                    write_session_event(&mut writer, &json!({ "type": "turn_end" }));
+                    write_session_event(writer, &json!({ "type": "turn_end" }));
                 }
-                _ => {
-                    write_json(
-                        &mut writer,
-                        &json!({
-                            "type": "response",
-                            "id": id,
-                            "command": command_type,
-                            "success": true,
-                            "data": {},
-                        }),
-                    );
-                }
+                _ => return false,
             }
-        }
+            true
+        });
     }
 }
 

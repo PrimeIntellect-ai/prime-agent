@@ -33,7 +33,7 @@ use pa_tui::interactive::{
 };
 use serde_json::{json, Value};
 
-use support::{attach_response, write_json, write_session_event};
+use support::{attach_response, create_response, write_json, write_session_event};
 
 /// The wait for the recovered banner: the shutdown recovery's fixed poll finds the successor well
 /// inside this bound.
@@ -83,21 +83,7 @@ impl FirstGeneration {
                 .to_string();
             match command_type.as_str() {
                 "create" => {
-                    write_json(
-                        &mut writer,
-                        &json!({
-                            "type": "response",
-                            "id": id,
-                            "command": "create",
-                            "success": true,
-                            "data": {
-                                "activeSessionId": "s1",
-                                "id": "s1",
-                                "sessionId": "sess-1",
-                                "sessionFile": "/tmp/sess-1.jsonl",
-                            },
-                        }),
-                    );
+                    write_json(&mut writer, &create_response(id));
                 }
                 "attach" => {
                     write_json(&mut writer, &attach_response(id, "restart session"));

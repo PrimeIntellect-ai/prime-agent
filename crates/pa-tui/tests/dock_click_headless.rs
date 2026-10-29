@@ -21,8 +21,6 @@
 
 mod support;
 
-use std::io::{BufRead, BufReader};
-use std::os::unix::net::UnixListener;
 use std::sync::{Mutex, MutexGuard};
 
 /// Mouse tracking is process-global state, so the headless runs serialize (each asserts on the
@@ -39,7 +37,10 @@ fn run_lock() -> MutexGuard<'static, ()> {
 use pa_tui::interactive::{run_interactive, HeadlessPlan, HeadlessStep, UiMode};
 use serde_json::{json, Value};
 
-use support::{attach_response, options, write_json};
+use support::{
+    attach_response, create_response, detach_response, options, serve_connection,
+    session_stats_response, write_json, MockSupervisor, Request,
+};
 
 /// The SGR reports a real terminal sends: a left press, a release, and the `?1003` buttonless
 /// motion report (base code 3 + the motion bit — 35) the hover affordance rides.
@@ -55,122 +56,42 @@ fn motion(col: usize, row: usize) -> String {
     format!("\x1b[<35;{col};{row}M")
 }
 
-struct MockSupervisor {
-    listener: UnixListener,
-}
-
 impl MockSupervisor {
-    fn bind(socket: &std::path::Path) -> Self {
-        MockSupervisor {
-            listener: UnixListener::bind(socket).expect("bind mock socket"),
-        }
-    }
-
     /// Serve one connection: the heartbeat catalog and the kernel-bash registry carry the rows that
     /// mount the activity dock.
     fn serve(self) {
         let (stream, _) = self.listener.accept().expect("accept");
-        let write_stream = stream.try_clone().expect("clone mock socket");
-        let mut writer = write_stream;
-        let mut reader = BufReader::new(stream);
-
-        // The kernel-bash capability gate: the dock's bash rows fold only when the daemon
-        // advertises the registry.
-        let hello = json!({
-            "type": "daemon_hello",
-            "protocol": { "name": "prime-agent.daemon", "version": 7 },
-            "serverCapabilities": ["kernel_bash_activity"],
-            "clientId": "mock",
-        });
-        write_json(&mut writer, &hello);
-
-        let mut line = String::new();
-        loop {
-            line.clear();
-            match reader.read_line(&mut line) {
-                Ok(0) | Err(_) => break,
-                Ok(_) => {}
-            }
-            let Ok(envelope) = serde_json::from_str::<Value>(line.trim()) else {
-                continue;
-            };
-            let id = envelope.get("id").and_then(Value::as_str).unwrap_or("");
-            let command = envelope.get("command").cloned().unwrap_or(Value::Null);
-            let command_type = command
-                .get("type")
-                .and_then(Value::as_str)
-                .unwrap_or_default()
-                .to_string();
-            match command_type.as_str() {
-                "create" => {
-                    write_json(
-                        &mut writer,
-                        &json!({
-                            "type": "response",
-                            "id": id,
-                            "command": "create",
-                            "success": true,
-                            "data": {
-                                "activeSessionId": "s1",
-                                "id": "s1",
-                                "sessionId": "sess-1",
-                                "sessionFile": "/tmp/sess-1.jsonl",
-                            },
-                        }),
-                    );
+        serve_connection(
+            stream,
+            &["kernel_bash_activity"],
+            |writer, Request { id, kind, .. }| {
+                match kind {
+                    "create" => {
+                        write_json(writer, &create_response(id));
+                    }
+                    "attach" => {
+                        write_json(writer, &attach_data(id));
+                    }
+                    "get_session_stats" => {
+                        write_json(writer, &session_stats_response(id));
+                    }
+                    "heartbeats_list" => {
+                        write_json(writer, &heartbeat_data(id));
+                        // A live goal rides the attach's first-frame fold as a session event: the
+                        // dock's goal group mounts with its row, the click surface's fourth group.
+                        write_json(writer, &goal_event());
+                    }
+                    "list_kernel_bash" => {
+                        write_json(writer, &bash_data(id));
+                    }
+                    "detach" => {
+                        write_json(writer, &detach_response(id));
+                    }
+                    _ => return false,
                 }
-                "attach" => {
-                    write_json(&mut writer, &attach_data(id));
-                }
-                "get_session_stats" => {
-                    write_json(
-                        &mut writer,
-                        &json!({
-                            "type": "response",
-                            "id": id,
-                            "command": "get_session_stats",
-                            "success": true,
-                            "data": {
-                                "contextUsage": { "tokens": 1200, "contextWindow": 200_000 },
-                                "cost": 0.01,
-                            },
-                        }),
-                    );
-                }
-                "heartbeats_list" => {
-                    write_json(&mut writer, &heartbeat_data(id));
-                    // A live goal rides the attach's first-frame fold as a session event: the
-                    // dock's goal group mounts with its row, the click surface's fourth group.
-                    write_json(&mut writer, &goal_event());
-                }
-                "list_kernel_bash" => {
-                    write_json(&mut writer, &bash_data(id));
-                }
-                "detach" => {
-                    write_json(
-                        &mut writer,
-                        &json!({
-                            "type": "response",
-                            "id": id,
-                            "command": "detach",
-                            "success": true,
-                        }),
-                    );
-                }
-                _ => {
-                    write_json(
-                        &mut writer,
-                        &json!({
-                            "type": "response",
-                            "id": id,
-                            "command": command_type,
-                            "success": true,
-                            "data": {},
-                        }),
-                    );
-                }
-            }
-        }
+                true
+            },
+        );
     }
 }
 

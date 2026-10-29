@@ -4,10 +4,10 @@
 // Every test binary compiles this module but uses only the helpers its scenarios need.
 #![allow(dead_code)]
 
-use std::io::{BufRead, BufReader, Write};
-use std::os::unix::net::UnixStream;
+use std::io::{BufRead, BufReader, ErrorKind, Write};
+use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use pa_tui::agents_view::AgentsViewOptions;
 use pa_tui::interactive::{InteractiveOptions, ModelSelection, SessionSelection};
@@ -189,5 +189,142 @@ pub fn attach_response(id: &str, session_name: &str) -> Value {
             "lastEventSequence": 0,
             "lastEventCursor": null,
         },
+    })
+}
+
+/// A mock daemon listening on the test's socket; each test binary adds its own `serve`.
+pub struct MockSupervisor {
+    pub listener: UnixListener,
+}
+
+impl MockSupervisor {
+    pub fn bind(socket: &Path) -> Self {
+        MockSupervisor {
+            listener: UnixListener::bind(socket).expect("bind mock socket"),
+        }
+    }
+}
+
+/// One request a mock supervisor read off the wire.
+pub struct Request<'a> {
+    pub id: &'a str,
+    pub kind: &'a str,
+    pub command: Value,
+}
+
+/// Accept the next client within a 1.5 s idle window; `None` when no client dials in time, so a
+/// mock whose client may never connect still lets the plan's join finish.
+pub fn accept_within_idle_window(listener: &UnixListener) -> Option<UnixStream> {
+    listener
+        .set_nonblocking(true)
+        .expect("nonblocking mock listener");
+    let idle_until = Instant::now() + Duration::from_millis(1500);
+    loop {
+        match listener.accept() {
+            Ok((stream, _)) => return Some(stream),
+            Err(error) if error.kind() == ErrorKind::WouldBlock => {
+                if Instant::now() >= idle_until {
+                    return None;
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            Err(_) => return None,
+        }
+    }
+}
+
+/// Serve one client connection until it hangs up: send the protocol-7 `daemon_hello` advertising
+/// `capabilities`, then hand each request to `handle`. A request `handle` declines (returns
+/// `false`) gets the generic `success: true, data: {}` reply.
+pub fn serve_connection(
+    stream: UnixStream,
+    capabilities: &[&str],
+    mut handle: impl FnMut(&mut UnixStream, Request<'_>) -> bool,
+) {
+    let mut writer = stream.try_clone().expect("clone mock socket");
+    let mut reader = BufReader::new(stream);
+    write_json(
+        &mut writer,
+        &json!({
+            "type": "daemon_hello",
+            "protocol": { "name": "prime-agent.daemon", "version": 7 },
+            "serverCapabilities": capabilities,
+            "clientId": "mock",
+        }),
+    );
+    let mut line = String::new();
+    loop {
+        line.clear();
+        match reader.read_line(&mut line) {
+            Ok(0) | Err(_) => break,
+            Ok(_) => {}
+        }
+        let Ok(envelope) = serde_json::from_str::<Value>(line.trim()) else {
+            continue;
+        };
+        let id = envelope.get("id").and_then(Value::as_str).unwrap_or("");
+        let command = envelope.get("command").cloned().unwrap_or(Value::Null);
+        let command_type = command
+            .get("type")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        let request = Request {
+            id,
+            kind: &command_type,
+            command,
+        };
+        if !handle(&mut writer, request) {
+            write_json(
+                &mut writer,
+                &json!({
+                    "type": "response",
+                    "id": id,
+                    "command": command_type,
+                    "success": true,
+                    "data": {},
+                }),
+            );
+        }
+    }
+}
+
+/// The `create` reply for the new session `s1`.
+pub fn create_response(id: &str) -> Value {
+    json!({
+        "type": "response",
+        "id": id,
+        "command": "create",
+        "success": true,
+        "data": {
+            "activeSessionId": "s1",
+            "id": "s1",
+            "sessionId": "sess-1",
+            "sessionFile": "/tmp/sess-1.jsonl",
+        },
+    })
+}
+
+/// The `get_session_stats` reply: 1,200 of 200,000 context tokens used, one cent spent.
+pub fn session_stats_response(id: &str) -> Value {
+    json!({
+        "type": "response",
+        "id": id,
+        "command": "get_session_stats",
+        "success": true,
+        "data": {
+            "contextUsage": { "tokens": 1200, "contextWindow": 200_000 },
+            "cost": 0.01,
+        },
+    })
+}
+
+/// The `detach` reply (no data).
+pub fn detach_response(id: &str) -> Value {
+    json!({
+        "type": "response",
+        "id": id,
+        "command": "detach",
+        "success": true,
     })
 }

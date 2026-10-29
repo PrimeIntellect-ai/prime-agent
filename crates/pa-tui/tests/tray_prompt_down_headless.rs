@@ -33,16 +33,18 @@
 
 mod support;
 
-use std::io::{BufRead, BufReader};
 use std::os::unix::net::UnixListener;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use pa_tui::interactive::{
     run_interactive, HeadlessPlan, HeadlessStep, InteractiveOptions, UiMode,
 };
-use serde_json::{json, Value};
+use serde_json::json;
 
-use support::{attach_response, options, write_json};
+use support::{
+    accept_within_idle_window, attach_response, create_response, options, serve_connection,
+    write_json, Request,
+};
 
 struct MockSupervisor {
     listener: UnixListener,
@@ -62,105 +64,44 @@ impl MockSupervisor {
     /// Serve one client connection until it goes quiet (bounded, so the
     /// plan teardown join always finishes).
     fn serve(self) {
-        self.listener
-            .set_nonblocking(true)
-            .expect("nonblocking mock listener");
-        let idle_window = std::time::Duration::from_millis(1500);
-        let idle_until = std::time::Instant::now() + idle_window;
-        let (stream, _) = loop {
-            match self.listener.accept() {
-                Ok(accepted) => break accepted,
-                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                    if std::time::Instant::now() >= idle_until {
-                        return;
-                    }
-                    std::thread::sleep(std::time::Duration::from_millis(10));
-                }
-                Err(_) => return,
-            }
+        let Some(stream) = accept_within_idle_window(&self.listener) else {
+            return;
         };
-        let mut writer = stream.try_clone().expect("clone mock socket");
-        let mut reader = BufReader::new(stream);
-
-        let hello = json!({
-            "type": "daemon_hello",
-            "protocol": { "name": "prime-agent.daemon", "version": 7 },
-            "serverCapabilities": ["kernel_bash_activity"],
-            "clientId": "mock",
-        });
-        write_json(&mut writer, &hello);
-
-        let mut line = String::new();
-        loop {
-            line.clear();
-            match reader.read_line(&mut line) {
-                Ok(0) | Err(_) => break,
-                Ok(_) => {}
-            }
-            let Ok(envelope) = serde_json::from_str::<Value>(line.trim()) else {
-                continue;
-            };
-            let id = envelope.get("id").and_then(Value::as_str).unwrap_or("");
-            let command = envelope.get("command").cloned().unwrap_or(Value::Null);
-            let command_type = command
-                .get("type")
-                .and_then(Value::as_str)
-                .unwrap_or_default()
-                .to_string();
-            match command_type.as_str() {
-                "create" => {
-                    write_json(
-                        &mut writer,
-                        &json!({
-                            "type": "response",
-                            "id": id,
-                            "command": "create",
-                            "success": true,
-                            "data": {
-                                "activeSessionId": "s1",
-                                "id": "s1",
-                                "sessionId": "sess-1",
-                                "sessionFile": "/tmp/sess-1.jsonl",
-                            },
-                        }),
-                    );
+        serve_connection(
+            stream,
+            &["kernel_bash_activity"],
+            |writer, Request { id, kind, .. }| {
+                match kind {
+                    "create" => {
+                        write_json(writer, &create_response(id));
+                    }
+                    "attach" => {
+                        write_json(writer, &attach_response(id, "tray session"));
+                    }
+                    "list_kernel_bash" => {
+                        let activities = if self.shell_running {
+                            json!([
+                                {"id": "shell-1", "command": "render the frames", "pid": 4242, "status": "running"},
+                            ])
+                        } else {
+                            json!([])
+                        };
+                        write_json(
+                            writer,
+                            &json!({
+                                "type": "response",
+                                "id": id,
+                                "command": "list_kernel_bash",
+                                "success": true,
+                                "data": { "activities": activities },
+                            }),
+                        );
+                    }
+                    _ => return false,
                 }
-                "attach" => {
-                    write_json(&mut writer, &attach_response(id, "tray session"));
-                }
-                "list_kernel_bash" => {
-                    let activities = if self.shell_running {
-                        json!([
-                            {"id": "shell-1", "command": "render the frames", "pid": 4242, "status": "running"},
-                        ])
-                    } else {
-                        json!([])
-                    };
-                    write_json(
-                        &mut writer,
-                        &json!({
-                            "type": "response",
-                            "id": id,
-                            "command": "list_kernel_bash",
-                            "success": true,
-                            "data": { "activities": activities },
-                        }),
-                    );
-                }
-                _ => {
-                    write_json(
-                        &mut writer,
-                        &json!({
-                            "type": "response",
-                            "id": id,
-                            "command": command_type,
-                            "success": true,
-                            "data": {},
-                        }),
-                    );
-                }
-            }
-        }
+                true
+            },
+        );
     }
 }
 

@@ -20,15 +20,13 @@
 
 mod support;
 
-use std::io::{BufRead, BufReader};
 use std::os::unix::net::UnixListener;
 use std::path::Path;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use pa_tui::interactive::{run_interactive, HeadlessPlan, HeadlessStep, UiMode};
-use serde_json::{json, Value};
 
-use support::{attach_response, options, write_json};
+use support::{attach_response, create_response, options, serve_connection, write_json, Request};
 
 struct MockSupervisor {
     listener: UnixListener,
@@ -45,70 +43,18 @@ impl MockSupervisor {
     /// the editor state is the subject.
     fn serve(self) {
         let (stream, _) = self.listener.accept().expect("accept");
-        let writer = stream.try_clone().expect("clone mock socket");
-        let mut writer = writer;
-        let mut reader = BufReader::new(stream);
-
-        let hello = json!({
-            "type": "daemon_hello",
-            "protocol": { "name": "prime-agent.daemon", "version": 7 },
-            "serverCapabilities": [],
-            "clientId": "mock",
-        });
-        write_json(&mut writer, &hello);
-
-        let mut line = String::new();
-        loop {
-            line.clear();
-            match reader.read_line(&mut line) {
-                Ok(0) | Err(_) => break,
-                Ok(_) => {}
-            }
-            let Ok(envelope) = serde_json::from_str::<Value>(line.trim()) else {
-                continue;
-            };
-            let id = envelope.get("id").and_then(Value::as_str).unwrap_or("");
-            let command = envelope.get("command").cloned().unwrap_or(Value::Null);
-            let command_type = command
-                .get("type")
-                .and_then(Value::as_str)
-                .unwrap_or_default()
-                .to_string();
-            match command_type.as_str() {
+        serve_connection(stream, &[], |writer, Request { id, kind, .. }| {
+            match kind {
                 "create" => {
-                    write_json(
-                        &mut writer,
-                        &json!({
-                            "type": "response",
-                            "id": id,
-                            "command": "create",
-                            "success": true,
-                            "data": {
-                                "activeSessionId": "s1",
-                                "id": "s1",
-                                "sessionId": "sess-1",
-                                "sessionFile": "/tmp/sess-1.jsonl",
-                            },
-                        }),
-                    );
+                    write_json(writer, &create_response(id));
                 }
                 "attach" => {
-                    write_json(&mut writer, &attach_response(id, "editing session"));
+                    write_json(writer, &attach_response(id, "editing session"));
                 }
-                _ => {
-                    write_json(
-                        &mut writer,
-                        &json!({
-                            "type": "response",
-                            "id": id,
-                            "command": command_type,
-                            "success": true,
-                            "data": {},
-                        }),
-                    );
-                }
+                _ => return false,
             }
-        }
+            true
+        });
     }
 }
 

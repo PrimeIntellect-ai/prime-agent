@@ -2,7 +2,6 @@
 
 mod support;
 
-use std::io::{BufRead, BufReader};
 use std::os::unix::net::UnixListener;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -12,7 +11,7 @@ use pa_tui::interactive::{
 };
 use serde_json::{json, Value};
 
-use support::write_json;
+use support::{serve_connection, session_stats_response, write_json, Request};
 
 const HISTORY_MESSAGES: usize = 4;
 const HISTORY_LEAF_ID: &str = "attached-branch-leaf";
@@ -49,44 +48,18 @@ impl MockSupervisor {
 
     fn serve(mut self) {
         let (stream, _) = self.listener.accept().expect("accept");
-        let mut writer = stream.try_clone().expect("clone mock socket");
-        let mut reader = BufReader::new(stream);
         let mut held_backfill: Option<String> = None;
-
-        let hello = json!({
-            "type": "daemon_hello",
-            "protocol": { "name": "prime-agent.daemon", "version": 7 },
-            "serverCapabilities": [],
-            "clientId": "mock",
-        });
-        write_json(&mut writer, &hello);
-
-        let mut line = String::new();
-        loop {
-            line.clear();
-            match reader.read_line(&mut line) {
-                Ok(0) | Err(_) => break,
-                Ok(_) => {}
-            }
-            let Ok(envelope) = serde_json::from_str::<Value>(line.trim()) else {
-                continue;
-            };
-            let id = envelope.get("id").and_then(Value::as_str).unwrap_or("");
-            let command = envelope.get("command").cloned().unwrap_or(Value::Null);
-            let command_type = command
-                .get("type")
-                .and_then(Value::as_str)
-                .unwrap_or_default();
-            match command_type {
+        serve_connection(stream, &[], |writer, Request { id, kind, command }| {
+            match kind {
                 "attach" => {
-                    write_json(&mut writer, &attach_response(id, self.windowed));
+                    write_json(writer, &attach_response(id, self.windowed));
                 }
                 "get_messages" => {
                     self.requests.lock().unwrap().push(command.clone());
                     if self.failures > 0 {
                         self.failures -= 1;
-                        write_json(&mut writer, &history_failure(id));
-                        continue;
+                        write_json(writer, &history_failure(id));
+                        return true;
                     }
                     if command["page"].get("before").is_some() {
                         if self.hold_backfill {
@@ -94,7 +67,7 @@ impl MockSupervisor {
                             // The frame is proof the server received this request;
                             // the headless plan cannot leave or reload before it.
                             write_json(
-                                &mut writer,
+                                writer,
                                 &json!({
                                     "type": "session_event", "activeSessionId": "s1",
                                     "event": {"type": "message_end", "message": {
@@ -102,41 +75,30 @@ impl MockSupervisor {
                                     }},
                                 }),
                             );
-                            continue;
+                            return true;
                         }
-                        write_json(&mut writer, &get_messages_response(id, &self));
-                        continue;
+                        write_json(writer, &get_messages_response(id, &self));
+                        return true;
                     }
                     if matches!(self.rebuild_response, RebuildResponse::Reject) {
-                        write_json(&mut writer, &history_failure(id));
-                        continue;
+                        write_json(writer, &history_failure(id));
+                        return true;
                     }
                     // A cursor-less page is a transcript rebuild. Release the
                     // obsolete response before it; the separate unit regression
                     // injects an already-queued note to verify the epoch fence.
                     if let Some(held) = held_backfill.take() {
-                        write_json(&mut writer, &get_messages_response(&held, &self));
+                        write_json(writer, &get_messages_response(&held, &self));
                     }
-                    write_json(&mut writer, &whole_head_response(id));
+                    write_json(writer, &whole_head_response(id));
                 }
                 "get_session_stats" => {
-                    write_json(
-                        &mut writer,
-                        &success_response(
-                            id,
-                            "get_session_stats",
-                            &json!({
-                                "contextUsage": { "tokens": 1200, "contextWindow": 200_000 },
-                                "cost": 0.01,
-                            }),
-                        ),
-                    );
+                    write_json(writer, &session_stats_response(id));
                 }
-                _ => {
-                    write_json(&mut writer, &success_response(id, command_type, &json!({})));
-                }
+                _ => return false,
             }
-        }
+            true
+        });
     }
 }
 
@@ -144,13 +106,6 @@ fn history_failure(id: &str) -> Value {
     json!({
         "type": "response", "id": id, "command": "get_messages",
         "success": false, "error": "temporary history rejection",
-    })
-}
-
-fn success_response(id: &str, command: &str, data: &Value) -> Value {
-    json!({
-        "type": "response", "id": id, "command": command,
-        "success": true, "data": data,
     })
 }
 

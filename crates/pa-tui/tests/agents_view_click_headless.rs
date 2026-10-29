@@ -21,14 +21,13 @@
 mod support;
 
 use std::io::BufReader;
-use std::os::unix::net::UnixListener;
 use std::time::Duration;
 
 use pa_tui::agents_view::{run_agents_view, AgentsHeadlessPlan, AgentsStep, AgentsViewUiMode};
 use pa_tui::interactive::SessionSelection;
 use serde_json::{json, Value};
 
-use support::{read_line, respond, respond_failure, view_options, write_json};
+use support::{read_line, respond, respond_failure, view_options, write_json, MockSupervisor};
 
 /// Mouse tracking is process-global state, so the headless runs serialize through one lock (the
 /// click dispatch gates on it; tokio's, so the guard rides the run's awaits).
@@ -52,17 +51,7 @@ fn roster_row(id: &str, name: &str) -> Value {
     })
 }
 
-struct MockSupervisor {
-    listener: UnixListener,
-}
-
 impl MockSupervisor {
-    fn bind(socket: &std::path::Path) -> Self {
-        MockSupervisor {
-            listener: UnixListener::bind(socket).expect("bind mock socket"),
-        }
-    }
-
     /// Serve the view connection: hello, then the command loop until EOF.
     fn serve(self) {
         let (stream, _) = self.listener.accept().expect("accept view connection");
