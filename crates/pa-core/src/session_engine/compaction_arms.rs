@@ -192,11 +192,11 @@ impl AgentSession {
         };
         // The flight spans the attempts, the rebuilt-context replace, and
         // the kernel-state notice: every path here REPLACES the live loop
-        // context, and the other replacers — `refine_with_refiner`'s
-        // outcome push and `record_compaction_outcome`'s failure row —
-        // take the same flight. A row pushed onto the context must not
-        // interleave with the replace: it would duplicate in the rebuilt
-        // view or vanish under it while staying durable either way.
+        // context, and the other replacers — the refine child's reply
+        // push and `record_compaction_outcome`'s failure row — take the
+        // same flight. A row pushed onto the context must not interleave
+        // with the replace: it would duplicate in the rebuilt view or
+        // vanish under it while staying durable either way.
         let _flight = self.compaction_flight.lock().await;
         let mut outcome = self.compaction_attempts(&options, started_at).await?;
         if matches!(outcome, CompactOutcome::Skipped(_)) {

@@ -305,6 +305,17 @@ const EMPTY_PLAN: &str = r#"{"summary":"bench","edits":[]}"#;
 /// A persisted session over two seeded rows, with the live loop context
 /// built the way the resume path builds it (one rebuild).
 async fn refine_test_session() -> (AgentSession, tempfile::TempDir) {
+    refine_test_session_built(true).await
+}
+
+/// `refine_test_session`'s unpersisted twin: the daemon's engine session
+/// (in-memory, no materialized session file), for the pins that care
+/// about the parent's file-less shape.
+async fn refine_test_session_unpersisted() -> (AgentSession, tempfile::TempDir) {
+    refine_test_session_built(false).await
+}
+
+async fn refine_test_session_built(persisted: bool) -> (AgentSession, tempfile::TempDir) {
     let provider = Arc::new(ScriptedProvider::new(test_model()));
     let options = AgentOptions {
         initial_state: AgentInitialState {
@@ -318,8 +329,13 @@ async fn refine_test_session() -> (AgentSession, tempfile::TempDir) {
     let tmp = tempfile::tempdir().unwrap();
     let session_dir = tmp.path().join("session");
     std::fs::create_dir_all(&session_dir).unwrap();
-    let mut manager = SessionManager::in_memory(tmp.path());
-    manager.materialize_session_file(Some(session_dir));
+    let mut manager = if persisted {
+        let mut manager = SessionManager::in_memory(tmp.path());
+        manager.materialize_session_file(Some(session_dir.clone()));
+        manager
+    } else {
+        SessionManager::in_memory_in_session_dir(tmp.path(), &session_dir)
+    };
     manager
         .append_message(SessionAgentMessage::User(pa_types::ai::UserMessage {
             content: pa_types::ai::UserContent::Text("do a thing twice".to_string()),
@@ -622,5 +638,48 @@ async fn a_kernel_write_between_prepare_and_apply_rejects_the_stale_edit() {
         reloaded.entries[&crate::refinement::RefinementKind::Memory]["m1"].title,
         "Kernel's own",
         "the kernel's concurrent write survived, never clobbered"
+    );
+}
+
+#[tokio::test]
+async fn the_spawn_prompt_carries_the_in_session_refinement_history() {
+    // The daemon's engine session is in-memory — its audit rows have no
+    // session file for the child to read — so the in-session refinement
+    // history can only reach the child's planner through the envelope
+    // (the pre-PR planner merged it with the global history). Red when
+    // the envelope drops back to a session-file path: the unpersisted
+    // parent's history never leaves the session.
+    let (session, tmp) = refine_test_session_unpersisted().await;
+    let global_dir = tmp.path().join("harness");
+    let result = crate::refinement::RefinementResult {
+        id: "refine_hist_1".to_string(),
+        summary: "pin the history handoff".to_string(),
+        rationale: "repeated".to_string(),
+        expected_outcome: "recall".to_string(),
+        applied_edits: vec![],
+        harness_state_path: String::new(),
+        rollback_of: None,
+        scope: None,
+    };
+    {
+        let mut manager = session.session.lock().await;
+        manager.append_custom_entry_retained(
+            refine::REFINEMENT_AUDIT_CUSTOM_TYPE,
+            Some(serde_json::to_value(&result).unwrap()),
+        );
+    }
+    let (_, prompt) = session
+        .prepare_refinement(
+            &refine::RefineOptions::default(),
+            &session_ai_model(),
+            &global_dir,
+        )
+        .await
+        .unwrap();
+    let parsed: serde_json::Value = serde_json::from_str(&prompt).unwrap();
+    assert_eq!(parsed["type"], "refinement.request");
+    assert_eq!(
+        parsed["refinementHistory"][0]["summary"], "pin the history handoff",
+        "the in-session audit rows ride the envelope: {parsed}"
     );
 }

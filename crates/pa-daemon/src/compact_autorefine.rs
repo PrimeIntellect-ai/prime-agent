@@ -73,6 +73,18 @@ impl AgentSessionEngine {
         // behind the in-flight guard.
         self.runtime
             .block_on(async { self.release_dead_refine_child_round().await });
+        // A live refinement child (a manual `/refine` spawn whose reply has
+        // not landed) owns the apply lane: taking the armed round now would
+        // only fail the spawn against it and surface a spurious
+        // `refine_failed`. The trigger stays armed for a later boundary.
+        if self
+            .refine_flight
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .is_some()
+        {
+            return Ok(());
+        }
         // The round take: the gates decide and stamp the cadence; the
         // in-flight guard holds the trigger while the child runs.
         let options = {
@@ -246,6 +258,48 @@ mod tests {
             assistant_texts(&events).last().map(String::as_str),
             Some("third reply"),
             "the third turn answered"
+        );
+    }
+
+    /// A live refinement child (a manual `/refine` spawn whose reply has
+    /// not landed) owns the apply lane: the armed round never takes
+    /// against it — the spawn would only collide and surface a spurious
+    /// `refine_failed` — and the trigger stays armed for a later
+    /// boundary. Red when the pre-take flight check is lost: the round
+    /// takes and the spawn's error surfaces.
+    #[test]
+    fn an_armed_round_waits_out_a_live_refine_child_instead_of_failing() {
+        let _faux = FAUX_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let (engine, dir) =
+            trigger_engine(&json!({ "responses": [ {"text": "seed reply"} ] }), 1, true);
+        let mut events: Vec<EngineEvent> = Vec::new();
+        admit(&engine, "seed turn".to_string(), &mut events);
+        engine.mark_compact_auto_refine_pending();
+        // The manual refinement child in flight (this engine has no child
+        // runtime, so the dead-child probe cannot clear it).
+        *engine
+            .refine_flight
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) =
+            Some(crate::refine_children::RefineChildFlight {
+                rlm_child_id: "rlm-child-1".to_string(),
+                active_session_id: "active-1".to_string(),
+                prepared: pa_core::session_engine::refine::PreparedRefinement {
+                    options: pa_core::session_engine::refine::RefineOptions::default(),
+                    requested_scope: pa_core::refinement::HarnessScope::Global,
+                    baseline_state: pa_core::refinement::empty_harness_state(),
+                    id: "refine_1".to_string(),
+                },
+                source: pa_core::session_engine::refine::RefinementSource::User,
+                global_harness_dir: dir.path().join("harness"),
+            });
+        let outcome = engine.consume_compact_auto_refine();
+        assert!(outcome.is_ok(), "the collision stays silent: {outcome:?}");
+        assert!(
+            engine.compact_auto_refine_pending(),
+            "the trigger stays armed for the later boundary"
         );
     }
 

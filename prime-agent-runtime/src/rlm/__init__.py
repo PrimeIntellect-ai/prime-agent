@@ -187,8 +187,9 @@ async def spawn(
 ) -> RLMSpawnHandle:
     """Spawn a recursive Prime Agent child and return once its task is admitted.
 
-    ``name`` is required and must be unique among siblings. ``model`` selects a
-    child with an exact ``provider/model`` selector. ``thinking`` sets the child
+    ``name`` names the child and must be unique among siblings (omitted only for
+    the unnamed ``kind="refine"`` one-shot). ``model`` selects a child with an
+    exact ``provider/model`` selector. ``thinking`` sets the child
     reasoning level (e.g. 'off', 'low', 'medium', 'high'); defaults to the parent
     level; levels invalid for the resolved model fail the spawn. ``cwd`` starts
     the child in that directory (relative to the session cwd); defaults to the
