@@ -160,7 +160,8 @@ pub fn assert_thinking_supported(
 }
 
 /// The directory a child starts in: a requested `cwd` resolves against the
-/// session cwd, otherwise the child shares the session cwd.
+/// session cwd and is canonicalized (project-context discovery walks its
+/// ancestors), otherwise the child shares the session cwd.
 ///
 /// # Errors
 /// Returns an error naming `operation` when the requested directory does not exist.
@@ -172,11 +173,11 @@ pub fn resolve_child_cwd(
     let Some(requested) = requested else {
         return Ok(session_cwd.to_path_buf());
     };
-    let cwd = session_cwd.join(requested);
-    if !cwd.is_dir() {
-        bail!("{operation} cwd {} is not a directory", cwd.display());
+    let joined = session_cwd.join(requested);
+    match joined.canonicalize() {
+        Ok(cwd) if cwd.is_dir() => Ok(cwd),
+        _ => bail!("{operation} cwd {} is not a directory", joined.display()),
     }
-    Ok(cwd)
 }
 
 /// Rejection message for an unresolved model reference: the

@@ -237,18 +237,22 @@ fn spawn_request(name: &str, prompt: &str) -> RlmSpawnRequest {
     }
 }
 
-/// A child spawned with `cwd` runs in that directory and loads its project
-/// context; a missing directory refuses the spawn.
+/// A child spawned with a relative `cwd` runs in that directory and loads only
+/// its project context; a missing directory refuses the spawn.
 #[tokio::test]
 async fn rlm_spawn_cwd_starts_the_child_in_that_directory() {
     let dir = tempfile::TempDir::new().expect("temp dir");
     let socket = dir.path().join("daemon.sock");
     let agent_dir = dir.path().join("agent");
+    let main = dir.path().join("main");
     let project = dir.path().join("project");
-    std::fs::create_dir_all(&agent_dir).expect("agent dir");
-    std::fs::create_dir_all(&project).expect("project dir");
     let marker = format!("SPAWN_CWD_CONTEXT_{}", uuid::Uuid::new_v4().simple());
-    std::fs::write(project.join("AGENTS.md"), &marker).expect("write AGENTS.md");
+    let main_marker = format!("SPAWN_CWD_PARENT_CONTEXT_{}", uuid::Uuid::new_v4().simple());
+    for (path, content) in [(&main, &main_marker), (&project, &marker)] {
+        std::fs::create_dir_all(path).expect("project dir");
+        std::fs::write(path.join("AGENTS.md"), content).expect("write AGENTS.md");
+    }
+    std::fs::create_dir_all(&agent_dir).expect("agent dir");
     let _daemon = spawn_daemon(&socket, &agent_dir);
     let (mut client, _) = Client::connect(&socket);
     // The faux engine (and its faux model) runs the real agent engine, so the
@@ -264,7 +268,7 @@ async fn rlm_spawn_cwd_starts_the_child_in_that_directory() {
         rlm_depth: 0,
         rlm_max_depth: 2,
         model: Some("faux/faux-1".to_string()),
-        cwd: Some(agent_dir.to_string_lossy().to_string()),
+        cwd: Some(main.to_string_lossy().to_string()),
         session_id: Some("parent-session-uuid".to_string()),
         session_file: Some(agent_dir.join("parent.jsonl").to_string_lossy().to_string()),
         thinking: None,
@@ -273,7 +277,7 @@ async fn rlm_spawn_cwd_starts_the_child_in_that_directory() {
 
     let handle = children
         .spawn(RlmSpawnRequest {
-            cwd: Some(project.to_string_lossy().to_string()),
+            cwd: Some("../project".to_string()),
             ..spawn_request("worker-cwd", "ship the lane")
         })
         .await
@@ -288,7 +292,10 @@ async fn rlm_spawn_cwd_starts_the_child_in_that_directory() {
                 .cloned()
         })
     });
-    assert_eq!(summary["cwd"], json!(project));
+    assert_eq!(
+        summary["cwd"],
+        json!(project.canonicalize().expect("project"))
+    );
     client.send_command(
         "prompt",
         &json!({ "type": "get_system_prompt", "activeSessionId": summary["id"] }),
@@ -296,6 +303,7 @@ async fn rlm_spawn_cwd_starts_the_child_in_that_directory() {
     let context = client.read_response("prompt");
     let system_prompt = context["data"]["systemPrompt"].as_str().unwrap_or_default();
     assert!(system_prompt.contains(&marker), "{context}");
+    assert!(!system_prompt.contains(&main_marker), "{context}");
 
     let missing = project.join("missing");
     let error = children
