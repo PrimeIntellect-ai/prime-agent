@@ -41,7 +41,7 @@ use pa_tui::interactive::{
 };
 use serde_json::{json, Value};
 
-use support::{options, write_json};
+use support::{attach_response, options, write_json};
 
 /// The SGR wheel-up / wheel-down press reports a real terminal sends.
 const WHEEL_UP: &str = "\x1b[<64;10;10M";
@@ -179,36 +179,9 @@ fn attach_data(id: &str) -> Value {
             }
         })
         .collect();
-    json!({
-        "type": "response",
-        "id": id,
-        "command": "attach",
-        "success": true,
-        "data": {
-            "protocol": { "name": "prime-agent.daemon", "version": 7 },
-            "activeSessionId": "s1",
-            "snapshot": {
-                "activeSessionId": "s1",
-                "summary": { "id": "s1", "cwd": "/tmp" },
-                "state": {
-                    "activeSessionId": "s1",
-                    "cwd": "/tmp",
-                    "sessionId": "sess-1",
-                    "sessionName": "mouse session",
-                    "model": null,
-                    "isStreaming": false,
-                    "isCompacting": false,
-                    "sessionActions": { "queuedCount": 0, "steering": [], "followUps": [] },
-                },
-                "messages": messages,
-                "lastEventSequence": 0,
-                "lastEventCursor": null,
-            },
-            "client": { "id": "mock", "capabilities": [] },
-            "lastEventSequence": 0,
-            "lastEventCursor": null,
-        },
-    })
+    let mut response = attach_response(id, "mouse session");
+    response["data"]["snapshot"]["messages"] = json!(messages);
+    response
 }
 
 /// Run the headless plan and return the captured frames. Holds the run lock: mouse tracking is

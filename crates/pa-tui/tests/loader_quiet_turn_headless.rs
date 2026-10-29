@@ -17,7 +17,7 @@ use pa_tui::interactive::{
 };
 use serde_json::{json, Value};
 
-use support::{options, write_json};
+use support::{attach_response, options, write_json};
 
 /// One mock daemon: serves one client connection, answering the attach
 /// with a mid-turn snapshot and then staying silent until the turn ends.
@@ -141,42 +141,16 @@ fn attach_data(id: &str) -> Value {
         .duration_since(std::time::UNIX_EPOCH)
         .expect("clock after the epoch")
         .as_millis();
-    json!({
-        "type": "response",
-        "id": id,
-        "command": "attach",
-        "success": true,
-        "data": {
-            "protocol": { "name": "prime-agent.daemon", "version": 7 },
-            "activeSessionId": "s1",
-            "snapshot": {
-                "activeSessionId": "s1",
-                "summary": { "id": "s1", "cwd": "/tmp" },
-                "state": {
-                    "activeSessionId": "s1",
-                    "cwd": "/tmp",
-                    "sessionId": "sess-1",
-                    "sessionName": "quiet turn session",
-                    "model": null,
-                    "isStreaming": true,
-                    "isCompacting": false,
-                    "sessionActions": { "queuedCount": 0, "steering": [], "followUps": [] },
-                },
-                "messages": [
-                    {
-                        "role": "user",
-                        "content": [{ "type": "text", "text": "run the sweep" }],
-                        "timestamp": now_ms,
-                    },
-                ],
-                "lastEventSequence": 0,
-                "lastEventCursor": null,
-            },
-            "client": { "id": "mock", "capabilities": [] },
-            "lastEventSequence": 0,
-            "lastEventCursor": null,
+    let mut response = attach_response(id, "quiet turn session");
+    response["data"]["snapshot"]["state"]["isStreaming"] = json!(true);
+    response["data"]["snapshot"]["messages"] = json!([
+        {
+            "role": "user",
+            "content": [{ "type": "text", "text": "run the sweep" }],
+            "timestamp": now_ms,
         },
-    })
+    ]);
+    response
 }
 
 /// How long the mock's turn stays silent before `turn_end`.

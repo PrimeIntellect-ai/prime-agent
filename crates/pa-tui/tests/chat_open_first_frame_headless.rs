@@ -29,7 +29,7 @@ use pa_tui::interactive::{
 };
 use serde_json::{json, Value};
 
-use support::{options, write_json};
+use support::{attach_response, options, write_json};
 
 /// The loaded-daemon stand-in: the dock's data requests answer this late, far past the first
 /// frame's render — late enough that a fire-and-forget open-time fetch (the layout-shift bug)
@@ -176,36 +176,10 @@ fn attach_data(id: &str, with_content: bool) -> Value {
     } else {
         json!([])
     };
-    json!({
-        "type": "response",
-        "id": id,
-        "command": "attach",
-        "success": true,
-        "data": {
-            "protocol": { "name": "prime-agent.daemon", "version": 7 },
-            "activeSessionId": "s1",
-            "snapshot": {
-                "activeSessionId": "s1",
-                "summary": { "id": "s1", "cwd": "/tmp" },
-                "state": {
-                    "activeSessionId": "s1",
-                    "cwd": "/tmp",
-                    "sessionId": "sess-1",
-                    "sessionName": "layout probe",
-                    "model": "faux-1",
-                    "isStreaming": false,
-                    "isCompacting": false,
-                    "sessionActions": { "queuedCount": 0, "steering": [], "followUps": [] },
-                },
-                "messages": messages,
-                "lastEventSequence": 0,
-                "lastEventCursor": null,
-            },
-            "client": { "id": "mock", "capabilities": [] },
-            "lastEventSequence": 0,
-            "lastEventCursor": null,
-        },
-    })
+    let mut response = attach_response(id, "layout probe");
+    response["data"]["snapshot"]["state"]["model"] = json!("faux-1");
+    response["data"]["snapshot"]["messages"] = messages;
+    response
 }
 
 /// The attach snapshot's transcript shape the open drives.

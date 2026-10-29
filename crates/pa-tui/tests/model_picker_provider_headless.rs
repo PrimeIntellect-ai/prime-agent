@@ -31,7 +31,7 @@ use pa_tui::interactive::{
 use pa_types::ai::Model;
 use serde_json::{json, Value};
 
-use support::write_json;
+use support::{attach_response, write_json};
 
 /// One catalog model: the id `z-ai/glm-5.3` under a provider, with a provider-distinct name so the
 /// picker's rows identify by name.
@@ -181,36 +181,10 @@ impl MockSupervisor {
     /// The slim attach result: the state carries the current model identity — the id AND the
     /// provider (`state.model.provider`).
     fn attach_data(id: &str) -> Value {
-        json!({
-            "type": "response",
-            "id": id,
-            "command": "attach",
-            "success": true,
-            "data": {
-                "protocol": { "name": "prime-agent.daemon", "version": 7 },
-                "activeSessionId": "s1",
-                "snapshot": {
-                    "activeSessionId": "s1",
-                    "summary": { "id": "s1", "cwd": "/tmp" },
-                    "state": {
-                        "activeSessionId": "s1",
-                        "cwd": "/tmp",
-                        "sessionId": "sess-1",
-                        "sessionName": "provider session",
-                        "model": { "id": "z-ai/glm-5.3", "provider": "prime-inference" },
-                        "isStreaming": false,
-                        "isCompacting": false,
-                        "sessionActions": { "queuedCount": 0, "steering": [], "followUps": [] },
-                    },
-                    "messages": [],
-                    "lastEventSequence": 0,
-                    "lastEventCursor": null,
-                },
-                "client": { "id": "mock", "capabilities": [] },
-                "lastEventSequence": 0,
-                "lastEventCursor": null,
-            },
-        })
+        let mut response = attach_response(id, "provider session");
+        response["data"]["snapshot"]["state"]["model"] =
+            json!({ "id": "z-ai/glm-5.3", "provider": "prime-inference" });
+        response
     }
 
     /// The live session state: the same prime-inference model identity.

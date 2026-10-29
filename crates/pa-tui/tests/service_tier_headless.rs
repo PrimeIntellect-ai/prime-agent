@@ -29,7 +29,7 @@ use pa_tui::interactive::{
 };
 use serde_json::{json, Value};
 
-use support::{options, write_json};
+use support::{attach_response, options, write_json};
 
 struct MockSupervisor {
     listener: UnixListener,
@@ -197,36 +197,10 @@ impl MockSupervisor {
 /// The slim attach result: one session on an `OpenRouter` completions model (the catalog entry the
 /// eligibility predicate reads).
 fn attach_data(id: &str) -> Value {
-    json!({
-        "type": "response",
-        "id": id,
-        "command": "attach",
-        "success": true,
-        "data": {
-            "protocol": { "name": "prime-agent.daemon", "version": 7 },
-            "activeSessionId": "s1",
-            "snapshot": {
-                "activeSessionId": "s1",
-                "summary": { "id": "s1", "cwd": "/tmp" },
-                "state": {
-                    "activeSessionId": "s1",
-                    "cwd": "/tmp",
-                    "sessionId": "sess-1",
-                    "sessionName": "tier session",
-                    "model": { "id": "openai/gpt-5.5", "provider": "openrouter" },
-                    "isStreaming": false,
-                    "isCompacting": false,
-                    "sessionActions": { "queuedCount": 0, "steering": [], "followUps": [] },
-                },
-                "messages": [],
-                "lastEventSequence": 0,
-                "lastEventCursor": null,
-            },
-            "client": { "id": "mock", "capabilities": [] },
-            "lastEventSequence": 0,
-            "lastEventCursor": null,
-        },
-    })
+    let mut response = attach_response(id, "tier session");
+    response["data"]["snapshot"]["state"]["model"] =
+        json!({ "id": "openai/gpt-5.5", "provider": "openrouter" });
+    response
 }
 
 /// The composition-root catalog seed (the options snapshot).

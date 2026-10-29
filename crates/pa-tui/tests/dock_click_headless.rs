@@ -39,7 +39,7 @@ fn run_lock() -> MutexGuard<'static, ()> {
 use pa_tui::interactive::{run_interactive, HeadlessPlan, HeadlessStep, UiMode};
 use serde_json::{json, Value};
 
-use support::{options, write_json};
+use support::{attach_response, options, write_json};
 
 /// The SGR reports a real terminal sends: a left press, a release, and the `?1003` buttonless
 /// motion report (base code 3 + the motion bit — 35) the hover affordance rides.
@@ -185,36 +185,9 @@ fn attach_data(id: &str) -> Value {
             "timestamp": 2u64,
         }),
     ];
-    json!({
-        "type": "response",
-        "id": id,
-        "command": "attach",
-        "success": true,
-        "data": {
-            "protocol": { "name": "prime-agent.daemon", "version": 7 },
-            "activeSessionId": "s1",
-            "snapshot": {
-                "activeSessionId": "s1",
-                "summary": { "id": "s1", "cwd": "/tmp" },
-                "state": {
-                    "activeSessionId": "s1",
-                    "cwd": "/tmp",
-                    "sessionId": "sess-1",
-                    "sessionName": "dock click session",
-                    "model": null,
-                    "isStreaming": false,
-                    "isCompacting": false,
-                    "sessionActions": { "queuedCount": 0, "steering": [], "followUps": [] },
-                },
-                "messages": messages,
-                "lastEventSequence": 0,
-                "lastEventCursor": null,
-            },
-            "client": { "id": "mock", "capabilities": [] },
-            "lastEventSequence": 0,
-            "lastEventCursor": null,
-        },
-    })
+    let mut response = attach_response(id, "dock click session");
+    response["data"]["snapshot"]["messages"] = json!(messages);
+    response
 }
 
 /// One scoped heartbeat: the dock's heartbeats group reads one live job (the heartbeats view's

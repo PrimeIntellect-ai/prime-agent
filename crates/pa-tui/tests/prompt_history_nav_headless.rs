@@ -31,7 +31,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use pa_tui::interactive::{run_interactive, HeadlessPlan, HeadlessStep, UiMode};
 use serde_json::{json, Value};
 
-use support::{options, write_json, write_session_event};
+use support::{attach_response, options, write_json, write_session_event};
 
 struct MockSupervisor {
     listener: UnixListener,
@@ -96,7 +96,7 @@ impl MockSupervisor {
                     );
                 }
                 "attach" => {
-                    write_json(&mut writer, &attach_data(id));
+                    write_json(&mut writer, &attach_response(id, "recall session"));
                 }
                 "heartbeats_list" => {
                     // One in-scope heartbeat row: the dock renders its heartbeats group, and that
@@ -161,40 +161,6 @@ impl MockSupervisor {
             }
         }
     }
-}
-
-/// The slim attach result: one empty session.
-fn attach_data(id: &str) -> Value {
-    json!({
-        "type": "response",
-        "id": id,
-        "command": "attach",
-        "success": true,
-        "data": {
-            "protocol": { "name": "prime-agent.daemon", "version": 7 },
-            "activeSessionId": "s1",
-            "snapshot": {
-                "activeSessionId": "s1",
-                "summary": { "id": "s1", "cwd": "/tmp" },
-                "state": {
-                    "activeSessionId": "s1",
-                    "cwd": "/tmp",
-                    "sessionId": "sess-1",
-                    "sessionName": "recall session",
-                    "model": null,
-                    "isStreaming": false,
-                    "isCompacting": false,
-                    "sessionActions": { "queuedCount": 0, "steering": [], "followUps": [] },
-                },
-                "messages": [],
-                "lastEventSequence": 0,
-                "lastEventCursor": null,
-            },
-            "client": { "id": "mock", "capabilities": [] },
-            "lastEventSequence": 0,
-            "lastEventCursor": null,
-        },
-    })
 }
 
 /// Run a headless plan; the captured frames show the editor surface (the prompt box) and the dock.

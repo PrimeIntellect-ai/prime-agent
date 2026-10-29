@@ -31,7 +31,7 @@ use pa_tui::interactive::{
 };
 use serde_json::{json, Value};
 
-use support::{write_json, write_session_event};
+use support::{attach_response, write_json, write_session_event};
 
 /// The real worker admission refusal (`QUEUED_INPUT_SUSPENDED`), the stand-in for every daemon-side
 /// "alive but refusing THIS request".
@@ -251,7 +251,7 @@ impl SharedAnswers {
                     );
                 }
                 "attach" => {
-                    let mut data = attach_data(id);
+                    let mut data = attach_response(id, "rejection session");
                     if self.rebind_before_close && !self.prompt_requests.lock().unwrap().is_empty()
                     {
                         data["data"]["activeSessionId"] = json!("s2");
@@ -406,40 +406,6 @@ impl SharedAnswers {
             }
         }
     }
-}
-
-/// The slim attach result with an empty transcript.
-fn attach_data(id: &str) -> Value {
-    json!({
-        "type": "response",
-        "id": id,
-        "command": "attach",
-        "success": true,
-        "data": {
-            "protocol": { "name": "prime-agent.daemon", "version": 7 },
-            "activeSessionId": "s1",
-            "snapshot": {
-                "activeSessionId": "s1",
-                "summary": { "id": "s1", "cwd": "/tmp" },
-                "state": {
-                    "activeSessionId": "s1",
-                    "cwd": "/tmp",
-                    "sessionId": "sess-1",
-                    "sessionName": "rejection session",
-                    "model": null,
-                    "isStreaming": false,
-                    "isCompacting": false,
-                    "sessionActions": { "queuedCount": 0, "steering": [], "followUps": [] },
-                },
-                "messages": [],
-                "lastEventSequence": 0,
-                "lastEventCursor": null,
-            },
-            "client": { "id": "mock", "capabilities": [] },
-            "lastEventSequence": 0,
-            "lastEventCursor": null,
-        },
-    })
 }
 
 /// One alt+enter key event (the follow-up key, TS `app.message.followUp`).

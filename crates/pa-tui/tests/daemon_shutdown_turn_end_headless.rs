@@ -33,7 +33,7 @@ use pa_tui::interactive::{
 };
 use serde_json::{json, Value};
 
-use support::{write_json, write_session_event};
+use support::{attach_response, write_json, write_session_event};
 
 /// The wait for the recovered banner: the recovery's fixed poll finds the successor well inside
 /// this bound.
@@ -103,7 +103,7 @@ impl FirstGeneration {
                     );
                 }
                 "attach" => {
-                    write_json(&mut writer, &attach_data(id));
+                    write_json(&mut writer, &attach_response(id, "restart session"));
                 }
                 "prompt" => {
                     write_json(&mut writer, &success_response(id, "prompt"));
@@ -233,7 +233,7 @@ impl SuccessorDaemon {
             match command_type.as_str() {
                 "attach" => {
                     self.attach_requests.lock().unwrap().push(command);
-                    write_json(&mut writer, &attach_data(id));
+                    write_json(&mut writer, &attach_response(id, "restart session"));
                 }
                 _ => write_json(&mut writer, &success_response(id, &command_type)),
             }
@@ -282,40 +282,6 @@ fn success_response(id: &str, command: &str) -> Value {
         "command": command,
         "success": true,
         "data": {},
-    })
-}
-
-/// The slim attach result with an empty transcript.
-fn attach_data(id: &str) -> Value {
-    json!({
-        "type": "response",
-        "id": id,
-        "command": "attach",
-        "success": true,
-        "data": {
-            "protocol": { "name": "prime-agent.daemon", "version": 7 },
-            "activeSessionId": "s1",
-            "snapshot": {
-                "activeSessionId": "s1",
-                "summary": { "id": "s1", "cwd": "/tmp" },
-                "state": {
-                    "activeSessionId": "s1",
-                    "cwd": "/tmp",
-                    "sessionId": "sess-1",
-                    "sessionName": "restart session",
-                    "model": null,
-                    "isStreaming": false,
-                    "isCompacting": false,
-                    "sessionActions": { "queuedCount": 0, "steering": [], "followUps": [] },
-                },
-                "messages": [],
-                "lastEventSequence": 0,
-                "lastEventCursor": null,
-            },
-            "client": { "id": "mock", "capabilities": [] },
-            "lastEventSequence": 0,
-            "lastEventCursor": null,
-        },
     })
 }
 

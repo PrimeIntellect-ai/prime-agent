@@ -28,7 +28,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use pa_tui::interactive::{run_interactive, HeadlessPlan, HeadlessStep, UiMode};
 use serde_json::{json, Value};
 
-use support::{options, write_json};
+use support::{attach_response, options, write_json};
 
 struct MockSupervisor {
     listener: UnixListener,
@@ -93,39 +93,7 @@ impl MockSupervisor {
                     );
                 }
                 "attach" => {
-                    write_json(
-                        &mut writer,
-                        &json!({
-                            "type": "response",
-                            "id": id,
-                            "command": "attach",
-                            "success": true,
-                            "data": {
-                                "protocol": { "name": "prime-agent.daemon", "version": 7 },
-                                "activeSessionId": "s1",
-                                "snapshot": {
-                                    "activeSessionId": "s1",
-                                    "summary": { "id": "s1", "cwd": "/tmp" },
-                                    "state": {
-                                        "activeSessionId": "s1",
-                                        "cwd": "/tmp",
-                                        "sessionId": "sess-1",
-                                        "sessionName": "editing session",
-                                        "model": null,
-                                        "isStreaming": false,
-                                        "isCompacting": false,
-                                        "sessionActions": { "queuedCount": 0, "steering": [], "followUps": [] },
-                                    },
-                                    "messages": [],
-                                    "lastEventSequence": 0,
-                                    "lastEventCursor": null,
-                                },
-                                "client": { "id": "mock", "capabilities": [] },
-                                "lastEventSequence": 0,
-                                "lastEventCursor": null,
-                            },
-                        }),
-                    );
+                    write_json(&mut writer, &attach_response(id, "editing session"));
                 }
                 _ => {
                     write_json(

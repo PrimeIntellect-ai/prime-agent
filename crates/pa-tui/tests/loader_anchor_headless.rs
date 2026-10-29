@@ -30,7 +30,7 @@ use pa_tui::interactive::{
 };
 use serde_json::{json, Value};
 
-use support::{options, write_json};
+use support::{attach_response, options, write_json};
 
 /// One mock daemon: serves one client connection, answering the attach with a mid-turn snapshot
 /// whose user message is `prompt_age_ms` old.
@@ -155,42 +155,16 @@ fn attach_data(id: &str, prompt_age_ms: u64) -> Value {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|since| since.as_millis() as u64)
         .unwrap_or_default();
-    json!({
-        "type": "response",
-        "id": id,
-        "command": "attach",
-        "success": true,
-        "data": {
-            "protocol": { "name": "prime-agent.daemon", "version": 7 },
-            "activeSessionId": "s1",
-            "snapshot": {
-                "activeSessionId": "s1",
-                "summary": { "id": "s1", "cwd": "/tmp" },
-                "state": {
-                    "activeSessionId": "s1",
-                    "cwd": "/tmp",
-                    "sessionId": "sess-1",
-                    "sessionName": "loader anchor session",
-                    "model": null,
-                    "isStreaming": true,
-                    "isCompacting": false,
-                    "sessionActions": { "queuedCount": 0, "steering": [], "followUps": [] },
-                },
-                "messages": [
-                    {
-                        "role": "user",
-                        "content": [{ "type": "text", "text": "run the sweep" }],
-                        "timestamp": now_ms.saturating_sub(prompt_age_ms),
-                    },
-                ],
-                "lastEventSequence": 0,
-                "lastEventCursor": null,
-            },
-            "client": { "id": "mock", "capabilities": [] },
-            "lastEventSequence": 0,
-            "lastEventCursor": null,
+    let mut response = attach_response(id, "loader anchor session");
+    response["data"]["snapshot"]["state"]["isStreaming"] = json!(true);
+    response["data"]["snapshot"]["messages"] = json!([
+        {
+            "role": "user",
+            "content": [{ "type": "text", "text": "run the sweep" }],
+            "timestamp": now_ms.saturating_sub(prompt_age_ms),
         },
-    })
+    ]);
+    response
 }
 
 /// Run one headless leg against a fresh mock whose prompt is `prompt_age_ms` old, and return the

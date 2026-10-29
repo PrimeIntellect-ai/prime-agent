@@ -155,3 +155,39 @@ pub fn view_options(socket: &Path) -> AgentsViewOptions {
         create_config: json!({}),
     }
 }
+
+/// A successful `attach` response for the idle session `s1` named `session_name`, with no model
+/// and an empty transcript. Scenarios patch the returned value for anything else (for example
+/// `response["data"]["snapshot"]["messages"]`).
+pub fn attach_response(id: &str, session_name: &str) -> Value {
+    json!({
+        "type": "response",
+        "id": id,
+        "command": "attach",
+        "success": true,
+        "data": {
+            "protocol": { "name": "prime-agent.daemon", "version": 7 },
+            "activeSessionId": "s1",
+            "snapshot": {
+                "activeSessionId": "s1",
+                "summary": { "id": "s1", "cwd": "/tmp" },
+                "state": {
+                    "activeSessionId": "s1",
+                    "cwd": "/tmp",
+                    "sessionId": "sess-1",
+                    "sessionName": session_name,
+                    "model": null,
+                    "isStreaming": false,
+                    "isCompacting": false,
+                    "sessionActions": { "queuedCount": 0, "steering": [], "followUps": [] },
+                },
+                "messages": [],
+                "lastEventSequence": 0,
+                "lastEventCursor": null,
+            },
+            "client": { "id": "mock", "capabilities": [] },
+            "lastEventSequence": 0,
+            "lastEventCursor": null,
+        },
+    })
+}

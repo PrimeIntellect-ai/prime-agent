@@ -30,7 +30,7 @@ use pa_tui::interactive::{
 };
 use serde_json::{json, Value};
 
-use support::{options, write_json, write_session_event};
+use support::{attach_response, options, write_json, write_session_event};
 
 /// Tall enough that the whole 20-row bash preview plus its status rows fit the window.
 const TALL_PLAN_HEIGHT: u16 = 64;
@@ -165,7 +165,7 @@ impl MockSupervisor {
                         );
                     }
                     "attach" => {
-                        write_json(&mut writer, &attach_data(id));
+                        write_json(&mut writer, &attach_response(id, "bash session"));
                     }
                     "get_session_stats" => {
                         write_json(
@@ -467,40 +467,6 @@ fn side_question_event(id: &str, question: &str, status: &str, answer: &str) -> 
             "question": question,
             "answer": answer,
             "status": status,
-        },
-    })
-}
-
-/// The slim attach result with an empty transcript.
-fn attach_data(id: &str) -> Value {
-    json!({
-        "type": "response",
-        "id": id,
-        "command": "attach",
-        "success": true,
-        "data": {
-            "protocol": { "name": "prime-agent.daemon", "version": 7 },
-            "activeSessionId": "s1",
-            "snapshot": {
-                "activeSessionId": "s1",
-                "summary": { "id": "s1", "cwd": "/tmp" },
-                "state": {
-                    "activeSessionId": "s1",
-                    "cwd": "/tmp",
-                    "sessionId": "sess-1",
-                    "sessionName": "bash session",
-                    "model": null,
-                    "isStreaming": false,
-                    "isCompacting": false,
-                    "sessionActions": { "queuedCount": 0, "steering": [], "followUps": [] },
-                },
-                "messages": [],
-                "lastEventSequence": 0,
-                "lastEventCursor": null,
-            },
-            "client": { "id": "mock", "capabilities": [] },
-            "lastEventSequence": 0,
-            "lastEventCursor": null,
         },
     })
 }

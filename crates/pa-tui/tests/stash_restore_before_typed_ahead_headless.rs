@@ -30,7 +30,7 @@ use pa_tui::interactive::{
 };
 use serde_json::{json, Value};
 
-use support::write_json;
+use support::{attach_response, write_json};
 
 /// How long the reopen's attach stalls: far past the plan's first step,
 /// so the Ctrl+D provably lands while the open is still in flight.
@@ -164,36 +164,9 @@ fn serve_connection(stream: UnixStream, stall_attach: bool) {
 
 /// The attach result: one live session with an empty transcript.
 fn attach_data(id: &str) -> Value {
-    json!({
-        "type": "response",
-        "id": id,
-        "command": "attach",
-        "success": true,
-        "data": {
-            "protocol": { "name": "prime-agent.daemon", "version": 7 },
-            "activeSessionId": "s1",
-            "snapshot": {
-                "activeSessionId": "s1",
-                "summary": { "id": "s1", "cwd": "/tmp" },
-                "state": {
-                    "activeSessionId": "s1",
-                    "cwd": "/tmp",
-                    "sessionId": "sess-1",
-                    "sessionName": "stash reopen probe",
-                    "model": "faux-1",
-                    "isStreaming": false,
-                    "isCompacting": false,
-                    "sessionActions": { "queuedCount": 0, "steering": [], "followUps": [] },
-                },
-                "messages": [],
-                "lastEventSequence": 0,
-                "lastEventCursor": null,
-            },
-            "client": { "id": "mock", "capabilities": [] },
-            "lastEventSequence": 0,
-            "lastEventCursor": null,
-        },
-    })
+    let mut response = attach_response(id, "stash reopen probe");
+    response["data"]["snapshot"]["state"]["model"] = json!("faux-1");
+    response
 }
 
 fn options(
