@@ -23,16 +23,14 @@ mod support;
 
 use std::io::{BufRead, BufReader};
 use std::os::unix::net::UnixListener;
-use std::path::PathBuf;
 
 use crossterm::event::KeyCode;
 use pa_tui::interactive::{
-    run_interactive, HeadlessPlan, HeadlessStep, InteractiveOptions, ModelSelection,
-    SessionSelection, UiMode,
+    run_interactive, HeadlessPlan, HeadlessStep, InteractiveOptions, UiMode,
 };
 use serde_json::{json, Value};
 
-use support::write_json;
+use support::{options, write_json};
 
 /// One mock daemon: serves one client connection, answering the attach with a mid-turn snapshot
 /// whose user message is `prompt_age_ms` old.
@@ -195,44 +193,6 @@ fn attach_data(id: &str, prompt_age_ms: u64) -> Value {
     })
 }
 
-fn options(socket: PathBuf) -> InteractiveOptions {
-    InteractiveOptions {
-        models: None,
-        socket_path: socket,
-        cwd: PathBuf::from("/tmp"),
-        session_dir: None,
-        script_path: None,
-        model_selection: ModelSelection::default(),
-        model_catalog: Vec::new(),
-        model_configured_providers: std::collections::HashSet::default(),
-        model_recent_models: Vec::new(),
-        default_thinking_level: None,
-        no_session: false,
-        session: SessionSelection::New,
-        initial_message: None,
-        show_images: true,
-        fullscreen_mouse: false,
-        theme: "prime".to_string(),
-        code_block_indent: "  ".to_string(),
-        tree_filter_mode: String::new(),
-        branch_summary_skip_prompt: false,
-        version: "0.0.0".to_string(),
-        onboarding: None,
-        telemetry_disabled: None,
-        client_auth: None,
-        traces: None,
-        provider_auth: None,
-        update_commands: None,
-        telemetry: None,
-        keybindings: pa_tui::keybindings::KeybindingsManager::new(),
-        session_rlm_depth: None,
-        prompt_stash: std::sync::Arc::default(),
-        session_has_children: false,
-        restore_dock_focus: false,
-        client_settings: None,
-    }
-}
-
 /// Run one headless leg against a fresh mock whose prompt is `prompt_age_ms` old, and return the
 /// loader's rendered elapsed seconds (the `Waiting · {elapsed}` readout).
 fn loader_elapsed_secs(prompt_age_ms: u64) -> u64 {
@@ -263,7 +223,13 @@ fn loader_elapsed_secs(prompt_age_ms: u64) -> u64 {
         height: 40,
     };
     let outcome = runtime
-        .block_on(run_interactive(options(socket), UiMode::Headless(plan)))
+        .block_on(run_interactive(
+            InteractiveOptions {
+                fullscreen_mouse: false,
+                ..options(socket)
+            },
+            UiMode::Headless(plan),
+        ))
         .expect("interactive run");
     handle.join().expect("mock supervisor finished");
     let all = outcome.frames.join("\n");

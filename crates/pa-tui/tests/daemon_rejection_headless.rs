@@ -23,13 +23,11 @@ mod support;
 
 use std::io::{BufRead, BufReader};
 use std::os::unix::net::{UnixListener, UnixStream};
-use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use pa_tui::interactive::{
-    run_interactive, HeadlessPlan, HeadlessStep, InteractiveOptions, ModelSelection,
-    SessionSelection, UiMode,
+    run_interactive, HeadlessPlan, HeadlessStep, InteractiveOptions, SessionSelection, UiMode,
 };
 use serde_json::{json, Value};
 
@@ -444,44 +442,6 @@ fn attach_data(id: &str) -> Value {
     })
 }
 
-fn options_with_session(socket: PathBuf, session: SessionSelection) -> InteractiveOptions {
-    InteractiveOptions {
-        models: None,
-        socket_path: socket,
-        cwd: PathBuf::from("/tmp"),
-        session_dir: None,
-        script_path: None,
-        model_selection: ModelSelection::default(),
-        model_catalog: Vec::new(),
-        model_configured_providers: std::collections::HashSet::default(),
-        model_recent_models: Vec::new(),
-        default_thinking_level: None,
-        no_session: false,
-        session,
-        initial_message: None,
-        show_images: true,
-        fullscreen_mouse: false,
-        theme: "prime".to_string(),
-        code_block_indent: "  ".to_string(),
-        tree_filter_mode: String::new(),
-        branch_summary_skip_prompt: false,
-        version: "0.0.0".to_string(),
-        onboarding: None,
-        telemetry_disabled: None,
-        client_auth: None,
-        traces: None,
-        provider_auth: None,
-        update_commands: None,
-        telemetry: None,
-        keybindings: pa_tui::keybindings::KeybindingsManager::new(),
-        session_rlm_depth: None,
-        prompt_stash: Arc::default(),
-        session_has_children: false,
-        restore_dock_focus: false,
-        client_settings: None,
-    }
-}
-
 /// One alt+enter key event (the follow-up key, TS `app.message.followUp`).
 fn alt_enter() -> KeyEvent {
     KeyEvent::new(KeyCode::Enter, KeyModifiers::ALT)
@@ -552,7 +512,11 @@ fn run_plan(
         width: 100,
         height: 40,
     };
-    let options = options_with_session(socket, selection);
+    let options = InteractiveOptions {
+        session: selection,
+        fullscreen_mouse: false,
+        ..support::options(socket)
+    };
     let outcome = runtime.block_on(async {
         if agents_view_open {
             pa_tui::interactive::run_interactive_agents_view_open(

@@ -29,13 +29,11 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use pa_tui::agents_view::{
-    run_agents_view, AgentsHeadlessPlan, AgentsStep, AgentsViewOptions, AgentsViewUiMode,
-};
+use pa_tui::agents_view::{run_agents_view, AgentsHeadlessPlan, AgentsStep, AgentsViewUiMode};
 use pa_tui::interactive::SessionSelection;
 use serde_json::{json, Value};
 
-use support::read_line;
+use support::{read_line, view_options};
 
 /// Mouse tracking is process-global state, so the headless runs serialize through one lock (the
 /// click dispatch gates on it; tokio's, so the guard rides the run's awaits).
@@ -242,27 +240,6 @@ fn respond_failure(writer: &mut UnixStream, id: &str, command: &str, error: &str
             "error": error,
         }),
     );
-}
-
-fn view_options(socket: &std::path::Path) -> AgentsViewOptions {
-    AgentsViewOptions {
-        socket_path: socket.to_path_buf(),
-        cwd: PathBuf::from("/tmp"),
-        session_dir: Some(PathBuf::from("/tmp/sessions")),
-        theme: "prime".to_string(),
-        version: "0.0.0".to_string(),
-        anchor_session_id: None,
-        scope: None,
-        query: None,
-        expanded_ancestors: Vec::new(),
-        selected_row_identity: None,
-        selected_key: None,
-        status_message: None,
-        keybindings: pa_tui::keybindings::KeybindingsManager::new(),
-        show_hardware_cursor: false,
-        incident_notice_state: None,
-        create_config: serde_json::json!({}),
-    }
 }
 
 /// Run one headless plan and return the outcome. Holds the run lock: the click dispatch gates on

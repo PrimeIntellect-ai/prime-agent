@@ -7,14 +7,13 @@ mod support;
 
 use std::io::BufReader;
 use std::os::unix::net::UnixListener;
-use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use pa_tui::agents_view::{AgentsHeadlessPlan, AgentsStep, AgentsViewOptions, AgentsViewUiMode};
+use pa_tui::agents_view::{AgentsHeadlessPlan, AgentsStep, AgentsViewUiMode};
 use serde_json::{json, Value};
 
-use support::{read_line, respond, write_json};
+use support::{read_line, respond, view_options, write_json};
 
 const FILES: usize = 600;
 
@@ -96,27 +95,6 @@ fn saved_row(index: usize) -> Value {
         "messageCount": 3,
         "name": name,
     })
-}
-
-fn view_options(socket: &std::path::Path) -> AgentsViewOptions {
-    AgentsViewOptions {
-        socket_path: socket.to_path_buf(),
-        cwd: PathBuf::from("/tmp"),
-        session_dir: Some(PathBuf::from("/tmp/sessions")),
-        theme: "prime".to_string(),
-        version: "0.0.0".to_string(),
-        anchor_session_id: None,
-        scope: None,
-        query: None,
-        expanded_ancestors: Vec::new(),
-        selected_row_identity: None,
-        selected_key: None,
-        status_message: None,
-        keybindings: pa_tui::keybindings::KeybindingsManager::new(),
-        show_hardware_cursor: false,
-        incident_notice_state: None,
-        create_config: serde_json::json!({}),
-    }
 }
 
 #[tokio::test]

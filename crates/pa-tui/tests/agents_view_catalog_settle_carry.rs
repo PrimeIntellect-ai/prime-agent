@@ -191,22 +191,8 @@ fn saved_catalog_row(path: &str, id: &str, name: &str) -> Value {
 /// the saved catalog).
 fn view_options(socket: &std::path::Path, anchor: Option<&str>) -> AgentsViewOptions {
     AgentsViewOptions {
-        socket_path: socket.to_path_buf(),
-        cwd: PathBuf::from("/tmp"),
-        session_dir: Some(PathBuf::from("/tmp/sessions")),
-        theme: "prime".to_string(),
-        version: "0.0.0".to_string(),
         anchor_session_id: anchor.map(str::to_string),
-        scope: None,
-        query: None,
-        expanded_ancestors: Vec::new(),
-        selected_row_identity: None,
-        selected_key: None,
-        status_message: None,
-        keybindings: pa_tui::keybindings::KeybindingsManager::new(),
-        show_hardware_cursor: false,
-        incident_notice_state: None,
-        create_config: serde_json::json!({}),
+        ..support::view_options(socket)
     }
 }
 

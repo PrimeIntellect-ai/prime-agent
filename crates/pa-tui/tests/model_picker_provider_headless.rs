@@ -26,8 +26,7 @@ use std::os::unix::net::UnixListener;
 use std::path::PathBuf;
 
 use pa_tui::interactive::{
-    run_interactive, HeadlessPlan, HeadlessStep, InteractiveOptions, ModelSelection,
-    SessionSelection, UiMode,
+    run_interactive, HeadlessPlan, HeadlessStep, InteractiveOptions, UiMode,
 };
 use pa_types::ai::Model;
 use serde_json::{json, Value};
@@ -238,39 +237,9 @@ fn options(socket: PathBuf, catalog: Vec<Model>) -> InteractiveOptions {
     configured_providers.insert("prime-inference".to_string());
     configured_providers.insert("openrouter".to_string());
     InteractiveOptions {
-        models: None,
-        socket_path: socket,
-        cwd: PathBuf::from("/tmp"),
-        session_dir: None,
-        script_path: None,
-        model_selection: ModelSelection::default(),
         model_catalog: catalog,
         model_configured_providers: configured_providers,
-        model_recent_models: Vec::new(),
-        default_thinking_level: None,
-        no_session: false,
-        session: SessionSelection::New,
-        initial_message: None,
-        show_images: true,
-        fullscreen_mouse: true,
-        theme: "prime".to_string(),
-        code_block_indent: "  ".to_string(),
-        tree_filter_mode: String::new(),
-        branch_summary_skip_prompt: false,
-        version: "0.0.0".to_string(),
-        onboarding: None,
-        telemetry_disabled: None,
-        client_auth: None,
-        traces: None,
-        provider_auth: None,
-        update_commands: None,
-        telemetry: None,
-        keybindings: pa_tui::keybindings::KeybindingsManager::new(),
-        session_rlm_depth: None,
-        prompt_stash: std::sync::Arc::default(),
-        session_has_children: false,
-        restore_dock_focus: false,
-        client_settings: None,
+        ..support::options(socket)
     }
 }
 

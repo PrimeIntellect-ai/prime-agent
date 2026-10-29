@@ -29,18 +29,16 @@ mod support;
 
 use std::io::{BufRead, BufReader};
 use std::os::unix::net::UnixListener;
-use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use anyhow::Result;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use pa_tui::interactive::{
-    run_interactive, HeadlessPlan, HeadlessStep, InteractiveOptions, ModelSelection,
-    SessionSelection, UiMode,
+    run_interactive, HeadlessPlan, HeadlessStep, InteractiveOptions, UiMode,
 };
 use serde_json::{json, Value};
 
-use support::write_json;
+use support::{options, write_json};
 
 /// The rule row's glyph: the settings page's bars (the search field's borders, the detail block's
 /// separator).
@@ -389,44 +387,6 @@ impl pa_tui::client_settings::ClientSettings for RecordingSettings {
     }
 }
 
-fn options(socket: PathBuf, settings: Arc<RecordingSettings>) -> InteractiveOptions {
-    InteractiveOptions {
-        models: None,
-        socket_path: socket,
-        cwd: PathBuf::from("/tmp"),
-        session_dir: None,
-        script_path: None,
-        model_selection: ModelSelection::default(),
-        model_catalog: Vec::new(),
-        model_configured_providers: std::collections::HashSet::default(),
-        model_recent_models: Vec::new(),
-        default_thinking_level: None,
-        no_session: false,
-        session: SessionSelection::New,
-        initial_message: None,
-        show_images: true,
-        fullscreen_mouse: true,
-        theme: "prime".to_string(),
-        code_block_indent: "  ".to_string(),
-        tree_filter_mode: String::new(),
-        branch_summary_skip_prompt: false,
-        version: "0.0.0".to_string(),
-        onboarding: None,
-        telemetry_disabled: None,
-        client_auth: None,
-        traces: None,
-        provider_auth: None,
-        update_commands: None,
-        telemetry: None,
-        keybindings: pa_tui::keybindings::KeybindingsManager::new(),
-        session_rlm_depth: None,
-        prompt_stash: Arc::default(),
-        session_has_children: false,
-        restore_dock_focus: false,
-        client_settings: Some(settings),
-    }
-}
-
 /// Run a plan against the mock daemon, with the recording settings seam.
 fn run_plan(steps: Vec<HeadlessStep>) -> (Vec<String>, Arc<RecordingSettings>) {
     std::env::remove_var("TMUX");
@@ -447,7 +407,10 @@ fn run_plan(steps: Vec<HeadlessStep>) -> (Vec<String>, Arc<RecordingSettings>) {
     };
     let outcome = runtime
         .block_on(run_interactive(
-            options(socket, settings.clone()),
+            InteractiveOptions {
+                client_settings: Some(settings.clone()),
+                ..options(socket)
+            },
             UiMode::Headless(plan),
         ))
         .expect("interactive run");

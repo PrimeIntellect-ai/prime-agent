@@ -13,16 +13,14 @@ mod support;
 use std::collections::HashSet;
 use std::io::{BufRead, BufReader};
 use std::os::unix::net::UnixListener;
-use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use pa_tui::interactive::{
-    run_interactive, HeadlessPlan, HeadlessStep, InteractiveOptions, ModelSelection,
-    SessionSelection, UiMode,
+    run_interactive, HeadlessPlan, HeadlessStep, InteractiveOptions, SessionSelection, UiMode,
 };
 use serde_json::{json, Value};
 
-use support::write_json;
+use support::{options, write_json};
 
 const TAIL: usize = 300;
 /// The window's page size and resident chunk count (the bound under test).
@@ -193,44 +191,6 @@ fn page_data(page: &Value) -> Value {
     })
 }
 
-fn options(socket: PathBuf) -> InteractiveOptions {
-    InteractiveOptions {
-        models: None,
-        socket_path: socket,
-        cwd: PathBuf::from("/tmp"),
-        session_dir: None,
-        script_path: None,
-        model_selection: ModelSelection::default(),
-        model_catalog: Vec::new(),
-        model_configured_providers: std::collections::HashSet::default(),
-        model_recent_models: Vec::new(),
-        default_thinking_level: None,
-        no_session: false,
-        session: SessionSelection::Attach("s1".to_string()),
-        initial_message: None,
-        show_images: true,
-        fullscreen_mouse: true,
-        theme: "prime".to_string(),
-        code_block_indent: "  ".to_string(),
-        tree_filter_mode: String::new(),
-        branch_summary_skip_prompt: false,
-        version: "0.0.0".to_string(),
-        onboarding: None,
-        telemetry_disabled: None,
-        client_auth: None,
-        traces: None,
-        provider_auth: None,
-        update_commands: None,
-        telemetry: None,
-        keybindings: pa_tui::keybindings::KeybindingsManager::new(),
-        session_rlm_depth: None,
-        prompt_stash: std::sync::Arc::default(),
-        session_has_children: false,
-        restore_dock_focus: false,
-        client_settings: None,
-    }
-}
-
 fn run(paging: Paging, steps: Vec<HeadlessStep>) -> (Vec<String>, Vec<Value>) {
     std::env::remove_var("TMUX");
     let dir = tempfile::TempDir::new().expect("temp dir");
@@ -252,7 +212,13 @@ fn run(paging: Paging, steps: Vec<HeadlessStep>) -> (Vec<String>, Vec<Value>) {
         height: HEIGHT,
     };
     let outcome = runtime
-        .block_on(run_interactive(options(socket), UiMode::Headless(plan)))
+        .block_on(run_interactive(
+            InteractiveOptions {
+                session: SessionSelection::Attach("s1".to_string()),
+                ..options(socket)
+            },
+            UiMode::Headless(plan),
+        ))
         .expect("interactive run");
     handle.join().expect("mock supervisor finished");
     let pages = pages.lock().unwrap().clone();

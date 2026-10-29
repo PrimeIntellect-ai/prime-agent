@@ -23,18 +23,16 @@ mod support;
 
 use std::io::{BufRead, BufReader};
 use std::os::unix::net::UnixListener;
-use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use anyhow::Result;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use pa_tui::interactive::{
-    run_interactive, HeadlessPlan, HeadlessStep, InteractiveOptions, ModelSelection,
-    SessionSelection, UiMode,
+    run_interactive, HeadlessPlan, HeadlessStep, InteractiveOptions, UiMode,
 };
 use serde_json::{json, Value};
 
-use support::write_json;
+use support::{options, write_json};
 
 /// The session identity one run attaches to: the second run uses a different id, so the saved
 /// level is shown to apply to another chat too.
@@ -323,44 +321,6 @@ impl pa_tui::client_settings::ClientSettings for StubSettings {
     }
 }
 
-fn options(socket: PathBuf, settings: Arc<StubSettings>) -> InteractiveOptions {
-    InteractiveOptions {
-        models: None,
-        socket_path: socket,
-        cwd: PathBuf::from("/tmp"),
-        session_dir: None,
-        script_path: None,
-        model_selection: ModelSelection::default(),
-        model_catalog: Vec::new(),
-        model_configured_providers: std::collections::HashSet::default(),
-        model_recent_models: Vec::new(),
-        default_thinking_level: None,
-        no_session: false,
-        session: SessionSelection::New,
-        initial_message: None,
-        show_images: true,
-        fullscreen_mouse: true,
-        theme: "prime".to_string(),
-        code_block_indent: "  ".to_string(),
-        tree_filter_mode: String::new(),
-        branch_summary_skip_prompt: false,
-        version: "0.0.0".to_string(),
-        onboarding: None,
-        telemetry_disabled: None,
-        client_auth: None,
-        traces: None,
-        provider_auth: None,
-        update_commands: None,
-        telemetry: None,
-        keybindings: pa_tui::keybindings::KeybindingsManager::new(),
-        session_rlm_depth: None,
-        prompt_stash: std::sync::Arc::default(),
-        session_has_children: false,
-        restore_dock_focus: false,
-        client_settings: Some(settings),
-    }
-}
-
 fn run_plan(
     settings: Arc<StubSettings>,
     session: MockSession,
@@ -383,7 +343,10 @@ fn run_plan(
     };
     let outcome = runtime
         .block_on(run_interactive(
-            options(socket, settings),
+            InteractiveOptions {
+                client_settings: Some(settings),
+                ..options(socket)
+            },
             UiMode::Headless(plan),
         ))
         .expect("interactive run");

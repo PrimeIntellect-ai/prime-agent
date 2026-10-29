@@ -25,17 +25,15 @@ mod support;
 
 use std::io::{BufRead, BufReader};
 use std::os::unix::net::UnixListener;
-use std::path::PathBuf;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use pa_tui::agents_view::AgentsViewScope;
 use pa_tui::interactive::{
-    run_interactive, HeadlessPlan, HeadlessStep, InteractiveOptions, ModelSelection,
-    SessionSelection, UiMode,
+    run_interactive, HeadlessPlan, HeadlessStep, InteractiveOptions, UiMode,
 };
 use serde_json::{json, Value};
 
-use support::{write_json, write_session_event};
+use support::{options, write_json, write_session_event};
 
 struct MockSupervisor {
     listener: UnixListener,
@@ -281,47 +279,6 @@ fn canary_heartbeats() -> Value {
     })
 }
 
-fn options(
-    socket: PathBuf,
-    keybindings: pa_tui::keybindings::KeybindingsManager,
-) -> InteractiveOptions {
-    InteractiveOptions {
-        models: None,
-        socket_path: socket,
-        cwd: PathBuf::from("/tmp"),
-        session_dir: None,
-        script_path: None,
-        model_selection: ModelSelection::default(),
-        model_catalog: Vec::new(),
-        model_configured_providers: std::collections::HashSet::default(),
-        model_recent_models: Vec::new(),
-        default_thinking_level: None,
-        no_session: false,
-        session: SessionSelection::New,
-        initial_message: None,
-        show_images: true,
-        fullscreen_mouse: false,
-        theme: "prime".to_string(),
-        code_block_indent: "  ".to_string(),
-        tree_filter_mode: String::new(),
-        branch_summary_skip_prompt: false,
-        version: "0.0.0".to_string(),
-        onboarding: None,
-        telemetry_disabled: None,
-        client_auth: None,
-        traces: None,
-        provider_auth: None,
-        update_commands: None,
-        telemetry: None,
-        keybindings,
-        session_rlm_depth: None,
-        prompt_stash: std::sync::Arc::default(),
-        session_has_children: false,
-        restore_dock_focus: false,
-        client_settings: None,
-    }
-}
-
 /// One alt+a key event (the dock's focus hand-off, `app.subagents.focus`).
 fn alt_a() -> KeyEvent {
     KeyEvent::new(KeyCode::Char('a'), KeyModifiers::ALT)
@@ -406,7 +363,11 @@ fn run_scenario(
     };
     let outcome = runtime
         .block_on(run_interactive(
-            options(socket, keybindings),
+            InteractiveOptions {
+                fullscreen_mouse: false,
+                keybindings,
+                ..options(socket)
+            },
             UiMode::Headless(plan),
         ))
         .expect("interactive run");

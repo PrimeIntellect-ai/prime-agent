@@ -23,14 +23,13 @@ mod support;
 
 use std::io::{BufRead, BufReader};
 use std::os::unix::net::{UnixListener, UnixStream};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use pa_tui::interactive::{
-    run_interactive, HeadlessPlan, HeadlessStep, InteractiveOptions, ModelSelection,
-    SessionSelection, UiMode,
+    run_interactive, HeadlessPlan, HeadlessStep, InteractiveOptions, UiMode,
 };
 use serde_json::{json, Value};
 
@@ -306,44 +305,6 @@ fn enter() -> KeyEvent {
     KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)
 }
 
-fn options_with_session(socket: PathBuf, session: SessionSelection) -> InteractiveOptions {
-    InteractiveOptions {
-        models: None,
-        socket_path: socket,
-        cwd: PathBuf::from("/tmp"),
-        session_dir: None,
-        script_path: None,
-        model_selection: ModelSelection::default(),
-        model_catalog: Vec::new(),
-        model_configured_providers: std::collections::HashSet::default(),
-        model_recent_models: Vec::new(),
-        default_thinking_level: None,
-        no_session: false,
-        session,
-        initial_message: None,
-        show_images: true,
-        fullscreen_mouse: false,
-        theme: "prime".to_string(),
-        code_block_indent: "  ".to_string(),
-        tree_filter_mode: String::new(),
-        branch_summary_skip_prompt: false,
-        version: "0.0.0".to_string(),
-        onboarding: None,
-        telemetry_disabled: None,
-        client_auth: None,
-        traces: None,
-        provider_auth: None,
-        update_commands: None,
-        telemetry: None,
-        keybindings: pa_tui::keybindings::KeybindingsManager::new(),
-        session_rlm_depth: None,
-        prompt_stash: Arc::default(),
-        session_has_children: false,
-        restore_dock_focus: false,
-        client_settings: None,
-    }
-}
-
 /// The operator's daemon restart recovers an attached window (TS #2458): the announced non-update
 /// closing arms the bounded shutdown recovery, the pane stays mounted while it waits, and the
 /// restarted daemon's reattach lands.
@@ -386,7 +347,10 @@ fn an_announced_shutdown_reconnects_when_the_daemon_comes_back() {
         width: 100,
         height: 40,
     };
-    let options = options_with_session(socket, SessionSelection::New);
+    let options = InteractiveOptions {
+        fullscreen_mouse: false,
+        ..support::options(socket)
+    };
     let outcome = runtime.block_on(run_interactive(options, UiMode::Headless(plan)));
     let _ = handle.join();
     let outcome = outcome.expect("the recovered run returns normally");

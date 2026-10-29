@@ -23,7 +23,6 @@ mod support;
 
 use std::io::{BufRead, BufReader};
 use std::os::unix::net::UnixListener;
-use std::path::PathBuf;
 use std::sync::{Mutex, MutexGuard};
 
 /// Mouse tracking is process-global state, so the headless runs serialize (each asserts on the
@@ -38,12 +37,11 @@ fn run_lock() -> MutexGuard<'static, ()> {
 }
 
 use pa_tui::interactive::{
-    run_interactive, HeadlessPlan, HeadlessStep, InteractiveOptions, ModelSelection,
-    SessionSelection, UiMode,
+    run_interactive, HeadlessPlan, HeadlessStep, InteractiveOptions, UiMode,
 };
 use serde_json::{json, Value};
 
-use support::write_json;
+use support::{options, write_json};
 
 /// The SGR reports a real terminal sends with ?1002+?1006 tracking active: a left press, a left
 /// drag (button 0 + the motion bit 32), and a release.
@@ -223,44 +221,6 @@ fn attach_data(id: &str) -> Value {
     })
 }
 
-fn options(socket: PathBuf, fullscreen_mouse: bool) -> InteractiveOptions {
-    InteractiveOptions {
-        models: None,
-        socket_path: socket,
-        cwd: PathBuf::from("/tmp"),
-        session_dir: None,
-        script_path: None,
-        model_selection: ModelSelection::default(),
-        model_catalog: Vec::new(),
-        model_configured_providers: std::collections::HashSet::default(),
-        model_recent_models: Vec::new(),
-        default_thinking_level: None,
-        no_session: false,
-        session: SessionSelection::New,
-        initial_message: None,
-        show_images: true,
-        client_settings: None,
-        fullscreen_mouse,
-        theme: "prime".to_string(),
-        code_block_indent: "  ".to_string(),
-        tree_filter_mode: String::new(),
-        branch_summary_skip_prompt: false,
-        version: "0.0.0".to_string(),
-        onboarding: None,
-        telemetry_disabled: None,
-        client_auth: None,
-        traces: None,
-        provider_auth: None,
-        update_commands: None,
-        telemetry: None,
-        keybindings: pa_tui::keybindings::KeybindingsManager::new(),
-        session_rlm_depth: None,
-        prompt_stash: std::sync::Arc::default(),
-        session_has_children: false,
-        restore_dock_focus: false,
-    }
-}
-
 /// Run the headless plan and return the captured frames and selection copies. Holds the run lock:
 /// mouse tracking is process-global.
 fn run_plan(steps: Vec<HeadlessStep>, fullscreen_mouse: bool) -> (Vec<String>, Vec<String>) {
@@ -281,7 +241,10 @@ fn run_plan(steps: Vec<HeadlessStep>, fullscreen_mouse: bool) -> (Vec<String>, V
     };
     let outcome = runtime
         .block_on(run_interactive(
-            options(socket, fullscreen_mouse),
+            InteractiveOptions {
+                fullscreen_mouse,
+                ..options(socket)
+            },
             UiMode::Headless(plan),
         ))
         .expect("interactive run");

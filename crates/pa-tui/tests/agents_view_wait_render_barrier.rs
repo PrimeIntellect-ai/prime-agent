@@ -26,11 +26,11 @@ use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-use pa_tui::agents_view::{AgentsHeadlessPlan, AgentsStep, AgentsViewOptions, AgentsViewUiMode};
+use pa_tui::agents_view::{AgentsHeadlessPlan, AgentsStep, AgentsViewUiMode};
 use pa_tui::interactive::SessionSelection;
 use serde_json::{json, Value};
 
-use support::read_line;
+use support::{read_line, view_options};
 
 /// Longer than the retired budget-settle ordering's whole window, so a plan gated on the old
 /// 300ms settle deterministically ends before the catalog lands (the red the barrier removes).
@@ -204,27 +204,6 @@ fn respond_failure(writer: &mut UnixStream, id: &str, command: &str, error: &str
             "error": error,
         }),
     )
-}
-
-fn view_options(socket: &std::path::Path) -> AgentsViewOptions {
-    AgentsViewOptions {
-        socket_path: socket.to_path_buf(),
-        cwd: PathBuf::from("/tmp"),
-        session_dir: Some(PathBuf::from("/tmp/sessions")),
-        theme: "prime".to_string(),
-        version: "0.0.0".to_string(),
-        anchor_session_id: None,
-        scope: None,
-        query: None,
-        expanded_ancestors: Vec::new(),
-        selected_row_identity: None,
-        selected_key: None,
-        status_message: None,
-        keybindings: pa_tui::keybindings::KeybindingsManager::new(),
-        show_hardware_cursor: false,
-        incident_notice_state: None,
-        create_config: serde_json::json!({}),
-    }
 }
 
 /// The barrier holds the queued plan batch until a frame rendered after arming carries the
