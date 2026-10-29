@@ -13,6 +13,7 @@ from pathlib import Path
 import subprocess
 import tempfile
 import threading
+import time
 
 from check_minimum_reasoning import Handler, Server
 from check_saved_catalog import CatalogClient
@@ -66,7 +67,15 @@ def observe(binary, root, receipt):
             assert active, created
             receipt['result'] = client.call('refine', activeSessionId=active,
                                             instructions='Fixture no-op refinement')
+            assert receipt['result'].get('refinementChildSpawned'), receipt['result']
             assert server.error is None, server.error
+            # The refine wire is fire-and-wake: the spawned refinement child
+            # plans asynchronously after the RPC returns (the synchronous
+            # in-process refiner call this check was written for is gone),
+            # so the planning request is awaited with observable readiness.
+            deadline = time.monotonic() + 60
+            while not server.requests and time.monotonic() < deadline:
+                time.sleep(0.05)
             assert len(server.received_headers) == len(server.requests) == 1, server.requests
             headers = {key.lower(): value for key, value in server.received_headers[0].items()}
             actual = {key: headers.get(key) for key in ('authorization', 'x-prime-team-id')}
