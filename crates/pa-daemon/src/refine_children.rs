@@ -280,20 +280,39 @@ impl AgentSessionEngine {
         let Some(children) = self.children.clone() else {
             return;
         };
-        tokio::spawn(async move {
-            for _ in 0..REFINEMENT_TEARDOWN_SLICES {
-                if matches!(
-                    children.delete_inactive_subagent(&rlm_child_id).await,
-                    Ok("deleted" | "not_found")
-                ) {
-                    return;
-                }
-                tokio::time::sleep(std::time::Duration::from_millis(
-                    REFINEMENT_TEARDOWN_SLICE_MS,
-                ))
-                .await;
-            }
-            eprintln!("pa-daemon: the refinement child {rlm_child_id} never settled for teardown");
-        });
+        tokio::spawn(retire_refine_child(
+            children,
+            rlm_child_id,
+            REFINEMENT_TEARDOWN_SLICES,
+            REFINEMENT_TEARDOWN_SLICE_MS,
+        ));
+    }
+}
+
+/// The teardown body: poll the delete until the child settles on its own.
+/// A child still wedged when the window expires is killed and its record
+/// retired — no refine child orphans in the registry and its slot frees.
+async fn retire_refine_child(
+    children: std::sync::Arc<crate::rlm_children::SupervisorChildSessions>,
+    rlm_child_id: String,
+    slices: u32,
+    slice_ms: u64,
+) {
+    for _ in 0..slices {
+        if matches!(
+            children.delete_inactive_subagent(&rlm_child_id).await,
+            Ok("deleted" | "not_found")
+        ) {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(slice_ms)).await;
+    }
+    children.cancel_child_run(&rlm_child_id).await;
+    tokio::time::sleep(std::time::Duration::from_millis(slice_ms)).await;
+    if !matches!(
+        children.delete_inactive_subagent(&rlm_child_id).await,
+        Ok("deleted" | "not_found")
+    ) {
+        eprintln!("pa-daemon: the refinement child {rlm_child_id} never settled for teardown");
     }
 }
