@@ -10,9 +10,9 @@ use serde_json::{json, Map, Value};
 use tokio::sync::Mutex;
 
 use super::daemon::{
-    admit_session, attach_daemon_session, create_daemon_session, reserve_session_slot,
-    resolve_session_mcp_servers, summary_str, teardown, DaemonAcpOptions, DaemonAcpState,
-    DaemonBinding, DaemonLink,
+    admit_session, attach_daemon_session, create_daemon_session, detach_daemon_session,
+    reserve_session_slot, resolve_session_mcp_servers, summary_str, DaemonAcpOptions,
+    DaemonAcpState, DaemonBinding, DaemonLink,
 };
 use super::jsonrpc;
 use super::producer::FrameSink;
@@ -128,8 +128,10 @@ pub(super) async fn handle_session_load(
         .and_then(Value::as_str)
         .unwrap_or_default();
     let params = types::NewSessionParams::parse(&params);
-    match bind_saved_session(&id, session_id, &params, link, state, options).await {
-        Ok(history) => admit_session(id, params, Some(history), link, state, tx).await,
+    match open_saved_session(&id, session_id, &params, link, state, options).await {
+        Ok((binding, history)) => {
+            admit_session(id, params, binding, Some(history), link, state, tx).await;
+        }
         Err(error_response) => {
             state.lock().await.session_new_in_flight = false;
             let _ = tx.send(error_response);
@@ -137,20 +139,19 @@ pub(super) async fn handle_session_load(
     }
 }
 
-/// Open the saved session through the daemon's create (which reuses the
-/// live worker already serving the file), attach it, read its stored
-/// conversation and check the requested MCP servers against its cwd. Only
-/// then is the previously bound daemon session left the way EOF would
-/// leave it, so a failed load keeps the old binding. `Err` is the
-/// request's error response.
-async fn bind_saved_session(
+/// Check the requested MCP servers against the saved session's cwd, open
+/// the session through the daemon's create (which reuses the live worker
+/// already serving the file), attach it, and read its stored conversation.
+/// Returns the session's binding; `admit_session` rebinds the connection
+/// once the admission succeeded. `Err` is the request's error response.
+async fn open_saved_session(
     id: &Value,
     session_id: &str,
     params: &types::NewSessionParams,
     link: &Arc<DaemonLink>,
     state: &Arc<Mutex<DaemonAcpState>>,
     options: &DaemonAcpOptions,
-) -> Result<Vec<Value>, Value> {
+) -> Result<(DaemonBinding, Vec<Value>), Value> {
     let internal = |error: anyhow::Error| super::internal_error(id, &format!("{error:#}"));
     let bound = state.lock().await.binding.clone();
     let catalog = saved_sessions(link, &bound.active_session_id, None, None)
@@ -169,6 +170,8 @@ async fn bind_saved_session(
             Some(&json!({ "reason": format!("Unknown session: {session_id}") })),
         ));
     };
+    let cwd = row["cwd"].as_str().unwrap_or_default();
+    resolve_session_mcp_servers(id, &params.mcp_servers, Path::new(cwd))?;
     let mut create = options.create.clone();
     if let DaemonCommand::Create {
         session_path,
@@ -182,7 +185,7 @@ async fn bind_saved_session(
         *no_session = None;
         *lifecycle = Some(DaemonSessionLifecycle::Resident);
         if let Some(config) = config.as_mut() {
-            config["cwd"] = row["cwd"].clone();
+            config["cwd"] = json!(cwd);
         }
     }
     let summary = create_daemon_session(link, create)
@@ -191,9 +194,10 @@ async fn bind_saved_session(
     let active_session_id = summary_str(&summary, "activeSessionId");
     // Loading the session this connection already hosts keeps the binding.
     if active_session_id == bound.active_session_id {
-        return fetch_history(link, &active_session_id)
+        let history = fetch_history(link, &active_session_id)
             .await
-            .map_err(internal);
+            .map_err(internal)?;
+        return Ok((bound, history));
     }
     let loaded = DaemonBinding {
         active_session_id,
@@ -205,32 +209,13 @@ async fn bind_saved_session(
     attach_daemon_session(link, &loaded.active_session_id)
         .await
         .map_err(internal)?;
-    let prepared = match resolve_session_mcp_servers(id, &params.mcp_servers, &loaded.cwd) {
-        Ok(_) => fetch_history(link, &loaded.active_session_id)
-            .await
-            .map_err(internal),
-        Err(error_response) => Err(error_response),
-    };
-    if prepared.is_err() {
-        detach_daemon_session(link, &loaded.active_session_id).await;
-        return prepared;
+    match fetch_history(link, &loaded.active_session_id).await {
+        Ok(history) => Ok((loaded, history)),
+        Err(error) => {
+            detach_daemon_session(link, &loaded.active_session_id).await;
+            Err(internal(error))
+        }
     }
-    teardown(link, state, &bound).await;
-    if !bound.client_owned {
-        detach_daemon_session(link, &bound.active_session_id).await;
-    }
-    state.lock().await.binding = loaded;
-    prepared
-}
-
-async fn detach_daemon_session(link: &Arc<DaemonLink>, active_session_id: &str) {
-    let _ = link
-        .request(DaemonCommand::Detach {
-            id: None,
-            active_session_id: Some(active_session_id.to_string()),
-            rest: Map::default(),
-        })
-        .await;
 }
 
 /// The session's stored conversation (`get_messages`).

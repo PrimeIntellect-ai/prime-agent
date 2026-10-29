@@ -1107,7 +1107,8 @@ async fn handle_session_new(
         return;
     }
     let params = types::NewSessionParams::parse(&params);
-    admit_session(id, params, None, link, state, tx).await;
+    let binding = state.lock().await.binding.clone();
+    admit_session(id, params, binding, None, link, state, tx).await;
 }
 
 /// Reserve the connection's one session slot for a `session/new` or
@@ -1130,30 +1131,33 @@ pub(crate) async fn reserve_session_slot(
     true
 }
 
-/// Host the bound daemon session as the ACP session and admit its MCP
+/// Host `binding`'s daemon session as the ACP session and admit its MCP
 /// servers through the wire command. The caller reserved the slot. A
 /// `session/load` passes the stored conversation in `history`: it is
-/// replayed before the response.
+/// replayed before the response. When `binding` is not the bound daemon
+/// session (a load that attached another one), the connection rebinds to
+/// it only once the admission succeeded; a failed admission detaches it.
 pub(crate) async fn admit_session(
     id: Value,
     params: types::NewSessionParams,
+    binding: DaemonBinding,
     history: Option<Vec<Value>>,
     link: &Arc<DaemonLink>,
     state: &Arc<Mutex<DaemonAcpState>>,
     tx: producer::FrameSink,
 ) {
-    let binding = state.lock().await.binding.clone();
+    let bound = state.lock().await.binding.clone();
+    let attached = (bound.active_session_id != binding.active_session_id)
+        .then_some(binding.active_session_id.as_str());
+    // The pending clear targets the bound session, which the earlier
+    // servers were installed on.
     if !state.lock().await.mcp_server_names.is_empty() {
-        if let Err(error) = clear_connection_servers(
-            link,
-            &binding.active_session_id,
-            &binding.mcp_owner_id,
-            state,
-        )
-        .await
+        if let Err(error) =
+            clear_connection_servers(link, &bound.active_session_id, &bound.mcp_owner_id, state)
+                .await
         {
-            state.lock().await.session_new_in_flight = false;
-            let _ = tx.send(super::internal_error(&id, &error.to_string()));
+            let error_response = super::internal_error(&id, &error.to_string());
+            fail_admission(link, state, attached, &tx, error_response).await;
             return;
         }
     }
@@ -1162,8 +1166,7 @@ pub(crate) async fn admit_session(
     let resolved = match resolve_session_mcp_servers(&id, &params.mcp_servers, &binding.cwd) {
         Ok(resolved) => resolved,
         Err(error_response) => {
-            state.lock().await.session_new_in_flight = false;
-            let _ = tx.send(error_response);
+            fail_admission(link, state, attached, &tx, error_response).await;
             return;
         }
     };
@@ -1230,8 +1233,8 @@ pub(crate) async fn admit_session(
                 state,
             )
             .await;
-            state.lock().await.session_new_in_flight = false;
-            let _ = tx.send(super::internal_error(&id, &error.to_string()));
+            let error_response = super::internal_error(&id, &error.to_string());
+            fail_admission(link, state, attached, &tx, error_response).await;
             return;
         }
         if resolved.is_empty() {
@@ -1270,10 +1273,16 @@ pub(crate) async fn admit_session(
     // it). For `session/new` the producer gate opens only after the
     // response is queued, so no held update can precede it.
     let producer = Arc::clone(&hosted.producer);
+    // The pause the last close held belongs to the bound session; a
+    // rebinding load releases it with that session instead.
     let inherited_pause = {
         let mut guard = state.lock().await;
         guard.session_new_in_flight = false;
-        if let Some(pause_id) = guard.closed_input_pause_id.clone() {
+        if let Some(pause_id) = guard
+            .closed_input_pause_id
+            .clone()
+            .filter(|_| attached.is_none())
+        {
             hosted.input_pause_id = Some(pause_id);
             hosted.input_pause_key = guard.closed_input_pause_key.clone();
         }
@@ -1282,6 +1291,7 @@ pub(crate) async fn admit_session(
             .closed_input_pause_id
             .clone()
             .zip(guard.closed_input_pause_key.clone())
+            .filter(|_| attached.is_none())
     };
     let children = match fetch_rlm_children(link, &binding.active_session_id).await {
         Ok(children) => children,
@@ -1293,14 +1303,16 @@ pub(crate) async fn admit_session(
                 state,
             )
             .await;
-            let mut guard = state.lock().await;
-            guard.session = None;
-            guard.session_new_in_flight = false;
-            drop(guard);
-            let _ = tx.send(super::internal_error(&id, &error.to_string()));
+            state.lock().await.session = None;
+            let error_response = super::internal_error(&id, &error.to_string());
+            fail_admission(link, state, attached, &tx, error_response).await;
             return;
         }
     };
+    if attached.is_some() {
+        leave_daemon_session(link, state, &bound).await;
+        state.lock().await.binding = binding.clone();
+    }
     {
         let mut guard = state.lock().await;
         if let Some(current) = guard.session.as_mut() {
@@ -1357,6 +1369,61 @@ pub(crate) async fn admit_session(
         }
     }
     producer.commit_session_new_response().await;
+}
+
+/// Answer a failed admission and free the slot. A load that attached
+/// another daemon session detaches it, so the connection keeps its binding.
+async fn fail_admission(
+    link: &Arc<DaemonLink>,
+    state: &Arc<Mutex<DaemonAcpState>>,
+    attached: Option<&str>,
+    tx: &producer::FrameSink,
+    error_response: Value,
+) {
+    if let Some(active_session_id) = attached {
+        detach_daemon_session(link, active_session_id).await;
+    }
+    state.lock().await.session_new_in_flight = false;
+    let _ = tx.send(error_response);
+}
+
+/// Leave the daemon session a successful `session/load` rebound away from:
+/// release the pause its last close held, then end it (client-owned) or
+/// detach it. Admission's pending clear already removed its MCP servers.
+async fn leave_daemon_session(
+    link: &Arc<DaemonLink>,
+    state: &Arc<Mutex<DaemonAcpState>>,
+    previous: &DaemonBinding,
+) {
+    let closed_pause = {
+        let mut guard = state.lock().await;
+        guard.closed_input_pause_key = None;
+        guard.closed_input_pause_id.take()
+    };
+    if let Some(pause_id) = closed_pause {
+        let _ = release_session_input_pause(link, &previous.active_session_id, &pause_id).await;
+    }
+    if previous.client_owned {
+        let _ = link
+            .request(DaemonCommand::CompleteOwnedSession {
+                id: None,
+                active_session_id: previous.active_session_id.clone(),
+                rest: Map::default(),
+            })
+            .await;
+    } else {
+        detach_daemon_session(link, &previous.active_session_id).await;
+    }
+}
+
+pub(crate) async fn detach_daemon_session(link: &Arc<DaemonLink>, active_session_id: &str) {
+    let _ = link
+        .request(DaemonCommand::Detach {
+            id: None,
+            active_session_id: Some(active_session_id.to_string()),
+            rest: Map::default(),
+        })
+        .await;
 }
 
 /// Resolve and check a session's ACP MCP servers against its cwd; `Err` is
@@ -1983,7 +2050,7 @@ async fn handle_session_close(
 /// with `cancelOwned`), the MCP servers go and the producer fences. A
 /// client-owned session ends with the connection; a resident one stays
 /// and is detached when the link drops.
-pub(crate) async fn teardown(
+async fn teardown(
     link: &Arc<DaemonLink>,
     state: &Arc<Mutex<DaemonAcpState>>,
     binding: &DaemonBinding,
