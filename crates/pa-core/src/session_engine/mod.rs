@@ -185,6 +185,11 @@ pub struct AgentSession {
     /// resolves it (verification harnesses building the session directly
     /// keep `None`, which reads as the fail-closed disabled default).
     agent_dir: Option<std::path::PathBuf>,
+    /// The session-local harness store (the session artifact dir's `harness`),
+    /// resolved once by the host and shared with the kernel env
+    /// (`RLM_HARNESS_STATE_DIR`) and the digest, TS `_localHarnessStateDir`.
+    /// `None`: the session has no local store, so local refinements refuse.
+    local_harness_dir: Option<std::path::PathBuf>,
 }
 
 impl AgentSession {
@@ -198,11 +203,17 @@ impl AgentSession {
         session: SessionManager,
         prompt_templates: Vec<PromptTemplate>,
     ) -> anyhow::Result<Self> {
+        // No host-resolved store: the session's own artifact dir decides (the
+        // first leg of TS `_localHarnessStateDir`).
+        let local_harness_dir = crate::refinement::get_local_harness_state_dir(
+            session.get_session_artifact_dir().as_deref(),
+        );
         Self::from_session_arc(
             agent,
             Arc::new(tokio::sync::Mutex::new(session)),
             prompt_templates,
             None,
+            local_harness_dir,
         )
         .await
     }
@@ -220,6 +231,7 @@ impl AgentSession {
         session: Arc<tokio::sync::Mutex<SessionManager>>,
         prompt_templates: Vec<PromptTemplate>,
         harness_digest: Option<harness_digest::HarnessDigestContext>,
+        local_harness_dir: Option<std::path::PathBuf>,
     ) -> anyhow::Result<Self> {
         let persistence = session.clone();
         agent
@@ -253,6 +265,7 @@ impl AgentSession {
             semantic_edges: std::sync::Mutex::new(None),
             side_question_stream_fn: std::sync::Mutex::new(None),
             agent_dir: None,
+            local_harness_dir,
             compaction_flight: tokio::sync::Mutex::new(()),
         };
         this.ensure_harness_digest_context().await?;

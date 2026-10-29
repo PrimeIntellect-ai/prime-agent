@@ -116,7 +116,6 @@ impl SessionManager {
             session_dir,
             cwd,
             persist,
-            session_dir_backed: persist,
             flushed: false,
             has_assistant_entry: false,
             append_ownership: super::window::AppendOwnership::Unleased,
@@ -148,20 +147,13 @@ impl SessionManager {
         Self::new_with(cwd.to_path_buf(), cwd.to_path_buf(), None, false)
     }
 
-    /// Create an in-memory manager pinned to a session's own directory: the
-    /// session's identity (its directory, the local harness state's home) stays its own.
+    /// Create an in-memory manager pinned to a session's own directory,
+    /// instead of the working directory (the daemon's mirrored engine
+    /// session: its persisted file is owned by the worker, but artifact
+    /// paths resolve against this directory).
     #[must_use]
     pub fn in_memory_in_session_dir(cwd: &Path, session_dir: &Path) -> Self {
-        let mut manager = Self::new_with(cwd.to_path_buf(), session_dir.to_path_buf(), None, false);
-        manager.session_dir_backed = true;
-        manager
-    }
-
-    /// Whether the manager carries a session directory of its own:
-    /// session-owned artifacts (the local harness state) need it.
-    #[must_use]
-    pub fn has_session_dir(&self) -> bool {
-        self.session_dir_backed
+        Self::new_with(cwd.to_path_buf(), session_dir.to_path_buf(), None, false)
     }
 
     /// Open an existing session file (repair + migrate), or a fresh one.
@@ -268,7 +260,6 @@ impl SessionManager {
             manager.session_dir = session_dir;
             manager.session_file = Some(path);
             manager.persist = true;
-            manager.session_dir_backed = true;
             // The production adoption path: the test constructor rides the
             // same detach semantics the daemon's engine uses.
             manager.adopt_window(window);
@@ -449,7 +440,6 @@ impl SessionManager {
         self.session_id.clone_from(&session_id);
         self.session_file = Some(target.clone());
         self.persist = true;
-        self.session_dir_backed = true;
         let timestamp = format_iso_now();
         let git = capture_git_context(&self.cwd);
         let header = FileEntry::Header {

@@ -681,3 +681,67 @@ async fn refinement_and_auto_review_send_the_session_request_identity() {
         ]
     );
 }
+
+/// The daemon's engine session is non-persisted and pinned to the SESSIONS
+/// directory, carrying the durable file's id. The kernel reads the local store
+/// the host resolved from the conversation log (`session-artifacts/<id>/harness`,
+/// exported as `RLM_HARNESS_STATE_DIR`): a local refinement must write that same
+/// store, never `<sessions dir>/harness`, which every session would share.
+#[tokio::test]
+async fn a_local_refinement_writes_the_store_the_kernel_reads() {
+    let provider = Arc::new(ScriptedProvider::new(test_model()));
+    let options = AgentOptions {
+        initial_state: AgentInitialState {
+            model: Some(test_model()),
+            ..Default::default()
+        },
+        stream_fn: Some(provider.stream_fn()),
+        ..Default::default()
+    };
+    let agent = Agent::new(options);
+    let tmp = tempfile::tempdir().unwrap();
+    let cwd = tmp.path().join("project");
+    let sessions_dir = tmp.path().join("sessions");
+    std::fs::create_dir_all(&cwd).unwrap();
+    std::fs::create_dir_all(&sessions_dir).unwrap();
+    let mut manager = SessionManager::in_memory_in_session_dir(&cwd, &sessions_dir);
+    manager.new_session(&crate::session::manager::NewSessionOptions {
+        id: Some("sess-1".to_string()),
+        ..Default::default()
+    });
+    manager
+        .append_message(SessionAgentMessage::User(pa_types::ai::UserMessage {
+            content: pa_types::ai::UserContent::Text("do a thing twice".to_string()),
+            timestamp: 0,
+            rest: serde_json::Map::default(),
+        }))
+        .unwrap();
+    manager.append_message(refine_assistant_row(false)).unwrap();
+    // What the host exports to the kernel for this session's conversation log.
+    let kernel_store = crate::session_engine::harness_digest::local_harness_dir_for_log(
+        &sessions_dir.join("sess-1.jsonl"),
+    )
+    .unwrap();
+    let session = AgentSession::from_session_arc(
+        Arc::new(agent),
+        Arc::new(tokio::sync::Mutex::new(manager)),
+        vec![],
+        None,
+        Some(kernel_store.clone()),
+    )
+    .await
+    .unwrap();
+    let result = session
+        .refine_with_refiner(
+            &refine::RefineOptions::default(),
+            refine::RefinementSource::User,
+            &session_ai_model(),
+            refine_plan_call(APPLIED_PLAN),
+            tmp.path().join("harness"),
+        )
+        .await
+        .unwrap();
+    assert_eq!(result.scope, Some(crate::refinement::HarnessScope::Local));
+    assert!(kernel_store.join("harness_state.json").is_file());
+    assert!(!sessions_dir.join("harness").exists());
+}

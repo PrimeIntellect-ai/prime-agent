@@ -771,6 +771,7 @@ pub async fn create_session(mut config: SessionEngineConfig) -> anyhow::Result<S
         resources.prompts.clone(),
         super::refinement_gate::enabled(Some(&refinement_settings))
             .then_some(digest_context.clone()),
+        digest_context.local_dir.clone(),
     )
     .await?;
     // Receipts that landed after their cell's tool result persist as

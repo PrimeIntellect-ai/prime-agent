@@ -402,6 +402,7 @@ async fn placement_rig(
             include_shell_examples: false,
             include_refine: false,
         }),
+        /*local_harness_dir*/ None,
     )
     .await
     .unwrap();

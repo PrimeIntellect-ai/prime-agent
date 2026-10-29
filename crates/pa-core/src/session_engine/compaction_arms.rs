@@ -449,6 +449,7 @@ impl AgentSession {
                     refinement_history: &refinement_history,
                 },
                 &global_harness_dir,
+                self.local_harness_dir.as_deref(),
                 model,
                 options,
                 source,

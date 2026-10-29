@@ -170,6 +170,7 @@ async fn digest_session_with_harness(
         ))),
         vec![],
         Some(harness),
+        /*local_harness_dir*/ None,
     )
     .await
     .unwrap()
@@ -209,6 +210,7 @@ async fn resumed_digest_session(
         Arc::new(tokio::sync::Mutex::new(manager)),
         vec![],
         Some(harness),
+        /*local_harness_dir*/ None,
     )
     .await
     .unwrap()
