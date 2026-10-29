@@ -41,6 +41,8 @@ BUNDLER = SCRIPTS_DIR / "bundle_catalog.py"
 ASSEMBLER = SCRIPTS_DIR / "assemble_artifacts.py"
 VERIFIER = SCRIPTS_DIR / "verify_release.py"
 PACKER = REPO / "scripts" / "package_release.py"
+# The synthetic repos have no Cargo workspace for cargo-about to scan.
+FAKE_CARGO_ABOUT_DIR = SCRIPTS_DIR / "testdata" / "bin"
 
 HOST_TARGET = "x86_64-unknown-linux-gnu"
 # Archives carry the TS platform alias (the name the update flow's channel
@@ -52,6 +54,7 @@ def run_cli(script, args, env_extra=None, cwd=None):
     env = dict(os.environ)
     env.pop("GITHUB_TOKEN", None)
     env.pop("PRIME_CATALOG_REPO_TOKEN", None)
+    env["PATH"] = f"{FAKE_CARGO_ABOUT_DIR}{os.pathsep}{env['PATH']}"
     if env_extra:
         env.update(env_extra)
     return subprocess.run(
@@ -156,6 +159,7 @@ class SyntheticRepo:
         (root / "skills").mkdir(parents=True)
         (root / "skills" / "skill.md").write_text("# skill\n")
         (root / "LICENSE").write_text("license\n")
+        (root / "deny.toml").write_text('[licenses]\nallow = ["MIT"]\n')
         (root / "README.md").write_text("readme\n")
         runtime = root / "runtime"
         runtime.mkdir()

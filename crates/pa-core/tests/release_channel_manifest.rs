@@ -113,9 +113,17 @@ fn run_step(script: &str, cwd: &Path, release_version: &str) -> std::process::Ou
 }
 
 fn python(script: &Path, args: &[&std::ffi::OsStr]) -> std::process::Output {
+    // The assembler's fixture repo has no Cargo workspace for cargo-about to
+    // scan; the release scripts' stand-in writes placeholder notices.
+    let fake_cargo_about = workspace_root().join("scripts/release/testdata/bin");
+    let path = std::env::join_paths(std::iter::once(fake_cargo_about).chain(
+        std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()),
+    ))
+    .expect("join PATH");
     Command::new("python3")
         .arg(script)
         .args(args)
+        .env("PATH", path)
         .current_dir(workspace_root())
         .output()
         .expect("run the release script")
@@ -557,6 +565,7 @@ fn assembled_archives_carry_the_platform_alias_the_reader_demands() {
     .expect("runtime manifest");
     std::fs::create_dir_all(repo.join("skills")).expect("skills dir");
     std::fs::write(repo.join("LICENSE"), "fixture license\n").expect("LICENSE");
+    std::fs::write(repo.join("deny.toml"), "[licenses]\nallow = [\"MIT\"]\n").expect("deny.toml");
     std::fs::write(repo.join("README.md"), "fixture readme\n").expect("README.md");
     // The fail-closed Linux assembler accepts only a paired shipped ELF +
     // decoder from split_debug.py, so the fixture compiles a tiny real ELF

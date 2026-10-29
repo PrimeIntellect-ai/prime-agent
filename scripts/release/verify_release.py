@@ -51,6 +51,7 @@ EXPECTED_TOP_LEVEL = {
     "prime-agent-runtime",
     "skills",
     "LICENSE",
+    "THIRD-PARTY-NOTICES.txt",
     "README.md",
     "package.json",
     # The bundled catalog assets (spec §3.2): the installed artifact must
