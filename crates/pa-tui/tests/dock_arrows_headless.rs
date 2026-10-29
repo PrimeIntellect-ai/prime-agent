@@ -27,14 +27,12 @@ use std::os::unix::net::UnixListener;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use pa_tui::agents_view::AgentsViewScope;
-use pa_tui::interactive::{
-    run_interactive, HeadlessPlan, HeadlessStep, InteractiveOptions, UiMode,
-};
+use pa_tui::interactive::{HeadlessPlan, HeadlessStep, InteractiveOptions};
 use serde_json::{json, Value};
 
 use support::{
-    accept_within_idle_window, attach_response, create_response, options, serve_connection,
-    write_json, write_session_event, Request,
+    accept_within_idle_window, attach_response, create_response, options, run_headless,
+    serve_connection, write_json, write_session_event, Request,
 };
 
 struct MockSupervisor {
@@ -252,35 +250,23 @@ fn run_scenario(
     factory_lane: bool,
     keybindings: pa_tui::keybindings::KeybindingsManager,
 ) -> pa_tui::interactive::InteractiveOutcome {
-    // The ambient TMUX variable adds a startup notice; scrub it so runs are the same inside tmux
-    // and out.
-    std::env::remove_var("TMUX");
-    let dir = tempfile::TempDir::new().expect("temp dir");
-    let socket = dir.path().join("tui.sock");
-    let supervisor = MockSupervisor::bind(&socket, heartbeats, goal, roster, pushes, factory_lane);
-    let handle = std::thread::spawn(move || supervisor.serve());
-
-    let runtime = tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()
-        .expect("tokio runtime");
-    let plan = HeadlessPlan {
-        steps,
-        width: 100,
-        height: 40,
-    };
-    let outcome = runtime
-        .block_on(run_interactive(
-            InteractiveOptions {
-                fullscreen_mouse: false,
-                keybindings,
-                ..options(socket)
-            },
-            UiMode::Headless(plan),
-        ))
-        .expect("interactive run");
-    handle.join().expect("mock supervisor finished");
-    outcome
+    run_headless(
+        HeadlessPlan {
+            steps,
+            width: 100,
+            height: 40,
+        },
+        |socket| InteractiveOptions {
+            fullscreen_mouse: false,
+            keybindings,
+            ..options(socket)
+        },
+        |socket| {
+            let supervisor =
+                MockSupervisor::bind(socket, heartbeats, goal, roster, pushes, factory_lane);
+            move || supervisor.serve()
+        },
+    )
 }
 
 /// The line index of the first frame line containing `needle`.

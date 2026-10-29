@@ -24,14 +24,13 @@ mod support;
 use std::os::unix::net::UnixListener;
 use std::path::PathBuf;
 
-use pa_tui::interactive::{
-    run_interactive, HeadlessPlan, HeadlessStep, InteractiveOptions, UiMode,
-};
+use pa_tui::interactive::{HeadlessPlan, HeadlessStep, InteractiveOptions};
 use pa_types::ai::Model;
 use serde_json::{json, Value};
 
 use support::{
-    attach_response, create_response, detach_response, serve_connection, write_json, Request,
+    attach_response, create_response, detach_response, run_headless, serve_connection, write_json,
+    Request,
 };
 
 /// One catalog model: the id `z-ai/glm-5.3` under a provider, with a provider-distinct name so the
@@ -159,28 +158,18 @@ fn options(socket: PathBuf, catalog: Vec<Model>) -> InteractiveOptions {
 }
 
 fn run_plan(steps: Vec<HeadlessStep>) -> Vec<String> {
-    std::env::remove_var("TMUX");
-    let dir = tempfile::TempDir::new().expect("temp dir");
-    let socket = dir.path().join("tui.sock");
-    let supervisor = MockSupervisor::bind(&socket, duplicate_id_catalog());
-    let handle = std::thread::spawn(move || supervisor.serve());
-
-    let runtime = tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()
-        .expect("tokio runtime");
-    let plan = HeadlessPlan {
-        steps,
-        width: 100,
-        height: 30,
-    };
-    let outcome = runtime
-        .block_on(run_interactive(
-            options(socket, duplicate_id_catalog()),
-            UiMode::Headless(plan),
-        ))
-        .expect("interactive run");
-    handle.join().expect("mock supervisor finished");
+    let outcome = run_headless(
+        HeadlessPlan {
+            steps,
+            width: 100,
+            height: 30,
+        },
+        |socket| options(socket, duplicate_id_catalog()),
+        |socket| {
+            let supervisor = MockSupervisor::bind(socket, duplicate_id_catalog());
+            move || supervisor.serve()
+        },
+    );
     outcome.frames
 }
 

@@ -31,13 +31,11 @@ use std::sync::{Arc, Mutex};
 
 use anyhow::Result;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use pa_tui::interactive::{
-    run_interactive, HeadlessPlan, HeadlessStep, InteractiveOptions, UiMode,
-};
+use pa_tui::interactive::{HeadlessPlan, HeadlessStep, InteractiveOptions};
 use serde_json::json;
 
 use support::{
-    attach_response, create_response, detach_response, options, serve_connection,
+    attach_response, create_response, detach_response, options, run_headless, serve_connection,
     session_stats_response, write_json, MockSupervisor, Request,
 };
 
@@ -281,32 +279,22 @@ impl pa_tui::client_settings::ClientSettings for RecordingSettings {
 
 /// Run a plan against the mock daemon, with the recording settings seam.
 fn run_plan(steps: Vec<HeadlessStep>) -> (Vec<String>, Arc<RecordingSettings>) {
-    std::env::remove_var("TMUX");
-    let dir = tempfile::TempDir::new().expect("temp dir");
-    let socket = dir.path().join("tui.sock");
-    let supervisor = MockSupervisor::bind(&socket);
-    let handle = std::thread::spawn(move || supervisor.serve());
-
     let settings = Arc::new(RecordingSettings::default());
-    let runtime = tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()
-        .expect("tokio runtime");
-    let plan = HeadlessPlan {
-        steps,
-        width: 100,
-        height: 30,
-    };
-    let outcome = runtime
-        .block_on(run_interactive(
-            InteractiveOptions {
-                client_settings: Some(settings.clone()),
-                ..options(socket)
-            },
-            UiMode::Headless(plan),
-        ))
-        .expect("interactive run");
-    handle.join().expect("mock supervisor finished");
+    let outcome = run_headless(
+        HeadlessPlan {
+            steps,
+            width: 100,
+            height: 30,
+        },
+        |socket| InteractiveOptions {
+            client_settings: Some(settings.clone()),
+            ..options(socket)
+        },
+        |socket| {
+            let supervisor = MockSupervisor::bind(socket);
+            move || supervisor.serve()
+        },
+    );
     (outcome.frames, settings)
 }
 

@@ -23,10 +23,12 @@ mod support;
 
 use std::os::unix::net::UnixListener;
 
-use pa_tui::interactive::{run_interactive, HeadlessPlan, HeadlessStep, UiMode};
+use pa_tui::interactive::{HeadlessPlan, HeadlessStep};
 use serde_json::{json, Value};
 
-use support::{create_response, detach_response, options, serve_connection, write_json, Request};
+use support::{
+    create_response, detach_response, options, run_headless, serve_connection, write_json, Request,
+};
 
 /// The session the mock serves: the `model` state block, the levels, and the live level (the value
 /// `set_thinking_level` moves). `fail_state_after_switch` fails every state read AFTER a switch.
@@ -198,25 +200,18 @@ impl MockSupervisor {
 }
 
 fn run_plan(session: MockSession, steps: Vec<HeadlessStep>) -> Vec<String> {
-    std::env::remove_var("TMUX");
-    let dir = tempfile::TempDir::new().expect("temp dir");
-    let socket = dir.path().join("tui.sock");
-    let supervisor = session.bind(&socket);
-    let handle = std::thread::spawn(move || supervisor.serve());
-
-    let runtime = tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()
-        .expect("tokio runtime");
-    let plan = HeadlessPlan {
-        steps,
-        width: 100,
-        height: 30,
-    };
-    let outcome = runtime
-        .block_on(run_interactive(options(socket), UiMode::Headless(plan)))
-        .expect("interactive run");
-    handle.join().expect("mock supervisor finished");
+    let outcome = run_headless(
+        HeadlessPlan {
+            steps,
+            width: 100,
+            height: 30,
+        },
+        options,
+        |socket| {
+            let supervisor = session.bind(socket);
+            move || supervisor.serve()
+        },
+    );
     outcome.frames
 }
 

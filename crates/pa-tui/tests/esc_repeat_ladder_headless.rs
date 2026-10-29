@@ -10,13 +10,11 @@ mod support;
 
 use anyhow::Result;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use pa_tui::interactive::{
-    run_interactive, HeadlessPlan, HeadlessStep, InteractiveOptions, UiMode,
-};
+use pa_tui::interactive::{HeadlessPlan, HeadlessStep, InteractiveOptions};
 use serde_json::json;
 
 use support::{
-    attach_response, create_response, detach_response, options, serve_connection,
+    attach_response, create_response, detach_response, options, run_headless, serve_connection,
     session_stats_response, write_json, MockSupervisor, Request,
 };
 
@@ -254,31 +252,21 @@ fn esc() -> HeadlessStep {
 /// capture dedupes consecutive identical frames, so each tree-selector mount lands as its own
 /// frame.
 fn run_plan(steps: Vec<HeadlessStep>) -> Vec<String> {
-    std::env::remove_var("TMUX");
-    let dir = tempfile::TempDir::new().expect("temp dir");
-    let socket = dir.path().join("tui.sock");
-    let supervisor = MockSupervisor::bind(&socket);
-    let handle = std::thread::spawn(move || supervisor.serve());
-
-    let runtime = tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()
-        .expect("tokio runtime");
-    let plan = HeadlessPlan {
-        steps,
-        width: 100,
-        height: 30,
-    };
-    let outcome = runtime
-        .block_on(run_interactive(
-            InteractiveOptions {
-                client_settings: Some(std::sync::Arc::new(StubSettings)),
-                ..options(socket)
-            },
-            UiMode::Headless(plan),
-        ))
-        .expect("interactive run");
-    handle.join().expect("mock supervisor finished");
+    let outcome = run_headless(
+        HeadlessPlan {
+            steps,
+            width: 100,
+            height: 30,
+        },
+        |socket| InteractiveOptions {
+            client_settings: Some(std::sync::Arc::new(StubSettings)),
+            ..options(socket)
+        },
+        |socket| {
+            let supervisor = MockSupervisor::bind(socket);
+            move || supervisor.serve()
+        },
+    );
     outcome.frames
 }
 

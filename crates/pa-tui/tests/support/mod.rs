@@ -10,7 +10,10 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use pa_tui::agents_view::AgentsViewOptions;
-use pa_tui::interactive::{InteractiveOptions, ModelSelection, SessionSelection};
+use pa_tui::interactive::{
+    run_interactive, HeadlessPlan, InteractiveOptions, InteractiveOutcome, ModelSelection,
+    SessionSelection, UiMode,
+};
 use serde_json::{json, Value};
 
 /// Write one newline-delimited JSON frame to the client.
@@ -327,4 +330,30 @@ pub fn detach_response(id: &str) -> Value {
         "command": "detach",
         "success": true,
     })
+}
+
+/// Run one headless chat `plan` against a mock daemon on a fresh socket, with the ambient `TMUX`
+/// variable scrubbed (its startup notice must not reach the frames). `mock` binds the daemon on
+/// the socket path and returns its serve loop, which runs on its own thread; the run waits for it.
+pub fn run_headless<Serve>(
+    plan: HeadlessPlan,
+    options: impl FnOnce(PathBuf) -> InteractiveOptions,
+    mock: impl FnOnce(&Path) -> Serve,
+) -> InteractiveOutcome
+where
+    Serve: FnOnce() + Send + 'static,
+{
+    std::env::remove_var("TMUX");
+    let dir = tempfile::TempDir::new().expect("temp dir");
+    let socket = dir.path().join("tui.sock");
+    let handle = std::thread::spawn(mock(&socket));
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .expect("tokio runtime");
+    let outcome = runtime
+        .block_on(run_interactive(options(socket), UiMode::Headless(plan)))
+        .expect("interactive run");
+    handle.join().expect("mock supervisor finished");
+    outcome
 }

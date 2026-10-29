@@ -26,12 +26,10 @@ use std::sync::{Arc, Mutex};
 
 use anyhow::Result;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use pa_tui::interactive::{
-    run_interactive, HeadlessPlan, HeadlessStep, InteractiveOptions, UiMode,
-};
+use pa_tui::interactive::{HeadlessPlan, HeadlessStep, InteractiveOptions};
 use serde_json::{json, Value};
 
-use support::{options, serve_connection, write_json, Request};
+use support::{options, run_headless, serve_connection, write_json, Request};
 
 /// The session identity one run attaches to: the second run uses a different id, so the saved
 /// level is shown to apply to another chat too.
@@ -287,31 +285,21 @@ fn run_plan(
     session: MockSession,
     steps: Vec<HeadlessStep>,
 ) -> Vec<String> {
-    std::env::remove_var("TMUX");
-    let dir = tempfile::TempDir::new().expect("temp dir");
-    let socket = dir.path().join("tui.sock");
-    let supervisor = MockSupervisor::bind(&socket, session);
-    let handle = std::thread::spawn(move || supervisor.serve());
-
-    let runtime = tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()
-        .expect("tokio runtime");
-    let plan = HeadlessPlan {
-        steps,
-        width: 100,
-        height: 30,
-    };
-    let outcome = runtime
-        .block_on(run_interactive(
-            InteractiveOptions {
-                client_settings: Some(settings),
-                ..options(socket)
-            },
-            UiMode::Headless(plan),
-        ))
-        .expect("interactive run");
-    handle.join().expect("mock supervisor finished");
+    let outcome = run_headless(
+        HeadlessPlan {
+            steps,
+            width: 100,
+            height: 30,
+        },
+        |socket| InteractiveOptions {
+            client_settings: Some(settings),
+            ..options(socket)
+        },
+        |socket| {
+            let supervisor = MockSupervisor::bind(socket, session);
+            move || supervisor.serve()
+        },
+    );
     outcome.frames
 }
 

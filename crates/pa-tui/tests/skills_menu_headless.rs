@@ -30,8 +30,8 @@ use pa_tui::interactive::{
 use serde_json::{json, Value};
 
 use support::{
-    attach_response, create_response, detach_response, serve_connection, session_stats_response,
-    write_json, write_session_event, Request,
+    attach_response, create_response, detach_response, run_headless, serve_connection,
+    session_stats_response, write_json, write_session_event, Request,
 };
 
 struct MockSupervisor {
@@ -313,25 +313,18 @@ fn options(socket: PathBuf) -> InteractiveOptions {
 }
 
 fn run_plan(steps: Vec<HeadlessStep>) -> Vec<String> {
-    std::env::remove_var("TMUX");
-    let dir = tempfile::TempDir::new().expect("temp dir");
-    let socket = dir.path().join("tui.sock");
-    let supervisor = MockSupervisor::bind(&socket);
-    let handle = std::thread::spawn(move || supervisor.serve());
-
-    let runtime = tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()
-        .expect("tokio runtime");
-    let plan = HeadlessPlan {
-        steps,
-        width: 100,
-        height: 30,
-    };
-    let outcome = runtime
-        .block_on(run_interactive(options(socket), UiMode::Headless(plan)))
-        .expect("interactive run");
-    handle.join().expect("mock supervisor finished");
+    let outcome = run_headless(
+        HeadlessPlan {
+            steps,
+            width: 100,
+            height: 30,
+        },
+        options,
+        |socket| {
+            let supervisor = MockSupervisor::bind(socket);
+            move || supervisor.serve()
+        },
+    );
     outcome.frames
 }
 
