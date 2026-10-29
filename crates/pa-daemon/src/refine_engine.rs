@@ -157,35 +157,6 @@ impl RefineEngine {
         })
     }
 
-    /// The parent session file's in-session refinement history (the audit
-    /// rows), parsed straight off the JSONL.
-    fn session_refinement_history(
-        session_file: &Path,
-    ) -> Vec<pa_core::refinement::RefinementResult> {
-        let Ok(content) = std::fs::read_to_string(session_file) else {
-            return Vec::new();
-        };
-        content
-            .lines()
-            .filter_map(|line| {
-                let entry = serde_json::from_str::<pa_types::session::FileEntry>(line).ok()?;
-                match entry {
-                    pa_types::session::FileEntry::Custom { payload, .. } => Some(payload),
-                    _ => None,
-                }
-            })
-            .filter(|payload| {
-                payload.custom_type == pa_core::session_engine::refine::REFINEMENT_AUDIT_CUSTOM_TYPE
-            })
-            .filter_map(|payload| {
-                payload.data.as_ref().and_then(|data| {
-                    serde_json::from_value::<pa_core::refinement::RefinementResult>(data.clone())
-                        .ok()
-                })
-            })
-            .collect()
-    }
-
     /// Serve the one refinement request: read the harness state and the
     /// refinement history from the envelope's paths, run one completion
     /// with the refinement system prompt, and answer with the proposal
@@ -222,11 +193,16 @@ impl RefineEngine {
         // The refinement history: the global refinements file plus the
         // parent session's audit rows.
         let global_history = load_global_refinement_history(global_dir);
-        let session_history = request
-            .get("parentSessionFile")
-            .and_then(Value::as_str)
-            .map(|file| Self::session_refinement_history(Path::new(file)))
-            .unwrap_or_default();
+        // The parent's in-session audit rows ride the envelope (its engine
+        // session is in-memory, so no file carries them); a malformed
+        // envelope fails the child visibly instead of planning on a
+        // partial history.
+        let session_history = match request.get("refinementHistory") {
+            Some(history) => serde_json::from_value::<Vec<pa_core::refinement::RefinementResult>>(
+                history.clone(),
+            )?,
+            None => Vec::new(),
+        };
         let history = merge_refinement_history(&global_history, &session_history);
         let user_prompt = refinement_user_prompt(&planning_state, &history, conversation, &options);
         let (model, api_key, headers) = self.resolve_model()?;

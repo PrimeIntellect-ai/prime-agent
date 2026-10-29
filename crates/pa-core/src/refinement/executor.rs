@@ -170,8 +170,10 @@ pub struct RefinementRequest {
     pub local_harness_dir: Option<String>,
     /// The agent dir's global harness state dir.
     pub global_harness_dir: String,
-    /// The parent's session file (the in-session refinement history).
-    pub parent_session_file: Option<String>,
+    /// The parent's in-session refinement history (the audit rows): the
+    /// daemon's engine session is in-memory, so the rows can only reach
+    /// the child through the prompt.
+    pub session_history: Vec<RefinementResult>,
 }
 
 /// Build the refinement child's spawn prompt: the JSON request envelope
@@ -193,8 +195,8 @@ pub fn refinement_spawn_prompt(
     if let Some(dir) = &request.local_harness_dir {
         envelope["localHarnessDir"] = serde_json::json!(dir);
     }
-    if let Some(file) = &request.parent_session_file {
-        envelope["parentSessionFile"] = serde_json::json!(file);
+    if !request.session_history.is_empty() {
+        envelope["refinementHistory"] = serde_json::json!(request.session_history);
     }
     // The trim needs the envelope's own head room: serialize it once with
     // the conversation slot empty, then trim the conversation against the
@@ -411,7 +413,16 @@ mod tests {
             instructions: Some("prefer small edits".to_string()),
             local_harness_dir: Some("/local/harness".to_string()),
             global_harness_dir: "/global/harness".to_string(),
-            parent_session_file: Some("/sessions/parent.jsonl".to_string()),
+            session_history: vec![RefinementResult {
+                id: "refine_1".to_string(),
+                summary: "note it".to_string(),
+                rationale: "repeated".to_string(),
+                expected_outcome: "recall".to_string(),
+                applied_edits: vec![],
+                harness_state_path: String::new(),
+                rollback_of: None,
+                scope: Some(HarnessScope::Local),
+            }],
         };
         let conversation = "x".repeat(200_000);
         let prompt = refinement_spawn_prompt(&request, 100_000, &conversation);
@@ -421,7 +432,10 @@ mod tests {
         assert_eq!(parsed["instructions"], "prefer small edits");
         assert_eq!(parsed["localHarnessDir"], "/local/harness");
         assert_eq!(parsed["globalHarnessDir"], "/global/harness");
-        assert_eq!(parsed["parentSessionFile"], "/sessions/parent.jsonl");
+        // The parent's in-session audit rows ride the envelope (the daemon's
+        // in-memory session has no file for the child to read).
+        assert_eq!(parsed["refinementHistory"][0]["summary"], "note it");
+        assert_eq!(parsed["refinementHistory"][0]["id"], "refine_1");
         let carried = parsed["conversation"].as_str().unwrap();
         assert!(carried.starts_with("[Earlier conversation omitted to fit the model context.]"));
         // The byte budget: the head plus the carried tail stays inside the window.

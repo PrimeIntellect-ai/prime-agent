@@ -294,19 +294,11 @@ impl AgentSession {
         let parts = self.session.lock().await.refine_transcript_parts();
         let crate::session::manager::RefineTranscriptParts {
             messages,
-            refinement_history: _,
+            refinement_history,
         } = parts.await?;
         let conversation =
             crate::session_engine::compaction_utils::serialize_conversation(&messages);
-        let (local_harness_dir, parent_session_file) = {
-            let session = self.session.lock().await;
-            (
-                local_harness_state_dir(&session),
-                session
-                    .get_session_file()
-                    .map(|path| path.display().to_string()),
-            )
-        };
+        let local_harness_dir = local_harness_state_dir(&*self.session.lock().await);
         // The baseline captured now — before the child's model pass, which
         // can take many seconds — so concurrent kernel writes to the store
         // are rejected at apply time instead of clobbered.
@@ -320,7 +312,10 @@ impl AgentSession {
             instructions: options.instructions.clone(),
             local_harness_dir: (!options.global).then(|| local_harness_dir.display().to_string()),
             global_harness_dir: global_harness_dir.display().to_string(),
-            parent_session_file,
+            // The in-session audit rows ride the prompt: the daemon's
+            // engine session is in-memory (no session file for the child
+            // to read), and the planner always saw this history.
+            session_history: refinement_history,
         };
         let prompt = refinement_spawn_prompt(&request, model.context_window, &conversation);
         let prepared = PreparedRefinement {
