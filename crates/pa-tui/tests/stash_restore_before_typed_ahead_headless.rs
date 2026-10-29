@@ -18,7 +18,9 @@
 #![cfg(unix)]
 #![allow(clippy::too_many_lines, clippy::large_futures)]
 
-use std::io::{BufRead, BufReader, Write};
+mod support;
+
+use std::io::{BufRead, BufReader};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::PathBuf;
 
@@ -28,6 +30,8 @@ use pa_tui::interactive::{
     SessionSelection, UiMode,
 };
 use serde_json::{json, Value};
+
+use support::write_json;
 
 /// How long the reopen's attach stalls: far past the plan's first step,
 /// so the Ctrl+D provably lands while the open is still in flight.
@@ -157,13 +161,6 @@ fn serve_connection(stream: UnixStream, stall_attach: bool) {
             }
         }
     }
-}
-
-fn write_json(writer: &mut UnixStream, value: &Value) {
-    let mut line = serde_json::to_string(value).expect("serialize mock frame");
-    line.push('\n');
-    writer.write_all(line.as_bytes()).expect("write mock frame");
-    writer.flush().expect("flush mock frame");
 }
 
 /// The attach result: one live session with an empty transcript.

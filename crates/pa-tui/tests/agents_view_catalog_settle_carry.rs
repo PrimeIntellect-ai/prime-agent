@@ -19,8 +19,10 @@
 // The wrappers preserve a uniform Result-returning API surface.
 #![allow(clippy::unnecessary_wraps)]
 
-use std::io::{BufRead, BufReader, Write};
-use std::os::unix::net::{UnixListener, UnixStream};
+mod support;
+
+use std::io::BufReader;
+use std::os::unix::net::UnixListener;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -28,6 +30,8 @@ use std::time::Duration;
 use pa_tui::agents_view::{AgentsHeadlessPlan, AgentsStep, AgentsViewOptions, AgentsViewUiMode};
 use pa_tui::interactive::SessionSelection;
 use serde_json::{json, Value};
+
+use support::{read_line, respond, respond_failure, write_json};
 
 /// The catalog request is held long enough that a keyed step lands while the load is still in
 /// flight (the pre-load Enter that arms the hint).
@@ -71,7 +75,7 @@ impl MockSupervisor {
             "protocol": { "name": "prime-agent.daemon", "version": 7 },
             "serverCapabilities": [],
         });
-        write_line(&mut writer, &hello);
+        write_json(&mut writer, &hello);
         loop {
             let Some(line) = read_line(&mut reader) else {
                 return;
@@ -117,7 +121,7 @@ impl MockSupervisor {
                     // The streamed rows (newest first), then the terminal response — the same wire
                     // the daemon sends.
                     for row in saved_catalog() {
-                        write_line(
+                        write_json(
                             &mut writer,
                             &json!({
                                 "id": id,
@@ -139,7 +143,7 @@ impl MockSupervisor {
                         let mut stale =
                             saved_catalog_row("/tmp/sessions/s2.jsonl", "s2", "stale clobber");
                         stale["messageCount"] = json!(9);
-                        write_line(
+                        write_json(
                             &mut writer,
                             &json!({
                                 "id": id,
@@ -181,70 +185,6 @@ fn saved_catalog_row(path: &str, id: &str, name: &str) -> Value {
         "messageCount": 3,
         "name": name,
     })
-}
-
-fn write_line(writer: &mut UnixStream, value: &Value) {
-    let mut line = serde_json::to_string(value).expect("serialize line");
-    line.push('\n');
-    writer.write_all(line.as_bytes()).expect("write");
-    writer.flush().expect("flush");
-}
-
-fn respond(writer: &mut UnixStream, id: &str, command: &str, data: &Value) {
-    write_line(
-        writer,
-        &json!({
-            "id": id,
-            "type": "response",
-            "command": command,
-            "success": true,
-            "data": data,
-        }),
-    );
-}
-
-fn respond_failure(writer: &mut UnixStream, id: &str, command: &str, error: &str) {
-    write_line(
-        writer,
-        &json!({
-            "id": id,
-            "type": "response",
-            "command": command,
-            "success": false,
-            "error": error,
-        }),
-    );
-}
-
-/// One line with a bounded quiet window (the view connection sits quiet between its inputs); `None`
-/// ends the serve loop on EOF or the quiet cap.
-fn read_line(reader: &mut BufReader<UnixStream>) -> Option<String> {
-    const QUIET_WINDOW_MS: u32 = 90;
-    let mut quiet_windows: u32 = 0;
-    let mut line = String::new();
-    loop {
-        match reader.read_line(&mut line) {
-            Ok(0) => return None,
-            Ok(_) if line.trim().is_empty() => {
-                line.clear();
-            }
-            Ok(_) => return Some(line),
-            Err(error)
-                if matches!(
-                    error.kind(),
-                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
-                ) =>
-            {
-                quiet_windows += 1;
-                if quiet_windows >= QUIET_WINDOW_MS {
-                    return None;
-                }
-                std::thread::sleep(Duration::from_millis(50));
-                line.clear();
-            }
-            Err(_) => return None,
-        }
-    }
 }
 
 /// One view options set: `anchor` seeds the entry anchor (a session whose row can only come from

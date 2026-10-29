@@ -3,8 +3,10 @@
 //! row, and a late kill failure staying on its own shell.
 #![cfg(unix)]
 
-use std::io::{BufRead, BufReader, Write};
-use std::os::unix::net::{UnixListener, UnixStream};
+mod support;
+
+use std::io::BufReader;
+use std::os::unix::net::UnixListener;
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -13,6 +15,8 @@ use pa_tui::agents_view::{
     AgentsViewUiMode,
 };
 use serde_json::{json, Value};
+
+use support::{read_line, respond, respond_failure, write_json};
 
 // Headless mouse tracking is process-global; all plans in this binary serialize.
 static RUN_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
@@ -33,7 +37,7 @@ fn serve(listener: &UnixListener) -> Vec<String> {
         .expect("read timeout");
     let mut writer = stream.try_clone().expect("clone socket");
     let mut reader = BufReader::new(stream);
-    write_line(
+    write_json(
         &mut writer,
         &json!({
             "type": "daemon_hello",
@@ -113,69 +117,6 @@ fn serve(listener: &UnixListener) -> Vec<String> {
             }
         };
         respond(&mut writer, id, command_type, &data);
-    }
-}
-
-fn write_line(writer: &mut UnixStream, value: &Value) {
-    let mut line = serde_json::to_string(value).expect("serialize line");
-    line.push('\n');
-    writer.write_all(line.as_bytes()).expect("write");
-    writer.flush().expect("flush");
-}
-
-fn respond(writer: &mut UnixStream, id: &str, command: &str, data: &Value) {
-    write_line(
-        writer,
-        &json!({
-            "id": id,
-            "type": "response",
-            "command": command,
-            "success": true,
-            "data": data,
-        }),
-    );
-}
-
-fn respond_failure(writer: &mut UnixStream, id: &str, command: &str, error: &str) {
-    write_line(
-        writer,
-        &json!({
-            "id": id,
-            "type": "response",
-            "command": command,
-            "success": false,
-            "error": error,
-        }),
-    );
-}
-
-/// One line with a bounded quiet window; `None` ends the serve loop on EOF or the quiet cap.
-fn read_line(reader: &mut BufReader<UnixStream>) -> Option<String> {
-    const QUIET_WINDOW_MS: u32 = 90;
-    let mut quiet_windows: u32 = 0;
-    let mut line = String::new();
-    loop {
-        match reader.read_line(&mut line) {
-            Ok(0) => return None,
-            Ok(_) if line.trim().is_empty() => {
-                line.clear();
-            }
-            Ok(_) => return Some(line),
-            Err(error)
-                if matches!(
-                    error.kind(),
-                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
-                ) =>
-            {
-                quiet_windows += 1;
-                if quiet_windows >= QUIET_WINDOW_MS {
-                    return None;
-                }
-                std::thread::sleep(Duration::from_millis(50));
-                line.clear();
-            }
-            Err(_) => return None,
-        }
     }
 }
 

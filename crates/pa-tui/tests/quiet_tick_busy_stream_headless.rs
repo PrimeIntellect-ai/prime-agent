@@ -3,7 +3,9 @@
 //! keystroke still restarts the window, so a typed command plus Enter submits as typed.
 #![cfg(unix)]
 
-use std::io::{BufRead, BufReader, Write};
+mod support;
+
+use std::io::{BufRead, BufReader};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::PathBuf;
 use std::time::Duration;
@@ -13,6 +15,8 @@ use pa_tui::interactive::{
     SessionSelection, UiMode,
 };
 use serde_json::{json, Value};
+
+use support::write_json;
 
 /// The stream's cadence: intervals shorter than the tick's 50ms window, so stream wakes alone
 /// keep a per-iteration sleep from completing.
@@ -109,13 +113,6 @@ fn stream_reply(mut writer: UnixStream) {
         );
     }
     write_json(&mut writer, &event(json!({ "type": "turn_end" })));
-}
-
-fn write_json(writer: &mut UnixStream, value: &Value) {
-    let mut line = serde_json::to_string(value).expect("serialize mock frame");
-    line.push('\n');
-    writer.write_all(line.as_bytes()).expect("write mock frame");
-    writer.flush().expect("flush mock frame");
 }
 
 /// The attach result: one empty, quiet session.

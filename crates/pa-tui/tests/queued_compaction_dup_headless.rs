@@ -3,8 +3,10 @@
 //! answers `get_messages`, so a refetch would be recorded.
 #![cfg(unix)]
 
-use std::io::{BufRead, BufReader, Write};
-use std::os::unix::net::{UnixListener, UnixStream};
+mod support;
+
+use std::io::{BufRead, BufReader};
+use std::os::unix::net::UnixListener;
 use std::path::PathBuf;
 
 use pa_tui::interactive::{
@@ -12,6 +14,8 @@ use pa_tui::interactive::{
     SessionSelection, UiMode,
 };
 use serde_json::{json, Value};
+
+use support::write_json;
 
 const QUEUED_TEXT: &str = "queued while compacting";
 const SUMMARY_TEXT: &str = "the compacted summary";
@@ -225,13 +229,6 @@ fn generic_response(id: &str, command: &str) -> Value {
         "type": "response", "id": id, "command": command,
         "success": true, "data": {},
     })
-}
-
-fn write_json(writer: &mut UnixStream, value: &Value) {
-    let mut line = serde_json::to_string(value).expect("serialize mock frame");
-    line.push('\n');
-    writer.write_all(line.as_bytes()).expect("write mock frame");
-    writer.flush().expect("flush mock frame");
 }
 
 fn options(socket: PathBuf) -> InteractiveOptions {

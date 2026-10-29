@@ -6,13 +6,17 @@
 //! event-driven refetch, so the plan proves the whole wiring.
 #![cfg(unix)]
 
-use std::io::{BufRead, BufReader, Write};
+mod support;
+
+use std::io::{BufReader, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::PathBuf;
 use std::time::Duration;
 
 use pa_tui::agents_view::{AgentsHeadlessPlan, AgentsStep, AgentsViewOptions, AgentsViewUiMode};
 use serde_json::{json, Value};
+
+use support::read_line;
 
 struct MockSupervisor {
     listener: UnixListener,
@@ -185,38 +189,6 @@ fn respond_failure(writer: &mut UnixStream, id: &str, command: &str, error: &str
             "error": error,
         }),
     )
-}
-
-/// One line with a bounded quiet window: the view connection sits quiet
-/// between its inputs, so timeouts keep the loop alive for a bounded
-/// span; `None` ends the serve loop on EOF or the quiet cap.
-fn read_line(reader: &mut BufReader<UnixStream>) -> Option<String> {
-    const QUIET_WINDOW_MS: u32 = 90;
-    let mut quiet_windows: u32 = 0;
-    let mut line = String::new();
-    loop {
-        match reader.read_line(&mut line) {
-            Ok(0) => return None,
-            Ok(_) if line.trim().is_empty() => {
-                line.clear();
-            }
-            Ok(_) => return Some(line),
-            Err(error)
-                if matches!(
-                    error.kind(),
-                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
-                ) =>
-            {
-                quiet_windows += 1;
-                if quiet_windows >= QUIET_WINDOW_MS {
-                    return None;
-                }
-                std::thread::sleep(Duration::from_millis(50));
-                line.clear();
-            }
-            Err(_) => return None,
-        }
-    }
 }
 
 /// One view options set.

@@ -19,8 +19,10 @@
 // The wrappers preserve a uniform Result-returning API surface.
 #![allow(clippy::unnecessary_wraps)]
 
-use std::io::{BufRead, BufReader, Write};
-use std::os::unix::net::{UnixListener, UnixStream};
+mod support;
+
+use std::io::{BufRead, BufReader};
+use std::os::unix::net::UnixListener;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
@@ -31,6 +33,8 @@ use pa_tui::interactive::{
     SessionSelection, UiMode,
 };
 use serde_json::{json, Value};
+
+use support::write_json;
 
 /// The session identity one run attaches to: the second run uses a different id, so the saved
 /// level is shown to apply to another chat too.
@@ -120,13 +124,6 @@ impl MockSupervisor {
             }
         }
     }
-}
-
-fn write_json(writer: &mut UnixStream, value: &Value) {
-    let mut line = serde_json::to_string(value).expect("serialize mock frame");
-    line.push('\n');
-    writer.write_all(line.as_bytes()).expect("write mock frame");
-    writer.flush().expect("flush mock frame");
 }
 
 /// The slim attach result: one empty session.

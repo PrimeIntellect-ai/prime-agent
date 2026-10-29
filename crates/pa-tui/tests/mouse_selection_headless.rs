@@ -19,8 +19,10 @@
 // The wrappers preserve a uniform Result-returning API surface.
 #![allow(clippy::unnecessary_wraps)]
 
-use std::io::{BufRead, BufReader, Write};
-use std::os::unix::net::{UnixListener, UnixStream};
+mod support;
+
+use std::io::{BufRead, BufReader};
+use std::os::unix::net::UnixListener;
 use std::path::PathBuf;
 use std::sync::{Mutex, MutexGuard};
 
@@ -40,6 +42,8 @@ use pa_tui::interactive::{
     SessionSelection, UiMode,
 };
 use serde_json::{json, Value};
+
+use support::write_json;
 
 /// The SGR reports a real terminal sends with ?1002+?1006 tracking active: a left press, a left
 /// drag (button 0 + the motion bit 32), and a release.
@@ -170,13 +174,6 @@ impl MockSupervisor {
             }
         }
     }
-}
-
-fn write_json(writer: &mut UnixStream, value: &Value) {
-    let mut line = serde_json::to_string(value).expect("serialize mock frame");
-    line.push('\n');
-    writer.write_all(line.as_bytes()).expect("write mock frame");
-    writer.flush().expect("flush mock frame");
 }
 
 /// The slim attach result: 40 alternating one-row messages — the transcript is far taller than the

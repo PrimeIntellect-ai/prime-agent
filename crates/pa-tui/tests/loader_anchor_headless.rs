@@ -19,8 +19,10 @@
 // The wrappers preserve a uniform Result-returning API surface.
 #![allow(clippy::unnecessary_wraps)]
 
-use std::io::{BufRead, BufReader, Write};
-use std::os::unix::net::{UnixListener, UnixStream};
+mod support;
+
+use std::io::{BufRead, BufReader};
+use std::os::unix::net::UnixListener;
 use std::path::PathBuf;
 
 use crossterm::event::KeyCode;
@@ -29,6 +31,8 @@ use pa_tui::interactive::{
     SessionSelection, UiMode,
 };
 use serde_json::{json, Value};
+
+use support::write_json;
 
 /// One mock daemon: serves one client connection, answering the attach with a mid-turn snapshot
 /// whose user message is `prompt_age_ms` old.
@@ -144,13 +148,6 @@ impl MockSupervisor {
             }
         }
     }
-}
-
-fn write_json(writer: &mut UnixStream, value: &Value) {
-    let mut line = serde_json::to_string(value).expect("serialize mock frame");
-    line.push('\n');
-    writer.write_all(line.as_bytes()).expect("write mock frame");
-    writer.flush().expect("flush mock frame");
 }
 
 /// The attach result: a mid-turn snapshot whose LAST HUMAN PROMPT is `prompt_age_ms` old and whose

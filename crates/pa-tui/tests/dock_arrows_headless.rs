@@ -21,8 +21,10 @@
 // The wrappers preserve a uniform Result-returning API surface.
 #![allow(clippy::unnecessary_wraps)]
 
-use std::io::{BufRead, BufReader, Write};
-use std::os::unix::net::{UnixListener, UnixStream};
+mod support;
+
+use std::io::{BufRead, BufReader};
+use std::os::unix::net::UnixListener;
 use std::path::PathBuf;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -32,6 +34,8 @@ use pa_tui::interactive::{
     SessionSelection, UiMode,
 };
 use serde_json::{json, Value};
+
+use support::{write_json, write_session_event};
 
 struct MockSupervisor {
     listener: UnixListener,
@@ -204,24 +208,6 @@ impl MockSupervisor {
             }
         }
     }
-}
-
-fn write_session_event(writer: &mut UnixStream, event: &Value) {
-    write_json(
-        writer,
-        &json!({
-            "type": "session_event",
-            "activeSessionId": "s1",
-            "event": event,
-        }),
-    );
-}
-
-fn write_json(writer: &mut UnixStream, value: &Value) {
-    let mut line = serde_json::to_string(value).expect("serialize mock frame");
-    line.push('\n');
-    writer.write_all(line.as_bytes()).expect("write mock frame");
-    writer.flush().expect("flush mock frame");
 }
 
 /// The slim attach result with an empty transcript.

@@ -19,8 +19,10 @@
 // The wrappers preserve a uniform Result-returning API surface.
 #![allow(clippy::unnecessary_wraps)]
 
-use std::io::{BufRead, BufReader, Write};
-use std::os::unix::net::{UnixListener, UnixStream};
+mod support;
+
+use std::io::{BufRead, BufReader};
+use std::os::unix::net::UnixListener;
 use std::path::PathBuf;
 
 use pa_tui::interactive::{
@@ -28,6 +30,8 @@ use pa_tui::interactive::{
     SessionSelection, UiMode,
 };
 use serde_json::{json, Value};
+
+use support::write_json;
 
 /// The session the mock serves: the `model` state block, the levels, and the live level (the value
 /// `set_thinking_level` moves). `fail_state_after_switch` fails every state read AFTER a switch.
@@ -256,13 +260,6 @@ impl MockSupervisor {
             },
         })
     }
-}
-
-fn write_json(writer: &mut UnixStream, value: &Value) {
-    let mut line = serde_json::to_string(value).expect("serialize mock frame");
-    line.push('\n');
-    writer.write_all(line.as_bytes()).expect("write mock frame");
-    writer.flush().expect("flush mock frame");
 }
 
 fn options(socket: PathBuf) -> InteractiveOptions {

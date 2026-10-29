@@ -3,14 +3,18 @@
 //! rest of the store so the oldest session is still found.
 #![cfg(unix)]
 
-use std::io::{BufRead, BufReader, Write};
-use std::os::unix::net::{UnixListener, UnixStream};
+mod support;
+
+use std::io::BufReader;
+use std::os::unix::net::UnixListener;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use pa_tui::agents_view::{AgentsHeadlessPlan, AgentsStep, AgentsViewOptions, AgentsViewUiMode};
 use serde_json::{json, Value};
+
+use support::{read_line, respond, write_json};
 
 const FILES: usize = 600;
 
@@ -23,7 +27,7 @@ fn serve(listener: &UnixListener, saved_requests: &Mutex<Vec<Value>>) {
         .expect("read timeout");
     let mut writer = stream.try_clone().expect("clone socket");
     let mut reader = BufReader::new(stream);
-    write_line(
+    write_json(
         &mut writer,
         &json!({
             "type": "daemon_hello",
@@ -54,7 +58,7 @@ fn serve(listener: &UnixListener, saved_requests: &Mutex<Vec<Value>>) {
                     .map(|index| saved_row(FILES - 1 - index))
                     .collect();
                 for row in &rows {
-                    write_line(
+                    write_json(
                         &mut writer,
                         &json!({
                             "id": id,
@@ -92,57 +96,6 @@ fn saved_row(index: usize) -> Value {
         "messageCount": 3,
         "name": name,
     })
-}
-
-fn write_line(writer: &mut UnixStream, value: &Value) {
-    let mut line = serde_json::to_string(value).expect("serialize line");
-    line.push('\n');
-    writer.write_all(line.as_bytes()).expect("write");
-    writer.flush().expect("flush");
-}
-
-fn respond(writer: &mut UnixStream, id: &str, command: &str, data: &Value) {
-    write_line(
-        writer,
-        &json!({
-            "id": id,
-            "type": "response",
-            "command": command,
-            "success": true,
-            "data": data,
-        }),
-    );
-}
-
-/// One line with a bounded quiet window (the view connection sits quiet between its inputs); `None`
-/// ends the serve loop on EOF or the quiet cap.
-fn read_line(reader: &mut BufReader<UnixStream>) -> Option<String> {
-    const QUIET_WINDOW_MS: u32 = 90;
-    let mut quiet_windows: u32 = 0;
-    let mut line = String::new();
-    loop {
-        match reader.read_line(&mut line) {
-            Ok(0) => return None,
-            Ok(_) if line.trim().is_empty() => {
-                line.clear();
-            }
-            Ok(_) => return Some(line),
-            Err(error)
-                if matches!(
-                    error.kind(),
-                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
-                ) =>
-            {
-                quiet_windows += 1;
-                if quiet_windows >= QUIET_WINDOW_MS {
-                    return None;
-                }
-                std::thread::sleep(Duration::from_millis(50));
-                line.clear();
-            }
-            Err(_) => return None,
-        }
-    }
 }
 
 fn view_options(socket: &std::path::Path) -> AgentsViewOptions {

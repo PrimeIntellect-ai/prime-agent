@@ -19,13 +19,17 @@
 // The wrappers preserve a uniform Result-returning API surface.
 #![allow(clippy::unnecessary_wraps)]
 
-use std::io::{BufRead, BufReader, Write};
-use std::os::unix::net::{UnixListener, UnixStream};
+mod support;
+
+use std::io::{BufRead, BufReader};
+use std::os::unix::net::UnixListener;
 use std::path::PathBuf;
 use std::time::Duration;
 
 use pa_tui::agents_view::{AgentsHeadlessPlan, AgentsStep, AgentsViewOptions, AgentsViewUiMode};
 use serde_json::{json, Value};
+
+use support::{respond, respond_failure, write_json};
 
 /// Environment mutations are process-global: the `PRIME_AGENT_CODING_AGENT_DIR` redirect serializes
 /// on one lock and restores on exit. A tokio mutex (a std guard across an await is a clippy error).
@@ -62,7 +66,7 @@ impl MockSupervisor {
             let write_stream = stream.try_clone().expect("clone socket");
             let mut writer = write_stream;
             let mut reader = BufReader::new(stream);
-            write_line(
+            write_json(
                 &mut writer,
                 &json!({
                     "type": "daemon_hello",
@@ -124,39 +128,6 @@ impl MockSupervisor {
             }
         }
     }
-}
-
-fn write_line(writer: &mut UnixStream, value: &Value) {
-    let mut line = serde_json::to_string(value).expect("serialize line");
-    line.push('\n');
-    writer.write_all(line.as_bytes()).expect("write");
-    writer.flush().expect("flush");
-}
-
-fn respond(writer: &mut UnixStream, id: &str, command: &str, data: &Value) {
-    write_line(
-        writer,
-        &json!({
-            "id": id,
-            "type": "response",
-            "command": command,
-            "success": true,
-            "data": data,
-        }),
-    );
-}
-
-fn respond_failure(writer: &mut UnixStream, id: &str, command: &str, error: &str) {
-    write_line(
-        writer,
-        &json!({
-            "id": id,
-            "type": "response",
-            "command": command,
-            "success": false,
-            "error": error,
-        }),
-    );
 }
 
 fn read_line(reader: &mut impl BufRead) -> Option<String> {
