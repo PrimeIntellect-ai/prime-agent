@@ -1215,6 +1215,22 @@ fn acp_session_list_and_load_restore_a_saved_session_in_a_new_process() {
     );
     assert_eq!(row["title"], "Name a river.");
 
+    // A load that fails (an invalid MCP server) keeps the startup binding:
+    // the next session/new hosts the startup session, not the saved one.
+    let bad_load = second.request(
+        "session/load",
+        &json!({ "sessionId": session_id, "cwd": cwd, "mcpServers": [
+            { "name": "n", "type": "stdio", "command": "", "args": [], "env": [] },
+        ] }),
+    );
+    let (bad_response, _) = second.wait_response(bad_load, TIMEOUT);
+    assert_eq!(bad_response["error"]["code"], -32602, "{bad_response}");
+    let startup_session_id = new_session(&mut second);
+    assert_ne!(startup_session_id, session_id);
+    let close = second.request("session/close", &json!({ "sessionId": startup_session_id }));
+    let (close_response, _) = second.wait_response(close, TIMEOUT);
+    assert_eq!(close_response["result"], json!({}));
+
     let load = second.request(
         "session/load",
         &json!({ "sessionId": session_id, "cwd": cwd, "mcpServers": [] }),

@@ -1159,24 +1159,14 @@ pub(crate) async fn admit_session(
     }
     // MCP admission runs after the pending-clear retry: a rejected list
     // fails the request with the same error payloads.
-    let resolved = match super::mcp::resolve_acp_mcp_servers(&params.mcp_servers, &binding.cwd) {
+    let resolved = match resolve_session_mcp_servers(&id, &params.mcp_servers, &binding.cwd) {
         Ok(resolved) => resolved,
-        Err(reason) => {
+        Err(error_response) => {
             state.lock().await.session_new_in_flight = false;
-            let _ = tx.send(jsonrpc::error_response(
-                &id,
-                jsonrpc::INVALID_PARAMS,
-                "Invalid params",
-                Some(&json!({ "reason": reason })),
-            ));
+            let _ = tx.send(error_response);
             return;
         }
     };
-    if let Err(details) = super::mcp::acp_mcp_tool_names(&resolved) {
-        state.lock().await.session_new_in_flight = false;
-        let _ = tx.send(super::internal_error(&id, &details));
-        return;
-    }
 
     let acp_session_id = binding.session_id.clone();
     let producer = UpdateProducer::new(acp_session_id.clone(), tx.clone());
@@ -1367,6 +1357,26 @@ pub(crate) async fn admit_session(
         }
     }
     producer.commit_session_new_response().await;
+}
+
+/// Resolve and check a session's ACP MCP servers against its cwd; `Err` is
+/// the request's error response.
+pub(crate) fn resolve_session_mcp_servers(
+    id: &Value,
+    servers: &[Value],
+    cwd: &Path,
+) -> Result<Vec<pa_core::mcp::AcpMcpServerConfig>, Value> {
+    let resolved = super::mcp::resolve_acp_mcp_servers(servers, cwd).map_err(|reason| {
+        jsonrpc::error_response(
+            id,
+            jsonrpc::INVALID_PARAMS,
+            "Invalid params",
+            Some(&json!({ "reason": reason })),
+        )
+    })?;
+    super::mcp::acp_mcp_tool_names(&resolved)
+        .map_err(|details| super::internal_error(id, &details))?;
+    Ok(resolved)
 }
 
 async fn replace_connection_servers(

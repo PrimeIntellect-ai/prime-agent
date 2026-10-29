@@ -2,7 +2,7 @@
 //! catalog. The ACP session id is the prime-agent session id, so the ids
 //! `session/new`, `session/list` and `session/load` report round-trip.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use pa_types::daemon::{DaemonCommand, DaemonSessionLifecycle};
@@ -10,8 +10,9 @@ use serde_json::{json, Map, Value};
 use tokio::sync::Mutex;
 
 use super::daemon::{
-    admit_session, attach_daemon_session, create_daemon_session, reserve_session_slot, summary_str,
-    teardown, DaemonAcpOptions, DaemonAcpState, DaemonBinding, DaemonLink,
+    admit_session, attach_daemon_session, create_daemon_session, reserve_session_slot,
+    resolve_session_mcp_servers, summary_str, teardown, DaemonAcpOptions, DaemonAcpState,
+    DaemonBinding, DaemonLink,
 };
 use super::jsonrpc;
 use super::producer::FrameSink;
@@ -44,7 +45,13 @@ pub(super) async fn handle_session_list(
         .as_array()
         .into_iter()
         .flatten()
-        .filter(|row| cwd.is_none_or(|cwd| row["cwd"].as_str() == Some(cwd)))
+        .filter(|row| {
+            cwd.is_none_or(|cwd| {
+                row["cwd"]
+                    .as_str()
+                    .is_some_and(|row_cwd| super::same_cwd(Path::new(cwd), Path::new(row_cwd)))
+            })
+        })
         .filter_map(session_info)
         .collect();
     let mut result = json!({ "sessions": sessions });
@@ -120,54 +127,47 @@ pub(super) async fn handle_session_load(
         .get("sessionId")
         .and_then(Value::as_str)
         .unwrap_or_default();
-    let history = match bind_saved_session(session_id, link, state, options).await {
-        Ok(Some(history)) => history,
-        Ok(None) => {
+    let params = types::NewSessionParams::parse(&params);
+    match bind_saved_session(&id, session_id, &params, link, state, options).await {
+        Ok(history) => admit_session(id, params, Some(history), link, state, tx).await,
+        Err(error_response) => {
             state.lock().await.session_new_in_flight = false;
-            let _ = tx.send(jsonrpc::error_response(
-                &id,
-                jsonrpc::INVALID_PARAMS,
-                "Invalid params",
-                Some(&json!({ "reason": format!("Unknown session: {session_id}") })),
-            ));
-            return;
+            let _ = tx.send(error_response);
         }
-        Err(error) => {
-            state.lock().await.session_new_in_flight = false;
-            let _ = tx.send(super::internal_error(&id, &format!("{error:#}")));
-            return;
-        }
-    };
-    admit_session(
-        id,
-        types::NewSessionParams::parse(&params),
-        Some(history),
-        link,
-        state,
-        tx,
-    )
-    .await;
+    }
 }
 
 /// Open the saved session through the daemon's create (which reuses the
-/// live worker already serving the file), attach it, leave the previously
-/// bound daemon session the way EOF would, and return the stored
-/// conversation. `None` when no saved session has the id.
+/// live worker already serving the file), attach it, read its stored
+/// conversation and check the requested MCP servers against its cwd. Only
+/// then is the previously bound daemon session left the way EOF would
+/// leave it, so a failed load keeps the old binding. `Err` is the
+/// request's error response.
 async fn bind_saved_session(
+    id: &Value,
     session_id: &str,
+    params: &types::NewSessionParams,
     link: &Arc<DaemonLink>,
     state: &Arc<Mutex<DaemonAcpState>>,
     options: &DaemonAcpOptions,
-) -> anyhow::Result<Option<Vec<Value>>> {
+) -> Result<Vec<Value>, Value> {
+    let internal = |error: anyhow::Error| super::internal_error(id, &format!("{error:#}"));
     let bound = state.lock().await.binding.clone();
-    let catalog = saved_sessions(link, &bound.active_session_id, None, None).await?;
+    let catalog = saved_sessions(link, &bound.active_session_id, None, None)
+        .await
+        .map_err(internal)?;
     let Some(row) = catalog["sessions"]
         .as_array()
         .into_iter()
         .flatten()
         .find(|row| row["id"].as_str() == Some(session_id))
     else {
-        return Ok(None);
+        return Err(jsonrpc::error_response(
+            id,
+            jsonrpc::INVALID_PARAMS,
+            "Invalid params",
+            Some(&json!({ "reason": format!("Unknown session: {session_id}") })),
+        ));
     };
     let mut create = options.create.clone();
     if let DaemonCommand::Create {
@@ -185,49 +185,77 @@ async fn bind_saved_session(
             config["cwd"] = row["cwd"].clone();
         }
     }
-    let summary = create_daemon_session(link, create).await?;
+    let summary = create_daemon_session(link, create)
+        .await
+        .map_err(internal)?;
+    let active_session_id = summary_str(&summary, "activeSessionId");
+    // Loading the session this connection already hosts keeps the binding.
+    if active_session_id == bound.active_session_id {
+        return fetch_history(link, &active_session_id)
+            .await
+            .map_err(internal);
+    }
     let loaded = DaemonBinding {
-        active_session_id: summary_str(&summary, "activeSessionId"),
+        active_session_id,
         session_id: summary_str(&summary, "sessionId"),
         cwd: PathBuf::from(summary_str(&summary, "cwd")),
         client_owned: false,
         mcp_owner_id: bound.mcp_owner_id.clone(),
     };
-    // Loading the session this connection already hosts keeps the binding.
-    if loaded.active_session_id != bound.active_session_id {
-        attach_daemon_session(link, &loaded.active_session_id).await?;
-        teardown(link, state, &bound).await;
-        if !bound.client_owned {
-            let _ = link
-                .request(DaemonCommand::Detach {
-                    id: None,
-                    active_session_id: Some(bound.active_session_id.clone()),
-                    rest: Map::default(),
-                })
-                .await;
-        }
-        state.lock().await.binding = loaded.clone();
+    attach_daemon_session(link, &loaded.active_session_id)
+        .await
+        .map_err(internal)?;
+    let prepared = match resolve_session_mcp_servers(id, &params.mcp_servers, &loaded.cwd) {
+        Ok(_) => fetch_history(link, &loaded.active_session_id)
+            .await
+            .map_err(internal),
+        Err(error_response) => Err(error_response),
+    };
+    if prepared.is_err() {
+        detach_daemon_session(link, &loaded.active_session_id).await;
+        return prepared;
     }
-    let messages = link
+    teardown(link, state, &bound).await;
+    if !bound.client_owned {
+        detach_daemon_session(link, &bound.active_session_id).await;
+    }
+    state.lock().await.binding = loaded;
+    prepared
+}
+
+async fn detach_daemon_session(link: &Arc<DaemonLink>, active_session_id: &str) {
+    let _ = link
+        .request(DaemonCommand::Detach {
+            id: None,
+            active_session_id: Some(active_session_id.to_string()),
+            rest: Map::default(),
+        })
+        .await;
+}
+
+/// The session's stored conversation (`get_messages`).
+async fn fetch_history(
+    link: &Arc<DaemonLink>,
+    active_session_id: &str,
+) -> anyhow::Result<Vec<Value>> {
+    let response = link
         .request(DaemonCommand::GetMessages {
             id: None,
-            active_session_id: state.lock().await.binding.active_session_id.clone(),
+            active_session_id: active_session_id.to_string(),
             page: None,
             capabilities: None,
             rest: Map::default(),
         })
         .await?;
-    if !messages.success {
-        anyhow::bail!(messages
+    if !response.success {
+        anyhow::bail!(response
             .error
             .unwrap_or_else(|| "unknown error".to_string()));
     }
-    Ok(Some(
-        messages
-            .data
-            .and_then(|data| data.get("messages").and_then(Value::as_array).cloned())
-            .unwrap_or_default(),
-    ))
+    Ok(response
+        .data
+        .and_then(|data| data.get("messages").and_then(Value::as_array).cloned())
+        .unwrap_or_default())
 }
 
 /// The stored conversation as `session/update`s, in order. User text is
