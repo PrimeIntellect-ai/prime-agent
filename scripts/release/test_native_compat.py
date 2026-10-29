@@ -11,7 +11,13 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from assemble_artifacts import BUNDLED_CATALOG_FILES, deny_allowed_licenses, pack_tarball, stage_tree
+from assemble_artifacts import (
+    BUNDLED_CATALOG_FILES,
+    deny_allowed_licenses,
+    pack_tarball,
+    stage_tree,
+    write_third_party_notices,
+)
 from native_compat import validate_compatibility_archive
 
 
@@ -123,6 +129,19 @@ class ThirdPartyNoticesTests(unittest.TestCase):
         deny = Path(__file__).resolve().parents[2] / "deny.toml"
         self.assertEqual(deny_allowed_licenses(deny),
                          tomllib.loads(deny.read_text())["licenses"]["allow"])
+
+    def test_notices_drop_terminal_control_characters(self):
+        def cargo_about(command, **_):
+            output = Path(command[command.index("--output-file") + 1])
+            output.write_bytes("a\x1b[31mb\x07\tc\x9b\r\nd\x7f\n".encode())
+            return subprocess.CompletedProcess(command, 0, "", "")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp) / "notices.txt"
+            with patch("assemble_artifacts.subprocess.run", side_effect=cargo_about):
+                write_third_party_notices(Path(__file__).resolve().parents[2],
+                                          "x86_64-unknown-linux-gnu", out)
+            self.assertEqual(out.read_bytes(), b"a[31mb\tc\nd\n")
 
 
 if __name__ == "__main__":

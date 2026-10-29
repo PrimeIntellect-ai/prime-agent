@@ -72,6 +72,9 @@ from native_compat import stage_native_compat
 BINARY_PLACEHOLDER = "prime-agent"
 # The licenses of every crate linked into the binary (`write_third_party_notices`).
 THIRD_PARTY_NOTICES = "THIRD-PARTY-NOTICES.txt"
+# Terminal control characters (C0 except tab and newline, DEL, C1): crate
+# license texts must not reach the terminal of whoever prints the notices.
+CONTROL_CHARACTERS = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f]")
 STAGED_ENTRIES = [
     BINARY_PLACEHOLDER,
     "prime-agent-runtime",
@@ -318,6 +321,8 @@ def write_third_party_notices(repo_root: Path, target: str, out: Path) -> None:
                  ".github/actions/install-cargo-about pins)")
     if result.returncode != 0:
         fail(f"cargo-about failed for {target}:\n{result.stderr.strip()}")
+    text = out.read_bytes().decode("utf-8")
+    out.write_bytes(CONTROL_CHARACTERS.sub("", text).encode("utf-8"))
 
 
 def stage_tree(staging: Path, args: argparse.Namespace, stamped_version: str | None) -> dict:
