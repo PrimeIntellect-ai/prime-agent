@@ -1,9 +1,9 @@
 <p align="center">
   <a href="https://primeintellect.ai">
     <picture>
-      <source media="(prefers-color-scheme: light)" srcset="https://github.com/user-attachments/assets/40c36e38-c5bd-4c5a-9cb3-f7b902cd155d">
-      <source media="(prefers-color-scheme: dark)" srcset="https://github.com/user-attachments/assets/6414bc9b-126b-41ca-9307-9e982430cde8">
-      <img alt="Prime Intellect" src="https://github.com/user-attachments/assets/6414bc9b-126b-41ca-9307-9e982430cde8" width="312" style="max-width: 100%;">
+      <source media="(prefers-color-scheme: light)" srcset="docs/assets/prime-logo-light.png">
+      <source media="(prefers-color-scheme: dark)" srcset="docs/assets/prime-logo-dark.png">
+      <img alt="Prime Intellect" src="docs/assets/prime-logo-dark.png" width="312" style="max-width: 100%;">
     </picture>
   </a>
 </p>
@@ -20,7 +20,7 @@ Prime Agent: A Self-Improving RLM Harness
 
 <p align="center">
   <a href="https://github.com/PrimeIntellect-ai/prime-agent/actions/workflows/ci.yml">
-    <img src="https://github.com/PrimeIntellect-ai/prime-agent/actions/workflows/ci.yml/badge.svg" alt="CI" />
+    <img src="https://img.shields.io/github/actions/workflow/status/PrimeIntellect-ai/prime-agent/ci.yml?branch=main&amp;event=push&amp;label=CI" alt="CI" />
   </a>
   <a href="https://arxiv.org/abs/2608.23552">
     <img src="https://img.shields.io/badge/arXiv-2608.23552-b31b1b.svg" alt="arXiv" />
