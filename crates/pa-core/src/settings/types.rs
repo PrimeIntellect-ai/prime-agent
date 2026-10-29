@@ -309,9 +309,11 @@ pub struct Settings {
     pub quiet_startup: Option<bool>,
     pub shell_command_prefix: Option<String>,
     pub npm_command: Option<Vec<String>>,
+    /// Execution reads this from global settings only; project overrides are ignored.
     pub mcp_servers: Option<serde_json::Map<String, serde_json::Value>>,
     /// Extra local MCP service-catalog files (~-relative allowed), merged after the
     /// compiled built-ins; first source wins per id, and no bundled id can be shadowed.
+    /// Read from global settings only, like executable MCP server configuration.
     pub mcp_catalog_sources: Option<Vec<String>>,
     pub packages: Option<Vec<serde_json::Value>>,
     pub skills: Option<Vec<String>>,
