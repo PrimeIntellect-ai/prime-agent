@@ -79,6 +79,24 @@ impl AgentSessionEngine {
         emit: &mut dyn FnMut(EngineEvent) -> bool,
     ) -> anyhow::Result<TurnOnce> {
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<EngineEvent>();
+        // The worker persists rows as `emit` handles them, behind the engine.
+        // A Stop hook awaits this barrier so `transcript_path` holds the
+        // finished turn before the command reads it.
+        let delivery = std::sync::Arc::new(Delivery::default());
+        let tx = CountedSender {
+            tx,
+            delivery: std::sync::Arc::clone(&delivery),
+        };
+        let flush_target = self.session.lock().await.clone();
+        if let Some(core) = &flush_target {
+            let delivery = std::sync::Arc::clone(&delivery);
+            core.session
+                .set_transcript_flush(Some(std::sync::Arc::new(move || {
+                    let delivery = std::sync::Arc::clone(&delivery);
+                    Box::pin(async move { delivery.flushed().await })
+                        as pa_agent::BoxFut<'static, ()>
+                })));
+        }
         // Goal usage accounting at the message_end hook: each settled non-error
         // assistant message records its token delta, from the engine mirror.
         let goal_runtime = self.goal_runtime.lock().expect("goal runtime lock").clone();
@@ -417,6 +435,7 @@ impl AgentSessionEngine {
                             if !emit(event) {
                                 aborted = true;
                             }
+                            delivery.delivered();
                         }
                         None => break,
                     }
@@ -428,7 +447,9 @@ impl AgentSessionEngine {
                         Err(error) => admission_error = Some(error),
                     }
                     while let Ok(event) = rx.try_recv() {
-                        if !emit(event) {
+                        let accepted = emit(event);
+                        delivery.delivered();
+                        if !accepted {
                             aborted = true;
                             break;
                         }
@@ -450,6 +471,10 @@ impl AgentSessionEngine {
         // every queued event.
         while let Ok(event) = rx.try_recv() {
             let _ = emit(event);
+            delivery.delivered();
+        }
+        if let Some(core) = &flush_target {
+            core.session.set_transcript_flush(None);
         }
         let () = subscription.unsubscribe().await;
         if aborted {
@@ -517,4 +542,56 @@ fn tool_result_wire_value(result: &pa_agent::types::AgentToolResult) -> Value {
         .map(|block| serde_json::to_value(block).unwrap_or(Value::Null))
         .collect();
     json!({ "content": content, "details": result.details })
+}
+
+/// Counts events handed to and handled by the worker's `emit`.
+#[derive(Default)]
+struct Delivery {
+    sent: std::sync::atomic::AtomicU64,
+    handled: std::sync::atomic::AtomicU64,
+    progress: tokio::sync::Notify,
+}
+
+impl Delivery {
+    fn delivered(&self) {
+        self.handled
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.progress.notify_waiters();
+    }
+
+    /// Wait until every event sent so far was handled, bounded so a stalled
+    /// worker never holds a Stop hook.
+    async fn flushed(&self) {
+        let target = self.sent.load(std::sync::atomic::Ordering::SeqCst);
+        let wait = async {
+            loop {
+                // Register before checking, so a delivery in between still wakes us.
+                let progress = self.progress.notified();
+                let mut progress = std::pin::pin!(progress);
+                progress.as_mut().enable();
+                if self.handled.load(std::sync::atomic::Ordering::SeqCst) >= target {
+                    return;
+                }
+                progress.await;
+            }
+        };
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(5), wait).await;
+    }
+}
+
+/// The engine-to-worker channel, counting what it sends for [`Delivery`].
+#[derive(Clone)]
+struct CountedSender {
+    tx: tokio::sync::mpsc::UnboundedSender<EngineEvent>,
+    delivery: std::sync::Arc<Delivery>,
+}
+
+impl CountedSender {
+    /// Returns whether the worker side is still receiving.
+    fn send(&self, event: EngineEvent) -> bool {
+        self.delivery
+            .sent
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.tx.send(event).is_ok()
+    }
 }

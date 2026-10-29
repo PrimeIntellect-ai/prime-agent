@@ -124,6 +124,11 @@ fn standard_message(message: &pa_agent::types::AgentMessage) -> Option<&pa_agent
     Some(message)
 }
 
+/// Awaits the host's asynchronous transcript writes for everything the
+/// session has emitted so far. Installed by hosts (the daemon worker) whose
+/// durable transcript lags the session's events.
+pub type TranscriptFlush = Arc<dyn Fn() -> pa_agent::BoxFut<'static, ()> + Send + Sync>;
+
 /// The session-bound agent: admission rules + persistence over the loop.
 pub struct AgentSession {
     lifecycle_hooks: Option<Arc<lifecycle::LifecycleHooks>>,

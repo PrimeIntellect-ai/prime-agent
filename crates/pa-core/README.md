@@ -135,7 +135,10 @@ restored when admission is refused; raw accepted rows remain unchanged. The publ
 `engine::SessionEndHook` is a cloneable close handle taking an
 `engine::SessionEndReason`: hosts snapshot it under their selection lock and await
 it after releasing that lock, at close and before replacing a session. Hook
-context rows use the public `HOOK_CONTEXT_CUSTOM_TYPE`. `CompactionTrigger` and
+context rows use the public `HOOK_CONTEXT_CUSTOM_TYPE`. Hosts that write the
+transcript behind the session install a `TranscriptFlush` with
+`AgentSession::set_transcript_flush`; Stop hooks await it so `transcript_path`
+holds the finished turn. `CompactionTrigger` and
 `compact_with_trigger` run PreCompact inside the existing serialized compaction
 path, cancelled by the host's compaction abort signal; `SessionCommandParams`
 carries that signal for `/compact`. These public APIs introduce no dependency

@@ -224,7 +224,7 @@ All payloads follow their event-specific schemas. Tool-event fields include:
 | Input | Meaning |
 | --- | --- |
 | `session_id` | Durable session identity; daemon mirrors use the host ledger identity rather than their temporary in-memory manager id. |
-| `transcript_path` | Existing raw session transcript path, or JSON `null`. Its file format is not a stable hook API. |
+| `transcript_path` | The session's on-disk JSONL transcript, as in Codex and Claude Code, on every event. JSON `null` for an in-memory session (no session file) and before the file exists: a new session writes it once its first assistant row lands, so the very first SessionStart and UserPromptSubmit can see `null`. When Stop runs, the finished turn, final assistant message included, is already on disk, including in daemon sessions whose worker writes rows behind the engine. Its row format is Prime's session format, not a stable hook API. |
 | `cwd` | Session working directory. |
 | `hook_event_name` | `PreToolUse` or `PostToolUse`. |
 | `model` | Active model identifier. |
@@ -237,8 +237,9 @@ All payloads follow their event-specific schemas. Tool-event fields include:
 | `agent_id`, `agent_type` | Subagent sessions only: the subagent's session id and `"rlm"`. Omitted for the root session; also present on UserPromptSubmit. |
 
 Lifecycle payloads use the following exact field sets; absent optional agent metadata
-is omitted. Every event includes `session_id`, `transcript_path`, `cwd` and
-`hook_event_name`.
+is omitted. Every event, tool events included, carries `session_id` (the durable
+session id), `transcript_path` (see above), `cwd` and `hook_event_name`, the same
+common fields Codex and Claude Code send.
 
 | Event | Additional fields |
 | --- | --- |

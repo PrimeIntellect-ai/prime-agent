@@ -57,7 +57,7 @@ impl ToolHooks {
                 json!({
                     "hook_event_name": "SessionEnd",
                     "session_id": finish_identity.session_id,
-                    "transcript_path": finish_identity.transcript_path,
+                    "transcript_path": finish_identity.transcript(),
                     "cwd": finish_identity.cwd,
                     "reason": reason.as_str(),
                 })
@@ -164,6 +164,14 @@ pub(super) struct Identity {
 pub(super) const SUBAGENT_TYPE: &str = "rlm";
 
 impl Identity {
+    /// The session's on-disk JSONL transcript, as in Codex and Claude Code;
+    /// `None` (JSON null) for an in-memory session or before the file exists.
+    pub fn transcript(&self) -> Option<&str> {
+        self.transcript_path
+            .as_deref()
+            .filter(|path| std::path::Path::new(path).is_file())
+    }
+
     /// Add the optional subagent fields; root sessions omit them.
     pub fn tag_agent(&self, input: &mut Value) {
         if let Some(agent_id) = &self.agent_id {
@@ -187,7 +195,7 @@ impl Identity {
         let mut input = json!({
             "session_id": self.session_id,
             "turn_id": *self.run_id.read().unwrap_or_else(std::sync::PoisonError::into_inner),
-            "transcript_path": self.transcript_path,
+            "transcript_path": self.transcript(),
             "cwd": self.cwd,
             "permission_mode": "default",
             "hook_event_name": event,

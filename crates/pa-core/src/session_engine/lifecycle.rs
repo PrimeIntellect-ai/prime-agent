@@ -40,6 +40,8 @@ pub(super) struct LifecycleHooks {
     /// The initial `SessionStart` gate completed: `SessionEnd` may pair with it.
     started: std::sync::atomic::AtomicBool,
     deferred_rows: OnceLock<Arc<Mutex<Vec<pa_types::session::CustomMessage>>>>,
+    /// Host barrier awaited before Stop runs, so its transcript is on disk.
+    transcript_flush: Mutex<Option<super::TranscriptFlush>>,
 }
 
 impl LifecycleHooks {
@@ -53,7 +55,15 @@ impl LifecycleHooks {
             pending_start: AtomicU8::new(STARTUP),
             started: std::sync::atomic::AtomicBool::new(false),
             deferred_rows: OnceLock::new(),
+            transcript_flush: Mutex::new(None),
         }
+    }
+
+    pub fn set_transcript_flush(&self, flush: Option<super::TranscriptFlush>) {
+        *self
+            .transcript_flush
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = flush;
     }
 
     pub fn set_deferred_rows(&self, rows: Arc<Mutex<Vec<pa_types::session::CustomMessage>>>) {
@@ -88,7 +98,7 @@ impl LifecycleHooks {
         let mut input = json!({
             "session_id": self.identity.session_id,
             "cwd": self.identity.cwd,
-            "transcript_path": self.identity.transcript_path,
+            "transcript_path": self.identity.transcript(),
             "hook_event_name": event,
             "model": model,
             "permission_mode": "default",
@@ -263,6 +273,16 @@ impl LifecycleHooks {
         if self.subagent() || !self.runtime.might_run("Stop") {
             return Ok(Vec::new());
         }
+        // A host that persists rows asynchronously flushes the finished turn
+        // first: a Stop hook reads the complete transcript at transcript_path.
+        let flush = self
+            .transcript_flush
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        if let Some(flush) = flush {
+            flush().await;
+        }
         let text = message
             .content
             .iter()
@@ -365,6 +385,14 @@ impl super::AgentSession {
             tracing::warn!(%message, "pre-compaction hook message");
         }
         Ok(())
+    }
+
+    /// Install (or clear) the host barrier the Stop hook awaits so it reads a
+    /// complete transcript. A session without hooks ignores it.
+    pub fn set_transcript_flush(&self, flush: Option<super::TranscriptFlush>) {
+        if let Some(hooks) = &self.lifecycle_hooks {
+            hooks.set_transcript_flush(flush);
+        }
     }
 
     pub(crate) fn mark_compaction_hook(&self) {

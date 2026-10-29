@@ -851,3 +851,52 @@ async fn aborted_tool_call_keeps_its_result_with_hook_callbacks_installed() {
         Some(&json!("aborted"))
     );
 }
+
+/// Every event carries `session_id` and `transcript_path`; a Stop hook reads
+/// the finished turn, final answer included, at that path. An in-memory
+/// session reports a null path.
+#[tokio::test]
+async fn stop_hook_reads_the_finished_transcript_at_transcript_path() {
+    let fixture = Fixture::new(&json!({"hooks": {
+        "UserPromptSubmit": [{"hooks": [{"type": "command",
+            "command": "{ cat; printf '\\n'; } >> events.jsonl"}]}],
+        "Stop": [{"hooks": [{"type": "command",
+            "command": "input=$(cat); printf '%s\\n' \"$input\" >> events.jsonl; path=$(printf '%s' \"$input\" | sed -n 's/.*\"transcript_path\":\"\\([^\"]*\\)\".*/\\1/p'); cp \"$path\" seen.jsonl"}]}]
+    }}));
+    let provider = Arc::new(ScriptedProvider::new(Model::unknown()));
+    provider.push_text_turn("the final answer");
+    provider.push_text_turn("second answer");
+    let session_dir = fixture.cwd.join("sessions");
+    let engine = create_session(SessionEngineConfig {
+        session_manager: Some(super::SessionManager::persisted(&fixture.cwd, &session_dir)),
+        ..fixture.config(&provider)
+    })
+    .await
+    .unwrap();
+    engine
+        .prompt("question", PromptOptions::default())
+        .await
+        .unwrap();
+    let seen = std::fs::read_to_string(fixture.cwd.join("seen.jsonl")).unwrap();
+    assert!(seen.contains("the final answer"), "{seen}");
+    let session_id = engine.session.session_id().await;
+    let all = events(&fixture.cwd.join("events.jsonl"));
+    let stop = all
+        .iter()
+        .find(|event| event["hook_event_name"] == "Stop")
+        .unwrap();
+    assert_eq!(stop["session_id"], json!(session_id));
+    assert!(stop["transcript_path"]
+        .as_str()
+        .is_some_and(|path| std::path::Path::new(path)
+            .extension()
+            .is_some_and(|extension| extension == "jsonl")));
+    // The first prompt's admission precedes the session file, which is
+    // written once the first assistant row exists: its path is still null.
+    let first_prompt = all
+        .iter()
+        .find(|event| event["hook_event_name"] == "UserPromptSubmit")
+        .unwrap();
+    assert_eq!(first_prompt["session_id"], json!(session_id));
+    assert!(first_prompt["transcript_path"].is_null());
+}

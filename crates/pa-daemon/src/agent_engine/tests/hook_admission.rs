@@ -144,3 +144,78 @@ fn hook_veto_keeps_primary_and_batch_out_of_durable_history() {
         [json!("startup")]
     );
 }
+
+/// The worker persists rows behind the engine. A Stop hook still reads the
+/// finished turn at `transcript_path`: the engine waits for the worker to
+/// handle every emitted event before running Stop.
+#[test]
+fn stop_hook_reads_the_worker_persisted_final_answer() {
+    let _faux = FAUX_TEST_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let dir = tempfile::tempdir().unwrap();
+    let cwd = dir.path().join("project");
+    let agent_dir = dir.path().join("agent");
+    std::fs::create_dir_all(&cwd).unwrap();
+    std::fs::create_dir_all(&agent_dir).unwrap();
+    std::fs::write(
+        agent_dir.join("hooks.json"),
+        serde_json::to_vec(&json!({"hooks": {"Stop": [{"hooks": [{"type": "command",
+            "command": "path=$(cat | sed -n 's/.*\"transcript_path\":\"\\([^\"]*\\)\".*/\\1/p'); cp \"$path\" seen.jsonl"}]}]}}))
+        .unwrap(),
+    )
+    .unwrap();
+    let mut store = crate::session_store::SessionFile::create(cwd.to_str().unwrap(), None, 0);
+    let path = dir.path().join("session.jsonl");
+    store.set_path(path.clone());
+    store.rewrite().unwrap();
+    let engine = AgentSessionEngine::new(AgentEngineConfig {
+        cwd: cwd.clone(),
+        agent_dir,
+        provider: None,
+        model: None,
+        api_key: None,
+        thinking: None,
+        session_dir: None,
+        session_file: Some(path),
+        faux_script: Some(
+            json!({"engine": "faux", "responses": [{"text": "persisted final answer"}]})
+                .to_string(),
+        ),
+        supervisor_link: None,
+        telemetry_disabled: Some(true),
+        cron_store: None,
+        queued_steering_probe: None,
+    })
+    .unwrap();
+    engine.run_prompt(
+        0,
+        PromptRequest {
+            message: "question".into(),
+            batch: vec![],
+            images: vec![],
+            source: "user".into(),
+            agent_message_id: None,
+            custom_message: None,
+        },
+        &|| false,
+        &mut |event| {
+            let message = match event {
+                EngineEvent::UserMessage(message) => message,
+                EngineEvent::AssistantMessage(message) => {
+                    // A slow worker write: without the barrier the Stop hook
+                    // would copy the file before this row lands.
+                    std::thread::sleep(std::time::Duration::from_millis(300));
+                    message
+                }
+                _ => return true,
+            };
+            store
+                .persist_entry("message", json!({"message": message}))
+                .unwrap();
+            true
+        },
+    );
+    let seen = std::fs::read_to_string(cwd.join("seen.jsonl")).unwrap();
+    assert!(seen.contains("persisted final answer"), "{seen}");
+}
