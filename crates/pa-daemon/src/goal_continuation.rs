@@ -472,9 +472,7 @@ mod tests {
     use std::sync::Arc;
 
     use super::*;
-    use crate::agent_engine::tests::{
-        admit, faux_engine_with_settings, goal_admission_collector, FAUX_TEST_LOCK,
-    };
+    use crate::agent_engine::tests::{admit, faux_engine_with_settings, goal_admission_collector};
     use crate::engine::EngineEvent;
 
     /// Inject the engine's background-bash liveness probe (a `true`
@@ -491,9 +489,6 @@ mod tests {
 
     #[test]
     fn live_background_bash_holds_the_goal_continuation_until_it_settles() {
-        let _faux = FAUX_TEST_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let (engine, _dir) = faux_engine_with_settings(
             &serde_json::json!({ "responses": [{"text": "warm ok"}, {"text": "turn reply"}] }),
             u64::MAX,

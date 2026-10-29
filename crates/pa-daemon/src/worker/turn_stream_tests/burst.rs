@@ -161,14 +161,10 @@ async fn a_provider_burst_broadcasts_one_coalesced_update_per_tick_not_per_delta
 /// The streamed-turn pipeline end to end, timed on the turn wall clock.
 /// The faux splitter randomizes chunk sizes, so runs vary; compare
 /// medians, not single runs.
-#[allow(clippy::await_holding_lock)] // the faux registry is process-global: the guard must span the async flow
 #[tokio::test]
 #[ignore = "run with cargo test -p pa-daemon --release streamed_turn_pipeline_benchmark -- --ignored --nocapture"]
 async fn streamed_turn_pipeline_benchmark() {
     for text_kb in [64usize, 256, 512] {
-        let _faux = crate::agent_engine::FAUX_TEST_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let dir = tempfile::TempDir::new().unwrap();
         let word = "benchmark word ";
         let text = word.repeat(text_kb * 1024 / word.len());
@@ -212,12 +208,8 @@ async fn streamed_turn_pipeline_benchmark() {
 
 /// The parked loop snapshot reaches the wire intact: the last flushed
 /// `text_delta` update before `message_end` carries the final content.
-#[allow(clippy::await_holding_lock)] // the faux registry is process-global: the guard must span the async flow
 #[tokio::test]
 async fn the_last_parked_update_carries_the_final_content() {
-    let _faux = crate::agent_engine::FAUX_TEST_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let dir = tempfile::TempDir::new().unwrap();
     let text = "pin word ".repeat(512);
     let script = json!({ "engine": "faux", "responses": [{ "content": [{ "type": "text", "text": text }] }] });

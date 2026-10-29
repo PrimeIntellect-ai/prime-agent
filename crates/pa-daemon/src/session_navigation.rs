@@ -510,14 +510,8 @@ mod tests {
     }
 
     /// A tree move is not a replacement: the built session stays warm.
-    // The faux provider registration is global; the lock must span the
-    // awaited turns that consume its queue.
-    #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn replacement_flows_retire_only_on_a_prepared_file() {
-        let _faux = crate::agent_engine::FAUX_TEST_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let dir = tempfile::TempDir::new().expect("temp dir");
         let sessions_dir = dir.path().join("sessions");
         std::fs::create_dir_all(&sessions_dir).expect("sessions dir");

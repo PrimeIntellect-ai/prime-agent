@@ -101,7 +101,6 @@ impl AgentSessionEngine {
 mod tests {
     use crate::agent_engine::tests::{admit, faux_engine_with_settings};
     use crate::agent_engine::AgentSessionEngine;
-    use crate::agent_engine::FAUX_TEST_LOCK;
     use crate::engine::SessionEngine;
     use crate::engine::{CompactionOutcome, CompactionRequest, EngineEvent};
     use serde_json::json;
@@ -182,9 +181,6 @@ mod tests {
     /// after the settle); the worker's servicing body consumes the decline.
     #[test]
     fn threshold_compaction_arms_the_review_off_the_turn_path() {
-        let _faux = FAUX_TEST_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let headroom = crossing_headroom();
         let (engine, _dir) = trigger_engine(
             &json!({
@@ -237,9 +233,6 @@ mod tests {
 
     #[test]
     fn the_declining_review_stamps_the_cooldown() {
-        let _faux = FAUX_TEST_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
         // reserve 1: the headroom never crosses, so only the manual
         // compaction runs.
         let (engine, _dir) = trigger_engine(
@@ -310,9 +303,6 @@ mod tests {
 
     #[test]
     fn sessions_without_the_refine_surface_never_run_a_review() {
-        let _faux = FAUX_TEST_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let headroom = crossing_headroom();
         let (engine, _dir) = trigger_engine(
             &json!({
@@ -355,9 +345,6 @@ mod tests {
 
     #[test]
     fn manual_compaction_arms_and_consumes_the_round() {
-        let _faux = FAUX_TEST_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let (engine, _dir) = trigger_engine(
             &json!({
                 "responses": [
@@ -417,9 +404,6 @@ mod tests {
 
     #[test]
     fn refine_session_command_emits_the_refine_events() {
-        let _faux = FAUX_TEST_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let plan = r#"{"summary":"one edit","edits":[{"action":"create","kind":"memory","id":"m1","title":"t","content":"c"}]}"#;
         let (engine, _dir) = trigger_engine(&json!({ "responses": [ {"text": plan} ] }), 1, true);
         let mut events: Vec<EngineEvent> = Vec::new();

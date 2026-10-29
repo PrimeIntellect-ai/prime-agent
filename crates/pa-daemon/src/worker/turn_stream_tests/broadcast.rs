@@ -303,7 +303,6 @@ async fn a_turn_without_a_model_turn_keeps_the_bare_fallback_frames() {
 /// One `agent_end` per agent run on the wire: the retry run re-opens with
 /// its own `agent_start` + `turn_start` frames, and its `agent_end`
 /// carries only the retry's messages; no bare synthesized frame trails.
-#[allow(clippy::await_holding_lock)] // the faux registry is process-global: the guard must span the async flow
 #[tokio::test]
 async fn a_retried_turn_broadcasts_one_agent_end_per_run() {
     fn roles_of(frame: &Value) -> Vec<String> {
@@ -317,9 +316,6 @@ async fn a_retried_turn_broadcasts_one_agent_end_per_run() {
             })
             .unwrap_or_default()
     }
-    let _faux = crate::agent_engine::tests::FAUX_TEST_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let dir = std::env::temp_dir().join(format!(
         "pa-worker-agent-end-retry-{}",
         uuid::Uuid::new_v4()

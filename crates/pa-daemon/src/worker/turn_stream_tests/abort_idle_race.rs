@@ -77,15 +77,9 @@ fn dump_hang_state(worker: &Worker) -> String {
     dump
 }
 
-// The faux registry is process-global: the lock guard must span the
-// whole async flow (every rep registers into the same registry).
-#[allow(clippy::await_holding_lock)]
 #[tokio::test]
 #[ignore = "the rate harness: run with PA_RACE_* knobs (see the module docs)"]
 async fn abort_and_send_idle_race_rate_harness() {
-    let _faux = crate::agent_engine::tests::FAUX_TEST_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let reps = race_knob("PA_RACE_REPS", 50).clamp(1, 100_000);
     let delay_ms = race_knob("PA_RACE_DELAY_MS", 3000).clamp(200, 600_000);
     let window_ms = race_knob("PA_RACE_IDLE_WINDOW_MS", 300).clamp(50, 600_000);

@@ -186,12 +186,8 @@ async fn compact_with_paused_goal_never_continues() {
 /// or built with uv on PATH (the guard inside names the
 /// recipe when the cell fails instead of letting the loop drain
 /// the faux script into a misleading count mismatch).
-#[allow(clippy::await_holding_lock)] // the faux registry is process-global: the guard must span the async flow
 #[tokio::test]
 async fn goal_turn_end_loop_runs_to_completion() {
-    let _faux = crate::agent_engine::tests::FAUX_TEST_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let dir = std::env::temp_dir().join(format!("pa-worker-goal-loop-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(&dir).unwrap();
     let config = WorkerConfig {
@@ -316,12 +312,8 @@ async fn goal_turn_end_loop_runs_to_completion() {
     assert!(plain.success, "a post-goal prompt failed: {plain:?}");
 }
 
-#[allow(clippy::await_holding_lock)] // the faux registry is process-global: the guard must span the async flow
 #[tokio::test]
 async fn goal_pause_withdraws_the_queued_continuation() {
-    let _faux = crate::agent_engine::tests::FAUX_TEST_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let dir = std::env::temp_dir().join(format!("pa-worker-goal-pause-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(&dir).unwrap();
     let config = WorkerConfig {

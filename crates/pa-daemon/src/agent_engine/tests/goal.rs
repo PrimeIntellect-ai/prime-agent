@@ -3,9 +3,6 @@ use super::*;
 
 #[test]
 fn recovery_rebuild_rehydrates_the_goal_from_the_session_file() {
-    let _faux = FAUX_TEST_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let dir = tempfile::TempDir::new().unwrap();
     let agent_dir = dir.path().join("agent");
     std::fs::create_dir_all(&agent_dir).unwrap();
@@ -100,9 +97,6 @@ fn recovery_rebuild_rehydrates_the_goal_from_the_session_file() {
 /// never admit a user row.
 #[test]
 fn goal_start_keeps_the_prompt_images_on_the_context_row() {
-    let _faux = FAUX_TEST_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let dir = tempfile::TempDir::new().unwrap();
     let engine = std::sync::Arc::new(
         AgentSessionEngine::new(AgentEngineConfig {
@@ -211,9 +205,6 @@ fn wire_assistant_message(text: String) -> Value {
 /// post-recovery compact runs over it — never a skip on the empty branch.
 #[test]
 fn recovered_engine_compaction_walk_sees_the_durable_history() {
-    let _faux = FAUX_TEST_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let dir = tempfile::TempDir::new().unwrap();
     write_compaction_settings(dir.path(), 1);
     // The durable store a killed worker leaves behind: a long
@@ -286,9 +277,6 @@ fn recovered_engine_compaction_walk_sees_the_durable_history() {
 
 #[test]
 fn post_compaction_goal_continuation_mint() {
-    let _faux = FAUX_TEST_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let (engine, _engine_dir) = faux_engine_with_settings(
         &serde_json::json!({ "responses": [{"text": "goal turn reply"}] }),
         1,
@@ -389,9 +377,6 @@ fn post_compaction_goal_continuation_mint() {
 /// armed flag behind and the settle sites deliver a second one.
 #[test]
 fn post_compaction_mint_delivers_the_armed_deferral_once() {
-    let _faux = FAUX_TEST_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let (engine, _engine_dir) = faux_engine_with_settings(
         &serde_json::json!({ "responses": [{"text": "goal turn reply"}] }),
         1,
@@ -466,9 +451,6 @@ pub(crate) fn admit_request(
 
 #[test]
 fn goal_turn_end_mints_the_loop_until_the_goal_completes() {
-    let _faux = FAUX_TEST_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let dir = tempfile::TempDir::new().unwrap();
     let engine = std::sync::Arc::new(
         AgentSessionEngine::new(AgentEngineConfig {
@@ -570,9 +552,6 @@ fn goal_turn_end_mints_the_loop_until_the_goal_completes() {
 
 #[test]
 fn paused_goal_mints_no_turn_end_continuation() {
-    let _faux = FAUX_TEST_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let (engine, _engine_dir) = faux_engine_with_settings(
         &serde_json::json!({ "responses": [
             {"text": "start turn reply"},
@@ -611,9 +590,6 @@ fn paused_goal_mints_no_turn_end_continuation() {
 
 #[test]
 fn budget_exhausted_stops_with_the_ts_budget_steer() {
-    let _faux = FAUX_TEST_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let (engine, _engine_dir) = faux_engine_with_settings(
         &serde_json::json!({ "responses": [{"text": "crossing turn reply"}] }),
         1,
@@ -671,9 +647,6 @@ fn budget_exhausted_stops_with_the_ts_budget_steer() {
 
 #[test]
 fn queued_input_defers_the_turn_end_mint() {
-    let _faux = FAUX_TEST_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let (engine, _engine_dir) = faux_engine_with_settings(
         &serde_json::json!({ "responses": [{"text": "first"}, {"text": "second"}] }),
         1,
@@ -716,9 +689,6 @@ fn queued_input_defers_the_turn_end_mint() {
 
 #[test]
 fn running_children_owe_the_continuation_and_settle_delivers_it() {
-    let _faux = FAUX_TEST_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let dir = tempfile::TempDir::new().unwrap();
     let engine = std::sync::Arc::new(
         AgentSessionEngine::new(AgentEngineConfig {
@@ -824,9 +794,6 @@ fn engine_session_entries(engine: &AgentSessionEngine) -> Vec<pa_types::session:
 
 #[test]
 fn injected_custom_turn_holds_one_representation() {
-    let _faux = FAUX_TEST_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let (engine, _dir) = faux_engine_with_settings(
         &serde_json::json!({ "responses": [{"text": "notice acknowledged"}] }),
         1,
@@ -922,9 +889,6 @@ fn injected_custom_turn_holds_one_representation() {
 
 #[test]
 fn goal_start_continuation_holds_one_representation() {
-    let _faux = FAUX_TEST_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let (engine, _dir) = faux_engine_with_settings(
         &serde_json::json!({ "responses": [{"text": "goal turn reply"}] }),
         1,
@@ -982,9 +946,6 @@ fn goal_start_continuation_holds_one_representation() {
 
 #[test]
 fn active_goal_aborted_turn_row_broadcasts_and_goal_accounting_skips_it() {
-    let _faux = FAUX_TEST_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let dir = tempfile::TempDir::new().unwrap();
     let engine = AgentSessionEngine::new(AgentEngineConfig {
         cwd: dir.path().to_path_buf(),
