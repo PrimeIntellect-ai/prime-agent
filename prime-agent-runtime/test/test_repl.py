@@ -144,7 +144,7 @@ class ReplTest(unittest.TestCase):
         return repl
 
     def test_bash_activity_is_available_while_cell_is_running(self):
-        self.repl.send({"type": "execute", "id": "cell", "code": "from rlm import bash\nimport asyncio\nh = bash('echo ready; sleep 20'); await asyncio.sleep(20)"})
+        self.repl.send({"type": "execute", "id": "cell", "code": "from rlm import bash\nimport asyncio\nh = bash('echo ready; sleep 20')\nawait asyncio.get_running_loop().create_future()"})
         # Wait for the activity start display before requesting list.
         while True:
             event = self.repl.read_event()
@@ -184,7 +184,7 @@ class ReplTest(unittest.TestCase):
 
     def test_factory_activity_is_available_while_cell_is_running(self):
         repl = self.enabled_factory_repl()
-        repl.send({"type": "execute", "id": "cell", "code": "import asyncio\nawait asyncio.sleep(20)"})
+        repl.send({"type": "execute", "id": "cell", "code": "import asyncio\nawait asyncio.get_running_loop().create_future()"})
         # The factory graph answers out of band while the cell runs: no
         # live runs exist yet, so the graph action lists the empty registry.
         repl.send({"type": "factory_activity", "id": "g", "action": "graph"})
@@ -455,7 +455,7 @@ class ReplTest(unittest.TestCase):
                 "if hasattr(signal, 'pthread_kill'):",
                 "    del signal.pthread_kill",
                 "import asyncio",
-                "await asyncio.sleep(30)",
+                "await asyncio.get_running_loop().create_future()",
             ]
         )
         self.repl.send({"type": "execute", "id": "nokill", "code": code})
@@ -572,11 +572,13 @@ class ReplTest(unittest.TestCase):
 
     def test_interrupt_await_suspended(self):
         events = self._interrupt_after_running(
-            "await", "import asyncio\nawait asyncio.sleep(1e9)"
+            "await", "import asyncio\nawait asyncio.get_running_loop().create_future()"
         )
         error = one(events, "error")
         self.assertEqual(error["ename"], "KeyboardInterrupt")
-        self.assertIn("await asyncio.sleep(1e9)", "".join(error["traceback"]))
+        self.assertIn(
+            "await asyncio.get_running_loop().create_future()", "".join(error["traceback"])
+        )
         self.assertEqual(one(events, "done")["status"], "error")
         follow = self.repl.execute("after-await", "2+2")
         self.assertEqual(one(follow, "result")["text"], "4")
@@ -602,7 +604,7 @@ class ReplTest(unittest.TestCase):
                 "    while True:",
                 "        time.sleep(0.05)",
                 "hog_task = asyncio.create_task(hog())",
-                "await asyncio.sleep(1e9)",
+                "await asyncio.get_running_loop().create_future()",
             ]
         )
         events = self._interrupt_after_running("fg", code)
@@ -615,7 +617,7 @@ class ReplTest(unittest.TestCase):
         self.assertEqual(one(follow, "result")["text"], "14")
 
     def test_interrupt_written_back_to_back_with_execute(self):
-        execute = json.dumps({"type": "execute", "id": "race", "code": "import asyncio\nawait asyncio.sleep(1e9)"})
+        execute = json.dumps({"type": "execute", "id": "race", "code": "import asyncio\nawait asyncio.get_running_loop().create_future()"})
         interrupt = json.dumps({"type": "interrupt"})
         assert self.repl.proc.stdin is not None
         self.repl.proc.stdin.write(execute + "\n" + interrupt + "\n")
@@ -649,7 +651,8 @@ class ReplTest(unittest.TestCase):
                 "import time",
                 "class SlowRepr:",
                 "    def __repr__(self):",
-                "        time.sleep(600)",
+                "        while True:",
+                "            time.sleep(0.05)",
                 "        return 'late'",
                 "SlowRepr()",
             ]
@@ -682,6 +685,77 @@ class ReplTest(unittest.TestCase):
         self.assertNotIn("repl.py", text)
         self.assertNotIn("ast.py", text)
         self.assertEqual(one(events, "done")["status"], "error")
+
+    def test_discipline_screen_declines_long_sleep(self):
+        events = self.repl.execute(
+            "sleep-30", "import time\ntime.sleep(30)\nprint('slept')"
+        )
+        error = one(events, "error")
+        self.assertEqual(error["ename"], "CellDeclinedError")
+        self.assertIn("[bash-done]", error["evalue"])
+        self.assertIn("time.sleep(30)", error["evalue"])
+        text = "".join(error["traceback"])
+        self.assertIn("Traceback (most recent call last):", text)
+        self.assertEqual(one(events, "done")["status"], "error")
+        # Refused before it ran: nothing from the cell body reached stdout.
+        self.assertIsNone(one(events, "result"))
+        self.assertNotIn("slept", stream_text(events, "stdout"))
+
+    def test_discipline_screen_allows_short_and_unresolved_waits(self):
+        events = self.repl.execute("sleep-short", "import time\ntime.sleep(0.05)\nprint('ok')")
+        self.assertIsNone(one(events, "error"))
+        self.assertEqual(one(events, "done")["status"], "ok")
+        self.assertIn("ok", stream_text(events, "stdout"))
+        events = self.repl.execute("sleep-var", "import time\nn = 0.05\ntime.sleep(n)")
+        self.assertIsNone(one(events, "error"))
+        events = self.repl.execute("aio-short", "import asyncio\nawait asyncio.sleep(0.05)")
+        self.assertIsNone(one(events, "error"))
+
+    def test_discipline_screen_declines_sleep_aliases(self):
+        for rid, code in (
+            ("alias", "from time import sleep as wait\nwait(45)"),
+            ("module-alias", "import time as t\nt.sleep(60)"),
+            ("aio", "import asyncio\nawait asyncio.sleep(15)"),
+            ("bare", "time.sleep(30)"),
+        ):
+            events = self.repl.execute(rid, code)
+            self.assertEqual(one(events, "error")["ename"], "CellDeclinedError", rid)
+            self.assertEqual(one(events, "done")["status"], "error", rid)
+
+    def test_discipline_screen_declines_subprocess_family(self):
+        for rid, code in (
+            ("imp", "import subprocess"),
+            ("run", "import subprocess\nsubprocess.run(['ls'])"),
+            ("from-import", "from subprocess import run\nrun(['ls'])"),
+            ("os-system", "import os\nos.system('ls')"),
+            ("os-popen", "os.popen('ls')"),
+            ("from-os", "from os import system\nsystem('ls')"),
+            ("pty", "import pty\npty.spawn('/bin/sh')"),
+        ):
+            events = self.repl.execute(rid, code)
+            error = one(events, "error")
+            self.assertEqual(error["ename"], "CellDeclinedError", rid)
+            self.assertIn("bash('...')", error["evalue"], rid)
+            self.assertEqual(one(events, "done")["status"], "error", rid)
+
+    def test_discipline_screen_spares_mentions_bash_and_libraries(self):
+        code = (
+            "import os\n"
+            "doc = 'never run time.sleep(30) or os.system(rm -rf /) in a cell'\n"
+            "print(doc, os.pathsep)"
+        )
+        events = self.repl.execute("mention", code)
+        self.assertIsNone(one(events, "error"))
+        self.assertEqual(one(events, "done")["status"], "ok")
+        # Backgrounded shell work is the sanctioned shape, never declined.
+        events = self.repl.execute("bg", "from rlm import bash\nbash('sleep 30 & echo started')\nprint('launched')")
+        self.assertIsNone(one(events, "error"))
+        self.assertIn("launched", stream_text(events, "stdout"))
+
+    def test_declined_cell_keeps_kernel_usable(self):
+        self.repl.execute("d1", "import time\ntime.sleep(10)")
+        events = self.repl.execute("d2", "2+2")
+        self.assertEqual(one(events, "result")["text"], "4")
 
     def test_snapshot_restore_roundtrip(self):
         with tempfile.TemporaryDirectory() as tmp:
