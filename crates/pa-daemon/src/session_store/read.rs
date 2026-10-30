@@ -3,8 +3,9 @@
 
 use super::view::is_warning_shown_row;
 use super::{
-    anyhow, fold_child_usage_attributions, fs, message_text, BufRead, Context, HashMap, Map, Path,
-    PathBuf, Read, Result, SessionEntry, SessionFile, SessionHeader, SessionWindow, Value,
+    anyhow, fold_child_usage_attributions, fs, message_text, BilledRowSinkSlot, BufRead, Context,
+    HashMap, Map, Path, PathBuf, Read, Result, SessionEntry, SessionFile, SessionHeader,
+    SessionWindow, Value,
 };
 
 const CURRENT_SESSION_VERSION: u32 = 3;
@@ -161,6 +162,7 @@ impl SessionFile {
             trace_upload: None,
             anthropic_warning_shown: false,
             skipped_lines: 0,
+            billed_row_sink: BilledRowSinkSlot::default(),
         };
         for line in lines {
             let line = line.with_context(read_context)?;
@@ -222,6 +224,7 @@ impl SessionFile {
             trace_upload: None,
             anthropic_warning_shown,
             skipped_lines: 0,
+            billed_row_sink: BilledRowSinkSlot::default(),
         };
         // The raw rows are consumed in place: each line String drops as soon as its
         // parsed entry joins the store.
@@ -288,6 +291,7 @@ impl SessionFile {
         full.leaf_id.clone_from(&self.leaf_id);
         full.lease.clone_from(&self.lease);
         full.trace_upload.clone_from(&self.trace_upload);
+        full.billed_row_sink.clone_from(&self.billed_row_sink);
         full.child_usage_recovery
             .clone_from(&self.child_usage_recovery);
         // The merged store's leaf is the window's leaf: re-derive the gate
@@ -323,6 +327,7 @@ impl SessionFile {
             trace_upload: None,
             anthropic_warning_shown: false,
             skipped_lines: 0,
+            billed_row_sink: BilledRowSinkSlot::default(),
         }
     }
 }

@@ -240,6 +240,21 @@ pub struct SessionFile {
     /// serve it through `get_state`
     /// (`SessionSummary::anthropic_warning_shown`).
     pub(crate) anthropic_warning_shown: bool,
+    /// Told about each appended row that bills a model call (the engine's
+    /// goal budget and telemetry accounting).
+    pub(crate) billed_row_sink: BilledRowSinkSlot,
+}
+
+#[derive(Clone, Default)]
+pub(crate) struct BilledRowSinkSlot(pub(crate) Option<pa_core::session::billed_row::BilledRowSink>);
+
+impl std::fmt::Debug for BilledRowSinkSlot {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_tuple("BilledRowSinkSlot")
+            .field(&self.0.is_some())
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone)]

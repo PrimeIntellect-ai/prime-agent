@@ -906,6 +906,22 @@ pub async fn create_session(mut config: SessionEngineConfig) -> anyhow::Result<S
         wiring.rlm_usage.set_telemetry(telemetry.clone());
     }
     let goal_driver = wiring.runtime.goal_driver().clone();
+    // Each row the session's durable store appends that bills a model call
+    // outside the agent loop charges the running goal and telemetry run.
+    let charge_goal = goal_driver.lock().await.billed_row_recorder();
+    let charge_run = telemetry.clone();
+    wiring
+        .rlm_usage
+        .store()
+        .observe_billed_rows(std::sync::Arc::new(
+            move |row: &crate::session::billed_row::BilledRow| {
+                charge_goal(&row.usage);
+                if let Some(telemetry) = &charge_run {
+                    telemetry.note_billed_call(&row.usage);
+                }
+            },
+        ))
+        .await;
     // The factory host bridge: registered from `create_session` (the #3184
     // pattern), so the daemon/TUI factory surface resolves against this
     // session's harness dirs, model registry, and the allowlist pin. The
@@ -1128,3 +1144,6 @@ mod tests;
 
 #[cfg(test)]
 mod append_system_tests;
+
+#[cfg(test)]
+mod billed_row_tests;

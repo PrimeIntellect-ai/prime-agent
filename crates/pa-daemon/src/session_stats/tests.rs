@@ -251,8 +251,9 @@ fn aborted_assistant_usage_is_skipped() {
 }
 
 /// The compaction boundary against the windowed reader: the windowed store
-/// never loads the pre-cut ancestry and must still report the same active
-/// numbers as the full store.
+/// never loads the pre-cut ancestry and must still report the same numbers
+/// as the full store — the kept region's counts and the whole branch's spend,
+/// the billed rows on both sides of the cut included.
 #[test]
 fn compaction_boundary_serves_the_windowed_reader() {
     let dir = tempfile::TempDir::new().unwrap();
@@ -294,10 +295,20 @@ fn compaction_boundary_serves_the_windowed_reader() {
     };
     let lines = [
         json!({"type": "session", "version": 3, "id": "s1", "timestamp": "2026-09-23T00:00:00.000Z", "cwd": "/tmp"}).to_string(),
-        // Pre-cut ancestry: spend the active stats must not report.
+        // Pre-cut ancestry: the window folds its spend, a side call included.
         user("u1", None),
         assistant("a1", Some("u1"), usage(1000, 200, 5000, 6200, 0.75)),
-        user("u2", Some("a1")),
+        json!({
+            "type": "custom", "id": "m1", "parentId": "a1",
+            "timestamp": "2026-09-23T00:00:00.000Z",
+            "customType": "model_usage",
+            "data": {
+                "source": "side_question", "provider": "prime-inference",
+                "modelId": "internal/glm-5.3-fast", "usage": usage(300, 30, 0, 330, 0.125),
+            },
+        })
+        .to_string(),
+        user("u2", Some("m1")),
         assistant("a2", Some("u2"), usage(800, 150, 3000, 3950, 1.25)),
         // The kept region starts at u3 (firstKeptEntryId); the kept rows precede the
         // compaction entry in file order, as in a real compacted file.
@@ -336,24 +347,25 @@ fn compaction_boundary_serves_the_windowed_reader() {
         "toolResults": 0,
         "totalMessages": 6,
         "tokens": {
-            "input": 1_500, "output": 300, "cacheRead": 5_500,
-            "cacheWrite": 0, "total": 7_300,
+            "input": 13_599, "output": 779, "cacheRead": 13_500,
+            "cacheWrite": 0, "total": 27_878,
         },
-        "cost": 0.875,
+        "cost": 3.5,
         "contextUsage": {
             "tokens": 3_100, "contextWindow": 1_000, "percent": 310.0,
         },
     });
     assert_eq!(session_stats(&full, Some(1_000)), expected);
-    // The windowed store (retained region) and the full store walk the same kept region:
-    // identical active numbers.
+    // The windowed store (retained region plus the folded older path) reports
+    // the full store's numbers.
     assert_eq!(session_stats(&windowed, Some(1_000)), expected);
 }
 
-/// The audit's captured devbox session (sanitized): the pre-cut ancestry is
-/// spend TS drops from the active stats; the kept region is what TS reports
-/// post-compaction. Point `PA_ACTIVE_STATS_CAPTURED_FIXTURE` at a local copy
-/// to run it (real captures are never committed).
+/// The audit's captured devbox session (sanitized): the kept region's counts
+/// and context usage are what TS reports post-compaction; the spend covers
+/// the whole branch, where the windowed and full stores must agree. Point
+/// `PA_ACTIVE_STATS_CAPTURED_FIXTURE` at a local copy to run it (real
+/// captures are never committed).
 #[test]
 #[ignore = "set PA_ACTIVE_STATS_CAPTURED_FIXTURE to the captured session path"]
 fn captured_compaction_boundary_matches_ts_active_stats() {
@@ -374,29 +386,25 @@ fn captured_compaction_boundary_matches_ts_active_stats() {
         "toolCalls": 748,
         "toolResults": 748,
         "totalMessages": 3718,
-        "tokens": {
-            "input": 3_667_340,
-            "output": 142_884,
-            "cacheRead": 219_856_050,
-            "cacheWrite": 269_974,
-            "total": 223_936_248,
-        },
-        "cost": 3.921_395,
         "contextUsage": {
             "tokens": 53_519,
             "contextWindow": 200_000,
             "percent": 26.759_500_000_000_003,
         },
     });
-    assert_eq!(session_stats(&full, Some(200_000)), expected);
-    // The windowed store (retained region) and the full store walk the same kept region:
-    // identical active numbers.
-    assert_eq!(session_stats(&windowed, Some(200_000)), expected);
+    let stats = session_stats(&full, Some(200_000));
+    let mut active = stats.clone();
+    for spend in ["tokens", "cost"] {
+        active.as_object_mut().expect("stats object").remove(spend);
+    }
+    assert_eq!(active, expected);
+    assert_eq!(session_stats(&windowed, Some(200_000)), stats);
 }
 
 /// The compaction boundary in miniature: kept rows plus a ghost-parent row
-/// are what the active stats report; the side-question FORK is spend the
-/// reloaded list drops (it survives on whole-file surfaces).
+/// are what the counts report, while the spend covers the gap-bridged branch
+/// (the pre-cut ancestry and the compaction call); the side-question FORK is
+/// spend off the branch (it survives on whole-file surfaces).
 #[test]
 fn compaction_boundary_drops_the_pre_cut_ancestry() {
     let dir = tempfile::TempDir::new().unwrap();
@@ -468,8 +476,8 @@ fn compaction_boundary_drops_the_pre_cut_ancestry() {
         "toolCalls": 0,
         "toolResults": 0,
         "totalMessages": 6,
-        "tokens": { "input": 30, "output": 15, "cacheRead": 0, "cacheWrite": 0, "total": 45 },
-        "cost": 1.0,
+        "tokens": { "input": 1_049, "output": 34, "cacheRead": 0, "cacheWrite": 0, "total": 1_083 },
+        "cost": 2.125,
         // The strict branch truncates at the ghost parent, so the context estimate anchors on
         // the last row alone.
         "contextUsage": { "tokens": 15, "contextWindow": 1000, "percent": 1.5 },
