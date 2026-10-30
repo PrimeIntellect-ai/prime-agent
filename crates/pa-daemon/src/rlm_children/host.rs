@@ -129,12 +129,21 @@ impl RlmSubagentHost for SupervisorChildSessions {
                 // child-model path so the allowlist still gates the selector.
                 let model = match request.kind {
                     pa_core::session_engine::rlm_host::RlmSpawnKind::Decision => {
-                        let selector =
+                        // The selector lookup loads settings synchronously
+                        // (a lock with bounded retries), so it runs off the
+                        // async executor — the same offload the allowlist
+                        // loader below it makes.
+                        let selector_cwd = cwd.clone();
+                        let selector_agent_dir = this.agent_dir.clone();
+                        let selector = tokio::task::spawn_blocking(move || {
                             pa_core::session_engine::decision_api::decision_model_selector(
-                                &cwd,
-                                &this.agent_dir,
+                                &selector_cwd,
+                                &selector_agent_dir,
                             )
-                            .map_err(anyhow::Error::msg)?;
+                        })
+                        .await
+                        .context("the decision selector load task join failed")?
+                        .map_err(anyhow::Error::msg)?;
                         resolve_child_model_allowlisted(&this, Some(&selector), "spawn", "subagent")
                             .await?
                     }
