@@ -111,6 +111,17 @@ impl RlmSubagentHost for SupervisorChildSessions {
             let admission = async {
                 this.assert_name_available(&name, identity.rlm_depth + 1)
                     .await?;
+                // The child's eventual working directory: the create
+                // below runs it there, so the decision model resolves from
+                // the same project-scoped settings the child's engine
+                // reads (`SettingsManager::create(cwd, agent_dir)`), never
+                // from the parent's cwd — the two can name different
+                // `decisionModel` values.
+                let cwd = resolve_child_cwd(
+                    Path::new(identity.cwd.as_deref().unwrap_or("/")),
+                    request.cwd.as_deref(),
+                    "rlm.spawn",
+                )?;
                 // A decision child runs the settings decision model: the
                 // spawn refuses with the same actionable message the
                 // decision path serves while the setting is unset or
@@ -120,7 +131,7 @@ impl RlmSubagentHost for SupervisorChildSessions {
                     pa_core::session_engine::rlm_host::RlmSpawnKind::Decision => {
                         let selector =
                             pa_core::session_engine::decision_api::decision_model_selector(
-                                std::path::Path::new(identity.cwd.as_deref().unwrap_or("/")),
+                                &cwd,
                                 &this.agent_dir,
                             )
                             .map_err(anyhow::Error::msg)?;
@@ -140,11 +151,6 @@ impl RlmSubagentHost for SupervisorChildSessions {
                 assert_thinking_supported(&this.agent_dir, request.thinking.as_deref(), &model)?;
                 let thinking = request.thinking.as_deref().or(identity.thinking.as_deref());
                 let child_dir = this.child_session_dir(&child_id, &identity)?;
-                let cwd = resolve_child_cwd(
-                    Path::new(identity.cwd.as_deref().unwrap_or("/")),
-                    request.cwd.as_deref(),
-                    "rlm.spawn",
-                )?;
                 // Every spawned child — a decision child included —
                 // presents the subagent runtime identity; the decision
                 // flag's one durable home is the create command's
