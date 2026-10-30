@@ -11,7 +11,13 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from assemble_artifacts import BUNDLED_CATALOG_FILES, pack_tarball, stage_tree
+from assemble_artifacts import (
+    BUNDLED_CATALOG_FILES,
+    deny_allowed_licenses,
+    pack_tarball,
+    stage_tree,
+    write_third_party_notices,
+)
 from native_compat import validate_compatibility_archive
 
 
@@ -40,9 +46,12 @@ class NativeCompatibilityTests(unittest.TestCase):
             repo_root=self.root, target=target, binary=self.binary,
             runtime_dir=None, catalog_assets=self.root, version="1.0.0", sha="a" * 40,
         )
-        # Catalog validation has its own integration suite; this test exercises
-        # packaging with a minimal payload to isolate the migration regression.
-        with patch("assemble_artifacts.validate_bundled_catalog_dir", return_value={}):
+        # Catalog validation has its own integration suite and the notices need
+        # a Cargo workspace; this test exercises packaging with a minimal
+        # payload to isolate the migration regression.
+        with patch("assemble_artifacts.validate_bundled_catalog_dir", return_value={}), \
+             patch("assemble_artifacts.write_third_party_notices",
+                   side_effect=lambda _root, _target, out: out.write_text("notices\n")):
             facts = stage_tree(staging, args, stamp)
         archive = self.root / "release.tar.gz"
         pack_tarball(staging, archive, facts["payload"])
@@ -111,6 +120,28 @@ class NativeCompatibilityTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("Native compatibility verified:", result.stdout)
         self.assertNotIn("src.tar.gz", result.stdout)
+
+
+class ThirdPartyNoticesTests(unittest.TestCase):
+    def test_accepted_licenses_are_deny_toml_allow_list(self):
+        import tomllib  # the release build hosts lack it (Python 3.9/3.10); CI runs 3.12
+
+        deny = Path(__file__).resolve().parents[2] / "deny.toml"
+        self.assertEqual(deny_allowed_licenses(deny),
+                         tomllib.loads(deny.read_text())["licenses"]["allow"])
+
+    def test_notices_drop_terminal_control_characters(self):
+        def cargo_about(command, **_):
+            output = Path(command[command.index("--output-file") + 1])
+            output.write_bytes("a\x1b[31mb\x07\tc\x9b\r\nd\x7f\n".encode())
+            return subprocess.CompletedProcess(command, 0, "", "")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp) / "notices.txt"
+            with patch("assemble_artifacts.subprocess.run", side_effect=cargo_about):
+                write_third_party_notices(Path(__file__).resolve().parents[2],
+                                          "x86_64-unknown-linux-gnu", out)
+            self.assertEqual(out.read_bytes(), b"a[31mb\tc\nd\n")
 
 
 if __name__ == "__main__":

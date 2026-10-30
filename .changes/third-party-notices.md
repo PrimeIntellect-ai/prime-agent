@@ -1,0 +1,1 @@
+- Release archives on every platform now include `THIRD-PARTY-NOTICES.txt`, with the license texts of all Rust crates built into the `prime-agent` binary and the crates each license covers. Installs keep it beside `LICENSE` in the payload directory.
