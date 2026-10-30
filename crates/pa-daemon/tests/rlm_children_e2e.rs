@@ -606,7 +606,7 @@ async fn rlm_children_spawn_roster_collect_delete_end_to_end() {
 fn spawn_systemone_mock() -> String {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind systemone mock");
     let url = format!("http://127.0.0.1:{}", listener.local_addr().unwrap().port());
-    let envelope = r#"{"model":"decision-fixture/clef","answers":{"action":{"choice":"left","confidence":0.9,"probabilities":{"left":0.9,"right":0.1}}}}"#;
+    let envelope = r#"{"model":"decision-fixture/clef","usage":{"input_tokens":177,"output_tokens":0},"answers":{"action":{"choice":"left","confidence":0.9,"probabilities":{"left":0.9,"right":0.1}}}}"#;
     let reply = format!(
         "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{envelope}",
         envelope.len(),
