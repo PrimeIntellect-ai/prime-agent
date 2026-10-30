@@ -753,12 +753,14 @@ fn display_entries_round_trip_and_tombstones_stick() {
         spawn_code: None,
         model: Some(json!({"provider": "p", "modelId": "m"})),
         status: "running".into(),
+        decision_child: true,
         created_at: 1,
     };
     assert!(write_rlm_subagent_display(&entry).unwrap());
     let read = read_rlm_subagent_display(&child_dir).unwrap();
     assert_eq!(read.child_id, "sub-1");
     assert_eq!(read.prompt.as_deref(), Some("do work"));
+    assert!(read.decision_child, "the display round-trips the flag");
     let mut tombstone = entry.clone();
     tombstone.status = "deleted".into();
     assert!(write_rlm_subagent_display(&tombstone).unwrap());
@@ -781,6 +783,7 @@ fn display_entry_file_is_owner_only() {
         spawn_code: None,
         model: None,
         status: "running".into(),
+        decision_child: false,
         created_at: 1,
     };
     assert!(write_rlm_subagent_display(&entry).unwrap());

@@ -586,7 +586,8 @@ impl SupervisorChildSessionsInner {
                 // stop the update roster from reviving it.
                 let completed = {
                     let record = record.lock().await;
-                    (matches!(record.run.verdict(), Some(RunVerdict::Done)) && !record.decision_child)
+                    (matches!(record.run.verdict(), Some(RunVerdict::Done))
+                        && !record.decision_child)
                         .then(|| (record.session_dir.clone(), record.rlm_child_id.clone()))
                 };
                 if let Some((session_dir, child_id)) = completed {
