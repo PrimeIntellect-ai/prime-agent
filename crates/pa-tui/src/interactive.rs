@@ -33,11 +33,11 @@ mod render;
 
 pub use headless::{HeadlessPlan, HeadlessStep, UiMode};
 pub use onboarding::{ModelReadiness, OnboardingSink, OnboardingTask};
-pub(crate) use render::write_flush_rows;
 use render::{
     apply_startup_chrome, check_tmux_keyboard_setup, spawn_session_reader, Renderer,
     TerminalHandoff,
 };
+pub(crate) use render::{exit_flush_enabled, write_flush_rows};
 
 pub(crate) mod reconnect;
 
@@ -234,6 +234,9 @@ pub trait InteractionTelemetry: Send + Sync {
     /// The run's first `app.suspend` cycle (`tui suspend used`): `outcome` is `resumed` (the
     /// SIGCONT continuation restored the terminal) / `failed`.
     fn suspend_used(&self, outcome: &'static str) -> Pin<Box<dyn Future<Output = ()> + Send + '_>>;
+    /// The run's first automatic scrollback flush (`tui scrollback flush used`): a settled
+    /// turn appended its transcript rows into native scrollback.
+    fn scrollback_flush_used(&self) -> Pin<Box<dyn Future<Output = ()> + Send + '_>>;
     /// The terminal enhanced-key modes settled (`tui enhanced keys`): `kitty` /
     /// `modify_other_keys` report the established combination.
     fn enhanced_keys(
