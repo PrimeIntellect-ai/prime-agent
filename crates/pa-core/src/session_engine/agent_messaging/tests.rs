@@ -26,6 +26,7 @@ fn observe_rows_carry_the_typed_status_and_activity() {
         parent_session_id: None,
         rlm_child_id: None,
         first_message: None,
+        session_file: None,
     };
     let value = row.to_value();
     assert_eq!(value["status"], "running");
@@ -471,6 +472,7 @@ fn observe_row(active_session_id: &str, is_current: bool) -> AgentObserveSummary
         parent_session_id: None,
         rlm_child_id: None,
         first_message: None,
+        session_file: None,
     }
 }
 

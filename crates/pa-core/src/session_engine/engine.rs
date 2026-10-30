@@ -156,8 +156,9 @@ async fn mcp_gating(
     settings: &crate::settings::SettingsManager,
     agent_dir: std::path::PathBuf,
 ) -> anyhow::Result<(Vec<String>, Vec<String>, crate::mcp::McpManager)> {
+    // MCP execution is user/global only, matching TS getGlobalMcpServers.
     let user_servers = settings
-        .settings()
+        .global_settings()
         .mcp_servers
         .clone()
         .unwrap_or_default()

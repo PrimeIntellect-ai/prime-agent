@@ -1,19 +1,22 @@
 //! The `/factory` view: one panel per live factory run — the machine
 //! diagram with live highlighting, the run's state, the instances
-//! running and queued, the budget consumed, and the milestone tail — on
-//! the activity pages' picker keyset (arrows + Enter + Esc): the arrows
-//! move the run selection over the NEWEST-FIRST feed (a run created
-//! after an existing one renders above it, and the page opens with the
-//! newest run selected), Enter opens the selected run's in-page action
-//! rows (stop/resume — the heartbeats picker's drill-in shape), and Esc
-//! backs out of the open action rows or closes the page.
+//! running and queued, the budget consumed, and the milestone tail. The
+//! panels read NEWEST-FIRST (a run created after an existing one renders
+//! above it). The arrows walk the run headers and the states that ran a
+//! session, across panels; Enter/→ open the selected state's latest
+//! child session, ←/Esc close the page. Navigation never acts on a run:
+//! the stop rides the agents view's two-press `app.agents.delete`
+//! grammar (a header stops its run, a state stops its running child),
+//! and `r` resumes a paused run.
 //!
 //! The view is pure presentation and selection: the session UI owns the
 //! refresh cadence (the run's collect cycle: a bounded watch on the
-//! selected run, then the graph list), executes the actions through the
-//! daemon's `factory_activity` lane, and repaints on the snapshot
-//! signatures' hysteresis (a per-transition repaint never spams: only a
-//! notice-worthy run-shape change flips the changed marker).
+//! selected run, then the graph list), executes the actions (run
+//! stop/resume on the daemon's `factory_activity` lane, a child stop on
+//! `cancel_rlm_child`, the open through the session's roster), and
+//! repaints on the snapshot signatures' hysteresis (a per-transition
+//! repaint never spams: only a notice-worthy run-shape change flips the
+//! changed marker).
 //!
 //! The diagram is the honest in-terminal machine graph: every state as a
 //! status-glyphed row in the machine's declared order — the row's label
@@ -180,24 +183,13 @@ pub fn dock_factory_items(runs: &[FactoryRunSnapshot]) -> Vec<String> {
         .collect()
 }
 
-/// One run-level action the page offers on a live run (the heartbeats
-/// picker's action-row grammar): the stop that tears the run and its
-/// children down, and the pause complement's resume.
+/// One run-level action the page offers on a live run: the stop that
+/// tears the run and its children down, and the pause complement's
+/// resume.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FactoryAction {
     Stop,
     Resume,
-}
-
-impl FactoryAction {
-    /// The action row's label.
-    #[must_use]
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::Stop => "Stop the run",
-            Self::Resume => "Resume the run",
-        }
-    }
 }
 
 /// Parse the daemon `factory_activity` graph reply: `{"runs": [...]}` in
@@ -357,9 +349,19 @@ fn parse_run(run: &Value) -> Option<FactoryRunSnapshot> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FactoryViewAction {
     None,
-    /// Stop the selected run.
+    /// Open the selected state's latest child session.
+    Open {
+        child_id: String,
+    },
+    /// Stop the selected run (a confirmed stop on its header).
     Stop {
         run_id: String,
+    },
+    /// Stop the selected state's running child (a confirmed stop on its
+    /// state row); `label` names the row (`<run>/<state>`).
+    StopChild {
+        child_id: String,
+        label: String,
     },
     /// Resume the selected (paused) run.
     Resume {
@@ -368,28 +370,25 @@ pub enum FactoryViewAction {
     Close,
 }
 
-/// The page's mode: the run feed, or the selected run's open action rows
-/// (the heartbeats picker's list/detail drill-in shape, one level — the
-/// feed stays mounted behind the action rows; there is no separate detail
-/// page to paint).
+/// One selectable row, by identity: a run's header (`state_id` `None`)
+/// or one of its states with a session.
 #[derive(Debug, Clone, PartialEq, Eq)]
-enum Mode {
-    /// The run feed: the arrows walk the run selection.
-    Feed,
-    /// The open run's action rows: the arrows walk the offered actions.
-    /// The tracked action rides by IDENTITY, not index — a fold may
-    /// change the run's state (and with it the offered set) while the
-    /// rows are open, and a tracked index would silently rename the
-    /// selection to a different action (the feed's same-run lesson, one
-    /// level up).
-    Actions {
-        run_id: String,
-        action: FactoryAction,
-    },
+pub struct FactoryRow {
+    pub run_id: String,
+    pub state_id: Option<String>,
 }
 
-/// The `/factory` view's state: the parsed run panels, the selection, the
-/// open action rows, and the hysteresis bookkeeping.
+impl FactoryRow {
+    fn header(run_id: &str) -> Self {
+        Self {
+            run_id: run_id.to_string(),
+            state_id: None,
+        }
+    }
+}
+
+/// The `/factory` view's state: the parsed run panels, the selected row,
+/// the armed stop, and the hysteresis bookkeeping.
 #[derive(Debug)]
 pub struct FactoryView {
     runs: Vec<FactoryRunSnapshot>,
@@ -397,8 +396,12 @@ pub struct FactoryView {
     /// signature changed, decayed on the next cycle (no per-transition
     /// repaint spam — one marker per notice-worthy change).
     recent_change: Vec<bool>,
-    selected: usize,
-    mode: Mode,
+    selected: Option<FactoryRow>,
+    /// The row a first stop press armed, with the stop it armed: the next
+    /// stop press on the same row confirms exactly that stop (a child a
+    /// retry replaced in between is a different stop), any other key
+    /// disarms.
+    armed: Option<(FactoryRow, FactoryViewAction)>,
     error: Option<String>,
     viewport_rows: usize,
 }
@@ -406,29 +409,27 @@ pub struct FactoryView {
 impl FactoryView {
     /// Build the view from the first snapshot batch. The batch arrives
     /// newest-first ([`parse_factory_runs`]'s reading order), so the
-    /// default selection — index 0 — is the newest run: the page opens on
-    /// the feed's live head.
+    /// default selection — the first row — is the newest run's header.
     #[must_use]
     pub fn new(runs: Vec<FactoryRunSnapshot>, viewport_rows: usize) -> Self {
         let recent_change = vec![false; runs.len()];
-        Self {
+        let mut view = Self {
             runs,
             recent_change,
-            selected: 0,
-            mode: Mode::Feed,
+            selected: None,
+            armed: None,
             error: None,
             viewport_rows,
-        }
+        };
+        view.selected = view.rows().into_iter().next();
+        view
     }
 
-    /// The actions the page offers on one run (the heartbeats picker's
-    /// `availableActions` grammar): the pause complement first — resume
-    /// on a paused run — then stop, exactly while the run is live (a
-    /// `done` run with residents still in flight keeps its stop; a
-    /// fully terminal run offers nothing). The offered set is derived
-    /// from the run's CURRENT snapshot everywhere — the render, the
-    /// arrow walk, the Enter confirmation — so a fold's state change
-    /// can never leave a stale action offered.
+    /// The run-level actions the page offers on one run: resume on a
+    /// paused run, then stop exactly while the run is live (a `done` run
+    /// with residents still in flight keeps its stop; a fully terminal
+    /// run offers nothing). Always read from the run's CURRENT snapshot,
+    /// so a fold's state change never leaves a stale action offered.
     #[must_use]
     pub fn available_actions(run: &FactoryRunSnapshot) -> Vec<FactoryAction> {
         let mut actions = Vec::with_capacity(2);
@@ -460,8 +461,33 @@ impl FactoryView {
         view
     }
 
+    /// The selectable rows in display order, flattened across panels:
+    /// each run's header, then its states whose node has a session
+    /// ([`FactoryNodeState::latest_child`]).
+    fn rows(&self) -> Vec<FactoryRow> {
+        let mut rows = Vec::new();
+        for run in &self.runs {
+            rows.push(FactoryRow::header(&run.run_id));
+            rows.extend(
+                run.states
+                    .iter()
+                    .filter(|state| {
+                        run.nodes
+                            .get(&state.id)
+                            .and_then(FactoryNodeState::latest_child)
+                            .is_some()
+                    })
+                    .map(|state| FactoryRow {
+                        run_id: run.run_id.clone(),
+                        state_id: Some(state.id.clone()),
+                    }),
+            );
+        }
+        rows
+    }
+
     /// Apply one refreshed snapshot batch: keep the selection on the same
-    /// run, and light the changed marker exactly on the runs whose
+    /// row, and light the changed marker exactly on the runs whose
     /// signature changed this cycle (the marker decays when the run goes
     /// quiet — the repaint hysteresis, no per-transition spam). Returns
     /// whether any run changed.
@@ -479,56 +505,51 @@ impl FactoryView {
                 changed = true;
             }
         }
-        // Keep the selection on the same run id, never the same index:
-        // the list reads newest-first, so a newer run folding in moves
-        // the selected run down without stealing the selection. A run
-        // that left the batch (the wire cap's oldest-end trim, a
-        // cleared registry) returns the selection to the feed's head —
-        // the newest run — because the same slot names a different run
-        // in the reversed order.
-        let selected_id = self.runs.get(self.selected).map(|run| run.run_id.clone());
         self.runs = runs;
         self.recent_change = recent_change;
-        self.selected = match selected_id {
-            Some(selected_id) => self
-                .runs
-                .iter()
-                .position(|run| run.run_id == selected_id)
-                .unwrap_or(0),
-            None => 0,
-        };
-        // The open action rows ride the same fold discipline as the
-        // feed's selection: a run that left the batch closes the rows,
-        // and a state change under them re-reads the offered set — a
-        // paused run that stopped mid-menu no longer offers resume,
-        // and the tracked action clamps to what the run still offers
-        // (never a stale target: the rows confirm against the folded
-        // snapshot, not the one they opened on).
-        if let Mode::Actions { run_id, action } = self.mode.clone() {
-            let offered = self
-                .runs
-                .iter()
-                .find(|run| run.run_id == run_id)
-                .map(Self::available_actions)
-                .unwrap_or_default();
-            match offered.first().copied() {
-                None => self.mode = Mode::Feed,
-                Some(first) if !offered.contains(&action) => {
-                    self.mode = Mode::Actions {
-                        run_id,
-                        action: first,
-                    };
-                }
-                Some(_) => {}
+        // The selection rides the row's identity, never its index (the
+        // feed reads newest-first, so a newer run folding in shifts every
+        // index): a vanished state falls back to its run's header, a
+        // vanished run to the first row.
+        let rows = self.rows();
+        self.selected = match self.selected.take() {
+            Some(row) if rows.contains(&row) => Some(row),
+            Some(row) if rows.contains(&FactoryRow::header(&row.run_id)) => {
+                Some(FactoryRow::header(&row.run_id))
             }
+            _ => rows.into_iter().next(),
+        };
+        // An armed stop the row no longer offers (the run left the batch
+        // or stopped offering stop, the child settled or a retry replaced
+        // it) disarms.
+        if self
+            .armed
+            .as_ref()
+            .is_some_and(|(row, stop)| self.stop_action(row).as_ref() != Some(stop))
+        {
+            self.armed = None;
         }
         changed
     }
 
-    /// The selected run's snapshot, when any run is live.
+    /// The run that owns the selected row (the watch target and the run
+    /// actions' target).
     #[must_use]
     pub fn selected_run(&self) -> Option<&FactoryRunSnapshot> {
-        self.runs.get(self.selected)
+        let selected = self.selected.as_ref()?;
+        self.runs.iter().find(|run| run.run_id == selected.run_id)
+    }
+
+    #[must_use]
+    pub fn selected_row(&self) -> Option<&FactoryRow> {
+        self.selected.as_ref()
+    }
+
+    /// Select `row` by identity. A row the batch does not list yet stays
+    /// selected until the refresh that lists it lands ([`Self::apply_runs`]
+    /// keeps a listed selection).
+    pub fn select(&mut self, row: FactoryRow) {
+        self.selected = Some(row);
     }
 
     /// Record one fetch/error line from the session UI's refresh. The
@@ -539,124 +560,131 @@ impl FactoryView {
         self.error = error.map(|text| crate::menu_panel::scrub_controls(&text));
     }
 
-    /// One key press on the activity pages' picker keyset (arrows +
-    /// Enter + Esc — the heartbeats/bash pages' family): the arrows
-    /// move the selection (the feed's run, or the open action rows'
-    /// action), Enter opens the selected run's action rows or runs the
-    /// selected action, and Esc/ctrl+c back out of the open action rows
-    /// or close the page. Every binding reads the keybinding manager
-    /// (`tui.select.up`/`down`/`confirm`/`cancel`), so a user's remap
-    /// reaches this page exactly like its siblings.
+    /// One key press. Navigation never acts on a run: the arrows (the
+    /// `tui.select.up`/`down` bindings) walk the rows, Enter/→ open the
+    /// selected state's session (inert on a header), ←/Esc/ctrl+c close
+    /// the page. The stop rides the agents view's two-press grammar on
+    /// `app.agents.delete`: the first press arms the selected row, a
+    /// second press on it stops (the run on a header, the child on a
+    /// state), and any other key only disarms. `r` resumes a paused run.
     #[must_use]
     pub fn handle_key(&mut self, key: &str, kb: &KeybindingsManager) -> FactoryViewAction {
-        if key == "ctrl+c" || kb.matches(key, "tui.select.cancel") {
-            // Esc backs out of the open action rows before it closes
-            // the page — the drill-in's back.
-            if self.mode != Mode::Feed {
-                self.mode = Mode::Feed;
+        let armed = self.armed.take();
+        if kb.matches(key, "app.agents.delete") {
+            let Some(row) = self.selected.clone() else {
                 return FactoryViewAction::None;
+            };
+            let Some(stop) = self.stop_action(&row) else {
+                return FactoryViewAction::None;
+            };
+            if armed
+                .as_ref()
+                .is_some_and(|(armed_row, armed_stop)| *armed_row == row && *armed_stop == stop)
+            {
+                return stop;
             }
+            self.armed = Some((row, stop));
+            return FactoryViewAction::None;
+        }
+        if armed.is_some() {
+            return FactoryViewAction::None;
+        }
+        if key == "ctrl+c" || kb.matches(key, "tui.select.cancel") {
             return FactoryViewAction::Close;
         }
-        if kb.matches(key, "tui.select.up") || kb.matches(key, "tui.select.down") {
-            let delta: isize = if kb.matches(key, "tui.select.up") {
-                -1
-            } else {
-                1
-            };
-            self.move_selection(delta);
+        if kb.matches(key, "tui.select.up") {
+            self.move_selection(-1);
+            return FactoryViewAction::None;
+        }
+        if kb.matches(key, "tui.select.down") {
+            self.move_selection(1);
             return FactoryViewAction::None;
         }
         if kb.matches(key, "tui.select.confirm") {
-            return self.confirm_selection();
+            return self.open_selected();
         }
-        // The horizontal arrows mirror back/confirm — as fallbacks only,
-        // after the configured bindings, so a rebound Left/Right keeps
-        // its configured action.
-        if key == "left" {
-            if self.mode != Mode::Feed {
-                self.mode = Mode::Feed;
-                return FactoryViewAction::None;
-            }
-            return FactoryViewAction::Close;
+        // The horizontal arrows are fallbacks after the configured
+        // bindings, so a rebound Left/Right keeps its configured action.
+        match key {
+            "left" => FactoryViewAction::Close,
+            "right" => self.open_selected(),
+            "r" => match self.selected_run() {
+                Some(run) if Self::available_actions(run).contains(&FactoryAction::Resume) => {
+                    FactoryViewAction::Resume {
+                        run_id: run.run_id.clone(),
+                    }
+                }
+                _ => FactoryViewAction::None,
+            },
+            _ => FactoryViewAction::None,
         }
-        if key == "right" {
-            return self.confirm_selection();
-        }
-        FactoryViewAction::None
     }
 
-    /// One arrow step: the feed walks the run selection (newest-first —
-    /// down the feed reads OLDER), the open action rows walk their
-    /// offered set. A run that left the batch under open rows closes
-    /// them (the fold's own hand-back, reached from the key path too).
+    /// One arrow step over the flattened rows; both ends clamp.
     fn move_selection(&mut self, delta: isize) {
-        match self.mode.clone() {
-            Mode::Feed => {
-                if self.runs.is_empty() {
-                    return;
+        let rows = self.rows();
+        if rows.is_empty() {
+            return;
+        }
+        let current = self
+            .selected
+            .as_ref()
+            .and_then(|selected| rows.iter().position(|row| row == selected))
+            .unwrap_or(0);
+        let next = (current as isize + delta).clamp(0, rows.len() as isize - 1) as usize;
+        self.selected = Some(rows[next].clone());
+    }
+
+    /// The selected state's latest child, as the open action; a header
+    /// opens nothing.
+    fn open_selected(&self) -> FactoryViewAction {
+        self.selected
+            .as_ref()
+            .and_then(|row| self.row_child(row))
+            .map_or(FactoryViewAction::None, |(child_id, _)| {
+                FactoryViewAction::Open {
+                    child_id: child_id.to_string(),
                 }
-                let next = (self.selected as isize + delta).clamp(0, self.runs.len() as isize - 1)
-                    as usize;
-                self.selected = next;
-            }
-            Mode::Actions { run_id, action } => {
-                let Some(run) = self.runs.iter().find(|run| run.run_id == run_id) else {
-                    self.mode = Mode::Feed;
-                    return;
-                };
-                let actions = Self::available_actions(run);
-                let Some(current) = actions.iter().position(|candidate| *candidate == action)
-                else {
-                    return;
-                };
-                let next = (current as isize + delta).clamp(0, actions.len() as isize - 1) as usize;
-                self.mode = Mode::Actions {
-                    run_id,
-                    action: actions[next],
-                };
-            }
+            })
+    }
+
+    /// A state row's latest child and its instance row.
+    fn row_child(&self, row: &FactoryRow) -> Option<(&str, &diagram::FactoryInstance)> {
+        let run = self.runs.iter().find(|run| run.run_id == row.run_id)?;
+        run.nodes.get(row.state_id.as_ref()?)?.latest_child()
+    }
+
+    /// The row's display label: the run's name, `<run>/<state>` for a
+    /// state.
+    fn row_label(&self, row: &FactoryRow) -> String {
+        let run = self
+            .runs
+            .iter()
+            .find(|run| run.run_id == row.run_id)
+            .map_or_else(|| row.run_id.clone(), FactoryRunSnapshot::display_name);
+        match &row.state_id {
+            Some(state_id) => format!("{run}/{state_id}"),
+            None => run,
         }
     }
 
-    /// Enter: the feed opens the selected run's action rows (when the
-    /// run offers any — a terminal run answers nothing), the open rows
-    /// run the selected action and return to the feed. The
-    /// confirmation re-resolves the run and its offered set against
-    /// the CURRENT batch — a fold may have changed the run's state, or
-    /// dropped the run, while the rows were open — so the action lands
-    /// on the folded truth, never a stale target.
-    fn confirm_selection(&mut self) -> FactoryViewAction {
-        match self.mode.clone() {
-            Mode::Feed => {
-                if let Some(run) = self.selected_run() {
-                    if let Some(action) = Self::available_actions(run).first().copied() {
-                        self.mode = Mode::Actions {
-                            run_id: run.run_id.clone(),
-                            action,
-                        };
-                    }
-                }
-                FactoryViewAction::None
-            }
-            Mode::Actions { run_id, action } => {
-                let offered = self
-                    .runs
-                    .iter()
-                    .find(|run| run.run_id == run_id)
-                    .map(Self::available_actions)
-                    .unwrap_or_default();
-                self.mode = Mode::Feed;
-                if offered.contains(&action) {
-                    match action {
-                        FactoryAction::Stop => FactoryViewAction::Stop { run_id },
-                        FactoryAction::Resume => FactoryViewAction::Resume { run_id },
-                    }
-                } else {
-                    FactoryViewAction::None
-                }
-            }
+    /// What a confirmed stop on the row does, when the row can be stopped
+    /// now: a header stops its run while the run offers stop; a state
+    /// stops its latest child while that child runs.
+    fn stop_action(&self, row: &FactoryRow) -> Option<FactoryViewAction> {
+        if row.state_id.is_some() {
+            let (child_id, instance) = self.row_child(row)?;
+            return (instance.status == "running").then(|| FactoryViewAction::StopChild {
+                child_id: child_id.to_string(),
+                label: self.row_label(row),
+            });
         }
+        let run = self.runs.iter().find(|run| run.run_id == row.run_id)?;
+        Self::available_actions(run)
+            .contains(&FactoryAction::Stop)
+            .then(|| FactoryViewAction::Stop {
+                run_id: run.run_id.clone(),
+            })
     }
 
     /// Render the view: one panel per live run (the machine diagram with
@@ -664,10 +692,10 @@ impl FactoryView {
     /// trailing key hint.
     #[must_use]
     pub fn render(&self, theme: &Theme, width: usize, kb: &KeybindingsManager) -> Vec<Line> {
-        // The panel area: one panel per run, each panel's row range
-        // recorded for the budget window below.
+        // The panel area: one panel per run; the selected row's line (and
+        // its panel's start) is recorded for the budget window below.
         let mut panels: Vec<Line> = Vec::new();
-        let mut panel_ranges: Vec<(usize, usize)> = Vec::new();
+        let mut focus: Option<(usize, usize)> = None;
         if self.runs.is_empty() {
             panels.push(vec![Span::raw("")]);
             panels.push(vec![
@@ -687,15 +715,13 @@ impl FactoryView {
                 panels.push(vec![Span::raw("")]);
             }
             let panel_start = panels.len();
-            self.render_panel(theme, width, run, index, &mut panels);
-            panel_ranges.push((panel_start, panels.len()));
+            if let Some(line) = self.render_panel(theme, width, run, index, &mut panels) {
+                focus = Some((panel_start, line));
+            }
         }
-        // The chrome area: the open action rows, the error line from the
-        // last failed refresh, and the trailing key hint. The chrome
-        // always renders — the hint is the view's only key legend, and
-        // the action rows are the page's only action surface.
-        let action_rows = self.action_block(theme);
-        let mut chrome_rows = 2 + action_rows.len();
+        // The chrome area: the error line from the last failed refresh
+        // and the trailing key hint (the view's only key legend).
+        let mut chrome_rows = 2;
         if self.error.is_some() {
             chrome_rows += 2;
         }
@@ -703,35 +729,28 @@ impl FactoryView {
         // renders more rows than the viewport asked for. A tall view
         // windows over the panel area: the leading window keeps the top
         // of the feed (the newest panels — the oldest panels drop
-        // first), and when the focused run's panel falls below it the
-        // window slides to it (the focused run is the actionable one —
-        // the feed's selection, or the run whose action rows are
-        // open — so a stop/resume target never hides behind the
-        // budget); the chrome stays pinned at the end either way.
-        let focus = match &self.mode {
-            Mode::Actions { run_id, .. } => self
-                .runs
-                .iter()
-                .position(|run| &run.run_id == run_id)
-                .unwrap_or(self.selected),
-            Mode::Feed => self.selected,
-        };
+        // first), and when the selected row falls below it the window
+        // slides: to the row's panel header when the row fits under it,
+        // else just far enough to show the row (an open or stop target
+        // never hides behind the budget); the chrome stays pinned at the
+        // end.
         let budget = self.viewport_rows.max(1);
         let panel_budget = budget.saturating_sub(chrome_rows);
         if panels.len() > panel_budget {
-            let mut start = 0;
-            if let Some((focus_start, _)) = panel_ranges.get(focus) {
-                if *focus_start >= panel_budget {
-                    start = *focus_start;
+            let start = match focus {
+                Some((panel_start, line)) if line >= panel_budget => {
+                    if line - panel_start < panel_budget {
+                        panel_start
+                    } else {
+                        line + 1 - panel_budget
+                    }
                 }
-            }
-            if start > 0 {
-                panels.drain(..start);
-            }
+                _ => 0,
+            };
+            panels.drain(..start);
             panels.truncate(panel_budget);
         }
         let mut rows = panels;
-        rows.extend(action_rows);
         if let Some(error) = &self.error {
             rows.push(vec![Span::raw("")]);
             rows.push(vec![
@@ -740,11 +759,8 @@ impl FactoryView {
             ]);
         }
         rows.push(vec![Span::raw("")]);
-        let hint = match self.mode {
-            Mode::Feed => Self::feed_hint(kb),
-            Mode::Actions { .. } => Self::actions_hint(kb),
-        };
-        rows.push(vec![Span::raw("  "), theme.fg_span(ThemeColor::Dim, hint)]);
+        let (hint, hint_color) = self.hint(kb);
+        rows.push(vec![Span::raw("  "), theme.fg_span(hint_color, hint)]);
         // A degenerate budget (a sub-chrome viewport on a short terminal)
         // tail-clips: the hint is the chrome's last row and always survives.
         if rows.len() > budget {
@@ -755,76 +771,53 @@ impl FactoryView {
             .collect()
     }
 
-    /// The feed's bottom hint line (the heartbeats/bash pages' grammar):
-    /// the arrows move, Enter opens the selected run's action rows, Esc
-    /// closes.
-    fn feed_hint(kb: &KeybindingsManager) -> String {
+    /// The bottom hint line: the confirm prompt while a stop is armed,
+    /// else the keys, with stop/resume only when the selected row offers
+    /// them.
+    fn hint(&self, kb: &KeybindingsManager) -> (String, ThemeColor) {
         let key = |binding: &str, fallback: &str| {
             kb.first_key(binding)
                 .map_or_else(|| fallback.to_string(), |key| format_key_text(&key))
         };
-        format!(
-            "{}/{} move \u{b7} {} actions \u{b7} {} close",
-            key("tui.select.up", "\u{2191}"),
-            key("tui.select.down", "\u{2193}"),
-            key("tui.select.confirm", "Enter"),
-            key("tui.select.cancel", "Esc"),
-        )
-    }
-
-    /// The open action rows' hint line: the arrows walk the actions,
-    /// Enter runs the tracked one, Esc backs out to the feed.
-    fn actions_hint(kb: &KeybindingsManager) -> String {
-        let key = |binding: &str, fallback: &str| {
-            kb.first_key(binding)
-                .map_or_else(|| fallback.to_string(), |key| format_key_text(&key))
-        };
-        format!(
-            "{}/{} action \u{b7} {} run \u{b7} {} back",
-            key("tui.select.up", "\u{2191}"),
-            key("tui.select.down", "\u{2193}"),
-            key("tui.select.confirm", "Enter"),
-            key("tui.select.cancel", "Esc"),
-        )
-    }
-
-    /// The open action rows (the heartbeats picker's drill-in, one
-    /// level): a blank, a header naming the run, one row per offered
-    /// action with the tracked one marked. The block rides the
-    /// trailing chrome — the panel window's budget keeps it and the
-    /// hint painted together.
-    fn action_block(&self, theme: &Theme) -> Vec<Line> {
-        let Mode::Actions { run_id, action } = &self.mode else {
-            return Vec::new();
-        };
-        let Some(run) = self.runs.iter().find(|run| &run.run_id == run_id) else {
-            return Vec::new();
-        };
-        let mut rows = vec![vec![Span::raw("")]];
-        let mut header: Line = vec![Span::raw("  ")];
-        header.push(theme.fg_span(ThemeColor::ToolTitle, "actions: "));
-        header.push(theme.fg_span(ThemeColor::Text, run.display_name()));
-        rows.push(header);
-        for offered in Self::available_actions(run) {
-            let tracked = offered == *action;
-            let mut row: Line = vec![Span::raw("  ")];
-            row.push(Span::raw(if tracked { "▸ " } else { "  " }));
-            row.push(theme.fg_span(
-                if tracked {
-                    ThemeColor::Text
-                } else {
-                    ThemeColor::Muted
-                },
-                offered.label().to_string(),
-            ));
-            rows.push(row);
+        let stop_key = key("app.agents.delete", "ctrl+x");
+        if let Some((armed, _)) = &self.armed {
+            return (
+                format!(
+                    "stop {}? {stop_key} again to confirm, any other key cancels",
+                    self.row_label(armed)
+                ),
+                ThemeColor::Warning,
+            );
         }
-        rows
+        let mut parts = vec![
+            format!(
+                "{}/{} move",
+                key("tui.select.up", "\u{2191}"),
+                key("tui.select.down", "\u{2193}"),
+            ),
+            format!("{}/\u{2192} open", key("tui.select.confirm", "Enter")),
+            "\u{2190} back".to_string(),
+        ];
+        if self
+            .selected
+            .as_ref()
+            .is_some_and(|selected| self.stop_action(selected).is_some())
+        {
+            parts.push(format!("{stop_key} stop"));
+        }
+        if self
+            .selected_run()
+            .is_some_and(|run| Self::available_actions(run).contains(&FactoryAction::Resume))
+        {
+            parts.push("r resume".to_string());
+        }
+        (parts.join(" \u{b7} "), ThemeColor::Dim)
     }
 
     /// One run panel: the header (name, state, changed marker), the stats
     /// line (budget consumed, parallel, instances), the machine diagram,
-    /// and the milestone tail.
+    /// and the milestone tail. Returns the selected row's line in `rows`
+    /// when the selection is in this panel.
     fn render_panel(
         &self,
         theme: &Theme,
@@ -832,11 +825,16 @@ impl FactoryView {
         run: &FactoryRunSnapshot,
         index: usize,
         rows: &mut Vec<Line>,
-    ) {
-        let selected = index == self.selected;
+    ) -> Option<usize> {
+        let selected = self
+            .selected
+            .as_ref()
+            .filter(|row| row.run_id == run.run_id);
+        let header_selected = selected.is_some_and(|row| row.state_id.is_none());
+        let selected_state = selected.and_then(|row| row.state_id.as_deref());
         let changed = self.recent_change.get(index).copied().unwrap_or(false);
         // The header: the selection marker, the run's name, its state.
-        let mut header: Line = vec![Span::raw(if selected { "▸ " } else { "  " })];
+        let mut header: Line = vec![Span::raw(if header_selected { "▸ " } else { "  " })];
         header.push(theme.fg_span(ThemeColor::ToolTitle, "factory: "));
         header.push(theme.fg_span(ThemeColor::Text, run.display_name()));
         let state_text = match run.state.as_deref() {
@@ -857,10 +855,11 @@ impl FactoryView {
             Span::raw("  "),
             theme.fg_span(ThemeColor::Muted, Self::stats_line(run, running)),
         ];
+        let header_line = rows.len();
         rows.push(header);
         rows.push(truncate_line(&stats, width, ""));
         rows.push(vec![Span::raw("")]);
-        Self::render_diagram(theme, run, rows);
+        let state_line = Self::render_diagram(theme, run, selected_state, rows);
         if !run.milestones.is_empty() {
             let tail = run
                 .milestones
@@ -876,6 +875,11 @@ impl FactoryView {
                 theme.fg_span(ThemeColor::MdQuote, "milestones: "),
                 theme.fg_span(ThemeColor::Muted, tail),
             ]);
+        }
+        if header_selected {
+            Some(header_line)
+        } else {
+            state_line
         }
     }
 
@@ -905,10 +909,17 @@ impl FactoryView {
     }
 
     /// The machine diagram: every state in the machine's declared order as
-    /// a status-glyphed row, its outgoing transitions as connector rows
-    /// (joins once, back edges marked, the last-fired edges marked and
-    /// colored).
-    fn render_diagram(theme: &Theme, run: &FactoryRunSnapshot, rows: &mut Vec<Line>) {
+    /// a status-glyphed row (the selected state marked), its outgoing
+    /// transitions as connector rows (joins once, back edges marked, the
+    /// last-fired edges marked and colored). Returns the selected state's
+    /// line in `rows`.
+    fn render_diagram(
+        theme: &Theme,
+        run: &FactoryRunSnapshot,
+        selected_state: Option<&str>,
+        rows: &mut Vec<Line>,
+    ) -> Option<usize> {
+        let mut selected_line = None;
         let order: Vec<&str> = run.states.iter().map(|state| state.id.as_str()).collect();
         let position = |id: &str| order.iter().position(|candidate| *candidate == id);
         for state in &run.states {
@@ -917,13 +928,25 @@ impl FactoryView {
             // status: a multi-entry state whose latest entry settled while
             // an earlier one still runs stays bright (is_active covers
             // every entry's status, not just the newest).
+            // A state without a session (never entered, or no child
+            // spawned yet) paints dim whatever its status: it is not
+            // selectable.
             let (glyph, color) = match node {
+                Some(node) if node.latest_child().is_none() => {
+                    (node_glyph(&node.status).0, ThemeColor::Dim)
+                }
                 Some(node) if node.is_active() => ("●", ThemeColor::Accent),
                 Some(node) => node_glyph(&node.status),
                 None => ("○", ThemeColor::Dim),
             };
+            let marker = if selected_state == Some(state.id.as_str()) {
+                selected_line = Some(rows.len());
+                " ▸ "
+            } else {
+                "   "
+            };
             let mut row: Line = vec![
-                Span::raw("   "),
+                Span::raw(marker),
                 theme.fg_span(color, glyph.to_string()),
                 Span::raw(" "),
                 // The whole row paints in the node's status color: active
@@ -943,7 +966,9 @@ impl FactoryView {
                     row.push(theme.fg_span(color, format!(" ({occupancy})")));
                 }
             }
-            if let Some(subagent) = &state.subagent {
+            if let Some(python) = &state.python {
+                row.push(theme.fg_span(ThemeColor::Dim, format!(" (py {python})")));
+            } else if let Some(subagent) = &state.subagent {
                 row.push(theme.fg_span(ThemeColor::Dim, format!(" ({subagent})")));
             }
             let status_text =
@@ -995,6 +1020,7 @@ impl FactoryView {
                 rows.push(row);
             }
         }
+        selected_line
     }
 }
 

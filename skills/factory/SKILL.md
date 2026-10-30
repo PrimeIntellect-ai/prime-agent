@@ -52,6 +52,9 @@ user to run `/factory on` and restart the client.
   manages them. The seeds are `builder`, `pr-manager`, and `review-sweep`.
 - The TUI factory page: the activity dock's `⚙ N factory` group (Enter or
   click) opens one live diagram per run, newest run first. The up/down
-  arrows move the selection, Enter opens the selected run's action rows
-  (stop, or resume while it is paused — arrows to walk, Enter to run),
-  Esc closes.
+  arrows walk the run headers and the states that spawned a child;
+  Enter or Right opens the selected state's latest child session, and
+  Left or Esc closes the page. Ctrl+X (the agents view's stop key) twice
+  stops the selected row: the whole run on its header, or the state's
+  running child (that attempt fails under the state's `retries` and
+  `failure_policy`). `r` resumes a paused run.

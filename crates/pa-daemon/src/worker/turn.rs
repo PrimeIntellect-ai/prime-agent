@@ -45,7 +45,7 @@ impl TurnRunner {
     pub(super) async fn run(self) {
         loop {
             let engine = self.engine.clone();
-            let item: Option<Vec<QueuedItem>> = {
+            let item: Option<(Lane, Vec<QueuedItem>)> = {
                 let mut core = self.core.lock().unwrap();
                 if core.shutdown_requested {
                     drop(core);
@@ -69,7 +69,7 @@ impl TurnRunner {
                     core.abort_requested = false;
                     core.retry_abort_requested = false;
                     core.running_tool_calls.clear();
-                    Some(items)
+                    Some((Lane::Steering, items))
                 } else if core.follow_up.front().is_some() {
                     let items = gather_delivery_batch(&mut core, Lane::FollowUp);
                     core.running_admission_ids = items
@@ -80,13 +80,13 @@ impl TurnRunner {
                     core.abort_requested = false;
                     core.retry_abort_requested = false;
                     core.running_tool_calls.clear();
-                    Some(items)
+                    Some((Lane::FollowUp, items))
                 } else {
                     core.busy = false;
                     None
                 }
             };
-            if let Some(items) = item {
+            if let Some((lane, items)) = item {
                 // No pickup checkpoint: admission recorded its busy evidence; the
                 // settle's `turn_end` verdict parks the session later. The item leaves
                 // the queue projection BEFORE its turn starts (a stale row would
@@ -109,7 +109,7 @@ impl TurnRunner {
                     let _ = self.emit_action_update(&snapshot);
                 }
                 self.push_roster_delta();
-                self.run_turn(engine, items).await;
+                self.run_turn(engine, lane, items).await;
             } else {
                 self.idle_notify.notify_waiters();
                 // Every park re-stamps the activity end: the idle-eviction
@@ -312,7 +312,8 @@ impl TurnRunner {
     pub(super) async fn run_turn(
         &self,
         engine: std::sync::Arc<dyn SessionEngine>,
-        items: Vec<QueuedItem>,
+        lane: Lane,
+        mut items: Vec<QueuedItem>,
     ) {
         let Some((first, batched)) = items.split_first() else {
             return;
@@ -390,8 +391,12 @@ impl TurnRunner {
             .iter()
             .filter_map(|item| item.admission_id.clone())
             .collect();
-        let items_done: Vec<oneshot::Sender<TurnSettle>> =
-            items.into_iter().filter_map(|item| item.done).collect();
+        // The done senders leave the items behind (done = None): on
+        // shutdown, the batch's unaccepted tail returns to its lane below.
+        let items_done: Vec<oneshot::Sender<TurnSettle>> = items
+            .iter_mut()
+            .filter_map(|item| item.done.take())
+            .collect();
         let turn_outcome = Arc::new(std::sync::Mutex::new(None::<TurnSettle>));
         let turn_outcome_slot = Arc::clone(&turn_outcome);
         // Whether the engine surfaced any `agent_end` this run (the
@@ -421,11 +426,17 @@ impl TurnRunner {
         // post-join flag read raced `handle_abort`).
         let abort_gate_armed = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let abort_gate_armed_seen = Arc::clone(&abort_gate_armed);
+        let batch_len = items.len();
+        // The accepted prefix must survive an engine panic after persistence.
+        let accepted_prefix = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let accepted_prefix_seen = Arc::clone(&accepted_prefix);
         let turn = tokio::task::spawn_blocking(move || {
             // The engine's own terminal `turn_end` frame keeps the
             // trailing `Done` fallback silent.
             let mut engine_turn_ended = false;
-            let mut active_committed = false;
+            // The picked batch's accepted rows (primary, then one per
+            // batched item) that passed the abort gate and persisted.
+            let mut accepted_rows = 0usize;
             let mut active_running = false;
             // Restored next-turn rows are PREFIX rows: the "Starting" row
             // drops at the accepted row. The flip closure reads the flag
@@ -664,17 +675,20 @@ impl TurnRunner {
                 // The `committing`/`running` transitions ride the events that mark the moments.
                 let mut action_frame: Option<SessionActionSnapshot> = None;
                 if !emitting_prefix_rows.get()
-                    && !active_committed
+                    && accepted_rows < batch_len
                     && matches!(
                         event,
                         EngineEvent::UserMessage(_) | EngineEvent::CustomMessage(_)
                     )
                 {
-                    active_committed = true;
-                    if let Some(active) = core.active_action.as_mut() {
-                        active.phase = "committing".to_string();
+                    accepted_rows += 1;
+                    accepted_prefix_seen.store(accepted_rows, std::sync::atomic::Ordering::SeqCst);
+                    if accepted_rows == 1 {
+                        if let Some(active) = core.active_action.as_mut() {
+                            active.phase = "committing".to_string();
+                        }
+                        action_frame = Some(session_snapshot(&core));
                     }
-                    action_frame = Some(session_snapshot(&core));
                 } else if !active_running
                     && matches!(
                         event,
@@ -689,6 +703,9 @@ impl TurnRunner {
                 }
                 let done_result = match &event {
                     EngineEvent::Done(result) => {
+                        if result.is_ok() {
+                            core.turn_completed = true;
+                        }
                         pa_core::session_engine::compaction_trace::trace(
                             "turn.done_emitted",
                             &serde_json::json!({
@@ -1047,6 +1064,7 @@ impl TurnRunner {
             engine.run_prompt(prompt_index, request, &aborted_probe, &mut emit);
         });
         let _ = turn.await;
+        let accepted_rows = accepted_prefix.load(std::sync::atomic::Ordering::SeqCst);
         // The emit path is joined: a stale parked partial must not
         // surface after the settle events.
         coalescer.close();
@@ -1055,6 +1073,18 @@ impl TurnRunner {
         let engine_reported_run_end = engine_agent_end.load(std::sync::atomic::Ordering::SeqCst);
         let more_queued = {
             let mut core = self.core.lock().unwrap();
+            // A shutdown never loses admitted input: the batch items whose
+            // transcript row never persisted exist nowhere else, so they
+            // return to the front of their lane, in order.
+            if core.shutdown_requested && !core.turn_cancelled {
+                let lane_items = match lane {
+                    Lane::Steering => &mut core.steering,
+                    Lane::FollowUp => &mut core.follow_up,
+                };
+                for item in items.into_iter().skip(accepted_rows).rev() {
+                    lane_items.push_front(item);
+                }
+            }
             let more_queued = !core.steering.is_empty() || !core.follow_up.is_empty();
             // Publish the note clear and idle transition atomically to
             // roster readers, which capture core then the engine note.

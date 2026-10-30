@@ -107,18 +107,29 @@ fn cell_code(card: &ToolCallCard) -> &str {
 }
 
 /// Render the ipython cell card: the fixed summary line, then the expanded
-/// code and output rows when conversation detail is `all`.
+/// code and output rows when the card's `detail` is `all`. The sent agent
+/// messages' bodies follow the conversation `level` instead.
 #[must_use]
 pub fn render(
     card: &ToolCallCard,
     frame: usize,
     detail: Detail,
+    level: Detail,
     theme: &Theme,
     width: usize,
     show_images: bool,
 ) -> Vec<Line> {
     let mut lines = RowOutput::paint();
-    layout(card, frame, detail, theme, width, show_images, &mut lines);
+    layout(
+        card,
+        frame,
+        detail,
+        level,
+        theme,
+        width,
+        show_images,
+        &mut lines,
+    );
     lines.into_lines()
 }
 
@@ -126,19 +137,31 @@ pub(super) fn count(
     card: &ToolCallCard,
     frame: usize,
     detail: Detail,
+    level: Detail,
     theme: &Theme,
     width: usize,
     show_images: bool,
 ) -> usize {
     let mut lines = RowOutput::count();
-    layout(card, frame, detail, theme, width, show_images, &mut lines);
+    layout(
+        card,
+        frame,
+        detail,
+        level,
+        theme,
+        width,
+        show_images,
+        &mut lines,
+    );
     lines.len()
 }
 
+#[allow(clippy::too_many_arguments)]
 fn layout(
     card: &ToolCallCard,
     frame: usize,
     detail: Detail,
+    level: Detail,
     theme: &Theme,
     width: usize,
     show_images: bool,
@@ -165,14 +188,16 @@ fn layout(
             code,
         )
     });
-    // TS renders the sent-message receipt rows even when the cell is
-    // collapsed; the body opens up only when expanded.
+    // The sent-message receipt rows render even when the cell is collapsed. They are agent
+    // messages of their own, so their bodies follow the conversation level, not a click on
+    // the card.
+    let messages_expanded = level.tool_output_expanded();
     if !detail.tool_output_expanded() {
-        render_sent_agent_messages(lines, &details, false, theme, width);
+        render_sent_agent_messages(lines, &details, messages_expanded, theme, width);
         return;
     }
     let has_code = render_code(lines, code, theme, width);
-    render_sent_agent_messages(lines, &details, true, theme, width);
+    render_sent_agent_messages(lines, &details, messages_expanded, theme, width);
     render_output(card, &details, lines, has_code, show_images, theme, width);
     // Image blocks render below the card when shown (TS adds these rows
     // for every tool shell).
