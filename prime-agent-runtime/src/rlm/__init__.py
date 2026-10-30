@@ -193,6 +193,20 @@ async def spawn(
     ``cwd`` starts the child in that directory (relative to the session cwd); defaults
     to the session cwd.
     """
+    return await _spawn(prompt, name=name, model=model, thinking=thinking, cwd=cwd)
+
+
+async def _spawn(
+    prompt: str,
+    *,
+    name: str,
+    model: str | None = None,
+    thinking: str | None = None,
+    cwd: str | None = None,
+    factory: dict[str, str] | None = None,
+) -> RLMSpawnHandle:
+    """``spawn`` plus the factory executor's run tag (``{runId, specId,
+    stateId}``), which the host records on the child's ledger spawn edge."""
     if not isinstance(prompt, str):
         raise TypeError(f"prompt must be str, got {type(prompt).__name__}")
     kwargs: dict[str, Any] = {"name": name}
@@ -202,6 +216,8 @@ async def spawn(
         kwargs["thinking"] = thinking
     if cwd is not None:
         kwargs["cwd"] = cwd
+    if factory is not None:
+        kwargs["factory"] = factory
     # Wire type stays "rlm.run" so kernels and hosts of different versions stay compatible.
     payload = await host_request("rlm.run", {"prompt": prompt, "kwargs": kwargs})
     return _spawn_handle_from_payload(payload)

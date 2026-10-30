@@ -4,7 +4,7 @@
 use std::time::Duration;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum StatusTone {
+pub(crate) enum StatusTone {
     Muted,
     Warning,
     Error,

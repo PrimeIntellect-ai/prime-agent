@@ -1293,6 +1293,7 @@ mod tests {
             thinking: None,
             cwd: None,
             spawned_by_request_id: None,
+            factory: None,
         });
         std::future::poll_fn(|context| {
             assert!(spawn.as_mut().poll(context).is_pending());

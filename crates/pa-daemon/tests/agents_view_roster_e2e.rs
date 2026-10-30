@@ -426,6 +426,7 @@ async fn rlm_children_key_the_roster_by_parent_path_and_child_id() {
             thinking: None,
             cwd: None,
             spawned_by_request_id: None,
+            factory: None,
         })
         .await
         .expect("spawn child");
