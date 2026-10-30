@@ -845,6 +845,8 @@ pub(crate) async fn build_headless_engine_with(
             extra_builtin_skill_overrides: vec![],
             rlm_subagent_host,
             rlm_usage_store: None,
+
+            inbox: None,
             progress_note_emit: None,
             rlm_depth,
             factory_child,

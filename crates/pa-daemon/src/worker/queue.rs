@@ -585,6 +585,155 @@ pub(crate) fn admit_kernel_notice(
     work_notify.notify_one();
 }
 
+/// The queue-strip coalescing key of the inbox arrival notice: one
+/// queued short row covers every arrival of the busy window (a later
+/// arrival replaces it instead of stacking).
+pub(crate) const INBOX_ARRIVAL_QUEUE_KEY: &str = "inbox:arrival";
+/// The coalescing key of the periodic unread reminder.
+pub(crate) const INBOX_REMINDER_QUEUE_KEY: &str = "inbox:reminder";
+
+/// Admit one inbox arrival (the daemon's inbox routing of a
+/// `bash.completed` or `factory.progress` notice): the message lands in
+/// the session's durable inbox and ONE short steering notice wakes the
+/// agent. Arrivals inside one busy window coalesce: while a notice row
+/// is still queued, a later arrival extends and replaces it (the batch
+/// the queued row covers); the delivered row leaves the queue, so the
+/// next arrival starts a fresh batch.
+pub(crate) fn admit_inbox_notice(
+    recovery: &std::sync::Mutex<Option<WorkerRecoveryJournal>>,
+    core: &Arc<Mutex<SessionCore>>,
+    work_notify: &Arc<Notify>,
+    inbox: &std::sync::Arc<pa_core::session_engine::inbox::SessionInbox>,
+    arrivals: &pa_core::session_engine::inbox::InboxArrivals,
+    notice: pa_core::session_engine::inbox::InboxNotice,
+    session_is_closed: impl Fn() -> bool,
+) {
+    // The busy sample, the batch, and the push share ONE critical
+    // section, like the notice admission below: a turn starting between
+    // them would queue an invisible row for a busy session.
+    let mut core_guard = core.lock().unwrap();
+    // A notice that raced past the sink's first check is refused here
+    // (the close's clear wipes the lanes); its message already made the
+    // journal durable, which is honest — it did arrive.
+    if session_is_closed() {
+        return;
+    }
+    let message = inbox.push(notice, pa_core::autonomous::now_millis());
+    let (policy, queue_visible) = if core_guard.busy {
+        (TurnPolicy::Queued, true)
+    } else {
+        (TurnPolicy::Injected, false)
+    };
+    {
+        let mut arrivals = arrivals.lock().unwrap();
+        // A queued notice row covers its arrivals until it delivers; no
+        // row means the last notice already delivered (or was cleared).
+        let coalescing = core_guard
+            .steering
+            .iter()
+            .chain(core_guard.follow_up.iter())
+            .any(|item| item.queue_key.as_deref() == Some(INBOX_ARRIVAL_QUEUE_KEY));
+        if !coalescing {
+            arrivals.clear();
+        }
+        arrivals.push(message);
+        let (count, _, _) = inbox.count();
+        let (preview, text) = pa_core::session_engine::inbox::arrival_notice(&arrivals, count);
+        // The replacement pattern the scheduler's queue keys use: the
+        // fresh row replaces the coalesced one instead of stacking.
+        core_guard
+            .steering
+            .retain(|item| item.queue_key.as_deref() != Some(INBOX_ARRIVAL_QUEUE_KEY));
+        core_guard
+            .follow_up
+            .retain(|item| item.queue_key.as_deref() != Some(INBOX_ARRIVAL_QUEUE_KEY));
+        core_guard.steering.push_back(QueuedItem {
+            priority: QueuePriority::Background,
+            preview: Some(preview),
+            message: text,
+            custom_message: None,
+            agent_message: None,
+            queue_key: Some(INBOX_ARRIVAL_QUEUE_KEY.to_string()),
+            admission_id: None,
+            images: Vec::new(),
+            done: None,
+            queue_visible,
+            policy,
+            forced_batch: false,
+        });
+    }
+    // The checkpoint re-locks the core (documented order: recovery lock
+    // first), so the admission's guard must release first.
+    drop(core_guard);
+    // The busy-evidence checkpoint: the notice is undelivered live
+    // work until its turn settles.
+    checkpoint_queue_recovery(
+        recovery,
+        core,
+        QueueCheckpoint::Admitted {
+            operation: "steer_queued",
+        },
+    );
+    work_notify.notify_one();
+}
+
+/// Admit one periodic unread reminder: while the inbox stays non-empty,
+/// a steering row repeats the waiting count (the reminderIntervalMs
+/// cycle in `agent_inbox.rs`); an empty inbox admits nothing. The queue
+/// key keeps one row — a later reminder replaces the queued one.
+pub(crate) fn admit_inbox_reminder(
+    recovery: &std::sync::Mutex<Option<WorkerRecoveryJournal>>,
+    core: &Arc<Mutex<SessionCore>>,
+    work_notify: &Arc<Notify>,
+    inbox: &std::sync::Arc<pa_core::session_engine::inbox::SessionInbox>,
+    session_is_closed: impl Fn() -> bool,
+) {
+    let (count, oldest_arrived_at_ms, _) = inbox.count();
+    if count == 0 {
+        return;
+    }
+    let waited_ms =
+        pa_core::autonomous::now_millis().saturating_sub(oldest_arrived_at_ms.unwrap_or_default());
+    let message = pa_core::session_engine::inbox::reminder_notice(count, waited_ms);
+    let mut core_guard = core.lock().unwrap();
+    if session_is_closed() {
+        return;
+    }
+    let (policy, queue_visible) = if core_guard.busy {
+        (TurnPolicy::Queued, true)
+    } else {
+        (TurnPolicy::Injected, false)
+    };
+    {
+        core_guard
+            .steering
+            .retain(|item| item.queue_key.as_deref() != Some(INBOX_REMINDER_QUEUE_KEY));
+        core_guard.steering.push_back(QueuedItem {
+            priority: QueuePriority::Background,
+            preview: Some("Inbox reminder".to_string()),
+            message,
+            custom_message: None,
+            agent_message: None,
+            queue_key: Some(INBOX_REMINDER_QUEUE_KEY.to_string()),
+            admission_id: None,
+            images: Vec::new(),
+            done: None,
+            queue_visible,
+            policy,
+            forced_batch: false,
+        });
+    }
+    drop(core_guard);
+    checkpoint_queue_recovery(
+        recovery,
+        core,
+        QueueCheckpoint::Admitted {
+            operation: "steer_queued",
+        },
+    );
+    work_notify.notify_one();
+}
+
 /// Withdraw one queued bash completion notice: the kernel read the result
 /// before the notice delivered (pids are reused, so the command disambiguates).
 pub(crate) fn withdraw_bash_completion_notice(
