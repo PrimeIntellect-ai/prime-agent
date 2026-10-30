@@ -71,14 +71,20 @@ impl SessionUi {
         }
     }
 
-    /// Refresh the activity dock and the title's cost (the only writer
-    /// of `chrome.cost_usd`).
-    pub(super) fn update_subagent_summary(&mut self, view: &mut AgentView) {
-        let identity = crate::subagents::SessionIdentity::new(
+    /// This session's family-addressing identity: the keys its roster
+    /// children reference it by.
+    pub(super) fn session_identity(&self) -> crate::subagents::SessionIdentity {
+        crate::subagents::SessionIdentity::new(
             (!self.active_session_id.is_empty()).then(|| self.active_session_id.clone()),
             (!self.session_id.is_empty()).then(|| self.session_id.clone()),
             self.session_file.clone(),
-        );
+        )
+    }
+
+    /// Refresh the activity dock and the title's cost (the only writer
+    /// of `chrome.cost_usd`).
+    pub(super) fn update_subagent_summary(&mut self, view: &mut AgentView) {
+        let identity = self.session_identity();
         self.subagent_counts = crate::subagents::count_descendants(&self.roster, &identity);
         // The title's spend is the family rollup the agents view bills the
         // session's row.
@@ -111,9 +117,8 @@ impl SessionUi {
         let goal_label = tray_goal_label(&self.goal_view.goal);
         // The dock's shells group lists only runs actively running right now (operator scoping):
         // finished runs stay in the bash view.
-        let shells = crate::bash_view::dock_shell_items(&crate::bash_view::parse_bash_activities(
-            &self.bash_activities,
-        ));
+        let shell_rows = crate::bash_view::parse_bash_activities(&self.bash_activities);
+        let shells = crate::bash_view::dock_shell_items(&shell_rows);
         // The dock's factory group lists live runs only — the view's one liveness rule
         // (`FactoryRunSnapshot::is_live`: a live state, or children still in flight — a `done`
         // run whose resident children still run keeps its entry like its panel and its stop
@@ -137,6 +142,7 @@ impl SessionUi {
             ),
             heartbeats_paused: paused_heartbeat_count(&self.heartbeat_catalog),
             shells,
+            shells_persistent: crate::bash_view::ShellCounts::of(&shell_rows).persistent,
             factory_runs,
             factory_counts: crate::factory_view::FactoryRunCounts::of(&runs),
             // The group renders exactly while the daemon advertises the
@@ -236,11 +242,13 @@ impl SessionUi {
         self.dirty = true;
     }
 
-    /// Mount the panel an agents-view activity line requested; its close returns to the agents
+    /// Mount the panel an agents-view activity line (or a return to the page that requested the
+    /// session just left) asked for; with `closes_to_agents_view`, its close returns to the agents
     /// view.
     pub(crate) fn open_agents_view_panel(
         &mut self,
         panel: crate::interactive::SessionPanel,
+        closes_to_agents_view: bool,
         view: &mut AgentView,
     ) {
         match panel {
@@ -250,9 +258,16 @@ impl SessionUi {
                     bash_view.select(&id);
                 }
             }
-            crate::interactive::SessionPanel::FactoryRuns => self.open_factory_page(view),
+            crate::interactive::SessionPanel::FactoryRuns { row } => {
+                self.open_factory_page(view);
+                if let (Some(row), Some(factory_view)) = (row, view.factory_view.as_mut()) {
+                    factory_view.select(row);
+                    self.sync_factory_selection(view);
+                }
+            }
         }
-        self.panel_returns_to_agents_view = view.bash_view.is_some() || view.factory_view.is_some();
+        self.panel_returns_to_agents_view =
+            closes_to_agents_view && (view.bash_view.is_some() || view.factory_view.is_some());
     }
 
     /// The close of a panel the agents view requested hands the pane back to it; returns whether

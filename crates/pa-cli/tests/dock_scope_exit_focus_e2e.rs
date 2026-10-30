@@ -277,6 +277,7 @@ async fn scope_exit_keeps_the_subagents_item(exit_key: &'static str) {
             child: child_path.to_string_lossy().to_string(),
             depth: 1,
             name: "scope exit worker".to_string(),
+            factory: None,
         })
         .expect("append spawn edge");
 

@@ -1,5 +1,6 @@
 use super::*;
 use crate::agents_view_state::reconcile_unified_sessions;
+use crate::bash_view::ShellCounts;
 use serde_json::json;
 use std::collections::{HashMap, HashSet};
 
@@ -59,7 +60,10 @@ fn rows_with_activity(
         &expanded,
         &HashSet::default(),
         &rollups,
-        activity,
+        &ActivityCounts {
+            live: activity.clone(),
+            ..ActivityCounts::default()
+        },
         None,
     )
 }
@@ -613,7 +617,7 @@ fn saved_child_nests_under_its_saved_parent() {
         &std::collections::HashSet::default(),
         &HashSet::default(),
         &rollups,
-        &HashMap::new(),
+        &ActivityCounts::default(),
         None,
     );
     assert_eq!(rows.len(), 2);
@@ -627,7 +631,7 @@ fn saved_child_nests_under_its_saved_parent() {
         &expanded,
         &HashSet::default(),
         &rollups,
-        &HashMap::new(),
+        &ActivityCounts::default(),
         None,
     );
     assert_eq!(rows[2].title, "saved child");
@@ -810,7 +814,7 @@ fn rollups_sum_costs_over_descendants_only() {
         &std::collections::HashSet::default(),
         &HashSet::default(),
         &empty,
-        &HashMap::new(),
+        &ActivityCounts::default(),
         None,
     );
     // Without rollups the per-pass walk fills the same totals.
@@ -877,7 +881,7 @@ fn an_active_query_ranks_hits_globally_ancestors_sink_last() {
         &expanded,
         &HashSet::default(),
         &rollups,
-        &HashMap::new(),
+        &ActivityCounts::default(),
         None,
     );
     let titles: Vec<&str> = rows.iter().map(|row| row.title.as_str()).collect();
@@ -954,7 +958,7 @@ fn equal_scores_break_ties_by_recency_not_section() {
         &std::collections::HashSet::default(),
         &HashSet::default(),
         &rollups,
-        &HashMap::new(),
+        &ActivityCounts::default(),
         None,
     );
     assert_eq!(
@@ -1038,7 +1042,7 @@ fn the_summary_line_bills_the_deleted_descendant_bucket() {
         &HashSet::new(),
         &HashSet::new(),
         &rollups,
-        &HashMap::new(),
+        &ActivityCounts::default(),
         None,
     );
     let summary = rows
@@ -1233,7 +1237,7 @@ fn a_ledger_child_nests_across_the_windows_path_forms() {
         &HashSet::default(),
         &HashSet::default(),
         &rollups,
-        &HashMap::new(),
+        &ActivityCounts::default(),
         None,
     );
     // RED on main: the child's `file:\\?\...` parent key never matches the
@@ -1260,7 +1264,10 @@ fn activity(entries: &[(&str, usize, usize, usize)]) -> HashMap<String, SessionA
             (
                 active.to_string(),
                 SessionActivity {
-                    shells,
+                    shells: ShellCounts {
+                        running: shells,
+                        persistent: 0,
+                    },
                     factory_runs: crate::factory_view::FactoryRunCounts { running, paused },
                 },
             )
@@ -1341,6 +1348,101 @@ fn activity_lines_without_subagents_and_without_counts() {
         rows.len(),
         3,
         "b has no lines and a has no shells line: {titles:?}"
+    );
+}
+
+fn shells_lines(rows: &[AgentsViewRow]) -> Vec<(&str, &str)> {
+    rows.iter()
+        .filter(|row| row.kind == RowKind::Shells)
+        .map(|row| (row.identity.as_str(), row.title.as_str()))
+        .collect()
+}
+
+/// A live node's shells line breaks out its persistent shells; without any it keeps the plain
+/// count. The kernel lists its persistent shells too, so they count once.
+#[test]
+fn a_live_shells_line_counts_its_persistent_shells() {
+    let roster = vec![
+        roster_entry("a", "idle", &parent_summary("a")),
+        roster_entry("b", "idle", &parent_summary("b")),
+    ];
+    let shells = |running, persistent| SessionActivity {
+        shells: ShellCounts {
+            running,
+            persistent,
+        },
+        factory_runs: crate::factory_view::FactoryRunCounts::default(),
+    };
+    let records = reconcile_unified_sessions(&roster, &[], None);
+    let rows = build_rows(
+        &records,
+        None,
+        &HashSet::default(),
+        &HashSet::default(),
+        &compute_rollups(&records),
+        &ActivityCounts {
+            live: HashMap::from([
+                ("a-live".to_string(), shells(2, 1)),
+                ("b-live".to_string(), shells(2, 0)),
+            ]),
+            persistent_shells: HashMap::from([(
+                "a".to_string(),
+                ShellCounts {
+                    running: 1,
+                    persistent: 1,
+                },
+            )]),
+        },
+        None,
+    );
+    let mut lines = shells_lines(&rows);
+    lines.sort_unstable();
+    assert_eq!(
+        lines,
+        vec![
+            ("shells:file:/x/a.jsonl", "$ 2 shells · 1 persistent"),
+            ("shells:file:/x/b.jsonl", "$ 2 shells"),
+        ]
+    );
+}
+
+/// A node's persistent shells come from the poll's daemon list (by `sessionId`), with or without
+/// a live kernel: an idle live session still shows them.
+#[test]
+fn a_node_without_kernel_shells_shows_its_live_persistent_shells() {
+    let roster = vec![roster_entry("live", "idle", &parent_summary("live"))];
+    let saved = vec![
+        json!({ "id": "gone", "path": "/x/gone.jsonl", "messageCount": 2 }),
+        json!({ "id": "live", "path": "/x/live.jsonl", "messageCount": 2 }),
+    ];
+    let records = reconcile_unified_sessions(&roster, &saved, None);
+    let persistent = |shells| ShellCounts {
+        running: shells,
+        persistent: shells,
+    };
+    let rows = build_rows(
+        &records,
+        None,
+        &HashSet::default(),
+        &HashSet::default(),
+        &compute_rollups(&records),
+        &ActivityCounts {
+            live: HashMap::new(),
+            persistent_shells: HashMap::from([
+                ("gone".to_string(), persistent(2)),
+                ("live".to_string(), persistent(1)),
+            ]),
+        },
+        None,
+    );
+    let mut lines = shells_lines(&rows);
+    lines.sort_unstable();
+    assert_eq!(
+        lines,
+        vec![
+            ("shells:file:/x/gone.jsonl", "$ 2 shells · 2 persistent"),
+            ("shells:file:/x/live.jsonl", "$ 1 shell · 1 persistent"),
+        ]
     );
 }
 

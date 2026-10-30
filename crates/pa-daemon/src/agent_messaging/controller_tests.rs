@@ -60,7 +60,8 @@ async fn spawn_fake_supervisor(
                         ),
                         // Target-specific transcripts let resolver regressions prove
                         // which worker was read; older fixtures retain their five-row tail.
-                        "get_messages" => {
+                        // Serves the tail reads (`start = -limit`) recent messages sends.
+                        "get_session_messages" => {
                             let active = command["activeSessionId"].as_str().unwrap_or_default();
                             let messages = roster["messagesByActiveSessionId"]
                                 .get(active)
@@ -71,13 +72,23 @@ async fn spawn_fake_supervisor(
                                         { "role": "user", "content": "m1", "timestamp": 11 },
                                         { "role": "user", "content": "m2", "timestamp": 12 },
                                         { "role": "user", "content": "m3", "timestamp": 13 },
-                                        { "role": "user", "content": "m4", "timestamp": 14 },
+                                        { "role": "compactionSummary", "summary": "m4", "timestamp": 14 },
                                     ])
                                 });
+                            let messages = messages.as_array().unwrap();
+                            let tail = usize::try_from(command["limit"].as_u64().unwrap()).unwrap();
+                            let begin = messages.len().saturating_sub(tail);
+                            let rows: Vec<Value> = messages[begin..]
+                                .iter()
+                                .enumerate()
+                                .map(|(offset, message)| {
+                                    json!({ "index": begin + offset, "id": "", "message": message })
+                                })
+                                .collect();
                             response_success(
                                 Some(&id),
-                                "get_messages",
-                                Some(json!({ "messages": messages })),
+                                "get_session_messages",
+                                Some(json!({ "messages": rows, "total": messages.len() })),
                             )
                         }
                         "get_worker_peer_transport" => match ticket_response.clone() {
@@ -1051,9 +1062,75 @@ async fn recent_messages_resolves_by_name_and_reports_the_envelope() {
     assert_eq!(recent.messages.len(), 2);
     assert_eq!(recent.messages[0].index, 3);
     assert_eq!(recent.messages[0].text, "m3");
+    assert_eq!(
+        recent.messages[1].text, "m4",
+        "the compaction summary previews"
+    );
     // A target outside the nuclear family never reaches the transcript read.
     let error = observer.recent_messages("ghost", 2, 90).await.unwrap_err();
     assert_eq!(error.to_string(), "agent ghost is not reachable");
+}
+
+/// The display reader keeps a custom row's stored ISO timestamp. Its
+/// public observe preview must preserve that timestamp as epoch milliseconds.
+#[tokio::test]
+async fn recent_messages_preserves_custom_transcript_timestamps() {
+    let mut store = crate::session_store::SessionFile::create("/fixture", None, 0);
+    store.append_message(&json!({"role": "user", "content": "hello", "timestamp": 13}));
+    store.append_entry(
+        "custom_message",
+        json!({
+            "customType": "agent_message", "content": "notice", "display": true,
+        }),
+    );
+    store.entries.last_mut().unwrap().timestamp = "2004-07-21T00:47:44.465Z".to_string();
+    let transcript = store
+        .session_messages(-10, 10, |_| true, &std::collections::HashSet::new())
+        .unwrap()
+        .into_reply();
+    let messages: Vec<Value> = transcript["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|row| row["message"].clone())
+        .collect();
+    let dir = tempfile::TempDir::new().unwrap();
+    let socket = dir.path().join("sup.sock");
+    spawn_fake_supervisor(socket.clone(), json!({
+        "sessions": [
+            {"activeSessionId": "aaa111", "sessionId": "sess-a"},
+            {"activeSessionId": "ddd444", "sessionId": "sess-d", "sessionName": "kid",
+             "runtimeKind": "subagent", "parentActiveSessionId": "aaa111", "parentSessionId": "sess-a"},
+        ],
+        "messagesByActiveSessionId": {"ddd444": messages},
+    }), None).await;
+    let recent = observe_controller(socket)
+        .recent_messages("kid", 10, 90)
+        .await
+        .unwrap();
+    assert_eq!(
+        recent.messages,
+        vec![
+            AgentObserveMessagePreview {
+                index: 0,
+                role: "user".into(),
+                timestamp: Some(13),
+                text: "hello".into(),
+                truncated: false,
+                tool_calls: Vec::new(),
+                custom_type: None,
+            },
+            AgentObserveMessagePreview {
+                index: 1,
+                role: "custom".into(),
+                timestamp: Some(1_090_370_864_465),
+                text: "notice".into(),
+                truncated: false,
+                tool_calls: Vec::new(),
+                custom_type: Some("agent_message".into()),
+            },
+        ]
+    );
 }
 
 #[tokio::test]

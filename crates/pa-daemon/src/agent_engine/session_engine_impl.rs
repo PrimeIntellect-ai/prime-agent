@@ -958,6 +958,12 @@ impl SessionEngine for AgentSessionEngine {
         }
     }
 
+    fn on_turn_start(&self) {
+        if let Some(children) = &self.children {
+            children.notify_turn_started();
+        }
+    }
+
     /// The worker's turn completed: release child prompt tasks waiting on the boundary.
     fn on_turn_done(&self) {
         *self

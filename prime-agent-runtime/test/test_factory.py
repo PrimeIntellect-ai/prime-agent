@@ -50,6 +50,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import importlib
 import json
 import os
 import re
@@ -63,7 +64,6 @@ from typing import Any
 from unittest.mock import patch
 
 import rlm as rlm_module
-from rlm import factory as factory_module
 from rlm.factory import (
     ANSWER_BINDING_CAP,
     ANSWER_CAPTURE_CAP,
@@ -103,6 +103,8 @@ from rlm.factory import (
     validate_factory_spec,
 )
 from rlm.harness import HarnessState
+
+factory_module = importlib.import_module("rlm.factory")
 
 
 # ---------------------------------------------------------------------------
@@ -1171,18 +1173,28 @@ class ValidateFactoryMachineTest(unittest.TestCase):
                 repr(required),
             )
 
-    def test_entry_states_cannot_declare_inputs(self) -> None:
-        with_inputs = {
-            "states": [
-                state("src", entry=True, inputs=[{"name": "i", "type": "text", "from": "peer.o"}]),
-                state("peer", outputs=[{"name": "o", "type": "text"}]),
-            ],
-            "transitions": [{"from": "peer", "to": "src"}],
-        }
-        self.assertEqual(
-            validate_factory_machine(with_inputs),
-            ["entry state src cannot declare inputs"],
-        )
+    def test_entry_state_inputs_must_be_optional(self) -> None:
+        absent = object()  # sentinel: the optional key is omitted entirely
+
+        def with_inputs(optional: Any) -> dict[str, Any]:
+            inp: dict[str, Any] = {"name": "i", "type": "text", "from": "peer.o"}
+            if optional is not absent:
+                inp["optional"] = optional
+            return {
+                "states": [
+                    state("src", entry=True, inputs=[inp]),
+                    state("peer", outputs=[{"name": "o", "type": "text"}]),
+                ],
+                "transitions": [{"from": "src", "to": "peer"}, {"from": "peer", "to": "src"}],
+            }
+
+        self.assertEqual(validate_factory_machine(with_inputs(True)), [])
+        for required in (False, absent):
+            self.assertEqual(
+                validate_factory_machine(with_inputs(required)),
+                ["entry state src input 'i' must be optional: an entry state's first entry has no upstream settle to bind"],
+                repr(required),
+            )
         entry_without_inputs = {"states": [state("a", entry=True)], "transitions": []}
         self.assertEqual(validate_factory_machine(entry_without_inputs), [])
         # Compiled dags only mark dep-free nodes as entry states, so the rule
@@ -1206,6 +1218,44 @@ class ValidateFactoryMachineTest(unittest.TestCase):
                 ["state a max_entries must be an integer >= 1"],
                 repr(bad),
             )
+
+    def test_python_states(self) -> None:
+        python = {"import": "tools", "callable": "plan"}
+        machine = {
+            "states": [
+                {"id": "plan", "entry": True, "python": python, "outputs": [{"name": "items", "type": "json"}]},
+                state("work", inputs=[{"name": "items", "type": "json", "from": "plan.items"}]),
+            ],
+            "transitions": [{"from": "plan", "to": "work"}],
+        }
+        self.assertEqual(validate_factory_machine(machine), [])
+        canonical = canonicalize_factory_spec(machine)
+        self.assertEqual(canonical["states"][0]["python"], python)
+        self.assertNotIn("subagent", canonical["states"][0])
+        # The dag form compiles python nodes to python states.
+        dag = {"nodes": [{"id": "plan", "python": python}, node("work", depends_on=["plan"])]}
+        self.assertEqual(canonicalize_factory_spec(dag)["states"][0]["python"], python)
+
+        cases = {
+            "declares both subagent and python": {"python": python, "subagent": "worker"},
+            "python requires non-empty 'import' and 'callable' strings": {"python": {"import": "tools"}},
+            "python state a cannot be resident": {"python": python, "lifecycle": "resident"},
+            "python state a cannot use foreach": {
+                "python": python,
+                "inputs": [{"name": "xs", "type": "json", "from": "b.xs"}],
+                "foreach": {"over": "xs", "max": 2},
+            },
+        }
+        for expected, fields in cases.items():
+            machine = {
+                "states": [
+                    {"id": "a", "entry": not fields.get("inputs"), **fields},
+                    state("b", entry=True, outputs=[{"name": "xs", "type": "json"}]),
+                ],
+                "transitions": [],
+            }
+            errors = validate_factory_machine(machine)
+            self.assertTrue(any(expected in error for error in errors), (expected, errors))
 
     def test_subagent_required(self) -> None:
         missing = {"states": [{"id": "a", "entry": True}], "transitions": []}
@@ -3333,6 +3383,11 @@ class FactoryExecutorTest(_ExecutorTestCase):
             self.assertEqual(spawn[0]["prompt"], "Template by title.")
             self.assertEqual(spawn[0]["kwargs"]["model"], "pi/test-model")
             self.assertEqual(spawn[0]["kwargs"]["thinking"], "low")
+            # The run tag the host records on the child's ledger spawn edge.
+            self.assertEqual(
+                spawn[0]["kwargs"]["factory"],
+                {"runId": result["run_id"], "specId": "sw", "stateId": node_id},
+            )
 
     @async_test
     async def test_inline_subagent_name_labels_the_spawned_child(self) -> None:
@@ -5826,6 +5881,60 @@ class FactoryExecutorTest(_ExecutorTestCase):
         self.assertEqual(status["usage"]["transitions_fired"], 3)
 
     @async_test
+    async def test_machine_loop_back_into_entry_state_binds_null_then_the_real_settle(self) -> None:
+        # investigate -> check -> investigate: the entry state's optional
+        # input binds null on admission and the checker's objections on the
+        # loop-back entry.
+        self.host.child_outcomes["child-1"] = {"status": "done", "answer": "FINDINGS-1"}
+        self.host.child_outcomes["child-2"] = {
+            "status": "done",
+            "answer": '```json\n{"verdict": {"approved": false, "objections": ["OBJ-A1"]}}\n```',
+        }
+        self.host.child_outcomes["child-3"] = {"status": "done", "answer": "FINDINGS-2"}
+        self.host.child_outcomes["child-4"] = {
+            "status": "done",
+            "answer": '```json\n{"verdict": {"approved": true, "objections": []}}\n```',
+        }
+        self.store_machine(
+            {
+                "states": [
+                    {
+                        "id": "investigate",
+                        "entry": True,
+                        "subagent": "worker",
+                        "inputs": [{"name": "verdict", "type": "json", "from": "check.verdict", "optional": True}],
+                        "outputs": [{"name": "findings", "type": "text"}],
+                        "max_entries": 3,
+                    },
+                    {
+                        "id": "check",
+                        "subagent": "worker",
+                        "inputs": [{"name": "findings", "type": "text", "from": "investigate.findings"}],
+                        "outputs": [{"name": "verdict", "type": "json"}],
+                        "max_entries": 3,
+                    },
+                ],
+                "transitions": [
+                    {"from": "investigate", "to": "check"},
+                    {
+                        "from": "check",
+                        "to": "investigate",
+                        "when": {"output": "verdict", "path": "approved", "op": "eq", "value": False},
+                    },
+                ],
+            }
+        )
+        result = await self.start()
+        status = await self.settle(result)
+        self.assertEqual(status["state"], "done")
+        prompts = [call["prompt"] for call in self.host.spawn_calls("investigate")]
+        self.assertEqual(len(prompts), 2)
+        self.assertIn("null", prompts[0])
+        self.assertNotIn("OBJ-A1", prompts[0])
+        self.assertIn("OBJ-A1", prompts[1])
+        self.assertEqual(self.state_report(status, "check")["entries_used"], 2)
+
+    @async_test
     async def test_machine_optional_foreach_over_expands_empty_then_the_real_settle(self) -> None:
         # Review finding (PR #3199): marking the foreach.over input
         # optional used to hit "foreach entry did not resolve its over
@@ -6742,6 +6851,217 @@ class FactoryExecutorTest(_ExecutorTestCase):
         # both states ran to completion: neither admission failed
         self.assertEqual(self.node_status(status, "collect-findings-pass-one")["status"], "done")
         self.assertEqual(self.node_status(status, "collect-findings-pass-two")["status"], "done")
+
+
+# ---------------------------------------------------------------------------
+# Python states (a real isolated subprocess per call)
+# ---------------------------------------------------------------------------
+
+_PYTHON_TOOLS = """
+import time
+
+def plan(inputs):
+    print("planning")  # prints go to stderr, never into the outputs
+    return {"items": ["a", "b"], "mode": "go"}
+
+async def echo(inputs):
+    return {"echo": inputs}
+
+def boom(inputs):
+    raise ValueError("boom")
+
+def wrong_keys(inputs):
+    return {"other": 1}
+
+def slow(inputs):
+    time.sleep(60)
+    return {}
+"""
+
+
+class FactoryPythonStateTest(_ExecutorTestCase):
+    def setUp(self) -> None:
+        super().setUp()
+        workdir = TemporaryDirectory()
+        self.addCleanup(workdir.cleanup)
+        Path(workdir.name, "factory_py_tools.py").write_text(_PYTHON_TOOLS, encoding="utf-8")
+        previous_cwd = os.getcwd()
+        os.chdir(workdir.name)
+        self.addCleanup(os.chdir, previous_cwd)
+
+    @staticmethod
+    def py(callable_name: str) -> dict[str, str]:
+        return {"import": "factory_py_tools", "callable": callable_name}
+
+    async def finish(self, result: dict[str, Any]) -> dict[str, Any]:
+        await self.executor._runs[result["run_id"]].task
+        return await rlm_module.rlm.factory.status(result["run_id"])
+
+    def node_status(self, status: dict[str, Any], node_id: str) -> dict[str, Any]:
+        return next(entry for entry in status["nodes"] if entry["id"] == node_id)
+
+    @async_test
+    async def test_python_states_route_and_bind_like_agent_states(self) -> None:
+        self.host.outcomes["work"] = {"status": "done", "answer": '```json\n{"count": 2}\n```'}
+        self.store_machine(
+            {
+                "states": [
+                    {
+                        "id": "plan",
+                        "entry": True,
+                        "python": self.py("plan"),
+                        "outputs": [{"name": "items", "type": "json"}, {"name": "mode", "type": "text"}],
+                    },
+                    state(
+                        "work",
+                        inputs=[{"name": "items", "type": "json", "from": "plan.items"}],
+                        outputs=[{"name": "count", "type": "json"}],
+                    ),
+                    state("halt"),
+                    {
+                        "id": "check",
+                        "python": self.py("echo"),
+                        "inputs": [
+                            {"name": "count", "type": "json", "from": "work.count"},
+                            {"name": "mode", "type": "text", "from": "plan.mode"},
+                        ],
+                        "outputs": [{"name": "echo", "type": "json"}],
+                    },
+                ],
+                "transitions": [
+                    {"from": "plan", "to": "work", "when": {"output": "mode", "op": "eq", "value": "go"}},
+                    {"from": "plan", "to": "halt", "when": {"output": "mode", "op": "eq", "value": "stop"}},
+                    {"from": "work", "to": "check"},
+                ],
+            }
+        )
+        result = await self.start()
+        status = await self.finish(result)
+
+        self.assertEqual(status["state"], "done")
+        # Only the agent state spawned a child.
+        self.assertEqual(self.host.calls_of("rlm.run"), self.host.spawn_calls("work"))
+        self.assertEqual(len(self.host.spawn_calls("work")), 1)
+        self.assertIn('["a", "b"]', self.host.spawn_calls("work")[0]["prompt"])
+        self.assertEqual(self.node_status(status, "halt")["status"], "pending")
+        run = self.executor._runs[result["run_id"]]
+        self.assertEqual(run.states["check"].entries[0].outputs, {"echo": {"count": 2, "mode": "go"}})
+        plan = self.node_status(status, "plan")
+        self.assertIsNone(plan["instances"][0]["child"])
+        self.assertEqual(plan["answer_preview"], '{"items":["a","b"],"mode":"go"}')
+        graph_states = {row["id"]: row for row in self.executor.graph(result["run_id"])["machine"]["states"]}
+        self.assertEqual(graph_states["plan"]["python"], "factory_py_tools.plan")
+        self.assertNotIn("subagent", graph_states["plan"])
+
+    @async_test
+    async def test_failed_calls_retry_then_apply_the_failure_policy(self) -> None:
+        for callable_name, expected in (
+            ("boom", "python state exited with code 1: "),
+            ("wrong_keys", "python state returned keys ['other'] but declares outputs ['out']"),
+        ):
+            with self.subTest(callable_name):
+                self.store_machine(
+                    {
+                        "run": {"failure_policy": "continue"},
+                        "states": [
+                            {
+                                "id": "call",
+                                "entry": True,
+                                "python": self.py(callable_name),
+                                "retries": 1,
+                                "outputs": [{"name": "out", "type": "json"}],
+                            }
+                        ],
+                    },
+                    spec_id=callable_name.replace("_", "-"),
+                )
+                status = await self.finish(await self.start(callable_name.replace("_", "-")))
+                self.assertEqual(status["state"], "failed")
+                call = self.node_status(status, "call")
+                self.assertEqual(call["attempts"], 2)
+                self.assertIn(expected, call["error"])
+                if callable_name == "boom":
+                    self.assertIn("ValueError: boom", call["error"])
+
+    @async_test
+    async def test_a_call_past_its_time_limit_is_killed_without_a_retry(self) -> None:
+        self.executor = FactoryExecutor(harness=self.harness)
+        factory_module._DEFAULT_EXECUTOR = self.executor
+        self.store_machine(
+            {
+                "run": {"failure_policy": "continue"},
+                "states": [{"id": "slow", "entry": True, "python": self.py("slow"), "retries": 2, "budget_ms": 300}],
+            }
+        )
+        result = await self.start()
+        process = self.executor._runs[result["run_id"]].states["slow"].entries[0].instances[0].process
+        status = await self.finish(result)
+        self.assertIsNotNone(process.proc.returncode)
+        slow = self.node_status(status, "slow")
+        self.assertEqual(slow["attempts"], 1)
+        self.assertEqual(slow["error"], "python state time limit 300ms exceeded")
+
+    @async_test
+    async def test_stop_kills_a_running_call(self) -> None:
+        self.store_machine({"states": [{"id": "slow", "entry": True, "python": self.py("slow")}]})
+        result = await self.start()
+        instance = self.executor._runs[result["run_id"]].states["slow"].entries[0].instances[0]
+        process = instance.process
+        stopped = await rlm_module.rlm.factory.stop(result["run_id"])
+        self.assertEqual(stopped["state"], "stopped")
+        self.assertIsNotNone(process.proc.returncode)
+        self.assertEqual(instance.status, "cancelled")
+
+    @async_test
+    async def test_a_python_deadline_is_not_delayed_by_a_running_child(self) -> None:
+        self.executor = FactoryExecutor(harness=self.harness)
+        factory_module._DEFAULT_EXECUTOR = self.executor
+        self.store_machine({
+            "run": {"failure_policy": "continue"},
+            "states": [
+                state("work", entry=True),
+                {"id": "slow", "entry": True, "python": self.py("slow"), "budget_ms": 300},
+            ],
+        })
+        collecting = asyncio.Event()
+        never_settles = asyncio.Event()
+
+        async def collect_running_child(targets, *, timeout_ms):
+            collecting.set()
+            try:
+                await asyncio.wait_for(never_settles.wait(), timeout_ms / 1000)
+            except asyncio.TimeoutError:
+                return []
+            raise AssertionError("the child never settles")
+
+        with patch.object(rlm_module, "collect", collect_running_child):
+            result = await self.start()
+            process = self.executor._runs[result["run_id"]].states["slow"].entries[0].instances[0].process
+            try:
+                await asyncio.wait_for(collecting.wait(), 1)
+                # Bound failure well below the ordinary 2-second child poll.
+                await asyncio.wait_for(process.proc.wait(), 1)
+                self.assertIsNotNone(process.proc.returncode)
+            finally:
+                await rlm_module.rlm.factory.stop(result["run_id"])
+
+    @async_test
+    async def test_executor_failure_stops_its_python_processes(self) -> None:
+        self.store_machine({"states": [{"id": "slow", "entry": True, "python": self.py("slow")}]})
+        with patch.object(self.executor, "_wait_python", side_effect=RuntimeError("host failed")):
+            result = await self.start()
+            run = self.executor._runs[result["run_id"]]
+            instance = run.states["slow"].entries[0].instances[0]
+            process = instance.process
+            try:
+                await run.task
+                self.assertEqual(
+                    (run.state, run.states["slow"].entries[0].status, instance.status, process.proc.returncode is not None),
+                    ("failed", "cancelled", "cancelled", True),
+                )
+            finally:
+                if process.proc.returncode is None:
+                    await process.stop()
 
 
 # ---------------------------------------------------------------------------
@@ -8953,6 +9273,7 @@ class FactoryRunFromLibraryTest(unittest.TestCase):
 
 _INSTALLED_LIBRARY_RUNNER = r"""
 import asyncio
+import importlib
 import json
 
 
@@ -9013,8 +9334,9 @@ class ScriptedHost:
 
 async def main():
     import rlm as rlm_module
-    import rlm.factory as factory_module
     from rlm.factory import FactoryExecutor
+
+    factory_module = importlib.import_module("rlm.factory")
 
     rlm_module.host_request = ScriptedHost()
 

@@ -66,8 +66,8 @@ impl AgentSessionEngine {
         let cwd = std::sync::Arc::new(std::sync::RwLock::new(config.cwd.clone()));
         // The ACP MCP store (auth storage construction is blocking, off the hot async paths).
         let agent_dir = config.agent_dir.clone();
-        // Settings-declared user servers; re-read per resolve so `mcp.refresh` sees settings
-        // changes.
+        // Executable MCP settings and catalog sources are user/global only.
+        // Re-read per resolve so refresh sees user changes without project overrides.
         let mcp_cwd = std::sync::Arc::clone(&cwd);
         let mcp_agent_dir = agent_dir.clone();
         let catalog_cwd = std::sync::Arc::clone(&cwd);
@@ -84,7 +84,7 @@ impl AgentSessionEngine {
                 let settings = pa_core::settings::SettingsManager::create(&mcp_cwd, &mcp_agent_dir);
                 Some(
                     settings
-                        .settings()
+                        .global_settings()
                         .mcp_servers
                         .clone()
                         .unwrap_or_default()
@@ -108,7 +108,7 @@ impl AgentSessionEngine {
                 let settings =
                     pa_core::settings::SettingsManager::create(&catalog_cwd, &catalog_agent_dir);
                 settings
-                    .settings()
+                    .global_settings()
                     .mcp_catalog_sources
                     .clone()
                     .unwrap_or_default()

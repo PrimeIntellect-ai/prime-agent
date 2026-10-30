@@ -65,7 +65,8 @@ pub enum RowKind {
     Subagent,
     /// A read-only spawn-program line.
     Code,
-    /// The node's own running kernel shells line.
+    /// The node's own shells line: its kernel's running shells, or without a live kernel its live
+    /// persistent shells from the daemon's list.
     Shells,
     /// The node's own live factory runs line.
     FactoryRuns,
@@ -121,12 +122,20 @@ pub struct SelectionKey {
     pub active_session_id: Option<String>,
 }
 
-/// One live session's own activity counts, keyed by its `activeSessionId`: the shells and
+/// One session's own activity counts (a live one's keyed by its `activeSessionId`): the shells and
 /// factory-run lines render them.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct SessionActivity {
-    pub shells: usize,
+    pub shells: crate::bash_view::ShellCounts,
     pub factory_runs: crate::factory_view::FactoryRunCounts,
+}
+
+/// The activity poll's counts: each live session's by its `activeSessionId`, and the live
+/// persistent shells by their assigned `sessionId` (every session's persistent count).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ActivityCounts {
+    pub live: std::collections::HashMap<String, SessionActivity>,
+    pub persistent_shells: std::collections::HashMap<String, crate::bash_view::ShellCounts>,
 }
 
 /// One recursive rollup over the record hierarchy (TS

@@ -32,8 +32,10 @@ impl Supervisor {
             resident.note_retired();
             // The stop tombstone persists before the worker is even told (TS
             // `stopWorkerUntracked`): a supervisor that dies between here and the worker's
-            // exit leaves durable stop intent, and the next boot finishes the stop.
-            if self.persist_stop_tombstone(&resident).await.is_err() {
+            // exit leaves durable stop intent, and the next boot finishes the stop. The
+            // tombstone is the resumable stop variant: a lost step after it keeps the
+            // session instead of archiving it.
+            if self.persist_stop_tombstone_stop(&resident).await.is_err() {
                 self.log_line(&format!(
                     "session worker {} stop tombstone could not persist; leaving the worker untouched (the next boot retries the stop)",
                     resident.worker_id
@@ -44,12 +46,12 @@ impl Supervisor {
                 .route_command_typed(
                     &resident,
                     "shutdown",
-                    json!({}),
+                    json!({ "daemonShutdown": true }),
                     ROUTE_TIMEOUT_MS,
                     RouteAdmission::SupervisorInternal,
                 )
                 .await;
-            self.retire_worker_after_stop(&resident).await;
+            self.retire_worker_after_stop(&resident, true).await;
         }
         self.registry.clear().await;
         // The workers are all stopped now, so the accept loop may exit; the gate alone
