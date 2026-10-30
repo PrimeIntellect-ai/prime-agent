@@ -13,7 +13,7 @@ use serde_json::{json, Map, Value};
 use crate::backpressure::RouteAdmission;
 use crate::protocol::{response_failure, response_success, DaemonResponse};
 use crate::registry::ResidentWorker;
-use crate::supervisor::Supervisor;
+use crate::supervisor::{RosterFamilySeedOwner, Supervisor};
 
 /// Worker round-trip budget for the sender-summary read and the delivery
 /// route (TS `WORKER_REQUEST_TIMEOUT_MS`).
@@ -274,7 +274,11 @@ impl Supervisor {
         let launch = tokio::spawn({
             let supervisor = Arc::clone(self);
             let create = create;
-            async move { supervisor.launch_worker(&create, None).await }
+            async move {
+                supervisor
+                    .launch_worker(&create, None, RosterFamilySeedOwner::Registration)
+                    .await
+            }
         });
         let launched = tokio::time::timeout(
             std::time::Duration::from_millis(crate::supervisor::ROUTE_TIMEOUT_MS),
@@ -392,7 +396,11 @@ impl Supervisor {
         let launch = tokio::spawn({
             let supervisor = Arc::clone(self);
             let create = create;
-            async move { supervisor.launch_worker(&create, None).await }
+            async move {
+                supervisor
+                    .launch_worker(&create, None, RosterFamilySeedOwner::Registration)
+                    .await
+            }
         });
         let launched = tokio::time::timeout(
             std::time::Duration::from_millis(crate::supervisor::ROUTE_TIMEOUT_MS),
@@ -664,6 +672,8 @@ mod tests {
             name: "kid".to_string(),
             deleted: None,
             deleted_usage: None,
+            deleted_usage_by_model: None,
+            factory: None,
         };
         for selector in ["kid", "sub-kid1", "sess-kid"] {
             assert!(ledger_edge_matches(&edge, selector), "{selector}");

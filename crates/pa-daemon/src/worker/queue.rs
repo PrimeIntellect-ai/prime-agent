@@ -279,7 +279,7 @@ pub(crate) fn checkpoint_queue_recovery(
     };
     // The lanes are read under the recovery lock (a microsecond core hold —
     // never across the journal's fsyncs): no persist interleaves this read.
-    let (active_session_id, session_id, session_file, lanes, turn_in_flight) = {
+    let (active_session_id, session_id, session_file, lanes, turn_in_flight, suspended) = {
         let core = core_lock.lock().unwrap();
         (
             core.active_session_id.clone(),
@@ -292,6 +292,7 @@ pub(crate) fn checkpoint_queue_recovery(
                 .map(|s| s.path.to_string_lossy().to_string()),
             queue_lanes(&core),
             core.busy,
+            core.queued_input_suspended,
         )
     };
     let (busy, operation) = match checkpoint {
@@ -314,6 +315,7 @@ pub(crate) fn checkpoint_queue_recovery(
         operation,
         &lanes.steering,
         &lanes.follow_up,
+        suspended,
     );
 }
 
@@ -328,6 +330,8 @@ pub(crate) fn queue_lanes(core: &SessionCore) -> QueueLanes {
                 queue_key: item.queue_key.clone(),
                 queue_visible: item.queue_visible,
                 policy: item.policy.journal_value().to_string(),
+                forced_batch: item.forced_batch,
+                images: item.images.clone(),
             })
             .collect()
     }
@@ -337,19 +341,23 @@ pub(crate) fn queue_lanes(core: &SessionCore) -> QueueLanes {
     }
 }
 
-/// The next delivery: steering first, then follow-up. At a run end the
-/// follow-up lane is due anyway, so a steering notification run that
-/// empties its lane carries follow-up's leading notification run into the
-/// same delivery. After a mid-run cut the follow-up lane keeps waiting.
-pub(crate) fn gather_delivery(core: &mut SessionCore, boundary: RunBoundary) -> Vec<QueuedItem> {
+/// The next delivery and the lane it anchors in: steering first, then
+/// follow-up. At a run end the follow-up lane is due anyway, so a steering
+/// notification run that empties its lane carries follow-up's leading
+/// notification run into the same delivery. After a mid-run cut the
+/// follow-up lane keeps waiting.
+pub(crate) fn gather_delivery(
+    core: &mut SessionCore,
+    boundary: RunBoundary,
+) -> (Lane, Vec<QueuedItem>) {
     if core.steering.is_empty() {
-        return gather_delivery_batch(core, Lane::FollowUp);
+        return (Lane::FollowUp, gather_delivery_batch(core, Lane::FollowUp));
     }
     let mut batch = gather_delivery_batch(core, Lane::Steering);
     if core.steering.is_empty() && batch[0].is_notification() && boundary == RunBoundary::RunEnd {
         batch.extend(take_notification_run(&mut core.follow_up));
     }
-    batch
+    (Lane::Steering, batch)
 }
 
 /// The lane's front item anchors the delivery. A notification front takes
@@ -364,6 +372,10 @@ fn gather_delivery_batch(core: &mut SessionCore, lane: Lane) -> Vec<QueuedItem> 
     let Some(first) = items.front() else {
         return Vec::new();
     };
+    // Only a real pickup starts a new delivery. Empty or parked lanes retain
+    // the prior delivery's cancellation and successful completion facts.
+    core.turn_cancelled = false;
+    core.turn_completed = false;
     // The armed set forces "all" only when the front item is armed; an un-armed
     // front disarms the batch once no armed item remains queued.
     let forced = lane == Lane::Steering && core.forced_all_steering && first.forced_batch;
@@ -415,10 +427,8 @@ fn take_notification_run(items: &mut VecDeque<QueuedItem>) -> Vec<QueuedItem> {
 pub(crate) fn restore_queue_snapshot(
     journal: &WorkerRecoveryJournal,
     active_session_id: &str,
-) -> (VecDeque<QueuedItem>, VecDeque<QueuedItem>) {
+) -> (VecDeque<QueuedItem>, VecDeque<QueuedItem>, bool) {
     fn pending(lanes: Vec<crate::journal::WorkerQueueItemRecord>) -> VecDeque<QueuedItem> {
-        // Images on a queued prompt do not survive the restart; the
-        // delivery rows ride the item record without them.
         lanes
             .into_iter()
             .map(|record| {
@@ -449,25 +459,22 @@ pub(crate) fn restore_queue_snapshot(
                     agent_message,
                     queue_key: record.queue_key,
                     admission_id: None,
-                    images: Vec::new(),
+                    images: record.images,
                     done: None,
                     queue_visible: record.queue_visible,
                     policy,
-                    forced_batch: false,
+                    forced_batch: record.forced_batch,
                 }
             })
             .collect()
     }
 
-    let mut steering = VecDeque::new();
-    let mut follow_up = VecDeque::new();
-    if let Some((steering_lanes, follow_up_lanes)) =
-        journal.latest_queue_snapshot(active_session_id)
-    {
-        steering = pending(steering_lanes);
-        follow_up = pending(follow_up_lanes);
+    match journal.latest_queue_snapshot(active_session_id) {
+        Some((steering, follow_up, suspended)) => {
+            (pending(steering), pending(follow_up), suspended)
+        }
+        None => (VecDeque::new(), VecDeque::new(), false),
     }
-    (steering, follow_up)
 }
 
 /// Admit one held autonomous continuation through the follow-up lane:

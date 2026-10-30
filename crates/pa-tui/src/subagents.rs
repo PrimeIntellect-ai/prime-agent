@@ -455,7 +455,7 @@ mod tests {
             &std::collections::HashSet::new(),
             &std::collections::HashSet::new(),
             &rollups,
-            &std::collections::HashMap::new(),
+            &crate::agents_view_forest::ActivityCounts::default(),
             None,
         );
         let row = rows

@@ -588,6 +588,7 @@ impl Worker {
                 && core.running_admission_ids.contains(admission_id);
             if abort_running {
                 core.abort_requested = true;
+                core.turn_cancelled = true;
             }
             (status, dropped_queued, abort_running)
         };

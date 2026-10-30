@@ -146,6 +146,19 @@ pub struct RlmSpawnRequest {
     /// The parent's in-flight turn request the spawn anchors to (TS
     /// `spawnedByRequestId`): `None` for a spawn outside an active run.
     pub spawned_by_request_id: Option<String>,
+    /// The factory run that spawned the child; the daemon records it on
+    /// the child's ledger spawn edge.
+    pub factory: Option<RlmFactoryTag>,
+}
+
+/// The factory executor's run tag on a spawned child (`rlm.spawn`'s
+/// private `factory` kwarg, wire shape `{runId, specId, stateId}`).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RlmFactoryTag {
+    pub run_id: String,
+    pub spec_id: String,
+    pub state_id: String,
 }
 
 /// Validated `rlm.create_session` request handed to the host.
@@ -644,7 +657,11 @@ fn register_run(handlers: &mut HostRequestHandlers, bridge: &Arc<RlmHostBridge>)
 fn spawn_request_from_payload(prompt: &str, data: &Value) -> anyhow::Result<RlmSpawnRequest> {
     const OPERATION: &str = "rlm.spawn";
     let kwargs = kwargs_from_payload(data);
-    reject_unsupported_kwargs(&kwargs, OPERATION, &["name", "model", "thinking"])?;
+    reject_unsupported_kwargs(
+        &kwargs,
+        OPERATION,
+        &["name", "model", "thinking", "factory"],
+    )?;
     let name = optional_string_kwarg(&kwargs, "name", OPERATION)?;
     let name = normalize_requested_rlm_subagent_session_name(name, OPERATION)?;
     if let Some(name) = &name {
@@ -655,12 +672,21 @@ fn spawn_request_from_payload(prompt: &str, data: &Value) -> anyhow::Result<RlmS
     let thinking = optional_string_kwarg(&kwargs, "thinking", OPERATION)?;
     let thinking =
         normalize_requested_rlm_subagent_thinking_level(thinking, OPERATION)?.map(String::from);
+    let factory = match kwargs.get("factory") {
+        None | Some(Value::Null) => None,
+        Some(tag) => Some(serde_json::from_value(tag.clone()).map_err(|_| {
+            anyhow::anyhow!(
+                "{OPERATION} factory must be an object with string runId, specId, and stateId"
+            )
+        })?),
+    };
     Ok(RlmSpawnRequest {
         prompt: prompt.to_string(),
         name,
         model,
         thinking,
         spawned_by_request_id: None,
+        factory,
     })
 }
 
@@ -1304,7 +1330,10 @@ mod tests {
             json!({
                 "type": "rlm.run",
                 "prompt": "ship the lane",
-                "kwargs": { "name": "worker", "model": "p/m", "thinking": "High" }
+                "kwargs": {
+                    "name": "worker", "model": "p/m", "thinking": "High",
+                    "factory": { "runId": "r1", "specId": "sw", "stateId": "build" },
+                }
             }),
         )
         .await
@@ -1324,6 +1353,14 @@ mod tests {
         assert_eq!(requests[0].name.as_deref(), Some("worker"));
         assert_eq!(requests[0].model.as_deref(), Some("p/m"));
         assert_eq!(requests[0].thinking.as_deref(), Some("high"));
+        assert_eq!(
+            requests[0].factory,
+            Some(RlmFactoryTag {
+                run_id: "r1".to_string(),
+                spec_id: "sw".to_string(),
+                state_id: "build".to_string(),
+            })
+        );
         drop(requests);
 
         // Validation: prompt type, unsupported kwargs, name rules.

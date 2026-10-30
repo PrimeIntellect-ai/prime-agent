@@ -429,6 +429,7 @@ async fn spawn_child(sessions: &SupervisorChildSessions) -> RlmSpawnHandle {
             model: None,
             thinking: None,
             spawned_by_request_id: None,
+            factory: None,
         })
         .await
         .expect("spawn must succeed against the fake supervisor")
@@ -795,6 +796,63 @@ async fn a_settled_child_without_a_reply_delivers_the_terminal_notice() {
     let extra =
         tokio::time::timeout(std::time::Duration::from_millis(300), follow_up_rx.recv()).await;
     assert!(extra.is_err(), "no second notice may arrive");
+}
+
+/// A spawn admitted while the parent is idle (a background kernel task: a
+/// factory run resumed or advanced between turns) has no turn to wait
+/// for: the task prompt goes out at once and the run settles.
+#[tokio::test]
+async fn a_child_spawned_while_the_parent_is_idle_runs_without_a_turn_boundary() {
+    let (follow_up_tx, mut follow_up_rx) = mpsc::unbounded_channel();
+    let (sessions, _kill_rx) =
+        sessions_with_fake_supervisor(follow_up_tx, 0, FakeKill::Success, FakeChild::Healthy).await;
+    spawn_child(&sessions).await;
+
+    let notice = tokio::time::timeout(Duration::from_secs(10), follow_up_rx.recv())
+        .await
+        .expect("an idle parent's child must not wait for a parent turn boundary")
+        .expect("the follow_up channel stays open");
+    assert_eq!(
+        notice["customMessage"]["customType"],
+        "rlm_child_terminal_notice"
+    );
+}
+
+/// A spawn admitted mid-turn holds its task prompt until that parent turn
+/// completes, so the parent's continuation request reaches the provider
+/// before the child's first turn.
+#[tokio::test]
+async fn a_child_spawned_mid_turn_prompts_after_the_parent_turn_completes() {
+    let (follow_up_tx, _follow_up_rx) = mpsc::unbounded_channel();
+    let gate = Arc::new(FakePeerGate {
+        armed: AtomicBool::new(true),
+        ..FakePeerGate::default()
+    });
+    let (sessions, _kill_rx) = sessions_with_fake_child_subagents(
+        follow_up_tx,
+        0,
+        FakeKill::Success,
+        FakeChild::Healthy,
+        Arc::new(FakeChildSubagents {
+            prompt_gate: Some(Arc::clone(&gate)),
+            ..FakeChildSubagents::default()
+        }),
+    )
+    .await;
+    sessions.notify_turn_started();
+    spawn_child(&sessions).await;
+    assert!(
+        tokio::time::timeout(Duration::from_millis(300), gate.copied.notified())
+            .await
+            .is_err(),
+        "the task prompt must wait for the spawning turn"
+    );
+
+    sessions.notify_turn_done();
+    tokio::time::timeout(Duration::from_secs(10), gate.copied.notified())
+        .await
+        .expect("the turn boundary releases the task prompt");
+    gate.release.notify_one();
 }
 
 /// A `collect` that lands while the task prompt is still in flight reads

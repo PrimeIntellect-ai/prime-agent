@@ -161,6 +161,7 @@ fn spawn_request(name: &str, prompt: &str) -> RlmSpawnRequest {
         model: None,
         thinking: None,
         spawned_by_request_id: None,
+        factory: None,
     }
 }
 

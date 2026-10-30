@@ -135,6 +135,21 @@ pub struct WindowStats {
     pub cache_write: u64,
     #[serde(with = "super::window_cache::float_bits")]
     pub cost: f64,
+    /// The prefix's display-transcript rows by [`display_role`].
+    pub display_rows: HashMap<String, usize>,
+}
+
+/// The role a session row shows under in the display transcript: a message row's own role,
+/// `custom` for a `custom_message` row, `compactionSummary` for a compaction; `None` for
+/// rows the transcript does not show.
+#[must_use]
+pub fn display_role<'a>(entry_type: &str, message_role: Option<&'a str>) -> Option<&'a str> {
+    match entry_type {
+        "message" => message_role,
+        "custom_message" => Some("custom"),
+        "compaction" => Some("compactionSummary"),
+        _ => None,
+    }
 }
 
 /// One older-path assistant row's spend-relevant usage: an attribution
@@ -356,6 +371,16 @@ impl WindowedSessionStore {
             }
             let on_path = expected.as_deref() == Some(id);
             if on_path {
+                let role = display_role(
+                    &meta.kind,
+                    meta.message.as_ref().map(|message| message.role.as_str()),
+                );
+                if let Some(role) = role.filter(|_| window_done) {
+                    *older_path_stats
+                        .display_rows
+                        .entry(role.to_owned())
+                        .or_default() += 1;
+                }
                 if window_done && meta.kind == "message" {
                     if let Some(message) = &meta.message {
                         older_path_stats.total_messages += 1;

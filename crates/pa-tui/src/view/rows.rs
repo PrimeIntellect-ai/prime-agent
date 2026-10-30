@@ -209,6 +209,7 @@ impl AgentView {
                     card,
                     self.pulse_frame,
                     detail,
+                    self.detail,
                     &self.theme,
                     width,
                     self.show_images,
