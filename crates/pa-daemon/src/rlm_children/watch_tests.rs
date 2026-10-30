@@ -449,6 +449,7 @@ async fn a_factory_child_settles_without_a_parent_notice() {
             model: None,
             thinking: None,
             cwd: None,
+            refine_child: false,
             spawned_by_request_id: None,
             factory: Some(pa_core::session_engine::rlm_host::RlmFactoryTag {
                 run_id: "run".to_string(),
@@ -941,8 +942,10 @@ async fn a_refine_childs_prompt_skips_the_turn_boundary_wait() {
             name: None,
             model: None,
             thinking: None,
+            cwd: None,
             spawned_by_request_id: None,
             refine_child: true,
+            factory: None,
         })
         .await
         .expect("the refinement child spawn must succeed against the fake supervisor");
