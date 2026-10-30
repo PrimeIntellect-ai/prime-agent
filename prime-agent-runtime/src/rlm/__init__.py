@@ -490,6 +490,21 @@ async def progress_note(message: str) -> RLMProgressNoteResult:
     return RLMProgressNoteResult(accepted=accepted, retry_after_ms=retry_after_ms)
 
 
+async def respond(text: str) -> None:
+    """Send ``text`` to the user as your reply, exactly as given.
+
+    The message appears right after the running cell and reads as if you had
+    written it (markdown renders); it also becomes your answer to a parent
+    or in print mode. The turn continues; prints a one-line receipt.
+    """
+    if not isinstance(text, str):
+        raise TypeError(f"text must be str, got {type(text).__name__}")
+    if not text.strip():
+        raise ValueError("text must not be empty")
+    await host_request("rlm.respond", {"text": text})
+    print(f"Sent to the user ({len(text)} characters).")
+
+
 async def delete_subagent(target: str | RLMSubagent | RLMSpawnHandle) -> RLMSubagent:
     """Delete one running or retained direct child from the current parent session.
 
@@ -679,6 +694,9 @@ class _RLMNamespace:
     async def progress_note(self, message: str) -> RLMProgressNoteResult:
         return await progress_note(message)
 
+    async def respond(self, text: str) -> None:
+        return await respond(text)
+
     async def delete_subagent(self, target: str | RLMSubagent | RLMSpawnHandle) -> RLMSubagent:
         return await delete_subagent(target)
 
@@ -745,6 +763,7 @@ __all__ = [
     "persistent_shells",
     "progress_note",
     "rename",
+    "respond",
     "rlm",
     "spawn",
 ]

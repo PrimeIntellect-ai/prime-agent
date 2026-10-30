@@ -927,35 +927,26 @@ pub(super) fn should_mark_error(state: &ChildRecord) -> bool {
     !(state.closed_by_parent || state.notice_delivered || state.settled_status.is_some())
 }
 
-/// The child's last assistant text from its durable session file (the exit
+/// The child's last reply from its durable session file (the exit
 /// capture's fallback when the worker is already gone): the file is the
-/// record a worker replacement replays from, so its last assistant row is
-/// the child's final say even after a crash. The newest non-empty text row
-/// wins; a file with no assistant rows (the prompt arm's never-started
-/// turn) answers nothing.
+/// record a worker replacement replays from, so its last reply row is the
+/// child's final say even after a crash. The newest non-empty reply (an
+/// assistant text or an `rlm.respond` row) wins; a file with neither (the
+/// prompt arm's never-started turn) answers nothing.
 pub(super) fn last_assistant_text_from_file(session_file: &str) -> Option<String> {
+    use pa_core::session_engine::messages::reply_text;
+    use pa_types::session::{AgentMessage, FileEntry};
     let content = std::fs::read_to_string(session_file).ok()?;
-    for line in content.lines().rev() {
-        let Ok(pa_types::session::FileEntry::Message {
-            message: pa_types::session::AgentMessage::Assistant(assistant),
-            ..
-        }) = serde_json::from_str::<pa_types::session::FileEntry>(line.trim())
-        else {
-            continue;
-        };
-        let text = assistant
-            .content
-            .iter()
-            .filter_map(|block| match block {
-                pa_types::ai::AssistantContentBlock::Text(text) => Some(text.text.clone()),
-                _ => None,
-            })
-            .collect::<String>();
-        if !text.is_empty() {
-            return Some(text);
+    content.lines().rev().find_map(|line| {
+        let entry = serde_json::from_str::<FileEntry>(line.trim()).ok()?;
+        match &entry {
+            FileEntry::Message { message, .. } => reply_text(message),
+            FileEntry::CustomMessage { payload, .. } => reply_text(&AgentMessage::Custom(
+                pa_core::session::create_custom_message(payload, &entry),
+            )),
+            _ => None,
         }
-    }
-    None
+    })
 }
 
 /// The error a child's final turn ended in, read from its durable session
@@ -1129,6 +1120,47 @@ pub(super) mod exit_capture_tests {
         assert_eq!(last_assistant_text_from_file(&bare.to_string_lossy()), None);
         let _ = std::fs::remove_file(&file);
         let _ = std::fs::remove_file(&bare);
+    }
+
+    /// A child that answered with `rlm.respond` ends its turn with empty
+    /// text: its answer is the text it sent.
+    #[test]
+    fn a_child_that_answered_with_rlm_respond_reports_the_sent_text() {
+        let respond_row = pa_types::session::FileEntry::CustomMessage {
+            payload: pa_types::session::CustomMessageEntry {
+                custom_type: pa_core::session_engine::messages::RLM_RESPONSE_CUSTOM_TYPE
+                    .to_string(),
+                content: pa_types::ai::UserContent::Text("| a |\n|---|\n| 1 |".to_string()),
+                details: None,
+                display: true,
+                rest: Map::default(),
+            },
+            base: pa_types::session::EntryBase {
+                id: Some("row-2".to_string()),
+                parent_id: None,
+                timestamp: None,
+                rest: Map::default(),
+            },
+        };
+        let file = std::env::temp_dir().join(format!(
+            "pa-rlm-exit-capture-respond-{}.jsonl",
+            uuid::Uuid::new_v4().simple()
+        ));
+        std::fs::write(
+            &file,
+            format!(
+                "{}\n{}\n{}\n",
+                assistant_row("Building the table."),
+                serde_json::to_string(&respond_row).expect("serialize the respond row"),
+                assistant_row("")
+            ),
+        )
+        .expect("write the session file");
+        assert_eq!(
+            last_assistant_text_from_file(&file.to_string_lossy()).as_deref(),
+            Some("| a |\n|---|\n| 1 |")
+        );
+        let _ = std::fs::remove_file(&file);
     }
 
     /// The retry episode's durable outcome row, as the worker persists it.

@@ -701,12 +701,20 @@ impl Worker {
         }
         let core = self.core.lock().unwrap();
         let text = core.store.as_ref().and_then(|store| {
-            store
-                .messages()
-                .into_iter()
-                .rev()
-                .find(|message| crate::types::message_role(message) == Some("assistant"))
-                .map(|message| crate::types::message_text(&message))
+            // The newest non-empty reply: an assistant text or a message
+            // the model sent with `rlm.respond`.
+            store.messages().into_iter().rev().find_map(|message| {
+                let is_reply = match crate::types::message_role(&message) {
+                    Some("assistant") => true,
+                    Some("custom") => {
+                        message.get("customType").and_then(Value::as_str)
+                            == Some(pa_core::session_engine::messages::RLM_RESPONSE_CUSTOM_TYPE)
+                    }
+                    _ => false,
+                };
+                Some(crate::types::message_text(&message))
+                    .filter(|text| is_reply && !text.is_empty())
+            })
         });
         response_success(
             None,

@@ -366,6 +366,21 @@ class RlmProgressNoteTest(unittest.TestCase):
                 asyncio.run(rlm_module.rlm.progress_note("note"))
 
 
+class RlmRespondTest(unittest.TestCase):
+    def test_respond_sends_the_text_verbatim(self) -> None:
+        text = "  | a |\n|---|\n| 1 |\n"
+        host_request = AsyncMock(return_value={})
+
+        with patch.object(rlm_module, "host_request", host_request):
+            self.assertIsNone(asyncio.run(rlm_module.rlm.respond(text)))
+
+        host_request.assert_awaited_once_with("rlm.respond", {"text": text})
+
+    def test_respond_rejects_empty_text(self) -> None:
+        with self.assertRaisesRegex(ValueError, "empty"):
+            asyncio.run(rlm_module.rlm.respond(" \n"))
+
+
 class RlmSubagentExtrasTest(unittest.TestCase):
     def test_lists_live_state_extras_from_host(self) -> None:
         host_request = AsyncMock(
