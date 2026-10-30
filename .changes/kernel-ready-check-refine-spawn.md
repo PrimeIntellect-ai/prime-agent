@@ -1,1 +1,3 @@
 - The kernel venv's runtime-ready check tracks the shipped `rlm.spawn` signature (`name` optional alongside `kind="refine"`): the stale check still pinned `name` as required, so every CI kernel boot rejected the runtime this tree itself installs and rebuilt the shared venv instead.
+- Refinement still runs from depth-2 sessions: `rlm.spawn kind="refine"` never spends the subagent recursion budget.
+- A refinement reply that lands while its parent turn is running parks and applies at the session's next idle boundary, so the refinement notice never wedges itself into the turn's history.

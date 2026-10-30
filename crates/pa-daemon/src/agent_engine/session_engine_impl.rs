@@ -318,16 +318,27 @@ impl SessionEngine for AgentSessionEngine {
         self.consume_compact_auto_refine_round()
     }
 
-    /// The refine child's reply wake: the in-flight child's proposal (or
-    /// its failure envelope) applies here.
-    fn route_refine_child_reply(
+    /// The refine child's reply wake, delivery half: the in-flight child's
+    /// proposal (or its failure envelope) parks for the idle-boundary
+    /// apply — the child's send never waits on the parent's apply.
+    fn park_refine_child_reply(
         &self,
         sender_active_session_id: &str,
         message: &str,
-    ) -> crate::engine::RefineChildReplyRoute<'_> {
-        let sender = sender_active_session_id.to_string();
-        let message = message.to_string();
-        Box::pin(async move { self.consume_refine_child_reply(&sender, &message).await })
+    ) -> crate::engine::RefineChildReplyPark<'_> {
+        // The fully-qualified call names the inherent (sync) park over
+        // this same-named trait method: the delivery answers immediately.
+        let parked =
+            AgentSessionEngine::park_refine_child_reply(self, sender_active_session_id, message);
+        Box::pin(async move { parked })
+    }
+
+    /// The parked refine reply's idle-boundary apply: the proposal (or its
+    /// failure envelope) applies through the existing apply machinery.
+    fn apply_pending_refine_reply(&self) -> crate::engine::PendingRefineApply<'_> {
+        // The fully-qualified call names the inherent (async) apply over
+        // this same-named trait method.
+        Box::pin(async move { AgentSessionEngine::apply_pending_refine_reply(self).await })
     }
 
     /// The worker's live session summary, rendered into the sender identity block.

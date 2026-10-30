@@ -1,11 +1,12 @@
 //! One agent turn: the runner that admits queued input, drives the
 //! engine, and settles the result.
 use super::{
-    checkpoint_queue_recovery, compact_action_label, create_daemon_event_meta,
-    emit_refinement_event_for_session, gather_delivery_batch, json, oneshot, session_snapshot,
-    AssistantSnapshot, DaemonOutbound, EngineEvent, EventPump, Lane, Map, Notify, OutboundFrame,
-    PromptRequest, QueueCheckpoint, QueuedItem, Result, SessionActionSnapshot, SessionCore,
-    SessionEngine, TurnSettle, Value, WorkerRecoveryJournal, ABORTED_TURN_SETTLE_ERROR,
+    broadcast_custom_row_locked, checkpoint_queue_recovery, compact_action_label,
+    create_daemon_event_meta, emit_refinement_event_for_session, emit_worker_event_with,
+    gather_delivery_batch, json, oneshot, persist_custom_row, session_snapshot, AssistantSnapshot,
+    DaemonOutbound, EngineEvent, EventPump, Lane, Map, Notify, OutboundFrame, PromptRequest,
+    QueueCheckpoint, QueuedItem, Result, SessionActionSnapshot, SessionCore, SessionEngine,
+    TurnSettle, Value, WorkerRecoveryJournal, ABORTED_TURN_SETTLE_ERROR,
 };
 
 use std::sync::{Arc, Mutex};
@@ -110,6 +111,14 @@ impl TurnRunner {
                 self.push_roster_delta();
                 self.run_turn(engine, lane, items).await;
             } else {
+                // The parked refine child reply applies at this idle
+                // boundary: the runner owns turn admission, so the apply's
+                // context push can never interleave with a running turn's
+                // history (a notice between an assistant tool call and its
+                // tool result drops the real result). The apply runs before
+                // the idle notify, so a waiter never sees a session whose
+                // refinement is still parked.
+                self.apply_parked_refine_reply().await;
                 self.idle_notify.notify_waiters();
                 // Every park re-stamps the activity end: the idle-eviction
                 // window measures from the TRUE last activity.
@@ -139,6 +148,67 @@ impl TurnRunner {
                         self.work_notify.notified().await;
                     }
                 }
+            }
+        }
+    }
+
+    /// Record one durable custom row and broadcast its
+    /// `message_start`/`message_end` pair (the runner-local form of the
+    /// worker's emit, for rows that land outside a turn).
+    fn emit_custom_row(&self, message: &Value) {
+        let mut core = self.core.lock().unwrap();
+        persist_custom_row(&mut core, message);
+        broadcast_custom_row_locked(&mut core, &self.events, message);
+    }
+
+    /// Sequence and broadcast one `session_event` frame at the worker
+    /// level (the runner-local form of the worker's emit).
+    fn emit_worker_event(&self, event: Value) {
+        emit_worker_event_with(&self.core, &self.events, event);
+    }
+
+    /// Apply a parked refine child reply at the idle boundary: the
+    /// proposal (or its failure envelope) applies through the engine, and
+    /// the outcome rows and event emit here — the fire-and-wake
+    /// contract's apply half, sequenced by this runner so it never
+    /// interleaves with a turn's rows. `Ok(())` when nothing was parked.
+    async fn apply_parked_refine_reply(&self) {
+        let Some(outcome) = self.engine.apply_pending_refine_reply().await else {
+            return;
+        };
+        match outcome {
+            Ok((result, source)) => {
+                // The refinement's durable rows: the TUI outcome, plus
+                // the model-facing notice when edits applied.
+                let outcome_row =
+                    pa_core::session_engine::refine::create_refinement_outcome_message(&result);
+                if let Ok(value) =
+                    serde_json::to_value(pa_types::session::AgentMessage::Custom(outcome_row))
+                {
+                    self.emit_custom_row(&value);
+                }
+                if result.applied_edits.iter().any(|edit| edit.applied) {
+                    let notice = pa_core::session_engine::refine::create_refinement_notice_message(
+                        &result, source,
+                    );
+                    if let Ok(value) =
+                        serde_json::to_value(pa_types::session::AgentMessage::Custom(notice))
+                    {
+                        self.emit_custom_row(&value);
+                    }
+                }
+                crate::user_bash::emit_session_event_frame(
+                    &self.core,
+                    &self.events,
+                    crate::worker::refine_complete_event(&result),
+                );
+            }
+            Err(error) => {
+                eprintln!("pa-daemon: the refinement child's reply failed to apply: {error:#}");
+                self.emit_worker_event(json!({
+                    "type": "refine_failed",
+                    "error": format!("{error:#}"),
+                }));
             }
         }
     }
