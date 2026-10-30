@@ -1,6 +1,6 @@
 //! The index concern: the entry-chain index maintenance — the push-side `by_id`/`leaf_id`
-//! bookkeeping, the live and end-of-load child-usage attribution folds, the
-//! rewrite-persist deferred fold, and the entry-id mint.
+//! bookkeeping with the branch's role counts, the live and end-of-load child-usage
+//! attribution folds, the rewrite-persist deferred fold, and the entry-id mint.
 
 use super::{HashMap, SessionEntry, SessionFile, Value};
 
@@ -139,9 +139,33 @@ impl SessionFile {
             },
         };
         self.chain.push(link);
-        self.by_id.insert(entry.id.clone(), position);
-        self.leaf_id = Some(entry.id.clone());
+        let id = entry.id.clone();
+        self.by_id.insert(id.clone(), position);
         self.entries.push(entry);
+        self.set_leaf(Some(id));
+    }
+
+    /// The one place the leaf moves. An append onto the leaf adds its row to the branch's
+    /// role counts; any other move leaves them stale for the next read to recount (a
+    /// recount here would walk the branch at every jump of a file load).
+    pub(crate) fn set_leaf(&mut self, leaf: Option<String>) {
+        if leaf == self.leaf_id {
+            return;
+        }
+        let appended = leaf
+            .as_deref()
+            .and_then(|id| self.by_id.get(id).copied())
+            .filter(|&position| self.entries[position].parent_id == self.leaf_id);
+        self.branch_roles = match (appended, self.branch_roles.take()) {
+            (Some(position), Some(mut counts)) => {
+                if let Some(role) = self.display_role(position) {
+                    super::view::count_role(&mut counts, role);
+                }
+                Some(counts)
+            }
+            _ => None,
+        };
+        self.leaf_id = leaf;
     }
 
     /// Undo the newest [`Self::index_entry`] (a failed rewrite-persist).
@@ -156,7 +180,9 @@ impl SessionFile {
         self.entries.clear();
         self.by_id.clear();
         self.chain.clear();
-        self.leaf_id = None;
+        self.set_leaf(None);
+        // An empty index: the branch has no rows, so appends count from here.
+        self.branch_roles = Some(HashMap::new());
     }
 
     /// The ancestor of `position` at chain depth `depth` (at most the position's own depth).

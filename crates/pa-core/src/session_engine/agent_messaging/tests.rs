@@ -531,6 +531,16 @@ impl AgentObserveController for StaticObserveController {
             truncated: true,
         }))
     }
+
+    fn session_messages(
+        &self,
+        _target: &str,
+        _start: i64,
+        _limit: u64,
+        _roles: Vec<String>,
+    ) -> impl Future<Output = anyhow::Result<Value>> + Send {
+        std::future::ready(Ok(json!({ "messages": [], "total": 0, "agent": "kid-1" })))
+    }
 }
 
 /// TS `AgentObserveListResult`: the caller's own row rides `current`,

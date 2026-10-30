@@ -136,7 +136,8 @@ impl LinkAgentObserveController {
 }
 
 /// Resolve within the nuclear family using the registry's normalized id-suffix
-/// and exact-name contract. Exact active ids retain direct-lookup precedence.
+/// and exact-name contract, or the exact RLM child id. Exact active ids retain
+/// direct-lookup precedence.
 fn find_target(
     mut summaries: Vec<AgentObserveSummary>,
     target: &str,
@@ -156,6 +157,7 @@ fn find_target(
                 .is_some_and(|id| crate::registry::selector_matches(id, target))
                 || crate::registry::selector_matches(&summary.session_id, target)
                 || summary.session_name.as_deref() == Some(target)
+                || summary.rlm_child_id.as_deref() == Some(target)
         })
         .collect();
     if matches.len() > 1 {
@@ -263,6 +265,26 @@ impl AgentObserveController for LinkAgentObserveController {
             max_chars,
             truncated,
         })
+    }
+
+    /// The member's own worker answers with its store and running calls; the supervisor
+    /// reads the file of a member no worker holds.
+    async fn session_messages(
+        &self,
+        target: &str,
+        start: i64,
+        limit: u64,
+        roles: Vec<String>,
+    ) -> anyhow::Result<Value> {
+        let agent = self.family_target(target).await?;
+        let mut data = self
+            .request_session_messages(&agent, start, limit, roles)
+            .await?;
+        data["agent"] = json!(agent
+            .session_name
+            .or(agent.active_session_id)
+            .unwrap_or_default());
+        Ok(data)
     }
 }
 

@@ -13,7 +13,8 @@ use serde_json::Value;
 
 use super::ipython_details::{
     format_duration, is_agent_message_receipt, is_edit_confirmation, parse_sent_agent_message,
-    read_background_shell, BackgroundShell, BashCommands, IpythonDetails, IpythonError,
+    read_background_shell, transcript_reads_summary, BackgroundShell, BashCommands, IpythonDetails,
+    IpythonError,
 };
 use super::layout::RowOutput;
 use super::{highlight, ToolCallCard};
@@ -194,10 +195,10 @@ fn layout(
             code,
         )
     });
-    // Edit summaries and sent-message receipts show even when the cell is
-    // collapsed; code and output open up only when expanded. The sent
-    // messages are agent messages of their own, so their bodies follow the
-    // conversation level, not a click on the card.
+    // Edit summaries, sent-message receipts, and transcript reads show even
+    // when the cell is collapsed; code and output open up only when
+    // expanded. The sent messages are agent messages of their own, so their
+    // bodies follow the conversation level, not a click on the card.
     let expanded = detail.tool_output_expanded();
     let has_code = expanded && render_code(lines, code, theme, width);
     render_diffs(
@@ -209,6 +210,7 @@ fn layout(
         width,
     );
     render_sent_agent_messages(lines, &details, level.tool_output_expanded(), theme, width);
+    render_transcript_reads(lines, &details, expanded, theme, width);
     if !expanded {
         return;
     }
@@ -593,6 +595,34 @@ fn render_sent_agent_messages(
                 }
             }
         }
+    }
+}
+
+/// One summary row for the cell's `rlm.session.messages` reads, shaped like
+/// the sent agent-message rows; the expanded view sets it off from the code.
+fn render_transcript_reads(
+    lines: &mut RowOutput,
+    details: &IpythonDetails,
+    expanded: bool,
+    theme: &Theme,
+    width: usize,
+) {
+    if let Some(summary) = transcript_reads_summary(&details.transcript_reads) {
+        if expanded {
+            lines.blank();
+        }
+        lines.push(|| {
+            let row: Line = vec![
+                Span::raw(" "),
+                Span::styled(
+                    "\u{2261} transcript".to_string(),
+                    theme.fg_style(ThemeColor::Muted),
+                ),
+                Span::styled(" \u{b7} ".to_string(), theme.fg_style(ThemeColor::Dim)),
+                Span::styled(summary, theme.fg_style(ThemeColor::Dim)),
+            ];
+            truncate_line(&row, width, "\u{2026}")
+        });
     }
 }
 
