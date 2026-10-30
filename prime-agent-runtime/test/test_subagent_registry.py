@@ -97,7 +97,7 @@ class RlmSubagentRegistryTest(unittest.TestCase):
         self.assertEqual(result.name, "api-reviewer")
         self.assertEqual(result.model, "deepseek/deepseek-v4-flash")
 
-    def test_forwards_the_decision_kind_to_host_and_rejects_other_kinds(self) -> None:
+    def test_forwards_the_decision_kind_to_host(self) -> None:
         host_request = AsyncMock(
             return_value={
                 "rlm_child_id": "sub-a1b2c3d4",
@@ -117,14 +117,6 @@ class RlmSubagentRegistryTest(unittest.TestCase):
                 "kwargs": {"name": "system-1", "kind": "decision"},
             },
         )
-
-        host_request = AsyncMock()
-        with patch.object(rlm_module, "host_request", host_request):
-            with self.assertRaisesRegex(TypeError, "kind must be 'decision' or None"):
-                asyncio.run(
-                    rlm_module.rlm.spawn("decide", name="system-1", kind="oracle")
-                )
-        host_request.assert_not_awaited()
 
     def test_requires_an_explicit_child_name(self) -> None:
         host_request = AsyncMock()

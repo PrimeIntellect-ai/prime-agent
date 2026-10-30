@@ -194,7 +194,7 @@ async def spawn(
     ``cwd`` starts the child in that directory (relative to the session cwd); defaults
     to the session cwd.
     ``kind`` selects a dedicated child kind; ``"decision"`` spawns the Decision API
-    child (the model comes from the decisionApi.systemOneModel setting).
+    child (the model comes from the ``decisionModel`` setting).
     """
     return await _spawn(prompt, name=name, model=model, thinking=thinking, cwd=cwd, kind=kind)
 
@@ -213,8 +213,6 @@ async def _spawn(
     stateId}``), which the host records on the child's ledger spawn edge."""
     if not isinstance(prompt, str):
         raise TypeError(f"prompt must be str, got {type(prompt).__name__}")
-    if kind is not None and kind != "decision":
-        raise TypeError(f"kind must be 'decision' or None, got {kind!r}")
     kwargs: dict[str, Any] = {"name": name}
     if model is not None:
         kwargs["model"] = model
