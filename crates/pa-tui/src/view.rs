@@ -167,6 +167,10 @@ pub struct AgentView {
     /// Row texts of the inline frame at the last main-screen flush: the
     /// next flush diffs against this, so exits never duplicate scrollback.
     flushed_frame: Vec<String>,
+    /// Row texts of the transcript rows at the last turn-settle scrollback
+    /// flush: the next settle's delta flush appends only rows past this
+    /// base, so consecutive turns never duplicate scrollback.
+    flushed_transcript_rows: Vec<String>,
     pub(crate) frame_rows: usize,
     /// The last composed frame's clickable link ranges: the click
     /// dispatch resolves a screen cell to its URL through these.
@@ -339,6 +343,7 @@ impl AgentView {
             layout_width: 0,
             layout_options: None,
             flushed_frame: Vec::new(),
+            flushed_transcript_rows: Vec::new(),
             frame_rows: 0,
             frame_links: Vec::new(),
             selection: crate::selection::SelectionState::default(),

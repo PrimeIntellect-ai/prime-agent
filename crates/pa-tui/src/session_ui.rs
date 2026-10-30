@@ -362,6 +362,7 @@ pub(crate) struct SessionUi {
     /// Adoption telemetry (counted into `tui exit`); `None` drops events.
     pub(crate) telemetry: Option<std::sync::Arc<dyn crate::interactive::InteractionTelemetry>>,
     scroll_adoption_emitted: bool,
+    scrollback_flush_emitted: bool,
     pub(crate) exit_reason: &'static str,
     /// The daemon connection's recovery state, written only through its transition
     /// ([`crate::interactive::reconnect::Connection::on`]).

@@ -64,6 +64,11 @@ pub trait ClientSettings: Send + Sync {
     fn set_clear_on_shrink(&self, enabled: bool) -> Result<()>;
     /// `terminal.showTerminalProgress` (TS default false).
     fn show_terminal_progress(&self) -> bool;
+    /// `terminal.scrollbackFlush` (default true on a real settings store). The default body
+    /// reads disabled so fixture runs without a settings handle never write scrollback.
+    fn scrollback_flush(&self) -> bool {
+        false
+    }
     /// Persists `terminal.showTerminalProgress` to the global scope.
     ///
     /// # Errors

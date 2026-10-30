@@ -166,6 +166,9 @@ impl ClientSettings for CliClientSettings {
         set_show_terminal_progress,
         bool
     );
+    fn scrollback_flush(&self) -> bool {
+        self.manager().get_scrollback_flush()
+    }
     setting!(
         image_auto_resize,
         set_image_auto_resize,

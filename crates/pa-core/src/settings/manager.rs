@@ -234,6 +234,17 @@ impl SettingsManager {
             .unwrap_or(true)
     }
 
+    /// `terminal.scrollbackFlush`: whether a settled turn appends its new
+    /// transcript rows into the native terminal scrollback (default true).
+    #[must_use]
+    pub fn get_scrollback_flush(&self) -> bool {
+        self.settings()
+            .terminal
+            .as_ref()
+            .and_then(|terminal| terminal.scrollback_flush)
+            .unwrap_or(true)
+    }
+
     /// `terminal.showImages`: whether image blocks in tool results render
     /// their type/dimension metadata rows (TS default: true).
     #[must_use]

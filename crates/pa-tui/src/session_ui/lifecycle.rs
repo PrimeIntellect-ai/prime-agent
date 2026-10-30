@@ -177,6 +177,7 @@ impl SessionUi {
             page_notes,
             telemetry: options.telemetry.clone(),
             scroll_adoption_emitted: false,
+            scrollback_flush_emitted: false,
             exit_reason: "daemon_closed",
             connection: crate::interactive::reconnect::Connection::Connected,
             pending_rebind: None,

@@ -209,6 +209,21 @@ impl SessionUi {
         }
     }
 
+    /// Report the run's first automatic scrollback flush (`tui scrollback
+    /// flush used`), fire-and-forget so the paint never waits on the
+    /// telemetry flush.
+    pub(crate) fn track_scrollback_flush(&mut self) {
+        if self.scrollback_flush_emitted {
+            return;
+        }
+        self.scrollback_flush_emitted = true;
+        if let Some(telemetry) = self.telemetry.clone() {
+            tokio::spawn(async move {
+                telemetry.scrollback_flush_used().await;
+            });
+        }
+    }
+
     /// Report a builtin command submission (`agent command used`),
     /// fire-and-forget like the scroll event: the command's handling never
     /// waits on the telemetry flush.
