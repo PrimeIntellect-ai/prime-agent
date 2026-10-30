@@ -1430,8 +1430,8 @@ async fn run_boundaries_record_git_state() {
     );
 }
 
-/// Cancelling a caller after its resolved bill reaches the store boundary
-/// must not cancel that bill while the durable store is busy.
+/// Cancelling a caller once its bill is resolved must not cancel that bill,
+/// whether the session lock or the durable store is busy.
 #[tokio::test]
 async fn a_resolved_model_bill_survives_its_callers_cancellation() {
     use std::future::Future;
@@ -1502,17 +1502,19 @@ async fn a_resolved_model_bill_survives_its_callers_cancellation() {
         },
     )
     .unwrap();
+    let busy_session = Arc::clone(session.session_handle()).lock_owned().await;
     let mut recording = Box::pin(session.record_model_usage(Some(bill.clone())));
-    // One poll reaches the blocked append (or its owned recording task).
-    // Readiness is the store's signal, never a fixed sleep.
+    // One poll hands the bill to its recording task, which waits on the
+    // held session lock. Readiness is the store's signal, never a fixed sleep.
     assert!(recording
         .as_mut()
         .poll(&mut Context::from_waker(Waker::noop()))
         .is_pending());
+    drop(recording);
+    drop(busy_session);
     tokio::time::timeout(std::time::Duration::from_secs(5), store.entered.notified())
         .await
         .expect("recording reached the store");
-    drop(recording);
     store.release.notify_one();
     tokio::time::timeout(
         std::time::Duration::from_secs(5),
