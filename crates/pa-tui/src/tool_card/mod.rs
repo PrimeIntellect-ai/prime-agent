@@ -112,31 +112,24 @@ pub fn working_icon(frame: usize) -> &'static str {
     crate::chat::working_icon_frame(frame)
 }
 
-/// Render one tool-call card through its tool shell. `detail` is the
-/// card's own level (a click may flip it); `conversation_detail` is the
-/// conversation level, which alone drives edit diffs. `show_images` (the
-/// `terminal.showImages` setting) renders metadata rows or `[Image: ...]`
-/// placeholders.
+/// Render one tool-call card through its tool shell. `detail` is the card's own level (a click
+/// flips it); `level` is the conversation level, which the python card's edit diffs and sent
+/// agent messages follow. `show_images` (the `terminal.showImages` setting) renders metadata
+/// rows or `[Image: ...]` placeholders.
 #[must_use]
 pub fn render_tool_card(
     card: &ToolCallCard,
     frame: usize,
     detail: Detail,
-    conversation_detail: Detail,
+    level: Detail,
     theme: &Theme,
     width: usize,
     show_images: bool,
 ) -> Vec<Line> {
     match card.name.as_str() {
-        name if pa_types::ai::is_python_tool_name(name) => ipython::render(
-            card,
-            frame,
-            detail,
-            conversation_detail,
-            theme,
-            width,
-            show_images,
-        ),
+        name if pa_types::ai::is_python_tool_name(name) => {
+            ipython::render(card, frame, detail, level, theme, width, show_images)
+        }
         "bash" => bash::render(card, frame, detail, theme, width, show_images),
         _ => generic::render(card, frame, detail, theme, width, show_images),
     }
@@ -215,6 +208,46 @@ pub(crate) fn panel_line(content: Line, bg: ratatui::style::Style, width: usize)
 /// The bash panel duration: tenths of a second.
 pub(crate) fn format_bash_duration(ms: u128) -> String {
     format!("{:.1}s", ms as f64 / 1000.0)
+}
+
+/// The instant a still-running call started (the live-timer gate,
+/// operator feature 2026-10-03): `Some` while the card saw its execution
+/// start and the final result never landed — every settle path stamps
+/// `ended_at` together with the result — `None` once settled or when the
+/// card never saw its start (the TS render-state lifecycle). A running
+/// call exists only inside an active turn, and the turn's loader spinner
+/// keeps the loop repainting at its 80ms phase cadence (#3296's wake), so
+/// a duration rendered from this instant ticks on those repaints without
+/// adding a wake of its own.
+fn live_started(card: &ToolCallCard) -> Option<Instant> {
+    card.started_at.filter(|_| card.ended_at.is_none())
+}
+
+/// The `Elapsed`/`Took` duration row the panel shells render below the
+/// call's content (the bash card's TS `Took 1.2s` row): while the call
+/// runs the label is `Elapsed` and the value is recomputed on every
+/// paint — the loader spinner's 80ms phase repaints tick it — and once
+/// the final result lands the row is the exact static `Took` timing the
+/// settled card always rendered. A card that never saw its execution
+/// start renders no row.
+fn duration_row(
+    card: &ToolCallCard,
+    theme: &Theme,
+    content_width: usize,
+    rows: &mut layout::RowOutput,
+) {
+    let Some(started) = card.started_at else {
+        return;
+    };
+    let label = if card.ended_at.is_some() {
+        "Took"
+    } else {
+        "Elapsed"
+    };
+    let elapsed = card.ended_at.unwrap_or_else(Instant::now) - started;
+    let text = format!("{label} {}", format_bash_duration(elapsed.as_millis()));
+    rows.blank();
+    rows.wrapped_text(&text, theme.fg_style(ThemeColor::Dim), content_width);
 }
 
 /// The bash tool's output byte budget, used when the spill carries no
@@ -339,21 +372,15 @@ pub(crate) fn count_tool_card(
     card: &ToolCallCard,
     frame: usize,
     detail: Detail,
-    conversation_detail: Detail,
+    level: Detail,
     theme: &Theme,
     width: usize,
     show_images: bool,
 ) -> usize {
     match card.name.as_str() {
-        name if pa_types::ai::is_python_tool_name(name) => ipython::count(
-            card,
-            frame,
-            detail,
-            conversation_detail,
-            theme,
-            width,
-            show_images,
-        ),
+        name if pa_types::ai::is_python_tool_name(name) => {
+            ipython::count(card, frame, detail, level, theme, width, show_images)
+        }
         "bash" => bash::count(card, frame, detail, theme, width, show_images),
         _ => generic::count(card, frame, detail, theme, width, show_images),
     }

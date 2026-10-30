@@ -1,0 +1,70 @@
+name: Changelog fragment
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, labeled, unlabeled]
+    branches: [main]
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  changelog-fragment:
+    name: Check changelog fragment
+    runs-on: ubuntu-latest
+    if: github.event.pull_request.user.type != 'Bot'
+    steps:
+      - name: Require a changelog fragment for shipped changes or an explicit opt-out
+        uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea # v7.0.1
+        with:
+          script: |
+            const pr = context.payload.pull_request;
+            if (pr.labels.some((label) => label.name === "no-changelog")) {
+              core.info("Label no-changelog is set; skipping changelog check.");
+              return;
+            }
+            // listFiles caps at 3000 files; beyond that the check cannot see every change.
+            if (pr.changed_files > 3000) {
+              core.setFailed("PR changes more than 3000 files; split it or apply the no-changelog label.");
+              return;
+            }
+            const files = await github.paginate(github.rest.pulls.listFiles, {
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: pr.number,
+              per_page: 100,
+            });
+            // What the release ships: the binary's sources (vendor/ is a patched dependency,
+            // install-rust.sh is compiled in) and the payload assemble_artifacts.py stages.
+            const shipped = ["crates/", "vendor/", "install-rust.sh", "prime-agent-runtime/", "skills/"];
+            const isShipped = (path) => shipped.some((prefix) => path.startsWith(prefix)) && !/\/tests?\//.test(path);
+            if (!files.some((f) => isShipped(f.filename) || (f.previous_filename !== undefined && isShipped(f.previous_filename)))) {
+              core.info("No shipped paths changed; no changelog fragment needed.");
+              return;
+            }
+            // fold_changelog.py folds direct children of .changes/ except README.md.
+            const fragments = files.filter(
+              (f) =>
+                (f.status === "added" || f.status === "modified") &&
+                /^\.changes\/[^/]+\.md$/.test(f.filename) &&
+                f.filename !== ".changes/README.md",
+            );
+            for (const f of fragments) {
+              // Read at the head commit through the base repo: works for fork PRs with this read-only token.
+              const { data } = await github.rest.repos.getContent({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                path: f.filename,
+                ref: pr.head.sha,
+              });
+              if (Buffer.from(data.content, "base64").toString().trim() !== "") {
+                core.info(`Changelog fragment found: ${f.filename}`);
+                return;
+              }
+            }
+            core.setFailed(
+              `Shipped paths (${shipped.join(", ")}) changed but no non-empty changelog fragment ` +
+                "was added or modified. Add .changes/<branch-slug>.md containing e.g. " +
+                "`- Fixed the frobnicator dropping input on resize.`, or apply the no-changelog label.",
+            );

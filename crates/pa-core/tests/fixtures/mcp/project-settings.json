@@ -1,0 +1,17 @@
+{
+  "mcpServers": {
+    "user-server": {
+      "command": "fixture-project-server",
+      "args": ["project-argument"],
+      "cwd": "/project/workspace",
+      "env": { "FIXTURE_TOKEN": { "env": "FIXTURE_PROJECT_TOKEN" } },
+      "enabled": false,
+      "enabledTools": ["project-tool"],
+      "disabledTools": [],
+      "startupTimeoutMs": 56000,
+      "callTimeoutMs": 78000
+    },
+    "disabled-server": { "enabled": true },
+    "project-server": { "type": "stdio", "command": "fixture-project-server" }
+  }
+}

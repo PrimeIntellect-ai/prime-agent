@@ -220,12 +220,8 @@ fn parse_key_event_record(key_event: &KeyEventRecord) -> Option<WindowsKeyEvent>
                 // values.
                 let ch = std::char::from_u32(unicode_scalar_value as u32).unwrap();
                 let key_code = KeyCode::Char(ch);
-                let kind = if key_event.key_down {
-                    KeyEventKind::Press
-                } else {
-                    KeyEventKind::Release
-                };
-                let key_event = KeyEvent::new_with_kind(key_code, modifiers, kind);
+                // The Alt release carries the completed character, not a key release.
+                let key_event = KeyEvent::new(key_code, modifiers);
                 return Some(WindowsKeyEvent::KeyEvent(key_event));
             }
         }
@@ -375,4 +371,48 @@ fn parse_mouse_event_record(
         row: ypos,
         modifiers,
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn alt_code_characters_are_presses_and_ordinary_keyups_stay_releases() {
+        for ch in ['€', '—', '“', '”', 'A'] {
+            let record = KeyEventRecord {
+                key_down: false,
+                repeat_count: 1,
+                virtual_key_code: VK_MENU as u16,
+                virtual_scan_code: 0,
+                u_char: ch as u16,
+                // ControlKeyState wraps a u32; zero means no modifiers are held.
+                control_key_state: unsafe { std::mem::zeroed() },
+            };
+            assert_eq!(
+                handle_key_event(record, &mut None),
+                Some(Event::Key(KeyEvent::new(
+                    KeyCode::Char(ch),
+                    KeyModifiers::NONE
+                )))
+            );
+        }
+        let record = KeyEventRecord {
+            key_down: false,
+            repeat_count: 1,
+            virtual_key_code: VK_DELETE as u16,
+            virtual_scan_code: 0,
+            u_char: 0,
+            // ControlKeyState wraps a u32; zero means no modifiers are held.
+            control_key_state: unsafe { std::mem::zeroed() },
+        };
+        assert_eq!(
+            handle_key_event(record, &mut None),
+            Some(Event::Key(KeyEvent::new_with_kind(
+                KeyCode::Delete,
+                KeyModifiers::NONE,
+                KeyEventKind::Release,
+            )))
+        );
+    }
 }

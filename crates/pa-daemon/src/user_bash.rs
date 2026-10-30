@@ -532,8 +532,8 @@ impl OutputStream {
         self.clone()
     }
 
-    fn push(&mut self, data: &[u8]) {
-        let text = sanitize_output(&String::from_utf8_lossy(data));
+    fn push(&mut self, data: &str) {
+        let text = sanitize_output(data);
         if text.is_empty() {
             return;
         }
@@ -628,16 +628,24 @@ async fn run_bash(run: RunBash<'_>) -> BashEnd {
     }));
     // stdout and stderr merge into one stream (TS wires both pipes to the
     // same `onData`); the shared accumulator keeps the arrival order.
+    // A read can end inside a multi-byte character; each pipe's decoder holds its leading
+    // bytes for the next read (TS `TextDecoder`, `stream: true`).
     let pump = |mut reader: Box<dyn AsyncRead + Unpin + Send>| {
         let stream = Arc::clone(&stream);
         async move {
+            let mut decoder = crate::streaming_utf8::StreamingUtf8::default();
             let mut buffer = [0u8; 8192];
             loop {
                 match reader.read(&mut buffer).await {
                     Ok(0) | Err(_) => break,
-                    Ok(read) => stream.lock().unwrap().push(&buffer[..read]),
+                    Ok(read) => {
+                        let text = decoder.decode_chunk(&buffer[..read]);
+                        stream.lock().unwrap().push(&text);
+                    }
                 }
             }
+            let rest = decoder.flush();
+            stream.lock().unwrap().push(&rest);
         }
     };
     let stdout_pump = stdout.map(|pipe| pump(Box::new(pipe)));
@@ -1033,6 +1041,29 @@ mod tests {
             response.error.as_deref(),
             Some("execute_bash_and_wait requires a command")
         );
+    }
+
+    /// Multi-byte characters that straddle a pipe read decode intact: a per-read decode replaced
+    /// both halves with U+FFFD in the stream and the row the model reads.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn characters_split_across_reads_decode_intact() {
+        let cwd = tempfile::tempdir().expect("tempdir");
+        let worker = created_worker(cwd.path()).await;
+        // 1,500 seven-byte lines cross an 8 KiB read without reaching either output cap.
+        let response = worker
+            .dispatch(
+                "execute_bash_and_wait",
+                &json!({
+                    "activeSessionId": "bash-session",
+                    "command": "yes '\u{20ac}\u{20ac}' | head -n 1500",
+                }),
+            )
+            .await;
+        assert!(response.success, "failed: {response:?}");
+        let data = response.data.expect("data");
+        let output = data["output"].as_str().expect("output");
+        assert_eq!(output, "\u{20ac}\u{20ac}\n".repeat(1500));
     }
 
     /// A command whose shell dies by a signal reports 128 + the signal number, like a shell's

@@ -1,1 +1,0 @@
-- A `!` command or a model `bash` tool call whose shell dies from a signal (for example a crash, an OOM kill or `kill`) now reports 128 + the signal number as its exit code, so the model is told it failed, like the TypeScript version.
