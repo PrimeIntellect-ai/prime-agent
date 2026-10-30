@@ -5,13 +5,16 @@
 #![cfg(unix)]
 #![warn(clippy::allow_attributes_without_reason)]
 
-use std::io::{BufRead, BufReader, Write};
-use std::os::unix::net::{UnixListener, UnixStream};
-use std::path::PathBuf;
+mod support;
+
+use std::io::{BufRead, BufReader};
+use std::os::unix::net::UnixListener;
 use std::time::Duration;
 
-use pa_tui::agents_view::{AgentsHeadlessPlan, AgentsStep, AgentsViewOptions, AgentsViewUiMode};
+use pa_tui::agents_view::{AgentsHeadlessPlan, AgentsStep, AgentsViewUiMode};
 use serde_json::{json, Value};
+
+use support::{respond, respond_failure, view_options, write_json};
 
 /// Environment mutations are process-global: the `PRIME_AGENT_CODING_AGENT_DIR` redirect serializes
 /// on one lock and restores on exit. A tokio mutex (a std guard across an await is a clippy error).
@@ -48,7 +51,7 @@ impl MockSupervisor {
             let write_stream = stream.try_clone().expect("clone socket");
             let mut writer = write_stream;
             let mut reader = BufReader::new(stream);
-            write_line(
+            write_json(
                 &mut writer,
                 &json!({
                     "type": "daemon_hello",
@@ -110,39 +113,6 @@ impl MockSupervisor {
             }
         }
     }
-}
-
-fn write_line(writer: &mut UnixStream, value: &Value) {
-    let mut line = serde_json::to_string(value).expect("serialize line");
-    line.push('\n');
-    writer.write_all(line.as_bytes()).expect("write");
-    writer.flush().expect("flush");
-}
-
-fn respond(writer: &mut UnixStream, id: &str, command: &str, data: &Value) {
-    write_line(
-        writer,
-        &json!({
-            "id": id,
-            "type": "response",
-            "command": command,
-            "success": true,
-            "data": data,
-        }),
-    );
-}
-
-fn respond_failure(writer: &mut UnixStream, id: &str, command: &str, error: &str) {
-    write_line(
-        writer,
-        &json!({
-            "id": id,
-            "type": "response",
-            "command": command,
-            "success": false,
-            "error": error,
-        }),
-    );
 }
 
 fn read_line(reader: &mut impl BufRead) -> Option<String> {
@@ -212,27 +182,6 @@ fn worker_crash_line() -> String {
         "msg": "Session worker 5b1d3aeb91ee stderr: uncaught exception: Error: write EPIPE",
     })
     .to_string()
-}
-
-fn view_options(socket: &std::path::Path) -> AgentsViewOptions {
-    AgentsViewOptions {
-        socket_path: socket.to_path_buf(),
-        cwd: PathBuf::from("/tmp"),
-        session_dir: Some(PathBuf::from("/tmp/sessions")),
-        theme: "prime".to_string(),
-        version: "0.0.0".to_string(),
-        anchor_session_id: None,
-        scope: None,
-        query: None,
-        expanded_ancestors: Vec::new(),
-        selected_row_identity: None,
-        selected_key: None,
-        status_message: None,
-        keybindings: pa_tui::keybindings::KeybindingsManager::new(),
-        show_hardware_cursor: false,
-        incident_notice_state: None,
-        create_config: serde_json::json!({}),
-    }
 }
 
 /// The collapsed worker-crash notice line renders from the log tail, with the pointer to the

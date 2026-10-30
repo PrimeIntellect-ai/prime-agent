@@ -5,16 +5,21 @@
 #![cfg(unix)]
 #![warn(clippy::allow_attributes_without_reason)]
 
-use std::io::{BufRead, BufReader, Write};
-use std::os::unix::net::{UnixListener, UnixStream};
-use std::path::PathBuf;
+mod support;
+
+use std::io::{BufRead, BufReader};
+use std::os::unix::net::UnixListener;
 use std::sync::{Arc, Mutex};
 
 use pa_tui::interactive::{
-    run_interactive, HeadlessPlan, HeadlessStep, InteractiveOptions, ModelSelection,
-    SessionSelection, UiMode,
+    run_interactive, HeadlessPlan, HeadlessStep, InteractiveOptions, UiMode,
 };
 use serde_json::{json, Value};
+
+use support::{
+    attach_response, create_response, options, session_stats_response, write_json,
+    write_session_event,
+};
 
 /// Tall enough that the whole 20-row bash preview plus its status rows fit the window.
 const TALL_PLAN_HEIGHT: u16 = 64;
@@ -136,39 +141,13 @@ impl MockSupervisor {
                     .to_string();
                 match command_type.as_str() {
                     "create" => {
-                        write_json(
-                            &mut writer,
-                            &json!({
-                                "type": "response",
-                                "id": id,
-                                "command": "create",
-                                "success": true,
-                                "data": {
-                                    "activeSessionId": "s1",
-                                    "id": "s1",
-                                    "sessionId": "sess-1",
-                                    "sessionFile": "/tmp/sess-1.jsonl",
-                                },
-                            }),
-                        );
+                        write_json(&mut writer, &create_response(id));
                     }
                     "attach" => {
-                        write_json(&mut writer, &attach_data(id));
+                        write_json(&mut writer, &attach_response(id, "bash session"));
                     }
                     "get_session_stats" => {
-                        write_json(
-                            &mut writer,
-                            &json!({
-                                "type": "response",
-                                "id": id,
-                                "command": "get_session_stats",
-                                "success": true,
-                                "data": {
-                                    "contextUsage": { "tokens": 1200, "contextWindow": 200_000 },
-                                    "cost": 0.01,
-                                },
-                            }),
-                        );
+                        write_json(&mut writer, &session_stats_response(id));
                     }
                     "prompt" => {
                         write_json(
@@ -459,96 +438,6 @@ fn side_question_event(id: &str, question: &str, status: &str, answer: &str) -> 
     })
 }
 
-fn write_session_event(writer: &mut UnixStream, event: &Value) {
-    write_json(
-        writer,
-        &json!({
-            "type": "session_event",
-            "activeSessionId": "s1",
-            "event": event,
-        }),
-    );
-}
-
-fn write_json(writer: &mut UnixStream, value: &Value) {
-    let mut line = serde_json::to_string(value).expect("serialize mock frame");
-    line.push('\n');
-    writer.write_all(line.as_bytes()).expect("write mock frame");
-    writer.flush().expect("flush mock frame");
-}
-
-/// The slim attach result with an empty transcript.
-fn attach_data(id: &str) -> Value {
-    json!({
-        "type": "response",
-        "id": id,
-        "command": "attach",
-        "success": true,
-        "data": {
-            "protocol": { "name": "prime-agent.daemon", "version": 7 },
-            "activeSessionId": "s1",
-            "snapshot": {
-                "activeSessionId": "s1",
-                "summary": { "id": "s1", "cwd": "/tmp" },
-                "state": {
-                    "activeSessionId": "s1",
-                    "cwd": "/tmp",
-                    "sessionId": "sess-1",
-                    "sessionName": "bash session",
-                    "model": null,
-                    "isStreaming": false,
-                    "isCompacting": false,
-                    "sessionActions": { "queuedCount": 0, "steering": [], "followUps": [] },
-                },
-                "messages": [],
-                "lastEventSequence": 0,
-                "lastEventCursor": null,
-            },
-            "client": { "id": "mock", "capabilities": [] },
-            "lastEventSequence": 0,
-            "lastEventCursor": null,
-        },
-    })
-}
-
-fn options(socket: PathBuf) -> InteractiveOptions {
-    InteractiveOptions {
-        models: None,
-        socket_path: socket,
-        cwd: PathBuf::from("/tmp"),
-        session_dir: None,
-        script_path: None,
-        model_selection: ModelSelection::default(),
-        model_catalog: Vec::new(),
-        model_configured_providers: std::collections::HashSet::default(),
-        model_recent_models: Vec::new(),
-        default_thinking_level: None,
-        no_session: false,
-        session: SessionSelection::New,
-        initial_message: None,
-        show_images: true,
-        fullscreen_mouse: false,
-        theme: "prime".to_string(),
-        code_block_indent: "  ".to_string(),
-        tree_filter_mode: String::new(),
-        branch_summary_skip_prompt: false,
-        version: "0.0.0".to_string(),
-        onboarding: None,
-        telemetry_disabled: None,
-        client_auth: None,
-        traces: None,
-        provider_auth: None,
-        update_commands: None,
-        telemetry: None,
-        keybindings: pa_tui::keybindings::KeybindingsManager::new(),
-        session_rlm_depth: None,
-        prompt_stash: Arc::default(),
-        session_has_children: false,
-        restore_dock_focus: false,
-        client_settings: None,
-    }
-}
-
 /// The captured frames plus the recorded request payloads.
 #[derive(Debug)]
 struct RunOutcome {
@@ -590,7 +479,13 @@ fn run_plan_with(
         height: TALL_PLAN_HEIGHT,
     };
     let outcome = runtime
-        .block_on(run_interactive(options(socket), UiMode::Headless(plan)))
+        .block_on(run_interactive(
+            InteractiveOptions {
+                fullscreen_mouse: false,
+                ..options(socket)
+            },
+            UiMode::Headless(plan),
+        ))
         .expect("interactive run");
     let _ = handle.join();
     RunOutcome {

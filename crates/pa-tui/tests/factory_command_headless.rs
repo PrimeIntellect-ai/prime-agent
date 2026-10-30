@@ -36,17 +36,20 @@
 //   removals would ripple through the callers without changing behavior.
 #![allow(clippy::unnecessary_wraps)]
 
-use std::io::{BufRead, BufReader, Write};
-use std::os::unix::net::{UnixListener, UnixStream};
+mod support;
+
+use std::os::unix::net::UnixListener;
 use std::path::PathBuf;
 
 use anyhow::Result;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use pa_tui::interactive::{
-    run_interactive, HeadlessPlan, HeadlessStep, InteractiveOptions, ModelSelection,
-    SessionSelection, UiMode,
-};
+use pa_tui::interactive::{HeadlessPlan, HeadlessStep, InteractiveOptions};
 use serde_json::{json, Value};
+
+use support::{
+    attach_response, create_response, detach_response, run_headless, serve_connection,
+    session_stats_response, write_json, Request,
+};
 
 struct MockSupervisor {
     listener: UnixListener,
@@ -87,207 +90,99 @@ impl MockSupervisor {
             factory_graph_error,
         } = self;
         let (stream, _) = listener.accept().expect("accept");
-        let write_stream = stream.try_clone().expect("clone mock socket");
-        let mut writer = write_stream;
-        let mut reader = BufReader::new(stream);
-
-        let hello = json!({
-            "type": "daemon_hello",
-            "protocol": { "name": "prime-agent.daemon", "version": 7 },
-            "serverCapabilities": server_capabilities,
-            "clientId": "mock",
-        });
-        write_json(&mut writer, &hello);
-
+        let capabilities: Vec<&str> = server_capabilities.iter().map(String::as_str).collect();
         // A page stop also stops the mock's session: the daemon's `session_closed` follows the
         // stop's reply, and the closed session's graph lane answers a refusal from then on.
         let mut session_closed = false;
-        let mut line = String::new();
-        loop {
-            line.clear();
-            match reader.read_line(&mut line) {
-                Ok(0) | Err(_) => break,
-                Ok(_) => {}
-            }
-            let Ok(envelope) = serde_json::from_str::<Value>(line.trim()) else {
-                continue;
-            };
-            let id = envelope.get("id").and_then(Value::as_str).unwrap_or("");
-            let command = envelope.get("command").cloned().unwrap_or(Value::Null);
-            let command_type = command
-                .get("type")
-                .and_then(Value::as_str)
-                .unwrap_or_default()
-                .to_string();
-            match command_type.as_str() {
-                "create" => {
-                    write_json(
-                        &mut writer,
-                        &json!({
-                            "type": "response",
-                            "id": id,
-                            "command": "create",
-                            "success": true,
-                            "data": {
-                                "activeSessionId": "s1",
-                                "id": "s1",
-                                "sessionId": "sess-1",
-                                "sessionFile": "/tmp/sess-1.jsonl",
-                            },
-                        }),
-                    );
-                }
-                "attach" => {
-                    write_json(&mut writer, &attach_data(id));
-                }
-                "get_session_stats" => {
-                    write_json(
-                        &mut writer,
-                        &json!({
-                            "type": "response",
-                            "id": id,
-                            "command": "get_session_stats",
-                            "success": true,
-                            "data": {
-                                "contextUsage": { "tokens": 1200, "contextWindow": 200_000 },
-                                "cost": 0.01,
-                            },
-                        }),
-                    );
-                }
-                "detach" => {
-                    write_json(
-                        &mut writer,
-                        &json!({
-                            "type": "response",
-                            "id": id,
-                            "command": "detach",
-                            "success": true,
-                        }),
-                    );
-                }
-                "factory_activity" => {
-                    // The lane's mock: a graph action answers the
-                    // configured refusal (the worker arm's exact
-                    // kernel-not-running wire shape) or the configured
-                    // runs reply; every other action answers empty data
-                    // (the guard reads the graph list only).
-                    if command.get("action").and_then(Value::as_str) == Some("stop") {
+        serve_connection(
+            stream,
+            &capabilities,
+            |writer, Request { id, kind, command }| {
+                match kind {
+                    "create" => {
+                        write_json(writer, &create_response(id));
+                    }
+                    "attach" => {
+                        write_json(writer, &attach_response(id, "factory session"));
+                    }
+                    "get_session_stats" => {
+                        write_json(writer, &session_stats_response(id));
+                    }
+                    "detach" => {
+                        write_json(writer, &detach_response(id));
+                    }
+                    "factory_activity" => {
+                        // The lane's mock: a graph action answers the
+                        // configured refusal (the worker arm's exact
+                        // kernel-not-running wire shape) or the configured
+                        // runs reply; every other action answers empty data
+                        // (the guard reads the graph list only).
+                        if command.get("action").and_then(Value::as_str) == Some("stop") {
+                            write_json(
+                                writer,
+                                &json!({
+                                    "type": "response",
+                                    "id": id,
+                                    "command": "factory_activity",
+                                    "success": true,
+                                    "data": { "state": "stopping" },
+                                }),
+                            );
+                            write_json(
+                                writer,
+                                &json!({
+                                    "type": "session_closed",
+                                    "activeSessionId": "s1",
+                                    "reason": "killed",
+                                }),
+                            );
+                            session_closed = true;
+                            return true;
+                        }
+                        if command.get("action").and_then(Value::as_str) == Some("graph") {
+                            let error = if session_closed {
+                                Some("Unknown active session: s1".to_string())
+                            } else {
+                                factory_graph_error.clone()
+                            };
+                            if let Some(error) = error.as_ref() {
+                                write_json(
+                                    writer,
+                                    &json!({
+                                        "type": "response",
+                                        "id": id,
+                                        "command": "factory_activity",
+                                        "success": false,
+                                        "error": error,
+                                    }),
+                                );
+                                return true;
+                            }
+                        }
+                        let data = match (
+                            factory_graph.as_ref(),
+                            command.get("action").and_then(Value::as_str),
+                        ) {
+                            (Some(runs), Some("graph")) => runs.clone(),
+                            _ => json!({}),
+                        };
                         write_json(
-                            &mut writer,
+                            writer,
                             &json!({
                                 "type": "response",
                                 "id": id,
                                 "command": "factory_activity",
                                 "success": true,
-                                "data": { "state": "stopping" },
+                                "data": data,
                             }),
                         );
-                        write_json(
-                            &mut writer,
-                            &json!({
-                                "type": "session_closed",
-                                "activeSessionId": "s1",
-                                "reason": "killed",
-                            }),
-                        );
-                        session_closed = true;
-                        continue;
                     }
-                    if command.get("action").and_then(Value::as_str) == Some("graph") {
-                        let error = if session_closed {
-                            Some("Unknown active session: s1".to_string())
-                        } else {
-                            factory_graph_error.clone()
-                        };
-                        if let Some(error) = error.as_ref() {
-                            write_json(
-                                &mut writer,
-                                &json!({
-                                    "type": "response",
-                                    "id": id,
-                                    "command": "factory_activity",
-                                    "success": false,
-                                    "error": error,
-                                }),
-                            );
-                            continue;
-                        }
-                    }
-                    let data = match (
-                        factory_graph.as_ref(),
-                        command.get("action").and_then(Value::as_str),
-                    ) {
-                        (Some(runs), Some("graph")) => runs.clone(),
-                        _ => json!({}),
-                    };
-                    write_json(
-                        &mut writer,
-                        &json!({
-                            "type": "response",
-                            "id": id,
-                            "command": "factory_activity",
-                            "success": true,
-                            "data": data,
-                        }),
-                    );
+                    _ => return false,
                 }
-                _ => {
-                    write_json(
-                        &mut writer,
-                        &json!({
-                            "type": "response",
-                            "id": id,
-                            "command": command_type,
-                            "success": true,
-                            "data": {},
-                        }),
-                    );
-                }
-            }
-        }
-    }
-}
-
-fn write_json(writer: &mut UnixStream, value: &Value) {
-    let mut line = serde_json::to_string(value).expect("serialize mock frame");
-    line.push('\n');
-    writer.write_all(line.as_bytes()).expect("write mock frame");
-    writer.flush().expect("flush mock frame");
-}
-
-/// The slim attach result: one empty session.
-fn attach_data(id: &str) -> Value {
-    json!({
-        "type": "response",
-        "id": id,
-        "command": "attach",
-        "success": true,
-        "data": {
-            "protocol": { "name": "prime-agent.daemon", "version": 7 },
-            "activeSessionId": "s1",
-            "snapshot": {
-                "activeSessionId": "s1",
-                "summary": { "id": "s1", "cwd": "/tmp" },
-                "state": {
-                    "activeSessionId": "s1",
-                    "cwd": "/tmp",
-                    "sessionId": "sess-1",
-                    "sessionName": "factory session",
-                    "model": null,
-                    "isStreaming": false,
-                    "isCompacting": false,
-                    "sessionActions": { "queuedCount": 0, "steering": [], "followUps": [] },
-                },
-                "messages": [],
-                "lastEventSequence": 0,
-                "lastEventCursor": null,
+                true
             },
-            "client": { "id": "mock", "capabilities": [] },
-            "lastEventSequence": 0,
-            "lastEventCursor": null,
-        },
-    })
+        );
+    }
 }
 
 /// A minimal settings seam for the harness: the factory gate reads and
@@ -443,39 +338,8 @@ impl pa_tui::client_settings::ClientSettings for RecordingSettings {
 
 fn options(socket: PathBuf) -> InteractiveOptions {
     InteractiveOptions {
-        models: None,
-        socket_path: socket,
-        cwd: PathBuf::from("/tmp"),
-        session_dir: None,
-        script_path: None,
-        model_selection: ModelSelection::default(),
-        model_catalog: Vec::new(),
-        model_configured_providers: std::collections::HashSet::default(),
-        model_recent_models: Vec::new(),
-        default_thinking_level: None,
-        no_session: false,
-        session: SessionSelection::New,
-        initial_message: None,
-        show_images: true,
-        fullscreen_mouse: true,
-        theme: "prime".to_string(),
-        code_block_indent: "  ".to_string(),
-        tree_filter_mode: String::new(),
-        branch_summary_skip_prompt: false,
-        version: "0.0.0".to_string(),
-        onboarding: None,
-        telemetry_disabled: None,
-        client_auth: None,
-        traces: None,
-        provider_auth: None,
-        update_commands: None,
-        telemetry: None,
-        keybindings: pa_tui::keybindings::KeybindingsManager::new(),
-        session_rlm_depth: None,
-        prompt_stash: std::sync::Arc::default(),
-        session_has_children: false,
-        restore_dock_focus: false,
         client_settings: Some(std::sync::Arc::new(RecordingSettings::default())),
+        ..support::options(socket)
     }
 }
 
@@ -502,30 +366,23 @@ fn run_plan_config_with_graph_error(
     factory_graph_error: Option<String>,
     steps: Vec<HeadlessStep>,
 ) -> Vec<String> {
-    std::env::remove_var("TMUX");
-    let dir = tempfile::TempDir::new().expect("temp dir");
-    let socket = dir.path().join("tui.sock");
-    let supervisor = MockSupervisor::bind_with(
-        &socket,
-        server_capabilities,
-        factory_graph,
-        factory_graph_error,
+    let outcome = run_headless(
+        HeadlessPlan {
+            steps,
+            width: 100,
+            height: 30,
+        },
+        options,
+        |socket| {
+            let supervisor = MockSupervisor::bind_with(
+                socket,
+                server_capabilities,
+                factory_graph,
+                factory_graph_error,
+            );
+            move || supervisor.serve()
+        },
     );
-    let handle = std::thread::spawn(move || supervisor.serve());
-
-    let runtime = tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()
-        .expect("tokio runtime");
-    let plan = HeadlessPlan {
-        steps,
-        width: 100,
-        height: 30,
-    };
-    let outcome = runtime
-        .block_on(run_interactive(options(socket), UiMode::Headless(plan)))
-        .expect("interactive run");
-    handle.join().expect("mock supervisor finished");
     outcome.frames
 }
 
