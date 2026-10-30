@@ -594,6 +594,158 @@ def _interrupt_event(cell_id: str, exc: BaseException) -> dict[str, Any]:
     return {"event": "error", "id": cell_id, "ename": "KeyboardInterrupt", "evalue": "", "traceback": lines}
 
 
+# ── the discipline screen: banned in-cell shapes ────────────────────────────
+#
+# The shipped prompt's contract bans waiting and process spawning from cells
+# ("bash() is the shell surface"; "do not keep the turn open by polling with
+# time.sleep()"), and both classes park the whole turn: nothing can wake a
+# kernel cell from inside. The screen declines the cell before it runs, with
+# the allowed alternative in the error itself — a declined wait is a teaching
+# moment, not a held turn. Detection stays on the charged surface: literal
+# sleeps of 5s or more, and the subprocess family (import, call, os.system,
+# os.popen, pty.spawn). Anything else — short backoff sleeps, sleeps computed
+# from variables, library internals, sleeps and spawns inside string literals
+# or comments — is invisible to the screen and keeps running untouched.
+
+_DECLINE_SLEEP_SECONDS = 5.0
+_WATCHED_MODULES = ("time", "asyncio", "subprocess", "os", "pty")
+_SUBPROCESS_CALLS = (
+    "run",
+    "Popen",
+    "call",
+    "check_call",
+    "check_output",
+    "getoutput",
+    "getstatusoutput",
+)
+
+
+class CellDeclinedError(Exception):
+    """The kernel refused to run a cell: a banned shape under the discipline
+    contract. The message names the offending call and the allowed alternative."""
+
+
+def _declined_reason(code: str) -> CellDeclinedError | None:
+    """The decline for a banned cell shape, or None when the cell may run.
+
+    Import-aware where it can be (aliases bind through `import time as t` and
+    `from time import sleep`), name-based where it must be (the contract's
+    `time.sleep(...)` shape is charged as written, imports or not). A cell
+    that does not parse declines nothing: the compile step reports the
+    SyntaxError.
+    """
+    try:
+        tree = ast.parse(code)
+    except (SyntaxError, ValueError):
+        return None
+    module_alias: dict[str, str] = {}
+    function_alias: dict[str, tuple[str, str]] = {}
+    subprocess_import: ast.AST | None = None
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                root = alias.name.split(".")[0]
+                if root in _WATCHED_MODULES:
+                    module_alias[alias.asname or root] = root
+                    if root == "subprocess" and subprocess_import is None:
+                        subprocess_import = node
+        elif isinstance(node, ast.ImportFrom) and node.module:
+            root = node.module.split(".")[0]
+            if root in _WATCHED_MODULES:
+                for alias in node.names:
+                    function_alias[alias.asname or alias.name] = (root, alias.name)
+                if root == "subprocess" and subprocess_import is None:
+                    subprocess_import = node
+
+    def head(node: ast.AST) -> str:
+        source = ast.get_source_segment(code, node)
+        return (source or "").replace("\n", " ")[:60]
+
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        if isinstance(func, ast.Attribute) and isinstance(func.value, ast.Name):
+            root = module_alias.get(func.value.id) or func.value.id
+            member = func.attr
+        elif isinstance(func, ast.Name):
+            bound = function_alias.get(func.id)
+            if bound is None:
+                continue
+            root, member = bound
+        else:
+            continue
+        if root in ("time", "asyncio") and member == "sleep":
+            seconds = _literal_seconds(node)
+            if seconds is not None and seconds >= _DECLINE_SLEEP_SECONDS:
+                return CellDeclinedError(
+                    f"{head(node)}: the kernel declines in-cell sleeps of "
+                    f"{_DECLINE_SLEEP_SECONDS:g}s or longer - a sleeping cell parks "
+                    "the whole turn and nothing can wake it. End the turn instead: "
+                    "start the work with bash() (it returns immediately), reply with "
+                    "a short status text, and the [bash-done] notification wakes the "
+                    "session with the result; arm rlm_heartbeat.create for scheduled "
+                    "wakes. Remove the sleep and rerun the cell."
+                )
+        if (
+            (root == "subprocess" and member in _SUBPROCESS_CALLS)
+            or (root == "os" and member in ("system", "popen"))
+            or (root == "pty" and member == "spawn")
+        ):
+            return CellDeclinedError(
+                f"{head(node)}: the kernel declines process spawning from a cell - "
+                "bash() is the shell surface, never subprocess/os.system/pty. Run "
+                "the command with bash('...') instead: it returns immediately, "
+                "await it bounded or read the handle later, and the [bash-done] "
+                "notification delivers the result. Remove the subprocess call and "
+                "rerun the cell."
+            )
+    if subprocess_import is not None:
+        return CellDeclinedError(
+            f"{head(subprocess_import)}: the kernel declines process spawning from "
+            "a cell - bash() is the shell surface, never subprocess/os.system/pty. "
+            "Run the command with bash('...') instead: it returns immediately, "
+            "await it bounded or read the handle later, and the [bash-done] "
+            "notification delivers the result. Remove the subprocess import and "
+            "rerun the cell."
+        )
+    return None
+
+
+def _literal_seconds(call: ast.Call) -> float | None:
+    """The call's first positional argument as a number literal, else None.
+
+    The charged surface is literal-only: a sleep computed from a variable is
+    invisible to the screen exactly as it is to the contract's literal shape."""
+    if not call.args:
+        return None
+    arg = call.args[0]
+    if isinstance(arg, ast.Constant) and isinstance(arg.value, (int, float)) and not isinstance(
+        arg.value, bool
+    ):
+        return float(arg.value)
+    return None
+
+
+def _declined_event(cell_id: str, error: CellDeclinedError) -> dict[str, Any]:
+    """A declined cell's error event: the failed-cell header the host's result
+    rendering carries, with the decline's teaching message as the exception
+    line (the cell never ran, so there are no frames to show)."""
+    message = _cap_text(_safe_str(error))
+    return {
+        "event": "error",
+        "id": cell_id,
+        "ename": type(error).__name__,
+        "evalue": message,
+        "traceback": _cap_traceback_lines(
+            [
+                "Traceback (most recent call last):\n",
+                f"{type(error).__name__}: {message}\n",
+            ]
+        ),
+    }
+
+
 def _compile_cell(code: str, filename: str) -> tuple[list[types.CodeType], bool]:
     """Compile a cell; a trailing expression compiles separately in eval mode."""
     linecache.cache[filename] = (len(code), None, code.splitlines(keepends=True), filename)
@@ -659,6 +811,18 @@ async def _handle_execute(req: dict[str, Any], ns: dict[str, Any]) -> None:
     cell_token = _current_cell.set(cell_id)
     execution_token = _current_cell_execution.set(execution)
     try:
+        declined = _declined_reason(req["code"])
+        if declined is not None:
+            # Refused before it runs: nothing executed, so the decline's
+            # teaching message is the whole result. Same drain/finish/send
+            # order as a completed cell.
+            try:
+                _drain_output()
+            finally:
+                _finish_request(cell_id)
+            _send(_declined_event(cell_id, declined))
+            _send({"event": "done", "id": cell_id, "status": "error"})
+            return
         codes, has_trailing = _compile_cell(req["code"], filename)
         assert _loop is not None
         task = _loop.create_task(_run_codes(codes, ns))
