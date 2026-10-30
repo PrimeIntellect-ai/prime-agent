@@ -589,6 +589,7 @@ fn ledger_child_records(
                 },
                 |display| display.created_at,
             ),
+            decision_child: false,
             run: RunState::reseeded(
                 if display
                     .as_ref()
