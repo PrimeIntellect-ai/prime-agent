@@ -26,10 +26,6 @@ jobs:
     permissions:
       contents: read
     timeout-minutes: 60
-    outputs:
-      built_sha:
-        description: short sha of the built ref
-        value: ${{ steps.sha.outputs.sha }}
     steps:
       - name: Install build prerequisites
         run: |
@@ -79,9 +75,12 @@ jobs:
             --catalog-assets "target/x86_64-unknown-linux-gnu/catalog-assets" \
             --out-dir "target/x86_64-unknown-linux-gnu/dist"
           cat "target/x86_64-unknown-linux-gnu/dist/manifest.json"
+      - name: Record the built sha into the artifact
+        run: git rev-parse --short=8 HEAD > target/x86_64-unknown-linux-gnu/dist/BUILT_SHA
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: eval-tarball
           path: |
             target/x86_64-unknown-linux-gnu/dist/prime-agent-0.10.1-eval-linux-x64.tar.gz
             target/x86_64-unknown-linux-gnu/dist/manifest.json
+            target/x86_64-unknown-linux-gnu/dist/BUILT_SHA
