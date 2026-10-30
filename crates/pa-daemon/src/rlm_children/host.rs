@@ -126,28 +126,26 @@ impl RlmSubagentHost for SupervisorChildSessions {
                 // decision path serves while the setting is unset or
                 // unresolvable, then resolves through the ordinary
                 // child-model path so the allowlist still gates the selector.
-                let model = if request.decision_child {
-                    let selector = pa_core::session_engine::decision_api::decision_model_selector(
-                        std::path::Path::new(identity.cwd.as_deref().unwrap_or("/")),
-                        &this.agent_dir,
-                    )
-                    .map_err(anyhow::Error::msg)?;
-                    let selector = resolve_child_model_allowlisted(
-                        &this,
-                        Some(&selector),
-                        "spawn",
-                        "subagent",
-                    )
-                    .await?;
-                    selector
-                } else {
-                    resolve_child_model_allowlisted(
-                        &this,
-                        request.model.as_deref(),
-                        "spawn",
-                        "subagent",
-                    )
-                    .await?
+                let model = match request.kind {
+                    pa_core::session_engine::rlm_host::RlmSpawnKind::Decision => {
+                        let selector =
+                            pa_core::session_engine::decision_api::decision_model_selector(
+                                std::path::Path::new(identity.cwd.as_deref().unwrap_or("/")),
+                                &this.agent_dir,
+                            )
+                            .map_err(anyhow::Error::msg)?;
+                        resolve_child_model_allowlisted(&this, Some(&selector), "spawn", "subagent")
+                            .await?
+                    }
+                    pa_core::session_engine::rlm_host::RlmSpawnKind::Subagent => {
+                        resolve_child_model_allowlisted(
+                            &this,
+                            request.model.as_deref(),
+                            "spawn",
+                            "subagent",
+                        )
+                        .await?
+                    }
                 };
                 assert_thinking_supported(&this.agent_dir, request.thinking.as_deref(), &model)?;
                 let thinking = request.thinking.as_deref().or(identity.thinking.as_deref());
@@ -180,7 +178,8 @@ impl RlmSubagentHost for SupervisorChildSessions {
                         identity.rlm_depth + 1,
                         &model,
                         thinking,
-                        request.decision_child,
+                        /*decision_child*/
+                        request.kind == pa_core::session_engine::rlm_host::RlmSpawnKind::Decision,
                         &cwd.to_string_lossy(),
                         &child_dir,
                         request.spawned_by_request_id.as_deref(),
@@ -204,7 +203,8 @@ impl RlmSubagentHost for SupervisorChildSessions {
                     label: rlm_child_label(&request.prompt),
                     started_at_ms: now_ms(),
                     run: RunState::running(),
-                    decision_child: request.decision_child,
+                    decision_child: request.kind
+                        == pa_core::session_engine::rlm_host::RlmSpawnKind::Decision,
                     answer_preview: None,
                     answer_text: None,
                     answer_captured: false,
