@@ -177,6 +177,7 @@ impl SessionUi {
             page_notes,
             telemetry: options.telemetry.clone(),
             scroll_adoption_emitted: false,
+            scrollback_flush_emitted: false,
             exit_reason: "daemon_closed",
             reconnect: None,
             daemon_closing_notice: None,

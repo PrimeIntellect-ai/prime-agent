@@ -51,6 +51,135 @@ impl AgentView {
         self.flushed_frame = std::mem::take(&mut sink.texts);
         Ok(())
     }
+
+    /// Stream the turn-settled transcript delta to `out` as the automatic scrollback flush:
+    /// unlike `stream_flush_to` this writes ONLY the chat-entry rows, with their own diff base
+    /// (`self.flushed_transcript_rows`), so the dock, tail, and splash never land in scrollback
+    /// and a settle never rewrites rows that already scrolled. Returns whether any rows
+    /// appended (a reset, an unchanged transcript, or a mid-run suspend that already wrote
+    /// them appends nothing).
+    ///
+    /// - the FIRST flush of a run steps one line down before its rows: the main screen's
+    ///   cursor sits at the end of the shell line that launched the TUI, and a bare row write
+    ///   would leave that line's tail glued to the first row (the launch line stays intact
+    ///   instead); later flushes continue right after the previous turn's rows;
+    /// - rows extending the flushed transcript append into scrollback, chunked like the exit
+    ///   flush;
+    /// - a change inside the flushed transcript (compaction, a branch switch, a rewrap, a
+    ///   detail change) writes NOTHING: scrollback is immutable, so the affected region becomes
+    ///   a deliberate gap and the base silently advances to the new rows;
+    /// - on a write error the base keeps only the prefix that reached the terminal: rows
+    ///   already in scrollback are durable, so a retry never duplicates them (this path runs
+    ///   again, unlike the exit flush).
+    ///
+    /// The exit path's shared base (`self.flushed_frame`) is re-seeded with the full inline row
+    /// texts WITHOUT writing them whenever rows already reached scrollback (a successful
+    /// append, or the durable prefix of a failed one): the next suspend/exit flush must start
+    /// from the current frame instead of re-appending the transcript. A reset seeds NOTHING:
+    /// it wrote no rows, and the exit flush's repaint is what puts the rewritten region on the
+    /// visible screen.
+    ///
+    /// # Errors
+    ///
+    /// Propagates the write error after advancing the base to the durable prefix.
+    pub(crate) fn stream_transcript_delta_to(
+        &mut self,
+        out: &mut dyn std::io::Write,
+        width: usize,
+    ) -> std::io::Result<bool> {
+        let layout = self.layout_pass(width);
+        let rows = self.transcript_rows(width);
+        let texts: Vec<String> = rows.iter().map(row_text_of).collect();
+        let base = std::mem::take(&mut self.flushed_transcript_rows);
+        let changed_prefix = texts
+            .iter()
+            .zip(base.iter())
+            .any(|(text, flushed)| text.as_str() != flushed.as_str());
+        if changed_prefix || texts.len() < base.len() {
+            // An edited or re-rendered transcript is a scrollback gap, never a rewrite.
+            self.flushed_transcript_rows = texts;
+            return Ok(false);
+        }
+        let mut chunk = String::new();
+        let mut written = base.len();
+        // The run's first flush starts BELOW the launching shell line: the main-screen
+        // cursor parked at that line's end, and a row's bare `\r` never clears the rest
+        // of the line it lands on.
+        if base.is_empty() && !rows.is_empty() {
+            chunk.push_str("\r\n");
+        }
+        for (index, row) in rows[base.len()..].iter().enumerate() {
+            crate::interactive::write_flush_rows(&mut chunk, std::slice::from_ref(row));
+            if chunk.len() >= CHUNK_BYTES {
+                if let Err(error) = out.write_all(chunk.as_bytes()) {
+                    self.flushed_transcript_rows = texts[..written].to_vec();
+                    self.seed_flushed_frame(&layout.splash, &rows, &layout.tail, width);
+                    return Err(error);
+                }
+                chunk.clear();
+                // A completed chunk write is exit-path progress for the
+                // exit guard's force-quit hold.
+                crate::exit_guard::note_exit_progress();
+                written = base.len() + index + 1;
+            }
+        }
+        if !chunk.is_empty() {
+            if let Err(error) = out.write_all(chunk.as_bytes()) {
+                self.flushed_transcript_rows = texts[..written].to_vec();
+                self.seed_flushed_frame(&layout.splash, &rows, &layout.tail, width);
+                return Err(error);
+            }
+            chunk.clear();
+            crate::exit_guard::note_exit_progress();
+        }
+        let appended = base.len() < texts.len();
+        self.flushed_transcript_rows = texts;
+        self.seed_flushed_frame(&layout.splash, &rows, &layout.tail, width);
+        Ok(appended)
+    }
+
+    /// Rebase the settle delta base to the transcript a suspend/external-editor/exit flush
+    /// just appended onto the main screen: that flush owns those rows now, so the next
+    /// settle must append only what landed after it. Writes nothing, so the exit flush's
+    /// parity-frozen byte stream is untouched.
+    pub(crate) fn rebase_transcript_delta_base(&mut self, width: usize) {
+        let rows = self.transcript_rows(width);
+        self.flushed_transcript_rows = rows.iter().map(row_text_of).collect();
+    }
+
+    /// The chat-entry rows with the same per-entry rendering `stream_flush_to` uses: the
+    /// transcript alone, without the splash, tail, or dock.
+    fn transcript_rows(&self, width: usize) -> Vec<crate::Line> {
+        let mut rows: Vec<crate::Line> = Vec::new();
+        let mut preceded_by_tool_activity = false;
+        for (index, entry) in self.chat.iter().enumerate() {
+            let entry_rows =
+                self.render_entry(index, entry, width, index == 0, preceded_by_tool_activity);
+            rows.extend(entry_rows);
+            preceded_by_tool_activity = Self::is_compact_neighbor(entry);
+        }
+        rows
+    }
+
+    /// Replace the exit path's diff base with the current full inline row texts WITHOUT
+    /// writing them: a settle already wrote the transcript into scrollback, so the next
+    /// suspend/exit flush must not append it again.
+    fn seed_flushed_frame(
+        &mut self,
+        splash: &[crate::Line],
+        transcript_rows: &[crate::Line],
+        tail: &[crate::Line],
+        width: usize,
+    ) {
+        let dock = self.render_dock(width);
+        self.flushed_frame = splash
+            .iter()
+            .chain(transcript_rows)
+            .chain(tail)
+            .chain(dock.iter())
+            .map(row_text_of)
+            .collect();
+    }
 }
 
 /// The encoded flush rows leave the process in slices of at most this many bytes: each PTY
