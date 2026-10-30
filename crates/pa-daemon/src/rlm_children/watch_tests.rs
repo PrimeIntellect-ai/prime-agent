@@ -1,5 +1,6 @@
 use super::*;
 use crate::protocol::{response_failure, response_success};
+use pa_core::session_engine::rlm_host::RlmSpawnKind;
 use pa_core::session_engine::semantic_edges::{
     ChildCancelledReason, SemanticEdgeIdentity, SemanticEdgeLedgerEvent, SemanticEdgeRecorder,
 };
@@ -429,7 +430,7 @@ async fn spawn_child(sessions: &SupervisorChildSessions) -> RlmSpawnHandle {
             model: None,
             thinking: None,
             cwd: None,
-            decision_child: false,
+            kind: RlmSpawnKind::Subagent,
             spawned_by_request_id: None,
             factory: None,
         })
@@ -448,7 +449,7 @@ async fn a_factory_child_settles_without_a_parent_notice() {
             name: Some("f20-worker".to_string()),
             model: None,
             thinking: None,
-            decision_child: false,
+            kind: RlmSpawnKind::Subagent,
             cwd: None,
             spawned_by_request_id: None,
             factory: Some(pa_core::session_engine::rlm_host::RlmFactoryTag {

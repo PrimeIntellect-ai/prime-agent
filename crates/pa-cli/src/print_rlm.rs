@@ -21,7 +21,7 @@ use pa_core::session_engine::provider_adapter::model_thinking_level;
 use pa_core::session_engine::rlm_host::{
     resolve_rlm_max_depth, rlm_child_session_dir, rlm_create_session_daemonless_error,
     rlm_depth_limit_error, spawn_name_unavailable_error, RlmChildResult, RlmCreateSessionHandle,
-    RlmCreateSessionRequest, RlmDeleteSubagentResult, RlmHostFuture, RlmSpawnHandle,
+    RlmCreateSessionRequest, RlmDeleteSubagentResult, RlmHostFuture, RlmSpawnHandle, RlmSpawnKind,
     RlmSpawnRequest, RlmSubagentEntry, RlmSubagentHost,
 };
 
@@ -1296,7 +1296,8 @@ mod tests {
             name: Some("late".to_string()),
             model: None,
             thinking: None,
-            decision_child: false,
+            kind: RlmSpawnKind::Subagent,
+            cwd: None,
             spawned_by_request_id: None,
             factory: None,
         });
