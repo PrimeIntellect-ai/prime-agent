@@ -1,0 +1,1 @@
+feat: agent inboxes — machine notices (bash completions, factory milestones) accumulate in a durable per-session inbox; a short coalesced steering notice and a periodic reminder announce them; the agent reads and drains them with rlm.inbox.read()/rlm.inbox.count()
