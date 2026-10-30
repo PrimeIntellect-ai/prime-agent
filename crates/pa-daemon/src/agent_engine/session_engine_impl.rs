@@ -1007,13 +1007,13 @@ impl SessionEngine for AgentSessionEngine {
         // and the ledger records nothing. The engine build always wires
         // it; no fallback to the agent's own fn, which would leak the
         // id-carrying wrapper into the side call.
-        let side_stream_fn = {
-            let guard = self.session.blocking_lock();
-            guard
-                .as_deref()
-                .and_then(|engine| engine.session.side_question_stream_fn())
-        };
-        let Some(side_stream_fn) = side_stream_fn else {
+        // The run bills the engine it started on: a replace during the run must
+        // not move the bill to the replacement.
+        let built = self.session.blocking_lock().clone();
+        let side_stream_fn = built
+            .as_deref()
+            .and_then(|engine| engine.session.side_question_stream_fn());
+        let (Some(built), Some(side_stream_fn)) = (built, side_stream_fn) else {
             return SideQuestionOutcome::Failed {
                 answer: String::new(),
                 error: "Select a model before asking a side question".to_string(),
@@ -1031,11 +1031,8 @@ impl SessionEngine for AgentSessionEngine {
                     sink,
                 ));
         // The answer never enters the history, but the run's model calls bill the session.
-        let engine = self.session.blocking_lock().clone();
-        if let Some(engine) = engine {
-            self.runtime
-                .block_on(engine.session.record_model_usage(result.usage.clone()));
-        }
+        self.runtime
+            .block_on(built.session.record_model_usage(result.usage.clone()));
         match result.status {
             pa_core::session_engine::side_question::SideQuestionStatus::Complete => {
                 SideQuestionOutcome::Complete {
