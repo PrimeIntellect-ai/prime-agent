@@ -19,7 +19,7 @@ from unittest import mock
 
 from mcp.types import CallToolResult, TextContent
 from rlm import McpToolError, mcp
-from rlm.mcp import _parse_result
+from rlm.mcp_base import _parse_result
 
 
 _STDIO_FIXTURE = r"""import asyncio, json, os, sys
@@ -1205,35 +1205,6 @@ class McpDiscoveryInventoryTest(unittest.TestCase):
                 with self.assertRaisesRegex(mcp.McpDiscoveryError, "malformed"):
                     run(generation.discover())
                 self.assertEqual(generation.tools, {})
-
-    # -- moved shared helpers ----------------------------------------------
-
-    def test_parse_result_text_and_non_text_content(self):
-        block = type("B", (), {"text": "hello"})()
-        result = type("R", (), {"content": [block], "structuredContent": None, "isError": False})()
-        self.assertEqual(mcp._parse_result(result), "hello")
-
-        image = SimpleNamespace(data="raw")
-        result = type("R", (), {"content": [image], "structuredContent": None, "isError": False})()
-        self.assertEqual(mcp._parse_result(result), [image])
-
-    def test_resolve_config_value_env_literal_and_command_forms(self):
-        with mock.patch.dict(os.environ, {"MY_MCP_KEY": "resolved-secret"}, clear=False):
-            self.assertEqual(mcp._resolve_config_value("MY_MCP_KEY"), "resolved-secret")
-        self.assertEqual(mcp._resolve_config_value("key-abc"), "key-abc")
-        self.assertEqual(mcp._resolve_config_value("!security find-key"), "")
-        self.assertEqual(mcp._resolve_config_value("  "), "")
-
-    def test_read_auth_reads_provider_entry(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            cred = {"type": "oauth", "access": "tok", "refresh": "r", "expires": 1, "endpoint": "https://e.test/mcp"}
-            (Path(tmp) / "auth.json").write_text(json.dumps({"mcp:demo": cred, "other": "junk"}))
-            with mock.patch.dict(os.environ, {"PRIME_AGENT_CODING_AGENT_DIR": tmp}, clear=False):
-                self.assertEqual(mcp._read_auth("mcp:demo"), cred)
-                self.assertIsNone(mcp._read_auth("mcp:missing"))
-
-    def test_resolve_streamable_http_returns_callable(self):
-        self.assertTrue(callable(mcp._resolve_streamable_http()))
 
     def test_open_http_passes_headers_for_headers_signature(self):
         captured = {}
