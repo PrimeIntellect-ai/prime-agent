@@ -115,11 +115,14 @@ impl AgentSession {
         let Some(usage) = usage else {
             return;
         };
-        let session_id = self.session_id().await;
+        let session = std::sync::Arc::clone(&self.session);
         let store = std::sync::Arc::clone(&self.usage_store);
         // The task owns the resolved bill before the first await. Dropping
         // its JoinHandle detaches the append instead of dropping the bill.
+        // This session's manager never moves to another session, so the id
+        // read inside the task is still the one the bill was made in.
         let recording = tokio::spawn(async move {
+            let session_id = session.lock().await.get_session_id().to_string();
             if let Err(error) = store.append_model_usage(session_id, usage).await {
                 eprintln!("pa-core: model usage row not persisted: {error}");
             }
