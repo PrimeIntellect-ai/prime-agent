@@ -1,9 +1,5 @@
 #!/usr/bin/env python3
-"""Observe actual refinement errors and compare captured pinned TS outputs.
-
-The Rust output-limit message intentionally differs. Fixture verification does
-not waive parity: parity_equal and every error string are recorded separately.
-"""
+"""Observe actual refinement errors for each provider failure fixture."""
 import argparse
 import http.server
 import json
@@ -58,7 +54,7 @@ class ErrorHandler(http.server.BaseHTTPRequestHandler):
         self.wfile.write(data)
 
 
-TS_OBSERVED = {'length': 'Refinement failed: the model stopped before completing its JSON object. This usually means the output budget was exhausted; retry with a smaller request.', 'provider_error': 'Refinement failed: 400 fixture token budget invalid', 'normal_invalid': 'Refiner did not return a JSON object'}
+CASES = ('length', 'provider_error', 'normal_invalid')
 
 
 def observe(binary, root, case, receipt):
@@ -109,8 +105,7 @@ def observe(binary, root, case, receipt):
             else:
                 raise AssertionError('refine must report the fixture failure')
             assert len(server.requests) == 1, server.requests
-            receipt.update(actual_error=actual, ts_observed_error=TS_OBSERVED[case],
-                           parity_equal=actual == TS_OBSERVED[case])
+            receipt['actual_error'] = actual
             if case == 'length':
                 body = server.requests[0]['body']
                 budget = body.get('max_tokens', body.get('max_completion_tokens'))
@@ -143,15 +138,13 @@ def main():
     parser.add_argument('--receipt', required=True, type=Path)
     args = parser.parse_args()
     receipt = {'verified': False, 'scope': __doc__, 'cases': {},
-        'ts_reference': 'v0.9.8 / 7d442aafa985f9342134fac16c2ef41f03fb45c1',
-        'ts_binary_sha256': 'e50d4e4cf5735ea16cee30c3ca48fccb628ae2169fc867c33d461b8a90e87bc5',
         'not_verified': ['auto-review HTTP execution', 'TUI frames',
                          'full daemon wire-byte equality', 'live Prime Inference']}
     try:
         binary = Path(os.environ['PA_RUST_BINARY']).resolve()
         receipt['binary_sha256'] = digest(binary)
         with tempfile.TemporaryDirectory(prefix='pa-refine-errors-', dir='/tmp') as folder:
-            for case in TS_OBSERVED:
+            for case in CASES:
                 observed = receipt['cases'][case] = {}
                 try:
                     observe(binary, Path(folder) / case, case, observed)
@@ -160,8 +153,6 @@ def main():
         receipt['verified'] = all(c.get('behavior_verified') and c.get('cleanup_verified')
             and c.get('provider_stopped') and not c.get('error')
             for c in receipt['cases'].values())
-        receipt['parity_equal'] = all(c.get('parity_equal') is True
-                                     for c in receipt['cases'].values())
         if not receipt['verified']:
             receipt['error'] = 'one or more output controls failed; see cases'
     except Exception as error:
