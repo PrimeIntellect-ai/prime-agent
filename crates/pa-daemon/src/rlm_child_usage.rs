@@ -2,7 +2,9 @@
 //! session rows into per-origin batches (the engine-side producer owns the rest).
 //!
 //! Origin labels: the task prompt is the spawn kickoff row (`spawn_task`);
-//! user rows are `direct_user`; `error`/`aborted` fold nowhere.
+//! user rows are `direct_user`; `error`/`aborted` fold nowhere. Billed
+//! non-message rows (compactions, side calls) take the origin of the turn they
+//! follow.
 
 use pa_types::ai::Usage;
 use pa_types::session::ChildUsageOrigin;
@@ -109,8 +111,13 @@ pub(crate) fn child_usage_batches(
 ) -> (Vec<(ChildUsageOrigin, Usage)>, usize) {
     let mut batches: Vec<(ChildUsageOrigin, Usage)> = Vec::new();
     for (index, entry) in entries.iter().enumerate().skip(from) {
-        let billed = late_attribution(entries, from, entry)
-            .or_else(|| assistant_usage(entry).map(|usage| (usage, index)));
+        // Keep a late attribution's original target origin; compactions,
+        // branch summaries, and side calls bill at their own row's origin.
+        let billed = late_attribution(entries, from, entry).or_else(|| {
+            assistant_usage(entry)
+                .or_else(|| crate::session_usage::billed_store_row(entry).map(|row| row.usage))
+                .map(|usage| (usage, index))
+        });
         let Some((usage, origin_row)) = billed else {
             continue;
         };
@@ -255,23 +262,37 @@ mod tests {
     }
 
     /// The usage fold itself: rows accumulate per origin across the walk
-    /// (two `spawn_task` completions sum their fields).
+    /// (two `spawn_task` completions, the child's compaction, and its
+    /// refinement call sum their fields).
     #[test]
     fn batches_sum_across_completions_of_one_origin() {
         let entries = vec![
             spawn_kickoff_row("c0", "ship the lane"),
             assistant_row("a1", &captured_usage(10, 5, 0, 0.01), "toolUse"),
             assistant_row("a2", &captured_usage(20, 8, 0, 0.02), "stop"),
+            row(
+                "compaction",
+                "k1",
+                json!({"summary": "so far", "usage": captured_usage(40, 4, 44, 0.04)}),
+            ),
+            row(
+                "custom",
+                "r1",
+                json!({"customType": "model_usage", "data": {
+                    "source": "refine", "provider": "p", "modelId": "m",
+                    "usage": captured_usage(7, 1, 8, 0.005),
+                }}),
+            ),
         ];
         let (batches, cursor) = child_usage_batches(&entries, 0);
-        assert_eq!(cursor, 3);
+        assert_eq!(cursor, 5);
         let [(origin, usage)] = batches[..] else {
             panic!("one batch: {batches:?}");
         };
         assert_eq!(origin, ChildUsageOrigin::SpawnTask);
-        assert_eq!(usage.input, 30);
-        assert_eq!(usage.output, 13);
-        assert!((usage.cost.total.as_f64() - 0.03).abs() < 1e-9);
+        assert_eq!(usage.input, 77);
+        assert_eq!(usage.output, 18);
+        assert!((usage.cost.total.as_f64() - 0.075).abs() < 1e-9);
         let _ = usage_of(&entries[1]);
     }
 

@@ -142,6 +142,69 @@ fn the_built_session_carries_the_durable_header_id_across_rebuilds() {
     }
 }
 
+/// A side question bills the session it ran on: one `side_question` usage
+/// row carrying the run's tokens.
+#[test]
+fn a_side_question_bills_the_session_it_ran_on() {
+    use crate::engine::SessionEngine as _;
+    let _faux = FAUX_TEST_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let (engine, _dir) = faux_engine_with_settings(
+        &json!({ "responses": [{ "text": "warm ok" }, { "text": "the aside" }] }),
+        u64::MAX,
+    );
+    admit(&engine, "warm".to_string(), &mut Vec::new());
+    let built = engine
+        .session
+        .blocking_lock()
+        .clone()
+        .expect("built session");
+    let sink: pa_core::session_engine::side_question::SideQuestionSink =
+        std::sync::Arc::new(|_| true);
+    let outcome = engine.run_side_question(
+        crate::engine::SideQuestionRequest {
+            side_question_id: "sq".to_string(),
+            question: "why?".to_string(),
+            previous_turns: Vec::new(),
+        },
+        &pa_agent::abort::AbortController::new().signal(),
+        &sink,
+    );
+    assert!(
+        matches!(outcome, crate::engine::SideQuestionOutcome::Complete { .. }),
+        "{outcome:?}"
+    );
+    let entries = engine.runtime.block_on(async {
+        built
+            .session
+            .shared_persistence()
+            .lock()
+            .await
+            .get_entries()
+    });
+    let bills: Vec<(String, u64)> = serde_json::to_value(entries)
+        .unwrap()
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|row| row["customType"] == "model_usage")
+        .map(|row| {
+            (
+                row["data"]["source"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_string(),
+                row["data"]["usage"]["totalTokens"].as_u64().unwrap_or(0),
+            )
+        })
+        .collect();
+    assert!(
+        matches!(bills.as_slice(), [(source, tokens)] if source == "side_question" && *tokens > 0),
+        "one billed side-question row, got {bills:?}"
+    );
+}
+
 #[tokio::test]
 async fn replacement_teardown_retires_the_session_and_the_funnel_adopts_the_branch() {
     let engine = {

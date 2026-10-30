@@ -30,6 +30,11 @@ pub(crate) fn empty_usage() -> Value {
     })
 }
 
+/// A typed usage block in the wire shape the folds below add.
+fn usage_value(usage: &pa_types::ai::Usage) -> Value {
+    serde_json::to_value(usage).unwrap_or_else(|_| empty_usage())
+}
+
 /// TS `addAssistantUsage`: fold one usage block into a running total.
 fn add_usage(total: &mut Value, usage: &Value) {
     let add_field = |total: &mut Value, field: &str, usage: &Value| {
@@ -116,10 +121,8 @@ pub(crate) fn compute_own_and_total_usage(
                     add_usage(&mut total, usage);
                 }
             }
-        } else if matches!(entry.type_.as_str(), "compaction" | "branch_summary") {
-            if let Some(usage) = entry.fields.get("usage") {
-                add_usage(&mut total, usage);
-            }
+        } else if let Some(row) = crate::session_usage::billed_store_row(entry) {
+            add_usage(&mut total, &usage_value(&row.usage));
         }
     }
     let mut own = total.clone();
@@ -172,7 +175,7 @@ pub(crate) fn compute_own_usage_by_model(
             Some(at)
         };
     for entry in branch {
-        let usage = match entry.type_.as_str() {
+        match entry.type_.as_str() {
             "model_change" => {
                 let provider = entry
                     .fields
@@ -186,7 +189,6 @@ pub(crate) fn compute_own_usage_by_model(
                     .unwrap_or_default();
                 current = (!provider.is_empty() && !model_id.is_empty())
                     .then(|| (provider.to_string(), model_id.to_string()));
-                continue;
             }
             "message" => {
                 let Some(message) = entry.fields.get("message") else {
@@ -221,23 +223,17 @@ pub(crate) fn compute_own_usage_by_model(
                     }
                     None => unresolved = true,
                 }
-                continue;
             }
-            "compaction" | "branch_summary" => entry.fields.get("usage"),
-            _ => continue,
-        };
-        if let Some(usage) = usage {
-            // A summary row's recorded serving model (TS #2411's auxiliary routing)
-            // outranks the timeline: the timeline names the current model, not the one billed.
-            let row_model = (|| {
-                let provider = entry.fields.get("provider")?.as_str()?;
-                let model_id = entry.fields.get("modelId")?.as_str()?;
-                (!provider.is_empty() && !model_id.is_empty())
-                    .then(|| (provider.to_string(), model_id.to_string()))
-            })();
-            match bucket_for(row_model.or_else(|| current.clone()), &mut buckets) {
-                Some(at) => add_usage(&mut buckets[at], usage),
-                None => unresolved = true,
+            _ => {
+                let Some(row) = crate::session_usage::billed_store_row(entry) else {
+                    continue;
+                };
+                // A billed row's recorded serving model (TS #2411's auxiliary routing)
+                // outranks the timeline: the timeline names the current model, not the one billed.
+                match bucket_for(row.model.or_else(|| current.clone()), &mut buckets) {
+                    Some(at) => add_usage(&mut buckets[at], &usage_value(&row.usage)),
+                    None => unresolved = true,
+                }
             }
         }
     }
@@ -448,10 +444,11 @@ mod usage_tests {
         assert_eq!(own["cost"]["total"].as_f64(), Some(1.5));
     }
 
-    /// A `branch_summary` row served by an auxiliary model (TS #2411) bills on
-    /// the model its entry records, not the timeline's current model.
+    /// A `branch_summary` row served by an auxiliary model (TS #2411) and a
+    /// `model_usage` row bill on the model their entry records, not the
+    /// timeline's current model.
     #[test]
-    fn branch_summary_usage_bills_on_the_row_recorded_auxiliary_model() {
+    fn billed_rows_bill_on_the_row_recorded_model() {
         let entry = |value: &Value, id: &str| crate::session_store::SessionEntry {
             type_: value["type"].as_str().expect("type").to_string(),
             id: id.to_string(),
@@ -493,12 +490,21 @@ mod usage_tests {
                 }),
                 "b1",
             ),
+            entry(
+                &json!({
+                    "type": "custom",
+                    "customType": "model_usage",
+                    "data": {"source": "side_question", "provider": "openai", "modelId": "gpt-b", "usage": usage(20, 2)},
+                }),
+                "u1",
+            ),
         ];
         let branch: Vec<&crate::session_store::SessionEntry> = entries.iter().collect();
         let (own, _) = compute_own_and_total_usage(&branch, &entries);
+        assert_eq!(own["totalTokens"], json!(110 + 55 + 22));
         let breakdown =
             compute_own_usage_by_model(&branch, &entries, &own, None).expect("resolved");
-        assert_eq!(breakdown.len(), 2);
+        assert_eq!(breakdown.len(), 3);
         assert_eq!(breakdown[0]["provider"], json!("openai"));
         assert_eq!(breakdown[0]["id"], json!("gpt-a"));
         assert_eq!(breakdown[0]["ownUsage"]["totalTokens"], json!(110));
@@ -506,6 +512,8 @@ mod usage_tests {
         assert_eq!(breakdown[1]["provider"], json!("anthropic"));
         assert_eq!(breakdown[1]["id"], json!("aux-opus-4"));
         assert_eq!(breakdown[1]["ownUsage"]["totalTokens"], json!(55));
+        assert_eq!(breakdown[2]["id"], json!("gpt-b"));
+        assert_eq!(breakdown[2]["ownUsage"]["totalTokens"], json!(22));
     }
 
     /// A windowed load seeds the timeline with the retained-window boundary's

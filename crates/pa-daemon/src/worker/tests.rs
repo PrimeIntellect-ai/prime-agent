@@ -159,3 +159,66 @@ async fn background_refinement_event_is_fenced_to_its_review_session() {
     ));
     assert!(session_events_since(&mut subscription).is_empty());
 }
+
+/// A bill made in one session never lands in the session the worker moved
+/// to: once `core.store` holds the replacement, the store refuses it.
+#[tokio::test]
+async fn a_bill_made_before_a_session_replace_never_lands_in_the_replacement() {
+    use pa_core::session_engine::rlm_usage::RlmChildUsageStore as _;
+    let dir = std::env::temp_dir().join(format!("pa-bill-fence-{}", uuid::Uuid::new_v4()));
+    let worker = Worker::new(
+        WorkerConfig {
+            socket_path: dir.join("worker.sock"),
+            supervisor_socket_path: std::path::PathBuf::new(),
+            token: "token".to_string(),
+            worker_instance_id: String::new(),
+            active_session_id: "bill-session".to_string(),
+            agent_dir: dir.join("agent"),
+            recovery_journal_path: dir.join("recovery.jsonl"),
+            telemetry_disabled: None,
+            script: Some(json!({ "responses": [] })),
+        },
+        None,
+    );
+    let bill = || {
+        pa_core::session_engine::model_usage::ModelUsage::new(
+            "compaction_discarded",
+            "p",
+            "m",
+            pa_types::ai::Usage {
+                input: 5,
+                total_tokens: 5,
+                ..Default::default()
+            },
+        )
+        .unwrap()
+    };
+    let billed_rows = |worker: &Worker| {
+        let core = worker.core.lock().unwrap();
+        core.store
+            .as_ref()
+            .unwrap()
+            .entries()
+            .iter()
+            .filter(|entry| entry.type_ == "custom")
+            .count()
+    };
+    let session_at = |name: &str| {
+        let mut file = SessionFile::create("/tmp", None, 0);
+        file.set_path(dir.join(name));
+        file
+    };
+    let store = CoreUsageStore(Arc::clone(&worker.core));
+    let original = session_at("original.jsonl");
+    let original_id = original.session_id().to_string();
+    worker.core.lock().unwrap().store = Some(original);
+    store
+        .append_model_usage(original_id.clone(), bill())
+        .await
+        .unwrap();
+    assert_eq!(billed_rows(&worker), 1);
+
+    worker.core.lock().unwrap().store = Some(session_at("replacement.jsonl"));
+    assert!(store.append_model_usage(original_id, bill()).await.is_err());
+    assert_eq!(billed_rows(&worker), 0);
+}

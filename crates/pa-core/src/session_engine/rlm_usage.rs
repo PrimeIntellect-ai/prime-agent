@@ -8,6 +8,7 @@ use std::collections::HashMap;
 use pa_types::ai::Usage;
 use pa_types::session::ChildUsageOrigin;
 
+use super::model_usage::{ModelUsage, MODEL_USAGE_CUSTOM_TYPE};
 use crate::session::manager::SessionManager;
 
 pub fn add_assistant_usage(total: &mut Usage, usage: &Usage) {
@@ -73,6 +74,10 @@ pub enum ChildUsageAppendResult {
 /// for a row id already in the store (the identity must match), appending one
 /// row that carries the caller's id otherwise. Callers must preserve row ID,
 /// target, child usage and origin across retries.
+///
+/// The same boundary records the session's own model calls made outside the
+/// agent loop ([`ModelUsage`] rows), so they land in the durable transcript
+/// the usage folds read.
 pub trait RlmChildUsageStore: Send + Sync {
     fn last_assistant(&self) -> RlmChildUsageFuture<'_, Option<(String, Usage)>>;
 
@@ -83,6 +88,15 @@ pub trait RlmChildUsageStore: Send + Sync {
         child_usage: Usage,
         origin: Option<ChildUsageOrigin>,
     ) -> RlmChildUsageFuture<'_, std::io::Result<ChildUsageAppendResult>>;
+
+    /// Append one [`ModelUsage`] row to the transcript of `session_id`, the
+    /// session the bill was made in. A store that has since moved to another
+    /// session refuses the row instead of charging the replacement.
+    fn append_model_usage(
+        &self,
+        session_id: String,
+        usage: ModelUsage,
+    ) -> RlmChildUsageFuture<'_, std::io::Result<()>>;
 }
 
 pub(crate) struct SessionUsageStore(pub(crate) std::sync::Arc<tokio::sync::Mutex<SessionManager>>);
@@ -143,6 +157,23 @@ impl RlmChildUsageStore for SessionUsageStore {
                 origin,
             )?;
             Ok(ChildUsageAppendResult::Created(aggregate))
+        })
+    }
+
+    /// The wrapped manager stays on one session for the store's lifetime.
+    fn append_model_usage(
+        &self,
+        _session_id: String,
+        usage: ModelUsage,
+    ) -> RlmChildUsageFuture<'_, std::io::Result<()>> {
+        let session = std::sync::Arc::clone(&self.0);
+        Box::pin(async move {
+            let data = serde_json::to_value(&usage)?;
+            session
+                .lock()
+                .await
+                .append_custom_entry(MODEL_USAGE_CUSTOM_TYPE, Some(data))?;
+            Ok(())
         })
     }
 }
@@ -217,6 +248,12 @@ impl RlmChildUsageAttributions {
             forward: std::sync::Mutex::new(None),
             fallback: std::sync::Mutex::new(None),
         }
+    }
+
+    /// The session's durable usage store.
+    #[must_use]
+    pub fn store(&self) -> std::sync::Arc<dyn RlmChildUsageStore> {
+        std::sync::Arc::clone(&self.store)
     }
 
     /// Bind the telemetry handle the `rlm_child_*` session counters count
@@ -885,6 +922,14 @@ mod tests {
             self.store
                 .append_attribution(row_id, target_id, child_usage, origin)
         }
+
+        fn append_model_usage(
+            &self,
+            session_id: String,
+            usage: ModelUsage,
+        ) -> RlmChildUsageFuture<'_, std::io::Result<()>> {
+            self.store.append_model_usage(session_id, usage)
+        }
     }
 
     /// A failed append returns false and writes no row; the retry persists
@@ -966,6 +1011,14 @@ mod tests {
                 }
                 Ok(result)
             })
+        }
+
+        fn append_model_usage(
+            &self,
+            session_id: String,
+            usage: ModelUsage,
+        ) -> RlmChildUsageFuture<'_, std::io::Result<()>> {
+            self.store.append_model_usage(session_id, usage)
         }
     }
 
