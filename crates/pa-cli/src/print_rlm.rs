@@ -21,7 +21,7 @@ use pa_core::session_engine::provider_adapter::model_thinking_level;
 use pa_core::session_engine::rlm_host::{
     resolve_rlm_max_depth, rlm_child_session_dir, rlm_create_session_daemonless_error,
     rlm_depth_limit_error, spawn_name_unavailable_error, RlmChildResult, RlmCreateSessionHandle,
-    RlmCreateSessionRequest, RlmDeleteSubagentResult, RlmHostFuture, RlmSpawnHandle, RlmSpawnKind,
+    RlmCreateSessionRequest, RlmDeleteSubagentResult, RlmHostFuture, RlmSpawnHandle,
     RlmSpawnRequest, RlmSubagentEntry, RlmSubagentHost,
 };
 
@@ -1252,6 +1252,7 @@ impl AgentMessageController for InlineMessages {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use pa_core::session_engine::rlm_host::RlmSpawnKind;
 
     fn run_options(directory: &std::path::Path) -> crate::mode::RunOptions {
         crate::mode::RunOptions {
