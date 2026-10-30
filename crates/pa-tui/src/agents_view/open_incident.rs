@@ -3,7 +3,7 @@
 //! structured-log poll, the dismissal, and the panel render).
 use super::{
     ancestor_session_ids, has_session_children, scope_ancestors, AgentsViewMode, AgentsViewRow,
-    Line, OpenedRow, PathBuf, RowKind, SessionPanel, SessionSelection, Value, ANCHOR_LOADING_HINT,
+    Line, OpenedRow, RowKind, SessionPanel, SessionSelection, Value, ANCHOR_LOADING_HINT,
 };
 
 impl AgentsViewMode {
@@ -25,7 +25,9 @@ impl AgentsViewMode {
             RowKind::Shells => {
                 self.open_activity_line(&row, SessionPanel::Shells { shell_id: None });
             }
-            RowKind::FactoryRuns => self.open_activity_line(&row, SessionPanel::FactoryRuns),
+            RowKind::FactoryRuns => {
+                self.open_activity_line(&row, SessionPanel::FactoryRuns { row: None });
+            }
         }
     }
 
@@ -96,8 +98,7 @@ impl AgentsViewMode {
     /// the tree re-expands to the row when the chat returns to the view.
     pub(super) fn open_subagent_row(&mut self, row: &AgentsViewRow) {
         let ancestors = ancestor_session_ids(&self.rows, row.parent_identity.as_deref());
-        if row.summary.get("activeSessionId").is_some() || row.summary.get("sessionFile").is_some()
-        {
+        if SessionSelection::open_summary(&row.summary).is_some() {
             self.open_row(row, ancestors);
             return;
         }
@@ -168,36 +169,11 @@ impl AgentsViewMode {
         status_message: Option<String>,
         selected_identity: Option<String>,
     ) {
-        let summary = &row.summary;
-        if let Some(active) = summary
-            .get("activeSessionId")
-            .and_then(Value::as_str)
-            .filter(|id| !id.is_empty())
-        {
-            self.finish_open(
-                SessionSelection::Attach(active.to_string()),
-                row,
-                ancestors,
-                status_message,
-                selected_identity,
-            );
+        let Some(selection) = SessionSelection::open_summary(&row.summary) else {
+            self.set_status("Cannot open agent without an active runtime or saved session file");
             return;
-        }
-        if let Some(file) = summary
-            .get("sessionFile")
-            .and_then(Value::as_str)
-            .filter(|file| !file.is_empty())
-        {
-            self.finish_open(
-                SessionSelection::Resume(PathBuf::from(file)),
-                row,
-                ancestors,
-                status_message,
-                selected_identity,
-            );
-            return;
-        }
-        self.set_status("Cannot open agent without an active runtime or saved session file");
+        };
+        self.finish_open(selection, row, ancestors, status_message, selected_identity);
     }
 
     /// Record the open outcome: the selection plus the row metadata the flow and the session

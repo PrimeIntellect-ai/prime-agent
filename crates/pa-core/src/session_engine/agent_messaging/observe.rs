@@ -86,6 +86,8 @@ pub struct AgentObserveSummary {
     /// The session's first user message, preview-capped (an inactive
     /// child's identity signal; TS `firstMessage`).
     pub first_message: Option<String>,
+    /// The session's file: a transcript read of a member no worker holds opens it.
+    pub session_file: Option<String>,
 }
 
 impl AgentObserveSummary {

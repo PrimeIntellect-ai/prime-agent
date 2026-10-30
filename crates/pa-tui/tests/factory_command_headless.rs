@@ -845,7 +845,7 @@ fn alt_a() -> KeyEvent {
     KeyEvent::new(KeyCode::Char('a'), KeyModifiers::ALT)
 }
 
-/// One down-arrow key event (`tui.select.down`: the dock's next row, the page's next run).
+/// One down-arrow key event (`tui.select.down`: the dock's next row, the page's next row).
 fn down() -> KeyEvent {
     KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)
 }
@@ -853,6 +853,11 @@ fn down() -> KeyEvent {
 /// One plain Enter key event (the dock's focused-section open).
 fn enter() -> KeyEvent {
     KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)
+}
+
+/// One ctrl+x key event (`app.agents.delete`: the page's two-press stop).
+fn ctrl_x() -> KeyEvent {
+    KeyEvent::new(KeyCode::Char('x'), KeyModifiers::CONTROL)
 }
 
 /// One Esc key event (`tui.select.cancel`: the open page closes).
@@ -929,10 +934,10 @@ fn a_closed_session_clears_the_open_factory_page() {
             needle: "factory: only-run".to_string(),
             timeout_ms: 5_000,
         },
-        // Enter opens the run's action rows, the second Enter stops it; the mock's daemon then
-        // closes the session.
-        HeadlessStep::Key(enter()),
-        HeadlessStep::Key(enter()),
+        // The first stop press arms the selected run, the second stops it; the mock's daemon
+        // then closes the session.
+        HeadlessStep::Key(ctrl_x()),
+        HeadlessStep::Key(ctrl_x()),
         HeadlessStep::WaitRender {
             needle: "No live factory runs.".to_string(),
             timeout_ms: 5_000,

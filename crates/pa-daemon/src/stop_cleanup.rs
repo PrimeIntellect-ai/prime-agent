@@ -200,6 +200,9 @@ pub(crate) fn append_deleted_child_usage_amendments(
     }
     let summary = crate::session_usage::read_session_usage(&path)
         .and_then(|totals| crate::session_usage::session_usage_summary_from(&totals.own));
+    let by_model = summary
+        .as_ref()
+        .and_then(|summary| crate::state_getters::own_usage_by_model_of(&path, summary));
     let mut captured = 0usize;
     for edge in &tombstoned {
         let Some(reason) = edge.deleted else {
@@ -211,7 +214,13 @@ pub(crate) fn append_deleted_child_usage_amendments(
             continue;
         };
         if ledger
-            .append_delete_with_usage(&edge.child_id, &edge.child, reason, summary)
+            .append_delete_with_usage(
+                &edge.child_id,
+                &edge.child,
+                reason,
+                summary,
+                by_model.as_deref(),
+            )
             .is_err()
         {
             continue;
@@ -546,6 +555,7 @@ mod tests {
                 child: child_file.to_string_lossy().to_string(),
                 depth: 1,
                 name: "lane".to_string(),
+                factory: None,
             })
             .unwrap();
         ledger
@@ -555,6 +565,7 @@ mod tests {
                 child: moved_at.to_string_lossy().to_string(),
                 depth: 1,
                 name: "moved".to_string(),
+                factory: None,
             })
             .unwrap();
 
@@ -623,6 +634,7 @@ mod tests {
                 child: child_file.to_string_lossy().to_string(),
                 depth: 1,
                 name: "lane".to_string(),
+                factory: None,
             })
             .unwrap();
         // The tombstone lands before the kill (the revival window); the
@@ -710,6 +722,7 @@ mod tests {
                 child: child_file.to_string_lossy().to_string(),
                 depth: 1,
                 name: "lane".to_string(),
+                factory: None,
             })
             .unwrap();
         ledger
@@ -785,6 +798,7 @@ mod tests {
                 child: child_file.to_string_lossy().to_string(),
                 depth: 1,
                 name: "lane".to_string(),
+                factory: None,
             })
             .unwrap();
         // Still live: no capture (kill-failure retryability — the child
@@ -817,6 +831,7 @@ mod tests {
                     child: child_file.to_string_lossy().to_string(),
                     depth: 1,
                     name: "lane".to_string(),
+                    factory: None,
                 })
                 .unwrap();
             ledger

@@ -778,6 +778,9 @@ impl Supervisor {
                 child: child.to_string(),
                 depth,
                 name: session_name.clone(),
+                factory: metadata
+                    .get("factory")
+                    .and_then(|factory| serde_json::from_value(factory.clone()).ok()),
             })
             .inspect_err(|error| {
                 self.log_line(&format!("failed to append RLM ledger spawn: {error:#}"));

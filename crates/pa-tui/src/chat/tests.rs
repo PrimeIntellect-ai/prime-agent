@@ -422,7 +422,15 @@ fn ipython_card_done_line() {
         result_partial: false,
         ..Default::default()
     };
-    let rows = render_tool_card(&card, 0, Detail::Overview, &theme(), 100, true);
+    let rows = render_tool_card(
+        &card,
+        0,
+        Detail::Overview,
+        Detail::Overview,
+        &theme(),
+        100,
+        true,
+    );
     let text = rows[0]
         .iter()
         .map(|s| s.content.as_str())

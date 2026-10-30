@@ -16,7 +16,9 @@ use crate::factory_view::{
     factory_reply_lists_runs, live_run_count, parse_factory_runs, FactoryView, FactoryViewAction,
     FACTORY_WATCH_TICK_MS,
 };
+use crate::interactive::{SelectionOrigin, SessionPanel, SessionSelection};
 use crate::session_ui::{picker_viewport_rows, UI_REQUEST_TIMEOUT_MS};
+use crate::subagents::{descendant_entries_with_depth, SessionIdentity};
 
 /// One background factory refresh's delivery: the session the request
 /// asked about (a late reply from a previous session never repaints the
@@ -33,6 +35,11 @@ pub(crate) enum FactoryUpdate {
         session: String,
         epoch: u64,
         message: String,
+    },
+    ChildStop {
+        session: String,
+        message: String,
+        tone: crate::agents_view::StatusTone,
     },
 }
 
@@ -82,8 +89,9 @@ impl super::SessionUi {
     }
 
     /// One key press while the view is open: the view resolves the key;
-    /// stop/resume ride the daemon lane (bounded, with the outcome
-    /// reported), and Esc closes.
+    /// Open hands off to the child's session, the run stop/resume ride the
+    /// daemon lane and the child stop rides `cancel_rlm_child` (bounded,
+    /// with the outcome reported), and Close closes.
     pub(crate) async fn handle_factory_view_key(
         &mut self,
         key: crossterm::event::KeyEvent,
@@ -109,14 +117,83 @@ impl super::SessionUi {
                 self.close_panel_to_agents_view();
                 self.dirty = true;
             }
+            Some(FactoryViewAction::Open { child_id }) => self.open_factory_child(view, &child_id),
             Some(FactoryViewAction::Stop { run_id }) => {
                 self.factory_control(view, "stop", run_id).await?;
+            }
+            Some(FactoryViewAction::StopChild { child_id, label }) => {
+                self.stop_factory_child(child_id, label);
             }
             Some(FactoryViewAction::Resume { run_id }) => {
                 self.factory_control(view, "resume", run_id).await?;
             }
         }
         Ok(())
+    }
+
+    /// Open a state's child session: hand off like `/resume <session>`
+    /// (the selection plus the leave-now signal), with the child's depth
+    /// and this page on its selected row as the origin leaving the child
+    /// returns to. A child the roster cannot open yet reports on the
+    /// page's error line.
+    fn open_factory_child(&mut self, view: &mut AgentView, child_id: &str) {
+        if let Some((selection, rlm_depth)) =
+            factory_child_selection(&self.roster, &self.session_identity(), child_id)
+        {
+            self.pending_selection = Some(selection);
+            self.pending_selection_rlm_depth = rlm_depth;
+            self.pending_selection_origin = Some(SelectionOrigin {
+                panel: SessionPanel::FactoryRuns {
+                    row: view
+                        .factory_view
+                        .as_ref()
+                        .and_then(FactoryView::selected_row)
+                        .cloned(),
+                },
+                closes_to_agents_view: self.panel_returns_to_agents_view,
+            });
+            self.exit_requested = true;
+        } else if let Some(factory_view) = view.factory_view.as_mut() {
+            factory_view.set_error(Some(format!(
+                "cannot open {child_id}: no live runtime or saved session yet"
+            )));
+        }
+        self.dirty = true;
+    }
+
+    /// Stop a state's running child through the agents view's stop
+    /// (`cancel_rlm_child` on this session, its parent). The kernel
+    /// treats the cancel as a failed attempt under the state's retries
+    /// and failure policy. Success toasts; a no-effect or failed stop
+    /// lands on the page's error line.
+    fn stop_factory_child(&mut self, child_id: String, label: String) {
+        let action = crate::agents_view::DeleteAction::StopSubagent {
+            active_session_id: self.active_session_id.clone(),
+            child_id,
+            name: label,
+        };
+        let client = self.client.clone();
+        let tx = self.factory_updates.clone();
+        let session = self.active_session_id.clone();
+        tokio::spawn(async move {
+            let (message, tone) = match tokio::time::timeout(
+                Duration::from_millis(UI_REQUEST_TIMEOUT_MS),
+                crate::agents_view::execute_delete_action(&client, &action),
+            )
+            .await
+            {
+                Ok(result) => result,
+                Err(_) => (
+                    "timed out waiting for the Prime Agent daemon response".to_string(),
+                    crate::agents_view::StatusTone::Error,
+                ),
+            };
+            let _ = tx.send(FactoryUpdate::ChildStop {
+                session,
+                message,
+                tone,
+            });
+        });
     }
 
     /// One orchestration action (stop/resume): bounded request, the
@@ -336,9 +413,6 @@ impl super::SessionUi {
     /// reports it on its error line instead of painting a fake empty
     /// state (the emptiness the view shows is real).
     pub(crate) fn apply_factory_update(&mut self, update: FactoryUpdate, view: &mut AgentView) {
-        // The slot frees on every delivery path; a queued tick fires next.
-        self.factory_refresh_in_flight = false;
-        let queued = std::mem::take(&mut self.factory_refresh_queued);
         let (session, epoch, payload) = match update {
             FactoryUpdate::Snapshot {
                 session,
@@ -350,7 +424,33 @@ impl super::SessionUi {
                 epoch,
                 message,
             } => (session, epoch, Err(message)),
+            FactoryUpdate::ChildStop {
+                session,
+                message,
+                tone,
+            } => {
+                if session == self.active_session_id {
+                    match tone {
+                        crate::agents_view::StatusTone::Muted => self.toast(&message, view),
+                        crate::agents_view::StatusTone::Warning
+                        | crate::agents_view::StatusTone::Error => {
+                            if let Some(factory_view) = view.factory_view.as_mut() {
+                                factory_view.set_error(Some(message));
+                            } else {
+                                self.toast(&message, view);
+                            }
+                        }
+                    }
+                    self.dirty = true;
+                    self.spawn_factory_refresh();
+                }
+                return;
+            }
         };
+        // Only refresh deliveries release the refresh slot; child-stop
+        // results are independent of any snapshot currently in flight.
+        self.factory_refresh_in_flight = false;
+        let queued = std::mem::take(&mut self.factory_refresh_queued);
         if session != self.active_session_id || epoch != self.factory_list_epoch {
             if queued {
                 self.spawn_factory_refresh();
@@ -400,10 +500,78 @@ impl super::SessionUi {
     }
 }
 
+/// How a factory child opens: its roster row among this session's DIRECT
+/// children (child ids are only unique among siblings), opened like an
+/// agents-view row ([`SessionSelection::open_summary`], with the row's
+/// `rlmDepth`).
+fn factory_child_selection(
+    roster: &[Value],
+    session: &SessionIdentity,
+    child_id: &str,
+) -> Option<(SessionSelection, Option<u32>)> {
+    let summary = descendant_entries_with_depth(roster, session)
+        .into_iter()
+        .filter(|(_, depth)| *depth == 1)
+        .filter_map(|(entry, _)| entry.get("summary"))
+        .find(|summary| summary.get("rlmChildId").and_then(Value::as_str) == Some(child_id))?;
+    let rlm_depth = summary
+        .get("rlmDepth")
+        .and_then(Value::as_u64)
+        .map(|depth| depth as u32);
+    Some((SessionSelection::open_summary(summary)?, rlm_depth))
+}
+
 #[cfg(test)]
 mod fold_tests {
     use super::super::SessionUi;
+    use super::{factory_child_selection, SessionIdentity, SessionSelection};
     use serde_json::json;
+
+    /// A factory child opens through the roster: among this session's
+    /// direct children, a live runtime attaches and a saved-only child
+    /// resumes its file, each with its row's depth; a deeper descendant reusing the id (child ids
+    /// are only unique among siblings) and an unknown id resolve nothing.
+    #[test]
+    fn a_factory_child_resolves_to_attach_or_resume_via_the_roster() {
+        let child = |agent: &str, child_id: &str, parent: &str, extra: serde_json::Value| {
+            let mut summary = json!({
+                "runtimeKind": "subagent",
+                "rlmChildId": child_id,
+                "parentActiveSessionId": parent,
+            });
+            summary
+                .as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
+            json!({ "agentId": agent, "summary": summary })
+        };
+        let roster = vec![
+            child(
+                "a",
+                "review-1",
+                "root",
+                json!({ "activeSessionId": "live-a", "rlmDepth": 1 }),
+            ),
+            child("b", "fix-1", "root", json!({ "sessionFile": "/s/b.jsonl" })),
+            child(
+                "c",
+                "deep-1",
+                "live-a",
+                json!({ "activeSessionId": "live-c" }),
+            ),
+        ];
+        let root = SessionIdentity::new(Some("root".to_string()), None, None);
+        assert_eq!(
+            factory_child_selection(&roster, &root, "review-1"),
+            Some((SessionSelection::Attach("live-a".to_string()), Some(1)))
+        );
+        assert_eq!(
+            factory_child_selection(&roster, &root, "fix-1"),
+            Some((SessionSelection::Resume("/s/b.jsonl".into()), None))
+        );
+        assert_eq!(factory_child_selection(&roster, &root, "deep-1"), None);
+        assert_eq!(factory_child_selection(&roster, &root, "missing"), None);
+    }
 
     /// The malformed fold keeps the dock's cached reply (the Cursor
     /// review finding): a bad batch never replaces the last good reply,
