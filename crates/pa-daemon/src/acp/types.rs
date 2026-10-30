@@ -1,7 +1,8 @@
 //! ACP wire types: the method surface, `session/update` payload shapes,
-//! and prompt-block parsing. The served surface is exactly what the TS
-//! product serves; ACP-spec methods it does not serve (`session/load`,
-//! `session/read`, `session/clone`, cwd adoption) are not invented here.
+//! and prompt-block parsing. The served surface is the TS product's plus
+//! the stable `session/list` and `session/load`; other ACP-spec methods
+//! (`session/resume`, `session/read`, `session/clone`, cwd adoption) are
+//! not served.
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -43,11 +44,16 @@ pub struct McpCapabilities {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SessionCapabilities {
     pub close: CloseCapability,
+    pub list: ListCapability,
 }
 
 /// `{}`: present means `session/close` is served.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct CloseCapability {}
+
+/// `{}`: present means `session/list` is served.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct ListCapability {}
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -133,6 +139,9 @@ pub struct AcpStopReasonResponse {
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(tag = "sessionUpdate")]
 pub enum AcpSessionUpdate {
+    /// A user message of a replayed conversation (`session/load`).
+    #[serde(rename = "user_message_chunk")]
+    UserMessageChunk { content: TextBlock },
     /// A streaming chunk of the assistant's visible answer.
     #[serde(rename = "agent_message_chunk")]
     AgentMessageChunk {
@@ -388,7 +397,7 @@ pub fn initialize_result(product_version: &str) -> InitializeResult {
     InitializeResult {
         protocol_version: 1,
         agent_capabilities: AgentCapabilities {
-            load_session: false,
+            load_session: true,
             prompt_capabilities: PromptCapabilities {
                 image: true,
                 embedded_context: true,
@@ -396,6 +405,7 @@ pub fn initialize_result(product_version: &str) -> InitializeResult {
             mcp_capabilities: Some(McpCapabilities { http: true }),
             session_capabilities: SessionCapabilities {
                 close: CloseCapability::default(),
+                list: ListCapability::default(),
             },
         },
         agent_info: AgentInfo {
@@ -420,10 +430,10 @@ mod tests {
             json!({
                 "protocolVersion": 1,
                 "agentCapabilities": {
-                    "loadSession": false,
+                    "loadSession": true,
                     "promptCapabilities": { "image": true, "embeddedContext": true },
                     "mcpCapabilities": { "http": true },
-                    "sessionCapabilities": { "close": {} },
+                    "sessionCapabilities": { "close": {}, "list": {} },
                 },
                 "agentInfo": { "name": "prime-agent", "title": "Prime Agent", "version": "9.9.9" },
                 "_meta": { "ai.primeintellect.prime-agent": {} },

@@ -302,12 +302,15 @@ fn acp_initialize_matches_the_ts_golden() {
     let result = &response["result"];
     assert_eq!(result["protocolVersion"], 1);
     let capabilities = &result["agentCapabilities"];
-    assert_eq!(capabilities["loadSession"], false);
+    assert_eq!(capabilities["loadSession"], true);
     assert_eq!(
         capabilities["promptCapabilities"],
         json!({ "image": true, "embeddedContext": true })
     );
-    assert_eq!(capabilities["sessionCapabilities"], json!({ "close": {} }));
+    assert_eq!(
+        capabilities["sessionCapabilities"],
+        json!({ "close": {}, "list": {} })
+    );
     // ACP MCP server admission is served, so the http capability is advertised.
     assert_eq!(capabilities["mcpCapabilities"], json!({ "http": true }));
     let info = &result["agentInfo"];
@@ -1166,6 +1169,168 @@ fn acp_daemon_attached_default_session_persists_and_resumes() {
 }
 
 #[test]
+fn acp_session_load_refused_by_a_busy_worker_keeps_the_startup_binding() {
+    // Loading a session another client is mid-turn on, with an MCP server,
+    // fails at the worker's busy MCP replace; the connection keeps its own
+    // startup session instead of rebinding to the loaded one.
+    let home = tempfile::TempDir::new().unwrap();
+    let home_path = home.path().to_path_buf();
+    let socket = home_path.join("daemon.sock");
+    let answer = "a paced answer that keeps the worker busy while another client loads the session, streaming slowly enough to outlast the load";
+    std::fs::write(
+        home_path.join("worker-script.json"),
+        json!({ "engine": "faux", "tokensPerSecond": 2, "responses": [{ "text": answer }] })
+            .to_string(),
+    )
+    .unwrap();
+    let child = daemon_attached_command(&home_path, &socket, &["--mode", "acp"])
+        .spawn()
+        .expect("binary present");
+    let mut first = AcpChild::wrap(child, Some(home), socket.clone());
+    let session_id = initialize_and_new_session(&mut first);
+    let _ = first.request(
+        "session/prompt",
+        &json!({ "sessionId": session_id, "prompt": [{ "type": "text", "text": "a slow question" }] }),
+    );
+    first.wait_update("agent_message_chunk", TIMEOUT);
+
+    let child = daemon_attached_command(&home_path, &socket, &["--mode", "acp"])
+        .spawn()
+        .expect("binary present");
+    let mut second = AcpChild::wrap(child, None, socket);
+    let init = second.request("initialize", &initialize_params());
+    let _ = second.wait_response(init, TIMEOUT);
+    let load = second.request(
+        "session/load",
+        &json!({ "sessionId": session_id, "cwd": home_path.display().to_string(), "mcpServers": [
+            { "type": "http", "name": "probe", "url": "https://mcp.invalid/probe", "headers": [] },
+        ] }),
+    );
+    let (load_response, _) = second.wait_response(load, TIMEOUT);
+    assert!(
+        load_response["error"]["data"]["details"]
+            .as_str()
+            .is_some_and(|details| details.contains("while the agent is running")),
+        "{load_response}"
+    );
+    let startup_session_id = new_session(&mut second);
+    assert_ne!(startup_session_id, session_id);
+}
+
+#[test]
+fn acp_session_list_and_load_restore_a_saved_session_in_a_new_process() {
+    // The first process's resident session is listed by its prime-agent
+    // session id and loads in a second process: the conversation replays
+    // before the load response, and the next prompt runs on the same live
+    // worker (the script's second answer).
+    let home = tempfile::TempDir::new().unwrap();
+    let home_path = home.path().to_path_buf();
+    let socket = home_path.join("daemon.sock");
+    std::fs::write(
+        home_path.join("worker-script.json"),
+        json!({ "engine": "faux", "responses": ["The Nile.", "Everest."] }).to_string(),
+    )
+    .unwrap();
+    let child = daemon_attached_command(&home_path, &socket, &["--mode", "acp"])
+        .spawn()
+        .expect("binary present");
+    let mut first = AcpChild::wrap(child, Some(home), socket.clone());
+    let session_id = initialize_and_new_session(&mut first);
+    assert_prompt_ends_turn(&mut first, &session_id, "Name a river.");
+    first.close_stdin();
+    assert!(first.child.wait().expect("the ACP child exits").success());
+
+    let child = daemon_attached_command(&home_path, &socket, &["--mode", "acp"])
+        .spawn()
+        .expect("binary present");
+    let mut second = AcpChild::wrap(child, None, socket);
+    let init = second.request("initialize", &initialize_params());
+    let (init_response, _) = second.wait_response(init, TIMEOUT);
+    let capabilities = &init_response["result"]["agentCapabilities"];
+    assert_eq!(capabilities["loadSession"], true);
+    assert_eq!(capabilities["sessionCapabilities"]["list"], json!({}));
+
+    let list = second.request("session/list", &json!({}));
+    let (list_response, _) = second.wait_response(list, TIMEOUT);
+    let row = list_response["result"]["sessions"]
+        .as_array()
+        .and_then(|rows| rows.iter().find(|row| row["sessionId"] == session_id))
+        .unwrap_or_else(|| panic!("the saved session is listed: {list_response}"))
+        .clone();
+    let cwd = row["cwd"].as_str().expect("a listed cwd");
+    assert_eq!(
+        std::fs::canonicalize(cwd).unwrap(),
+        std::fs::canonicalize(&home_path).unwrap()
+    );
+    assert_eq!(row["title"], "Name a river.");
+
+    // A load that fails (an invalid MCP server) keeps the startup binding:
+    // the next session/new hosts the startup session, not the saved one.
+    let bad_load = second.request(
+        "session/load",
+        &json!({ "sessionId": session_id, "cwd": cwd, "mcpServers": [
+            { "name": "n", "type": "stdio", "command": "", "args": [], "env": [] },
+        ] }),
+    );
+    let (bad_response, _) = second.wait_response(bad_load, TIMEOUT);
+    assert_eq!(bad_response["error"]["code"], -32602, "{bad_response}");
+    let startup_session_id = new_session(&mut second);
+    assert_ne!(startup_session_id, session_id);
+    let close = second.request("session/close", &json!({ "sessionId": startup_session_id }));
+    let (close_response, _) = second.wait_response(close, TIMEOUT);
+    assert_eq!(close_response["result"], json!({}));
+
+    let load = second.request(
+        "session/load",
+        &json!({ "sessionId": session_id, "cwd": cwd, "mcpServers": [] }),
+    );
+    let (load_response, replay) = second.wait_response(load, TIMEOUT);
+    assert!(
+        load_response["result"]["configOptions"].is_array(),
+        "{load_response}"
+    );
+    let chunks: Vec<(String, String)> = replay
+        .iter()
+        .filter(|frame| frame["params"]["sessionId"] == session_id)
+        .map(|frame| &frame["params"]["update"])
+        .filter(|update| {
+            update["sessionUpdate"]
+                .as_str()
+                .is_some_and(|kind| kind.ends_with("_message_chunk"))
+        })
+        .map(|update| {
+            (
+                update["sessionUpdate"].as_str().unwrap().to_string(),
+                update["content"]["text"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_string(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        chunks,
+        [
+            (
+                "user_message_chunk".to_string(),
+                "Name a river.".to_string()
+            ),
+            ("agent_message_chunk".to_string(), "The Nile.".to_string()),
+        ],
+        "{replay:?}"
+    );
+
+    let updates = assert_prompt_ends_turn(&mut second, &session_id, "Name a mountain.");
+    assert!(
+        updates.iter().any(|frame| {
+            frame["params"]["update"]["sessionUpdate"] == "agent_message_chunk"
+                && frame["params"]["update"]["content"]["text"] == "Everest."
+        }),
+        "{updates:?}"
+    );
+}
+
+#[test]
 fn acp_daemon_attached_resident_eof_mid_turn_cancels_the_prompt() {
     let answer = "a paced answer that streams slowly enough to close mid-turn";
     let mut client = AcpChild::spawn(
@@ -1258,7 +1423,8 @@ fn acp_daemon_attached_close_keeps_the_worker_and_new_rebinds_it() {
     assert_eq!(sessions[0]["activeSessionId"], active_session_id);
 
     let second = new_session(&mut client);
-    assert_ne!(second, first);
+    // The ACP session id is the daemon session's prime-agent session id.
+    assert_eq!(second, first);
     let updates = assert_prompt_ends_turn(&mut client, &second, "Name a mountain.");
     let chunk = updates
         .iter()
