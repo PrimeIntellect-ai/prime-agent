@@ -214,7 +214,8 @@ async fn rpc_custom_rows_do_not_gain_human_queue_priority() {
     assert!(pause.success, "pause failed: {pause:?}");
     let custom = |content: &str| {
         json!({
-            "role": "custom", "customType": "user", "content": content
+            "role": "custom", "customType": "user", "content": content,
+            "display": true, "timestamp": 1_000
         })
     };
     for (command, message, row) in [
@@ -260,6 +261,35 @@ async fn rpc_custom_rows_do_not_gain_human_queue_priority() {
             QueuePriority::Background,
         ]
     );
+}
+
+/// A `customMessage` the delivery could not persist (no `display`/`timestamp`)
+/// is rejected at intake, so it never joins a notification run it would fail.
+#[tokio::test]
+async fn rpc_custom_rows_missing_the_session_shape_are_rejected_at_intake() {
+    let worker = created_dispatch_worker().await;
+    for command in ["prompt", "steer", "follow_up"] {
+        let response = worker
+            .dispatch(
+                command,
+                &json!({
+                    "activeSessionId": "suspension-session",
+                    "message": "notice",
+                    "customMessage": { "role": "custom", "customType": "notice", "content": "notice" },
+                }),
+            )
+            .await;
+        assert!(
+            !response.success
+                && response
+                    .error
+                    .as_deref()
+                    .is_some_and(|error| error.starts_with("Invalid customMessage")),
+            "{command}: {response:?}"
+        );
+    }
+    let core = worker.core.lock().unwrap();
+    assert!(core.steering.is_empty() && core.follow_up.is_empty());
 }
 
 #[tokio::test]

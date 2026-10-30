@@ -218,8 +218,10 @@ pub(crate) struct QueueLanes {
 }
 
 /// The wire `customMessage` of a prompt/follow-up command: an injected custom
-/// row that replaces the turn's user row. `Err` rejects loudly — a malformed
-/// notice must not degrade into a plain prompt.
+/// row that replaces the turn's user row. It must parse to the session shape the
+/// delivery persists (`role: "custom"`, `customType`, `content`, `display`,
+/// `timestamp`). `Err` rejects loudly — a malformed notice must not degrade into a
+/// plain prompt, nor fail the notification run it would join.
 pub(crate) fn parse_custom_message(value: Option<&Value>) -> Result<Option<Value>, String> {
     let Some(value) = value else {
         return Ok(None);
@@ -227,21 +229,15 @@ pub(crate) fn parse_custom_message(value: Option<&Value>) -> Result<Option<Value
     if value.is_null() {
         return Ok(None);
     }
-    let invalid = "Invalid customMessage: expected a custom message object with a customType";
-    let Some(object) = value.as_object() else {
-        return Err(invalid.to_string());
-    };
-    if object.get("role").and_then(Value::as_str) != Some("custom") {
-        return Err(invalid.to_string());
+    match serde_json::from_value::<pa_types::session::AgentMessage>(value.clone()) {
+        Ok(pa_types::session::AgentMessage::Custom(custom)) if !custom.custom_type.is_empty() => {
+            Ok(Some(value.clone()))
+        }
+        Ok(_) => Err(
+            "Invalid customMessage: expected a custom message object with a customType".to_string(),
+        ),
+        Err(error) => Err(format!("Invalid customMessage: {error}")),
     }
-    let custom_type = object
-        .get("customType")
-        .and_then(Value::as_str)
-        .filter(|kind| !kind.is_empty());
-    if custom_type.is_none() {
-        return Err(invalid.to_string());
-    }
-    Ok(Some(value.clone()))
 }
 
 /// One queue-lane recovery checkpoint: the verdict and the persisted
