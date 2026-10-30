@@ -1252,6 +1252,7 @@ impl AgentMessageController for InlineMessages {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use pa_core::session_engine::rlm_host::RlmSpawnKind;
 
     fn run_options(directory: &std::path::Path) -> crate::mode::RunOptions {
         crate::mode::RunOptions {
@@ -1296,6 +1297,7 @@ mod tests {
             name: Some("late".to_string()),
             model: None,
             thinking: None,
+            kind: RlmSpawnKind::Subagent,
             cwd: None,
             spawned_by_request_id: None,
             factory: None,

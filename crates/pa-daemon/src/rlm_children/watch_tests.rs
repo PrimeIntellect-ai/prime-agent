@@ -1,5 +1,6 @@
 use super::*;
 use crate::protocol::{response_failure, response_success};
+use pa_core::session_engine::rlm_host::RlmSpawnKind;
 use pa_core::session_engine::semantic_edges::{
     ChildCancelledReason, SemanticEdgeIdentity, SemanticEdgeLedgerEvent, SemanticEdgeRecorder,
 };
@@ -429,6 +430,7 @@ async fn spawn_child(sessions: &SupervisorChildSessions) -> RlmSpawnHandle {
             model: None,
             thinking: None,
             cwd: None,
+            kind: RlmSpawnKind::Subagent,
             spawned_by_request_id: None,
             factory: None,
         })
@@ -447,6 +449,8 @@ async fn a_factory_child_settles_without_a_parent_notice() {
             name: Some("f20-worker".to_string()),
             model: None,
             thinking: None,
+            kind: RlmSpawnKind::Subagent,
+            cwd: None,
             spawned_by_request_id: None,
             factory: Some(pa_core::session_engine::rlm_host::RlmFactoryTag {
                 run_id: "run".to_string(),
@@ -1055,6 +1059,181 @@ async fn a_cancelled_child_keeps_its_display_running_through_the_watcher_settle(
     let display = crate::rlm_ledger::read_rlm_subagent_display(Path::new(&handle.session_dir))
         .expect("display entry stays readable");
     assert_eq!(display.status, "running");
+}
+
+/// The decision spawn resolves its model from the child's eventual cwd,
+/// never the parent's: project-scoped settings (`<cwd>/.prime/agent/settings.json`)
+/// can name a different `decisionModel` in the two directories, and the
+/// child's engine reads its own cwd — the admission must agree.
+#[tokio::test]
+async fn a_decision_spawn_resolves_the_model_from_the_child_cwd() {
+    let tmp = tempfile::tempdir().unwrap();
+    let agent_dir = tmp.path().join("agent");
+    let parent_cwd = tmp.path().join("parent");
+    let child_cwd = tmp.path().join("child");
+    std::fs::create_dir_all(&agent_dir).unwrap();
+    std::fs::create_dir_all(parent_cwd.join(".prime/agent")).unwrap();
+    std::fs::create_dir_all(child_cwd.join(".prime/agent")).unwrap();
+    std::fs::write(
+        agent_dir.join("models.json"),
+        r#"{ "providers": { "fixture-decisions": {
+            "baseUrl": "https://fixture.example", "apiKey": "fixture-key", "api": "mock",
+            "models": [
+                { "id": "parent-model", "input": ["text"] },
+                { "id": "child-model", "input": ["text"] }
+            ]
+        } } }"#,
+    )
+    .unwrap();
+    std::fs::write(
+        parent_cwd.join(".prime/agent/settings.json"),
+        json!({ "decisionModel": "fixture-decisions/parent-model" }).to_string(),
+    )
+    .unwrap();
+    std::fs::write(
+        child_cwd.join(".prime/agent/settings.json"),
+        json!({ "decisionModel": "fixture-decisions/child-model" }).to_string(),
+    )
+    .unwrap();
+    let socket = tmp.path().join("decision-cwd.sock");
+    let (follow_up_tx, _follow_up_rx) = mpsc::unbounded_channel();
+    let (kill_tx, _kill_rx) = mpsc::unbounded_channel();
+    spawn_fake_supervisor(
+        socket.clone(),
+        follow_up_tx,
+        0,
+        kill_tx,
+        FakeSupervisorScript {
+            kill: FakeKill::Success,
+            child: FakeChild::Healthy,
+            child_subagents: Arc::new(FakeChildSubagents::default()),
+            peers: Arc::new(std::sync::Mutex::new(Vec::new())),
+        },
+    )
+    .await;
+    let sessions = SupervisorChildSessions::new(
+        Arc::new(crate::supervisor_link::SupervisorLink::new(socket)),
+        agent_dir.clone(),
+        "parent-live".to_string(),
+        std::sync::Arc::new(crate::model_allowlist::ModelRefusalTelemetry::new(
+            agent_dir, /*telemetry_disabled*/ true,
+        )),
+        String::new(),
+    );
+    sessions.set_identity(ParentIdentity {
+        model: Some("mock/mock-1".to_string()),
+        cwd: Some(parent_cwd.to_string_lossy().to_string()),
+        ..ParentIdentity::with_default_depth()
+    });
+    let handle = sessions
+        .spawn(RlmSpawnRequest {
+            prompt: "kickoff".to_string(),
+            name: Some("f20-worker".to_string()),
+            model: None,
+            thinking: None,
+            kind: RlmSpawnKind::Decision,
+            cwd: Some(child_cwd.to_string_lossy().to_string()),
+            spawned_by_request_id: None,
+            factory: None,
+        })
+        .await
+        .expect("the decision spawn resolves through the child cwd");
+    assert_eq!(
+        handle.model, "fixture-decisions/child-model",
+        "the decision model comes from the child's project settings, not the parent's"
+    );
+    let _ = sessions.delete_subagent(handle.rlm_child_id).await;
+}
+
+/// A decision child's spawn task is a readiness handshake, not its run:
+/// the watcher's settle tail withholds the ledger display's completed
+/// flip for it — a completed display would stop the update roster from
+/// reviving a child meant to serve decisions.
+#[tokio::test]
+async fn a_decision_child_keeps_its_display_running_through_the_watcher_settle() {
+    let (follow_up_tx, _follow_up_rx) = mpsc::unbounded_channel();
+    let (sessions, _kill_rx) =
+        sessions_with_fake_supervisor(follow_up_tx, 0, FakeKill::Success, FakeChild::Healthy).await;
+    let display_dir = tempfile::tempdir().unwrap();
+    let display_file = display_dir.path().join("rlm-subagent.json");
+    std::fs::write(
+        &display_file,
+        json!({ "type": "rlm_subagent", "childId": "child-id",
+                "sessionDir": display_dir.path(), "status": "running" })
+        .to_string(),
+    )
+    .unwrap();
+    let record = Arc::new(Mutex::new(ChildRecord {
+        rlm_child_id: "child-id".to_string(),
+        session_name: "lane".to_string(),
+        active_session_id: "child-live".to_string(),
+        session_id: Some("child-file".to_string()),
+        session_dir: display_dir.path().to_string_lossy().to_string(),
+        model: String::new(),
+        label: "task".to_string(),
+        started_at_ms: 0,
+        decision_child: true,
+        settled_status: Some("done"),
+        settled: true,
+        answer_preview: Some("Decision child ready.".to_string()),
+        answer_text: Some("Decision child ready.".to_string()),
+        answer_captured: true,
+        replied_since_task: true,
+        progress_note: None,
+        tool_use_count: None,
+        live_observation: None,
+        direct_observation: Arc::new(Mutex::new(())),
+        notice_delivered: false,
+        factory: false,
+        prompt_admitted: true,
+        error: None,
+        closed_by_parent: false,
+        retiring: false,
+        retirement_finished: false,
+        retirement_notified: false,
+        retirement_roster_emitted: false,
+        usage_registration_forgotten: false,
+        session_file: Some(
+            display_dir
+                .path()
+                .join("session.jsonl")
+                .display()
+                .to_string(),
+        ),
+        attributed_rows: Some(0),
+        pending_usage_report: None,
+        usage_watch_live: false,
+        usage_rearm: false,
+        emit_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
+        last_emitted_status: None,
+        rename_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
+    }));
+    sessions
+        .inner
+        .children
+        .lock()
+        .await
+        .push(Arc::clone(&record));
+    let (settle_tx, mut settle_rx) = mpsc::unbounded_channel();
+    sessions.set_settle_hook(Arc::new(move || {
+        let _ = settle_tx.send(());
+    }));
+    tokio::time::timeout(
+        Duration::from_secs(10),
+        sessions.inner.watch_child_settle(&record),
+    )
+    .await
+    .expect("the watcher settles the record");
+    tokio::time::timeout(Duration::from_secs(10), settle_rx.recv())
+        .await
+        .expect("the watcher's settle hook fires")
+        .expect("hook channel open");
+    let display = crate::rlm_ledger::read_rlm_subagent_display(display_dir.path())
+        .expect("display entry stays readable");
+    assert_eq!(
+        display.status, "running",
+        "a decision child meant to serve never completes its ledger display"
+    );
 }
 
 /// The `follow_up` carries exactly the TS failure row (`createRlmChildFailureMessage`).
@@ -2766,6 +2945,7 @@ fn an_already_settled_child_never_re_scores_as_an_unreachable_error() {
         model: String::new(),
         label: "task".to_string(),
         started_at_ms: 0,
+        decision_child: false,
         settled_status: None,
         settled: false,
         answer_preview: None,
@@ -2840,6 +3020,7 @@ async fn the_unreachable_give_up_skips_the_exit_capture_when_a_capture_stands() 
         model: String::new(),
         label: "task".to_string(),
         started_at_ms: 0,
+        decision_child: false,
         settled_status: None,
         settled: false,
         answer_preview: Some("the captured say".to_string()),

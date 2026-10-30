@@ -29,7 +29,7 @@ use std::process::{Child, Command, Stdio};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use pa_core::session_engine::rlm_host::{RlmSpawnRequest, RlmSubagentHost};
+use pa_core::session_engine::rlm_host::{RlmSpawnKind, RlmSpawnRequest, RlmSubagentHost};
 use pa_daemon::rlm_children::{ParentIdentity, SupervisorChildSessions};
 use pa_daemon::supervisor_link::SupervisorLink;
 use serde_json::{json, Value};
@@ -232,6 +232,7 @@ fn spawn_request(name: &str, prompt: &str) -> RlmSpawnRequest {
         model: None,
         thinking: None,
         cwd: None,
+        kind: RlmSpawnKind::Subagent,
         spawned_by_request_id: None,
         factory: None,
     }

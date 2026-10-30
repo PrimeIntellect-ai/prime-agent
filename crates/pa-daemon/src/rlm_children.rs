@@ -158,6 +158,11 @@ struct ChildRecord {
     model: String,
     label: String,
     started_at_ms: u64,
+    /// The Decision API child (`rlm.spawn kind="decision"`): its spawn
+    /// task is a readiness handshake, never its whole run — the settle
+    /// watcher's terminal handling (the ledger display's completed flip)
+    /// is withheld for it.
+    decision_child: bool,
     /// Terminal state (`done` | `error` | `cancelled`); running while absent.
     settled_status: Option<&'static str>,
     /// Set only by the settle funnel, after the terminal notice is delivered; the
@@ -765,6 +770,7 @@ impl SupervisorChildSessions {
                 model: String::new(),
                 label: String::new(),
                 started_at_ms: 0,
+                decision_child: false,
                 settled_status: None,
                 settled: false,
                 answer_preview: None,
