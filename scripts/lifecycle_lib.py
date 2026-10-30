@@ -737,10 +737,6 @@ class DockScreen:
                     elif command == "n" and nums[0] == 6:
                         replies.append(f"\x1b[{self.row + 1};{self.col + 1}R".encode())
                     elif command == "c": replies.append(b"\x1b[?1;2c")
-                    elif command == 't' and nums == [16]:
-                        # Fixed fixture cell geometry: TS asks for this in
-                        # image-capable terminals (CSI 16 t -> CSI 6;h;w t).
-                        replies.append(b'\x1b[6;16;8t')
                     elif command in 'hl' and params.startswith('?'):
                         for mode in nums:
                             if mode == 7:

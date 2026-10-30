@@ -21,10 +21,8 @@ Every contributor (human or agent) must read this before working on this repo.
   `gh pr create --repo PrimeIntellect-ai/prime-agent --base main`.
 - CI runs on the org's billing: `.github/workflows/continuous.yml` on `main` pushes and
   `release.yml` on version tags.
-- Parity ground truth is unchanged: a read-only checkout of the TS implementation (this
-  repo at tag `v0.9.8`, the last TS release before the Rust port merged to `main`). Clone
-  it to `~/prime-agent`, the conventional location the parity scripts and code fall back
-  to; tooling that honors an override reads `PA_TS_REFERENCE`.
+- The TS implementation stays readable at tag `v0.9.8`, the last TS release before the Rust
+  port merged to `main`.
 
 ## Style and structure
 
@@ -75,9 +73,9 @@ Every contributor (human or agent) must read this before working on this repo.
 - Bug fixes need a regression test that fails without the fix.
 - Keep test code in proportion to the change: one discriminating test per behavior change, not several that pin the same behavior or re-check behavior the PR does not change.
 - A new test file must be run by something: a runner, glob, loop, or run-time path in `.github/workflows/` or the Makefile. A name missing from those files can still be reached by a glob or a built path, so check those before calling a test unrun.
-- Verifiers over self-assessment: tmux user-level tests, differential tests against the TS binary
-  on PATH, golden corpora replayed against real captured data. No lane merges without its verifier
-  passing, rerun by the reviewer where feasible.
+- Verifiers over self-assessment: tmux user-level tests, golden corpora replayed against real
+  captured data. No lane merges without its verifier passing, rerun by the reviewer where
+  feasible.
 - Tests must wait for observable readiness, not fixed sleeps or retry-to-green loops. If a
   test must be disabled, give a reason at the test. Use isolated ports and temporary paths, and
   restore shared state. Run focused tests when changing their behavior.

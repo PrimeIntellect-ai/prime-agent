@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
 """Capture actual refinement HTTP identity using synthetic team auth.
 
-The official TS v0.9.8 Darwin arm64 binary was observed with the same
-loopback provider, model, synthetic auth and direct daemon refine command.
-It sends X-Prime-Team-ID: team-1 and Authorization: Bearer fixture-only.
-This checks those changed headers, not unrelated SDK headers or wire bytes.
+The refine request must send X-Prime-Team-ID: team-1 and Authorization:
+Bearer fixture-only. This checks those headers, not unrelated SDK headers or
+wire bytes.
 """
 import argparse
 import json
@@ -71,8 +70,7 @@ def observe(binary, root, receipt):
             headers = {key.lower(): value for key, value in server.received_headers[0].items()}
             actual = {key: headers.get(key) for key in ('authorization', 'x-prime-team-id')}
             expected = {'authorization': 'Bearer fixture-only', 'x-prime-team-id': 'team-1'}
-            receipt.update(rust_identity=actual, ts_observed_identity=expected,
-                           identity_equal=actual == expected)
+            receipt['identity'] = actual
             assert actual == expected, actual
             assert server.requests[0]['auxiliary'], server.requests
             receipt['refine_verified'] = True
@@ -95,8 +93,6 @@ def main():
     parser.add_argument('--receipt', required=True, type=Path)
     args = parser.parse_args()
     receipt = {'verified': False, 'scope': __doc__,
-        'ts_reference': 'v0.9.8 / 7d442aafa985f9342134fac16c2ef41f03fb45c1',
-        'ts_binary_sha256': 'e50d4e4cf5735ea16cee30c3ca48fccb628ae2169fc867c33d461b8a90e87bc5',
         'not_verified': ['auto-review HTTP execution', 'TUI frames',
                          'full HTTP or daemon wire-byte equality', 'live Prime Inference']}
     try:

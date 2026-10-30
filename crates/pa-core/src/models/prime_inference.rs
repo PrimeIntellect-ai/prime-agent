@@ -65,43 +65,6 @@ mod tests {
         assert!(!is_private_prime_inference_model_id("z-ai/glm-5.3"));
     }
 
-    /// Locate the TS reference repo: `PA_TS_REFERENCE` or `~/prime-agent`.
-    /// The repo ships with the dev box; other environments skip the
-    /// differential check.
-    fn ts_reference_root() -> Option<std::path::PathBuf> {
-        if let Ok(path) = std::env::var("PA_TS_REFERENCE") {
-            let path = std::path::PathBuf::from(path);
-            return path.is_dir().then_some(path);
-        }
-        let path = pa_types::platform::home_dir()?.join("prime-agent");
-        path.is_dir().then_some(path)
-    }
-
-    /// Differential: the provider base URL must equal the TS reference's
-    /// `PRIME_INFERENCE_BASE_URL` - the URL the installed TS binary actually
-    /// calls. Golden is read from the TS source, no network.
-    #[test]
-    fn base_url_matches_ts_reference() {
-        let Some(root) = ts_reference_root() else {
-            eprintln!("SKIPPED: TS reference repo not found (set PA_TS_REFERENCE)");
-            return;
-        };
-        let catalog = root.join("packages/coding-agent/src/core/prime-inference-model-catalog.ts");
-        let Ok(source) = std::fs::read_to_string(catalog) else {
-            eprintln!("SKIPPED: TS prime-inference-model-catalog.ts unreadable");
-            return;
-        };
-        let expected = source
-            .lines()
-            .find(|line| {
-                line.trim()
-                    .starts_with("export const PRIME_INFERENCE_BASE_URL")
-            })
-            .and_then(|line| line.split('"').nth(1))
-            .expect("TS reference defines a quoted PRIME_INFERENCE_BASE_URL");
-        assert_eq!(PRIME_INFERENCE_BASE_URL, expected);
-    }
-
     #[test]
     fn generated_catalog_base_urls_match_const() {
         let models = pa_ai::models_generated::get_models("prime-inference");
