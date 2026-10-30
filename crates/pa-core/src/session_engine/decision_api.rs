@@ -199,6 +199,13 @@ impl ResolvedDecisionModel {
     pub fn provider_and_id(&self) -> (&str, &str) {
         (&self.model.provider, &self.model.id)
     }
+
+    /// The model's api identifier (its transport family): the typed
+    /// assistant rows carry it.
+    #[must_use]
+    pub fn api(&self) -> &str {
+        &self.model.api
+    }
 }
 
 /// Resolve `decisionModel` through the model registry:
@@ -361,9 +368,7 @@ fn decision_answer(answers: &Value, criteria: &[(String, String)]) -> anyhow::Re
                     );
                 }
                 let Some(value) = share.as_f64().and_then(finite_or_none) else {
-                    bail!(
-                        "the decision model returned an invalid probability for action {name:?}"
-                    );
+                    bail!("the decision model returned an invalid probability for action {name:?}");
                 };
                 if !(0.0..=1.0).contains(&value) {
                     bail!(
