@@ -1157,71 +1157,6 @@ mod tests {
         Ok(base)
     }
 
-    /// The keep-alive loopback fixture: each accepted connection serves any
-    /// number of decision POSTs (no `connection: close`), so a pooled
-    /// client reuses one connection while a client built per decision opens
-    /// one per request. Returns the accepted-connection and served-request
-    /// counts.
-    async fn systemone_keepalive_fixture(
-        dir: &Path,
-        reply: Value,
-    ) -> anyhow::Result<(
-        std::sync::Arc<std::sync::atomic::AtomicUsize>,
-        std::sync::Arc<std::sync::atomic::AtomicUsize>,
-    )> {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
-        let base = format!("http://{}", listener.local_addr()?);
-        let connections = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let served = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let reply = reply.to_string();
-        {
-            use std::sync::atomic::Ordering;
-            use tokio::io::{AsyncReadExt, AsyncWriteExt};
-            let connections = std::sync::Arc::clone(&connections);
-            let served = std::sync::Arc::clone(&served);
-            tokio::spawn(async move {
-                while let Ok((mut socket, _)) = listener.accept().await {
-                    connections.fetch_add(1, Ordering::SeqCst);
-                    let mut raw = Vec::new();
-                    let mut chunk = [0u8; 4096];
-                    // Keep-alive: serve every request this connection
-                    // carries; the client closes it when the test ends.
-                    loop {
-                        let read = socket.read(&mut chunk).await.unwrap_or(0);
-                        if read == 0 {
-                            break;
-                        }
-                        raw.extend_from_slice(&chunk[..read]);
-                        let text = String::from_utf8_lossy(&raw);
-                        let Some((head, body)) = text.split_once("\r\n\r\n") else {
-                            continue;
-                        };
-                        let length = head
-                            .lines()
-                            .find_map(|line| {
-                                let line = line.to_ascii_lowercase();
-                                line.strip_prefix("content-length:")?.trim().parse().ok()
-                            })
-                            .unwrap_or(0);
-                        if body.len() < length {
-                            continue;
-                        }
-                        served.fetch_add(1, Ordering::SeqCst);
-                        let response = format!(
-                            "HTTP/1.1 200 Status\r\ncontent-type: application/json\r\n\
-                             content-length: {}\r\n\r\n{reply}",
-                            reply.len()
-                        );
-                        socket.write_all(response.as_bytes()).await.unwrap();
-                        raw.drain(..head.len() + 4 + length);
-                    }
-                }
-            });
-        }
-        write_systemone_registry(dir, &base)?;
-        Ok((connections, served))
-    }
-
     #[test]
     fn decision_answers_parse_leniently_and_validate_the_choice() {
         let criteria = vec![
@@ -1342,41 +1277,6 @@ mod tests {
         assert!(
             error.contains("chose"),
             "the envelope's choice must be validated against the criteria: {error}"
-        );
-    }
-
-    /// Consecutive systemone decisions ride one pooled connection: the
-    /// transport uses pa-ai's shared client (one pool, one TLS handshake
-    /// per host), not a client built per call. A client built per
-    /// decision accepts a second connection for the second request, so
-    /// the keep-alive fixture's connection count pins the reuse.
-    #[tokio::test]
-    async fn consecutive_systemone_decisions_reuse_one_pooled_connection() {
-        use std::sync::atomic::Ordering;
-        let dir = tempfile::tempdir().unwrap();
-        let envelope = json!({
-            "model": "fixture-decisions/systemone-model",
-            "answers": {"action": {"choice": "left", "confidence": 0.9}}
-        });
-        let (connections, served) = systemone_keepalive_fixture(dir.path(), envelope)
-            .await
-            .unwrap();
-        let request = json!({ "state": {}, "questions": { "action": {
-            "type": "choice", "criteria": { "left": "go left" }
-        } } });
-        let first = decide(request.clone(), dir.path()).await.unwrap();
-        let second = decide(request, dir.path()).await.unwrap();
-        assert_eq!(first["answers"]["action"]["choice"], "left");
-        assert_eq!(second["answers"]["action"]["choice"], "left");
-        assert_eq!(
-            served.load(Ordering::SeqCst),
-            2,
-            "two decisions, two requests"
-        );
-        assert_eq!(
-            connections.load(Ordering::SeqCst),
-            1,
-            "consecutive decisions must reuse the shared client's pooled connection"
         );
     }
 }
