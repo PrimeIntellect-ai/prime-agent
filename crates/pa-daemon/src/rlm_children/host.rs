@@ -82,7 +82,13 @@ impl RlmSubagentHost for SupervisorChildSessions {
         let this = Arc::clone(&self.inner);
         Box::pin(async move {
             let identity = this.identity.lock().expect("identity lock").clone();
-            if identity.rlm_depth >= identity.rlm_max_depth {
+            // The recursion budget bounds subagents only. A refinement
+            // child is a one-shot planning pass owned by its parent, not a
+            // worker of the tree: refusing it at the limit would lock
+            // every depth-2 session (or any session with a lowered max
+            // depth) out of `refine.run()` and the compaction-triggered
+            // refinement, so `kind="refine"` never spends the budget.
+            if !request.refine_child && identity.rlm_depth >= identity.rlm_max_depth {
                 bail!(rlm_depth_limit_error(
                     identity.rlm_depth,
                     identity.rlm_max_depth
