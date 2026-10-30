@@ -4,21 +4,7 @@
 //! expanded child rows open the subagent); hover motions ride along. The same mock also pins the
 //! shells poll's one-cycle-in-flight contract.
 #![cfg(unix)]
-// Casts: structurally bounded terminal-layout arithmetic; guarded conversions add panic paths.
-#![allow(
-    clippy::cast_possible_truncation,
-    clippy::cast_possible_wrap,
-    clippy::cast_sign_loss,
-    clippy::cast_precision_loss
-)]
-// Render routes are flat tables (one arm per route); splitting adds indirection.
-#![allow(clippy::too_many_lines)]
-// Widget state structs carry independent flag bits.
-#![allow(clippy::struct_excessive_bools, clippy::fn_params_excessive_bools)]
-// Futures are bounded by the surface's lifetime; boxing adds a steady-state allocation.
-#![allow(clippy::large_futures)]
-// The wrappers preserve a uniform Result-returning API surface.
-#![allow(clippy::unnecessary_wraps)]
+#![warn(clippy::allow_attributes_without_reason)]
 
 mod support;
 
@@ -495,6 +481,10 @@ async fn a_slow_shells_read_never_stacks_the_poll() {
 
 /// A cycle held across a session handoff belongs to the returning view, not the old UI channel.
 #[tokio::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "the inline mock daemon sits next to the two view runs it scripts"
+)]
 async fn a_held_shells_read_survives_the_agents_view_handoff() {
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
 

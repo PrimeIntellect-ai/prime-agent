@@ -3,21 +3,7 @@
 //! collapsed warning line renders from the agent.jsonl tail, Esc
 //! dismisses it, and a dismissal is sticky across polls/re-entries.
 #![cfg(unix)]
-// Casts: structurally bounded terminal-layout arithmetic; guarded conversions add panic paths.
-#![allow(
-    clippy::cast_possible_truncation,
-    clippy::cast_possible_wrap,
-    clippy::cast_sign_loss,
-    clippy::cast_precision_loss
-)]
-// Render routes are flat tables (one arm per route); splitting adds indirection.
-#![allow(clippy::too_many_lines)]
-// Widget state structs carry independent flag bits.
-#![allow(clippy::struct_excessive_bools, clippy::fn_params_excessive_bools)]
-// Futures are bounded by the surface's lifetime; boxing adds a steady-state allocation.
-#![allow(clippy::large_futures)]
-// The wrappers preserve a uniform Result-returning API surface.
-#![allow(clippy::unnecessary_wraps)]
+#![warn(clippy::allow_attributes_without_reason)]
 
 mod support;
 
@@ -139,6 +125,10 @@ fn read_line(reader: &mut impl BufRead) -> Option<String> {
 
 /// Milliseconds since the Unix epoch (the notice window rides the real clock; the fixture entries
 /// must be relative to it).
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "epoch milliseconds stay far below the target type's max"
+)]
 fn now_ms() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)

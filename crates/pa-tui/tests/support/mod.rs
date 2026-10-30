@@ -1,8 +1,10 @@
 //! Shared plumbing for the pa-tui headless integration tests: each test binary includes it with
 //! `mod support;` and serves its scenario-specific daemon answers on top of it.
 
-// Every test binary compiles this module but uses only the helpers its scenarios need.
-#![allow(dead_code)]
+#![allow(
+    dead_code,
+    reason = "every test binary compiles this module but uses only the helpers its scenarios need"
+)]
 
 use std::io::{BufRead, BufReader, ErrorKind, Write};
 use std::os::unix::net::{UnixListener, UnixStream};

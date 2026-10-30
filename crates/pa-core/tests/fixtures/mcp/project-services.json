@@ -1,0 +1,12 @@
+{
+  "version": 1,
+  "entries": [{
+    "server": "project-catalog", "service": "project-catalog", "label": "Project Catalog",
+    "url": "https://project.example/mcp", "aliases": [],
+    "transport": { "type": "http", "url": "https://project.example/mcp" },
+    "auth": { "strategy": "oauth", "clientRegistration": "dynamic" },
+    "setup": { "status": "ready" },
+    "verification": { "status": "unverified" },
+    "legacyBuiltin": false, "provenance": [{ "source": "user" }]
+  }]
+}

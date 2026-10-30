@@ -122,13 +122,17 @@ impl RlmSubagentHost for SupervisorChildSessions {
                 let thinking = request.thinking.as_deref().or(identity.thinking.as_deref());
                 let child_dir = this.child_session_dir(&child_id, &identity)?;
                 let cwd = identity.cwd.clone().unwrap_or_else(|| "/".to_string());
-                let runtime_metadata = json!({
+                let mut runtime_metadata = json!({
                     "kind": "subagent",
                     "rlmChildId": child_id,
                     "parentActiveSessionId": this.parent_active_session_id,
                     "rlmDepth": identity.rlm_depth + 1,
                     "createdAt": now_ms(),
                 });
+                // The admission's ledger spawn record reads the run tag back.
+                if let Some(factory) = &request.factory {
+                    runtime_metadata["factory"] = json!(factory);
+                }
                 let created = this
                     .create_child(
                         &child_id,

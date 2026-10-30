@@ -653,11 +653,16 @@ impl SessionUi {
                     Ok(tree) => {
                         // TS render width: clamp(columns - 2, 60, 120).
                         let width = terminal_columns().saturating_sub(2).clamp(60, 120);
+                        let factory_runs =
+                            crate::factory_view::parse_factory_runs(&self.factory_graph);
                         self.open_info_panel(
                             view,
                             None,
                             InfoContent::Rows(info_commands::context_tree_rows(
-                                &tree, width, scope,
+                                &tree,
+                                width,
+                                scope,
+                                &factory_runs,
                             )),
                         );
                         self.track_menu_opened("context", "command");

@@ -3,21 +3,7 @@
 //! responses — the readout appears after the first completed response
 //! with positive usage and span; off clears both the stats and the row.
 #![cfg(unix)]
-// Casts: structurally bounded terminal-layout arithmetic; guarded conversions add panic paths.
-#![allow(
-    clippy::cast_possible_truncation,
-    clippy::cast_possible_wrap,
-    clippy::cast_sign_loss,
-    clippy::cast_precision_loss
-)]
-// Render routes are flat tables (one arm per route); splitting adds indirection.
-#![allow(clippy::too_many_lines)]
-// Widget state structs carry independent flag bits.
-#![allow(clippy::struct_excessive_bools, clippy::fn_params_excessive_bools)]
-// Futures are bounded by the surface's lifetime; boxing adds a steady-state allocation.
-#![allow(clippy::large_futures)]
-// The wrappers preserve a uniform Result-returning API surface.
-#![allow(clippy::unnecessary_wraps)]
+#![warn(clippy::allow_attributes_without_reason)]
 
 mod support;
 
@@ -72,6 +58,10 @@ impl MockSupervisor {
 /// usage and a stream-start timestamp (`message_end` is set at provider stream start).
 fn stream_turn(writer: &mut UnixStream) {
     let event = |payload: Value| json!({ "type": "session_event", "activeSessionId": "s1", "event": payload });
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "epoch milliseconds stay far below the target type's max"
+    )]
     let stream_start_ms = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_millis() as i64)

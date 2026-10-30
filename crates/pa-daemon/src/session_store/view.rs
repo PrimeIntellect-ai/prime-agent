@@ -1,7 +1,10 @@
 //! The loaded-session view: the branch walks, the window/settings reads, the
 //! compacted message fold and its scalars, and the wire-shape message helpers.
 
-use super::{json, MessageWindowScalars, SessionEntry, SessionFile, TranscriptPageRows, Value};
+use super::{
+    json, MessageWindowScalars, SessionEntry, SessionFile, SessionMessages, TranscriptPageRows,
+    Value,
+};
 use pa_types::daemon::TranscriptPage;
 
 /// One display-transcript row: its entry id and wire message.
@@ -582,6 +585,93 @@ impl SessionFile {
             page.pop();
         }
         Some((page, false))
+    }
+
+    /// `rows[start:][:limit]` (Python slice semantics) over the active branch's display
+    /// transcript filtered to the roles `keep_role` accepts, each row with its index among
+    /// those rows. The total is a window's prefix counts plus one walk over the loaded
+    /// branch; only the returned rows materialize. `None` when the slice reaches into a
+    /// windowed store's unloaded prefix: the caller hydrates and reads again.
+    #[must_use]
+    pub fn session_messages(
+        &self,
+        start: i64,
+        limit: usize,
+        keep_role: impl Fn(&str) -> bool,
+        running_calls: &std::collections::HashSet<String>,
+    ) -> Option<SessionMessages> {
+        let in_flight = self.in_flight(running_calls);
+        let kept = |position: &usize| {
+            Some(*position) != in_flight && self.display_role(*position).is_some_and(&keep_role)
+        };
+        let prefix: usize = self.window.as_ref().map_or(0, |window| {
+            window
+                .older_path_stats
+                .display_rows
+                .iter()
+                .filter(|(role, _)| keep_role(role))
+                .map(|(_, count)| count)
+                .sum()
+        });
+        let total = prefix + self.walk_back(self.branch_leaf()).filter(kept).count();
+        let begin = if start < 0 {
+            total.saturating_sub(usize::try_from(start.unsigned_abs()).unwrap_or(usize::MAX))
+        } else {
+            usize::try_from(start).map_or(total, |start| start.min(total))
+        };
+        let end = total.min(begin.saturating_add(limit));
+        if begin < end && begin < prefix {
+            return None;
+        }
+        let mut rows: Vec<(usize, String, Value)> = self
+            .walk_back(self.branch_leaf())
+            .filter(kept)
+            .skip(total - end)
+            .take(end - begin)
+            .zip((begin..end).rev())
+            .filter_map(|(position, index)| {
+                let (id, message) = self.display_row(position)?;
+                Some((index, id.to_string(), message.into_owned()))
+            })
+            .collect();
+        rows.reverse();
+        Some(SessionMessages { rows, total })
+    }
+
+    /// The role a branch position shows under in the display transcript.
+    fn display_role(&self, position: usize) -> Option<&str> {
+        let entry = &self.entries[position];
+        pa_core::session::window::display_role(
+            &entry.type_,
+            entry.fields.get("message").and_then(message_role),
+        )
+    }
+
+    /// The step in flight: the newest assistant row, while one of its tool calls is still
+    /// running. Only that row can hold a running call (the engine awaits every call before
+    /// the next model call); it is not transcript yet.
+    fn in_flight(&self, running_calls: &std::collections::HashSet<String>) -> Option<usize> {
+        if running_calls.is_empty() {
+            return None;
+        }
+        self.walk_back(self.branch_leaf())
+            .find(|&position| self.display_role(position) == Some("assistant"))
+            .filter(|&position| {
+                self.entries[position]
+                    .fields
+                    .get("message")
+                    .and_then(|message| message.get("content"))
+                    .and_then(Value::as_array)
+                    .is_some_and(|content| {
+                        content.iter().any(|block| {
+                            block.get("type").and_then(Value::as_str) == Some("toolCall")
+                                && block
+                                    .get("id")
+                                    .and_then(Value::as_str)
+                                    .is_some_and(|id| running_calls.contains(id))
+                        })
+                    })
+            })
     }
 
     /// The newest user prompt's time on the branch (the attach snapshot's marker); the walk

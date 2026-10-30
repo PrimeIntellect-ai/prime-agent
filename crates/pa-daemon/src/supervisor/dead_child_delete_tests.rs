@@ -43,6 +43,7 @@ async fn fixture() -> Fixture {
             child: child_file.clone(),
             depth: 1,
             name: "dead-worker".to_string(),
+            factory: None,
         })
         .expect("the spawn edge appends");
     Fixture {

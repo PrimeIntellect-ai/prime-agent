@@ -3,21 +3,7 @@
 //! session and answers the `execute_bash` request with the streamed
 //! `bash_start`/`bash_output`/`bash_end` events.
 #![cfg(unix)]
-// Casts: structurally bounded terminal-layout arithmetic; guarded conversions add panic paths.
-#![allow(
-    clippy::cast_possible_truncation,
-    clippy::cast_possible_wrap,
-    clippy::cast_sign_loss,
-    clippy::cast_precision_loss
-)]
-// Render routes are flat tables (one arm per route); splitting adds indirection.
-#![allow(clippy::too_many_lines)]
-// Widget state structs carry independent flag bits.
-#![allow(clippy::struct_excessive_bools, clippy::fn_params_excessive_bools)]
-// Futures are bounded by the surface's lifetime; boxing adds a steady-state allocation.
-#![allow(clippy::large_futures)]
-// The wrappers preserve a uniform Result-returning API surface.
-#![allow(clippy::unnecessary_wraps)]
+#![warn(clippy::allow_attributes_without_reason)]
 
 mod support;
 
@@ -89,6 +75,10 @@ impl MockSupervisor {
 
     /// Serve connections until the client stops coming back (bounded, so the plan's join always
     /// finishes); the second connection carries the §10.3 `updateResume` hello.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "mock daemon request loop: one match arm per scripted request method"
+    )]
     fn serve(self) {
         self.listener
             .set_nonblocking(true)

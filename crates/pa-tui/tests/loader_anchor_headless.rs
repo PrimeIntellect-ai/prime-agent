@@ -3,21 +3,7 @@
 //! PROMPT's time, never the re-attach instant (TS anchors at the mount — deliberate divergence).
 //! Each `run_plan` below is one leg of the round trip: the returning client is a fresh process.
 #![cfg(unix)]
-// Casts: structurally bounded terminal-layout arithmetic; guarded conversions add panic paths.
-#![allow(
-    clippy::cast_possible_truncation,
-    clippy::cast_possible_wrap,
-    clippy::cast_sign_loss,
-    clippy::cast_precision_loss
-)]
-// Render routes are flat tables (one arm per route); splitting adds indirection.
-#![allow(clippy::too_many_lines)]
-// Widget state structs carry independent flag bits.
-#![allow(clippy::struct_excessive_bools, clippy::fn_params_excessive_bools)]
-// Futures are bounded by the surface's lifetime; boxing adds a steady-state allocation.
-#![allow(clippy::large_futures)]
-// The wrappers preserve a uniform Result-returning API surface.
-#![allow(clippy::unnecessary_wraps)]
+#![warn(clippy::allow_attributes_without_reason)]
 
 mod support;
 
@@ -88,6 +74,10 @@ impl MockSupervisor {
 /// The attach result: a mid-turn snapshot whose LAST HUMAN PROMPT is `prompt_age_ms` old and whose
 /// state is streaming (the frame the agents-view round trip returns into).
 fn attach_data(id: &str, prompt_age_ms: u64) -> Value {
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "epoch milliseconds stay far below the target type's max"
+    )]
     let now_ms = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|since| since.as_millis() as u64)
