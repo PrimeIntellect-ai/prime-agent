@@ -244,6 +244,17 @@ pub struct FactorySettings {
     pub enabled: Option<bool>,
 }
 
+/// `agentInbox` (the machine-notification inbox): enabled by default;
+/// `enabled: false` is the kill switch that restores direct notice-row
+/// steering. `reminderIntervalMs` (default 10 minutes, `0` disables)
+/// repeats the waiting count while the inbox stays unread.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentInboxSettings {
+    pub enabled: Option<bool>,
+    pub reminder_interval_ms: Option<u64>,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TelemetrySettings {
@@ -257,6 +268,9 @@ pub struct TelemetrySettings {
 /// The default per-cell watchdog budget for user `python_repl` cells: 60
 /// seconds.
 pub const DEFAULT_PYTHON_CELL_TIMEOUT_MS: u64 = 60_000;
+
+/// The default inbox reminder repeat interval: 10 minutes.
+pub const DEFAULT_AGENT_INBOX_REMINDER_INTERVAL_MS: u64 = 600_000;
 
 /// The settings document: every known field optional; unknown keys preserved.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -285,6 +299,7 @@ pub struct Settings {
     pub harness_refinements: Option<bool>,
     pub agent_traces: Option<AgentTracesSettings>,
     pub factory: Option<FactorySettings>,
+    pub agent_inbox: Option<AgentInboxSettings>,
     pub telemetry: Option<TelemetrySettings>,
     pub branch_summary: Option<BranchSummarySettings>,
     pub retry: Option<RetrySettings>,

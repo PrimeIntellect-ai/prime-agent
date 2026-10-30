@@ -1257,6 +1257,7 @@ async fn parent_renames_a_child_end_to_end() {
             subagent_host: Some(Arc::clone(&children) as Arc<dyn RlmSubagentHost>),
             usage_store: None,
             progress_note_emit: None,
+            inbox: None,
         },
         None,
         None,
@@ -1428,6 +1429,7 @@ async fn passivated_child_recent_messages_reads_its_file_end_to_end() {
             model: None,
             thinking: None,
             spawned_by_request_id: None,
+            factory: None,
         })
         .await
         .expect("spawn kid-a");

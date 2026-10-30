@@ -854,6 +854,8 @@ mod tests {
                     extra_builtin_skill_overrides: Vec::new(),
                     rlm_subagent_host: None,
                     rlm_usage_store: None,
+
+                    inbox: None,
                     progress_note_emit: None,
                     daemonless: true,
                     rlm_depth: None,
@@ -1472,6 +1474,8 @@ mod tests {
                     extra_builtin_skill_overrides: Vec::new(),
                     rlm_subagent_host: None,
                     rlm_usage_store: None,
+
+                    inbox: None,
                     progress_note_emit: None,
                     daemonless: true,
                     rlm_depth: None,

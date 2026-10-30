@@ -165,6 +165,8 @@ async fn abort_during_a_kernel_cell_settles_the_turn_immediately() {
         extra_builtin_skill_overrides: Vec::new(),
         rlm_subagent_host: None,
         rlm_usage_store: None,
+
+        inbox: None,
         progress_note_emit: None,
         rlm_depth: None,
         daemonless: true,

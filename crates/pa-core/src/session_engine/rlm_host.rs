@@ -1111,6 +1111,7 @@ mod tests {
                 subagent_host: host,
                 usage_store: None,
                 progress_note_emit: None,
+                inbox: None,
             },
             None,
             None,
@@ -1286,6 +1287,7 @@ mod tests {
                 progress_note_emit: Some(Arc::new(move |message, timestamp| {
                     sink.lock().unwrap().push((message.to_string(), timestamp));
                 })),
+                inbox: None,
             },
             None,
             None,
