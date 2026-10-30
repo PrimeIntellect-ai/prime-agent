@@ -448,6 +448,8 @@ async fn a_factory_child_settles_without_a_parent_notice() {
             name: Some("f20-worker".to_string()),
             model: None,
             thinking: None,
+            decision_child: false,
+            cwd: None,
             spawned_by_request_id: None,
             factory: Some(pa_core::session_engine::rlm_host::RlmFactoryTag {
                 run_id: "run".to_string(),

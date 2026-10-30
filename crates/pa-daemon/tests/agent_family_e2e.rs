@@ -1435,6 +1435,7 @@ async fn passivated_child_recent_messages_reads_its_file_end_to_end() {
             name: Some("kid-a".to_string()),
             model: None,
             thinking: None,
+            decision_child: false,
             cwd: None,
             spawned_by_request_id: None,
             factory: None,

@@ -252,26 +252,49 @@ impl DecisionEngine {
     }
 
     /// The transcript row pair for an answer: the assistant update and the
-    /// final message. The decision's usage rides both rows — the final
+    /// final message. Both rows are typed assistant messages — one text
+    /// block, the resolved model's `api`, a real usage, `StopReason::Stop`
+    /// — because `turn.rs` persists them verbatim and every later reader
+    /// deserializes: the reopened or revived child's context builder and
+    /// the exit capture's `last_assistant_text_from_file` skip a row that
+    /// does not parse. The decision's usage rides both rows — the final
     /// message is the row the cost ledger bills, and a row without usage
     /// reads as a free call.
     fn answer_rows(
+        api: &str,
         provider: &str,
         model: &str,
         text: &str,
-        usage: &Value,
+        usage: pa_types::ai::Usage,
     ) -> (EngineEvent, EngineEvent) {
         let now = crate::util::now_ms();
-        let row = |content: &str| {
-            let mut row = json!({
-                "role": "assistant", "content": content,
-                "provider": provider, "model": model,
-                "timestamp": now,
-            });
-            if usage.is_object() {
-                row["usage"] = usage.clone();
-            }
-            row
+        let row = |text: &str| {
+            let message = pa_types::ai::AssistantMessage {
+                content: vec![pa_types::ai::AssistantContentBlock::Text(
+                    pa_types::ai::TextContent {
+                        text: text.to_string(),
+                        text_signature: None,
+                        rest: serde_json::Map::default(),
+                    },
+                )],
+                api: api.to_string(),
+                provider: provider.to_string(),
+                model: model.to_string(),
+                response_model: None,
+                response_id: None,
+                diagnostics: None,
+                usage,
+                stop_reason: pa_types::ai::StopReason::Stop,
+                stop_reason_raw: None,
+                error_message: None,
+                timestamp: now,
+                rest: serde_json::Map::default(),
+            };
+            // The role-tagged session shape: the row persists and reads
+            // back as an assistant message (the store's `AgentMessage`
+            // tag), so the answer stays reachable for every later reader.
+            serde_json::to_value(pa_types::session::AgentMessage::Assistant(message))
+                .expect("the typed assistant row serializes")
         };
         (
             EngineEvent::AssistantUpdate {
@@ -428,11 +451,15 @@ impl SessionEngine for DecisionEngine {
             .as_ref()
             .is_some_and(|value| value.get("questions").is_some());
         if !is_request {
+            // The ready row is typed like the answer rows (the exit capture
+            // and the revived context read it the same way) but reports no
+            // model call: the readiness label, a zero usage, and no api.
             let (update, message) = Self::answer_rows(
+                "",
                 "decision",
                 "system-1",
                 "Decision child ready.",
-                &Value::Null,
+                pa_types::ai::Usage::default(),
             );
             for event in [update, message] {
                 if !emit(event) {
@@ -463,6 +490,31 @@ impl SessionEngine for DecisionEngine {
         }
         match result {
             Ok(envelope) => {
+                // The answer rows persist first: the completed decision and
+                // its usage reach the transcript and the cost ledger even
+                // when the reply delivery below fails, and the rows exist
+                // before the run's closing frames either way.
+                let text = envelope["answers"].to_string();
+                let usage =
+                    serde_json::from_value::<pa_types::ai::Usage>(envelope["usage"].clone())
+                        .unwrap_or_default();
+                // A served decision implies the engine-start resolution;
+                // its identity labels the transcript rows.
+                let Some(resolved) = self.model.as_ref().ok() else {
+                    unreachable!("a served decision implies the engine resolved its model");
+                };
+                let (provider, model) = resolved.provider_and_id();
+                let (update, final_message) =
+                    Self::answer_rows(resolved.api(), provider, model, &text, usage);
+                for event in [update, final_message.clone()] {
+                    if !emit(event) {
+                        emit(cancelled());
+                        return;
+                    }
+                }
+                let EngineEvent::AssistantMessage(turn_message) = final_message else {
+                    unreachable!("answer_rows returns an AssistantMessage");
+                };
                 let reply = json!({
                     "type": "decision_api.decision",
                     "seq": seq,
@@ -475,33 +527,15 @@ impl SessionEngine for DecisionEngine {
                     ))));
                     return;
                 }
-                let text = envelope["answers"].to_string();
-                // A served decision implies the engine-start resolution;
-                // its halves label the transcript rows.
-                let Some(resolved) = self.model.as_ref().ok() else {
-                    unreachable!("a served decision implies the engine resolved its model");
-                };
-                let (provider, model) = resolved.provider_and_id();
-                let (update, final_message) =
-                    Self::answer_rows(provider, model, &text, &envelope["usage"]);
-                for event in [update, final_message.clone()] {
-                    if !emit(event) {
-                        emit(cancelled());
-                        return;
-                    }
-                }
-                let EngineEvent::AssistantMessage(turn_message) = final_message else {
-                    unreachable!("answer_rows returns an AssistantMessage");
-                };
                 if !emit(EngineEvent::TurnEnd {
-                    message: turn_message,
+                    message: turn_message.clone(),
                     tool_results: Vec::new(),
                 }) {
                     emit(cancelled());
                     return;
                 }
                 if !emit(EngineEvent::AgentEnd {
-                    messages: vec![accepted_row],
+                    messages: vec![accepted_row, turn_message],
                 }) {
                     emit(cancelled());
                     return;
@@ -672,6 +706,7 @@ mod tests {
             thinking: None,
             child_script: None,
             semantic_spawn: None,
+            factory_child: false,
         };
         child.configure_rlm_identity(identity.clone()).unwrap();
         assert!(child.accept_goal(&goal(3, "follow the target")));
@@ -888,15 +923,31 @@ mod tests {
             Some(EngineEvent::Done(Ok(()))),
             "the spawn prompt must settle ready, not with a decision outcome: {events:?}"
         );
-        // The ready answer is the only assistant content on the turn.
-        let answered: Vec<&str> = events
+        // The ready answer is the only assistant content on the turn, and
+        // it rides a typed assistant row: the deserialization is the exit
+        // capture's read (a row that does not parse loses the text).
+        let answered: Vec<String> = events
             .iter()
             .filter_map(|event| match event {
-                EngineEvent::AssistantMessage(row) => row["content"].as_str(),
+                EngineEvent::AssistantMessage(row) => {
+                    let message: pa_types::ai::AssistantMessage =
+                        serde_json::from_value(row.clone()).ok()?;
+                    let text = message
+                        .content
+                        .iter()
+                        .filter_map(|block| match block {
+                            pa_types::ai::AssistantContentBlock::Text(text) => {
+                                Some(text.text.clone())
+                            }
+                            _ => None,
+                        })
+                        .collect::<String>();
+                    (!text.is_empty()).then_some(text)
+                }
                 _ => None,
             })
             .collect();
-        assert_eq!(answered, ["Decision child ready."]);
+        assert_eq!(answered, ["Decision child ready.".to_string()]);
     }
 
     /// A stub supervisor over `socket`: it answers each command on its own
@@ -1107,6 +1158,14 @@ mod tests {
                 _ => None,
             })
             .expect("a served decision emits its answer row");
+        // The row is a typed assistant message (one text block, the
+        // resolved model's api, a real usage, `StopReason::Stop`): the
+        // round trip is the read every later consumer makes — the revived
+        // child's context and the exit capture's `last_assistant_text_from_file`.
+        let typed: pa_types::ai::AssistantMessage = serde_json::from_value(answer.clone())
+            .expect("the answer row must deserialize as a typed assistant message");
+        assert_eq!(typed.stop_reason, pa_types::ai::StopReason::Stop);
+        assert!(!typed.api.is_empty(), "the row carries the model's api");
         let usage = &answer["usage"];
         assert!(
             usage["input"].as_u64().is_some_and(|input| input > 0),
@@ -1115,6 +1174,23 @@ mod tests {
         assert!(
             usage["output"].as_u64().is_some_and(|output| output > 0),
             "the answer row must carry the completion's usage: {answer}"
+        );
+        // The run's closing frame carries the whole message set: the
+        // accepted request row and the assistant decision row.
+        let agent_end = events
+            .iter()
+            .find_map(|event| match event {
+                EngineEvent::AgentEnd { messages } => Some(messages.clone()),
+                _ => None,
+            })
+            .expect("a served decision emits its agent_end frame");
+        assert_eq!(
+            agent_end
+                .iter()
+                .map(|message| message["role"].as_str().unwrap_or_default())
+                .collect::<Vec<_>>(),
+            ["user", "assistant"],
+            "the agent_end frame must carry the accepted row and the decision row: {agent_end:?}"
         );
         // The row bills: stored the way the turn loop persists message
         // rows, the child-usage ledger attributes the decision's cost
@@ -1134,6 +1210,96 @@ mod tests {
             usage["input"].as_u64().unwrap(),
             "the ledger must bill the completion's usage"
         );
+    }
+
+    /// The delivery-failure contract, pinned: a completed decision whose
+    /// reply cannot reach the parent still persists its answer rows and
+    /// usage (the transcript and the cost ledger keep the decision), and
+    /// the turn settles with the delivery error instead of dropping it.
+    /// The engine without a pushed session summary fails the send fast:
+    /// no known parent id.
+    #[test]
+    fn a_failed_reply_still_persists_the_decision_rows() {
+        // A private api name: the faux provider registry is global, so a
+        // shared name would race the other decision tests' response queues.
+        let registration =
+            pa_ai::faux::register_faux_provider(pa_ai::faux::RegisterFauxProviderOptions {
+                api: Some("faux-decision-undelivered".to_string()),
+                provider: Some("fixture-decisions".to_string()),
+                models: Some(vec![pa_ai::faux::FauxModelDefinition {
+                    id: "decision-model".to_string(),
+                    input: Some(vec![pa_types::ai::ModelInput::Text]),
+                    ..Default::default()
+                }]),
+                ..Default::default()
+            });
+        registration.set_responses(vec![pa_ai::faux::FauxResponseStep::Message(
+            pa_ai::faux::faux_assistant_text_message(
+                r#"{"action": {"choice": "left"}}"#,
+                pa_ai::faux::FauxAssistantMessageOptions::default(),
+            ),
+        )]);
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("settings.json"),
+            json!({ "decisionModel": "decision-model" }).to_string(),
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("models.json"),
+            r#"{ "providers": { "fixture-decisions": {
+                "baseUrl": "https://fixture.example", "apiKey": "fixture-key",
+                "api": "faux-decision-undelivered", "models": [
+                    { "id": "decision-model", "input": ["text"] }
+                ]
+            } } }"#,
+        )
+        .unwrap();
+        // No set_session_summary: the reply fails fast on the missing
+        // parent edge, the only deterministic delivery failure.
+        let engine = engine(dir.path());
+        let body = json!({
+            "seq": 7,
+            "state": {"observation": 1},
+            "questions": {"action": {
+                "type": "choice", "criteria": {"left": "go left", "right": "go right"}
+            }}
+        });
+        let request = PromptRequest {
+            message: body.to_string(),
+            images: Vec::new(),
+            source: "user".to_string(),
+            agent_message_id: None,
+            custom_message: None,
+            batch: Vec::new(),
+        };
+        let mut events: Vec<EngineEvent> = Vec::new();
+        engine.run_prompt(0, request, &|| false, &mut |event| {
+            events.push(event);
+            true
+        });
+        assert!(
+            matches!(events.last(), Some(EngineEvent::Done(Err(error)))
+                if error.starts_with("the decision reply could not reach the parent")),
+            "the undelivered decision must settle with the delivery error: {events:?}"
+        );
+        let answer = events
+            .iter()
+            .rev()
+            .find_map(|event| match event {
+                EngineEvent::AssistantMessage(message) => Some(message),
+                _ => None,
+            })
+            .expect("a failed reply still persists the decision's answer row");
+        assert!(
+            answer["usage"]["input"]
+                .as_u64()
+                .is_some_and(|input| input > 0),
+            "the failed reply still persists the decision's usage: {answer}"
+        );
+        let typed: pa_types::ai::AssistantMessage = serde_json::from_value(answer.clone())
+            .expect("the persisted row must deserialize as a typed assistant message");
+        assert_eq!(typed.stop_reason, pa_types::ai::StopReason::Stop);
     }
 
     /// The engine-start resolution, pinned: the decision model resolves
