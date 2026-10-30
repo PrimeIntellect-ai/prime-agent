@@ -224,16 +224,22 @@ impl AgentSessionEngine {
         children.any_running().await
     }
 
-    /// Whether a live background `bash()` handle holds the boundary: its
-    /// completion notice is the wake-up a held continuation waits for. The
-    /// probe reads the kernel manager without the session mutex (the
-    /// consult can run inside a compaction turn, which holds it).
-    pub(crate) fn has_live_background_bash_handles(&self) -> bool {
+    /// The number of live background `bash()` handles: the live-work term
+    /// of the quiescence observation. The probe reads the kernel manager
+    /// without the session mutex (the consult can run inside a
+    /// compaction turn, which holds it). An unwired probe answers `0`.
+    pub(crate) fn background_bash_handle_count(&self) -> usize {
         self.background_bash_probe
             .lock()
             .expect("background bash probe lock")
             .clone()
-            .is_some_and(|probe| probe())
+            .map_or(0, |probe| probe())
+    }
+
+    /// Whether a live background `bash()` handle holds the boundary: its
+    /// completion notice is the wake-up a held continuation waits for.
+    pub(crate) fn has_live_background_bash_handles(&self) -> bool {
+        self.background_bash_handle_count() > 0
     }
 
     /// The settled passivation gates (the kernel release and the whole-worker idle
@@ -477,11 +483,11 @@ mod tests {
     };
     use crate::engine::EngineEvent;
 
-    /// Inject the engine's background-bash liveness probe (a `true`
-    /// probe = a live background `bash()` handle).
+    /// Inject the engine's background-bash liveness probe (a `1` probe
+    /// = a live background `bash()` handle).
     fn set_background_bash_probe(
         engine: &Arc<AgentSessionEngine>,
-        probe: std::sync::Arc<dyn Fn() -> bool + Send + Sync>,
+        probe: std::sync::Arc<dyn Fn() -> usize + Send + Sync>,
     ) {
         *engine
             .background_bash_probe
@@ -504,7 +510,7 @@ mod tests {
         // The first prompt builds the session; the probe then stands in
         // for a kernel running a background bash handle.
         admit(&engine, "warm".to_string(), &mut events);
-        set_background_bash_probe(&engine, Arc::new(|| true));
+        set_background_bash_probe(&engine, Arc::new(|| 1));
         admit(
             &engine,
             "/goal ship behind the bash handle".to_string(),
@@ -545,7 +551,7 @@ mod tests {
                 .block_on(async { handles.driver.lock().await.owes_continuation() }),
             "a live handle must keep the deferral owed"
         );
-        set_background_bash_probe(&engine, Arc::new(|| false));
+        set_background_bash_probe(&engine, Arc::new(|| 0));
         engine
             .runtime
             .block_on(async { engine.goal_children_settled().await });
