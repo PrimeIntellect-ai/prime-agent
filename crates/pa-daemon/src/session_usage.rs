@@ -29,6 +29,20 @@ pub struct SessionUsageSummary {
 
 impl Eq for SessionUsageSummary {}
 
+/// One model's share of a session's own usage, with the cache split the
+/// summary folds away (the deleted-child capture's per-model snapshot).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelUsageSummary {
+    pub provider: String,
+    pub id: String,
+    pub input: u64,
+    pub output: u64,
+    pub cache_read: u64,
+    pub cache_write: u64,
+    pub cost: f64,
+}
+
 /// `None` (absent wire field) when the session recorded no billable work at all.
 #[must_use]
 pub fn session_usage_summary_from(usage: &Usage) -> Option<SessionUsageSummary> {

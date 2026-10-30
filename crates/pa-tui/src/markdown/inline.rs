@@ -8,10 +8,10 @@ pub fn render_inline(text: &str, style: &MarkdownStyle) -> Line {
 }
 
 /// The same inline render, plus origin tracking: which spans of the returned line
-/// carry a link's `(url)` bracket (`url_slots`) and which are inline-code spans
-/// (`code_slots`), in ascending span order. Style-tapering callers (headings,
-/// quotes) preserve those spans by origin — a span that merely renders in the same
-/// style is not a slot.
+/// carry a link's `(url)` bracket (`url_slots`; the bracket only renders without
+/// OSC 8 support) and which are inline-code spans (`code_slots`), in ascending span
+/// order. Style-tapering callers (headings, quotes) preserve those spans by origin —
+/// a span that merely renders in the same style is not a slot.
 #[must_use]
 pub(crate) fn render_inline_tracked(
     text: &str,
@@ -154,11 +154,12 @@ fn render_inline_ctx(
                     (label_spans, label_slots, label_codes),
                     modifier | Modifier::UNDERLINED,
                 );
-                // The URL rides after the wrap (the OSC 8 region covers the label
-                // only), in the dim `link_url` slot unless the label already is
-                // the URL (mailto stripped for the comparison).
+                // Without OSC 8 support the URL rides after the wrap (the OSC 8
+                // region covers the label only), in the dim `link_url` slot unless
+                // the label already is the URL (mailto stripped for the comparison).
+                // A hyperlink-capable terminal shows the clickable label alone.
                 let comparison = url.strip_prefix("mailto:").unwrap_or(url.as_str());
-                if label != url && label != comparison {
+                if !crate::hyperlinks::hyperlinks_enabled() && label != url && label != comparison {
                     // The bracket renders the destination as visible text, so it
                     // gets the same control-byte hardening as the OSC 8 target: a
                     // smuggled escape byte can never re-enter the terminal live.
@@ -382,12 +383,15 @@ fn render_inline_ctx(
                 label.content.push_str(crate::hyperlinks::OSC8_CLOSE);
             }
             spans.push(label);
-            // The URL rides beside the label in the dim `link_url` slot unless the
-            // label already shows it (mailto-stripped comparison). The bare-url
-            // regex tail only excludes whitespace, so the bracket gets the same
-            // hardening as the OSC 8 target.
+            // Without OSC 8 support the URL rides beside the label in the dim
+            // `link_url` slot unless the label already shows it (mailto-stripped
+            // comparison). The bare-url regex tail only excludes whitespace, so the
+            // bracket gets the same hardening as the OSC 8 target.
             let comparison = token.href.strip_prefix("mailto:").unwrap_or(&token.href);
-            if token.text != token.href && token.text != comparison {
+            if !crate::hyperlinks::hyperlinks_enabled()
+                && token.text != token.href
+                && token.text != comparison
+            {
                 let shown = crate::hyperlinks::sanitize_control_bytes(token.href.clone());
                 url_slots.push(spans.len());
                 spans.push(Span::styled(format!(" ({shown})"), style.link_url));

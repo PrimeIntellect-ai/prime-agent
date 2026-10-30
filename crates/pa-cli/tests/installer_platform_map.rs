@@ -55,7 +55,7 @@ fn detect(os: &str, arch: &str) -> Output {
          \x20 esac\n\
          }}\n\
          {block}\n\
-         printf '%s|%s|%s|%s\\n' \"$TARGET\" \"$CHANNEL_PLATFORM\" \"$WINDOWS\" \"$BINARY_NAME\"\n"
+         printf '%s|%s|%s\\n' \"$CHANNEL_PLATFORM\" \"$WINDOWS\" \"$BINARY_NAME\"\n"
     );
     let dir = tempfile::tempdir().expect("scratch dir");
     let path = dir.path().join("harness.sh");
@@ -78,40 +78,24 @@ fn map_row(output: &Output) -> String {
 #[test]
 fn the_uname_map_resolves_the_published_platforms() {
     let cases = [
-        (
-            "Darwin",
-            "arm64",
-            "aarch64-apple-darwin|darwin-arm64|no|prime-agent",
-        ),
-        (
-            "Darwin",
-            "x86_64",
-            "x86_64-apple-darwin|darwin-x64|no|prime-agent",
-        ),
-        (
-            "Linux",
-            "x86_64",
-            "x86_64-unknown-linux-gnu|linux-x64|no|prime-agent",
-        ),
-        (
-            "Linux",
-            "aarch64",
-            "aarch64-unknown-linux-gnu|linux-arm64|no|prime-agent",
-        ),
+        ("Darwin", "arm64", "darwin-arm64|no|prime-agent"),
+        ("Darwin", "x86_64", "darwin-x64|no|prime-agent"),
+        ("Linux", "x86_64", "linux-x64|no|prime-agent"),
+        ("Linux", "aarch64", "linux-arm64|no|prime-agent"),
         (
             "MINGW64_NT-10.0-19045",
             "x86_64",
-            "x86_64-pc-windows-msvc|win32-x64|yes|prime-agent.exe",
+            "win32-x64|yes|prime-agent.exe",
         ),
         (
             "MSYS_NT-10.0-19045",
             "x86_64",
-            "x86_64-pc-windows-msvc|win32-x64|yes|prime-agent.exe",
+            "win32-x64|yes|prime-agent.exe",
         ),
         (
             "CYGWIN_NT-10.0-19045",
             "x86_64",
-            "x86_64-pc-windows-msvc|win32-x64|yes|prime-agent.exe",
+            "win32-x64|yes|prime-agent.exe",
         ),
     ];
     for (os, arch, expected) in cases {

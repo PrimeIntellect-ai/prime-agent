@@ -1,0 +1,1 @@
+- `/refine` and the automatic refine review now say why they failed: a reply cut off at the model's output limit reports the limit and the model, and a provider error reports the provider's message, instead of "Refiner did not return a JSON object".

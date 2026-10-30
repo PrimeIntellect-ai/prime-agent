@@ -114,6 +114,94 @@ pub struct TranscriptPageRows {
     pub more: bool,
 }
 
+/// One display-transcript slice ([`SessionFile::session_messages`]).
+#[derive(Debug, Clone)]
+pub struct SessionMessages {
+    /// Each row's index among the matching rows, entry id, and wire message, oldest first.
+    pub rows: Vec<(usize, String, Value)>,
+    /// How many rows match on the active branch.
+    pub total: usize,
+}
+
+impl SessionMessages {
+    /// The `get_session_messages` reply `{messages: [{index, id, message}], total}`,
+    /// snapshot image payloads left out.
+    #[must_use]
+    pub fn into_reply(self) -> Value {
+        let messages: Vec<Value> = self
+            .rows
+            .into_iter()
+            .map(|(index, id, mut message)| {
+                crate::snapshot_stream::elide_snapshot_image_payloads(std::slice::from_mut(
+                    &mut message,
+                ));
+                json!({ "index": index, "id": id, "message": message })
+            })
+            .collect();
+        json!({ "messages": messages, "total": self.total })
+    }
+}
+
+/// One `get_session_messages` request: the slice bounds and the compiled role globs.
+pub struct SessionMessagesQuery {
+    start: i64,
+    limit: usize,
+    roles: globset::GlobSet,
+}
+
+impl SessionMessagesQuery {
+    /// Compile the role globs.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when a role is not a valid glob.
+    pub fn new(start: i64, limit: u64, roles: &[String]) -> Result<Self, globset::Error> {
+        let mut globs = globset::GlobSetBuilder::new();
+        for role in roles {
+            globs.add(globset::Glob::new(role)?);
+        }
+        Ok(Self {
+            start,
+            limit: usize::try_from(limit).unwrap_or(usize::MAX),
+            roles: globs.build()?,
+        })
+    }
+
+    /// The slice from `store`; `None` when it reaches a windowed store's unloaded prefix.
+    #[must_use]
+    pub fn read(
+        &self,
+        store: &SessionFile,
+        running_calls: &std::collections::HashSet<String>,
+    ) -> Option<SessionMessages> {
+        store.session_messages(
+            self.start,
+            self.limit,
+            |role| self.roles.is_match(role),
+            running_calls,
+        )
+    }
+
+    /// The slice from a session file no worker holds, read-only: no lease and no
+    /// session-file write (the windowed open may refresh its window-cache sidecar).
+    /// The windowed open serves slices inside the window; one that reaches the
+    /// unloaded prefix reads the full file. Nothing runs, so nothing is in flight.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the file cannot be read.
+    pub fn read_file(&self, path: &Path) -> Result<SessionMessages> {
+        let idle = std::collections::HashSet::new();
+        if let Some(slice) = self.read(&SessionFile::open_windowed(path)?, &idle) {
+            return Ok(slice);
+        }
+        let slice = self.read(&SessionFile::open(path)?, &idle);
+        // The whole-file load was transient: release its freed heap.
+        pa_types::memory_release::trim_freed_heap();
+        slice.ok_or_else(|| anyhow!("Session history is unavailable"))
+    }
+}
+
 /// The windowed sequence's summary scalars (newest timestamp, message count),
 /// from [`SessionFile::scan_message_scalars`] without materializing the fold.
 #[derive(Debug, Default, Clone, Copy, PartialEq)]

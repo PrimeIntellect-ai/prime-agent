@@ -1463,12 +1463,13 @@ async fn a_resolved_model_bill_survives_its_callers_cancellation() {
         }
         fn append_model_usage(
             &self,
+            session_id: String,
             usage: model_usage::ModelUsage,
         ) -> rlm_usage::RlmChildUsageFuture<'_, std::io::Result<()>> {
             Box::pin(async move {
                 self.entered.notify_one();
                 self.release.notified().await;
-                let result = self.inner.append_model_usage(usage).await;
+                let result = self.inner.append_model_usage(session_id, usage).await;
                 self.completed.notify_one();
                 result
             })

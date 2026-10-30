@@ -90,8 +90,14 @@ pub trait RlmChildUsageStore: Send + Sync {
         origin: Option<ChildUsageOrigin>,
     ) -> RlmChildUsageFuture<'_, std::io::Result<ChildUsageAppendResult>>;
 
-    fn append_model_usage(&self, usage: ModelUsage)
-        -> RlmChildUsageFuture<'_, std::io::Result<()>>;
+    /// Append one [`ModelUsage`] row to the transcript of `session_id`, the
+    /// session the bill was made in. A store that has since moved to another
+    /// session refuses the row instead of charging the replacement.
+    fn append_model_usage(
+        &self,
+        session_id: String,
+        usage: ModelUsage,
+    ) -> RlmChildUsageFuture<'_, std::io::Result<()>>;
 
     /// Report every row this store appends from now on that bills a model
     /// call: the store is the one place each billed row lands exactly once.
@@ -159,8 +165,10 @@ impl RlmChildUsageStore for SessionUsageStore {
         })
     }
 
+    /// The wrapped manager stays on one session for the store's lifetime.
     fn append_model_usage(
         &self,
+        _session_id: String,
         usage: ModelUsage,
     ) -> RlmChildUsageFuture<'_, std::io::Result<()>> {
         let session = std::sync::Arc::clone(&self.0);
@@ -926,9 +934,10 @@ mod tests {
 
         fn append_model_usage(
             &self,
+            session_id: String,
             usage: ModelUsage,
         ) -> RlmChildUsageFuture<'_, std::io::Result<()>> {
-            self.store.append_model_usage(usage)
+            self.store.append_model_usage(session_id, usage)
         }
 
         fn observe_billed_rows(&self, sink: BilledRowSink) -> RlmChildUsageFuture<'_, ()> {
@@ -1019,9 +1028,10 @@ mod tests {
 
         fn append_model_usage(
             &self,
+            session_id: String,
             usage: ModelUsage,
         ) -> RlmChildUsageFuture<'_, std::io::Result<()>> {
-            self.store.append_model_usage(usage)
+            self.store.append_model_usage(session_id, usage)
         }
 
         fn observe_billed_rows(&self, sink: BilledRowSink) -> RlmChildUsageFuture<'_, ()> {

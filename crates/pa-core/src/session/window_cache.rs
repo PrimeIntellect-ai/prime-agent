@@ -54,7 +54,7 @@ impl Generation {
 /// snapshot's `WindowStats` already folds the child usage attributions and
 /// the older path's billed rows, and unread keys are ignored on load (no
 /// `deny_unknown_fields`).
-pub(super) const SNAPSHOT_VERSION: u32 = 8;
+pub(super) const SNAPSHOT_VERSION: u32 = 9;
 // `retained_whole_file` is `#[serde(default)]` false: older sidecars
 // deserialize it as false and skip the full-history fast paths until the
 // next walk rewrites the sidecar (a version bump would force a re-walk).

@@ -282,6 +282,7 @@ impl AgentSession {
             };
             let summaries = UncommittedSummaries {
                 store: std::sync::Arc::clone(&self.usage_store),
+                session_id: self.session_id().await,
                 bill: crate::session_engine::compact_session::SummaryBill::default(),
             };
             let summarized = crate::session_engine::compact_session::summarize_attempt(
@@ -426,7 +427,7 @@ impl AgentSession {
             options,
             source,
             model,
-            refine::default_refiner_call(api_key, self.session_id().await),
+            self.refiner_call(model, api_key).await?,
             global_harness_dir,
         )
         .await
@@ -508,9 +509,11 @@ impl AgentSession {
 /// the bill (the compaction row carries those calls); a conflict, failure, or
 /// abort records it as a `compaction_discarded` `model_usage` row before
 /// `compaction_attempts` moves on. What is left when this drops belongs to a
-/// compaction future the caller dropped mid-flight, recorded from here.
+/// compaction future the caller dropped mid-flight, recorded from here, in
+/// the session the attempt started in.
 struct UncommittedSummaries {
     store: std::sync::Arc<dyn super::rlm_usage::RlmChildUsageStore>,
+    session_id: String,
     bill: crate::session_engine::compact_session::SummaryBill,
 }
 
@@ -525,8 +528,9 @@ impl Drop for UncommittedSummaries {
             return;
         };
         let store = std::sync::Arc::clone(&self.store);
+        let session_id = std::mem::take(&mut self.session_id);
         runtime.spawn(async move {
-            if let Err(error) = store.append_model_usage(usage).await {
+            if let Err(error) = store.append_model_usage(session_id, usage).await {
                 eprintln!("pa-core: model usage row not persisted: {error}");
             }
         });
