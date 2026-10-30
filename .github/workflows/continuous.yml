@@ -64,6 +64,30 @@ jobs:
             echo "superseded=false" >> "${GITHUB_OUTPUT}"
           fi
 
+  # The prime-agent-catalog commit every build job bundles, resolved once
+  # per run so all targets ship the same catalog revision.
+  catalog-ref:
+    name: Resolve the bundled catalog commit
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      sha: ${{ steps.resolve.outputs.sha }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Resolve prime-agent-catalog main
+        id: resolve
+        env:
+          # Authenticated lookups avoid the shared-runner anonymous API limit.
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          sha="$(python3 scripts/release/bundle_catalog.py resolve-ref)"
+          echo "sha=${sha}" >> "${GITHUB_OUTPUT}"
+          echo "bundling prime-agent-catalog ${sha}"
+
   # The dependency audit gate (RELEASE_SECURITY pragmatic baseline): the
   # same advisories + licenses check as `make deny` (deny.toml), on every
   # tree the branch channel builds binaries from. Advisories that are
@@ -85,7 +109,7 @@ jobs:
   # The audit gates every build: an unaudited tree must not produce
   # downloadable branch-channel binaries.
   build-gnu:
-    needs: [deny, staleness]
+    needs: [deny, staleness, catalog-ref]
     if: needs.staleness.outputs.superseded != 'true'
     name: build-${{ matrix.target }}
     runs-on: ${{ matrix.runs-on }}
@@ -180,11 +204,16 @@ jobs:
             echo "::error::binary requires ${max_glibc}, above the GLIBC_2.35 (Ubuntu 22.04) release baseline"
             exit 1
           fi
-      - name: Generate bundled catalog assets (fixture, offline-safe)
+      # The live catalog from prime-agent-catalog (public; no token needed)
+      # at the commit the catalog-ref job resolved: a fresh install's first
+      # model list comes from this snapshot, identical across targets.
+      - name: Generate bundled catalog assets (live catalog)
+        env:
+          CATALOG_REF: ${{ needs.catalog-ref.outputs.sha }}
         run: |
           set -euo pipefail
-          python3 scripts/release/bundle_catalog.py generate --fixture \
-            --out "target/${{ matrix.target }}/catalog-assets"
+          python3 scripts/release/bundle_catalog.py generate --network \
+            --catalog-ref "${CATALOG_REF}" --out "target/${{ matrix.target }}/catalog-assets"
       - name: Assemble tarball + checksums + manifest (commit-stamped)
         run: |
           set -euo pipefail
@@ -221,7 +250,7 @@ jobs:
           if-no-files-found: error
 
   build-darwin:
-    needs: [deny, staleness]
+    needs: [deny, staleness, catalog-ref]
     if: needs.staleness.outputs.superseded != 'true'
     name: build-${{ matrix.target }}
     runs-on: ${{ matrix.runs-on }}
@@ -267,11 +296,16 @@ jobs:
       # no consumer (~26% of the build step, measured).
       - name: Build (release, locked)
         run: cargo build --release --locked --target ${{ matrix.target }} -j 4 -p pa-cli --bin prime-agent
-      - name: Generate bundled catalog assets (fixture, offline-safe)
+      # The live catalog from prime-agent-catalog (public; no token needed)
+      # at the commit the catalog-ref job resolved: a fresh install's first
+      # model list comes from this snapshot, identical across targets.
+      - name: Generate bundled catalog assets (live catalog)
+        env:
+          CATALOG_REF: ${{ needs.catalog-ref.outputs.sha }}
         run: |
           set -euo pipefail
-          python3 scripts/release/bundle_catalog.py generate --fixture \
-            --out "target/${{ matrix.target }}/catalog-assets"
+          python3 scripts/release/bundle_catalog.py generate --network \
+            --catalog-ref "${CATALOG_REF}" --out "target/${{ matrix.target }}/catalog-assets"
       - name: Assemble tarball + checksums + manifest (commit-stamped)
         run: |
           set -euo pipefail

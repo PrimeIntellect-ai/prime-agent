@@ -17,7 +17,9 @@ use crate::providers::mistral::convert::{
     build_chat_payload, derive_mistral_tool_call_id, MistralToolCallIdNormalizer,
 };
 use crate::providers::mistral::{build_request_headers, MistralOptions, API_MISTRAL_CONVERSATIONS};
-use crate::providers::transform_messages::transform_messages_with_normalizer;
+use crate::providers::transform_messages::{
+    repair_unnamed_tool_calls, transform_messages_with_normalizer,
+};
 use crate::types::{
     done_reason, error_reason, AssistantContent, AssistantMessage, Context, Model, StopReason,
     TextContent, ThinkingContent, ToolCall, Usage,
@@ -361,8 +363,12 @@ async fn run_stream(
 
     if let Err(error) = stream_result {
         state.settle_partial_tool_calls(output);
+        repair_unnamed_tool_calls(output);
         return Err(error);
     }
+    // After the `*_end` events and the error settle, which address blocks by their streamed
+    // content indices; the final message is what the session stores.
+    repair_unnamed_tool_calls(output);
 
     Ok(())
 }
@@ -370,7 +376,7 @@ async fn run_stream(
 /// Scratch state for the streaming loop (`consumeChatStream` in the TS).
 struct MistralStreamState {
     current_block: Option<CurrentBlock>,
-    tool_blocks_by_key: HashMap<String, usize>,
+    tool_blocks_by_index: HashMap<i64, usize>,
     tool_partial_args: HashMap<usize, StreamingJsonAccumulator>,
 }
 
@@ -383,7 +389,7 @@ impl MistralStreamState {
     fn new() -> Self {
         Self {
             current_block: None,
-            tool_blocks_by_key: HashMap::new(),
+            tool_blocks_by_index: HashMap::new(),
             tool_partial_args: HashMap::new(),
         }
     }
@@ -619,20 +625,20 @@ impl MistralStreamState {
             if self.current_block.is_some() {
                 self.finish_current_block(output, writer);
             }
-            let call_id = match tool_call.get("id").and_then(Value::as_str) {
-                Some(id) if !id.is_empty() && id != "null" => id.to_string(),
-                _ => derive_mistral_tool_call_id(
-                    &format!(
-                        "toolcall:{}",
-                        tool_call.get("index").and_then(Value::as_i64).unwrap_or(0)
-                    ),
-                    0,
-                ),
-            };
-            let tool_index = tool_call.get("index").and_then(Value::as_i64).unwrap_or(0);
-            let key = format!("{call_id}:{}", tool_index.max(0));
-
-            let existing_index = self.tool_blocks_by_key.get(&key).copied();
+            let tool_index = tool_call
+                .get("index")
+                .and_then(Value::as_i64)
+                .unwrap_or(0)
+                .max(0);
+            let call_id = tool_call
+                .get("id")
+                .and_then(Value::as_str)
+                .filter(|id| !id.is_empty() && *id != "null");
+            let name = tool_call
+                .pointer("/function/name")
+                .and_then(Value::as_str)
+                .filter(|name| !name.is_empty());
+            let existing_index = self.tool_blocks_by_index.get(&tool_index).copied();
             let block_index = match existing_index {
                 Some(index)
                     if matches!(
@@ -643,20 +649,18 @@ impl MistralStreamState {
                     index
                 }
                 _ => {
-                    let name = tool_call
-                        .pointer("/function/name")
-                        .and_then(Value::as_str)
-                        .unwrap_or_default()
-                        .to_string();
                     output.content.push(AssistantContent::ToolCall(ToolCall {
-                        id: call_id.clone(),
-                        name,
+                        id: call_id.map_or_else(
+                            || derive_mistral_tool_call_id(&format!("toolcall:{tool_index}"), 0),
+                            str::to_string,
+                        ),
+                        name: name.unwrap_or_default().to_string(),
                         arguments: Map::default(),
                         thought_signature: None,
                         rest: Map::default(),
                     }));
                     let index = output.content.len() - 1;
-                    self.tool_blocks_by_key.insert(key.clone(), index);
+                    self.tool_blocks_by_index.insert(tool_index, index);
                     writer.push(AssistantMessageEvent::ToolcallStart {
                         content_index: index as u64,
                         partial: output.clone(),
@@ -665,10 +669,19 @@ impl MistralStreamState {
                 }
             };
 
+            if let AssistantContent::ToolCall(block) = &mut output.content[block_index] {
+                if let Some(id) = call_id {
+                    block.id = id.to_string();
+                }
+                if let Some(name) = name {
+                    block.name = name.to_string();
+                }
+            }
+
             let args_delta = match tool_call.pointer("/function/arguments") {
                 Some(Value::String(text)) => text.clone(),
                 Some(other) => serde_json::to_string(other).unwrap_or_else(|_| "{}".to_string()),
-                None => "{}".to_string(),
+                None => String::new(),
             };
             let parsed = self
                 .tool_partial_args
@@ -691,7 +704,7 @@ impl MistralStreamState {
     /// Port of the trailing block finalization.
     fn finish(&mut self, output: &mut AssistantMessage, writer: &AssistantMessageEventWriter) {
         self.finish_current_block(output, writer);
-        let mut indexes: Vec<usize> = self.tool_blocks_by_key.values().copied().collect();
+        let mut indexes: Vec<usize> = self.tool_blocks_by_index.values().copied().collect();
         indexes.sort_unstable();
         indexes.dedup();
         for index in indexes {

@@ -9,6 +9,7 @@ use super::{
 use serde_json::Value;
 
 use crate::protocol::DaemonResponse;
+use crate::session_store::SessionMessagesQuery;
 
 impl Worker {
     pub(crate) async fn dispatch(&self, command_type: &str, payload: &Value) -> DaemonResponse {
@@ -16,7 +17,7 @@ impl Worker {
         // Cancellation is deliberately excluded: it must reach the live turn immediately.
         let history_page = command_type == "get_messages"
             && transcript_page(payload).is_some_and(|page| page.reads_history());
-        if (history_page
+        if history_page
             || matches!(
                 command_type,
                 "get_session_tree"
@@ -27,43 +28,11 @@ impl Worker {
                     | "fork"
                     | "export_html"
                     | "export_jsonl"
-            ))
-            && self
-                .core
-                .lock()
-                .unwrap()
-                .store
-                .as_ref()
-                .is_some_and(|store| store.window.is_some())
+            )
         {
-            let path = self
-                .core
-                .lock()
-                .unwrap()
-                .store
-                .as_ref()
-                .unwrap()
-                .path
-                .clone();
-            let load_path = path.clone();
-            let hydrated = tokio::task::spawn_blocking(move || SessionFile::open(&load_path))
-                .await
-                .map_err(anyhow::Error::from)
-                .and_then(|result| result);
-            match hydrated {
-                Ok(full) => {
-                    let mut core = self.core.lock().unwrap();
-                    if let Some(store) = core.store.as_mut().filter(|store| store.path == path) {
-                        store.install_full_history(full);
-                    }
-                }
-                Err(error) => {
-                    return response_failure(None, command_type, &error.to_string(), None);
-                }
+            if let Err(error) = self.hydrate_history().await {
+                return response_failure(None, command_type, &error.to_string(), None);
             }
-            // The hydrated full file was a transient whole-file copy on
-            // top of the installed history: release its freed heap.
-            pa_types::memory_release::trim_freed_heap();
         }
         match command_type {
             "create" => self.handle_create(payload).await,
@@ -99,6 +68,7 @@ impl Worker {
             }
             "get_state" => self.handle_get_state(),
             "get_messages" => self.handle_get_messages(payload),
+            "get_session_messages" => self.handle_get_session_messages(payload).await,
             "get_session_header" => self.handle_get_session_header(),
             "get_session_stats" => self.handle_get_session_stats(),
             "get_model_catalog" => self.handle_get_model_catalog(),
@@ -122,7 +92,7 @@ impl Worker {
             "worker_deliver_message" => self.handle_worker_deliver_message(payload),
             "update_snapshot" => self.handle_update_snapshot(),
             "kill" => self.handle_kill(payload).await,
-            "shutdown" => self.handle_shutdown().await,
+            "shutdown" => self.handle_shutdown(payload).await,
             "rename" => self.handle_rename("rename", payload),
             "set_session_name" => self.handle_rename("set_session_name", payload),
             "mark_anthropic_warning_shown" => self.handle_mark_anthropic_warning_shown(),
@@ -227,7 +197,10 @@ impl Worker {
 
     /// `navigate_tree` with the reload's announcement: announced before the
     /// response reaches the client, so surfaces never show the pre-navigation goal.
+    /// The whole navigation runs under the queued-work pause (TS
+    /// `_navigateTree`'s `acquireQueuedWorkPause` + `waitForIdle`).
     async fn handle_navigate_tree(&self, payload: &Value) -> DaemonResponse {
+        let _queued_work = self.hold_queued_work_pause("navigate");
         let response = self.tree_navigation.navigate_tree(payload).await;
         if response.success {
             if let Some(goal) = self.engine.goal_update_after_rebuild() {
@@ -354,6 +327,7 @@ impl Worker {
         {
             let mut core = self.core.lock().unwrap();
             core.abort_requested = true;
+            core.turn_cancelled = true;
             // The queue parks and a plain prompt is rejected until a
             // resume site fires.
             core.queued_input_suspended = true;
@@ -522,6 +496,81 @@ impl Worker {
         )
     }
 
+    /// `get_session_messages`: one slice of the session's display transcript, filtered by
+    /// role globs; a slice into a windowed store's unloaded prefix hydrates the store first.
+    async fn handle_get_session_messages(&self, payload: &Value) -> DaemonResponse {
+        const NAME: &str = "get_session_messages";
+        if let Err(response) = self.require_created(NAME) {
+            return response;
+        }
+        let roles: Vec<String> = payload
+            .get("roles")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .map(str::to_string)
+            .collect();
+        let query = match SessionMessagesQuery::new(
+            payload.get("start").and_then(Value::as_i64).unwrap_or(0),
+            payload.get("limit").and_then(Value::as_u64).unwrap_or(0),
+            &roles,
+        ) {
+            Ok(query) => query,
+            Err(error) => return response_failure(None, NAME, &error.to_string(), None),
+        };
+        let read = || {
+            let core = self.core.lock().unwrap();
+            let slice = core
+                .store
+                .as_ref()
+                .and_then(|store| query.read(store, &core.running_tool_calls));
+            slice
+        };
+        let mut slice = read();
+        if slice.is_none() {
+            if let Err(error) = self.hydrate_history().await {
+                return response_failure(None, NAME, &error.to_string(), None);
+            }
+            slice = read();
+        }
+        let Some(slice) = slice else {
+            return response_failure(None, NAME, "Session history is unavailable", None);
+        };
+        response_success(None, NAME, Some(slice.into_reply()))
+    }
+
+    /// Load a windowed store's full history in place; a full store stays as it is.
+    async fn hydrate_history(&self) -> Result<()> {
+        let Some(path) = self
+            .core
+            .lock()
+            .unwrap()
+            .store
+            .as_ref()
+            .filter(|store| store.window.is_some())
+            .map(|store| store.path.clone())
+        else {
+            return Ok(());
+        };
+        let load_path = path.clone();
+        let full = tokio::task::spawn_blocking(move || SessionFile::open(&load_path)).await??;
+        if let Some(store) = self
+            .core
+            .lock()
+            .unwrap()
+            .store
+            .as_mut()
+            .filter(|store| store.path == path)
+        {
+            store.install_full_history(full);
+        }
+        // The hydrated full file was a transient whole-file copy on
+        // top of the installed history: release its freed heap.
+        pa_types::memory_release::trim_freed_heap();
+        Ok(())
+    }
+
     fn handle_get_queue(&self) -> DaemonResponse {
         if let Err(response) = self.require_created("get_queue") {
             return response;
@@ -637,6 +686,7 @@ impl Worker {
         }
         let mut core = self.core.lock().unwrap();
         core.abort_requested = true;
+        core.turn_cancelled = true;
         // The same TS `requestAbort()` suspension as the bare `abort`.
         core.queued_input_suspended = true;
         drop(core);
@@ -726,6 +776,7 @@ impl Worker {
         {
             let mut core = self.core.lock().unwrap();
             core.abort_requested = true;
+            core.turn_cancelled = true;
             core.steering.clear();
             core.follow_up.clear();
         }
@@ -812,8 +863,8 @@ impl Worker {
         // commands run concurrently, so a second lock scope here could
         // interleave another command's writes between the name and its
         // notice, ordering the notice against a contradicted name history.
-        // The broadcast (the client frames) runs after the lock drops, in
-        // the `session_info_changed` order TS emits.
+        // The frames share that lock so a compaction cannot include the
+        // notice before its broadcast; `session_info_changed` still comes first.
         let renamed_notice = previous
             .as_deref()
             .filter(|previous| *previous != name)
@@ -836,19 +887,19 @@ impl Worker {
         if let Some(notice) = renamed_notice.as_ref() {
             persist_custom_row(&mut core, notice);
         }
+        // `session_info_changed` makes every attached client re-read the name.
+        super::emit_worker_event_locked(
+            &mut core,
+            &self.events,
+            serde_json::json!({ "type": "session_info_changed", "name": name }),
+        );
+        if let Some(notice) = renamed_notice.as_ref() {
+            super::broadcast_custom_row_locked(&mut core, &self.events, notice);
+        }
         drop(core);
-        // `session_info_changed` makes every attached client re-read
-        // the name.
-        self.emit_worker_event(serde_json::json!({
-            "type": "session_info_changed",
-            "name": name,
-        }));
         // The sender identity follows the live name.
         if let Ok(summary_value) = serde_json::to_value(&summary) {
             self.engine.set_session_summary(summary_value);
-        }
-        if let Some(notice) = renamed_notice.as_ref() {
-            self.broadcast_custom_row(notice);
         }
         response_success(
             None,

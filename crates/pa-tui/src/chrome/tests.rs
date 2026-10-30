@@ -392,6 +392,7 @@ fn the_focused_dock_expands_into_one_row_per_group() {
         heartbeats_active: vec!["5m lane canary".to_string()],
         heartbeats_paused: 1,
         shells: vec!["cargo test · 12.0s".to_string()],
+        shells_persistent: 0,
         factory_runs: vec!["nightly paused".to_string()],
         factory_counts: crate::factory_view::FactoryRunCounts {
             running: 0,
@@ -986,4 +987,31 @@ fn detail_status_label() {
         conversation_detail_status(true, true, "Ctrl+O"),
         "Expanded mode (Ctrl+O to collapse)"
     );
+}
+
+/// The collapsed shells segment breaks out its persistent shells like the heartbeats' paused
+/// cluster, and its click region covers the cluster; without any it keeps the plain count.
+#[test]
+fn the_collapsed_shells_segment_counts_persistent_shells() {
+    let render = |shells_persistent| {
+        let dock = ActivityDock {
+            shells: items(2),
+            shells_persistent,
+            ..ActivityDock::default()
+        };
+        let (frame, segments) = render_activity_dock_segments(&dock, &theme(), 120);
+        let text: String = frame[1].iter().map(|span| span.content.as_str()).collect();
+        let bash = segments
+            .iter()
+            .find(|segment| segment.group == ActivityGroup::Bash)
+            .expect("the shells segment")
+            .cols
+            .clone();
+        text.chars()
+            .skip(bash.start)
+            .take(bash.end - bash.start)
+            .collect::<String>()
+    };
+    assert_eq!(render(1), "▸ 2 shells · 1 persistent");
+    assert_eq!(render(0), "▸ 2 shells");
 }

@@ -31,10 +31,11 @@ use std::time::{Duration, Instant};
 
 use pa_core::kernel::shared::{HostRequestHandlers, HostRequestPayload};
 use pa_core::session_engine::agent_messaging::{
-    register_agent_message_host_handlers, AgentFamilyRelationship, AgentMessageController,
+    register_agent_message_host_handlers, register_agent_observe_host_handlers,
+    AgentFamilyRelationship, AgentMessageController,
 };
 use pa_core::session_engine::rlm_host::{RlmSpawnRequest, RlmSubagentHost};
-use pa_daemon::agent_messaging::LinkAgentMessageController;
+use pa_daemon::agent_messaging::{LinkAgentMessageController, LinkAgentObserveController};
 use pa_daemon::rlm_children::{ParentIdentity, SupervisorChildSessions};
 use pa_daemon::supervisor_link::SupervisorLink;
 use serde_json::{json, Value};
@@ -423,6 +424,7 @@ async fn parent_child_agent_message_round_trip_end_to_end() {
             model: None,
             thinking: None,
             spawned_by_request_id: None,
+            factory: None,
         })
         .await
         .expect("spawn the child");
@@ -752,6 +754,7 @@ async fn family_edges_never_cross_families_end_to_end() {
                 model: None,
                 thinking: None,
                 spawned_by_request_id: None,
+                factory: None,
             })
             .await
             .expect("spawn the child");
@@ -892,6 +895,7 @@ async fn family_edges_never_cross_families_end_to_end() {
             model: None,
             thinking: None,
             spawned_by_request_id: None,
+            factory: None,
         })
         .await
         .expect("spawn the grandchild");
@@ -1210,6 +1214,7 @@ async fn parent_renames_a_child_end_to_end() {
             model: None,
             thinking: None,
             spawned_by_request_id: None,
+            factory: None,
         })
         .await
         .expect("spawn the child");
@@ -1291,4 +1296,214 @@ async fn parent_renames_a_child_end_to_end() {
         .find(|edge| edge.child_id == handle.rlm_child_id)
         .expect("the child's ledger edge");
     assert_eq!(edge.name, "bench-runner", "the ledger rename landed");
+}
+
+/// `agent_observe.recent_messages` on a family member through the real handler.
+async fn recent_member(
+    handlers: &HostRequestHandlers,
+    target: &str,
+    limit: u64,
+) -> anyhow::Result<Value> {
+    let recent = handlers
+        .get("agent_observe.recent")
+        .expect("the recent-messages handler")
+        .clone();
+    recent(HostRequestPayload {
+        data: json!({ "target": target, "limit": limit }),
+    })
+    .await
+}
+
+/// The observe handlers a worker wires, for the session `own_summary` describes.
+fn observe_handlers(
+    link: &Arc<SupervisorLink>,
+    own_summary: Value,
+    children: Option<Arc<SupervisorChildSessions>>,
+) -> HostRequestHandlers {
+    let active_session_id = own_summary["activeSessionId"]
+        .as_str()
+        .expect("own active id")
+        .to_string();
+    let controller = Arc::new(LinkAgentObserveController::new(
+        Arc::clone(link),
+        active_session_id,
+        Arc::new(std::sync::Mutex::new(Some(own_summary))),
+        children,
+    ));
+    let mut handlers = HostRequestHandlers::default();
+    register_agent_observe_host_handlers(controller, &mut handlers);
+    handlers
+}
+
+/// The live residents' durable session ids (`list` without `all`).
+fn resident_session_ids(client: &mut Client, id: &str) -> Vec<String> {
+    client.send_command(id, &json!({ "type": "list" }));
+    let response = client.read_response(id);
+    assert_eq!(response["success"], true, "list failed: {response}");
+    response["data"]["sessions"]
+        .as_array()
+        .expect("sessions")
+        .iter()
+        .filter_map(|row| row["sessionId"].as_str().map(str::to_string))
+        .collect()
+}
+
+/// A parent's `agent_observe.recent_messages` of its child reads the same
+/// previews after the child is passivated: the supervisor reads the child's
+/// session file, and no worker comes back for it.
+#[tokio::test]
+async fn passivated_child_recent_messages_reads_its_file_end_to_end() {
+    let Some(kernel_python) = kernel_python() else {
+        return;
+    };
+    let dir = tempfile::TempDir::new().expect("temp dir");
+    let socket = dir.path().join("daemon.sock");
+    let agent_dir = dir.path().join("agent");
+    let sessions_dir = agent_dir.join("sessions");
+    std::fs::create_dir_all(&sessions_dir).expect("sessions dir");
+    // Idle passivation is on, so the test can passivate kid-a.
+    std::fs::write(
+        agent_dir.join("settings.json"),
+        json!({ "idleEvictionMinutes": 1 }).to_string(),
+    )
+    .expect("write settings");
+    let root_script = write_faux_script(dir.path(), "root", &json!([{ "text": "root turn done" }]));
+    let kid_script = write_faux_script(dir.path(), "kid", &json!([{ "text": "kid spawned" }]));
+
+    let _daemon = spawn_supervisor(&socket, &agent_dir, &kernel_python);
+    wait_socket_ready(&socket);
+    let (mut client, hello) = Client::connect(&socket);
+    assert_eq!(hello["type"], "daemon_hello");
+    let link = Arc::new(SupervisorLink::new(socket.clone()));
+
+    client.send_command(
+        "create-parent",
+        &json!({
+            "type": "create",
+            "name": "parent",
+            "config": {
+                "cwd": dir.path().to_string_lossy(),
+                "sessionDir": sessions_dir.to_string_lossy(),
+                "script": root_script.to_string_lossy(),
+            },
+        }),
+    );
+    let created = client.read_response("create-parent");
+    assert_eq!(created["success"], true, "create parent failed: {created}");
+    let data = &created["data"];
+    let parent_summary = json!({
+        "activeSessionId": data["activeSessionId"].as_str().or_else(|| data["id"].as_str()),
+        "sessionId": data["sessionId"],
+        "sessionFile": data["sessionFile"],
+        "sessionName": "parent",
+        "runtimeKind": "top-level",
+    });
+    let children = Arc::new(SupervisorChildSessions::new(
+        Arc::clone(&link),
+        agent_dir.clone(),
+        parent_summary["activeSessionId"]
+            .as_str()
+            .expect("active id")
+            .to_string(),
+        std::sync::Arc::new(pa_daemon::model_allowlist::ModelRefusalTelemetry::new(
+            agent_dir.clone(),
+            /*telemetry_disabled*/ true,
+        )),
+        String::new(),
+    ));
+    children.set_identity(ParentIdentity {
+        rlm_depth: 0,
+        rlm_max_depth: 2,
+        model: Some("faux/faux-1".to_string()),
+        cwd: Some(dir.path().to_string_lossy().to_string()),
+        session_id: parent_summary["sessionId"].as_str().map(str::to_string),
+        session_file: parent_summary["sessionFile"].as_str().map(str::to_string),
+        thinking: None,
+        child_script: Some(kid_script.to_string_lossy().to_string()),
+    });
+    children
+        .spawn(RlmSpawnRequest {
+            prompt: "kid-a work".to_string(),
+            name: Some("kid-a".to_string()),
+            model: None,
+            thinking: None,
+            spawned_by_request_id: None,
+        })
+        .await
+        .expect("spawn kid-a");
+    children.notify_turn_done();
+    let deadline = Instant::now() + Duration::from_secs(60);
+    let kid_a = loop {
+        let rows = children.list_subagents().await.expect("child roster");
+        if let Some(row) = rows.into_iter().find(|row| row.status == "completed") {
+            break row;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "kid-a never settled; daemon log tail: {}",
+            daemon_log_tail(&dir.path().join("receipts"))
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    };
+    let kid_a_active = kid_a.active_session_id.clone().expect("kid-a active id");
+    let kid_a_session = kid_a.session_id.clone().expect("kid-a session id");
+    let parent_reads = observe_handlers(&link, parent_summary, Some(children));
+
+    // The resident kid-a answers through its worker: everything, then the newest row.
+    let all = recent_member(&parent_reads, "kid-a", 50)
+        .await
+        .expect("kid-a recent messages");
+    let previews = all["messages"].as_array().expect("previews");
+    assert!(
+        previews[0]["text"]
+            .as_str()
+            .is_some_and(|text| text.contains("kid-a work")),
+        "{all}"
+    );
+    let indexes: Vec<u64> = previews
+        .iter()
+        .map(|preview| preview["index"].as_u64().expect("index"))
+        .collect();
+    assert_eq!(
+        indexes,
+        (0..previews.len() as u64).collect::<Vec<_>>(),
+        "{all}"
+    );
+    assert_eq!(all["truncated"], false, "{all}");
+    let newest = recent_member(&parent_reads, "kid-a", 1)
+        .await
+        .expect("kid-a newest message");
+    assert_eq!(
+        newest["messages"],
+        json!([previews.last().expect("a preview")]),
+        "{newest}"
+    );
+    assert_eq!(newest["truncated"], true, "{newest}");
+
+    // A passivated kid-a reads the same from its file, and no worker comes back for it.
+    client.send_command(
+        "passivate-kid-a",
+        &json!({
+            "type": "worker_idle_passivation",
+            "workerToken": parent_worker_token(&agent_dir, &kid_a_active),
+            "idleMinutes": 1,
+        }),
+    );
+    let passivated = client.read_response("passivate-kid-a");
+    assert_eq!(passivated["success"], true, "passivation: {passivated}");
+    assert!(
+        !resident_session_ids(&mut client, "list-before").contains(&kid_a_session),
+        "the passivation stopped kid-a's worker"
+    );
+    for (limit, resident) in [(50, &all), (1, &newest)] {
+        let saved = recent_member(&parent_reads, "kid-a", limit)
+            .await
+            .expect("recent messages of the passivated kid-a");
+        assert_eq!(saved["messages"], resident["messages"], "{saved}");
+        assert_eq!(saved["truncated"], resident["truncated"], "{saved}");
+    }
+    assert!(
+        !resident_session_ids(&mut client, "list-after").contains(&kid_a_session),
+        "the read never revives kid-a"
+    );
 }

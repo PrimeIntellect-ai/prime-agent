@@ -3,7 +3,7 @@
 //! Deliberate divergence from TS: the Rust port never wakes at all — a schedule fires
 //! only while its session is live; due jobs on not-running sessions report dormant.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -24,33 +24,9 @@ struct TreeMember {
     session_file: PathBuf,
 }
 
-/// The ledger's parent→child map: non-deleted edges keyed by canonical parent path.
-fn children_by_parent(
-    agent_dir: &Path,
-    sessions_dir: &Path,
-) -> HashMap<String, Vec<(String, PathBuf)>> {
-    let ledger = RlmSpawnLedger::new(agent_dir, sessions_dir, |_| {});
-    let mut map: HashMap<String, Vec<(String, PathBuf)>> = HashMap::new();
-    let Ok(edges) = ledger.edges(false) else {
-        return map;
-    };
-    for edge in edges {
-        let child = PathBuf::from(&edge.child);
-        let parent = canonical_session_path(Path::new(&edge.parent));
-        map.entry(parent.to_string_lossy().to_string())
-            .or_default()
-            .push((edge.child_id.clone(), child));
-    }
-    map
-}
-
 /// The stopped root's session tree: the root file plus every descendant the ledger
 /// reaches from it (the ledger is the only topology store).
-fn session_tree(
-    agent_dir: &Path,
-    sessions_dir: &Path,
-    root_session_file: &Path,
-) -> Vec<TreeMember> {
+fn session_tree(ledger: &RlmSpawnLedger, root_session_file: &Path) -> Vec<TreeMember> {
     let mut members = Vec::new();
     let root = canonical_session_path(root_session_file);
     let root_id = read_session_info(&root).map_or_else(
@@ -66,28 +42,20 @@ fn session_tree(
     }
     members.push(TreeMember {
         session_id: root_id,
-        session_file: root.clone(),
+        session_file: root,
     });
-    let by_parent = children_by_parent(agent_dir, sessions_dir);
-    let mut queue = vec![root.to_string_lossy().to_string()];
-    let mut visited: HashSet<String> = queue.iter().cloned().collect();
-    while let Some(parent) = queue.pop() {
-        for (_child_id, child_file) in by_parent.get(&parent).cloned().unwrap_or_default() {
-            let child = canonical_session_path(&child_file);
-            let child_key = child.to_string_lossy().to_string();
-            if visited.contains(&child_key) {
-                continue;
-            }
-            visited.insert(child_key.clone());
-            let Some(info) = read_session_info(&child) else {
-                continue;
-            };
-            members.push(TreeMember {
-                session_id: info.id,
-                session_file: child.clone(),
-            });
-            queue.push(child_key);
-        }
+    let Ok(family) = ledger.family_edges([root_session_file.to_path_buf()]) else {
+        return members;
+    };
+    for edge in family {
+        let child = PathBuf::from(edge.child);
+        let Some(info) = read_session_info(&child) else {
+            continue;
+        };
+        members.push(TreeMember {
+            session_id: info.id,
+            session_file: child,
+        });
     }
     members
 }
@@ -96,12 +64,17 @@ fn session_tree(
 /// A live worker covering any tree member owns its stores again, so the walk aborts on
 /// a coverage hit (`live_files`, collected before the walk).
 pub(crate) fn cancel_scheduled_jobs_for_tree(
-    agent_dir: &Path,
-    sessions_dir: &Path,
+    ledger: &RlmSpawnLedger,
     root_session_file: &Path,
     live_files: &HashSet<String>,
 ) -> Result<usize> {
-    let members = session_tree(agent_dir, sessions_dir, root_session_file);
+    cancel_scheduled_jobs_for_members(&session_tree(ledger, root_session_file), live_files)
+}
+
+fn cancel_scheduled_jobs_for_members(
+    members: &[TreeMember],
+    live_files: &HashSet<String>,
+) -> Result<usize> {
     if members.iter().any(|member| {
         live_files.contains(
             &canonical_session_path(&member.session_file)
@@ -113,7 +86,7 @@ pub(crate) fn cancel_scheduled_jobs_for_tree(
     }
     let store = AgentCronJobStore::for_session_artifacts();
     let mut registered = false;
-    for member in &members {
+    for member in members {
         let Some(dir) = session_artifact_dir(&member.session_file, &member.session_id) else {
             continue;
         };
@@ -131,7 +104,7 @@ pub(crate) fn cancel_scheduled_jobs_for_tree(
     }
     let now = crate::util::now_ms();
     let mut cancelled = 0;
-    for member in &members {
+    for member in members {
         cancelled += store
             .cancel_jobs_for_session(
                 &CancelJobsFilter {
@@ -169,28 +142,25 @@ pub(crate) fn ensure_archived_state(root_session_file: &Path) -> Result<()> {
 /// and the root file carries the `archived` state. `live_files` is collected
 /// after the stopped worker left the registry.
 pub(crate) fn finalize_archived_stop(
-    agent_dir: &Path,
-    sessions_dir: &Path,
+    ledger: &RlmSpawnLedger,
     root_session_file: &Path,
     live_files: &HashSet<String>,
 ) -> (usize, Option<anyhow::Error>) {
-    let cancelled =
-        cancel_scheduled_jobs_for_tree(agent_dir, sessions_dir, root_session_file, live_files);
+    let members = session_tree(ledger, root_session_file);
+    let cancelled = cancel_scheduled_jobs_for_members(&members, live_files);
     let (cancelled, cancel_error) = match cancelled {
         Ok(count) => (count, None),
         Err(error) => (0, Some(error)),
     };
     // A live worker covering the tree owns its stores again — including the session
     // file's state — so the belt skips covered trees like the cancel does.
-    let covered = session_tree(agent_dir, sessions_dir, root_session_file)
-        .iter()
-        .any(|member| {
-            live_files.contains(
-                &canonical_session_path(&member.session_file)
-                    .to_string_lossy()
-                    .to_string(),
-            )
-        });
+    let covered = members.iter().any(|member| {
+        live_files.contains(
+            &canonical_session_path(&member.session_file)
+                .to_string_lossy()
+                .to_string(),
+        )
+    });
     if covered {
         return (cancelled, cancel_error);
     }
@@ -230,6 +200,9 @@ pub(crate) fn append_deleted_child_usage_amendments(
     }
     let summary = crate::session_usage::read_session_usage(&path)
         .and_then(|totals| crate::session_usage::session_usage_summary_from(&totals.own));
+    let by_model = summary
+        .as_ref()
+        .and_then(|summary| crate::state_getters::own_usage_by_model_of(&path, summary));
     let mut captured = 0usize;
     for edge in &tombstoned {
         let Some(reason) = edge.deleted else {
@@ -241,7 +214,13 @@ pub(crate) fn append_deleted_child_usage_amendments(
             continue;
         };
         if ledger
-            .append_delete_with_usage(&edge.child_id, &edge.child, reason, summary)
+            .append_delete_with_usage(
+                &edge.child_id,
+                &edge.child,
+                reason,
+                summary,
+                by_model.as_deref(),
+            )
             .is_err()
         {
             continue;
@@ -347,22 +326,18 @@ impl Supervisor {
         if root_session_file.is_empty() {
             return true;
         }
-        let sessions_dir = match crate::paths::sessions_dir(&self.options.agent_dir) {
-            Ok(dir) => dir,
+        let ledger = match self.rlm_spawn_ledger_for(None).await {
+            Ok(ledger) => ledger,
             Err(error) => {
                 self.log_line(&format!(
-                    "stop finalize: could not resolve the sessions dir: {error:#}"
+                    "stop finalize: could not resolve the spawn ledger: {error:#}"
                 ));
                 return false;
             }
         };
         let live = self.live_session_files().await;
-        let (cancelled, archive_error) = finalize_archived_stop(
-            &self.options.agent_dir,
-            &sessions_dir,
-            Path::new(&root_session_file),
-            &live,
-        );
+        let (cancelled, archive_error) =
+            finalize_archived_stop(&ledger, Path::new(&root_session_file), &live);
         if cancelled > 0 {
             self.log_line(&format!(
                 "stop finalize: cancelled {cancelled} scheduled job(s) of {root_session_file}"
@@ -463,7 +438,7 @@ impl Supervisor {
         if root_session_file.is_empty() {
             return;
         }
-        let Ok(sessions_dir) = crate::paths::sessions_dir(&self.options.agent_dir) else {
+        let Ok(ledger) = self.rlm_spawn_ledger_for(None).await else {
             return;
         };
         let mut live = self.live_session_files().await;
@@ -472,12 +447,8 @@ impl Supervisor {
                 .to_string_lossy()
                 .to_string(),
         );
-        let cancelled = cancel_scheduled_jobs_for_tree(
-            &self.options.agent_dir,
-            &sessions_dir,
-            Path::new(&root_session_file),
-            &live,
-        );
+        let cancelled =
+            cancel_scheduled_jobs_for_tree(&ledger, Path::new(&root_session_file), &live);
         let cancelled = match cancelled {
             Ok(count) => count,
             Err(error) => {
@@ -568,7 +539,14 @@ mod tests {
 
         let (root_id, root_file) = write_session(&sessions_dir, Some("orchestrator"));
         let (child_id, child_file) = write_session(&sessions_dir, Some("lane"));
-        // The ledger edge parent -> child.
+        let (moved_id, moved_at) = write_session(&sessions_dir, Some("moved"));
+        let moved_dir = agent_dir
+            .join("session-artifacts")
+            .join(&root_id)
+            .join("child-2");
+        std::fs::create_dir_all(&moved_dir).unwrap();
+        let moved_file = moved_dir.join(moved_at.file_name().unwrap());
+        std::fs::rename(&moved_at, &moved_file).unwrap();
         let ledger = RlmSpawnLedger::new(&agent_dir, &sessions_dir, |_| {});
         ledger
             .append_spawn(&crate::rlm_ledger::RlmSpawnInput {
@@ -577,17 +555,31 @@ mod tests {
                 child: child_file.to_string_lossy().to_string(),
                 depth: 1,
                 name: "lane".to_string(),
+                factory: None,
+            })
+            .unwrap();
+        ledger
+            .append_spawn(&crate::rlm_ledger::RlmSpawnInput {
+                child_id: "child-2".to_string(),
+                parent: root_file.to_string_lossy().to_string(),
+                child: moved_at.to_string_lossy().to_string(),
+                depth: 1,
+                name: "moved".to_string(),
+                factory: None,
             })
             .unwrap();
 
         write_job(&root_file, &root_id, "job-root");
         write_job(&child_file, &child_id, "job-child");
+        write_job(&moved_file, &moved_id, "job-moved");
 
         let live: HashSet<String> = HashSet::new();
-        let (cancelled, archive_error) =
-            finalize_archived_stop(&agent_dir, &sessions_dir, &root_file, &live);
+        let (cancelled, archive_error) = finalize_archived_stop(&ledger, &root_file, &live);
         assert!(archive_error.is_none());
-        assert_eq!(cancelled, 2, "the root and child jobs both cancel");
+        assert_eq!(
+            cancelled, 3,
+            "the root, the child, and the relocated child's jobs all cancel"
+        );
         assert_eq!(
             read_job(&root_file, &root_id).status,
             pa_core::cron::JobStatus::Cancelled
@@ -611,13 +603,14 @@ mod tests {
 
         let (root_id, root_file) = write_session(&sessions_dir, None);
         write_job(&root_file, &root_id, "job-root");
+        let ledger = RlmSpawnLedger::new(&agent_dir, &sessions_dir, |_| {});
 
         let live: HashSet<String> = [canonical_session_path(&root_file)
             .to_string_lossy()
             .to_string()]
         .into_iter()
         .collect();
-        let (cancelled, _) = finalize_archived_stop(&agent_dir, &sessions_dir, &root_file, &live);
+        let (cancelled, _) = finalize_archived_stop(&ledger, &root_file, &live);
         assert_eq!(cancelled, 0, "a covered tree keeps its schedules");
         assert_eq!(
             read_job(&root_file, &root_id).status,
@@ -641,6 +634,7 @@ mod tests {
                 child: child_file.to_string_lossy().to_string(),
                 depth: 1,
                 name: "lane".to_string(),
+                factory: None,
             })
             .unwrap();
         // The tombstone lands before the kill (the revival window); the
@@ -728,6 +722,7 @@ mod tests {
                 child: child_file.to_string_lossy().to_string(),
                 depth: 1,
                 name: "lane".to_string(),
+                factory: None,
             })
             .unwrap();
         ledger
@@ -803,6 +798,7 @@ mod tests {
                 child: child_file.to_string_lossy().to_string(),
                 depth: 1,
                 name: "lane".to_string(),
+                factory: None,
             })
             .unwrap();
         // Still live: no capture (kill-failure retryability — the child
@@ -835,6 +831,7 @@ mod tests {
                     child: child_file.to_string_lossy().to_string(),
                     depth: 1,
                     name: "lane".to_string(),
+                    factory: None,
                 })
                 .unwrap();
             ledger

@@ -525,7 +525,7 @@ class ReplTest(unittest.TestCase):
                     "import rlm",
                     "rlm._set_completion_notices_wired(True)",
                     "from rlm import bash",
-                    f"r = await bash('sleep 1.5 && touch {marker}', yield_after=3)",
+                    f"r = await bash('sleep 1.5 && touch {marker}')",
                 ]
             )
             self.repl.send({"type": "execute", "id": "ibash-bounded", "code": code})
@@ -819,6 +819,46 @@ class ReplTest(unittest.TestCase):
             events = fresh.execute("wakeup-probe", probe)
             self.assertEqual(one(events, "done")["status"], "ok")
             self.assertEqual(one(events, "result")["text"], "'woken'")
+
+    def test_restore_never_reopens_pickled_file_handles(self):
+        # dill saves a file object as (name, mode) and its revival reopens the
+        # path with that mode: "w" truncated the user's file on every restore
+        # even when the handle was closed (discussion #3085).
+        sys.path.insert(0, SRC)
+        self.addCleanup(sys.path.remove, SRC)
+        from rlm import repl as repl_module
+
+        with tempfile.TemporaryDirectory() as tmp:
+            target = os.path.join(tmp, "notes.txt")
+            handle = open(target, "w")
+            handle.close()
+            with open(target, "w") as fh:
+                fh.write("precious")
+            # A handle nested in a container takes the same reconstructor.
+            ns = {"handle": handle, "nested": {"inner": [handle]}}
+            path = os.path.join(tmp, "state", "kernel-state.dill")
+            manifest_path = os.path.join(tmp, "state", "kernel-state.json")
+            result = repl_module._snapshot_state(
+                ns,
+                path,
+                manifest_path,
+                repl_module.DEFAULT_SNAPSHOT_MAX_BYTES,
+                repl_module.DEFAULT_SNAPSHOT_MAX_VARIABLE_BYTES,
+                False,
+            )
+            self.assertEqual(result["saved"], ["handle", "nested"])
+
+            restored_ns = {}
+            result = repl_module._restore_state(restored_ns, path)
+            self.assertEqual((result["restored"], result["failed"]), (["handle", "nested"], []))
+            with open(target) as fh:
+                self.assertEqual(fh.read(), "precious")
+            restored = restored_ns["handle"]
+            self.assertEqual((restored.name, restored.mode, restored.closed), (target, "w", True))
+            self.assertIsInstance(restored_ns["nested"]["inner"][0], repl_module._RestoredFileStub)
+            for call in (lambda: restored.write("x"), restored.read, restored.readline):
+                with self.assertRaisesRegex(ValueError, "closed file"):
+                    call()
 
     def test_stdin_eof_flushes_final_snapshot(self):
         # Host death (EOF, no shutdown request) must persist the namespace
@@ -1185,7 +1225,7 @@ class ReplTest(unittest.TestCase):
                 "import rlm",
                 "rlm._set_completion_notices_wired(True)",
                 "from rlm import bash",
-                "handle = bash('sleep 0.6; printf degraded', yield_after=0.3)",
+                "handle = bash('sleep 1.5; printf degraded')",
                 "await handle",
                 "handle.pid",
             ]
@@ -1198,14 +1238,14 @@ class ReplTest(unittest.TestCase):
             {
                 "type": "bash.completed",
                 "pid": pid,
-                "command": "sleep 0.6; printf degraded",
+                "command": "sleep 1.5; printf degraded",
                 "exitCode": 0,
             },
         )
         reply_ok(self.repl, request)
 
     def test_degraded_await_of_a_persistent_shell_keeps_it_running_to_its_notice(self):
-        # yield_after and persistent= compose: the persistent handle's await
+        # The yield window and persistent= compose: the persistent handle's await
         # degrades like any handle's, and the shell (never owned by an await)
         # runs on to its [bash-done] notice.
         temp = tempfile.TemporaryDirectory()
@@ -1220,7 +1260,7 @@ class ReplTest(unittest.TestCase):
                 "import rlm",
                 "rlm._set_completion_notices_wired(True)",
                 "from rlm import bash",
-                "handle = bash('sleep 0.6; printf persisted', persistent=True, yield_after=0.3)",
+                "handle = bash('sleep 1.5; printf persisted', persistent=True)",
                 "snapshot = await handle",
                 "(snapshot.running, snapshot.handle is handle, handle.pid)",
             ]
@@ -1234,7 +1274,7 @@ class ReplTest(unittest.TestCase):
             {
                 "type": "bash.completed",
                 "pid": int(pid),
-                "command": "sleep 0.6; printf persisted",
+                "command": "sleep 1.5; printf persisted",
                 "exitCode": 0,
             },
         )

@@ -482,11 +482,11 @@ impl Worker {
         }
         // Restore the persisted queue snapshot (crash/respawn recovery) from
         // the worker recovery journal.
-        let (steering, follow_up) = {
+        let (steering, follow_up, restored_suspended) = {
             let guard = self.recovery.lock().unwrap();
             match guard.as_ref() {
                 Some(journal) => restore_queue_snapshot(journal, &self.config.active_session_id),
-                None => (VecDeque::new(), VecDeque::new()),
+                None => (VecDeque::new(), VecDeque::new(), false),
             }
         };
         // The session's settings-seeded switches: a restarted session re-seeds
@@ -527,6 +527,9 @@ impl Worker {
             core.cwd = cwd;
             core.steering = steering;
             core.follow_up = follow_up;
+            // The restored lanes carry their suspension: a user-aborted queue
+            // revives still parked, never auto-running its prompts.
+            core.queued_input_suspended = restored_suspended;
             // A resumed session's tool counter re-seeds from its file: a
             // revived worker keeps the count its roster rows carried.
             core.tool_use_count = store.tool_call_count();
@@ -551,6 +554,8 @@ impl Worker {
             }
             core.created = true;
             core.abort_requested = false;
+            core.turn_cancelled = false;
+            core.turn_completed = false;
             // A fresh session starts live: the previous close's
             // `session_closed` marker clears with the new session.
             if let Some(agent_engine) = &self.agent_engine {
@@ -561,7 +566,10 @@ impl Worker {
             core.active_service_tier = clamped_tier;
             core.steering_mode.clone_from(&steering_mode);
             core.follow_up_mode.clone_from(&follow_up_mode);
-            core.forced_all_steering = false;
+            // The restored rows carry their forced-batch flag: the batch
+            // gate rides the lane, so a restored forced batch keeps its
+            // one-turn semantics.
+            core.forced_all_steering = core.steering.iter().any(|item| item.forced_batch);
             core.scoped_models.clone_from(&scoped_entries);
             core.retry_abort_requested = false;
             // The session's depth falls back to the opened file's header: a resumed

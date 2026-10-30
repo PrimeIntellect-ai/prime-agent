@@ -13,7 +13,10 @@ use anyhow::{anyhow, Context, Result};
 use crate::config;
 use crate::mode::RunOptions;
 use pa_core::session::discovery::{resolve_session_path, ResolvedSession};
-use pa_tui::interactive::{InteractiveOptions, ModelSelection, SessionSelection, UiMode};
+use pa_tui::interactive::{
+    InteractiveOptions, InteractiveOutcome, ModelSelection, SelectionOrigin, SessionSelection,
+    UiMode,
+};
 
 mod daemon;
 
@@ -151,7 +154,7 @@ pub fn run_interactive_mode(options: &RunOptions) -> Result<i32> {
                 let (anchor, notice) = continue_view.map_or((None, None), |view| {
                     (Some(view.session_id), Some(view.notice))
                 });
-                run_agents_view_flow(tui_options, anchor, notice).await
+                run_agents_view_flow(tui_options, anchor, notice, None).await
             } else {
                 let outcome =
                     pa_tui::interactive::run_interactive(tui_options.clone(), UiMode::Terminal)
@@ -159,18 +162,15 @@ pub fn run_interactive_mode(options: &RunOptions) -> Result<i32> {
                 // TS `main.ts`: a direct session run closes into the agents view
                 // when the exit came through agents-back or `/resume`
                 // (`launchAgentsView` anchored on the session just left); every
-                // other exit (ctrl+c/ctrl+d, `/quit`) ends the process.
-                if outcome.return_to_agents_view {
-                    // A startup attach that fell back to the view has no session
-                    // identity to anchor on; its notice seeds the view's status
-                    // line instead.
-                    let anchor =
-                        (!outcome.session_id.is_empty()).then(|| outcome.session_id.clone());
-                    run_agents_view_flow(tui_options, anchor, outcome.agents_view_notice).await
-                } else {
-                    print_resume_hint(outcome.resume_hint.as_deref());
-                    Ok(())
-                }
+                // other exit (ctrl+c/ctrl+d, `/quit`) ends the process. The flow
+                // makes that call, exactly as for the sessions the view opens. The
+                // run consumed the CLI message: no later run of the flow replays it.
+                let base = InteractiveOptions {
+                    initial_message: None,
+                    ..tui_options
+                };
+                let entry = (base.clone(), outcome);
+                run_agents_view_flow(base, None, None, Some(entry)).await
             }
         };
         let result = run.await;
@@ -234,10 +234,15 @@ fn print_resume_hint(hint: Option<&str>) {
 
 /// The agents-view loop: open the view, run the session it opens, and return
 /// to the view on agents-back or bare `/resume`; every other exit ends the app.
+/// `entry` is a session run that already ended (the direct launch): the flow
+/// continues its handoff before the first view run. A session a run requests
+/// (`/resume <selector>`, the factory page's state open) runs next, and leaving
+/// it reopens the requesting session's origin page when the request carried one.
 async fn run_agents_view_flow(
-    base: InteractiveOptions,
+    mut base: InteractiveOptions,
     anchor: Option<String>,
     notice: Option<String>,
+    entry: Option<(InteractiveOptions, InteractiveOutcome)>,
 ) -> Result<()> {
     let mut anchor = anchor;
     // Every view run reuses the roster connection (a chat run hands it
@@ -254,7 +259,58 @@ async fn run_agents_view_flow(
     let mut selected_row_identity: Option<String> = None;
     let mut selected_key: Option<pa_tui::agents_view::AgentsViewSelectionKey> = None;
     let mut status_message: Option<String> = notice;
+    let mut handoff = entry;
     loop {
+        // The session runs chained by handoffs, each with the options it ran
+        // with; the origin is the requesting session (its options re-targeted
+        // at its live runtime) and the page leaving the requested session
+        // reopens.
+        let mut origin: Option<(InteractiveOptions, SelectionOrigin)> = None;
+        while let Some((ran_with, outcome)) = handoff.take() {
+            if !outcome.session_id.is_empty() {
+                anchor = Some(outcome.session_id.clone());
+            }
+            if let Some(notice) = &outcome.agents_view_notice {
+                status_message = Some(notice.clone());
+            }
+            if !outcome.return_to_agents_view && outcome.selection_request.is_none() {
+                print_resume_hint(outcome.resume_hint.as_deref());
+                if let Some(link) = roster_link.take() {
+                    link.close();
+                }
+                return Ok(());
+            }
+            if let Some(scope) = outcome.agents_view_scope {
+                // Push a frame with the session as the return chat and clear the
+                // query — a filter typed to find the session would hide the subtree.
+                frames.retain(|(frame, _)| frame.session_id != scope.session_id);
+                frames.push((
+                    scope,
+                    Some(SessionSelection::Attach(outcome.active_session_id.clone())),
+                ));
+                query = None;
+            } else if let Some(selection) = outcome.selection_request {
+                origin = outcome.selection_origin.map(|page| {
+                    let mut requester = ran_with;
+                    requester.session = SessionSelection::Attach(outcome.active_session_id);
+                    (requester, page)
+                });
+                let mut next = base.clone();
+                next.session = selection;
+                next.session_rlm_depth = outcome.selection_rlm_depth;
+                let outcome =
+                    pa_tui::interactive::run_interactive(next.clone(), UiMode::Terminal).await?;
+                handoff = Some((next, outcome));
+            } else if let Some((requester, page)) = origin.take() {
+                let outcome = pa_tui::interactive::run_interactive_origin_open(
+                    requester.clone(),
+                    UiMode::Terminal,
+                    page,
+                )
+                .await?;
+                handoff = Some((requester, outcome));
+            }
+        }
         let view_options = pa_tui::agents_view::AgentsViewOptions {
             socket_path: base.socket_path.clone(),
             cwd: base.cwd.clone(),
@@ -330,62 +386,16 @@ async fn run_agents_view_flow(
             session_options.cwd = cwd;
         }
         let outcome = pa_tui::interactive::run_interactive_agents_view_open(
-            session_options,
+            session_options.clone(),
             UiMode::Terminal,
             view.panel,
         )
         .await?;
-        if !outcome.session_id.is_empty() {
-            anchor = Some(outcome.session_id.clone());
-        }
-        if let Some(notice) = &outcome.agents_view_notice {
-            status_message = Some(notice.clone());
-        }
-        if !outcome.return_to_agents_view {
-            print_resume_hint(outcome.resume_hint.as_deref());
-            if let Some(link) = roster_link.take() {
-                link.close();
-            }
-            return Ok(());
-        }
-        if let Some(scope) = outcome.agents_view_scope {
-            // Push a frame with the session as the return chat and clear the
-            // query — a filter typed to find the session would hide the subtree.
-            frames.retain(|(frame, _)| frame.session_id != scope.session_id);
-            frames.push((
-                scope,
-                Some(SessionSelection::Attach(outcome.active_session_id.clone())),
-            ));
-            query = None;
-        }
-        let mut pending = outcome.selection_request;
-        while let Some(selection) = pending.take() {
-            let mut next = base.clone();
-            next.session = selection;
-            let outcome = pa_tui::interactive::run_interactive(next, UiMode::Terminal).await?;
-            if !outcome.session_id.is_empty() {
-                anchor = Some(outcome.session_id.clone());
-            }
-            if let Some(notice) = &outcome.agents_view_notice {
-                status_message = Some(notice.clone());
-            }
-            if !outcome.return_to_agents_view {
-                print_resume_hint(outcome.resume_hint.as_deref());
-                if let Some(link) = roster_link.take() {
-                    link.close();
-                }
-                return Ok(());
-            }
-            if let Some(scope) = outcome.agents_view_scope {
-                frames.retain(|(frame, _)| frame.session_id != scope.session_id);
-                frames.push((
-                    scope,
-                    Some(SessionSelection::Attach(outcome.active_session_id.clone())),
-                ));
-                query = None;
-            }
-            pending = outcome.selection_request;
-        }
+        // The run consumed the CLI message: neither a later open nor a return
+        // to this session replays it.
+        base.initial_message = None;
+        session_options.initial_message = None;
+        handoff = Some((session_options, outcome));
     }
 }
 

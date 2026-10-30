@@ -286,6 +286,53 @@ pub(crate) fn compute_own_usage_by_model(
     )
 }
 
+/// A transcript's own usage split by model: the same branch fold `/context`
+/// renders for a live child, kept only when it reconciles with `summary`
+/// (the whole-file snapshot a delete bills), so a deleted child's buckets
+/// always add up to its billed spend. `None` when the file is unreadable,
+/// a usage row resolves to no model, or the two folds disagree (a
+/// branched transcript).
+pub(crate) fn own_usage_by_model_of(
+    path: &std::path::Path,
+    summary: &crate::session_usage::SessionUsageSummary,
+) -> Option<Vec<crate::session_usage::ModelUsageSummary>> {
+    let store = crate::session_store::SessionFile::open(path).ok()?;
+    let branch = store.branch_bridged();
+    let (own_usage, _) = compute_own_and_total_usage(&branch, store.entries());
+    let buckets = compute_own_usage_by_model(
+        &branch,
+        store.entries(),
+        &own_usage,
+        store.window_boundary_model().as_ref(),
+    )?;
+    let tokens = |usage: &Value, field: &str| usage[field].as_u64().unwrap_or_default();
+    let by_model: Vec<crate::session_usage::ModelUsageSummary> = buckets
+        .iter()
+        .map(|bucket| {
+            let usage = &bucket["ownUsage"];
+            crate::session_usage::ModelUsageSummary {
+                provider: bucket["provider"].as_str().unwrap_or_default().to_string(),
+                id: bucket["id"].as_str().unwrap_or_default().to_string(),
+                input: tokens(usage, "input"),
+                output: tokens(usage, "output"),
+                cache_read: tokens(usage, "cacheRead"),
+                cache_write: tokens(usage, "cacheWrite"),
+                cost: usage["cost"]["total"].as_f64().unwrap_or_default(),
+            }
+        })
+        .collect();
+    let input: u64 = by_model
+        .iter()
+        .map(|model| model.input + model.cache_read + model.cache_write)
+        .sum();
+    let output: u64 = by_model.iter().map(|model| model.output).sum();
+    let cost: f64 = by_model.iter().map(|model| model.cost).sum();
+    let reconciles = input == summary.input_tokens
+        && output == summary.output_tokens
+        && (cost - summary.cost).abs() <= 1e-9 * (1.0 + cost.max(summary.cost));
+    reconciles.then_some(by_model)
+}
+
 #[cfg(test)]
 mod usage_tests {
     use super::*;

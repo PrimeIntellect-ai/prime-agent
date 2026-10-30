@@ -3,13 +3,17 @@
 
 use super::*;
 use crate::agents_view_forest::SessionActivity;
+use crate::bash_view::ShellCounts;
 use crate::interactive::SessionPanel;
 
 fn with_activity(mode: &mut AgentsViewMode, active: &str, shells: usize, factory_runs: usize) {
-    mode.session_activity.insert(
+    mode.session_activity.live.insert(
         active.to_string(),
         SessionActivity {
-            shells,
+            shells: ShellCounts {
+                running: shells,
+                persistent: 0,
+            },
             factory_runs: crate::factory_view::FactoryRunCounts {
                 running: factory_runs,
                 paused: 0,
@@ -65,7 +69,7 @@ fn enter_on_a_nested_factory_line_opens_the_child_with_the_factory_panel() {
         opened.selection,
         SessionSelection::Attach("c-live".to_string())
     );
-    assert_eq!(opened.panel, Some(SessionPanel::FactoryRuns));
+    assert_eq!(opened.panel, Some(SessionPanel::FactoryRuns { row: None }));
     assert_eq!(opened.expanded_ancestors, vec!["p".to_string()]);
 }
 

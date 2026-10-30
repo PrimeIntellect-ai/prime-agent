@@ -1,0 +1,1 @@
+- Concurrent OAuth credential lookups now keep the refresh flight reserved until the refreshed credential is committed and reloaded, preventing a second lookup from reusing the expired refresh token between fetch and persistence.

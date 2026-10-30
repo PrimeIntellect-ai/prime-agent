@@ -578,6 +578,16 @@ pub fn termination_signal(_status: &std::process::ExitStatus) -> Option<i32> {
     None
 }
 
+/// A child's exit code as a shell's `$?` reports it: the status code, or
+/// 128 + the signal number when a signal killed it (TS `normalizedExitCode`).
+/// Without the mapping a signal death carries no code and reads as success.
+#[must_use]
+pub fn normalized_exit_code(status: &std::process::ExitStatus) -> Option<i32> {
+    status
+        .code()
+        .or_else(|| termination_signal(status).map(|signal| 128 + signal))
+}
+
 /// The kernel32 termination surface for [`kill_pid`], hand-declared (repo
 /// policy: pinned constants and externs, no windows-sys dependency).
 #[cfg(windows)]

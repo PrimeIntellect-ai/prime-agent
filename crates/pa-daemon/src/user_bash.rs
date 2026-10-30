@@ -532,8 +532,8 @@ impl OutputStream {
         self.clone()
     }
 
-    fn push(&mut self, data: &[u8]) {
-        let text = sanitize_output(&String::from_utf8_lossy(data));
+    fn push(&mut self, data: &str) {
+        let text = sanitize_output(data);
         if text.is_empty() {
             return;
         }
@@ -628,16 +628,24 @@ async fn run_bash(run: RunBash<'_>) -> BashEnd {
     }));
     // stdout and stderr merge into one stream (TS wires both pipes to the
     // same `onData`); the shared accumulator keeps the arrival order.
+    // A read can end inside a multi-byte character; each pipe's decoder holds its leading
+    // bytes for the next read (TS `TextDecoder`, `stream: true`).
     let pump = |mut reader: Box<dyn AsyncRead + Unpin + Send>| {
         let stream = Arc::clone(&stream);
         async move {
+            let mut decoder = crate::streaming_utf8::StreamingUtf8::default();
             let mut buffer = [0u8; 8192];
             loop {
                 match reader.read(&mut buffer).await {
                     Ok(0) | Err(_) => break,
-                    Ok(read) => stream.lock().unwrap().push(&buffer[..read]),
+                    Ok(read) => {
+                        let text = decoder.decode_chunk(&buffer[..read]);
+                        stream.lock().unwrap().push(&text);
+                    }
                 }
             }
+            let rest = decoder.flush();
+            stream.lock().unwrap().push(&rest);
         }
     };
     let stdout_pump = stdout.map(|pipe| pump(Box::new(pipe)));
@@ -653,7 +661,7 @@ async fn run_bash(run: RunBash<'_>) -> BashEnd {
     });
     let mut pumps_done = false;
     // The run settles on the shell's exit, not on its pipes closing
-    // (abort_bash may kill it meanwhile; a signal death reports no exit code).
+    // (abort_bash may kill it meanwhile; a cancelled run reports no exit code).
     let status = loop {
         tokio::select! {
             // If both are ready, kill while the unreaped child still pins its PID.
@@ -672,7 +680,12 @@ async fn run_bash(run: RunBash<'_>) -> BashEnd {
         let _ = tokio::time::timeout(EXIT_STDIO_GRACE, &mut pumps).await;
     }
     drop(pumps);
-    let exit_code = status.ok().and_then(|status| status.code()).map(i64::from);
+    // A signal death reports 128 + the signal number, like a shell's `$?` (TS
+    // `normalizedExitCode`); a cancelled run still reports none below.
+    let exit_code = status
+        .ok()
+        .and_then(|status| pa_core::platform::process::normalized_exit_code(&status))
+        .map(i64::from);
     let cancelled = run.cancellation.is_cancelled();
     // The pumps are dropped, so this is the last reference; a poisoned
     // lock (a reader panicked) keeps whatever it collected.
@@ -1028,6 +1041,61 @@ mod tests {
             response.error.as_deref(),
             Some("execute_bash_and_wait requires a command")
         );
+    }
+
+    /// Multi-byte characters that straddle a pipe read decode intact: a per-read decode replaced
+    /// both halves with U+FFFD in the stream and the row the model reads.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn characters_split_across_reads_decode_intact() {
+        let cwd = tempfile::tempdir().expect("tempdir");
+        let worker = created_worker(cwd.path()).await;
+        // 1,500 seven-byte lines cross an 8 KiB read without reaching either output cap.
+        let response = worker
+            .dispatch(
+                "execute_bash_and_wait",
+                &json!({
+                    "activeSessionId": "bash-session",
+                    "command": "yes '\u{20ac}\u{20ac}' | head -n 1500",
+                }),
+            )
+            .await;
+        assert!(response.success, "failed: {response:?}");
+        let data = response.data.expect("data");
+        let output = data["output"].as_str().expect("output");
+        assert_eq!(output, "\u{20ac}\u{20ac}\n".repeat(1500));
+    }
+
+    /// A command whose shell dies by a signal reports 128 + the signal number, like a shell's
+    /// `$?` (TS `normalizedExitCode`): with no exit code the model would read it as a success.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_signal_death_reports_128_plus_the_signal() {
+        let cwd = tempfile::tempdir().expect("tempdir");
+        let worker = created_worker(cwd.path()).await;
+        for (command, code) in [
+            ("kill -TERM $$", 143),
+            ("kill -KILL $$", 137),
+            ("kill -SEGV $$", 139),
+        ] {
+            let response = worker
+                .dispatch(
+                    "execute_bash_and_wait",
+                    &json!({ "activeSessionId": "bash-session", "command": command }),
+                )
+                .await;
+            assert!(response.success, "failed: {response:?}");
+            assert_eq!(
+                response.data,
+                Some(json!({
+                    "output": "",
+                    "exitCode": code,
+                    "cancelled": false,
+                    "truncated": false,
+                })),
+                "{command}"
+            );
+        }
     }
 
     #[test]
