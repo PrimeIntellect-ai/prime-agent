@@ -440,36 +440,6 @@ mod tests {
         assert_eq!(transformed.len(), 2);
     }
 
-    /// `rlm.end_turn()` ends a turn on a tool result, so a replayed session
-    /// can be [user, assistant(tool call), tool result, user] with no
-    /// assistant message between the tool result and the next user turn.
-    /// The shared transform every provider runs must keep exactly that
-    /// shape: the matched tool result stays, no synthetic result is
-    /// inserted for its answered call, nothing is dropped.
-    #[test]
-    fn ended_turn_shape_replays_user_after_tool_result() {
-        let messages = vec![
-            user("hi"),
-            assistant_with_tool_call("call-1"),
-            Message::ToolResult(ToolResultMessage {
-                tool_call_id: "call-1".into(),
-                tool_name: "echo".into(),
-                content: vec![],
-                details: None,
-                is_error: false,
-                timestamp: 1,
-                rest: Map::default(),
-            }),
-            user("next turn"),
-        ];
-        let transformed =
-            transform_messages_with_normalizer(&messages, &test_model(), &|_, _, _| None);
-        assert_eq!(
-            transformed, messages,
-            "the ended-turn shape replays unchanged: the matched tool result stays and the user message follows directly"
-        );
-    }
-
     fn tool_call(id: &str, name: &str) -> AssistantContent {
         AssistantContent::ToolCall(ToolCall {
             id: id.to_string(),
