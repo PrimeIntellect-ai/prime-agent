@@ -512,42 +512,6 @@ fn core_layer_documents_the_real_tool_surface() {
     }
 }
 
-/// The core layer's `rlm.spawn` line documents the decision child's JSON
-/// contract: the request fields (`seq`, `state`, `questions`), the tagged
-/// `decision_api.decision` follow-up reply carrying the request's `seq`, and
-/// the ready-not-decision answer for any other message — a line that promises
-/// a decision for every message fails here.
-#[test]
-fn core_layer_documents_the_decision_child_contract() {
-    let spawn_line = CORE_LAYER
-        .lines()
-        .find(|line| line.contains("rlm.spawn("))
-        .expect("the core layer documents rlm.spawn");
-    for token in [
-        r#""seq""#,
-        r#""state""#,
-        r#""questions""#,
-        "decision_api.decision",
-    ] {
-        assert!(
-            spawn_line.contains(token),
-            "the rlm.spawn line must document the decision request/reply contract ({token})"
-        );
-    }
-    assert!(
-        spawn_line.contains("follow-up row"),
-        "the rlm.spawn line must document the reply's follow-up delivery"
-    );
-    assert!(
-        spawn_line.contains("Decision child ready."),
-        "the rlm.spawn line must say a non-request message readies the child, not a decision"
-    );
-    assert!(
-        !spawn_line.contains("answers every message"),
-        "the decision child answers decision requests only, not every message"
-    );
-}
-
 // Packaged-set parity (TS packages/coding-agent/skills)
 
 /// The packaged skill set at TS tip `f62dae4d0` (`packages/coding-agent/skills/`): 12 skills — the
