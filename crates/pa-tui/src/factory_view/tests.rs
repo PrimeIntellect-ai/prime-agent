@@ -2005,3 +2005,19 @@ fn the_dock_factory_items_list_live_runs_paused_first() {
         ]
     );
 }
+
+/// A graph reply's factory counts: the host's stored-spec count and the live runs only (a fully
+/// terminal run never counts), a paused run apart from the running ones.
+#[test]
+fn a_graph_reply_counts_stored_specs_and_live_runs() {
+    let mut response = three_run_response();
+    response["runs"][0]["state"] = json!("done");
+    response["runs"][0]["usage"]["running"] = json!(0);
+    response["runs"][1]["state"] = json!("running");
+    response["runs"][2]["state"] = json!("paused");
+    response["factorySpecs"] = json!(2);
+    assert_eq!(
+        FactoryCounts::of(&response).label().as_deref(),
+        Some("2 factories \u{b7} 1 running \u{b7} 1 paused")
+    );
+}

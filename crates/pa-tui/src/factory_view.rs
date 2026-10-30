@@ -236,6 +236,55 @@ pub fn live_run_count(data: &Value) -> usize {
         .count()
 }
 
+/// A session's stored factory specs: the host's `factorySpecs` count, carried by the unscoped
+/// graph reply and by an inactive session's catalog row (absent reads zero).
+#[must_use]
+pub fn stored_spec_count(data: &Value) -> usize {
+    data.get("factorySpecs")
+        .and_then(Value::as_u64)
+        .and_then(|count| usize::try_from(count).ok())
+        .unwrap_or_default()
+}
+
+/// A session's stored factory specs (durable) and its live runs, the paused ones apart.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct FactoryCounts {
+    pub specs: usize,
+    pub runs: FactoryRunCounts,
+}
+
+impl FactoryCounts {
+    /// The counts of an unscoped graph reply.
+    #[must_use]
+    pub fn of(data: &Value) -> Self {
+        Self {
+            specs: stored_spec_count(data),
+            runs: FactoryRunCounts::of(&parse_factory_runs(data)),
+        }
+    }
+
+    /// `N factories · M running[ · K paused]`, or `None` while the session has neither specs nor
+    /// live runs: the agents view's factory line and the expanded dock's factory row show exactly
+    /// then.
+    #[must_use]
+    pub fn label(self) -> Option<String> {
+        let FactoryRunCounts { running, paused } = self.runs;
+        (self.specs > 0 || running + paused > 0).then(|| {
+            let noun = if self.specs == 1 {
+                "factory"
+            } else {
+                "factories"
+            };
+            let paused = if paused > 0 {
+                format!(" \u{b7} {paused} paused")
+            } else {
+                String::new()
+            };
+            format!("{} {noun} \u{b7} {running} running{paused}", self.specs)
+        })
+    }
+}
+
 /// The malformed-lane error line (one message for the mount and the
 /// fold): a reply without the runs list is a malformed lane, never
 /// zero runs.
