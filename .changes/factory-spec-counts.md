@@ -1,0 +1,1 @@
+- The agents view and the expanded activity dock now count a session's stored factory specs beside its live runs (`⚙ N factories · M running`), and the expanded shells row leads with its running and persistent counts.
