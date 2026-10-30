@@ -136,6 +136,14 @@ impl TranscriptWindow {
         !self.start_resident || self.gap || self.fetch.is_some()
     }
 
+    /// Whether a settled turn's scrollback flush must skip: the resident run is cut off from
+    /// the tail (a gap row stands in the transcript) or a page is still in flight. Deliberately
+    /// NOT `incomplete()`: a session whose oldest rows are simply not resident still holds a
+    /// contiguous suffix, which is safe to flush: `start_resident` alone must not block.
+    pub(crate) fn scrollback_gap(&self) -> bool {
+        self.gap || self.fetch.is_some()
+    }
+
     /// The top key: the session's first page replaces the resident run.
     pub(crate) fn request_head(&mut self) {
         self.head_requested = !self.start_resident;
@@ -1030,6 +1038,36 @@ mod tests {
             land(false),
             painted,
             "a page that lands before the next paint completes the press once"
+        );
+    }
+
+    /// The scrollback flush's gap gate is deliberately NOT `incomplete()`: a session whose
+    /// oldest rows are simply not resident still holds a contiguous suffix, and only a real
+    /// gap or an in-flight page blocks the flush.
+    #[tokio::test]
+    async fn scrollback_gap_skips_only_real_gaps() {
+        let mut window = TranscriptWindow::default();
+        window.reset(None, None, BackfillSeam::Preserve);
+        assert!(!window.scrollback_gap(), "a resident tail is contiguous");
+        window.reset(
+            Some("leaf".to_string()),
+            Some("e9".to_string()),
+            BackfillSeam::Preserve,
+        );
+        assert!(window.incomplete());
+        assert!(
+            !window.scrollback_gap(),
+            "a non-resident HEAD alone is not a gap"
+        );
+        window.gap = true;
+        assert!(window.scrollback_gap(), "an eviction gap blocks the flush");
+        window.gap = false;
+        window.fetch = Some(tokio_util::task::AbortOnDropHandle::new(
+            tokio::task::spawn(std::future::pending()),
+        ));
+        assert!(
+            window.scrollback_gap(),
+            "an in-flight page blocks the flush"
         );
     }
 }

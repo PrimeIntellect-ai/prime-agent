@@ -786,6 +786,270 @@ fn flush_bytes(v: &mut AgentView, width: usize, screen_height: usize) -> Vec<u8>
     sink
 }
 
+/// Stream the transcript delta into a byte sink, returning the exact bytes
+/// the terminal would receive.
+fn transcript_delta_bytes(v: &mut AgentView, width: usize) -> Vec<u8> {
+    let mut sink: Vec<u8> = Vec::new();
+    v.stream_transcript_delta_to(&mut sink, width)
+        .expect("the delta flush streams");
+    sink
+}
+
+/// A writer that fails every write AFTER the first succeeds (durable-prefix pins), or every
+/// write (untouched-base pins).
+struct FailingWriter {
+    after: usize,
+    written: usize,
+}
+
+impl std::io::Write for FailingWriter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.written += 1;
+        if self.written > self.after {
+            return Err(std::io::Error::other("the sink refused the chunk"));
+        }
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+#[test]
+fn transcript_delta_flush_appends_only_new_rows() {
+    let mut v = view();
+    v.chrome.version = "0.0.0".to_string();
+    v.chrome.cwd = "/w".to_string();
+    v.chrome.chat_name = "w".to_string();
+    v.push(TranscriptItem::UserMessage {
+        text: "first turn".to_string(),
+    });
+    let first = transcript_delta_bytes(&mut v, 80);
+    let joined = String::from_utf8_lossy(&first);
+    assert!(joined.contains("first turn"));
+    assert!(
+        !joined.contains("Collapsed mode"),
+        "the dock never lands in scrollback"
+    );
+    // The run's first flush steps BELOW the launching shell line: its rows never glue to
+    // that line's leftover tail.
+    assert!(first.starts_with(b"\r\n") && first.ends_with(b"\r\n"));
+
+    // An unchanged transcript writes nothing.
+    assert!(transcript_delta_bytes(&mut v, 80).is_empty());
+
+    v.push(TranscriptItem::UserMessage {
+        text: "second turn".to_string(),
+    });
+    let second = transcript_delta_bytes(&mut v, 80);
+    let joined = String::from_utf8_lossy(&second);
+    assert!(joined.contains("second turn"));
+    assert!(
+        !joined.contains("first turn"),
+        "only the settled turn's new rows append"
+    );
+    // Later flushes continue right after the previous turn's rows: no fresh-line step, so
+    // no blank rows open between turns.
+    assert!(!second.starts_with(b"\r\n"));
+}
+
+#[test]
+fn transcript_delta_flush_resets_without_writing_on_an_edit() {
+    let mut v = view();
+    v.chrome.version = "0.0.0".to_string();
+    v.chrome.cwd = "/w".to_string();
+    v.chrome.chat_name = "w".to_string();
+    v.push(TranscriptItem::UserMessage {
+        text: "the edited turn".to_string(),
+    });
+    assert!(!transcript_delta_bytes(&mut v, 80).is_empty());
+
+    // An in-place rewrite (compaction, a detail change, a rewrap) is a scrollback gap: the
+    // base advances silently and NOTHING is written for that settle.
+    v.clear_chat();
+    assert!(transcript_delta_bytes(&mut v, 80).is_empty());
+
+    // The reset did not seed the exit path's base: the suspend/exit flush REPAINTS the
+    // visible frame (the rewritten region reaches the screen that way, with no scrollback
+    // duplication).
+    let repaint = flush_bytes(&mut v, 80, 24);
+    assert!(
+        repaint.starts_with(b"\x1b[2J\x1b[H"),
+        "the exit flush repaints the post-reset frame"
+    );
+
+    // The next append continues from the reset base: the new rows alone.
+    v.push(TranscriptItem::UserMessage {
+        text: "after the reset".to_string(),
+    });
+    let appended = transcript_delta_bytes(&mut v, 80);
+    let joined = String::from_utf8_lossy(&appended);
+    assert!(joined.contains("after the reset"));
+    assert!(!joined.contains("the edited turn"));
+}
+
+#[test]
+fn a_suspend_flush_rebases_the_settle_base() {
+    let mut v = view();
+    v.chrome.version = "0.0.0".to_string();
+    v.chrome.cwd = "/w".to_string();
+    v.chrome.chat_name = "w".to_string();
+    v.push(TranscriptItem::UserMessage {
+        text: "first turn".to_string(),
+    });
+    assert!(!transcript_delta_bytes(&mut v, 80).is_empty());
+    v.push(TranscriptItem::UserMessage {
+        text: "mid-turn rows".to_string(),
+    });
+
+    // A mid-run suspend cycle (Ctrl+Z, the external editor) appends the new rows through
+    // the exit-path flush; the renderer then rebases the settle base to what it wrote.
+    flush_bytes(&mut v, 80, 24);
+    v.rebase_transcript_delta_base(80);
+
+    // The turn's settle must not re-append what the suspend flush already wrote.
+    assert!(
+        transcript_delta_bytes(&mut v, 80).is_empty(),
+        "the suspend flush's rows are the settle base now"
+    );
+    v.push(TranscriptItem::UserMessage {
+        text: "the next turn".to_string(),
+    });
+    let appended = transcript_delta_bytes(&mut v, 80);
+    let joined = String::from_utf8_lossy(&appended);
+    assert!(joined.contains("the next turn"));
+    assert!(
+        !joined.contains("mid-turn rows") && !joined.contains("first turn"),
+        "only rows past the suspend flush append"
+    );
+}
+
+#[test]
+fn a_suspend_before_the_first_settle_rebases_the_empty_base() {
+    let mut v = view();
+    v.chrome.version = "0.0.0".to_string();
+    v.chrome.cwd = "/w".to_string();
+    v.chrome.chat_name = "w".to_string();
+    v.push(TranscriptItem::UserMessage {
+        text: "the streamed turn".to_string(),
+    });
+
+    // Suspending before any settle appends the whole transcript through the exit-path
+    // flush; the rebase adopts it, so the first settle appends only the turn's new rows
+    // instead of dumping the transcript a second time.
+    flush_bytes(&mut v, 80, 24);
+    v.rebase_transcript_delta_base(80);
+    v.push(TranscriptItem::UserMessage {
+        text: "a later row".to_string(),
+    });
+    let appended = transcript_delta_bytes(&mut v, 80);
+    let joined = String::from_utf8_lossy(&appended);
+    assert!(joined.contains("a later row"));
+    assert!(
+        !joined.contains("the streamed turn"),
+        "the suspend flush's transcript is never re-appended"
+    );
+}
+
+#[test]
+fn transcript_delta_flush_advances_the_base_to_the_durable_prefix_on_error() {
+    let mut v = view();
+    v.chrome.version = "0.0.0".to_string();
+    v.chrome.cwd = "/w".to_string();
+    v.chrome.chat_name = "w".to_string();
+    for index in 0..800 {
+        v.push(TranscriptItem::UserMessage {
+            text: format!("scrollback row {index}"),
+        });
+    }
+    let mut writer = FailingWriter {
+        after: 1,
+        written: 0,
+    };
+    // The first chunk lands, the second fails: the base keeps exactly the rows that reached
+    // the terminal, and the retry never re-appends them.
+    v.stream_transcript_delta_to(&mut writer, 80)
+        .expect_err("the sink refuses the later chunks");
+    assert_eq!(writer.written, 2);
+    // The failed flush also seeded the exit path's base with the frame it rendered, so the
+    // exit flush re-appends nothing the durable prefix already wrote.
+    assert!(
+        flush_bytes(&mut v, 80, 24).is_empty(),
+        "the exit base stays consistent with the durable prefix"
+    );
+
+    let mut sink: Vec<u8> = Vec::new();
+    v.stream_transcript_delta_to(&mut sink, 80)
+        .expect("the retry streams");
+    let joined = String::from_utf8_lossy(&sink);
+    assert!(
+        !joined.contains("scrollback row 0"),
+        "the durable chunk's rows are never re-appended"
+    );
+    assert!(
+        joined.contains("scrollback row 799"),
+        "the rows the failed write never landed append on the retry"
+    );
+}
+
+#[test]
+fn transcript_delta_flush_leaves_the_base_untouched_when_nothing_lands() {
+    let mut v = view();
+    v.chrome.version = "0.0.0".to_string();
+    v.chrome.cwd = "/w".to_string();
+    v.chrome.chat_name = "w".to_string();
+    v.push(TranscriptItem::UserMessage {
+        text: "the settled turn".to_string(),
+    });
+    let mut writer = FailingWriter {
+        after: 0,
+        written: 0,
+    };
+    v.stream_transcript_delta_to(&mut writer, 80)
+        .expect_err("the sink refuses every chunk");
+
+    // Nothing landed, so the base still holds nothing: the next flush appends the whole
+    // transcript once, and never duplicates rows the failed write could not have reached.
+    let appended = transcript_delta_bytes(&mut v, 80);
+    let joined = String::from_utf8_lossy(&appended);
+    assert!(joined.contains("the settled turn"));
+    assert_eq!(joined.matches("the settled turn").count(), 1);
+}
+
+#[test]
+fn a_settle_flush_seeds_the_exit_flush_base() {
+    let mut v = view();
+    v.chrome.version = "0.0.0".to_string();
+    v.chrome.cwd = "/w".to_string();
+    v.chrome.chat_name = "w".to_string();
+    v.push(TranscriptItem::UserMessage {
+        text: "the flushed turn".to_string(),
+    });
+    transcript_delta_bytes(&mut v, 80);
+
+    // The settle already wrote the transcript into scrollback: an unchanged frame's
+    // suspend/exit flush writes nothing instead of re-appending it.
+    assert!(flush_bytes(&mut v, 80, 24).is_empty());
+
+    // New transcript rows land ABOVE the seeded base: the exit flush repaints the visible
+    // window instead of appending the transcript into scrollback again.
+    v.push(TranscriptItem::UserMessage {
+        text: "the later turn".to_string(),
+    });
+    let repaint = flush_bytes(&mut v, 80, 24);
+    assert!(
+        repaint.starts_with(b"\x1b[2J\x1b[H"),
+        "the changed frame repaints, never re-appends"
+    );
+    // One screenful of rows: the SIMD bytecount dependency would be pointless here.
+    #[allow(clippy::naive_bytecount)]
+    let newline_rows = repaint.iter().filter(|b| **b == b'\n').count();
+    assert!(newline_rows <= 24, "the repaint stays one screenful");
+    let joined = String::from_utf8_lossy(&repaint);
+    assert!(joined.contains("the later turn"));
+}
+
 #[test]
 fn flush_streams_append_then_repaints_the_changed_tail() {
     let mut v = view();

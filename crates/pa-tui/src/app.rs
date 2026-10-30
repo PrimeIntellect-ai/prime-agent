@@ -118,7 +118,7 @@ fn run_app_surface(
 
         let (_w, h) = crossterm::terminal::size()?;
         view.set_terminal_rows(h);
-        draw(&mut terminal, &mut view)?;
+        draw(&mut terminal, &mut view, ScrollbackFlush::Off)?;
         // The verifier's panic driver: the unwind must cross the live
         // surface's unwind guard, not the already-restored exit.
         assert!(
@@ -244,10 +244,39 @@ pub fn dispatch_events(editor: &mut Editor, on_submit: &mut dyn FnMut(&str)) {
     }
 }
 
+/// One paint's settle-armed scrollback flush request: `Off` paints the fullscreen frame
+/// alone, while `Settle` runs the transcript delta flush inside the paint's
+/// synchronized-output bracket. Every gate is resolved by the run loop AT THE PAINT CALL
+/// SITE (nothing runs between that and the flush, and the paint bracket stays free of the
+/// settings store's disk read): a settle arms the request, but a page fetch or a settings
+/// change between the arm and this paint still decides it.
+#[derive(Clone, Copy)]
+pub(crate) enum ScrollbackFlush {
+    Off,
+    Settle {
+        /// The `terminal.scrollbackFlush` setting, read live through the client-settings seam
+        /// at the paint call site, so a settings toggle applies without a restart.
+        scrollback_flush: bool,
+        /// The transcript window's gap state: a gap row or an in-flight page blocks the flush.
+        transcript_gap: bool,
+    },
+}
+
+/// One paint's outcome: paint errors stay fatal in `draw`'s `Result`; a settle-armed
+/// scrollback flush that failed after the surface recovered in place reports here instead,
+/// so the run continues with an error row rather than tearing down the session.
+pub(crate) struct Painted {
+    pub(crate) scrollback_flush_error: Option<anyhow::Error>,
+    /// A settle-armed scrollback flush appended rows into native scrollback this paint: the
+    /// run's adoption telemetry fires once on it.
+    pub(crate) scrolled_scrollback: bool,
+}
+
 pub(crate) fn draw(
     terminal: &mut Terminal<crate::hyperlinks::LinkBackend>,
     view: &mut AgentView,
-) -> Result<()> {
+    scrollback: ScrollbackFlush,
+) -> Result<Painted> {
     // The mount sequences (the alt-screen adopt/enter, the queued clear, the cursor hide) ride
     // THIS draw's single flush: the first paint is the mount, and a mid-gap flush can never
     // carry the clear out early over it.
@@ -277,6 +306,57 @@ pub(crate) fn draw(
     // an intermediate, partly scrolled frame; a terminal without mode 2026 support ignores the
     // two escape sequences.
     crossterm::execute!(stdout(), terminal::BeginSynchronizedUpdate)?;
+    // A settle-armed scrollback flush rides the same bracket: the alt-screen switch and the
+    // transcript rows land with the repaint in one terminal update, so terminals with mode
+    // 2026 support (tmux) never flash a half-updated pane. The gates run HERE, at flush time,
+    // not at the arm: the setting reads live, the kill-switch re-reads the environment, and a
+    // page fetch that started between the arm and this paint blocks the flush.
+    let mut scrollback_flush_error = None;
+    let mut scrolled_scrollback = false;
+    if let ScrollbackFlush::Settle {
+        scrollback_flush,
+        transcript_gap,
+    } = scrollback
+    {
+        if scrollback_flush && crate::interactive::exit_flush_enabled() && !transcript_gap {
+            // Every step past the gate is best-effort: the bracket below must always reach
+            // its release, and a broken surface (the same write failure that broke the row
+            // writes also breaks the surface retakes) reports as the error row instead of a
+            // fatal teardown.
+            let mut surface_error = None;
+            match crate::altscreen::leave() {
+                Ok(()) => {
+                    use std::io::Write;
+                    let mut out = stdout();
+                    let flushed = match view.stream_transcript_delta_to(&mut out, width) {
+                        Ok(appended) => out.flush().map(|()| appended),
+                        Err(error) => Err(error),
+                    };
+                    // The suspend-path sequence re-takes the fullscreen surface: the flush
+                    // left the alternate screen, and a desynced ownership flag would make
+                    // the exit-time leave a silent no-op while fullscreen frames paint the
+                    // main screen.
+                    if let Err(error) = crate::altscreen::enter() {
+                        surface_error = Some(error);
+                    }
+                    let _ = crossterm::execute!(stdout(), crossterm::cursor::Hide);
+                    if let Err(error) = terminal.clear() {
+                        surface_error = surface_error.or_else(|| Some(anyhow::Error::new(error)));
+                    }
+                    match flushed {
+                        Ok(true) => scrolled_scrollback = true,
+                        Ok(false) => {}
+                        Err(error) => {
+                            surface_error =
+                                surface_error.or_else(|| Some(anyhow::Error::new(error)));
+                        }
+                    }
+                }
+                Err(error) => surface_error = Some(error),
+            }
+            scrollback_flush_error = surface_error;
+        }
+    }
     // The hardware cursor is positioned at the focused caret for IME on every frame, but only
     // shown when `showHardwareCursor` is on. ratatui's `set_cursor_position` shows the cursor
     // unconditionally, so it may carry the caret only in the show case — the hidden case would
@@ -311,7 +391,10 @@ pub(crate) fn draw(
         // Mode setup flushes stdout, so it must follow the completed first paint.
         crate::enhanced_keys::enable(&mut stdout())?;
     }
-    Ok(())
+    Ok(Painted {
+        scrollback_flush_error,
+        scrolled_scrollback,
+    })
 }
 
 /// Render one frame as plain text (the headless structural dump the tmux verifier and diff

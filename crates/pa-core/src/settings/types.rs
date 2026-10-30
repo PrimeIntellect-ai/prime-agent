@@ -182,6 +182,7 @@ pub struct TerminalSettings {
     pub clear_on_shrink: Option<bool>,
     pub show_terminal_progress: Option<bool>,
     pub fullscreen_mouse: Option<bool>,
+    pub scrollback_flush: Option<bool>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
