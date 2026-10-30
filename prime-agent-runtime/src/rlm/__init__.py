@@ -79,6 +79,14 @@ class RLMSubagent:
 
 
 @dataclass(frozen=True)
+class RLMDecision:
+    choice: str
+    confidence: float | None
+    probabilities: dict[str, float]
+    model: str
+
+
+@dataclass(frozen=True)
 class RLMProgressNoteResult:
     accepted: bool
     retry_after_ms: int | None = None
@@ -490,6 +498,38 @@ async def progress_note(message: str) -> RLMProgressNoteResult:
     return RLMProgressNoteResult(accepted=accepted, retry_after_ms=retry_after_ms)
 
 
+async def decide(
+    state: Any,
+    actions: dict[str, str],
+    *,
+    instructions: str | None = None,
+    images: list[str] | None = None,
+) -> RLMDecision:
+    """Get one fast decision from the ``decisionModel`` setting (System 1).
+
+    ``state`` is any JSON value describing the situation (put the goal in it);
+    ``actions`` maps each action name to when it applies; ``instructions``
+    replaces the default "advance the goal" question; ``images`` are up to 4
+    ``data:image/...;base64,`` URLs for vision models. One awaited host call
+    (~0.3 s for cloudflare/clef): it never wakes the session or adds a
+    transcript row, and its cost is billed to the session. The model must be
+    a structured-decision model (``api: "systemone"``). Failures (setting
+    unset or unusable, bad request, timeout after 30 s) raise RuntimeError.
+    For a control loop, run it in a background asyncio task; see
+    docs/rlm-decide.md.
+    """
+    payload = await host_request(
+        "rlm.decide",
+        {"state": state, "actions": actions, "instructions": instructions, "images": images},
+    )
+    return RLMDecision(
+        choice=payload["choice"],
+        confidence=payload["confidence"],
+        probabilities=payload["probabilities"],
+        model=payload["model"],
+    )
+
+
 async def delete_subagent(target: str | RLMSubagent | RLMSpawnHandle) -> RLMSubagent:
     """Delete one running or retained direct child from the current parent session.
 
@@ -679,6 +719,16 @@ class _RLMNamespace:
     async def progress_note(self, message: str) -> RLMProgressNoteResult:
         return await progress_note(message)
 
+    async def decide(
+        self,
+        state: Any,
+        actions: dict[str, str],
+        *,
+        instructions: str | None = None,
+        images: list[str] | None = None,
+    ) -> RLMDecision:
+        return await decide(state, actions, instructions=instructions, images=images)
+
     async def delete_subagent(self, target: str | RLMSubagent | RLMSpawnHandle) -> RLMSubagent:
         return await delete_subagent(target)
 
@@ -705,6 +755,7 @@ class _RLMNamespace:
         raise AttributeError(f"'rlm' object has no attribute {name!r}")
 
 
+_RLMNamespace.decide.__doc__ = decide.__doc__
 rlm = _RLMNamespace()
 harness = _harness_state
 factory = rlm.factory
@@ -727,6 +778,7 @@ __all__ = [
     "McpToolError",
     "NotEnabled",
     "RLMCreateSessionHandle",
+    "RLMDecision",
     "RLMModel",
     "RLMProgressNoteResult",
     "RLMSpawnHandle",
@@ -735,6 +787,7 @@ __all__ = [
     "create_session",
     "RefinementEvent",
     "bash",
+    "decide",
     "delete_subagent",
     "emit",
     "find_models",

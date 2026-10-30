@@ -38,6 +38,7 @@ The following programmatic tools are available in the REPL for subagent manageme
 - `rlm.rename(new_name: str, *, session_id=None) -> str`: rename the calling session (omit `session_id`) or a direct child (spawn handle, `list_subagents()` row, or session id; never the child's name); names must be unique among siblings, and the renamed session sees a transcript line for the change
 - `rlm.collect(targets=None, *, timeout_ms: int = 0) -> list[RLMChildResult]`: typed snapshots of direct children (status, settled flag, answer preview, error) without steering anyone; `timeout_ms=0` returns a non-blocking snapshot; a positive timeout blocks only this call until the children settle or the deadline passes
 - `rlm.progress_note(message: str) -> dict`: report brief in-flight progress to the parent orchestrator (at most 512 characters, throttled to about one note per 10 seconds); the parent sees notes without needing a reply
+- `rlm.decide(state, actions, *, instructions=None, images=None) -> RLMDecision`: one fast choice from the `decisionModel` setting; never wakes the session; see `help(rlm.decide)`
 - `RLMSpawnHandle`
   - `rlm_child_id: str`
   - `name: str`

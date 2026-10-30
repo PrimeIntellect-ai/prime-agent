@@ -82,6 +82,13 @@ fn legacy_read_session_info(path: &Path) -> Option<SessionInfo> {
                     serde_json::from_value::<pa_types::ai::Usage>(usage.clone()).ok()
                 }));
             }
+            "custom"
+                if entry.fields.get("customType").and_then(Value::as_str) == Some("decision") =>
+            {
+                usage_scan.fold_summarization(entry.fields.pointer("/data/usage").and_then(
+                    |usage| serde_json::from_value::<pa_types::ai::Usage>(usage.clone()).ok(),
+                ));
+            }
             "message" => {
                 message_count += 1;
                 if let Some(message) = entry.fields.get("message") {
@@ -486,6 +493,12 @@ fn a_persisted_scan_state_resumes_like_the_full_fold() {
             "targetId": target, "childUsage": usage(child), "aggregateUsage": usage(aggregate),
         })
     };
+    let decision = |id: &str, cost: f64| {
+        json!({
+            "type": "custom", "id": id, "timestamp": "2026-09-23T00:00:00.000Z",
+            "customType": "decision", "data": { "model": "p/m", "usage": usage(cost) },
+        })
+    };
     append_rows(
         &path,
         &[
@@ -495,6 +508,7 @@ fn a_persisted_scan_state_resumes_like_the_full_fold() {
             assistant("a3", 0.3),
             json!({"type":"compaction","id":"c1","timestamp":"2026-09-23T00:00:00.000Z","summary":"s","usage":usage(0.25)}),
             attribution("x1", "a2", 0.05, 0.45),
+            decision("d1", 0.125),
         ],
     );
     assert_fold_matches(&path);
@@ -518,7 +532,11 @@ fn a_persisted_scan_state_resumes_like_the_full_fold() {
         .drop_state(&path);
     append_rows(
         &path,
-        &[attribution("x2", "a2", 0.02, 0.52), assistant("a4", 0.4)],
+        &[
+            attribution("x2", "a2", 0.02, 0.52),
+            assistant("a4", 0.4),
+            decision("d2", 0.125),
+        ],
     );
     assert_fold_matches(&path);
     // A replacement file (a new inode): the stale sidecar fails the

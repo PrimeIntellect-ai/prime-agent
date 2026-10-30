@@ -360,6 +360,14 @@ impl SessionCounters {
         );
     }
 
+    /// A feature attempt's result, counted as `feature_<name>_<outcome>_count`
+    /// on `agent session ended` (names outside the fixed vocabulary count nothing).
+    pub fn note_feature_outcome(&self, feature_name: &str, outcome: &str) {
+        if let Some(key) = pa_telemetry::feature_outcome_key(feature_name, outcome) {
+            self.with(|values| *values.feature_outcomes.entry(key).or_default() += 1);
+        }
+    }
+
     /// An MCP connector call (the server name never uploads).
     pub fn note_mcp_connector_use(&self) {
         self.with(|values| values.mcp_connector_use_count += 1);
@@ -564,10 +572,7 @@ impl SessionTelemetry {
         outcome: &'static str,
         _configuration_choice: Option<&'static str>,
     ) {
-        if let Some(key) = pa_telemetry::feature_outcome_key(feature_name, outcome) {
-            self.counters
-                .with(|values| *values.feature_outcomes.entry(key).or_default() += 1);
-        }
+        self.counters.note_feature_outcome(feature_name, outcome);
     }
 
     /// Finalize any active run, emit `agent session ended`, and flush.

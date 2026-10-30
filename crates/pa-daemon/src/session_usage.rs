@@ -11,6 +11,7 @@ use pa_types::JsNumber;
 use serde::{Deserialize, Serialize};
 
 use pa_core::session_engine::compaction_exec::{add_assistant_usage, subtract_assistant_usage};
+use pa_core::session_engine::decision_api::DECISION_CUSTOM_TYPE;
 
 /// The token/cost summary the rows publish: `inputTokens` folds cache reads
 /// and writes into the input total; `cost` is the provider-billed total.
@@ -150,6 +151,13 @@ struct ScanUsageCost {
     total: JsNumber,
 }
 
+/// A `custom` entry's `data`, as far as the usage fold reads it.
+#[derive(Debug, Clone, Copy, Default, Deserialize)]
+pub(crate) struct ScanCustomData {
+    #[serde(default)]
+    usage: Option<ScanUsage>,
+}
+
 impl From<ScanUsage> for Usage {
     fn from(scan: ScanUsage) -> Usage {
         Usage {
@@ -274,6 +282,7 @@ pub struct UsageScan {
     #[serde(with = "usage_bits")]
     attributed_child_usage: Usage,
     attributed_child_ids: std::collections::HashSet<String>,
+    /// Model calls billed on their own entry: summaries and `rlm.decide` decisions.
     #[serde(with = "usage_bits")]
     summarization_usage: Usage,
 }
@@ -326,6 +335,13 @@ impl UsageScan {
         }
     }
 
+    /// A `custom` entry: an `rlm.decide` decision bills like a summarization call.
+    pub(crate) fn fold_custom(&mut self, custom_type: Option<&str>, data: Option<ScanCustomData>) {
+        if custom_type == Some(DECISION_CUSTOM_TYPE) {
+            self.fold_summarization(data.and_then(|data| data.usage).map(Usage::from));
+        }
+    }
+
     /// The totals behind [`summary`](Self::summary): `own` subtracts the attributed child spend,
     /// `total` keeps it (the deletion capture reads both from the child's frozen file).
     #[must_use]
@@ -366,6 +382,10 @@ struct ScanEntry {
     child_usage: Option<ScanUsage>,
     #[serde(default)]
     aggregate_usage: Option<ScanUsage>,
+    #[serde(default)]
+    custom_type: Option<String>,
+    #[serde(default)]
+    data: Option<ScanCustomData>,
 }
 
 #[derive(Deserialize)]
@@ -396,6 +416,7 @@ impl ScanEntry {
             "compaction" | "branch_summary" => {
                 scan.fold_summarization(self.usage.map(Usage::from));
             }
+            "custom" => scan.fold_custom(self.custom_type.as_deref(), self.data),
             _ => {}
         }
     }
@@ -638,7 +659,7 @@ mod tests {
     }
 
     #[test]
-    fn summarization_usage_is_added() {
+    fn summarization_and_decision_usage_is_added() {
         let summary = scan_summary(&[
             message(
                 "a",
@@ -660,15 +681,22 @@ mod tests {
                            "totalTokens": 55,
                            "cost": { "input": 0.0, "output": 0.1, "cacheRead": 0.0, "cacheWrite": 0.0, "total": 0.1 } }
             }),
+            json!({
+                "type": "custom", "id": "d", "customType": "decision",
+                "data": { "model": "prime-inference/cloudflare/clef",
+                          "usage": { "input": 177, "output": 0, "cacheRead": 0, "cacheWrite": 0,
+                                     "totalTokens": 177,
+                                     "cost": { "input": 0.5, "output": 0.0, "cacheRead": 0.0, "cacheWrite": 0.0, "total": 0.5 } } }
+            }),
         ]);
-        // 100 + 200 + 5 + 50 input tokens; 10 + 20 + 5 output. The cost sums
-        // in the fold's order: the summarization blocks accumulate first.
+        // 100 + 200 + 5 + 50 + 177 input tokens; 10 + 20 + 5 output. The cost
+        // sums in the fold's order: the summarization blocks accumulate first.
         assert_eq!(
             summary,
             Some(SessionUsageSummary {
-                input_tokens: 355,
+                input_tokens: 532,
                 output_tokens: 35,
-                cost: 1.0 + (0.3 + 0.1)
+                cost: 1.0 + (0.3 + 0.1 + 0.5)
             })
         );
     }
