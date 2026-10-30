@@ -57,6 +57,9 @@ pub struct AgentView {
     pub code_block_indent: String,
     pub editor: Editor,
     pub chrome: ChromeState,
+    /// The user status line driver (settings `statusLine`); `None` renders
+    /// the built-in chrome alone.
+    pub status_line: Option<crate::status_line::StatusLine>,
     /// Queued input parked behind the running turn (steering/follow-up
     /// lanes); renders as the dim strip above the prompt dock.
     pub queued: crate::queued::QueuedMessages,
@@ -282,6 +285,7 @@ impl AgentView {
             code_block_indent: "  ".to_string(),
             editor: Editor::new(),
             chrome: ChromeState::default(),
+            status_line: None,
             queued: crate::queued::QueuedMessages::default(),
             queue_selected: None,
             chat: Vec::new(),
@@ -345,6 +349,14 @@ impl AgentView {
             pending_handoff: None,
             handoff_seeds: 0,
             click: click::ClickSurface::default(),
+        }
+    }
+
+    /// Force the status line command to re-run at the next draw: a turn
+    /// end, a model change, and a session rebind all land here.
+    pub(crate) fn force_status_line_refresh(&mut self) {
+        if let Some(status_line) = &mut self.status_line {
+            status_line.force(std::time::Instant::now());
         }
     }
 

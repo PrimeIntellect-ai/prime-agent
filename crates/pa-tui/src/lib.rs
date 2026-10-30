@@ -104,6 +104,7 @@ pub mod session_ui;
 pub mod settings_menu;
 pub mod side_question;
 pub mod snapshot;
+pub mod status_line;
 pub mod subagents;
 mod suspend;
 mod terminal_image;

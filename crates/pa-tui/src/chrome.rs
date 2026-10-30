@@ -82,6 +82,11 @@ pub struct ChromeState {
     /// The footer's tok/sec readout: the dim bottom row's text; `None`
     /// renders no row (kept until the first completed response).
     pub speed_text: Option<String>,
+    /// The user status line's rendered rows (settings `statusLine`); empty
+    /// renders no rows.
+    pub status_line: Vec<String>,
+    /// Leading-space padding per user status line row.
+    pub status_line_padding: u64,
     /// Hide the splash `cwd` line (the scoped agents view keeps its
     /// metadata rows centered against the logo).
     pub splash_hide_cwd: bool,
@@ -1009,6 +1014,35 @@ pub fn render_speed_footer(text: &str, theme: &Theme, width: usize) -> Line {
     let dim = theme.fg_style(ThemeColor::Dim);
     let text = truncate_to_width(text, width, "");
     vec![Span::styled(text, dim)]
+}
+
+/// The user status line rows (settings `statusLine`): dim, padded, and
+/// truncated to the terminal width; empty renders no rows.
+#[must_use]
+pub fn render_status_line(
+    lines: &[String],
+    padding: u64,
+    theme: &Theme,
+    width: usize,
+) -> Vec<Line> {
+    if lines.is_empty() {
+        return Vec::new();
+    }
+    let dim = theme.fg_style(ThemeColor::Dim);
+    let padding = padding.min(width as u64) as usize;
+    let pad = " ".repeat(padding);
+    lines
+        .iter()
+        .map(|line| {
+            let text = truncate_to_width(line, width.saturating_sub(padding), "\u{2026}");
+            let mut row = Line::default();
+            if !pad.is_empty() {
+                row.push(Span::styled(pad.clone(), Style::default()));
+            }
+            row.push(Span::styled(text, dim));
+            row
+        })
+        .collect()
 }
 
 /// The editor surface background: `userMessageBg` (TS `getEditorTheme`).

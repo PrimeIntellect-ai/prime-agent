@@ -59,8 +59,14 @@ impl AgentView {
             }
             lines.extend(frame);
         }
-        // The `/speed` footer (TS `footerSlot`): a dim row only while
-        // the display is on with a sample.
+        // The footer rows: the user status line (settings `statusLine`), then the
+        // `/speed` footer (TS `footerSlot`) — the dock's last rows.
+        lines.extend(crate::chrome::render_status_line(
+            &self.chrome.status_line,
+            self.chrome.status_line_padding,
+            &self.theme,
+            width,
+        ));
         if let Some(speed) = &self.chrome.speed_text {
             lines.push(crate::chrome::render_speed_footer(
                 speed,

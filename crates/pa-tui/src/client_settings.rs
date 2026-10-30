@@ -33,6 +33,13 @@ pub trait ClientSettings: Send + Sync {
     ///
     /// Returns `Err` when the settings store fails.
     fn set_theme(&self, theme: &str) -> Result<()>;
+    /// `statusLine` (unset renders the built-in chrome): the user command whose
+    /// stdout renders as the footer rows — the Rust successor of the TS
+    /// `ctx.ui.setFooter` extension hook.
+    #[must_use]
+    fn status_line(&self) -> Option<pa_types::status_line::StatusLineSpec> {
+        None
+    }
     /// `terminal.showImages` (TS default true).
     fn show_images(&self) -> bool;
     /// Persists `terminal.showImages` to the global scope.

@@ -610,6 +610,9 @@ impl SessionUi {
             view.info_panel = None;
             self.speed_stats = None;
             view.chrome.speed_text = None;
+            // The rebind's session is the payload's owner: the status line command
+            // re-runs for the new session's facts at the next draw.
+            view.force_status_line_refresh();
         }
         let snapshot = self.pending_snapshot.take().unwrap_or_default();
         self.replace_transcript(snapshot, view);

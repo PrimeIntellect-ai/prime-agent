@@ -221,6 +221,16 @@ async fn run_interactive_surface(
     let theme = crate::app::load_theme(&options.theme);
     let mut view = AgentView::new(theme);
     view.code_block_indent = options.code_block_indent.clone();
+    // The user status line (settings `statusLine`): the command is read once at surface mount;
+    // a settings edit takes effect at the next surface.
+    if let Some(client_settings) = &options.client_settings {
+        if let Some(spec) = client_settings.status_line() {
+            view.status_line = Some(crate::status_line::StatusLine::new(
+                spec,
+                std::time::Instant::now(),
+            ));
+        }
+    }
     // The file-completion provider browses the SESSION cwd, not the process cwd: the completion
     // menu must browse the directory the user sees.
     let provider =

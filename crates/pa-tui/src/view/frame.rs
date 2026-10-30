@@ -16,6 +16,11 @@ impl AgentView {
     /// Compose the fullscreen frame: top bar, transcript window, dock —
     /// exactly `height` rows.
     pub fn render_frame(&mut self, width: usize, height: usize) -> Vec<Line> {
+        // The user status line (settings `statusLine`): re-run the command when due and copy
+        // its latest output into the chrome; its rows render as the dock's footer rows.
+        if let Some(status_line) = &mut self.status_line {
+            status_line.refresh_due(std::time::Instant::now(), &mut self.chrome);
+        }
         // The fullscreen compose forces image components to their textual fallback: re-emitting
         // an image placement each repaint would corrupt the display.
         let frame = crate::image_component::with_fullscreen_image_fallback(|| {
@@ -148,9 +153,15 @@ impl AgentView {
         let top = render_top_bar(&self.chrome, &self.theme, width);
         let top_rows = 1;
         let dock = match selector_dock {
-            // The replacement surfaces swap only the editor part; the `/speed` footer stays
-            // the dock's last row (TS `footerSlot`).
+            // The replacement surfaces swap only the editor part; the user status line and the
+            // `/speed` footer stay the dock's last rows (TS `footerSlot`).
             Some(mut dock) => {
+                dock.extend(crate::chrome::render_status_line(
+                    &self.chrome.status_line,
+                    self.chrome.status_line_padding,
+                    &self.theme,
+                    width,
+                ));
                 if let Some(speed) = &self.chrome.speed_text {
                     dock.push(crate::chrome::render_speed_footer(
                         speed,

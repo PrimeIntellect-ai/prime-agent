@@ -489,6 +489,9 @@ impl SessionUi {
             view.chrome.model_provider = Some(picked_provider.to_string());
             view.chrome.thinking_suffix = None;
         }
+        // The model is part of the payload: the status line re-runs for the
+        // new model at the next draw.
+        view.force_status_line_refresh();
         self.dirty = true;
     }
 }

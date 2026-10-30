@@ -732,6 +732,9 @@ impl SessionUi {
         } else {
             self.working_tokens.settle(usage_output);
             self.record_speed_sample(message, view);
+            // A completed turn settles cost and context: the status line re-runs
+            // so its payload reflects the new turn's numbers.
+            view.force_status_line_refresh();
         }
         if let Some(text) = blocks.iter().rev().find_map(|block| match block {
             MessageBlock::Text(text) => Some(text.clone()),

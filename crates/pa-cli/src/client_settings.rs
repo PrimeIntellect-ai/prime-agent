@@ -101,6 +101,10 @@ impl ClientSettings for CliClientSettings {
         self.manager().set_theme(theme.to_string())
     }
 
+    fn status_line(&self) -> Option<pa_types::status_line::StatusLineSpec> {
+        self.manager().get_status_line()
+    }
+
     fn default_service_tier(&self) -> String {
         // The wire name of the persisted default tier; "default" when
         // unset or unreadable.
