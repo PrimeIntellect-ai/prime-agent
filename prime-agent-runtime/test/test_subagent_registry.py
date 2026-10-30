@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import importlib
+import inspect
 import unittest
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
@@ -109,6 +110,14 @@ class RlmSubagentRegistryTest(unittest.TestCase):
             with self.assertRaisesRegex(AttributeError, r"rlm\.run was renamed; spawn a child with: handle = await rlm\.spawn\("):
                 target.run
             self.assertFalse(hasattr(target, "run"))
+
+    def test_package_module_resolves_namespace_attributes(self) -> None:
+        self.assertIs(rlm_module.factory, rlm_module.rlm.factory)
+        self.assertTrue(inspect.iscoroutinefunction(rlm_module.factory.run))
+        self.assertEqual(rlm_module.factory.help(), importlib.import_module("rlm.factory").FACTORY_HELP)
+        session = object()
+        with patch.object(type(rlm_module.rlm), "session", session, create=True):
+            self.assertIs(rlm_module.session, session)
 
     def test_finds_authenticated_models_through_host(self) -> None:
         host_request = AsyncMock(

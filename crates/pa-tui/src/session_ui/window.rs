@@ -93,6 +93,8 @@ pub(crate) struct TranscriptWindow {
     head_requested: bool,
     /// A page failed: no more pages until the next reset.
     failed: bool,
+    /// Scroll-up rows owed to the older page: it applies them when it lands.
+    pending_scroll_up: usize,
     epoch: u64,
     /// Dropping the handle aborts the in-flight page; the epoch fences a note
     /// that was already queued.
@@ -137,6 +139,7 @@ impl TranscriptWindow {
     /// The top key: the session's first page replaces the resident run.
     pub(crate) fn request_head(&mut self) {
         self.head_requested = !self.start_resident;
+        self.pending_scroll_up = 0;
     }
 
     fn resident_entries(&self) -> usize {
@@ -226,6 +229,9 @@ impl TranscriptWindow {
                 if self.chunks.len() > RESIDENT_CHUNKS {
                     grown += self.evict_newest(view);
                 }
+                if self.pending_scroll_up > 0 {
+                    view.scroll_by(-(std::mem::take(&mut self.pending_scroll_up) as isize));
+                }
                 grown
             }
             PageKind::Newer => {
@@ -271,6 +277,28 @@ impl TranscriptWindow {
                 inserted as isize - replaced as isize
             }
         }
+    }
+
+    /// Scroll the viewport; a scroll up at the top of the resident rows, while older history is
+    /// still to load, is owed to the older page.
+    pub(crate) fn scroll(&mut self, delta: isize, view: &mut AgentView) {
+        if delta < 0 && view.viewport_at_top() && !self.start_resident && !self.failed {
+            self.pending_scroll_up += delta.unsigned_abs();
+        } else {
+            self.pending_scroll_up = 0;
+            view.scroll_by(delta);
+        }
+    }
+
+    /// A selection auto-scroll drops the owed rows.
+    pub(crate) fn scroll_selection(
+        &mut self,
+        direction: isize,
+        col: usize,
+        view: &mut AgentView,
+    ) -> bool {
+        self.pending_scroll_up = 0;
+        view.scroll_selection(direction, col)
     }
 
     /// Evict the chunk next to the tail, leaving the gap row in its place.
@@ -359,6 +387,7 @@ impl TranscriptWindow {
     /// Drop a disjoint resident run, leaving the contiguous tail. Returns how many
     /// entries the rows above the tail shrank by.
     fn collapse_to_tail(&mut self, view: &mut AgentView) -> usize {
+        self.pending_scroll_up = 0;
         if !self.gap {
             return 0;
         }
@@ -943,5 +972,64 @@ mod tests {
         );
         assert_eq!(grown, full.len() as isize - 1, "the rows above the tail");
         assert_eq!(window.tail_start(), full.len() - 1);
+    }
+
+    #[test]
+    fn a_page_up_owed_to_the_older_page_moves_the_view_one_page() {
+        let entries = |prefix: &str| -> Vec<ChatEntry> {
+            (0..30)
+                .map(|index| ChatEntry::User {
+                    text: format!("{prefix} {index}"),
+                })
+                .collect()
+        };
+        let land = |paint_before_apply: bool| {
+            let mut window = TranscriptWindow::default();
+            window.reset(
+                Some("leaf".to_string()),
+                Some("t0".to_string()),
+                BackfillSeam::Preserve,
+            );
+            let mut view = AgentView::new(crate::theme::Theme::builtin(
+                "prime",
+                crate::theme::ColorMode::TrueColor,
+            ));
+            view.splash_suppressed = true;
+            for entry in entries("tail") {
+                view.push_entry(entry);
+            }
+            view.render_frame(40, 16);
+            while !view.viewport_at_top() {
+                window.scroll(-(view.page_size() as isize), &mut view);
+                view.render_frame(40, 16);
+            }
+            window.scroll(-(view.page_size() as isize), &mut view);
+            if paint_before_apply {
+                view.render_frame(40, 16);
+            }
+            let page = LoadedPage {
+                entries: entries("older"),
+                seam: BackfillSeam::Preserve,
+                first_id: Some("o0".to_string()),
+                last_id: Some("o29".to_string()),
+                more: true,
+            };
+            let request = TranscriptPage::End {
+                before: Some("t0".to_string()),
+                limit: CHUNK_MESSAGES,
+            };
+            window.apply(PageKind::Older, request, page, &mut view);
+            crate::app::render_frame_text(&mut view, 40, 16).join("\n")
+        };
+        let painted = land(true);
+        assert!(
+            painted.contains("older 29"),
+            "the press at the top scrolls one page into the older rows:\n{painted}"
+        );
+        assert_eq!(
+            land(false),
+            painted,
+            "a page that lands before the next paint completes the press once"
+        );
     }
 }

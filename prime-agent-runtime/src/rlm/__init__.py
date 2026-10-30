@@ -190,6 +190,19 @@ async def spawn(
     ``thinking`` sets the child reasoning level (e.g. 'off', 'low', 'medium', 'high');
     defaults to the parent level; levels invalid for the resolved model fail the spawn.
     """
+    return await _spawn(prompt, name=name, model=model, thinking=thinking)
+
+
+async def _spawn(
+    prompt: str,
+    *,
+    name: str,
+    model: str | None = None,
+    thinking: str | None = None,
+    factory: dict[str, str] | None = None,
+) -> RLMSpawnHandle:
+    """``spawn`` plus the factory executor's run tag (``{runId, specId,
+    stateId}``), which the host records on the child's ledger spawn edge."""
     if not isinstance(prompt, str):
         raise TypeError(f"prompt must be str, got {type(prompt).__name__}")
     kwargs: dict[str, Any] = {"name": name}
@@ -197,6 +210,8 @@ async def spawn(
         kwargs["model"] = model
     if thinking is not None:
         kwargs["thinking"] = thinking
+    if factory is not None:
+        kwargs["factory"] = factory
     # Wire type stays "rlm.run" so kernels and hosts of different versions stay compatible.
     payload = await host_request("rlm.run", {"prompt": prompt, "kwargs": kwargs})
     return _spawn_handle_from_payload(payload)
@@ -574,6 +589,9 @@ class _HarnessProxy:
     def __getattr__(self, name: str) -> Any:
         return getattr(self._resolve(), name)
 
+    def __dir__(self) -> list[str]:
+        return sorted({*super().__dir__(), *(name for name in dir(self._resolve()) if not name.startswith("_"))})
+
     def __repr__(self) -> str:
         return repr(self._resolve())
 
@@ -707,6 +725,7 @@ class _RLMNamespace:
 
 rlm = _RLMNamespace()
 harness = _harness_state
+factory = rlm.factory
 
 
 class _NotCallableModule(types.ModuleType):
@@ -759,6 +778,4 @@ def __getattr__(name: str) -> Any:  # noqa: D401 - module-level lazy attr hook
         from . import mcp_base
 
         return getattr(mcp_base, name)
-    if name == "run":
-        raise AttributeError(_RENAMED_RUN_MESSAGE)
-    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    return getattr(rlm, name)

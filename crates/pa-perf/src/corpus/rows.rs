@@ -118,7 +118,15 @@ pub(crate) struct SessionSpec {
     pub marker: Option<String>,
     pub parent_session: Option<String>,
     pub rlm_depth: Option<u64>,
+    /// Prefix every generated text block with its ordinal (`ORDINAL_PREFIX` +
+    /// n, counting up in transcript order) so a scrolled screen names how far
+    /// up it is; the marker turn stays untagged.
+    pub ordinals: bool,
 }
+
+/// The block-ordinal token: `ord` + the ordinal's digits. No generated
+/// word contains `ord`, so the token is unambiguous on any screen.
+pub const ORDINAL_PREFIX: &str = "ord";
 
 /// What one generated session produced.
 pub(crate) struct Written {
@@ -321,6 +329,11 @@ pub(crate) fn write_session_file(
     // The conversation: fill to `rows`, keeping a compaction boundary near
     // 60% for long sessions and the marker on the final user message.
     let target = spec.rows as u64;
+    let mut ordinals = spec.ordinals.then_some(0u64..);
+    let mut tag = |text: String| match ordinals.as_mut().and_then(Iterator::next) {
+        Some(ordinal) => format!("{ORDINAL_PREFIX}{ordinal} {text}"),
+        None => text,
+    };
     let mut compaction_at = (target >= 1500).then(|| target * 6 / 10);
     let mut last_user_text = String::new();
     while rows.rows_written() < target {
@@ -348,7 +361,7 @@ pub(crate) fn write_session_file(
         let marker_turn = spec.marker.is_some() && target - rows.rows_written() <= 4;
         let text = match &spec.marker {
             Some(marker) if marker_turn => marker.clone(),
-            _ => user_text(rng),
+            _ => tag(user_text(rng)),
         };
         let content = if rng.chance(30) {
             UserContent::Blocks(vec![UserContentBlock::Text(TextContent {
@@ -387,7 +400,7 @@ pub(crate) fn write_session_file(
         let mut blocks = Vec::new();
         if !marker_turn && rng.chance(60) {
             blocks.push(AssistantContentBlock::Thinking(ThinkingContent {
-                thinking: assistant_text(rng),
+                thinking: tag(assistant_text(rng)),
                 thinking_signature: None,
                 redacted: None,
                 rest: serde_json::Map::new(),
@@ -397,7 +410,7 @@ pub(crate) fn write_session_file(
             text: if marker_turn {
                 "Done.".to_string()
             } else {
-                assistant_text(rng)
+                tag(assistant_text(rng))
             },
             text_signature: None,
             rest: serde_json::Map::new(),
@@ -456,7 +469,7 @@ pub(crate) fn write_session_file(
                         tool_call_id: call_id,
                         tool_name: name.to_string(),
                         content: vec![UserContentBlock::Text(TextContent {
-                            text: tool_output(rng),
+                            text: tag(tool_output(rng)),
                             text_signature: None,
                             rest: serde_json::Map::new(),
                         })],
@@ -505,6 +518,7 @@ mod tests {
             marker: Some("final user marker".to_string()),
             parent_session: None,
             rlm_depth: Some(0),
+            ordinals: false,
         }
     }
 

@@ -1,8 +1,8 @@
 """Validation and compilation for factory specifications.
 
 A continual-harness ``factory`` entry stores a declarative state machine of
-subagent states in ``arguments["machine"]``: entry states (which declare
-no inputs), guarded transitions between states, and bounded re-entry
+subagent states in ``arguments["machine"]``: entry states (whose inputs
+are all optional), guarded transitions between states, and bounded re-entry
 (``max_entries``). The original DAG form in ``arguments["dag"]`` stays as
 sugar: it compiles to machine form (each node becomes a state entered
 once; a node's full effective dependency set compiles to ONE join
@@ -47,10 +47,11 @@ import json
 import math
 import os
 import re
+import signal
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable
+from typing import IO, Any, Callable
 from uuid import uuid4
 
 FAILURE_POLICIES: tuple[str, ...] = ("fail_fast", "continue", "escalate")
@@ -284,7 +285,22 @@ def _validate_state_fields(
         )
 
     subagent = state.get("subagent")
-    if _is_nonempty_str(subagent):
+    if "python" in state:
+        # A pure-Python state runs a callable instead of spawning a child.
+        python = state.get("python")
+        if "subagent" in state:
+            errors.append(f"{noun} {ref} declares both subagent and python; use exactly one")
+        if not (
+            isinstance(python, dict)
+            and _is_nonempty_str(python.get("import"))
+            and _is_nonempty_str(python.get("callable"))
+        ):
+            errors.append(f"{noun} {ref} python requires non-empty 'import' and 'callable' strings")
+        if is_resident:
+            errors.append(f"python {noun} {ref} cannot be resident")
+        if "foreach" in state:
+            errors.append(f"python {noun} {ref} cannot use foreach")
+    elif _is_nonempty_str(subagent):
         pass  # Harness subagent entry id or title; resolved at run time.
     elif isinstance(subagent, dict):
         # Runtime resolution strips these fields (_resolve_subagents /
@@ -305,7 +321,8 @@ def _validate_state_fields(
     else:
         errors.append(
             f"{noun} {ref} requires a subagent: a harness subagent id/title string "
-            "or an inline object with a prompt"
+            "or an inline object with a prompt (or a python state: "
+            '{"python": {"import": "<module>", "callable": "<function>"}})'
         )
 
     if "budget_ms" in state:
@@ -491,10 +508,11 @@ def validate_factory_machine(machine: Any) -> list[str]:
 
     Returns a list of human-readable error sentences; an empty list means
     the machine is valid. Rules: states are 1..1024 with unique slug ids and
-    at least one entry state; every state requires a subagent and entry
-    states declare no inputs; resident states declare no outputs, foreach,
-    retries, or outgoing transitions; wait blocks are rejected (the watch host
-    handlers arrive with the communication series); transitions reference
+    at least one entry state; every state requires a subagent or a python
+    callable (not both) and entry states declare only optional inputs;
+    resident states declare no outputs, foreach, retries, or outgoing
+    transitions; wait blocks are rejected (the watch host handlers arrive
+    with the communication series); transitions reference
     existing states (self-loops are legal re-entry) and may carry one guard
     over the from-state's latest settle output; a transition with a LIST of
     from-states is a join that fires once every source settled (guards are
@@ -597,16 +615,21 @@ def validate_factory_machine(machine: Any) -> list[str]:
             _is_int(state.get("max_entries")) and state.get("max_entries") >= STATE_MAX_ENTRIES_DEFAULT
         ):
             errors.append(f"state {state_id} max_entries must be an integer >= {STATE_MAX_ENTRIES_DEFAULT}")
-        if state.get("entry") is True and _port_list(state, "inputs"):
-            errors.append(f"entry state {state_id} cannot declare inputs")
-        # A REQUIRED self-input can never bind: the state's first entry needs
-        # its own prior settle, and no settle exists before an entry settles.
-        # Optional self-inputs are the loop form (the first entry binds the
-        # null sentinel, re-entries re-bind the previous settle), so only the
-        # required variant is rejected -- the machine-form mirror of the dag
-        # compiler's "node b cannot depend on itself" rule.
+        # A REQUIRED input can never bind on an entry state's first entry
+        # (admission has no upstream settle) nor on a self-input's first
+        # entry (no settle exists before an entry settles). Optional inputs
+        # are the loop form (the first entry binds the null sentinel, a
+        # later entry binds the real settle), so only the required variants
+        # are rejected -- the self-input check is the machine-form mirror of
+        # the dag compiler's "node b cannot depend on itself" rule.
         for inp in _port_list(state, "inputs"):
             if not isinstance(inp, dict) or inp.get("optional"):
+                continue
+            if state.get("entry") is True:
+                errors.append(
+                    f"entry state {state_id} input {inp.get('name')!r} must be optional: "
+                    "an entry state's first entry has no upstream settle to bind"
+                )
                 continue
             source = inp.get("from")
             if isinstance(source, str) and "." in source and source.partition(".")[0] == state_id:
@@ -782,7 +805,9 @@ def compile_factory_dag(dag: Any) -> "tuple[dict[str, Any] | None, list[str]]":
     for node in nodes:
         edges = _effective_dag_edges(node)
         state: dict[str, Any] = {"id": node["id"], "entry": not edges, "max_entries": STATE_MAX_ENTRIES_DEFAULT}
-        for key in ("subagent", "lifecycle", "budget_ms", "retries", "failure_policy", "inputs", "outputs", "foreach"):
+        for key in (
+            "subagent", "python", "lifecycle", "budget_ms", "retries", "failure_policy", "inputs", "outputs", "foreach"
+        ):
             if key in node:
                 state[key] = copy.deepcopy(node[key])
         machine["states"].append(state)
@@ -858,9 +883,8 @@ def _canonicalize_machine(machine: dict[str, Any]) -> dict[str, Any]:
             "lifecycle": state.get("lifecycle", NODE_LIFECYCLE_DEFAULT),
             "retries": state.get("retries", NODE_RETRIES_DEFAULT),
             "failure_policy": state.get("failure_policy", run_policy),
-            "subagent": copy.deepcopy(state["subagent"]),
         }
-        for key in ("budget_ms", "inputs", "outputs", "foreach"):
+        for key in ("subagent", "python", "budget_ms", "inputs", "outputs", "foreach"):
             if key in state:
                 state_out[key] = copy.deepcopy(state[key])
         states_out.append(state_out)
@@ -1096,6 +1120,31 @@ _INFRA_ERROR_MARKERS = (
     "child worker unreachable",
     "supervisor link",
 )
+
+PYTHON_STATE_TIMEOUT_MS_DEFAULT = 60_000
+"""A python call's time limit when neither the state nor the run sets
+``budget_ms``."""
+
+PYTHON_STDERR_TAIL_CAP = 2000
+"""How much of a failed python call's stderr its error text carries."""
+
+PYTHON_RUNNER = r"""
+import asyncio, importlib, inspect, json, os, sys
+sys.path.insert(0, os.getcwd())
+inputs = json.load(sys.stdin.buffer)
+result_stream = os.fdopen(os.dup(1), "w")
+os.dup2(2, 1)
+sys.stdout = sys.stderr
+result = getattr(importlib.import_module(sys.argv[1]), sys.argv[2])(inputs)
+if inspect.iscoroutine(result):
+    result = asyncio.run(result)
+json.dump(result, result_stream)
+result_stream.close()
+"""
+"""The ``python -I -c`` program that runs one python state call: inputs
+arrive as JSON on stdin, everything the call prints (its own subprocesses
+included) goes to stderr, and the returned dict is the only thing written
+to stdout."""
 
 _FENCED_JSON_RE = re.compile(r"```json\s*(.*?)\s*```", re.DOTALL)
 TERMINAL_ENTRY_STATUSES = ("done", "error", "cancelled")
@@ -1347,6 +1396,94 @@ def _guard_passes(when: dict[str, Any], outputs: dict[str, Any]) -> bool:
     return False
 
 
+class _PythonProcess:
+    """One python state call: a short-lived isolated subprocess.
+
+    stdout and stderr go to temp files, so a large output never blocks the
+    child on a full pipe and the kernel needs no reader task.
+    """
+
+    def __init__(self, proc: Any, stdout: IO[bytes], stderr: IO[bytes]) -> None:
+        self.proc = proc
+        self._stdout = stdout
+        self._stderr = stderr
+
+    @classmethod
+    async def start(cls, target: dict[str, str], inputs: dict[str, Any]) -> "_PythonProcess":
+        import asyncio
+        import sys
+        import tempfile
+
+        from .bash import _child_env
+
+        env = {key: value for key, value in _child_env().items() if not key.startswith("RLM_")}
+        stdout, stderr = tempfile.TemporaryFile(), tempfile.TemporaryFile()
+        try:
+            with tempfile.TemporaryFile() as stdin:
+                stdin.write(json.dumps(inputs).encode("utf-8"))
+                stdin.seek(0)
+                proc = await asyncio.create_subprocess_exec(
+                    sys.executable, "-I", "-c", PYTHON_RUNNER, target["import"], target["callable"],
+                    stdin=stdin, stdout=stdout, stderr=stderr,
+                    cwd=os.getcwd(), env=env, start_new_session=True,
+                )
+        except BaseException:
+            stdout.close()
+            stderr.close()
+            raise
+        return cls(proc, stdout, stderr)
+
+    def _kill(self) -> None:
+        """Kill the call's whole process group (the process alone on Windows)."""
+        if os.name == "posix":
+            from .bash import _signal_group
+
+            _signal_group(self.proc.pid, signal.SIGKILL)
+        else:
+            try:
+                self.proc.kill()
+            except ProcessLookupError:
+                pass  # already exited
+
+    async def stop(self) -> None:
+        """Kill a running call, wait for it to exit, and release its files."""
+        self._kill()
+        await self.proc.wait()
+        self.finish()
+
+    def finish(self) -> tuple[str, str]:
+        """Read stdout and the stderr tail of an exited call, then close both.
+        A call lives no longer than its exit: anything it left running in its
+        process group is killed."""
+        self._kill()
+        self._stdout.seek(0)
+        stdout = self._stdout.read().decode("utf-8", "replace")
+        self._stderr.seek(0, os.SEEK_END)
+        self._stderr.seek(max(self._stderr.tell() - PYTHON_STDERR_TAIL_CAP, 0))
+        stderr = self._stderr.read().decode("utf-8", "replace").strip()
+        self._stdout.close()
+        self._stderr.close()
+        return stdout, stderr
+
+
+def _python_outputs(state_spec: dict[str, Any], stdout: str) -> "dict[str, Any] | str":
+    """A python call's outputs from its stdout, or the error sentence when
+    stdout is not one object whose keys are exactly the declared outputs."""
+    try:
+        outputs = json.loads(stdout)
+    except ValueError:
+        return "python state did not write one JSON object to stdout"
+    if not isinstance(outputs, dict):
+        return f"python state returned {type(outputs).__name__}, not a dict"
+    declared = _declared_port_types(state_spec, "outputs")
+    if set(outputs) != set(declared):
+        return f"python state returned keys {sorted(outputs)} but declares outputs {sorted(declared)}"
+    for name, port_type in declared.items():
+        if port_type == "text" and not isinstance(outputs[name], str):
+            return f"python state output {name!r} is text but the call returned {type(outputs[name]).__name__}"
+    return outputs
+
+
 def _validate_spawn_settings(model: Any, thinking: Any) -> str | None:
     for key, value in (("model", model), ("thinking", thinking)):
         if value is not None and (not isinstance(value, str) or not value.strip()):
@@ -1388,6 +1525,9 @@ class _NodeInstance:
     # exit's last assistant text as delivered work (the M4 class).
     error: str | None = None
     tool_uses: int = 0
+    inputs: dict[str, Any] | None = None  # a python state's bound inputs; re-runs reuse them
+    process: "_PythonProcess | None" = None  # a python state's running call
+    deadline: float | None = None  # a python call's time limit (seconds on the injected clock)
 
 
 @dataclass
@@ -2246,6 +2386,8 @@ class FactoryExecutor:
         errors: list[str] = []
         for state_spec in canonical["states"]:
             state_id = state_spec["id"]
+            if "python" in state_spec:
+                continue  # python states spawn no child
             reference = state_spec["subagent"]
             if isinstance(reference, dict):
                 prompt = reference.get("prompt")
@@ -2548,11 +2690,15 @@ class FactoryExecutor:
             pair = self._next_pending_instance(run)
             if pair is None:
                 break
-            if self._children_budget_exceeded(run):
+            state, entry, instance = pair
+            python = "python" in state.spec
+            if not python and self._children_budget_exceeded(run):
                 await self._pause_for_children(run)
                 break
-            state, entry, instance = pair
-            outcome = await self._admit(run, state, entry, instance, allow_backoff=allow_backoff)
+            if python:
+                outcome = await self._start_python(run, state, entry, instance)
+            else:
+                outcome = await self._admit(run, state, entry, instance, allow_backoff=allow_backoff)
             if outcome == "admitted" and state.state_id not in started:
                 started.append(state.state_id)
             if outcome == "stopped":
@@ -2651,7 +2797,8 @@ class FactoryExecutor:
     def _prepare_entry(
         self, run: FactoryRun, state: _StateRun, entry: _StateEntry
     ) -> "tuple[list[_NodeInstance] | None, str | None]":
-        """Bind inputs, expand foreach, and render one prompt per instance.
+        """Bind inputs, expand foreach, and render one prompt per instance
+        (a python state gets one instance carrying the bound values instead).
 
         Returns ``(instances, None)`` on success, ``(None, None)`` while an
         input source has not settled yet (the entry stays pending), or
@@ -2659,7 +2806,9 @@ class FactoryExecutor:
         retry: a deterministic binding error would recur on every re-render,
         so the entry fails and its failure_policy applies directly.
         """
-        values: dict[str, str] = {}
+        # Raw bound values first: a python state receives them as-is, and an
+        # agent state renders them into its prompt below.
+        bound: dict[str, Any] = {}
         foreach = state.spec.get("foreach")
         items: list[Any] | None = None
         for inp in state.spec.get("inputs") or []:
@@ -2727,20 +2876,32 @@ class FactoryExecutor:
                     if foreach is not None and foreach.get("over") == name:
                         items = []
                         continue
-                    values[name] = "null" if port_type == "json" else "None"
+                    bound[name] = None
                     continue
                 if latest is None:
                     return None, None  # wait for the source's first settle
                 return None, failure
             if port_type == "text":
-                values[name] = value if isinstance(value, str) else json.dumps(value)
+                bound[name] = value if isinstance(value, str) else json.dumps(value)
                 continue
             if foreach is not None and foreach.get("over") == name:
                 if not isinstance(value, list):
                     return None, f"foreach.over input {name!r} is not a JSON list"
                 items = value
                 continue
-            values[name] = json.dumps(value)
+            bound[name] = value
+        if "python" in state.spec:
+            instance = _NodeInstance(index=state.instance_counter, prompt="", inputs=bound)
+            state.instance_counter += 1
+            return [instance], None
+        # The prompt form of a bound value: json inputs as JSON text (a
+        # missing optional one reads "null"), text inputs verbatim (a
+        # missing optional one reads "None").
+        port_types = {inp["name"]: inp["type"] for inp in state.spec.get("inputs") or []}
+        values = {
+            name: json.dumps(value) if port_types[name] == "json" else ("None" if value is None else value)
+            for name, value in bound.items()
+        }
         if foreach is None:
             assert state.prompt_template is not None
             instance = _NodeInstance(index=state.instance_counter, prompt=_render_prompt(state.prompt_template, values))
@@ -2799,13 +2960,17 @@ class FactoryExecutor:
         ``stop()`` is retracted (deleted and cancelled) instead of
         registered running.
         """
-        from . import spawn
+        from . import _spawn
 
         instance.attempt += 1
         child_name = _spawn_label(state.name, run.run_id, state.state_id, instance.index, instance.attempt)
         try:
-            handle = await spawn(
-                instance.prompt, name=child_name, model=state.model, thinking=state.thinking
+            handle = await _spawn(
+                instance.prompt,
+                name=child_name,
+                model=state.model,
+                thinking=state.thinking,
+                factory={"runId": run.run_id, "specId": run.spec_id, "stateId": state.state_id},
             )
         except RuntimeError as exc:
             last_error = str(exc)
@@ -2869,6 +3034,117 @@ class FactoryExecutor:
             name=child_name,
         )
         return "admitted"
+
+    async def _start_python(
+        self, run: FactoryRun, state: _StateRun, entry: _StateEntry, instance: _NodeInstance
+    ) -> str:
+        """Start one python state call. Returns "admitted", "failed", or
+        "stopped" like ``_admit``. The call holds a max_parallel slot but is
+        no child: it never counts toward ``max_children``."""
+        instance.attempt += 1
+        try:
+            process = await _PythonProcess.start(state.spec["python"], instance.inputs)
+        except OSError as exc:
+            await self._apply_instance_failure(
+                run, state, entry, instance, f"python state could not start: {exc}", retry=False
+            )
+            return "failed"
+        if run.state != "running":
+            # stop() ran while the process was starting; its pass could not see it.
+            await process.stop()
+            instance.status = "cancelled"
+            self._event(run, "cancelled", node=state.state_id, entry=entry.index, instance=instance.index)
+            return "stopped"
+        instance.process = process
+        instance.spawned_at = self._now_fn()
+        instance.deadline = instance.spawned_at + self._python_limit_ms(run, state) / 1000
+        instance.status = "running"
+        self._event(
+            run,
+            "started",
+            node=state.state_id,
+            entry=entry.index,
+            instance=instance.index,
+            attempt=instance.attempt,
+        )
+        return "admitted"
+
+    def _python_limit_ms(self, run: FactoryRun, state: _StateRun) -> int:
+        """A python call's time limit: the state's budget_ms, else the run's,
+        else the default."""
+        return state.spec.get("budget_ms") or run.run_budget_ms or PYTHON_STATE_TIMEOUT_MS_DEFAULT
+
+    async def _wait_python(self, calls: list[_NodeInstance]) -> None:
+        """Wait for the first python call to exit, bounded by the nearest
+        time limit and the collect poll timeout."""
+        import asyncio
+
+        nearest = min(instance.deadline for instance in calls)
+        timeout = min(max(nearest - self._now_fn(), 0.0), POLL_TIMEOUT_MS / 1000)
+        waits = [asyncio.ensure_future(instance.process.proc.wait()) for instance in calls]
+        _, pending = await asyncio.wait(waits, timeout=timeout, return_when=asyncio.FIRST_COMPLETED)
+        for wait in pending:
+            wait.cancel()
+
+    async def _apply_python_exit(
+        self, run: FactoryRun, state: _StateRun, entry: _StateEntry, instance: _NodeInstance
+    ) -> None:
+        """Settle one python call that exited or ran past its time limit."""
+        process = instance.process
+        assert process is not None and instance.spawned_at is not None
+        # Claimed before any await, like _cancel_running claims a child.
+        instance.process = None
+        instance.duration_ms = int((self._now_fn() - instance.spawned_at) * 1000)
+        if process.proc.returncode is None:
+            # Past its time limit: the limit is spent, so no retry.
+            await process.stop()
+            await self._apply_instance_failure(
+                run,
+                state,
+                entry,
+                instance,
+                f"python state time limit {self._python_limit_ms(run, state)}ms exceeded",
+                retry=False,
+            )
+            return
+        stdout, stderr = process.finish()
+        run.settle_count += 1
+        returncode = process.proc.returncode
+        if returncode != 0:
+            detail = f": {stderr}" if stderr else ""
+            await self._apply_instance_failure(
+                run, state, entry, instance, f"python state exited with code {returncode}{detail}", retry=True
+            )
+            return
+        outputs = _python_outputs(state.spec, stdout)
+        if isinstance(outputs, str):
+            await self._apply_instance_failure(run, state, entry, instance, outputs, retry=True)
+            return
+        instance.status = "done"
+        instance.answer = json.dumps(outputs, separators=(",", ":"))[:ANSWER_BINDING_CAP]
+        self._event(
+            run,
+            "settled",
+            node=state.state_id,
+            entry=entry.index,
+            instance=instance.index,
+            status="done",
+            duration_ms=instance.duration_ms,
+        )
+        self._event(
+            run,
+            "answer_captured",
+            node=state.state_id,
+            entry=entry.index,
+            instance=instance.index,
+            answer=instance.answer[:ANSWER_CAPTURE_CAP],
+            stage="arrived",
+        )
+        entry.answer = instance.answer
+        entry.outputs = outputs
+        entry.output_errors = {}
+        entry.status = "done"
+        self._queue_settle(run, state, entry)
 
     # -- settlement, retries, policies ---------------------------------------
 
@@ -3452,9 +3728,24 @@ class FactoryExecutor:
         # there, but the executor treats its slot as released.
         instance.status = "cancelled"
 
+    async def _cancel_python(self, run: FactoryRun) -> None:
+        """Stop executor-owned calls when the run stops or its control lane fails."""
+        for state_id in run.order:
+            state = run.states[state_id]
+            for entry in state.entries:
+                for instance in entry.instances:
+                    if instance.status == "running" and instance.process is not None:
+                        process, instance.process = instance.process, None
+                        instance.status = "cancelled"
+                        if entry.status == "running":
+                            entry.status = "cancelled"
+                        await process.stop()
+                        self._event(run, "cancelled", node=state_id, entry=entry.index, instance=instance.index)
+
     async def _cancel_running(self, run: FactoryRun) -> None:
         from . import delete_subagent
 
+        await self._cancel_python(run)
         for state_id in run.order:
             state = run.states[state_id]
             for entry in state.entries:
@@ -3569,6 +3860,9 @@ class FactoryExecutor:
             self._event(run, "executor_error", error=f"{type(exc).__name__}: {exc}")
             if run.state == "running":
                 run.state = "failed"
+                # Child agents remain supervisor-owned; these subprocesses
+                # have no owner or deadline enforcer after this lane exits.
+                await self._cancel_python(run)
                 try:
                     await self._milestone(run, "failed", f"executor error: {exc}")
                 except Exception:
@@ -3590,14 +3884,21 @@ class FactoryExecutor:
                 for state_id in run.order
                 for entry in run.states[state_id].entries
                 for instance in entry.instances
-                if instance.status == "running" and instance.child_id is not None
+                if instance.status == "running"
             ]
-            if in_flight:
+            children = [item for item in in_flight if item[2].child_id is not None]
+            python_calls = [item for item in in_flight if item[2].process is not None]
+            if children:
+                # A child poll must not postpone a concurrent Python call's deadline.
+                timeout_ms = POLL_TIMEOUT_MS
+                if python_calls:
+                    nearest = min(instance.deadline for _, _, instance in python_calls)
+                    timeout_ms = min(timeout_ms, max(0, math.ceil((nearest - self._now_fn()) * 1000)))
                 results = await collect(
-                    [instance.child_id for _, _, instance in in_flight], timeout_ms=POLL_TIMEOUT_MS
+                    [instance.child_id for _, _, instance in children], timeout_ms=timeout_ms
                 )
                 settled = {entry.rlm_child_id: entry for entry in results if entry.settled}
-                for state, entry, instance in in_flight:
+                for state, entry, instance in children:
                     # A GENERATION bump mid-batch drops this collect's
                     # results: the resumed loop re-collects the children
                     # (they stay running supervisor-side), so no settle is
@@ -3611,6 +3912,16 @@ class FactoryExecutor:
                     result = settled.get(instance.child_id or "")
                     if result is not None:
                         await self._apply_settlement(run, state, entry, instance, result)
+            elif python_calls:
+                await self._wait_python([instance for _, _, instance in python_calls])
+            for state, entry, instance in python_calls:
+                if run.loop_generation != generation:
+                    return
+                process = instance.process
+                if instance.status != "running" or process is None:
+                    continue  # stop()/fail_fast claimed it during the wait
+                if process.proc.returncode is not None or self._now_fn() >= instance.deadline:
+                    await self._apply_python_exit(run, state, entry, instance)
             # Re-check state before completion: stop() (or a policy transition)
             # can land while the collect above was in flight, and a run that
             # was stopped must never finalize as done.
@@ -3925,7 +4236,9 @@ def _machine_structure(
         }
         model, thinking = (resolved or {}).get(state["id"], (None, None))
         subagent = state.get("subagent")
-        if isinstance(subagent, dict):
+        if "python" in state:
+            row["python"] = f"{state['python']['import']}.{state['python']['callable']}"
+        elif isinstance(subagent, dict):
             # A resolved live run carries the executor's spawn settings for
             # both subagent forms; a spec graph surfaces the inline-declared
             # ones only (a reference form's settings resolve at run time).
@@ -4397,7 +4710,10 @@ def _machine_contract_lines(spec: "dict[str, Any]") -> list[str]:
             label += f" ({', '.join(flags)})"
         lines.append(label)
         subagent = state.get("subagent")
-        if isinstance(subagent, dict):
+        python = state.get("python")
+        if isinstance(python, dict):
+            lines.append(f"  python: {python.get('import')}.{python.get('callable')}")
+        elif isinstance(subagent, dict):
             settings = subagent.get("name") or subagent.get("prompt", "")[:60]
             lines.append(f"  subagent: inline ({settings})")
         elif isinstance(subagent, str):
@@ -5005,8 +5321,11 @@ the cap, fails to capture, and fails the producing state through its
 ## Authoring reference
 
 - **States**: 1 to 1024, unique ids matching `^[a-z0-9][a-z0-9-]{0,63}$`; at
-  least one state carries `"entry": true`, and entry states declare no
-  inputs. A state's `subagent` is a harness subagent entry id or title (its
+  least one state carries `"entry": true`. An entry state's inputs must all
+  be optional: its first entry binds the null sentinel, and a later entry
+  through a transition (a verify loop back into it) binds the real
+  settle. A state runs either a `python` callable (see Python states) or
+  a subagent. A state's `subagent` is a harness subagent entry id or title (its
   content is the prompt template; `metadata.model`/`metadata.thinking` are
   spawn settings) or an inline `{"prompt": ...}` object with optional
   `name`/`model`/`thinking`. The optional `name` labels the spawned
@@ -5166,6 +5485,72 @@ rlm.harness.create_factory(
 )
 ```
 
+## Python states
+
+A state can run a Python function instead of spawning a child: it carries
+`"python": {"import": "<module>", "callable": "<function>"}` in place of
+`subagent` (exactly one of the two). Use it for deterministic routing and
+data shaping — listing work items, filtering, reshaping one state's output
+for the next — where a child agent would only spend budget.
+
+- **Contract**: the executor calls `fn(inputs)` with a dict of the state's
+  declared inputs bound to raw values (a `text` input as a string, a `json`
+  input as the parsed value, an optional input with no value as `None`;
+  entry states with no declared inputs get `{}`). The function returns a
+  dict whose keys are exactly the declared output names (a `text` output must be a string);
+  that dict is the settle's outputs, so guards and downstream inputs read
+  it like any other state's. An `async def` function is awaited.
+- **Isolation**: every call runs in a fresh, short-lived Python subprocess
+  (the kernel's interpreter, isolated mode) in the session's working
+  directory, which is on the import path, so a module next to your work
+  imports. It has no `rlm`, no harness, no kernel globals, and cannot spawn
+  agents. Prints go to stderr; only the returned dict goes to stdout.
+- **Failures**: an exception (its stderr tail is the error), output that is
+  not a dict, or keys that do not match the declared outputs fail the
+  attempt: `retries` re-runs the call with the same inputs, then
+  `failure_policy` applies. A bad import fails at run time the same way.
+- **Time limit**: the state's `budget_ms`, else the run's `budget_ms`, else
+  60 seconds. A call past its limit is killed and fails without a retry.
+  `stop` and `fail_fast` kill running calls.
+- **Pure functions**: calls are re-run on retry and on resume after an
+  escalate pause, so a python state should depend only on its inputs.
+  A running call belongs to its run and is lost with it on a kernel
+  restart.
+- Python states cannot be `resident` and cannot use `foreach`. A call holds
+  a `max_parallel` slot but is no child: it does not count toward
+  `max_children`.
+
+A python state lists the work, then an agent state fans out over it:
+
+```python
+# my_tools.py in the session's working directory
+def changed_files(inputs):
+    import subprocess
+    out = subprocess.run(["git", "diff", "--name-only", "main"],
+                         capture_output=True, text=True, check=True).stdout
+    return {"files": out.split()[:8]}
+```
+
+```python
+rlm.harness.create_factory(
+    "file-review",
+    "Review each changed file.",
+    id="file-review",
+    machine={
+        "states": [
+            {"id": "files", "entry": True,
+             "python": {"import": "my_tools", "callable": "changed_files"},
+             "outputs": [{"name": "files", "type": "json"}]},
+            {"id": "review",
+             "subagent": {"prompt": "Review {file}; reply one line: `<path>: <problem or clean>`."},
+             "inputs": [{"name": "file", "type": "json", "from": "files.files"}],
+             "foreach": {"over": "file", "max": 8}},
+        ],
+        "transitions": [{"from": "files", "to": "review"}],
+    },
+)
+```
+
 ## Run and steer
 
 ```python
@@ -5256,14 +5641,16 @@ watched = await rlm.factory.watch(result["run_id"], 30)
   derive from their shapes.
 - The TUI factory page: the activity dock's `⚙ N factory` group (Enter or
   click) opens one live diagram per run, newest run first. The up/down
-  arrows move the run selection, Enter opens the selected run's action
-  rows (stop, or resume first while the run is paused — the arrows walk
-  the rows, Enter runs the tracked action), and Esc backs out of the rows
-  before it closes the page.
+  arrows walk the run headers and the states that spawned a child;
+  Enter or Right opens the selected state's latest child session, and
+  Left or Esc closes the page. Ctrl+X (the agents view's stop key) twice
+  stops the selected row: the whole run on its header, or the state's
+  running child (that attempt fails under the state's `retries` and
+  `failure_policy`). `r` resumes a paused run.
 
 ## Safety
 
-- Every state spawns real children that spend budget. Bound loops with
+- Every subagent state spawns real children that spend budget. Bound loops with
   `max_entries`, `max_transitions`, and `run.max_children` (total
   admissions); the default `escalate` policy pauses
   instead of failing, so read `status` (or the notice) before resuming.

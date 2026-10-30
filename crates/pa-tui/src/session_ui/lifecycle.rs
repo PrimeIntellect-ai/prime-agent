@@ -156,6 +156,8 @@ impl SessionUi {
             subagent_counts: crate::subagents::SubagentCounts::default(),
             session_file: None,
             pending_selection: None,
+            pending_selection_rlm_depth: None,
+            pending_selection_origin: None,
             return_to_agents_view: !options.no_session,
             panel_returns_to_agents_view: false,
             client_auth: options.client_auth.clone(),
@@ -539,6 +541,26 @@ impl SessionUi {
         std::time::Instant::now().checked_sub(std::time::Duration::from_millis(age))
     }
 
+    /// The one transcript replacement: clear the chat, render the entries,
+    /// and re-register decoded pending tool cards.
+    pub(crate) fn replace_transcript(&mut self, entries: Vec<ChatEntry>, view: &mut AgentView) {
+        view.clear_chat();
+        self.last_status_index = None;
+        self.pressed_click = None;
+        self.pending_tools.clear();
+        self.aborted_tools.clear();
+        for entry in entries {
+            view.push_entry(entry);
+        }
+        for entry in &view.chat {
+            if let ChatEntry::Tool(card) = entry {
+                if card.result.is_none() || card.result_partial {
+                    self.pending_tools.insert(card.id.clone());
+                }
+            }
+        }
+    }
+
     /// Fold the pending snapshot into the view (fresh transcript, footer
     /// labels). Called after attach and after every session switch.
     pub(crate) fn rebuild_view(&mut self, view: &mut AgentView, kind: &RebuildKind) {
@@ -591,31 +613,14 @@ impl SessionUi {
             self.speed_stats = None;
             view.chrome.speed_text = None;
         }
-        view.clear_chat();
-        self.last_status_index = None;
-        self.pressed_click = None;
-        self.pending_tools.clear();
-        self.aborted_tools.clear();
-        if let Some(items) = self.pending_snapshot.take() {
-            for entry in items {
-                view.push_entry(entry);
-            }
-        }
+        let snapshot = self.pending_snapshot.take().unwrap_or_default();
+        self.replace_transcript(snapshot, view);
         if let Some(message) = self.pending_model_fallback_message.take() {
             view.push_entry(ChatEntry::Status {
                 text: format!("\u{26a0} {message}"),
                 kind: crate::chat::StatusKind::Warning,
             });
             self.last_status_index = None;
-        }
-        // The rebuild re-registers the live tool cards (the resumed turn's streamed calls re-enter
-        // the pending map): a post-reconnect failure frame can still settle them.
-        for entry in &view.chat {
-            if let ChatEntry::Tool(card) = entry {
-                if card.result.is_none() || card.result_partial {
-                    self.pending_tools.insert(card.id.clone());
-                }
-            }
         }
         if let Some(model) = self.pending_model.take() {
             view.chrome.model_id = Some(model);
@@ -871,6 +876,7 @@ mod backfill_tests {
             ));
             session.open_agents_view_panel(
                 crate::interactive::SessionPanel::Shells { shell_id: None },
+                true,
                 &mut view,
             );
             session.rebuild_view(&mut view, &RebuildKind::Rebind);
@@ -918,6 +924,7 @@ mod backfill_tests {
                     crate::interactive::SessionPanel::Shells {
                         shell_id: Some("s2".to_string()),
                     },
+                    true,
                     &mut view,
                 );
                 if !preloaded {

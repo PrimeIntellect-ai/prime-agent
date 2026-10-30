@@ -129,6 +129,7 @@ const READ_ONLY_DAEMON_COMMANDS: &[&str] = &[
     "get_state",
     "get_connection_state",
     "get_messages",
+    "get_session_messages",
     "get_rlm_children",
     "get_session_stats",
     "get_context_tree",

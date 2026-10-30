@@ -57,6 +57,45 @@ fn a_saved_anchor_beyond_the_first_page_remains_pending_until_it_arrives() {
 }
 
 #[test]
+fn a_panel_anchored_outside_its_listed_subtree_does_not_page_the_catalog() {
+    for anchor in ["p", "x"] {
+        let mut mode = scoped_mode(
+            Some(anchor),
+            vec![
+                roster_entry("p", "idle", &parent_summary("p")),
+                roster_entry("c", "running", &child_summary("c", "p", "worker one")),
+                roster_entry("x", "idle", &parent_summary("x")),
+            ],
+        );
+        mode.finish_saved_page(more());
+        assert!(!mode.anchor_selection_pending, "anchor {anchor}");
+        assert_eq!(mode.next_saved_fetch(), None, "anchor {anchor}");
+    }
+}
+
+#[test]
+fn a_panel_keeps_waiting_for_a_nested_anchor_whose_parent_has_not_loaded() {
+    let mut mode = scoped_mode(
+        Some("g"),
+        vec![
+            roster_entry("p", "idle", &parent_summary("p")),
+            roster_entry("g", "running", &child_summary("g", "c", "grandchild")),
+        ],
+    );
+    mode.finish_saved_page(more());
+    assert!(mode.anchor_selection_pending);
+    assert!(mode.next_saved_fetch().is_some());
+    mode.roster.push(roster_entry(
+        "c",
+        "running",
+        &child_summary("c", "p", "worker one"),
+    ));
+    mode.rebuild_rows();
+    assert_eq!(mode.rows[mode.selected].summary["sessionId"], "g");
+    assert!(!mode.anchor_selection_pending);
+}
+
+#[test]
 fn a_carried_partial_catalog_keeps_waiting_for_a_missing_anchor() {
     let mut mode = mode_with_anchor(Some("older"), Vec::new());
     mode.apply_saved_loaded(vec![saved_catalog_row("/x/new.jsonl", "new", "newer")]);

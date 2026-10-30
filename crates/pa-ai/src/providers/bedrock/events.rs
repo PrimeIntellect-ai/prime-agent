@@ -60,6 +60,20 @@ impl BedrockStreamState {
     }
 }
 
+/// On the wire the payload is the bare event body and `:event-type` names it; the handlers read the
+/// SDK's wrapped form `{"<eventType>": {...}}`, so wrap it as the SDK does (exceptions carry their
+/// own header and stay bare).
+fn wrap_event_payload(event_type: Option<&str>, is_exception: bool, parsed: Value) -> Value {
+    match event_type {
+        Some(event_type) if !is_exception => {
+            let mut wrapped = Map::new();
+            wrapped.insert(event_type.to_string(), parsed);
+            Value::Object(wrapped)
+        }
+        _ => parsed,
+    }
+}
+
 pub(crate) fn handle_event(
     message: &crate::providers::bedrock::eventstream::EventStreamMessage,
     model: &Model,
@@ -70,6 +84,11 @@ pub(crate) fn handle_event(
 ) -> Result<(), ProviderError> {
     let payload = String::from_utf8_lossy(&message.payload);
     let parsed: Value = serde_json::from_str(payload.trim()).unwrap_or(Value::Null);
+    let parsed = wrap_event_payload(
+        message.event_type.as_deref(),
+        message.exception_type.is_some(),
+        parsed,
+    );
 
     // Exception events carry :exception-type and a JSON payload with message. TS rethrows the
     // modeled SDK exception, so `formatBedrockError` composes `{prefix}: {message}` and the
@@ -481,5 +500,124 @@ mod tests {
             request_id.as_ref(),
         );
         assert_eq!(output.usage.total_tokens, 15);
+    }
+
+    fn wire_model() -> Model {
+        Model {
+            id: "us.anthropic.claude-opus-4-6-v1".into(),
+            name: "Claude Opus 4.6".into(),
+            api: crate::providers::bedrock::API_BEDROCK_CONVERSE_STREAM.to_string(),
+            provider: "amazon-bedrock".into(),
+            base_url: "https://bedrock-runtime.us-east-1.amazonaws.com".into(),
+            reasoning: true,
+            thinking_level_map: None,
+            input: vec![ModelInput::Text],
+            cost: zero_model_cost(),
+            context_window: 200_000,
+            max_tokens: 8192,
+            max_tokens_explicit: false,
+            featured: None,
+            headers: None,
+            compat: None,
+        }
+    }
+
+    /// Feed decoded frames the way Bedrock sends them: the event name in `:event-type` and the bare
+    /// event body as the payload.
+    fn run_wire_events(frames: &[(&str, Value)]) -> AssistantMessage {
+        let model = wire_model();
+        let (writer, _stream) = crate::event_stream::create_assistant_message_event_stream();
+        let mut state = BedrockStreamState::new();
+        let mut output = crate::event_stream::initial_assistant_message(
+            crate::providers::bedrock::API_BEDROCK_CONVERSE_STREAM,
+            "amazon-bedrock",
+            &model.id,
+        );
+        for (event_type, body) in frames {
+            let message = crate::providers::bedrock::eventstream::EventStreamMessage {
+                message_type: Some("event".into()),
+                event_type: Some((*event_type).to_string()),
+                exception_type: None,
+                payload: body.to_string().into_bytes(),
+            };
+            handle_event(&message, &model, &mut output, &writer, &mut state, None)
+                .expect("event handled");
+        }
+        output
+    }
+
+    #[test]
+    fn bare_wire_payloads_produce_text_usage_and_stop_reason() {
+        let output = run_wire_events(&[
+            ("messageStart", json!({"role": "assistant", "p": "abc"})),
+            (
+                "contentBlockDelta",
+                json!({"contentBlockIndex": 0, "delta": {"text": "2 + 2 is "}, "p": "abcdefghijklmnopqrstuvwxyzABC"}),
+            ),
+            (
+                "contentBlockDelta",
+                json!({"contentBlockIndex": 0, "delta": {"text": "4."}, "p": "ab"}),
+            ),
+            (
+                "contentBlockStop",
+                json!({"contentBlockIndex": 0, "p": "ab"}),
+            ),
+            ("messageStop", json!({"stopReason": "end_turn", "p": "ab"})),
+            (
+                "metadata",
+                json!({"usage": {"inputTokens": 12, "outputTokens": 7, "totalTokens": 19}, "metrics": {"latencyMs": 300}, "p": "ab"}),
+            ),
+        ]);
+        assert_eq!(
+            output.content,
+            vec![AssistantContent::Text(TextContent {
+                text: "2 + 2 is 4.".into(),
+                text_signature: None,
+                rest: Map::default(),
+            })]
+        );
+        assert_eq!(
+            output.usage,
+            Usage {
+                input: 12,
+                output: 7,
+                total_tokens: 19,
+                ..Usage::default()
+            }
+        );
+        assert_eq!(output.stop_reason, StopReason::Stop);
+    }
+
+    #[test]
+    fn a_metadata_only_wire_stream_still_records_usage() {
+        let output = run_wire_events(&[(
+            "metadata",
+            json!({"usage": {"inputTokens": 3, "outputTokens": 0, "totalTokens": 3, "cacheReadInputTokens": 40}}),
+        )]);
+        assert_eq!(output.content, Vec::new());
+        assert_eq!(
+            output.usage,
+            Usage {
+                input: 3,
+                cache_read: 40,
+                total_tokens: 3,
+                ..Usage::default()
+            }
+        );
+    }
+
+    #[test]
+    fn event_payloads_are_wrapped_and_exception_and_headerless_payloads_pass_through() {
+        let bare = json!({"contentBlockIndex": 0, "delta": {"text": "hi"}});
+        let wrapped = json!({"contentBlockDelta": bare});
+        assert_eq!(
+            wrap_event_payload(Some("contentBlockDelta"), false, bare.clone()),
+            wrapped
+        );
+        assert_eq!(
+            wrap_event_payload(Some("throttlingException"), true, bare.clone()),
+            bare
+        );
+        assert_eq!(wrap_event_payload(None, false, bare.clone()), bare);
     }
 }

@@ -1,5 +1,6 @@
 //! The per-session shells and factory-run counts behind the agents-view activity lines.
 use super::{AgentsViewMode, DaemonClient, DaemonCommand, SessionActivity};
+use crate::bash_view::ShellCounts;
 use anyhow::Result;
 use serde_json::{Map, Value};
 use tokio::sync::oneshot;
@@ -8,7 +9,7 @@ use tokio::sync::oneshot;
 /// count.
 pub(super) struct ActivityRead {
     pub(super) active_session_id: String,
-    pub(super) shells: Option<usize>,
+    pub(super) shells: Option<ShellCounts>,
     pub(super) factory_runs: Option<crate::factory_view::FactoryRunCounts>,
 }
 
@@ -29,7 +30,7 @@ pub(super) fn spawn_session_activity_fetch(
             reads.spawn(async move {
                 let shells = async {
                     if !shells_supported {
-                        return Some(0);
+                        return Some(ShellCounts::default());
                     }
                     let reply = client
                         .request_ok(DaemonCommand::ListKernelBash {
@@ -39,7 +40,7 @@ pub(super) fn spawn_session_activity_fetch(
                         })
                         .await;
                     count(reply, |data| {
-                        Some(crate::bash_view::running_shell_count(data))
+                        Some(crate::bash_view::running_shell_counts(data))
                     })
                 };
                 let factory_runs = async {
@@ -79,7 +80,7 @@ pub(super) fn spawn_session_activity_fetch(
     rx
 }
 
-/// A session without a running kernel hosts nothing: zero, not a failed read.
+/// The daemon's no-kernel refusal reads as zero, not a failed read.
 fn count<T: Default>(reply: Result<Value>, count: impl Fn(&Value) -> Option<T>) -> Option<T> {
     match reply {
         Ok(data) => count(&data),
@@ -89,7 +90,7 @@ fn count<T: Default>(reply: Result<Value>, count: impl Fn(&Value) -> Option<T>) 
 }
 
 impl AgentsViewMode {
-    /// The roster's live sessions a fetch cycle asks: saved rows have no kernel and render no lines.
+    /// The roster's live sessions a fetch cycle asks: saved rows have no kernel.
     pub(super) fn live_session_ids(&self) -> Vec<String> {
         self.roster
             .iter()
@@ -102,11 +103,12 @@ impl AgentsViewMode {
     /// Fold one cycle into the counts (a failed read keeps that session's last count) and
     /// rebuild only when a count moved.
     pub(super) fn apply_session_activity(&mut self, reads: Vec<ActivityRead>) {
-        let activity = reads
+        let live = reads
             .into_iter()
             .map(|read| {
                 let last = self
                     .session_activity
+                    .live
                     .get(&read.active_session_id)
                     .copied()
                     .unwrap_or_default();
@@ -117,8 +119,8 @@ impl AgentsViewMode {
                 (read.active_session_id, counts)
             })
             .collect();
-        if activity != self.session_activity {
-            self.session_activity = activity;
+        if live != self.session_activity.live {
+            self.session_activity.live = live;
             self.rebuild_rows();
         }
     }

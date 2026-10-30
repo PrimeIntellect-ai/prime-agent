@@ -1,0 +1,2 @@
+- A graceful daemon shutdown can continue interrupted turns on restart while explicitly cancelled queued input remains parked.
+- A daemon shutdown interrupted mid-stop (a lost shutdown verdict, or a supervisor death inside the stop pass) keeps the session resumable on the next boot instead of archiving it.

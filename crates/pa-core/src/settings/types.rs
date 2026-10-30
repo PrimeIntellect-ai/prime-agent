@@ -254,50 +254,6 @@ pub struct TelemetrySettings {
     pub local_mirror: Option<bool>,
 }
 
-/// User-declared MCP server (settings `mcpServers` entry).
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "kebab-case")]
-pub enum McpServerConfig {
-    Http {
-        url: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        headers: Option<serde_json::Map<String, serde_json::Value>>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        bearer_token_env_var: Option<String>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        oauth: Option<bool>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        enabled: Option<bool>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        enabled_tools: Option<Vec<String>>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        disabled_tools: Option<Vec<String>>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        startup_timeout_ms: Option<u64>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        call_timeout_ms: Option<u64>,
-    },
-    Stdio {
-        command: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        args: Option<Vec<String>>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        cwd: Option<String>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        env: Option<serde_json::Map<String, serde_json::Value>>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        enabled: Option<bool>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        enabled_tools: Option<Vec<String>>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        disabled_tools: Option<Vec<String>>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        startup_timeout_ms: Option<u64>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        call_timeout_ms: Option<u64>,
-    },
-}
-
 /// The default per-cell watchdog budget for user `python_repl` cells: 60
 /// seconds.
 pub const DEFAULT_PYTHON_CELL_TIMEOUT_MS: u64 = 60_000;
@@ -353,9 +309,11 @@ pub struct Settings {
     pub quiet_startup: Option<bool>,
     pub shell_command_prefix: Option<String>,
     pub npm_command: Option<Vec<String>>,
+    /// Execution reads this from global settings only; project overrides are ignored.
     pub mcp_servers: Option<serde_json::Map<String, serde_json::Value>>,
     /// Extra local MCP service-catalog files (~-relative allowed), merged after the
     /// compiled built-ins; first source wins per id, and no bundled id can be shadowed.
+    /// Read from global settings only, like executable MCP server configuration.
     pub mcp_catalog_sources: Option<Vec<String>>,
     pub packages: Option<Vec<serde_json::Value>>,
     pub skills: Option<Vec<String>>,

@@ -1,9 +1,9 @@
 //! The `@` fuzzy file search: fd's own `ignore`-crate walk — files and directories, links
 //! followed, hidden entries included, `.git` pruned, fd's default gitignore rules — run
 //! on one background thread, because a no-match walk of a large tree takes seconds; the
-//! result lands on the receiver. From the first query on, the session's file index
-//! (see [`file_index`]) answers instead; the walk stays as the fallback for scopes the
-//! index cannot serve.
+//! result lands on the receiver. Once the session's file index (see [`file_index`]) is
+//! built, it answers instead, on the caller's thread; the walk stays as the fallback
+//! until then and for scopes the index cannot serve.
 
 use std::cmp::Ordering;
 use std::path::{Path, PathBuf};
@@ -18,7 +18,7 @@ use regex::RegexBuilder;
 use super::file_index::{Answer, FileIndex, IndexScope};
 use super::{
     build_completion_value, expand_home_path, parse_path_prefix, CompletionItem, SuggestionKind,
-    Suggestions,
+    SuggestionLookup, Suggestions,
 };
 
 /// The `.git` directory name: pruned from every walk.
@@ -43,15 +43,38 @@ impl Drop for FileSearch {
     }
 }
 
-/// Start the background search for the typed `@` token against the
-/// session cwd.
-pub(super) fn spawn(base: &Path, index: FileIndex, at_prefix: String) -> FileSearch {
+/// Look up the typed `@` token against the session cwd: the file index answers on the
+/// caller's thread when it serves the query, else the walk runs in the background.
+pub(super) fn lookup(
+    base: &Path,
+    index: &FileIndex,
+    at_prefix: String,
+) -> Option<SuggestionLookup> {
+    let cancel = AtomicBool::new(false);
+    let mut walk = false;
+    let served = resolve_search(base, &at_prefix, &cancel, |search, scope| {
+        match index.query(base, scope, search) {
+            Answer::Served(answered) => answered,
+            Answer::Walk => {
+                walk = true;
+                None
+            }
+        }
+    });
+    if walk {
+        return Some(SuggestionLookup::Searching(spawn(base, at_prefix)));
+    }
+    served.map(SuggestionLookup::Ready)
+}
+
+/// Start the background walk for the typed `@` token.
+fn spawn(base: &Path, at_prefix: String) -> FileSearch {
     let (tx, results) = mpsc::channel();
     let cancel = Arc::new(AtomicBool::new(false));
     let base = base.to_path_buf();
     let thread_cancel = Arc::clone(&cancel);
     thread::spawn(move || {
-        let _ = tx.send(search(&base, &index, &at_prefix, &thread_cancel));
+        let _ = tx.send(search(&base, &at_prefix, &thread_cancel));
     });
     FileSearch { results, cancel }
 }
@@ -243,27 +266,15 @@ fn walk_directory(search: &AtSearch<'_>) -> Vec<String> {
     found.into_inner().unwrap_or_else(PoisonError::into_inner)
 }
 
-/// The walk thread body: answer from the file index when it serves the query (walking
-/// once to build it on first use), fall back to the live walk otherwise, and rank.
-/// `None` means no menu: fd matched nothing, the query was an invalid regex (fd exits
-/// non-zero), or every entry scored zero.
-fn search(
-    base: &Path,
-    index: &FileIndex,
-    at_prefix: &str,
-    cancel: &AtomicBool,
-) -> Option<Suggestions> {
-    resolve_search(base, at_prefix, cancel, |search, scope| {
-        match index.query(base, scope, search) {
-            Answer::Served(answered) => answered,
-            Answer::Walk => {
-                let found = walk_directory(search);
-                suggestions(
-                    top_ranked(found.iter().filter_map(|form| search.score(form))),
-                    search,
-                )
-            }
-        }
+/// The walk thread body: walk the typed scope and rank. `None` means no menu: fd
+/// matched nothing, or every entry scored zero.
+fn search(base: &Path, at_prefix: &str, cancel: &AtomicBool) -> Option<Suggestions> {
+    resolve_search(base, at_prefix, cancel, |search, _| {
+        let found = walk_directory(search);
+        suggestions(
+            top_ranked(found.iter().filter_map(|form| search.score(form))),
+            search,
+        )
     })
 }
 

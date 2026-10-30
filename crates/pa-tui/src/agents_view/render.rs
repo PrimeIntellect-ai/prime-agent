@@ -969,6 +969,7 @@ impl Renderer {
                     crate::input::ReaderInput::BurstPaste(text) => {
                         ui_tx.send(UiInput::Paste(text)).is_ok()
                     }
+                    crate::input::ReaderInput::ChunkEnd => true,
                     // A guard-reassembled report: consumed unless tracking is active,
                     // the same contract as the terminal's own mouse events below.
                     crate::input::ReaderInput::Mouse(report) => {

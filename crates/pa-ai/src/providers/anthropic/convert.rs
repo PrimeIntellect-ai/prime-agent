@@ -2,7 +2,7 @@
 
 use serde_json::{json, Map, Value};
 
-use crate::providers::anthropic::{to_claude_code_name, CacheControl};
+use crate::providers::anthropic::{get_anthropic_compat, to_claude_code_name, CacheControl};
 use crate::types::{
     AssistantContent, Context, Message, Model, StopReason, Tool, UserMessageContent,
     UserOrToolContent,
@@ -77,6 +77,7 @@ pub fn convert_messages(
     cache_control: Option<&CacheControl>,
 ) -> Vec<Value> {
     let mut params: Vec<Value> = Vec::new();
+    let requires_thinking_signature = get_anthropic_compat(model).requires_thinking_signature;
     let transformed = crate::providers::transform_messages::transform_messages_with_normalizer(
         &context.messages,
         model,
@@ -164,19 +165,31 @@ pub fn convert_messages(
                             if thinking.thinking.trim().is_empty() {
                                 continue;
                             }
+                            // Unsigned thinking comes from an Anthropic-compatible endpoint that
+                            // never signs (MiMo, Kimi, DeepSeek), or from a Claude turn that hit
+                            // `max_tokens` before the signature arrived. (Aborted and errored turns
+                            // never get here: the transform step drops them, and turns thinking
+                            // from another model into text.) It is never replayed as `text`: the
+                            // model reads that as its own earlier reply and starts echoing its
+                            // reasoning (discussion #3391). Non-signing endpoints expect their
+                            // reasoning passed back, so it replays as an unsigned `thinking`
+                            // block; Claude rejects a thinking block without a valid signature, so
+                            // there it is dropped.
                             let signature = thinking.thinking_signature.as_deref().unwrap_or("");
                             if signature.trim().is_empty() {
-                                blocks.push(json!({
-                                    "type": "text",
-                                    "text": sanitize_surrogates(&thinking.thinking),
-                                }));
-                            } else {
-                                blocks.push(json!({
-                                    "type": "thinking",
-                                    "thinking": sanitize_surrogates(&thinking.thinking),
-                                    "signature": signature,
-                                }));
+                                if !requires_thinking_signature {
+                                    blocks.push(json!({
+                                        "type": "thinking",
+                                        "thinking": sanitize_surrogates(&thinking.thinking),
+                                    }));
+                                }
+                                continue;
                             }
+                            blocks.push(json!({
+                                "type": "thinking",
+                                "thinking": sanitize_surrogates(&thinking.thinking),
+                                "signature": signature,
+                            }));
                         }
                         AssistantContent::ToolCall(tool_call) => {
                             blocks.push(json!({
@@ -315,5 +328,125 @@ pub(crate) fn map_stop_reason(reason: &str) -> Result<StopReason, String> {
         "tool_use" => Ok(StopReason::ToolUse),
         "refusal" | "sensitive" => Ok(StopReason::Error),
         other => Err(format!("Unhandled stop reason: {other}")),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::convert_messages;
+    use crate::types::{Context, Message, Model};
+    use serde_json::{json, Value};
+
+    /// A model on a non-signing Anthropic-compatible endpoint (discussion #3391).
+    fn mimo() -> Model {
+        model(&json!({"id": "mimo-v2.6-pro", "provider": "xiaomi"}))
+    }
+
+    fn claude() -> Model {
+        model(&json!({"id": "claude-sonnet-5", "provider": "anthropic"}))
+    }
+
+    fn model(fields: &Value) -> Model {
+        let mut model = json!({
+            "name": "model", "api": "anthropic-messages", "baseUrl": "http://localhost",
+            "reasoning": true, "input": ["text"],
+            "cost": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0},
+            "contextWindow": 128_000, "maxTokens": 8192
+        });
+        model
+            .as_object_mut()
+            .expect("model object")
+            .extend(fields.as_object().expect("fields object").clone());
+        serde_json::from_value(model).expect("model json")
+    }
+
+    /// The request messages for a user prompt, one same-model assistant turn of `blocks`, and a
+    /// follow-up prompt.
+    fn convert(model: &Model, blocks: &Value) -> Vec<Value> {
+        let messages: Vec<Message> = serde_json::from_value(json!([
+            {"role": "user", "content": "rebuild", "timestamp": 1},
+            {
+                "role": "assistant", "content": blocks,
+                "api": "anthropic-messages", "provider": model.provider, "model": model.id,
+                "usage": {
+                    "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0, "totalTokens": 0,
+                    "cost": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0, "total": 0}
+                },
+                "stopReason": "stop", "timestamp": 2
+            },
+            {"role": "user", "content": "again", "timestamp": 3}
+        ]))
+        .expect("messages json");
+        let context = Context {
+            system_prompt: None,
+            messages,
+            tools: None,
+        };
+        convert_messages(&context, model, false, None)
+    }
+
+    fn assistant_turn(model: &Model, blocks: &Value) -> Value {
+        convert(model, blocks)
+            .into_iter()
+            .find(|message| message["role"] == "assistant")
+            .unwrap_or(Value::Null)
+    }
+
+    fn unsigned_turn() -> Value {
+        json!([
+            {"type": "thinking", "thinking": "Let me do it fast.", "thinkingSignature": ""},
+            {"type": "thinking", "thinking": "No signature field at all."},
+            {"type": "text", "text": "Rebuilt."}
+        ])
+    }
+
+    /// Discussion #3391: a non-signing endpoint gets its unsigned thinking back as `thinking`
+    /// blocks, never as visible text the model then imitates.
+    #[test]
+    fn unsigned_thinking_replays_as_thinking_on_a_non_signing_endpoint() {
+        assert_eq!(
+            assistant_turn(&mimo(), &unsigned_turn()),
+            json!({"role": "assistant", "content": [
+                {"type": "thinking", "thinking": "Let me do it fast."},
+                {"type": "thinking", "thinking": "No signature field at all."},
+                {"type": "text", "text": "Rebuilt."}
+            ]})
+        );
+    }
+
+    /// Claude rejects a thinking block without a valid signature, so unsigned thinking is dropped
+    /// there, and on any model whose compat says it requires one.
+    #[test]
+    fn unsigned_thinking_is_dropped_where_a_signature_is_required() {
+        let mut flagged = mimo();
+        flagged.compat = serde_json::from_value(json!({"requiresThinkingSignature": true}))
+            .expect("compat json");
+        for model in [claude(), flagged] {
+            assert_eq!(
+                assistant_turn(&model, &unsigned_turn()),
+                json!({"role": "assistant", "content": [{"type": "text", "text": "Rebuilt."}]}),
+                "{}",
+                model.id
+            );
+        }
+    }
+
+    /// Signed thinking still replays as a `thinking` block with its signature.
+    #[test]
+    fn signed_thinking_replays_as_thinking() {
+        let turn = assistant_turn(
+            &claude(),
+            &json!([
+                {"type": "thinking", "thinking": "Plan.", "thinkingSignature": "sig"},
+                {"type": "text", "text": "Rebuilt."}
+            ]),
+        );
+        assert_eq!(
+            turn,
+            json!({"role": "assistant", "content": [
+                {"type": "thinking", "thinking": "Plan.", "signature": "sig"},
+                {"type": "text", "text": "Rebuilt."}
+            ]})
+        );
     }
 }

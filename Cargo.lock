@@ -59,7 +59,7 @@ version = "1.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "40c48f72fd53cd289104fc64099abca73db4166ad86ea0b4341abe65af83dadc"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -70,7 +70,7 @@ checksum = "291e6a250ff86cd4a820112fb8898808a366d8f9f58ce16d1f538353ad55747d"
 dependencies = [
  "anstyle",
  "once_cell_polyfill",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -573,7 +573,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -1441,7 +1441,7 @@ checksum = "7c87def4c32ab89d880effc9e097653c8da5d6ef28e6b539d313baaacfbafcbe"
 
 [[package]]
 name = "pa-agent"
-version = "0.10.1"
+version = "0.10.2"
 dependencies = [
  "anyhow",
  "serde",
@@ -1452,7 +1452,7 @@ dependencies = [
 
 [[package]]
 name = "pa-ai"
-version = "0.10.1"
+version = "0.10.2"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -1487,7 +1487,7 @@ dependencies = [
 
 [[package]]
 name = "pa-cli"
-version = "0.10.1"
+version = "0.10.2"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -1517,7 +1517,7 @@ dependencies = [
 
 [[package]]
 name = "pa-core"
-version = "0.10.1"
+version = "0.10.2"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -1557,11 +1557,12 @@ dependencies = [
 
 [[package]]
 name = "pa-daemon"
-version = "0.10.1"
+version = "0.10.2"
 dependencies = [
  "anyhow",
  "filetime",
  "futures",
+ "globset",
  "nix",
  "pa-agent",
  "pa-ai",
@@ -1584,7 +1585,7 @@ dependencies = [
 
 [[package]]
 name = "pa-models"
-version = "0.10.1"
+version = "0.10.2"
 dependencies = [
  "hex",
  "hmac",
@@ -1604,7 +1605,7 @@ dependencies = [
 
 [[package]]
 name = "pa-perf"
-version = "0.10.1"
+version = "0.10.2"
 dependencies = [
  "anyhow",
  "clap",
@@ -1620,7 +1621,7 @@ dependencies = [
 
 [[package]]
 name = "pa-telemetry"
-version = "0.10.1"
+version = "0.10.2"
 dependencies = [
  "anyhow",
  "reqwest",
@@ -1635,7 +1636,7 @@ dependencies = [
 
 [[package]]
 name = "pa-tui"
-version = "0.10.1"
+version = "0.10.2"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -1663,7 +1664,7 @@ dependencies = [
 
 [[package]]
 name = "pa-types"
-version = "0.10.1"
+version = "0.10.2"
 dependencies = [
  "anyhow",
  "libc",
@@ -1858,7 +1859,7 @@ dependencies = [
  "once_cell",
  "socket2",
  "tracing",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -2165,7 +2166,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys 0.12.1",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -2433,7 +2434,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c3d1e2c7f27f8d4cb10542a02c49005dbd6e93095799d6f3be745fae9f8fedd4"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -2572,7 +2573,7 @@ dependencies = [
  "getrandom 0.4.3",
  "once_cell",
  "rustix 1.1.4",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -2643,9 +2644,9 @@ checksum = "fd3ca314f692efd6c868f8408f53fe444634a845f96c028b97d35f6a1f79f0ee"
 
 [[package]]
 name = "tokio"
-version = "1.53.1"
+version = "1.54.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "202caea871b69668250d242070849eb495be178ed697a3e98aebce5bc81a0bed"
+checksum = "b52fd3255258d26fac7264ab5a76b53c13367136dc011d3d6ad4f8ed070396a3"
 dependencies = [
  "bytes",
  "libc",
@@ -3156,7 +3157,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]

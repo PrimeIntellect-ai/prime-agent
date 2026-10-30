@@ -168,6 +168,7 @@ pub const KNOWN_COMMAND_TYPES: &[&str] = &[
     "list_persistent_shells",
     "tail_persistent_shell",
     "kill_persistent_shell",
+    "get_session_messages",
 ];
 
 /// Parsed client command envelope.
@@ -706,6 +707,9 @@ pub fn command_active_session_id(command: &DaemonCommand) -> Option<&str> {
         | DaemonCommand::GetMessages {
             active_session_id, ..
         }
+        | DaemonCommand::GetSessionMessages {
+            active_session_id, ..
+        }
         | DaemonCommand::GetRlmChildren {
             active_session_id, ..
         }
@@ -993,6 +997,7 @@ pub fn command_type_name(command: &DaemonCommand) -> &'static str {
         DaemonCommand::GetState { .. } => "get_state",
         DaemonCommand::GetConnectionState { .. } => "get_connection_state",
         DaemonCommand::GetMessages { .. } => "get_messages",
+        DaemonCommand::GetSessionMessages { .. } => "get_session_messages",
         DaemonCommand::GetRlmChildren { .. } => "get_rlm_children",
         DaemonCommand::GetSessionStats { .. } => "get_session_stats",
         DaemonCommand::GetContextTree { .. } => "get_context_tree",
