@@ -19,7 +19,7 @@ pub(super) struct PendingDelete {
 
 /// One stop-or-delete dispatch the run loop executes (the wire variant follows the row kind).
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) enum DeleteAction {
+pub(crate) enum DeleteAction {
     /// A running subagent: stop it via its parent's session
     /// (`cancel_rlm_child`).
     StopSubagent {
@@ -119,6 +119,85 @@ pub(super) fn no_effect_summary(data: Option<&serde_json::Value>) -> String {
     )
 }
 
+/// Run one stop-or-delete on the wire and summarize its outcome: the status text and its tone
+/// (success muted, a no-effect warning, a failure error). The factory page's child stop shares it.
+pub(crate) async fn execute_delete_action(
+    client: &DaemonClient,
+    action: &DeleteAction,
+) -> (String, StatusTone) {
+    let request = match action {
+        DeleteAction::StopSubagent {
+            active_session_id,
+            child_id,
+            ..
+        } => DaemonCommand::CancelRlmChild {
+            id: None,
+            active_session_id: active_session_id.clone(),
+            child_id: child_id.clone(),
+            rest: serde_json::Map::default(),
+        },
+        DeleteAction::DeleteSubagent {
+            active_session_id,
+            child_id,
+            ..
+        } => DaemonCommand::DeleteRlmSubagent {
+            id: None,
+            active_session_id: active_session_id.clone(),
+            child_id: child_id.clone(),
+            rest: serde_json::Map::default(),
+        },
+        DeleteAction::StopAgent {
+            active_session_id, ..
+        } => DaemonCommand::Kill {
+            id: None,
+            active_session_id: active_session_id.clone(),
+            rest: serde_json::Map::default(),
+        },
+        DeleteAction::DeleteSavedSession { session_path, .. } => {
+            DaemonCommand::DeleteSavedSession {
+                id: None,
+                active_session_id: None,
+                session_path: session_path.clone(),
+                rest: serde_json::Map::default(),
+            }
+        }
+        DeleteAction::StopShell { shell_id, .. } => DaemonCommand::KillPersistentShell {
+            id: None,
+            shell_id: shell_id.clone(),
+            rest: serde_json::Map::default(),
+        },
+    };
+    // The outcome's tone is explicit: success muted, a no-effect stop warning, a
+    // failure error — the status line never re-derives it from the text.
+    match client.request(request).await {
+        Ok(response) if response.success && action.effect_happened(&response) => {
+            (action.success_message(), StatusTone::Muted)
+        }
+        Ok(response) if response.success => {
+            // The wire ran but changed nothing: the status carries
+            // what the wire said, never the button's hope.
+            let summary = no_effect_summary(response.data.as_ref());
+            (
+                format!("{} did not change anything: {summary}", action.fail_word()),
+                StatusTone::Warning,
+            )
+        }
+        Ok(response) => {
+            let error = response
+                .error
+                .unwrap_or_else(|| "the command failed".into());
+            (
+                format!("{} failed: {error}", action.fail_word()),
+                StatusTone::Error,
+            )
+        }
+        Err(error) => (
+            format!("{} failed: {error}", action.fail_word()),
+            StatusTone::Error,
+        ),
+    }
+}
+
 /// One stop-or-delete wire dispatch: the call runs off the key loop, its outcome re-enters as a
 /// `DeleteResult` status line — the roster push, not the status, refreshes the rows.
 pub(super) fn spawn_delete_dispatch(
@@ -128,77 +207,7 @@ pub(super) fn spawn_delete_dispatch(
 ) -> tokio::task::JoinHandle<()> {
     let client = client.clone();
     tokio::spawn(async move {
-        let request = match &action {
-            DeleteAction::StopSubagent {
-                active_session_id,
-                child_id,
-                ..
-            } => DaemonCommand::CancelRlmChild {
-                id: None,
-                active_session_id: active_session_id.clone(),
-                child_id: child_id.clone(),
-                rest: serde_json::Map::default(),
-            },
-            DeleteAction::DeleteSubagent {
-                active_session_id,
-                child_id,
-                ..
-            } => DaemonCommand::DeleteRlmSubagent {
-                id: None,
-                active_session_id: active_session_id.clone(),
-                child_id: child_id.clone(),
-                rest: serde_json::Map::default(),
-            },
-            DeleteAction::StopAgent {
-                active_session_id, ..
-            } => DaemonCommand::Kill {
-                id: None,
-                active_session_id: active_session_id.clone(),
-                rest: serde_json::Map::default(),
-            },
-            DeleteAction::DeleteSavedSession { session_path, .. } => {
-                DaemonCommand::DeleteSavedSession {
-                    id: None,
-                    active_session_id: None,
-                    session_path: session_path.clone(),
-                    rest: serde_json::Map::default(),
-                }
-            }
-            DeleteAction::StopShell { shell_id, .. } => DaemonCommand::KillPersistentShell {
-                id: None,
-                shell_id: shell_id.clone(),
-                rest: serde_json::Map::default(),
-            },
-        };
-        // The outcome's tone is explicit: success muted, a no-effect stop warning, a
-        // failure error — the status line never re-derives it from the text.
-        let (outcome, tone) = match client.request(request).await {
-            Ok(response) if response.success && action.effect_happened(&response) => {
-                (action.success_message(), StatusTone::Muted)
-            }
-            Ok(response) if response.success => {
-                // The wire ran but changed nothing: the status carries
-                // what the wire said, never the button's hope.
-                let summary = no_effect_summary(response.data.as_ref());
-                (
-                    format!("{} did not change anything: {summary}", action.fail_word()),
-                    StatusTone::Warning,
-                )
-            }
-            Ok(response) => {
-                let error = response
-                    .error
-                    .unwrap_or_else(|| "the command failed".into());
-                (
-                    format!("{} failed: {error}", action.fail_word()),
-                    StatusTone::Error,
-                )
-            }
-            Err(error) => (
-                format!("{} failed: {error}", action.fail_word()),
-                StatusTone::Error,
-            ),
-        };
+        let (outcome, tone) = execute_delete_action(&client, &action).await;
         let deleted_saved_path = match &action {
             DeleteAction::DeleteSavedSession { session_path, .. }
                 if outcome.starts_with("Deleted session") =>

@@ -525,7 +525,7 @@ class ReplTest(unittest.TestCase):
                     "import rlm",
                     "rlm._set_completion_notices_wired(True)",
                     "from rlm import bash",
-                    f"r = await bash('sleep 1.5 && touch {marker}', yield_after=3)",
+                    f"r = await bash('sleep 1.5 && touch {marker}')",
                 ]
             )
             self.repl.send({"type": "execute", "id": "ibash-bounded", "code": code})
@@ -1225,7 +1225,7 @@ class ReplTest(unittest.TestCase):
                 "import rlm",
                 "rlm._set_completion_notices_wired(True)",
                 "from rlm import bash",
-                "handle = bash('sleep 0.6; printf degraded', yield_after=0.3)",
+                "handle = bash('sleep 1.5; printf degraded')",
                 "await handle",
                 "handle.pid",
             ]
@@ -1238,14 +1238,14 @@ class ReplTest(unittest.TestCase):
             {
                 "type": "bash.completed",
                 "pid": pid,
-                "command": "sleep 0.6; printf degraded",
+                "command": "sleep 1.5; printf degraded",
                 "exitCode": 0,
             },
         )
         reply_ok(self.repl, request)
 
     def test_degraded_await_of_a_persistent_shell_keeps_it_running_to_its_notice(self):
-        # yield_after and persistent= compose: the persistent handle's await
+        # The yield window and persistent= compose: the persistent handle's await
         # degrades like any handle's, and the shell (never owned by an await)
         # runs on to its [bash-done] notice.
         temp = tempfile.TemporaryDirectory()
@@ -1260,7 +1260,7 @@ class ReplTest(unittest.TestCase):
                 "import rlm",
                 "rlm._set_completion_notices_wired(True)",
                 "from rlm import bash",
-                "handle = bash('sleep 0.6; printf persisted', persistent=True, yield_after=0.3)",
+                "handle = bash('sleep 1.5; printf persisted', persistent=True)",
                 "snapshot = await handle",
                 "(snapshot.running, snapshot.handle is handle, handle.pid)",
             ]
@@ -1274,7 +1274,7 @@ class ReplTest(unittest.TestCase):
             {
                 "type": "bash.completed",
                 "pid": int(pid),
-                "command": "sleep 0.6; printf persisted",
+                "command": "sleep 1.5; printf persisted",
                 "exitCode": 0,
             },
         )
