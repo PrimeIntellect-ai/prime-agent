@@ -993,7 +993,7 @@ fn detail_status_label() {
 #[test]
 fn the_status_line_rows_pad_and_truncate() {
     let theme = Theme::builtin("prime", ColorMode::TrueColor);
-    assert!(render_status_line(&[], 0, &theme, 100).is_empty());
+    assert_eq!(render_status_line(&[], 0, &theme, 100), Vec::<Line>::new());
     let rows = render_status_line(&[String::from("hello"), "x".repeat(120)], 4, &theme, 20);
     assert_eq!(rows.len(), 2);
     let first: String = rows[0].iter().map(|span| span.content.as_str()).collect();

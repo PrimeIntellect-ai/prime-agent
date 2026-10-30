@@ -5,7 +5,7 @@ recorded in the [TypeScript changelog](https://github.com/PrimeIntellect-ai/prim
 
 ## [Unreleased]
 
-- The TUI footer is now user-configurable with the new `statusLine` setting (the Rust successor of the retired TypeScript `ctx.ui.setFooter` extension hook, discussion #3856): `statusLine.command` runs through the shell with a JSON session payload (session, cwd, model, context usage, cost, speed) on stdin, and its stdout — ANSI-stripped, capped at 16 KiB and 4 rows — renders as dim footer rows in the dock, above the `/speed` row. The command re-runs every 30 seconds, at the end of each turn, on a model change, and on a session rebind; a failing, slow (5 second timeout), or empty command renders nothing and the built-in chrome stays. `statusLine.padding` pads each rendered row.
+- The TUI footer is now user-configurable with the new `statusLine` setting (the Rust successor of the retired TypeScript `ctx.ui.setFooter` extension hook, discussion #3856): `statusLine.command` runs through the shell with a JSON session payload (session, cwd, model, context usage, cost, speed) on stdin, and its stdout — ANSI-stripped, capped at 16 KiB and 4 rows — renders as dim footer rows in the dock, above the `/speed` row. The command re-runs every 30 seconds (the TUI repaints the idle surface for it), at the end of each turn, on a model change, and on a session rebuild (rebind or resync); a failing, slow (5 second timeout), or empty command renders nothing and the built-in chrome stays. `statusLine.padding` pads each rendered row.
 
 ## [0.10.2] - 2026-10-28
 

@@ -422,7 +422,12 @@ fn run_plan(
 /// A configured `statusLine` command runs and its stdout renders as footer rows in the dock.
 #[test]
 fn the_status_line_command_renders_footer_rows() {
-    let steps = vec![HeadlessStep::WaitMs(1000)];
+    // Wait for the rendered needle (condition wait, not a fixed sleep): the worker thread
+    // stores the output and the frame wake above repaints it.
+    let steps = vec![HeadlessStep::WaitRender {
+        needle: "PRIME-SL-OK".to_string(),
+        timeout_ms: 10_000,
+    }];
     let frames = run_plan(
         Some(Arc::new(MockClientSettings {
             status_line: Some(StatusLineSpec {
@@ -448,7 +453,15 @@ fn the_status_line_command_renders_footer_rows() {
 /// previous output (none here), and the built-in chrome stays.
 #[test]
 fn a_failing_command_renders_no_status_line() {
-    let steps = vec![HeadlessStep::WaitMs(1000)];
+    // Wait for the attach frame (the session name in the top bar), then a bounded margin so
+    // the failing command has run; the absence is what the assertion checks.
+    let steps = vec![
+        HeadlessStep::WaitRender {
+            needle: "status line session".to_string(),
+            timeout_ms: 10_000,
+        },
+        HeadlessStep::WaitMs(500),
+    ];
     let frames = run_plan(
         Some(Arc::new(MockClientSettings {
             status_line: Some(StatusLineSpec {

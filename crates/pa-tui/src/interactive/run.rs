@@ -1275,6 +1275,14 @@ async fn run_interactive_surface(
         // paint; a keystroke's toast or hint) must not park behind a select that has no other wake.
         // The headless barriers' deadlines and the hint/toast expiry arm HERE, not after the frame
         // gate.
+        // The user status line's frame wake (settings `statusLine`): a due re-run, or output the
+        // worker stored since the last frame, dirties the frame so the arm below wakes the
+        // select and the loop paints — the worker thread cannot wake the select itself.
+        if let Some(wake) = view.status_line_frame_wake() {
+            if Instant::now() >= wake {
+                session.dirty = true;
+            }
+        }
         if (session.dirty || session.wants_transcript_page(&view)) && render_deadline.is_none() {
             render_deadline = Some(Instant::now());
         }

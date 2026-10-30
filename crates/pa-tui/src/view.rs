@@ -353,11 +353,21 @@ impl AgentView {
     }
 
     /// Force the status line command to re-run at the next draw: a turn
-    /// end, a model change, and a session rebind all land here.
+    /// end, a model change, and a session rebuild all land here.
     pub(crate) fn force_status_line_refresh(&mut self) {
         if let Some(status_line) = &mut self.status_line {
             status_line.force(std::time::Instant::now());
         }
+    }
+
+    /// The user status line's frame-wake instant (settings `statusLine`): the
+    /// run loop arms it into the frame-wake inventory so an idle surface still
+    /// repaints the due re-run and the worker's fresh output.
+    #[must_use]
+    pub fn status_line_frame_wake(&self) -> Option<std::time::Instant> {
+        self.status_line
+            .as_ref()
+            .map(crate::status_line::StatusLine::frame_wake)
     }
 
     pub fn terminal_rows(&self) -> u16 {

@@ -27,6 +27,10 @@ pub const COMMAND_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_OUTPUT_BYTES: usize = 16 * 1024;
 /// The rendered-line cap (multi-line status lines are supported).
 const MAX_LINES: usize = 4;
+/// How long the drain wait covers after the shell exits: a grandchild that
+/// keeps the pipe open must not wedge the run (the drain thread ends at
+/// pipe close, holding nothing the driver needs).
+const OUTPUT_GRACE: Duration = Duration::from_millis(500);
 
 /// The thread-safe result slot the render loop reads: `None` until the
 /// first successful run.
@@ -34,7 +38,8 @@ const MAX_LINES: usize = 4;
 pub(crate) struct SharedOutput(Mutex<Option<Vec<String>>>);
 
 impl SharedOutput {
-    fn take(&self) -> Option<Vec<String>> {
+    /// A copy of the latest output (the slot is never cleared).
+    fn snapshot(&self) -> Option<Vec<String>> {
         self.0.lock().expect("status line output poisoned").clone()
     }
 
@@ -43,11 +48,12 @@ impl SharedOutput {
     }
 }
 
-/// The JSON payload written to the command's stdin.
+/// The JSON payload written to the command's stdin. `version` is the
+/// running product version; `context.percent` is a 0-100 scale.
 #[must_use]
 pub fn payload(chrome: &ChromeState) -> Value {
     json!({
-        "version": 1,
+        "version": chrome.version,
         "session": {
             "name": chrome.chat_name,
             "depth": chrome.tray_depth,
@@ -77,8 +83,8 @@ pub fn payload(chrome: &ChromeState) -> Value {
 ///
 /// # Errors
 ///
-/// Returns `Err` on spawn failure, a non-zero exit, a timeout kill, or empty
-/// output.
+/// Returns `Err` on spawn failure, a non-zero exit, a timeout kill, an
+/// stdout that stays open past the grace window, or empty output.
 pub fn run_command(
     command: &str,
     payload: &Value,
@@ -97,15 +103,33 @@ pub fn run_command(
         let _ = stdin.write_all(payload.to_string().as_bytes());
         let _ = stdin.flush();
     }
-    // stdout drains on a side thread: a writer that outgrows the pipe buffer
-    // must not deadlock before the deadline check runs.
+    // The reader drains stdout to EOF, keeping the first MAX_OUTPUT_BYTES: a writer past the cap
+    // must not meet a closed read end, or SIGPIPE turns its success exit into a failure and
+    // discards the output already read.
     let stdout = child.stdout.take().map(|pipe| {
-        std::thread::spawn(move || {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let drain = std::thread::spawn(move || {
             use std::io::Read;
-            let mut buf = Vec::new();
-            let _ = pipe.take(MAX_OUTPUT_BYTES as u64).read_to_end(&mut buf);
-            buf
-        })
+            let mut kept: Vec<u8> = Vec::new();
+            let mut chunk = [0u8; 8192];
+            let mut source = pipe;
+            loop {
+                match source.read(&mut chunk) {
+                    // EOF and read errors both end the drain (a writer error past the cap is
+                    // not a status line failure: the kept prefix is still the output).
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => {
+                        if kept.len() < MAX_OUTPUT_BYTES {
+                            let room = MAX_OUTPUT_BYTES - kept.len();
+                            kept.extend_from_slice(&chunk[..n.min(room)]);
+                        }
+                        // Past the cap: the read itself is the drain.
+                    }
+                }
+            }
+            let _ = tx.send(kept);
+        });
+        (drain, rx)
     });
     let deadline = Instant::now() + timeout;
     let status = loop {
@@ -115,24 +139,26 @@ pub fn run_command(
                 if Instant::now() >= deadline {
                     let _ = child.kill();
                     let _ = child.wait();
-                    if let Some(handle) = stdout {
-                        let _ = handle.join();
-                    }
                     return Err("timeout".to_string());
                 }
                 std::thread::sleep(Duration::from_millis(25));
             }
             Err(error) => {
-                if let Some(handle) = stdout {
-                    let _ = handle.join();
-                }
+                let _ = child.kill();
+                let _ = child.wait();
                 return Err(error.to_string());
             }
         }
     };
-    let bytes = match stdout.map(std::thread::JoinHandle::join) {
-        Some(Ok(bytes)) => bytes,
-        Some(Err(_)) | None => Vec::new(),
+    // The pipe can outlive the shell (a backgrounded grandchild keeps the write end): wait for
+    // the drain with a grace window instead of joining unbounded — a wedge there would freeze
+    // the status line for the life of the surface.
+    let bytes = match stdout {
+        Some((_, rx)) => match rx.recv_timeout(OUTPUT_GRACE) {
+            Ok(bytes) => bytes,
+            Err(_) => return Err("stdout stayed open".to_string()),
+        },
+        None => Vec::new(),
     };
     if !status.success() {
         return Err(format!("exit {status}"));
@@ -155,6 +181,9 @@ pub fn run_command(
 pub struct StatusLine {
     spec: StatusLineSpec,
     output: Arc<SharedOutput>,
+    /// Set by the worker after a store the chrome has not copied yet; the
+    /// run loop reads it through `frame_wake` to repaint.
+    fresh: Arc<AtomicBool>,
     in_flight: Arc<AtomicBool>,
     next_refresh_at: Instant,
 }
@@ -167,21 +196,37 @@ impl StatusLine {
         Self {
             spec,
             output: Arc::default(),
+            fresh: Arc::new(AtomicBool::new(false)),
             in_flight: Arc::new(AtomicBool::new(false)),
             next_refresh_at: now,
         }
     }
 
     /// Force the next draw to re-run: a turn end, a model change, and a
-    /// session rebind all land here.
+    /// session rebuild all land here.
     pub fn force(&mut self, now: Instant) {
         self.next_refresh_at = now;
+    }
+
+    /// The frame-wake instant for the run loop: now when the worker stored
+    /// output the chrome has not copied yet, otherwise the next scheduled
+    /// re-run.
+    #[must_use]
+    pub fn frame_wake(&self) -> Instant {
+        if self.fresh.load(Ordering::Acquire) {
+            Instant::now()
+        } else {
+            self.next_refresh_at
+        }
     }
 
     /// Copy the latest output into the chrome; spawn a re-run when due and
     /// no run is in flight.
     pub fn refresh_due(&mut self, now: Instant, chrome: &mut ChromeState) {
-        chrome.status_line = self.output.take().unwrap_or_default();
+        // Cleared before the snapshot: a store that lands after the clear
+        // keeps the flag up and repaints on the next pass.
+        self.fresh.store(false, Ordering::Release);
+        chrome.status_line = self.output.snapshot().unwrap_or_default();
         chrome.status_line_padding = self.spec.padding.unwrap_or(0);
         if self.in_flight.load(Ordering::Acquire) || now < self.next_refresh_at {
             return;
@@ -191,10 +236,12 @@ impl StatusLine {
         self.in_flight.store(true, Ordering::Release);
         self.next_refresh_at = now + REFRESH_INTERVAL;
         let output = Arc::clone(&self.output);
+        let fresh = Arc::clone(&self.fresh);
         let in_flight = Arc::clone(&self.in_flight);
         std::thread::spawn(move || {
             if let Ok(lines) = run_command(&command, &payload, COMMAND_TIMEOUT) {
                 output.store(lines);
+                fresh.store(true, Ordering::Release);
             }
             in_flight.store(false, Ordering::Release);
         });
@@ -206,23 +253,36 @@ mod tests {
     use super::*;
     use crate::chrome::ContextUsage;
 
+    /// Poll a condition until it holds or the budget runs out: the tests
+    /// wait for the spawned runs' observable effect (the counter file),
+    /// not a fixed sleep.
+    fn wait_for(budget: Duration, probe: impl Fn() -> bool) {
+        let deadline = Instant::now() + budget;
+        while !probe() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
     fn chrome() -> ChromeState {
-        let mut chrome = ChromeState::default();
-        chrome.chat_name = "sess".to_string();
-        chrome.cwd = "/tmp/proj".to_string();
-        chrome.model_id = Some("slow".to_string());
-        chrome.model_provider = Some("llama-cpp-strix".to_string());
-        chrome.cost_usd = Some(0.25);
-        chrome.context = Some(ContextUsage {
-            tokens: 1_000,
-            context_window: 200_000,
-        });
-        chrome
+        ChromeState {
+            version: "9.9.9".to_string(),
+            chat_name: "sess".to_string(),
+            cwd: "/tmp/proj".to_string(),
+            model_id: Some("slow".to_string()),
+            model_provider: Some("llama-cpp-strix".to_string()),
+            cost_usd: Some(0.25),
+            context: Some(ContextUsage {
+                tokens: 1_000,
+                context_window: 200_000,
+            }),
+            ..ChromeState::default()
+        }
     }
 
     #[test]
     fn the_payload_carries_the_session_facts() {
         let value = payload(&chrome());
+        assert_eq!(value["version"], "9.9.9");
         assert_eq!(value["session"]["name"], "sess");
         assert_eq!(value["cwd"], "/tmp/proj");
         assert_eq!(value["model"]["id"], "slow");
@@ -244,7 +304,11 @@ mod tests {
 
     #[test]
     fn ansi_escapes_are_stripped_and_blank_lines_dropped() {
-        let command = r"printf 'one\n\033[1;32mtwo\033[0m\n\nthree\n'";
+        let command = r"printf 'one
+[1;32mtwo[0m
+
+three
+'";
         let lines = run_command(command, &json!({}), Duration::from_secs(2)).expect("printf");
         assert_eq!(
             lines,
@@ -262,10 +326,60 @@ mod tests {
     }
 
     #[test]
+    fn a_backgrounded_grandchild_cannot_wedge_the_run() {
+        // sh exits at once; the grandchild holds the pipe open. The drain wait is bounded by
+        // the grace window, so the run fails fast instead of freezing the status line.
+        let started = Instant::now();
+        let error =
+            run_command("sleep 30 &", &json!({}), Duration::from_secs(2)).expect_err("grace wins");
+        assert_eq!(error, "stdout stayed open");
+        assert!(started.elapsed() < Duration::from_secs(2));
+    }
+
+    #[test]
     fn a_failing_exit_is_an_error_not_output() {
         let error = run_command("echo x; exit 3", &json!({}), Duration::from_secs(2))
             .expect_err("exit 3 is a failure");
         assert!(error.starts_with("exit "));
+    }
+
+    #[test]
+    fn an_over_cap_writer_renders_the_truncated_prefix() {
+        // 200 KiB outlives the pipe buffer: with a read end that closed at 16 KiB the writer
+        // would SIGPIPE and the run would fail; the drain keeps the capped prefix instead.
+        let lines = run_command(
+            "yes line | head -c 200000",
+            &json!({}),
+            Duration::from_secs(5),
+        )
+        .expect("the writer is not killed");
+        assert_eq!(lines.len(), MAX_LINES);
+        assert!(lines.iter().all(|line| line == "line"));
+    }
+
+    #[test]
+    fn output_is_capped_at_four_rows() {
+        let lines = run_command(
+            r"printf 'a
+b
+c
+d
+e
+f
+'",
+            &json!({}),
+            Duration::from_secs(2),
+        )
+        .expect("printf");
+        assert_eq!(
+            lines,
+            vec![
+                "a".to_string(),
+                "b".to_string(),
+                "c".to_string(),
+                "d".to_string()
+            ]
+        );
     }
 
     #[test]
@@ -280,18 +394,20 @@ mod tests {
         let mut driver = StatusLine::new(spec, Instant::now());
         let mut chrome = ChromeState::default();
         driver.refresh_due(Instant::now(), &mut chrome); // run 1
-        std::thread::sleep(Duration::from_millis(150));
-        driver.refresh_due(Instant::now(), &mut chrome); // not due: no run, copies output
+        wait_for(Duration::from_secs(2), || {
+            driver.frame_wake() <= Instant::now()
+        });
+        // Not due yet: the next pass copies without re-running.
+        driver.refresh_due(Instant::now(), &mut chrome);
         assert_eq!(
-            std::fs::read_to_string(&count)
-                .map(|text| text.len())
-                .unwrap_or(0),
+            std::fs::read_to_string(&count).map_or(0, |text| text.len()),
             1
         );
         assert_eq!(chrome.status_line, vec!["ok".to_string()]);
         driver.force(Instant::now());
         driver.refresh_due(Instant::now(), &mut chrome); // due again: run 2
-        std::thread::sleep(Duration::from_millis(150));
-        assert_eq!(std::fs::read_to_string(&count).expect("run 2").len(), 2);
+        wait_for(Duration::from_secs(2), || {
+            std::fs::read_to_string(&count).map_or(0, |text| text.len()) == 2
+        });
     }
 }

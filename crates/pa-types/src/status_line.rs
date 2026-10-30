@@ -12,6 +12,5 @@ pub struct StatusLineSpec {
     /// The shell command line, run as `sh -c <command>`.
     pub command: String,
     /// Leading-space padding for each rendered row; unset reads as 0.
-    #[serde(default)]
     pub padding: Option<u64>,
 }

@@ -453,6 +453,9 @@ impl SessionUi {
                 view.working = None;
                 view.working_since = None;
                 view.retry = None;
+                // The turn's numbers settled (cost, context, speed): the status line re-runs
+                // for the new payload at the next draw — once per turn, not per message.
+                view.force_status_line_refresh();
                 // The turn settled: the held bash cards stream into the transcript.
                 Self::flush_pending_bash(view);
                 crate::snapshot::settle_pending_tool_cards(
@@ -732,9 +735,6 @@ impl SessionUi {
         } else {
             self.working_tokens.settle(usage_output);
             self.record_speed_sample(message, view);
-            // A completed turn settles cost and context: the status line re-runs
-            // so its payload reflects the new turn's numbers.
-            view.force_status_line_refresh();
         }
         if let Some(text) = blocks.iter().rev().find_map(|block| match block {
             MessageBlock::Text(text) => Some(text.clone()),

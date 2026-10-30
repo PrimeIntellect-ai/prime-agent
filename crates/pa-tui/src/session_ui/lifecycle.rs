@@ -610,9 +610,6 @@ impl SessionUi {
             view.info_panel = None;
             self.speed_stats = None;
             view.chrome.speed_text = None;
-            // The rebind's session is the payload's owner: the status line command
-            // re-runs for the new session's facts at the next draw.
-            view.force_status_line_refresh();
         }
         let snapshot = self.pending_snapshot.take().unwrap_or_default();
         self.replace_transcript(snapshot, view);
@@ -713,6 +710,9 @@ impl SessionUi {
         // The brand splash is the EMPTY chat's header: a rebuild that folds a non-empty transcript
         // suppresses it, every rebuild into an empty chat keeps it.
         view.splash_suppressed = !view.chat.is_empty();
+        // Every rebuild re-seeds the payload's sources (chat name, context, model, tier): the
+        // status line re-runs for the rebuilt view at the next draw.
+        view.force_status_line_refresh();
         self.dirty = true;
     }
 

@@ -1025,7 +1025,7 @@ pub fn render_status_line(
     theme: &Theme,
     width: usize,
 ) -> Vec<Line> {
-    if lines.is_empty() {
+    if lines.is_empty() || padding >= width as u64 {
         return Vec::new();
     }
     let dim = theme.fg_style(ThemeColor::Dim);
