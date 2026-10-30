@@ -1061,6 +1061,90 @@ async fn a_cancelled_child_keeps_its_display_running_through_the_watcher_settle(
     assert_eq!(display.status, "running");
 }
 
+/// The decision spawn resolves its model from the child's eventual cwd,
+/// never the parent's: project-scoped settings (`<cwd>/.prime/agent/settings.json`)
+/// can name a different `decisionModel` in the two directories, and the
+/// child's engine reads its own cwd — the admission must agree.
+#[tokio::test]
+async fn a_decision_spawn_resolves_the_model_from_the_child_cwd() {
+    let tmp = tempfile::tempdir().unwrap();
+    let agent_dir = tmp.path().join("agent");
+    let parent_cwd = tmp.path().join("parent");
+    let child_cwd = tmp.path().join("child");
+    std::fs::create_dir_all(&agent_dir).unwrap();
+    std::fs::create_dir_all(parent_cwd.join(".prime/agent")).unwrap();
+    std::fs::create_dir_all(child_cwd.join(".prime/agent")).unwrap();
+    std::fs::write(
+        agent_dir.join("models.json"),
+        r#"{ "providers": { "fixture-decisions": {
+            "baseUrl": "https://fixture.example", "apiKey": "fixture-key", "api": "mock",
+            "models": [
+                { "id": "parent-model", "input": ["text"] },
+                { "id": "child-model", "input": ["text"] }
+            ]
+        } } }"#,
+    )
+    .unwrap();
+    std::fs::write(
+        parent_cwd.join(".prime/agent/settings.json"),
+        json!({ "decisionModel": "fixture-decisions/parent-model" }).to_string(),
+    )
+    .unwrap();
+    std::fs::write(
+        child_cwd.join(".prime/agent/settings.json"),
+        json!({ "decisionModel": "fixture-decisions/child-model" }).to_string(),
+    )
+    .unwrap();
+    let socket = tmp.path().join("decision-cwd.sock");
+    let (follow_up_tx, _follow_up_rx) = mpsc::unbounded_channel();
+    let (kill_tx, _kill_rx) = mpsc::unbounded_channel();
+    spawn_fake_supervisor(
+        socket.clone(),
+        follow_up_tx,
+        0,
+        kill_tx,
+        FakeSupervisorScript {
+            kill: FakeKill::Success,
+            child: FakeChild::Healthy,
+            child_subagents: Arc::new(FakeChildSubagents::default()),
+            peers: Arc::new(std::sync::Mutex::new(Vec::new())),
+        },
+    )
+    .await;
+    let sessions = SupervisorChildSessions::new(
+        Arc::new(crate::supervisor_link::SupervisorLink::new(socket)),
+        agent_dir.clone(),
+        "parent-live".to_string(),
+        std::sync::Arc::new(crate::model_allowlist::ModelRefusalTelemetry::new(
+            agent_dir, /*telemetry_disabled*/ true,
+        )),
+        String::new(),
+    );
+    sessions.set_identity(ParentIdentity {
+        model: Some("mock/mock-1".to_string()),
+        cwd: Some(parent_cwd.to_string_lossy().to_string()),
+        ..ParentIdentity::with_default_depth()
+    });
+    let handle = sessions
+        .spawn(RlmSpawnRequest {
+            prompt: "kickoff".to_string(),
+            name: Some("f20-worker".to_string()),
+            model: None,
+            thinking: None,
+            kind: RlmSpawnKind::Decision,
+            cwd: Some(child_cwd.to_string_lossy().to_string()),
+            spawned_by_request_id: None,
+            factory: None,
+        })
+        .await
+        .expect("the decision spawn resolves through the child cwd");
+    assert_eq!(
+        handle.model, "fixture-decisions/child-model",
+        "the decision model comes from the child's project settings, not the parent's"
+    );
+    let _ = sessions.delete_subagent(handle.rlm_child_id).await;
+}
+
 /// A decision child's spawn task is a readiness handshake, not its run:
 /// the watcher's settle tail withholds the ledger display's completed
 /// flip for it — a completed display would stop the update roster from
