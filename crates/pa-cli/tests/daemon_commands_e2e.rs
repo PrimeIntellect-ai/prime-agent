@@ -241,13 +241,14 @@ fn create_session(
         .to_string()
 }
 
-/// Run a CLI in an isolated env (agent dir + TMPDIR point into the temp dir).
+/// Run a CLI in an isolated env (agent dir, HOME, and TMPDIR point into the temp dir).
 fn run_cli(binary: &Path, dir: &Path, agent_dir: &Path, args: &[&str]) -> Output {
     let mut command = Command::new(binary);
     command
         .args(args)
         .current_dir(dir)
         .env("PRIME_AGENT_CODING_AGENT_DIR", agent_dir)
+        .env("HOME", dir)
         .env("TMPDIR", dir);
     for key in SCRUB_ENV {
         command.env_remove(key);
@@ -814,6 +815,9 @@ fn ts_daemon_differential_cli_output() {
         // checkout has no package.json, so run from the scratch work dir.
         .current_dir(&work)
         .env("PRIME_AGENT_CODING_AGENT_DIR", &agent_dir)
+        // The TS worker bootstraps its kernel venv under $HOME/.prime/agent: with the real HOME
+        // it rebuilds the runner's shared kernel venv mid-shard, under later kernel e2e units.
+        .env("HOME", dir.path())
         .env("TMPDIR", dir.path())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
@@ -1049,6 +1053,15 @@ fn ts_daemon_differential_cli_output() {
         ));
     }
 
+    // The TS workers run in their own sessions and revive the supervisor, so killing the
+    // daemon child alone leaks them; the CLI's shutdown stops the whole daemon tree.
+    let shutdown = run_cli(&ts, dir.path(), &agent_dir, &["shutdown", "--force"]);
+    assert_eq!(
+        shutdown.status.code(),
+        Some(0),
+        "TS daemon shutdown: {}",
+        stderr(&shutdown)
+    );
     let _ = daemon.kill();
     let _ = daemon.wait();
     std::env::remove_var("TMPDIR");
