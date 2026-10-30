@@ -435,6 +435,39 @@ async fn spawn_child(sessions: &SupervisorChildSessions) -> RlmSpawnHandle {
         .expect("spawn must succeed against the fake supervisor")
 }
 
+#[tokio::test]
+async fn a_factory_child_settles_without_a_parent_notice() {
+    let (follow_up_tx, mut follow_up_rx) = mpsc::unbounded_channel();
+    let (sessions, _kill_rx) =
+        sessions_with_fake_supervisor(follow_up_tx, 0, FakeKill::Success, FakeChild::Healthy).await;
+    sessions
+        .spawn(RlmSpawnRequest {
+            prompt: "f20 child task".to_string(),
+            name: Some("f20-worker".to_string()),
+            model: None,
+            thinking: None,
+            spawned_by_request_id: None,
+            factory: Some(pa_core::session_engine::rlm_host::RlmFactoryTag {
+                run_id: "run".to_string(),
+                spec_id: "spec".to_string(),
+                state_id: "state".to_string(),
+            }),
+        })
+        .await
+        .expect("spawn must succeed against the fake supervisor");
+    sessions.notify_turn_done();
+
+    // The factory's own signal still reports the settle.
+    let results = sessions.collect(Vec::new(), 10_000).await.expect("collect");
+    assert_eq!(results[0].status, "done");
+    let notice =
+        tokio::time::timeout(std::time::Duration::from_millis(500), follow_up_rx.recv()).await;
+    assert!(
+        notice.is_err(),
+        "a factory child must not notify the parent: {notice:?}"
+    );
+}
+
 /// [`sessions_with_fake_supervisor`] whose fake answers `list_agent_peers`
 /// from `peers`: the supervisor's pushed worker roster that the live roster
 /// read joins each child row onto.
@@ -2743,6 +2776,7 @@ fn an_already_settled_child_never_re_scores_as_an_unreachable_error() {
         live_observation: None,
         direct_observation: Arc::new(Mutex::new(())),
         notice_delivered: false,
+        factory: false,
         prompt_admitted: true,
         error: None,
         closed_by_parent: false,
@@ -2816,6 +2850,7 @@ async fn the_unreachable_give_up_skips_the_exit_capture_when_a_capture_stands() 
         live_observation: None,
         direct_observation: Arc::new(Mutex::new(())),
         notice_delivered: false,
+        factory: false,
         prompt_admitted: true,
         error: None,
         closed_by_parent: false,

@@ -167,6 +167,7 @@ async fn abort_during_a_kernel_cell_settles_the_turn_immediately() {
         rlm_usage_store: None,
         progress_note_emit: None,
         rlm_depth: None,
+        factory_child: false,
         daemonless: true,
         telemetry: None,
         model_info: None,

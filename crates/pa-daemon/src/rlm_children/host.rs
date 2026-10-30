@@ -174,6 +174,7 @@ impl RlmSubagentHost for SupervisorChildSessions {
                     live_observation: None,
                     direct_observation: Arc::new(Mutex::new(())),
                     notice_delivered: false,
+                    factory: request.factory.is_some(),
                     prompt_admitted: false,
                     error: None,
                     closed_by_parent: false,
