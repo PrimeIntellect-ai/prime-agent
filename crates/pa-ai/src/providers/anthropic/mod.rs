@@ -151,6 +151,15 @@ pub struct AnthropicOptions {
 pub struct ResolvedAnthropicCompat {
     pub supports_eager_tool_input_streaming: bool,
     pub supports_long_cache_retention: bool,
+    /// Unsigned thinking is dropped from replayed history instead of replayed as a `thinking`
+    /// block. Claude rejects a thinking block without a valid signature; Anthropic-compatible
+    /// endpoints that never sign (`MiMo`, Kimi, `DeepSeek`) expect their reasoning passed back.
+    pub requires_thinking_signature: bool,
+}
+
+/// Whether `model` is a Claude model, whichever provider routes it.
+fn is_claude_model(model: &Model) -> bool {
+    model.provider == "anthropic" || model.id.to_ascii_lowercase().contains("claude")
 }
 
 pub fn get_anthropic_compat(model: &Model) -> ResolvedAnthropicCompat {
@@ -167,6 +176,10 @@ pub fn get_anthropic_compat(model: &Model) -> ResolvedAnthropicCompat {
             .as_ref()
             .and_then(|c| c.supports_long_cache_retention)
             .unwrap_or(true),
+        requires_thinking_signature: compat
+            .as_ref()
+            .and_then(|c| c.requires_thinking_signature)
+            .unwrap_or_else(|| is_claude_model(model)),
     }
 }
 
@@ -232,7 +245,8 @@ pub(crate) fn is_always_on_adaptive_thinking_model(model_id: &str) -> bool {
         || model_id.contains("opus-5.5")
 }
 
-/// Check if a model supports adaptive thinking (Opus 4.6+, Sonnet 4.6+).
+/// Check if a model supports adaptive thinking (Opus 4.6+, Sonnet 4.6+, Haiku 5+). Haiku 5.x
+/// rejects `thinking: {type: "enabled", budget_tokens}` with a 400, like the other 5.x families.
 pub(crate) fn supports_adaptive_thinking(model_id: &str) -> bool {
     model_id.contains("opus-4-6")
         || model_id.contains("opus-4.6")
@@ -244,6 +258,7 @@ pub(crate) fn supports_adaptive_thinking(model_id: &str) -> bool {
         || model_id.contains("sonnet-4-6")
         || model_id.contains("sonnet-4.6")
         || model_id.contains("sonnet-5")
+        || model_id.contains("haiku-5")
         || model_id.contains("fable-5")
         || model_id.contains("mythos-5")
         || model_id.contains("mythos-preview")
@@ -350,7 +365,7 @@ pub(crate) fn build_request_headers(
             .collect()
     });
 
-    let mut default_headers = match model.provider.as_str() {
+    let default_headers = match model.provider.as_str() {
         "cloudflare-ai-gateway" => {
             let mut headers = Map::new();
             headers.insert("accept".into(), json!("application/json"));
@@ -410,14 +425,8 @@ pub(crate) fn build_request_headers(
         }
     };
 
-    // withOpenCodeHeaders: session header for opencode providers.
-    if model.provider == "opencode" || model.provider == "opencode-go" {
-        if let Some(session_id) = session_id {
-            default_headers.insert("session_id".into(), json!(session_id));
-        }
-    }
-
     let mut pairs = headers_to_pairs(&default_headers);
+    crate::providers::opencode_headers::apply(&mut pairs, &model.provider, session_id);
     // The Anthropic SDK always sends the API version; mirror it.
     pairs.insert(0, ("anthropic-version".into(), "2023-06-01".into()));
     if model.provider == "cloudflare-ai-gateway" || model.provider == "github-copilot" || is_oauth {

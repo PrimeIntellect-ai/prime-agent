@@ -29,6 +29,8 @@ fn burst_runner(engine: Arc<dyn SessionEngine>) -> TurnRunner {
         created: false,
         attached_client_ids: Vec::new(),
         abort_requested: false,
+        turn_cancelled: false,
+        turn_completed: false,
         suppress_aborted_row: false,
         shutdown_requested: false,
         compacting: false,
@@ -84,6 +86,7 @@ async fn turn_session_events(engine: Arc<dyn SessionEngine>) -> Vec<Value> {
     runner
         .run_turn(
             engine,
+            Lane::Steering,
             vec![QueuedItem {
                 priority: QueuePriority::Human,
                 preview: None,
@@ -128,11 +131,17 @@ struct GateProbeEngine {
     frames: Vec<EngineEvent>,
     before_delivery: Mutex<Option<Box<dyn Fn() + Send>>>,
     boundaries: Mutex<Vec<Option<String>>>,
+    turns_done: std::sync::atomic::AtomicUsize,
 }
 
 impl SessionEngine for GateProbeEngine {
     fn set_prompt_context_boundary(&self, leaf_id: Option<String>) {
         self.boundaries.lock().unwrap().push(leaf_id);
+    }
+
+    fn on_turn_done(&self) {
+        self.turns_done
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     }
 
     fn run_prompt(
@@ -216,6 +225,7 @@ async fn gate_sighting_events(
     runner
         .run_turn(
             engine,
+            Lane::Steering,
             vec![QueuedItem {
                 priority: QueuePriority::Human,
                 preview: None,
@@ -571,6 +581,50 @@ async fn a_failed_runs_agent_end_follows_its_final_retry_end() {
     );
 }
 
+/// A turn aborted under row suppression (a manual compaction or tree move)
+/// still reaches the engine's turn boundary at its swallowed `Done`, so
+/// child prompts held for that turn are released.
+#[tokio::test]
+async fn a_suppressed_abort_still_ends_the_engine_turn() {
+    for done in [EngineEvent::Done(Ok(())), EngineEvent::DoneAborted] {
+        let engine = Arc::new(GateProbeEngine {
+            frames: vec![done],
+            ..GateProbeEngine::default()
+        });
+        let dynamic: Arc<dyn SessionEngine> = engine.clone();
+        let runner = burst_runner(Arc::clone(&dynamic));
+        {
+            let mut core = runner.core.lock().unwrap();
+            core.abort_requested = true;
+            core.suppress_aborted_row = true;
+        }
+        runner
+            .run_turn(
+                dynamic,
+                Lane::Steering,
+                vec![QueuedItem {
+                    priority: QueuePriority::Human,
+                    preview: None,
+                    message: "aborted".to_string(),
+                    custom_message: None,
+                    agent_message: None,
+                    queue_key: None,
+                    admission_id: None,
+                    images: Vec::new(),
+                    done: None,
+                    queue_visible: true,
+                    policy: TurnPolicy::Queued,
+                    forced_batch: false,
+                }],
+            )
+            .await;
+        assert_eq!(
+            engine.turns_done.load(std::sync::atomic::Ordering::SeqCst),
+            1
+        );
+    }
+}
+
 /// #4: the turn's tool executions count onto the session's `toolUseCount`
 /// (TS bumps the child's counter per `tool_execution_start`), the value the
 /// worker's roster deltas carry.
@@ -601,6 +655,7 @@ async fn a_turns_tool_executions_count_onto_the_summary() {
     runner
         .run_turn(
             engine,
+            Lane::Steering,
             vec![QueuedItem {
                 priority: QueuePriority::Human,
                 preview: None,
@@ -717,6 +772,7 @@ async fn model_transitions_reach_the_worker_owned_session_file() {
         runner
             .run_turn(
                 engine,
+                Lane::Steering,
                 vec![QueuedItem {
                     priority: QueuePriority::Human,
                     preview: None,
@@ -794,6 +850,7 @@ async fn prompt_restore_boundary_is_supplied_only_for_file_backed_stores() {
         runner
             .run_turn(
                 dynamic,
+                Lane::Steering,
                 vec![QueuedItem {
                     priority: QueuePriority::Human,
                     preview: None,

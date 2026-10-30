@@ -34,6 +34,7 @@ fn rendered_card_text(view: &crate::view::AgentView) -> Vec<String> {
         card,
         0,
         crate::chat::Detail::Overview,
+        crate::chat::Detail::Overview,
         &view.theme,
         100,
         true,
@@ -2141,6 +2142,7 @@ fn elided_image_tool_results_render_their_marker_metadata() {
     let rows = crate::tool_card::render_tool_card(
         card,
         0,
+        crate::chat::Detail::All,
         crate::chat::Detail::All,
         &crate::theme::Theme::builtin("prime", crate::theme::ColorMode::TrueColor),
         100,

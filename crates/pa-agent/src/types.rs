@@ -35,6 +35,17 @@ pub enum ServiceTier {
     Priority,
 }
 
+/// The requested provider transport (wire names match the shared AI
+/// package's). `None` leaves the choice to the provider.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Transport {
+    Sse,
+    Websocket,
+    WebsocketCached,
+    Auto,
+}
+
 /// How tool calls from one assistant message are executed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ToolExecutionMode {

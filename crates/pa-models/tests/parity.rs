@@ -44,14 +44,15 @@ fn every_real_entry_survives_transport_pinning() {
 
 #[test]
 fn passes_the_packer_gates() {
-    // The build lane's gate: >= 42 distinct (provider, api, baseUrl) tuples.
+    // The build lane's gate: >= 30 distinct (provider, api, baseUrl) tuples
+    // (scripts/release/bundle_catalog.py MIN_MODEL_TRANSPORT_TUPLES).
     let parsed = parse_model_catalog(&fixture(), InvalidEntries::Reject).unwrap();
     let tuples: std::collections::HashSet<(&str, &str, &str)> = parsed
         .models
         .iter()
         .map(|m| (m.provider.as_str(), m.api.as_str(), m.base_url.as_str()))
         .collect();
-    assert!(tuples.len() >= 42, "packer gate: >=42 transport tuples");
+    assert!(tuples.len() >= 30, "packer gate: >=30 transport tuples");
     let compiled: std::collections::HashSet<(String, String, String)> =
         transports::compiled_models()
             .iter()

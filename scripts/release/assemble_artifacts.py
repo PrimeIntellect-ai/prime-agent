@@ -16,10 +16,11 @@ Usage:
 
 `--catalog-assets` is the directory holding the generated bundled catalog
 assets (`models.bundled.json` + `mcp-services.bundled.json`); the packer
-hard-fails without VALIDATED assets (version gates + >= 42 transport tuples +
->= 68 services — see scripts/release/bundle_catalog.py, the catalog spec §3.2
-no-cold-start layer 2). CI generates them from the live catalog repo; offline
-builds use `bundle_catalog.py generate --fixture`.
+hard-fails without VALIDATED assets (version gates + the transport-tuple and
+service minimums — see scripts/release/bundle_catalog.py, the catalog spec
+§3.2 no-cold-start layer 2). CI generates them from the live catalog repo at
+one resolved commit per run; offline builds use
+`bundle_catalog.py generate --fixture`.
 
 `--binary` defaults to `<repo>/target/<target>/release/<binary-name>` (cross
 builds) and falls back to `<repo>/target/release/<binary-name>` (host builds),

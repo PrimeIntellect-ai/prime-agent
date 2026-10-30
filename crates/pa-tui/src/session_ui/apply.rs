@@ -361,8 +361,13 @@ impl SessionUi {
                 }
                 self.settled = None;
                 self.turn_error_shown = false;
-                // No card from a previous run settles on this one's failure.
-                self.pending_tools.clear();
+                // A new turn also settles leftovers from a lost turn-end frame.
+                crate::snapshot::settle_pending_tool_cards(
+                    view,
+                    &mut self.pending_tools,
+                    &mut self.aborted_tools,
+                    "the turn ended before this call returned",
+                );
                 self.aborted_tools.clear();
                 self.start_loader(view);
             }
@@ -404,8 +409,11 @@ impl SessionUi {
                 args,
             } => {
                 // The failed frame's sweep owns the call: the run's late tool frames land
-                // on nothing.
-                if !self.aborted_tools.contains(&tool_call_id) {
+                // on nothing. A start outside a live turn is one of those late
+                // frames — it would allocate a fresh card whose timer then
+                // reticks the settled id on this run's paints, so it lands
+                // on nothing too.
+                if !self.aborted_tools.contains(&tool_call_id) && self.turn_active {
                     crate::snapshot::apply_tool_execution_start(
                         view,
                         &tool_call_id,
@@ -416,6 +424,7 @@ impl SessionUi {
                     // pending-state reset or arrive without its own streamed frame).
                     self.pending_tools.insert(tool_call_id.clone());
                     Self::set_working_activity("Executing", false, view);
+                    self.track_live_tool_timer();
                 }
             }
             TurnUpdate::ToolExecutionUpdate {
@@ -471,8 +480,12 @@ impl SessionUi {
                 view.retry = None;
                 // The turn settled: the held bash cards stream into the transcript.
                 Self::flush_pending_bash(view);
-                // Stragglers never leak into the next run.
-                self.pending_tools.clear();
+                crate::snapshot::settle_pending_tool_cards(
+                    view,
+                    &mut self.pending_tools,
+                    &mut self.aborted_tools,
+                    "the turn ended before this call returned",
+                );
                 self.aborted_tools.clear();
                 // A provider failure already surfaced through the failed assistant message
                 // or the retry-exhausted banner; the turn result error is only a backstop.
@@ -956,6 +969,16 @@ impl SessionUi {
             }
         }
         false
+    }
+
+    /// Count live timer starts with the session's other interaction counters.
+    fn track_live_tool_timer(&self) {
+        let Some(telemetry) = self.telemetry.clone() else {
+            return;
+        };
+        tokio::spawn(async move {
+            telemetry.live_tool_timer_started().await;
+        });
     }
 
     /// `tui ipython bash rendered`: the settled ipython card that renders

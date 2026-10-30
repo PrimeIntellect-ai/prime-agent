@@ -10,7 +10,7 @@ use super::{
     infer_refinement_result_scope, merge_refinement_history, HarnessScope, HarnessState,
     RefinementKind, RefinementResult, REFINEMENT_KINDS,
 };
-use pa_types::ai::AssistantMessage;
+use pa_types::ai::{AssistantMessage, StopReason};
 use pa_types::session::AgentMessage;
 
 #[derive(Debug, Default, Clone)]
@@ -257,8 +257,9 @@ pub async fn plan_refinement(
     let mut request_model = model.clone();
     request_model.max_tokens = request_max_tokens.min(REFINEMENT_MAX_OUTPUT_TOKENS);
 
+    let max_tokens = request_model.max_tokens;
     let reply = refine_call(request_model, REFINEMENT_SYSTEM_PROMPT, user_prompt).await?;
-    let text = assistant_text(&reply);
+    let text = reply_text(&reply, max_tokens, "Refinement failed")?;
     Ok(RefinementPlan {
         proposal: parse_proposal(&text).map_err(anyhow::Error::msg)?,
         id,
@@ -267,8 +268,22 @@ pub async fn plan_refinement(
     })
 }
 
-fn assistant_text(reply: &AssistantMessage) -> String {
-    reply
+/// The text of a side call's reply. A reply cut off at its output limit or
+/// failed by the provider is an error that says so, never parsed as JSON.
+fn reply_text(reply: &AssistantMessage, max_tokens: u64, failure: &str) -> anyhow::Result<String> {
+    match reply.stop_reason {
+        StopReason::Length => anyhow::bail!(
+            "{failure}: the model hit its output limit ({max_tokens} tokens, {}/{})",
+            reply.provider,
+            reply.model
+        ),
+        StopReason::Error => anyhow::bail!(
+            "{failure}: {}",
+            reply.error_message.as_deref().unwrap_or("Unknown error")
+        ),
+        StopReason::Stop | StopReason::ToolUse | StopReason::Aborted => {}
+    }
+    Ok(reply
         .content
         .iter()
         .filter_map(|block| match block {
@@ -276,7 +291,7 @@ fn assistant_text(reply: &AssistantMessage) -> String {
             _ => None,
         })
         .collect::<Vec<_>>()
-        .join("\n")
+        .join("\n"))
 }
 
 /// Apply a plan to the (re-read) harness state. `factory_enabled` is the
@@ -382,8 +397,13 @@ pub async fn review_auto_refine(
     )?;
     let mut request_model = model.clone();
     request_model.max_tokens = request_max_tokens.min(AUTO_REFINE_REVIEW_MAX_OUTPUT_TOKENS);
+    let max_tokens = request_model.max_tokens;
     let reply = review_call(request_model, AUTO_REFINE_REVIEW_SYSTEM_PROMPT, user_prompt).await?;
-    parse_auto_refine_review(&assistant_text(&reply))
+    parse_auto_refine_review(&reply_text(
+        &reply,
+        max_tokens,
+        "Auto-refine review failed",
+    )?)
 }
 
 #[cfg(test)]
@@ -477,6 +497,48 @@ mod tests {
         assert_eq!(
             *plan_systems.lock().unwrap(),
             vec![REFINEMENT_SYSTEM_PROMPT]
+        );
+    }
+
+    /// A cut-off or failed reply reports its stop instead of a JSON parse
+    /// error on its partial text.
+    #[tokio::test]
+    async fn a_cut_off_or_failed_reply_reports_why() {
+        let stopped = |stop_reason: StopReason| -> RefinerFn {
+            Box::new(move |_model, _system, _prompt| {
+                Box::pin(async move {
+                    Ok(AssistantMessage {
+                        stop_reason,
+                        error_message: Some("max_tokens is too large".to_string()),
+                        ..text_message(r#"{"summary": "cut"#)
+                    })
+                })
+            })
+        };
+        let (state, model) = (super::super::empty_harness_state(), test_model());
+        let options = RefineOptions::default();
+        let plan = plan_refinement(
+            &[],
+            &state,
+            &[],
+            &model,
+            &options,
+            stopped(StopReason::Length),
+        );
+        let ctx = AutoRefineReviewContext {
+            reason: "checkpoint".to_string(),
+            turns_since_last_review: 1,
+        };
+        let review = review_auto_refine(&[], &state, &[], &model, &ctx, stopped(StopReason::Error));
+        assert_eq!(
+            [
+                plan.await.err().unwrap().to_string(),
+                review.await.err().unwrap().to_string()
+            ],
+            [
+                "Refinement failed: the model hit its output limit (8000 tokens, test/m)",
+                "Auto-refine review failed: max_tokens is too large",
+            ]
         );
     }
 

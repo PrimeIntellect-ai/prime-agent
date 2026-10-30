@@ -160,6 +160,8 @@ impl SessionUi {
             subagent_counts: crate::subagents::SubagentCounts::default(),
             session_file: None,
             pending_selection: None,
+            pending_selection_rlm_depth: None,
+            pending_selection_origin: None,
             return_to_agents_view: !options.no_session,
             panel_returns_to_agents_view: false,
             client_auth: options.client_auth.clone(),
@@ -910,6 +912,7 @@ mod backfill_tests {
             ));
             session.open_agents_view_panel(
                 crate::interactive::SessionPanel::Shells { shell_id: None },
+                true,
                 &mut view,
             );
             session.rebuild_view(&mut view, &RebuildKind::Rebind);
@@ -957,6 +960,7 @@ mod backfill_tests {
                     crate::interactive::SessionPanel::Shells {
                         shell_id: Some("s2".to_string()),
                     },
+                    true,
                     &mut view,
                 );
                 if !preloaded {

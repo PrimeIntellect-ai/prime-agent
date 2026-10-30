@@ -217,6 +217,7 @@ pub(crate) fn spawn_child(
             child: child_file.display().to_string(),
             depth,
             name: WORKER_NAMES[rng.below(WORKER_NAMES.len() as u64) as usize].to_string(),
+            factory: None,
         })?;
         written.push(child_file.clone());
         if depth < tree.max_depth {

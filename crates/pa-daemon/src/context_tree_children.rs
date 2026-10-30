@@ -1,7 +1,9 @@
 //! The persisted RLM child nodes of the /context tree: the live registry covers only children THIS
 //! worker spawned; every other child is read from its persisted session dir. Deliberate TS
 //! divergences: grandchildren live under the sibling tree (TS nests them inside `sub-<id>/`);
-//! deleted subagents stay hidden via durable ledger tombstones at every level (TS: memory only).
+//! a deleted subagent's transcript stays hidden via durable ledger tombstones at every level
+//! (TS: memory only) and its spend rides a `deleted` row from the ledger's deleted-spend fold,
+//! the same fold the agents view bills; every child carries its ledger edge's factory run tag.
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -17,9 +19,172 @@ use crate::session_store::SessionFile;
 const LABEL_MAX_CHARS: usize = 80;
 const ELLIPSIS: &str = "...";
 
-/// User-deleted child ids keyed by the deleted child's parent session
-/// file path (the RLM ledger's durable tombstones, canonicalized).
-pub type TombstonedChildren = HashMap<PathBuf, HashSet<String>>;
+/// The RLM ledger facts the walk reads, keyed by the parent session file
+/// (canonicalized): the tombstoned child ids whose transcripts stay hidden
+/// and the billable deleted children (the agents view's deleted-spend
+/// fold); plus each child's factory run tag, keyed by the child's own
+/// session file (child ids are only unique under one parent).
+#[derive(Debug, Default)]
+pub struct ContextLedger {
+    tombstoned: HashMap<PathBuf, HashSet<String>>,
+    tombstoned_files: HashSet<PathBuf>,
+    deleted: HashMap<PathBuf, Vec<crate::rlm_ledger::DeletedChildUsage>>,
+    factory: HashMap<PathBuf, crate::rlm_ledger::RlmFactoryTag>,
+}
+
+impl ContextLedger {
+    /// Read the facts from one ledger. An unreadable ledger degrades to no
+    /// filtering and no deleted rows.
+    pub fn read(ledger: &crate::rlm_ledger::RlmSpawnLedger) -> Self {
+        let mut facts = Self::default();
+        let (edges, deleted) = ledger.edges_with_deleted_children().unwrap_or_default();
+        // A reused path with a live edge bills as live, like the ledger's
+        // deleted-spend fold; an older tombstone must not hide its new owner.
+        let live_files: HashSet<PathBuf> = edges
+            .iter()
+            .filter(|edge| edge.deleted.is_none())
+            .map(|edge| crate::lease::canonical_session_path(Path::new(&edge.child)))
+            .collect();
+        // Replay order: the last edge at a child session file decides its tag.
+        for edge in edges {
+            let child = crate::lease::canonical_session_path(Path::new(&edge.child));
+            match edge.factory.clone() {
+                Some(tag) => facts.factory.insert(child, tag),
+                None => facts.factory.remove(&child),
+            };
+            if edge.deleted.is_some() {
+                let file = crate::lease::canonical_session_path(Path::new(&edge.child));
+                if !live_files.contains(&file) {
+                    facts.tombstoned_files.insert(file);
+                }
+                facts
+                    .tombstoned
+                    .entry(crate::lease::canonical_session_path(Path::new(
+                        &edge.parent,
+                    )))
+                    .or_default()
+                    .insert(edge.child_id);
+            }
+        }
+        for (parent, children) in deleted {
+            facts.deleted.insert(PathBuf::from(parent), children);
+        }
+        facts
+    }
+
+    /// The tombstoned child ids of one parent session file.
+    pub fn tombstoned_ids(&self, parent_file: &Path) -> HashSet<String> {
+        self.tombstoned
+            .get(&crate::lease::canonical_session_path(parent_file))
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    /// Whether this exact session file was tombstoned; called on the blocking walk.
+    pub(crate) fn is_tombstoned_file(&self, path: &Path) -> bool {
+        self.tombstoned_files
+            .contains(&crate::lease::canonical_session_path(path))
+    }
+
+    /// Set a child node's `factory` run tag from the ledger edge of its
+    /// session file.
+    fn tag(&self, node: &mut Value, session_file: &Path) {
+        if let Some(tag) = self
+            .factory
+            .get(&crate::lease::canonical_session_path(session_file))
+        {
+            node["factory"] = json!(tag);
+        }
+    }
+
+    /// One `deleted` row per billable deleted child of one parent session
+    /// file, with its per-model split when the capture recorded one (the
+    /// split's tokens equal the summary's; the billed cost stays the
+    /// summary's). Without a split, the summary's `inputTokens` already
+    /// include cache reads and writes.
+    pub fn deleted_nodes(&self, parent_file: &Path) -> Vec<Value> {
+        let Some(children) = self
+            .deleted
+            .get(&crate::lease::canonical_session_path(parent_file))
+        else {
+            return Vec::new();
+        };
+        children
+            .iter()
+            .map(|child| {
+                let summary = &child.usage;
+                let (input, cache_read, cache_write) = match &child.by_model {
+                    Some(models) => (
+                        models.iter().map(|model| model.input).sum(),
+                        models.iter().map(|model| model.cache_read).sum(),
+                        models.iter().map(|model| model.cache_write).sum(),
+                    ),
+                    None => (summary.input_tokens, 0, 0),
+                };
+                let usage = usage_value(
+                    input,
+                    summary.output_tokens,
+                    cache_read,
+                    cache_write,
+                    summary.cost,
+                );
+                // Its own id namespace: a live child reusing the id must
+                // never collide with (or invalidate) the deleted spend.
+                let mut node = json!({
+                    "id": format!("deleted:{}", child.child_file),
+                    "label": child.name,
+                    "status": "deleted",
+                    "deleted": true,
+                    "ownUsage": usage,
+                    "totalUsage": usage,
+                    "children": [],
+                });
+                if let Some(tag) = &child.factory {
+                    node["factory"] = json!(tag);
+                }
+                if let Some(models) = &child.by_model {
+                    let buckets: Vec<Value> = models
+                        .iter()
+                        .map(|model| {
+                            json!({
+                                "provider": model.provider,
+                                "id": model.id,
+                                "ownUsage": usage_value(
+                                    model.input,
+                                    model.output,
+                                    model.cache_read,
+                                    model.cache_write,
+                                    model.cost,
+                                ),
+                            })
+                        })
+                        .collect();
+                    node["ownUsageByModel"] = json!(buckets);
+                }
+                node
+            })
+            .collect()
+    }
+}
+
+/// The `Usage` wire shape for one token split and its billed total (the
+/// ledger keeps no per-category cost).
+fn usage_value(input: u64, output: u64, cache_read: u64, cache_write: u64, cost: f64) -> Value {
+    json!({
+        "input": input,
+        "output": output,
+        "cacheRead": cache_read,
+        "cacheWrite": cache_write,
+        "totalTokens": input + output + cache_read + cache_write,
+        "cost": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheWrite": 0,
+            "total": cost,
+        },
+    })
+}
 
 /// The artifact tree root every session's children live under
 /// (`child_session_dir` writes `<agent-dir>/session-artifacts/<id>/...`).
@@ -37,8 +202,21 @@ pub fn load_context_tree_child(
     artifacts_root: &Path,
     child_dir: &Path,
     registry: &ModelRegistry,
-    tombstones: &TombstonedChildren,
+    ledger: &ContextLedger,
 ) -> Option<Value> {
+    load_context_tree_child_with_path(artifacts_root, child_dir, registry, ledger)
+        .filter(|(path, _)| !ledger.is_tombstoned_file(path))
+        .map(|(_, node)| node)
+}
+
+/// The node and the exact file it read, so a stale live roster snapshot
+/// can be fenced against durable tombstones without hiding a reused id.
+pub(crate) fn load_context_tree_child_with_path(
+    artifacts_root: &Path,
+    child_dir: &Path,
+    registry: &ModelRegistry,
+    ledger: &ContextLedger,
+) -> Option<(PathBuf, Value)> {
     // The newest VALID session file: artifact dirs carry sibling `.jsonl`
     // files that are not sessions, so candidates are tried newest-first.
     let store = newest_session_files(child_dir)
@@ -84,20 +262,20 @@ pub fn load_context_tree_child(
     if let Some(by_model) = own_usage_by_model {
         node["ownUsageByModel"] = json!(by_model);
     }
-    // The child's own deleted subagents stay hidden one level down: the
-    // tombstones key by the deleted child's parent session file.
-    let deleted_ids = tombstones
-        .get(&crate::lease::canonical_session_path(&store.path))
-        .cloned()
-        .unwrap_or_default();
-    node["children"] = Value::Array(load_context_tree_children(
+    ledger.tag(&mut node, &store.path);
+    // The child's own deleted subagents stay hidden one level down and
+    // bill through their deleted rows: the ledger keys by the deleted
+    // child's parent session file.
+    let mut children = load_context_tree_children(
         artifacts_root,
         store.session_id(),
         registry,
-        &deleted_ids,
-        tombstones,
-    ));
-    Some(node)
+        &ledger.tombstoned_ids(&store.path),
+        ledger,
+    );
+    children.extend(ledger.deleted_nodes(&store.path));
+    node["children"] = Value::Array(children);
+    Some((store.path, node))
 }
 
 /// Build the nodes for every persisted child dir of one session (TS
@@ -108,7 +286,7 @@ pub fn load_context_tree_children(
     session_id: &str,
     registry: &ModelRegistry,
     skip_ids: &HashSet<String>,
-    tombstones: &TombstonedChildren,
+    ledger: &ContextLedger,
 ) -> Vec<Value> {
     child_session_dirs(&artifacts_root.join(session_id))
         .into_iter()
@@ -119,7 +297,7 @@ pub fn load_context_tree_children(
             })
         })
         .filter_map(|child_dir| {
-            load_context_tree_child(artifacts_root, &child_dir, registry, tombstones)
+            load_context_tree_child(artifacts_root, &child_dir, registry, ledger)
         })
         .collect()
 }
@@ -326,7 +504,7 @@ mod tests {
             &artifacts,
             &child_dir,
             &registry(),
-            &TombstonedChildren::new(),
+            &ContextLedger::default(),
         )
         .expect("node builds");
         assert_eq!(node["id"], json!("sub-003f741a"));
@@ -341,22 +519,14 @@ mod tests {
 
         // An errored child renders as errored; an aborted one as cancelled.
         let errored = write_child(&parent, "sub-errored", "01a0child-0001", "error");
-        let node = load_context_tree_child(
-            &artifacts,
-            &errored,
-            &registry(),
-            &TombstonedChildren::new(),
-        )
-        .expect("node builds");
+        let node =
+            load_context_tree_child(&artifacts, &errored, &registry(), &ContextLedger::default())
+                .expect("node builds");
         assert_eq!(node["status"], json!("error"));
         let aborted = write_child(&parent, "sub-aborted", "01a0child-0002", "aborted");
-        let node = load_context_tree_child(
-            &artifacts,
-            &aborted,
-            &registry(),
-            &TombstonedChildren::new(),
-        )
-        .expect("node builds");
+        let node =
+            load_context_tree_child(&artifacts, &aborted, &registry(), &ContextLedger::default())
+                .expect("node builds");
         assert_eq!(node["status"], json!("cancelled"));
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -431,7 +601,7 @@ mod tests {
             &artifacts,
             &child_dir,
             &registry(),
-            &TombstonedChildren::new(),
+            &ContextLedger::default(),
         )
         .expect("node builds");
         assert_eq!(
@@ -491,7 +661,7 @@ mod tests {
             &artifacts,
             &modelless,
             &registry(),
-            &TombstonedChildren::new(),
+            &ContextLedger::default(),
         )
         .expect("node builds");
         assert!(node.get("ownUsageByModel").is_none());
@@ -513,7 +683,7 @@ mod tests {
             "01a0parent-0000",
             &registry,
             &HashSet::default(),
-            &TombstonedChildren::new(),
+            &ContextLedger::default(),
         );
         assert_eq!(nodes.len(), 2, "non-sub dirs and empty dirs drop out");
 
@@ -523,7 +693,7 @@ mod tests {
             "01a0parent-0000",
             &registry,
             &skip,
-            &TombstonedChildren::new(),
+            &ContextLedger::default(),
         );
         assert_eq!(nodes.len(), 1);
         assert_eq!(nodes[0]["id"], json!("sub-b"));
@@ -553,7 +723,7 @@ mod tests {
             &artifacts,
             &child_dir,
             &registry(),
-            &TombstonedChildren::new(),
+            &ContextLedger::default(),
         )
         .expect("node builds");
         let grandchildren = node["children"].as_array().expect("children");
@@ -585,14 +755,15 @@ mod tests {
             "01a0grand-0001",
             "stop",
         );
-        let mut tombstones = TombstonedChildren::new();
-        tombstones
+        let mut ledger = ContextLedger::default();
+        ledger
+            .tombstoned
             .entry(crate::lease::canonical_session_path(
                 &child_dir.join("01a0child-0000.jsonl"),
             ))
             .or_default()
             .insert("sub-dead".to_string());
-        let node = load_context_tree_child(&artifacts, &child_dir, &registry(), &tombstones)
+        let node = load_context_tree_child(&artifacts, &child_dir, &registry(), &ledger)
             .expect("node builds");
         let grandchildren = node["children"].as_array().expect("children");
         assert_eq!(
@@ -626,7 +797,7 @@ mod tests {
             &artifacts,
             &child_dir,
             &registry(),
-            &TombstonedChildren::new(),
+            &ContextLedger::default(),
         )
         .expect("node builds");
         assert_eq!(node["ownUsage"]["input"], json!(7));

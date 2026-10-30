@@ -77,6 +77,30 @@ fn assistant_usage(entry: &SessionEntry) -> Option<Usage> {
         .and_then(|usage| serde_json::from_value(usage).ok())
 }
 
+/// A grandchild's attribution row whose target an earlier window already billed: that read
+/// carried only the attributions present then, so this row's own `childUsage` is still unbilled
+/// (returned with the target's index, whose turn labels the origin). An attribution into a
+/// target inside the window bills nothing itself: the open's fold already put every
+/// attribution in the file into the target's usage.
+fn late_attribution(
+    entries: &[SessionEntry],
+    from: usize,
+    entry: &SessionEntry,
+) -> Option<(Usage, usize)> {
+    if entry.type_ != "child_usage_attributed" {
+        return None;
+    }
+    let target_id = entry.fields.get("targetId")?.as_str()?;
+    let target = entries
+        .iter()
+        .take(from)
+        .rposition(|row| row.id == target_id)?;
+    // A late row must use the same target eligibility as an in-window folded completion.
+    assistant_usage(&entries[target])?;
+    let usage = serde_json::from_value(entry.fields.get("childUsage")?.clone()).ok()?;
+    Some((usage, target))
+}
+
 /// The per-origin usage delta of rows `[from..]`, in first-seen origin order, plus the next cursor:
 /// every parsed row is consumed, attributed or not, so the walk never rescans.
 pub(crate) fn child_usage_batches(
@@ -85,10 +109,12 @@ pub(crate) fn child_usage_batches(
 ) -> (Vec<(ChildUsageOrigin, Usage)>, usize) {
     let mut batches: Vec<(ChildUsageOrigin, Usage)> = Vec::new();
     for (index, entry) in entries.iter().enumerate().skip(from) {
-        let Some(usage) = assistant_usage(entry) else {
+        let billed = late_attribution(entries, from, entry)
+            .or_else(|| assistant_usage(entry).map(|usage| (usage, index)));
+        let Some((usage, origin_row)) = billed else {
             continue;
         };
-        let origin = child_usage_origin(entries, index);
+        let origin = child_usage_origin(entries, origin_row);
         match batches.iter_mut().find(|(origin_, _)| *origin_ == origin) {
             Some((_, total)) => {
                 pa_core::session_engine::rlm_usage::add_assistant_usage(total, &usage);
@@ -247,5 +273,82 @@ mod tests {
         assert_eq!(usage.output, 13);
         assert!((usage.cost.total.as_f64() - 0.03).abs() < 1e-9);
         let _ = usage_of(&entries[1]);
+    }
+
+    /// A grandchild's spend that lands after the parent read its target row still reaches the
+    /// parent: the late attribution bills its `childUsage` under the target turn's origin, while
+    /// an attribution into a target in the same window rides the folded target only once.
+    #[test]
+    fn late_grandchild_attributions_bill_once() {
+        let attribution = |id: &str, target: &str, child: Value, aggregate: Value| {
+            row(
+                "child_usage_attributed",
+                id,
+                json!({"targetId": target, "origin": "spawn_task",
+                       "childUsage": child, "aggregateUsage": aggregate}),
+            )
+        };
+        let mut entries = vec![
+            spawn_kickoff_row("c0", "ship the lane"),
+            assistant_row("a1", &captured_usage(100, 10, 110, 0.0), "toolUse"),
+        ];
+        let (first, cursor) = child_usage_batches(&entries, 0);
+        assert_eq!(first[0].1.input, 100);
+
+        entries.push(attribution(
+            "g1",
+            "a1",
+            captured_usage(30, 3, 33, 0.0),
+            captured_usage(130, 13, 110, 0.0),
+        ));
+        entries.push(user_row("u1"));
+        entries.push(assistant_row(
+            "a2",
+            &captured_usage(5, 1, 6, 0.0),
+            "toolUse",
+        ));
+        entries.push(attribution(
+            "g2",
+            "a2",
+            captured_usage(7, 2, 9, 0.0),
+            captured_usage(12, 3, 6, 0.0),
+        ));
+        // The reopen's fold: each target carries its latest aggregate.
+        entries[1].fields["message"]["usage"] = captured_usage(130, 13, 110, 0.0);
+        entries[4].fields["message"]["usage"] = captured_usage(12, 3, 6, 0.0);
+        let (second, next) = child_usage_batches(&entries, cursor);
+        assert_eq!(next, entries.len());
+        let [(spawn_origin, late), (user_origin, folded)] = second[..] else {
+            panic!("two batches: {second:?}");
+        };
+        assert_eq!(spawn_origin, ChildUsageOrigin::SpawnTask);
+        assert_eq!((late.input, late.output), (30, 3));
+        assert_eq!(user_origin, ChildUsageOrigin::DirectUser);
+        assert_eq!((folded.input, folded.output), (12, 3));
+    }
+
+    #[test]
+    fn late_attributions_preserve_target_exclusions() {
+        for stop_reason in ["error", "aborted"] {
+            let entries = vec![
+                spawn_kickoff_row("c0", "ship the lane"),
+                assistant_row("a1", &captured_usage(130, 13, 110, 0.03), stop_reason),
+                row(
+                    "child_usage_attributed",
+                    "g1",
+                    json!({"targetId": "a1", "origin": "spawn_task",
+                           "childUsage": captured_usage(30, 3, 33, 0.01),
+                           "aggregateUsage": captured_usage(130, 13, 110, 0.03)}),
+                ),
+            ];
+            // The existing exclusion must not depend on whether the target was read earlier.
+            for from in [0, 2] {
+                assert_eq!(
+                    child_usage_batches(&entries, from),
+                    (Vec::new(), entries.len()),
+                    "{stop_reason} target, cursor {from}"
+                );
+            }
+        }
     }
 }

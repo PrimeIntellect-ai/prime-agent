@@ -340,6 +340,8 @@ pub(crate) struct SessionUi {
     /// subagent linkage; `None` for unpersisted sessions).
     session_file: Option<String>,
     pub(crate) pending_selection: Option<SessionSelection>,
+    pub(crate) pending_selection_rlm_depth: Option<u32>,
+    pub(crate) pending_selection_origin: Option<crate::interactive::SelectionOrigin>,
     /// Whether this run may hand the terminal back to the agents view:
     /// false only for `--no-session` runs.
     pub(crate) return_to_agents_view: bool,
