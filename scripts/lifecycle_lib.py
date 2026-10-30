@@ -650,7 +650,7 @@ class DockScreen:
                     if end is None:
                         break
                     sequence = self.pending[:2 + end.end()]
-                    # OSC titles/hyperlinks do not move terminal cells. DCS,
+                    # OSC titles/hyperlinks/program status (7501) do not move terminal cells. DCS,
                     # APC and PM can carry graphics or sixel: never silently
                     # accept their unknown effect on the captured frame.
                     payload = self.pending[2:2 + end.start()]
@@ -660,7 +660,7 @@ class DockScreen:
                     # do not paint or set a color; a legacy PTY may stay silent.
                     # Color-setting variants remain unsupported and fail closed.
                     color_query = payload in ('10;?', '11;?')
-                    if self.pending[1] != ']' or (not color_query and osc_kind not in ('0', '1', '2', '7', '8', '52', '133')):
+                    if self.pending[1] != ']' or (not color_query and osc_kind not in ('0', '1', '2', '7', '8', '52', '133', '7501')):
                         self.unsupported_terminal.append(sequence)
                     self.pending = self.pending[2 + end.end():]
                     continue

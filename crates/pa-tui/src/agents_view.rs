@@ -1282,6 +1282,10 @@ async fn run_agents_view_surface(
                 + Duration::from_millis(crate::incident_notices::INCIDENT_NOTICE_POLL_INTERVAL_MS);
             redraw |= mode.refresh_incident_notices();
         }
+        // OSC 7501 program status: the picker waits on the user's choice.
+        if matches!(renderer, Renderer::Terminal { .. }) {
+            crate::program_status::report(crate::program_status::Status::Idle);
+        }
         // A failed saved-catalog fetch re-arms on the next query change or deferred shell open
         // (a key, a paste, or a click): one honest retry behind a terminal failure.
         if mode.take_saved_fetch_rearm() {

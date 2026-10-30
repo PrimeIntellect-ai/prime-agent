@@ -4,11 +4,11 @@
 use super::{
     attach_capabilities, attach_data_from_response, create_session, last_assistant_text_of, mpsc,
     reconstruct, resume_hint_from_stats, ActivityUpdates, AgentView, BTreeMap, ChatEntry,
-    CompactionAbortNote, Context, DaemonClient, DaemonCommand, DockFold, Duration, GoalView,
-    HashSet, InteractiveOptions, LoaderTokenTracker, Map, ModelCatalogUpdate, PromptOrder,
-    PromptSubmitNote, ReattachOutcome, RebuildKind, RecoveryKind, ReloadNote, Result, ResyncBash,
-    SessionSelection, SessionUi, ShareNote, TranscriptPageNote, UpdateNote, Value,
-    EXIT_DETACH_TIMEOUT_MS, EXIT_STATS_TIMEOUT_MS, UI_REQUEST_TIMEOUT_MS,
+    CompactionAbortNote, CompactionReason, CompactionState, Context, DaemonClient, DaemonCommand,
+    DockFold, Duration, GoalView, HashSet, InteractiveOptions, LoaderTokenTracker, Map,
+    ModelCatalogUpdate, PromptOrder, PromptSubmitNote, ReattachOutcome, RebuildKind, RecoveryKind,
+    ReloadNote, Result, ResyncBash, SessionSelection, SessionUi, ShareNote, TranscriptPageNote,
+    UpdateNote, Value, EXIT_DETACH_TIMEOUT_MS, EXIT_STATS_TIMEOUT_MS, UI_REQUEST_TIMEOUT_MS,
 };
 
 impl SessionUi {
@@ -111,6 +111,10 @@ impl SessionUi {
             context: None,
             list_rows: Vec::new(),
             turn_active: false,
+            run_open: false,
+            run_outcome: crate::program_status::Status::Done,
+            outcome_after_compaction: None,
+            settled: None,
             turn_ends_seen: 0,
             last_prompt_turn_end: 0,
             steering_mode: "all".to_string(),
@@ -192,6 +196,7 @@ impl SessionUi {
             user_bash_started_at: None,
             user_bash_counter: 0,
             resync_bash: None,
+            attach_compacting: None,
             loader_anchor_ms: None,
             side_bash: None,
             side_bash_discarded: None,
@@ -396,6 +401,12 @@ impl SessionUi {
         };
         self.user_bash_running = resync_bash.snap_running;
         self.resync_bash = Some(resync_bash);
+        self.attach_compacting = Some(
+            state
+                .and_then(|state| state.get("isCompacting"))
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
+        );
         let reconstructed = reconstruct(&attach);
         let mounted_session_changes = previous != attach.active_session_id;
         self.active_session_id = attach.active_session_id;
@@ -491,14 +502,21 @@ impl SessionUi {
         self.pending_snapshot = Some(reconstructed.chat);
         self.loader_anchor_ms = reconstructed.last_user_prompt_ms;
         self.goal_view.seed(reconstructed.goal.unwrap_or_default());
+        self.settled = None;
+        self.outcome_after_compaction = None;
         // The resynced state owns the loader: a turn still live behind the
-        // re-attach keeps the spinner, one that died with the old link does not.
-        let streaming = attach.snapshot.get("state").is_some_and(|state| {
-            ["isStreaming", "isCompacting"]
-                .iter()
-                .any(|flag| state.get(flag).and_then(Value::as_bool).unwrap_or(false))
-        });
+        // re-attach keeps the spinner, one that died with the old link does
+        // not. A compaction in flight seeds the compaction loader instead
+        // (see `rebuild_view`): its `compaction_end` clears it.
+        let streaming = attach
+            .snapshot
+            .get("state")
+            .and_then(|state| state.get("isStreaming"))
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
         self.turn_active = streaming;
+        self.run_open = streaming;
+        self.run_outcome = crate::program_status::Status::Done;
         self.streaming_index = None;
         // The turn-end watermark restarts only when the mounted session CHANGES: an end owed by the
         // detached session's stream must not pin the watermark (without the reset a later prompt's
@@ -612,6 +630,24 @@ impl SessionUi {
             view.info_panel = None;
             self.speed_stats = None;
             view.chrome.speed_text = None;
+        }
+        // Retry countdowns belong to the previous event stream. The fresh
+        // snapshot's activity flags own this attachment; only a new retry
+        // event can establish a countdown for it.
+        view.retry = None;
+        // A compaction in flight behind the attach keeps its loader until its
+        // `compaction_end`; the snapshot names no reason, so the wire's
+        // fallback (`manual`) labels it.
+        if let Some(compacting) = self.attach_compacting.take() {
+            view.compaction = None;
+            if compacting {
+                view.compaction_generation += 1;
+                view.compaction = Some(CompactionState {
+                    reason: CompactionReason::Manual,
+                    custom_instructions: None,
+                    summary: String::new(),
+                });
+            }
         }
         let snapshot = self.pending_snapshot.take().unwrap_or_default();
         self.replace_transcript(snapshot, view);
