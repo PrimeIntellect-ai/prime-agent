@@ -3,10 +3,9 @@
 //! single decision model call — the registry-resolved
 //! `decisionModel` model (resolved once at engine start)
 //! over the shared decision path (`pa_core::session_engine::decision_api`).
-//! The parent's tagged goal messages route into the engine's goal input
-//! (the newest seq wins; an older goal never overwrites a newer one), and
-//! each answer returns to the parent as a tagged `decision_api.decision`
-//! message.
+//! Each answer returns to the parent as a tagged
+//! `decision_api.decision` message (the parent's goal rides the
+//! request's `state`, the only guidance channel the model reads).
 
 use std::path::Path;
 use std::sync::{Arc, Mutex, PoisonError};
@@ -18,8 +17,8 @@ use crate::agent_messaging::{FamilyIdentity, LinkAgentMessageController};
 use crate::async_safe_runtime::AsyncSafeRuntime;
 use crate::engine::{
     AssistantSnapshot, BranchSummaryOutcome, BranchSummaryRequest, CompactionOutcome,
-    CompactionRequest, EngineEvent, PromptRequest, RlmSessionIdentity, SessionEngine,
-    SideQuestionOutcome, SideQuestionRequest,
+    CompactionRequest, EngineEvent, PromptRequest, SessionEngine, SideQuestionOutcome,
+    SideQuestionRequest,
 };
 use pa_core::session_engine::agent_messaging::{
     AgentFamilyRelationship, AgentMessageController, AgentMessageSendInput,
@@ -27,50 +26,15 @@ use pa_core::session_engine::agent_messaging::{
 use pa_core::session_engine::decision_api::ResolvedDecisionModel;
 use pa_core::session_engine::side_question::SideQuestionSink;
 
-/// One stored goal: the seq contract lives in the routing seam — a goal with
-/// an older seq than the stored one loses.
-#[derive(Debug, Clone)]
-struct StoredGoal {
-    seq: i64,
-    goal: Option<String>,
-}
-
-impl Default for StoredGoal {
-    fn default() -> Self {
-        Self {
-            seq: i64::MIN,
-            goal: None,
-        }
-    }
-}
-
-/// The stored goal beside the session file: `None` when no store exists or
-/// the read fails (a first boot, a torn write).
-fn read_goal_store(path: &std::path::Path) -> Option<StoredGoal> {
-    let value: Value = serde_json::from_str(&std::fs::read_to_string(path).ok()?).ok()?;
-    Some(StoredGoal {
-        seq: value["seq"].as_i64()?,
-        goal: value
-            .get("goal")
-            .and_then(Value::as_str)
-            .map(str::to_string),
-    })
-}
-
 /// The decision child's engine.
 pub struct DecisionEngine {
     /// The decision model resolved once at engine start, or the actionable
     /// refusal every decision answers with.
     model: Result<ResolvedDecisionModel, String>,
-    /// The latest goal message; shared with the worker's routing seam.
-    goals: Arc<Mutex<StoredGoal>>,
     /// The tagged-reply sender over the supervisor link.
     sender: Arc<LinkAgentMessageController>,
     /// The sender's identity source: the worker's session summary.
     own_summary: Arc<Mutex<Option<Value>>>,
-    /// The goal's durable home beside the session file, set at the create's
-    /// identity handoff; `None` before the worker's create arrives.
-    goal_store: Mutex<Option<std::path::PathBuf>>,
     /// The engine's own runtime: the decision call and the reply send are
     /// async, `run_prompt` is not — a current-thread runtime serves every
     /// `block_on` (the engine spawns nothing).
@@ -109,55 +73,9 @@ impl DecisionEngine {
         Self {
             model,
             own_summary,
-            goals: Arc::new(Mutex::new(StoredGoal::default())),
             sender,
-            goal_store: Mutex::new(None),
             runtime: AsyncSafeRuntime::new_current_thread().expect("decision engine runtime"),
         }
-    }
-
-    /// The routing seam's goal contract: a `decision_api.goal` message is
-    /// consumed without a turn, and a goal with an older-or-equal seq than
-    /// the stored one loses — only a newer goal updates the input.
-    fn accept_goal(&self, message: &str) -> bool {
-        let Ok(goal) = serde_json::from_str::<Value>(message) else {
-            return false;
-        };
-        if goal["type"] != "decision_api.goal" {
-            return false;
-        }
-        let Some(seq) = goal["seq"].as_i64() else {
-            // A malformed goal still carries the tag: consume, never a turn.
-            return true;
-        };
-        let goal = goal.get("goal").and_then(Value::as_str).map(str::to_string);
-        let mut stored = self.goals.lock().unwrap_or_else(PoisonError::into_inner);
-        if seq > stored.seq {
-            let updated = StoredGoal { seq, goal };
-            // The passivation contract: a newer goal is durable before it
-            // is live, so a revived child serves the parent's latest goal
-            // instead of an empty input. The write is best-effort — the
-            // in-memory goal stays ahead of a failed one.
-            if let Some(store) = self
-                .goal_store
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .as_ref()
-            {
-                let _ = std::fs::write(
-                    store,
-                    json!({ "seq": updated.seq, "goal": updated.goal }).to_string(),
-                );
-            }
-            *stored = updated;
-        }
-        true
-    }
-
-    /// The latest goal text (the decision call reads it into the state).
-    fn latest_goal(&self) -> Option<String> {
-        let stored = self.goals.lock().unwrap_or_else(PoisonError::into_inner);
-        stored.goal.clone().filter(|goal| !goal.is_empty())
     }
 
     /// The raw delivered body: the agent-message row carries it in
@@ -204,30 +122,11 @@ impl DecisionEngine {
         })
     }
 
-    /// Inject the parent's goal into the request's state: the state is the
-    /// only goal channel the model sees, so every valid state shape must
-    /// carry it. A non-object state (any JSON the request's `"state"` field
-    /// holds — the shared path accepts it verbatim) is wrapped under an
-    /// `"observation"` key, the shape a decision state is documented in;
-    /// an object state keeps its shape and only gains a `goal` key.
-    fn inject_goal(request: &mut Value, goal: &str) {
-        if let Some(state) = request.get_mut("state") {
-            if !state.is_object() {
-                *state = json!({ "observation": state.clone() });
-            }
-            if let Some(map) = state.as_object_mut() {
-                map.insert("goal".to_string(), json!(goal));
-            }
-        }
-    }
-
-    /// Serve one decision request message: inject the latest goal into the
-    /// state, then run the shared decision path (one provider completion)
-    /// with the engine-start resolution.
-    fn serve(&self, mut request: Value, aborted: &dyn Fn() -> bool) -> anyhow::Result<Value> {
-        if let Some(goal) = self.latest_goal() {
-            Self::inject_goal(&mut request, &goal);
-        }
+    /// Serve one decision request message: run the shared decision path
+    /// (one provider completion) with the engine-start resolution. The
+    /// request's `state` carries the parent's guidance verbatim — the
+    /// engine keeps no channel of its own.
+    fn serve(&self, request: Value, aborted: &dyn Fn() -> bool) -> anyhow::Result<Value> {
         let resolved = match self.model.as_ref() {
             Ok(resolved) => resolved,
             Err(refusal) => return Err(anyhow!(refusal.clone())),
@@ -307,27 +206,6 @@ impl DecisionEngine {
 }
 
 impl SessionEngine for DecisionEngine {
-    /// The decision engine consumes the parent's tagged messages: the
-    /// worker resolves the sender's parent edge for it alone.
-    fn routes_decision_events(&self) -> bool {
-        true
-    }
-    /// Consume the parent's tagged goal messages: no turn, newest seq
-    /// wins. The goal input is parent-authoritative: a sibling's, a
-    /// child's, or an unaffiliated sender's goal tags never reach it —
-    /// they route as ordinary messages instead.
-    fn route_decision_api_event(
-        &self,
-        relationship: Option<AgentFamilyRelationship>,
-        _sender_name: &str,
-        message: &str,
-    ) -> bool {
-        if relationship != Some(AgentFamilyRelationship::Parent) {
-            return false;
-        }
-        self.accept_goal(message)
-    }
-
     /// The worker's live session summary: the sender identity block of the
     /// tagged replies.
     fn set_session_summary(&self, summary: Value) {
@@ -337,37 +215,11 @@ impl SessionEngine for DecisionEngine {
             .unwrap_or_else(PoisonError::into_inner) = Some(summary);
     }
 
-    /// The create's identity handoff: the session file names the goal's
-    /// durable home, and a stored goal re-seeds the input (the revived
-    /// child of a passivated worker keeps the parent's latest goal under
-    /// the same seq contract).
-    fn configure_rlm_identity(&self, identity: RlmSessionIdentity) -> anyhow::Result<()> {
-        let store = identity
-            .session_file
-            .as_deref()
-            .map(std::path::Path::new)
-            .and_then(std::path::Path::parent)
-            .map(|dir| dir.join("decision-goal.json"));
-        if let Some(store) = store {
-            if let Some(stored) = read_goal_store(&store) {
-                let mut goals = self.goals.lock().unwrap_or_else(PoisonError::into_inner);
-                if stored.seq > goals.seq {
-                    *goals = stored;
-                }
-            }
-            *self
-                .goal_store
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner) = Some(store);
-        }
-        Ok(())
-    }
-
     /// The whole-worker gate passes: the engine holds no kernel, no cron,
-    /// and no RLM children of its own, and its one memory-only input — the
-    /// goal — is durable beside the session file. The worker-side idle
-    /// fences (attachment, queued lanes, live bash) stay the whole gate,
-    /// so an idle decision child passivates instead of staying resident.
+    /// no RLM children of its own, and no memory-only input — the
+    /// worker-side idle fences (attachment, queued lanes, live bash) are
+    /// the whole gate, so an idle decision child passivates instead of
+    /// staying resident.
     fn can_passivate_worker(
         &self,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send + '_>> {
@@ -584,150 +436,6 @@ mod tests {
             "decision-child".to_string(),
             "token".to_string(),
         )
-    }
-
-    /// The seq contract, pinned: an old goal arriving after a newer one
-    /// loses — the routing seam keeps the newest seq.
-    #[test]
-    fn an_older_goal_never_overwrites_a_newer_one() {
-        let dir = tempfile::tempdir().unwrap();
-        let engine = engine(dir.path());
-        let goal = |seq: i64, text: &str| {
-            json!({"type":"decision_api.goal","seq":seq,"goal":text}).to_string()
-        };
-        assert!(engine.accept_goal(&goal(3, "first")));
-        assert_eq!(engine.latest_goal().as_deref(), Some("first"));
-        // An older goal arrives late: it loses, and it still starts no turn.
-        assert!(engine.accept_goal(&goal(1, "stale")));
-        assert_eq!(engine.latest_goal().as_deref(), Some("first"));
-        // A newer goal wins.
-        assert!(engine.accept_goal(&goal(4, "second")));
-        assert_eq!(engine.latest_goal().as_deref(), Some("second"));
-        // A goal without a goal field clears the guidance but consumes the message.
-        assert!(engine.accept_goal(&json!({"type":"decision_api.goal","seq":5}).to_string()));
-        assert_eq!(engine.latest_goal(), None);
-        // Untagged messages are not consumed; neither are the reply tags.
-        assert!(!engine.accept_goal("ordinary message"));
-        assert!(!engine.accept_goal(&json!({"type":"decision_api.decision","seq":9}).to_string()));
-    }
-
-    /// The goal channel, pinned: a non-object state is wrapped so the goal
-    /// still reaches the model; a request without a state passes through
-    /// with nothing to carry the goal.
-    #[test]
-    fn a_non_object_state_is_wrapped_so_the_goal_reaches_the_model() {
-        let mut request = json!({ "state": "the target moved left" });
-        DecisionEngine::inject_goal(&mut request, "follow the target");
-        assert_eq!(
-            request["state"],
-            json!({ "observation": "the target moved left", "goal": "follow the target" })
-        );
-        // An object state keeps its shape and only gains the goal key.
-        let mut request = json!({ "state": { "observation": 1, "note": "hot" } });
-        DecisionEngine::inject_goal(&mut request, "follow the target");
-        assert_eq!(
-            request["state"],
-            json!({ "observation": 1, "note": "hot", "goal": "follow the target" })
-        );
-        // A request without a state is left alone: nothing to carry the goal.
-        let mut request = json!({ "questions": { "action": {} } });
-        DecisionEngine::inject_goal(&mut request, "follow the target");
-        assert_eq!(request, json!({ "questions": { "action": {} } }));
-    }
-
-    /// The goal-sender authorization, pinned: only the parent's goal
-    /// messages reach the goal input — a sibling's ceiling goal can never
-    /// poison the seq against the parent's later goals.
-    #[test]
-    fn only_the_parent_updates_the_goal_input() {
-        let dir = tempfile::tempdir().unwrap();
-        let engine = engine(dir.path());
-        let goal = |seq: i64, text: &str| {
-            json!({"type":"decision_api.goal","seq":seq,"goal":text}).to_string()
-        };
-        // The parent's goal is consumed into the input.
-        assert!(engine.route_decision_api_event(
-            Some(AgentFamilyRelationship::Parent),
-            "parent",
-            &goal(2, "follow the target")
-        ));
-        assert_eq!(engine.latest_goal().as_deref(), Some("follow the target"));
-        // Every other sender's goal is rejected — not consumed, so it
-        // routes as an ordinary message and starts a visible turn instead.
-        for (relationship, sender) in [
-            (Some(AgentFamilyRelationship::Sibling), "sibling"),
-            (Some(AgentFamilyRelationship::Child), "child"),
-            (None, "stranger"),
-        ] {
-            assert!(
-                !engine.route_decision_api_event(
-                    relationship,
-                    sender,
-                    &goal(i64::MAX, "steal the decision")
-                ),
-                "{sender}'s goal must be rejected"
-            );
-        }
-        assert_eq!(
-            engine.latest_goal().as_deref(),
-            Some("follow the target"),
-            "no rejected sender moved the goal"
-        );
-        // The parent's later goal still lands after the ceiling attempt.
-        assert!(engine.route_decision_api_event(
-            Some(AgentFamilyRelationship::Parent),
-            "parent",
-            &goal(3, "turn left")
-        ));
-        assert_eq!(engine.latest_goal().as_deref(), Some("turn left"));
-    }
-
-    /// The passivation contract, pinned: the whole-worker gate passes on
-    /// the current-thread runtime `block_on` needs, and the parent's goal
-    /// is durable — a fresh engine over the same session file (the revived
-    /// child of a passivated worker) re-seeds the latest goal under the
-    /// same seq contract.
-    #[test]
-    fn a_decision_child_passivates_and_its_goal_survives_the_revival() {
-        let dir = tempfile::tempdir().unwrap();
-        let child = engine(dir.path());
-        let goal = |seq: i64, text: &str| {
-            json!({"type":"decision_api.goal","seq":seq,"goal":text}).to_string()
-        };
-        // The whole-worker gate: an idle decision child passivates instead
-        // of staying resident, on the single worker thread `block_on`
-        // needs (the engine spawns nothing).
-        assert!(child
-            .runtime
-            .block_on(crate::engine::SessionEngine::can_passivate_worker(&child)));
-        assert_eq!(child.runtime.metrics().num_workers(), 1);
-        // The create's identity handoff names the goal's durable home.
-        let identity = RlmSessionIdentity {
-            rlm_depth: 1,
-            rlm_max_depth: None,
-            cwd: None,
-            session_id: None,
-            session_file: Some(
-                dir.path()
-                    .join("session.jsonl")
-                    .to_string_lossy()
-                    .into_owned(),
-            ),
-            thinking: None,
-            child_script: None,
-            semantic_spawn: None,
-            factory_child: false,
-        };
-        child.configure_rlm_identity(identity.clone()).unwrap();
-        assert!(child.accept_goal(&goal(3, "follow the target")));
-        // The revival: a fresh engine replays the create over the same
-        // session file and re-seeds the parent's latest goal.
-        let revived = engine(dir.path());
-        revived.configure_rlm_identity(identity).unwrap();
-        assert_eq!(revived.latest_goal().as_deref(), Some("follow the target"));
-        // The seq contract survives the revival: an older goal still loses.
-        assert!(revived.accept_goal(&goal(1, "stale")));
-        assert_eq!(revived.latest_goal().as_deref(), Some("follow the target"));
     }
 
     /// The cancellation recheck, pinned: the decision call is bounded,
@@ -1113,7 +821,7 @@ mod tests {
                 .count()
         };
         assert_eq!(replies("decision_api.decision"), 1);
-        assert!(replies("Decision child ready.") == 1);
+        assert_eq!(replies("Decision child ready."), 1);
         // A request without a seq still answers: the reply echoes null.
         let seqless = run(json!({
             "state": {"observation": 1},
