@@ -987,3 +987,23 @@ fn detail_status_label() {
         "Expanded mode (Ctrl+O to collapse)"
     );
 }
+
+/// The user status line rows: empty renders nothing; rows pad, truncate with
+/// an ellipsis, and keep the dim style.
+#[test]
+fn the_status_line_rows_pad_and_truncate() {
+    let theme = Theme::builtin("prime", ColorMode::TrueColor);
+    assert!(render_status_line(&[], 0, &theme, 100).is_empty());
+    let rows = render_status_line(&[String::from("hello"), "x".repeat(120)], 4, &theme, 20);
+    assert_eq!(rows.len(), 2);
+    let first: String = rows[0].iter().map(|span| span.content.as_str()).collect();
+    assert!(
+        first.starts_with("    hello"),
+        "the padding renders: {first:?}"
+    );
+    let second: String = rows[1].iter().map(|span| span.content.as_str()).collect();
+    assert!(
+        second.ends_with("\u{2026}"),
+        "the overflow truncates: {second:?}"
+    );
+}

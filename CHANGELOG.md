@@ -3,6 +3,10 @@
 Release notes for Prime Agent. Historical TypeScript release notes are
 recorded in the [TypeScript changelog](https://github.com/PrimeIntellect-ai/prime-agent/blob/v0.9.8/packages/coding-agent/CHANGELOG.md).
 
+## [Unreleased]
+
+- The TUI footer is now user-configurable with the new `statusLine` setting (the Rust successor of the retired TypeScript `ctx.ui.setFooter` extension hook, discussion #3856): `statusLine.command` runs through the shell with a JSON session payload (session, cwd, model, context usage, cost, speed) on stdin, and its stdout — ANSI-stripped, capped at 16 KiB and 4 rows — renders as dim footer rows in the dock, above the `/speed` row. The command re-runs every 30 seconds, at the end of each turn, on a model change, and on a session rebind; a failing, slow (5 second timeout), or empty command renders nothing and the built-in chrome stays. `statusLine.padding` pads each rendered row.
+
 ## [0.10.2] - 2026-10-28
 
 - The static usage layer no longer tells agents to await commands before ending the turn: since #3580 daemonless sessions also wake on a queued `[bash-done]` turn, every session kind has completion notifications, and the no-polling rule (end the turn and collect the result on the done notification) is the one turn-end contract.
