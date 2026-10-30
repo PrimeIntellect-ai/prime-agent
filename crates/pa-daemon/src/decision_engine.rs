@@ -467,19 +467,29 @@ impl SessionEngine for DecisionEngine {
                     return;
                 }
             }
+            // The ready answer is also the child's first tagged reply: the
+            // parent's registry records it (`replied_since_task`), so the
+            // spawn's settle watcher withholds the no-reply exit notice —
+            // one less parent run — and the caller learns the child serves.
+            // The reply is best-effort: a child whose parent edge is not
+            // known yet still readies (the notice is the fallback).
+            let _ = self.send_reply(&json!({
+                "type": "decision_api.decision",
+                "seq": Value::Null,
+                "note": "Decision child ready.",
+            }));
             emit(EngineEvent::Done(Ok(())));
             return;
         }
         let mut body = parsed.expect("checked above");
-        let Some(seq) = body.get("seq").and_then(Value::as_i64) else {
-            emit(EngineEvent::Done(Err(
-                "a decision request must carry an integer \"seq\" for its reply".to_string(),
-            )));
-            return;
-        };
-        if let Some(body) = body.as_object_mut() {
-            body.remove("seq");
-        }
+        // The reply echoes whatever `seq` the request carried — including
+        // none: a request without a `seq` still answers (a silent Done(Err)
+        // here would leave the parent waiting on a turn that already
+        // ended), so the branch that refused it is gone.
+        let seq = body
+            .as_object_mut()
+            .and_then(|body| body.remove("seq"))
+            .unwrap_or(Value::Null);
         let result = self.serve(body, aborted);
         // Cancellation can arrive while the bounded decision call runs:
         // either reply - the decision or its failure - must not reach the
@@ -805,7 +815,7 @@ mod tests {
         )
         .unwrap();
         let socket = dir.path().join("supervisor.sock");
-        let commands = stub_supervisor(&socket);
+        let commands = stub_supervisor(&socket, 2);
         let engine = DecisionEngine::new(
             dir.path(),
             dir.path(),
@@ -955,7 +965,7 @@ mod tests {
     /// supervisor-routed send delivers — and records every command it
     /// answers.
     #[cfg(unix)]
-    fn stub_supervisor(socket: &std::path::Path) -> Arc<Mutex<Vec<Value>>> {
+    fn stub_supervisor(socket: &std::path::Path, connections: usize) -> Arc<Mutex<Vec<Value>>> {
         let commands: Arc<Mutex<Vec<Value>>> = Arc::new(Mutex::new(Vec::new()));
         let stub_commands = Arc::clone(&commands);
         // Bind before returning so the engine's first connect cannot race
@@ -963,7 +973,7 @@ mod tests {
         let listener = std::os::unix::net::UnixListener::bind(socket).unwrap();
         std::thread::spawn(move || {
             use std::io::{BufRead, Write};
-            for _ in 0..2 {
+            for _ in 0..connections {
                 let Ok((stream, _)) = listener.accept() else {
                     return;
                 };
@@ -1011,6 +1021,141 @@ mod tests {
         commands
     }
 
+    /// The intake's reply contract, pinned: the kickoff's ready answer
+    /// reaches the parent as a tagged reply (so `replied_since_task` is
+    /// set and the spawn's settle watcher withholds the no-reply exit
+    /// notice), and every decision request answers — a body without a
+    /// `seq` replies with `seq: null` instead of ending the turn
+    /// silently, and whatever `seq` value the request carried echoes
+    /// back verbatim.
+    #[cfg(unix)]
+    #[test]
+    fn the_kickoff_replies_ready_and_every_request_answers() {
+        let registration =
+            pa_ai::faux::register_faux_provider(pa_ai::faux::RegisterFauxProviderOptions {
+                api: Some("faux-decision-intake".to_string()),
+                provider: Some("fixture-decisions".to_string()),
+                models: Some(vec![pa_ai::faux::FauxModelDefinition {
+                    id: "decision-model".to_string(),
+                    input: Some(vec![pa_types::ai::ModelInput::Text]),
+                    ..Default::default()
+                }]),
+                ..Default::default()
+            });
+        registration.set_responses(vec![pa_ai::faux::FauxResponseStep::Message(
+            pa_ai::faux::faux_assistant_text_message(
+                r#"{"action": {"choice": "left"}}"#,
+                pa_ai::faux::FauxAssistantMessageOptions::default(),
+            ),
+        )]);
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("settings.json"),
+            json!({ "decisionModel": "decision-model" }).to_string(),
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("models.json"),
+            r#"{ "providers": { "fixture-decisions": {
+                "baseUrl": "https://fixture.example", "apiKey": "fixture-key",
+                "api": "faux-decision-intake", "models": [
+                    { "id": "decision-model", "input": ["text"] }
+                ]
+            } } }"#,
+        )
+        .unwrap();
+        let socket = dir.path().join("supervisor.sock");
+        // The kickoff's ready reply and the request's decision reply: one
+        // transport probe leg and one send leg each.
+        let commands = stub_supervisor(&socket, 4);
+        let engine = DecisionEngine::new(
+            dir.path(),
+            dir.path(),
+            Arc::new(crate::supervisor_link::SupervisorLink::new(socket)),
+            "decision-child".to_string(),
+            "token".to_string(),
+        );
+        engine.set_session_summary(json!({ "parentActiveSessionId": "parent-live-1" }));
+        let run = |message: String| {
+            let request = PromptRequest {
+                message,
+                images: Vec::new(),
+                source: "user".to_string(),
+                agent_message_id: None,
+                custom_message: None,
+                batch: Vec::new(),
+            };
+            let mut events: Vec<EngineEvent> = Vec::new();
+            engine.run_prompt(0, request, &|| false, &mut |event| {
+                events.push(event);
+                true
+            });
+            events
+        };
+        // The kickoff (a non-request message) readies the child and sends
+        // the ready answer as its first tagged reply.
+        let kickoff = run("You are System 1, the decision child.".to_string());
+        assert!(
+            matches!(kickoff.last(), Some(EngineEvent::Done(Ok(())))),
+            "the kickoff must settle ready: {kickoff:?}"
+        );
+        let replies = |kind: &str| {
+            commands
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|command| {
+                    command["type"].as_str() == Some("send_message")
+                        && command["message"]
+                            .as_str()
+                            .is_some_and(|message| message.contains(kind))
+                })
+                .count()
+        };
+        assert_eq!(replies("decision_api.decision"), 1);
+        assert!(replies("Decision child ready.") == 1);
+        // A request without a seq still answers: the reply echoes null.
+        let seqless = run(json!({
+            "state": {"observation": 1},
+            "questions": {"action": {
+                "type": "choice", "criteria": {"left": "go left", "right": "go right"}
+            }}
+        })
+        .to_string());
+        assert!(
+            matches!(seqless.last(), Some(EngineEvent::Done(Ok(())))),
+            "a request without a seq must still settle its turn: {seqless:?}"
+        );
+        let sent: Vec<Value> = commands
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|command| command["type"].as_str() == Some("send_message"))
+            .filter_map(|command| {
+                serde_json::from_str(command["message"].as_str().unwrap_or_default()).ok()
+            })
+            .collect();
+        assert_eq!(sent.len(), 2, "the kickoff and the request both replied");
+        assert_eq!(
+            sent[0]["seq"],
+            Value::Null,
+            "the kickoff's reply carries a null seq"
+        );
+        assert_eq!(
+            sent[0]["note"], "Decision child ready.",
+            "the kickoff's reply is the ready answer: {sent:?}"
+        );
+        assert_eq!(
+            sent[1]["seq"],
+            Value::Null,
+            "a request without a seq answers with a null seq: {sent:?}"
+        );
+        assert_eq!(
+            sent[1]["decision"]["choice"], "left",
+            "the seqless request's decision still answers: {sent:?}"
+        );
+    }
+
     /// The reply route, pinned: a reply routes to the parent id the
     /// worker already knows — the pushed summary's `parentActiveSessionId`
     /// — and never fetches the family roster to find it; a child without
@@ -1022,7 +1167,7 @@ mod tests {
     fn a_reply_targets_the_known_parent_id_never_the_roster() {
         let dir = tempfile::tempdir().unwrap();
         let socket = dir.path().join("supervisor.sock");
-        let commands = stub_supervisor(&socket);
+        let commands = stub_supervisor(&socket, 2);
         let engine = DecisionEngine::new(
             dir.path(),
             dir.path(),
@@ -1114,7 +1259,7 @@ mod tests {
         )
         .unwrap();
         let socket = dir.path().join("supervisor.sock");
-        let _commands = stub_supervisor(&socket);
+        let _commands = stub_supervisor(&socket, 2);
         let engine = DecisionEngine::new(
             dir.path(),
             dir.path(),

@@ -51,6 +51,7 @@ fn record_with_file(child_id: &str, session_file: &Path) -> Arc<Mutex<ChildRecor
         model: String::new(),
         label: "child".to_string(),
         started_at_ms: 0,
+        decision_child: false,
         settled_status: None,
         settled: false,
         answer_preview: None,
