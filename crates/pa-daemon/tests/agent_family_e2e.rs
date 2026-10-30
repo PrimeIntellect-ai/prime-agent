@@ -1436,6 +1436,7 @@ async fn passivated_child_recent_messages_reads_its_file_end_to_end() {
             model: None,
             thinking: None,
             cwd: None,
+            refine_child: false,
             spawned_by_request_id: None,
             factory: None,
         })
