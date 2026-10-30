@@ -57,6 +57,7 @@ async fn scripted_engine(
         extra_builtin_skill_overrides: vec![],
         rlm_subagent_host: None,
         rlm_usage_store: None,
+        inbox: None,
         progress_note_emit: None,
         rlm_depth: None,
         daemonless: true,
