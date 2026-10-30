@@ -562,12 +562,35 @@ async fn serve_systemone(
         .ok_or_else(|| anyhow!("the decision model's reply has no \"answers\" object: {raw}"))?;
     let answer = decision_answer(answers, &request.criteria)?;
     // The envelope reports the resolved model's label, never the
-    // endpoint's bare id. The endpoint's usage, when it carries one,
-    // rides along so the decision child's answer rows bill in the cost
-    // ledger.
+    // endpoint's bare id. The endpoint's usage — clef's two token counts
+    // — maps into the typed `Usage` the cost ledger bills: the raw
+    // `{"input_tokens", "output_tokens"}` shape deserializes as no
+    // usage at all, so every clef decision would read as a free call.
+    // The mapped usage is priced through the resolved model like any
+    // chat completion, so the decision child's answer rows carry real
+    // cost.
+    let usage = {
+        let endpoint = parsed.get("usage");
+        let input = endpoint
+            .and_then(|usage| usage.get("input_tokens"))
+            .and_then(Value::as_u64)
+            .unwrap_or(0);
+        let output = endpoint
+            .and_then(|usage| usage.get("output_tokens"))
+            .and_then(Value::as_u64)
+            .unwrap_or(0);
+        let mut usage = pa_types::ai::Usage {
+            input,
+            output,
+            total_tokens: input + output,
+            ..Default::default()
+        };
+        pa_ai::models::calculate_cost(&resolved.model, &mut usage, None);
+        usage
+    };
     Ok(json!({
         "model": resolved.label(),
-        "usage": parsed.get("usage").cloned().unwrap_or(Value::Null),
+        "usage": usage,
         "answers": { "action": answer },
     }))
 }
@@ -1061,7 +1084,8 @@ mod tests {
             format!(
                 r#"{{ "providers": {{ "fixture-decisions": {{
                     "baseUrl": "{base}", "apiKey": "fixture-key", "api": "systemone",
-                    "models": [ {{ "id": "systemone-model", "input": ["text", "image"] }} ]
+                    "models": [ {{ "id": "systemone-model", "input": ["text", "image"],
+                                  "cost": {{ "input": 300, "output": 600, "cacheRead": 0, "cacheWrite": 0 }} }} ]
                 }} }} }}"#
             ),
         )?;
@@ -1251,8 +1275,9 @@ mod tests {
         let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         let envelope = json!({
             "model": "fixture-decisions/systemone-model",
-            "usage": {"input": 11, "output": 7, "cacheRead": 0, "cacheWrite": 0,
-                       "totalTokens": 18, "cost": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0, "total": 0.002}},
+            // The real endpoint shape (clef's live reply): two token
+            // counts, no cost, no Usage fields.
+            "usage": {"input_tokens": 11, "output_tokens": 0},
             "answers": {"action": {"choice": "left", "confidence": 0.9, "probabilities": {"left": 0.9, "right": 0.1}}}
         });
         systemone_fixture(dir.path(), envelope.clone(), std::sync::Arc::clone(&seen))
@@ -1264,9 +1289,17 @@ mod tests {
         let answer = decide(request, dir.path()).await.unwrap();
         assert_eq!(answer["model"], "fixture-decisions/systemone-model");
         assert_eq!(answer["answers"]["action"]["choice"], "left", "{answer}");
-        // The endpoint's usage rides the envelope, so the decision child's
-        // answer rows can bill in the cost ledger.
+        // The endpoint's two token counts map into the typed Usage the
+        // cost ledger bills (the raw shape parses as no usage, so every
+        // clef decision would read as a free call), priced through the
+        // resolved model.
         assert_eq!(answer["usage"]["input"], 11, "{answer}");
+        assert_eq!(answer["usage"]["output"], 0, "{answer}");
+        let cost = answer["usage"]["cost"]["total"].as_f64();
+        assert!(
+            cost.is_some_and(|cost| (0.003..0.004).contains(&cost)),
+            "the mapped usage must carry the resolved model's cost: {answer}"
+        );
         assert_eq!(
             answer["answers"]["action"]["probabilities"]["left"], 0.9,
             "the per-option probabilities ride the envelope: {answer}"
