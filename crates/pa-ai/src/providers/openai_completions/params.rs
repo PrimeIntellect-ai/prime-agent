@@ -327,8 +327,12 @@ pub(crate) fn build_headers(
     compat: &ResolvedCompat,
     conversation_id: Option<&str>,
 ) -> Vec<(String, String)> {
-    let mut headers: Vec<(String, String)> = Vec::new();
+    // The default Authorization goes in first so model and caller headers replace it (header names
+    // compare case-insensitively) instead of shipping a second Authorization alongside theirs.
+    let mut headers: Vec<(String, String)> =
+        vec![("Authorization".into(), format!("Bearer {api_key}"))];
     for (name, value) in model.headers.iter().flatten() {
+        headers.retain(|(existing, _)| !existing.eq_ignore_ascii_case(name));
         headers.push((name.clone(), value.clone()));
     }
 
@@ -347,8 +351,7 @@ pub(crate) fn build_headers(
         }
     }
 
-    headers.insert(0, ("Authorization".into(), format!("Bearer {api_key}")));
-    let _ = conversation_id;
+    crate::providers::opencode_headers::apply(&mut headers, &model.provider, conversation_id);
     headers
 }
 
@@ -388,6 +391,63 @@ mod tests {
                 name.eq_ignore_ascii_case("X-Prime-Team-ID") && value == "auth-owner-team"
             }),
             "the auth owner's header must ship: {headers:?}"
+        );
+    }
+
+    /// Discussion #3562: an explicit Authorization from the model or the caller replaces the
+    /// default bearer header instead of shipping beside it, whatever the header name's case.
+    #[test]
+    fn explicit_authorization_replaces_the_default_without_case_duplicates() {
+        let mut model = models_generated::get_model("prime-inference", "z-ai/glm-5.3")
+            .expect("the catalog carries a prime-inference model")
+            .clone();
+        let authorizations = |model: &Model, caller: Option<&HashMap<String, String>>| {
+            let compat = crate::providers::openai_completions::get_compat(model);
+            build_headers(model, "default-key", caller, None, &compat, None)
+                .into_iter()
+                .filter(|(name, _)| name.eq_ignore_ascii_case("authorization"))
+                .collect::<Vec<_>>()
+        };
+
+        model.headers = None;
+        assert_eq!(
+            authorizations(&model, None),
+            vec![(
+                "Authorization".to_string(),
+                "Bearer default-key".to_string()
+            )]
+        );
+
+        let caller = HashMap::from([(
+            "authorization".to_string(),
+            "Bearer caller-token".to_string(),
+        )]);
+        assert_eq!(
+            authorizations(&model, Some(&caller)),
+            vec![(
+                "authorization".to_string(),
+                "Bearer caller-token".to_string()
+            )]
+        );
+
+        model.headers = Some(std::collections::BTreeMap::from([(
+            "AUTHORIZATION".to_string(),
+            "Bearer model-token".to_string(),
+        )]));
+        assert_eq!(
+            authorizations(&model, None),
+            vec![(
+                "AUTHORIZATION".to_string(),
+                "Bearer model-token".to_string()
+            )]
+        );
+        // The caller still wins over the model.
+        assert_eq!(
+            authorizations(&model, Some(&caller)),
+            vec![(
+                "authorization".to_string(),
+                "Bearer caller-token".to_string()
+            )]
         );
     }
 

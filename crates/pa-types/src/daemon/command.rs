@@ -665,7 +665,7 @@ pub enum DaemonCommand {
         #[serde(flatten)]
         rest: JsonMap,
     },
-    /// One slice of the session's display transcript for `rlm.session.messages`:
+    /// One slice of the session's display transcript:
     /// `rows[start:][:limit]` over the rows whose role matches a `roles` glob.
     /// Rust-native extension.
     GetSessionMessages {

@@ -28,6 +28,7 @@ import threading
 import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
 SCRIPTS_DIR = Path(__file__).resolve().parent
 REPO = SCRIPTS_DIR.parent.parent
@@ -201,7 +202,8 @@ class ValidationGates(unittest.TestCase):
 
     def test_fixture_passes_the_full_gates(self):
         """Offline build verifier: --fixture produces a VALIDATED snapshot
-        (>= 42 transport tuples, >= 68 services) without any network."""
+        (it clears the transport-tuple and service minimums) without any
+        network."""
         with tempfile.TemporaryDirectory() as tmp:
             out = Path(tmp) / "assets"
             result = run_cli(BUNDLER, ["generate", "--fixture", "--out", str(out)])
@@ -283,7 +285,7 @@ class ValidationGates(unittest.TestCase):
             (out / "mcp-services.bundled.json").write_text(json.dumps(good))
             with self.assertRaises(SystemExit):
                 bundle_catalog.validate_bundled_model_catalog(
-                    out / "models.bundled.json")  # 0 tuples < 42
+                    out / "models.bundled.json")  # 0 tuples < the minimum
             small = {"schemaVersion": 1, "models": [json.loads(
                 bundle_catalog.fixture_catalog_bodies()["models.bundled.json"]
             )["models"][0]]}
@@ -328,7 +330,7 @@ class ValidationGates(unittest.TestCase):
         self.assertEqual(plugins["counts"]["total"], len(plugins["entries"]))
         self.assertEqual(
             plugins["counts"]["total"],
-            bundle_catalog.MIN_MCP_SERVICES + 5)
+            bundle_catalog.FIXTURE_MCP_SERVICES + 5)
 
     def test_small_fixture_verify_waiver(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -554,6 +556,61 @@ class NetworkMode(unittest.TestCase):
                              models_before)
             self.assertEqual((out / "mcp-services.bundled.json").read_text(),
                              services_before)
+
+    def test_transient_fetch_failures_retry_and_hard_failures_do_not(self):
+        """A 503 is retried inside fetch_catalog; a 404 fails on the first
+        request. Validation never retries: it runs after the fetch."""
+        body = bundle_catalog.fixture_catalog_bodies()["models.bundled.json"]
+        attempts = []
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                attempts.append(self.path)
+                flaky = self.path == "/flaky" and attempts.count("/flaky") == 1
+                status = 503 if flaky else (200 if self.path == "/flaky" else 404)
+                payload = body.encode() if status == 200 else b""
+                self.send_response(status)
+                self.send_header("content-length", str(len(payload)))
+                self.end_headers()
+                self.wfile.write(payload)
+
+            def log_message(self, *args):
+                pass
+
+        server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        base = f"http://127.0.0.1:{server.server_address[1]}"
+        try:
+            with contextlib.redirect_stderr(io.StringIO()) as captured, \
+                    mock.patch.object(bundle_catalog, "FETCH_RETRY_BACKOFF_SECONDS", (0, 0)):
+                self.assertEqual(bundle_catalog.fetch_catalog(f"{base}/flaky", "model"), body)
+            self.assertIn("HTTP 503", captured.getvalue())
+            self.assertEqual(attempts, ["/flaky", "/flaky"])
+            attempts.clear()
+            with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+                bundle_catalog.fetch_catalog(f"{base}/missing", "model")
+            self.assertEqual(attempts, ["/missing"])
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=5)
+
+    def test_resolve_ref_returns_the_catalog_commit(self):
+        sha = "01f4d46dd5157ec73f8faf440214088237c81d59"
+        server = RecordingServer({
+            "/commit": (sha.encode(), {}, 200),
+            "/garbage": (b"<html>rate limited</html>", {}, 200),
+        })
+        try:
+            self.assertEqual(bundle_catalog.resolve_catalog_ref(f"{server.base}/commit"), sha)
+            self.assertEqual(server.seen_headers[-1]["Accept"], "application/vnd.github.sha")
+            with contextlib.redirect_stderr(io.StringIO()) as captured, \
+                    self.assertRaises(SystemExit):
+                bundle_catalog.resolve_catalog_ref(f"{server.base}/garbage")
+            self.assertIn("not a commit id", captured.getvalue())
+        finally:
+            server.stop()
 
     def test_network_fetch_enforces_a_total_deadline(self):
         """The 5 s timeout is the TOTAL fetch budget, not per blocking op: a

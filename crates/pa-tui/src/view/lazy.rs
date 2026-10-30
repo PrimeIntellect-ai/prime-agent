@@ -228,6 +228,13 @@ impl AgentView {
             .then(|| (section - 1, row))
     }
 
+    /// Whether the last frame's top sat at or above the first entry's first row: scrolling up
+    /// reveals no resident entry.
+    pub(crate) fn viewport_at_top(&self) -> bool {
+        self.sparse_window
+            .is_some_and(|window| matches!(window.cursor, Some((0, _) | (1, 0))))
+    }
+
     /// Pause the viewport with row `row` of entry `index` at its top.
     pub(crate) fn scroll_to_entry(&mut self, index: usize, row: usize) {
         if self.layout_width == 0 {

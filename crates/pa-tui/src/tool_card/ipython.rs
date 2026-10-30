@@ -40,6 +40,13 @@ enum CardStatus {
 
 impl CardStatus {
     fn of(card: &ToolCallCard, details: &IpythonDetails) -> CardStatus {
+        // An interrupted cell never renders as a success: a settled
+        // straggler's kept partial can still carry a background shell
+        // whose exit code reads Done, and the aborted stamp is the
+        // truth the exit code never saw.
+        if card.aborted {
+            return CardStatus::Aborted;
+        }
         let result = card.result.as_ref();
         let is_error = result.is_some_and(|r| r.is_error);
         if !card.result_partial {
@@ -101,18 +108,29 @@ fn cell_code(card: &ToolCallCard) -> &str {
 }
 
 /// Render the ipython cell card: the fixed summary line, then the expanded
-/// code and output rows when conversation detail is `all`.
+/// code and output rows when the card's `detail` is `all`. The sent agent
+/// messages' bodies follow the conversation `level` instead.
 #[must_use]
 pub fn render(
     card: &ToolCallCard,
     frame: usize,
     detail: Detail,
+    level: Detail,
     theme: &Theme,
     width: usize,
     show_images: bool,
 ) -> Vec<Line> {
     let mut lines = RowOutput::paint();
-    layout(card, frame, detail, theme, width, show_images, &mut lines);
+    layout(
+        card,
+        frame,
+        detail,
+        level,
+        theme,
+        width,
+        show_images,
+        &mut lines,
+    );
     lines.into_lines()
 }
 
@@ -120,19 +138,31 @@ pub(super) fn count(
     card: &ToolCallCard,
     frame: usize,
     detail: Detail,
+    level: Detail,
     theme: &Theme,
     width: usize,
     show_images: bool,
 ) -> usize {
     let mut lines = RowOutput::count();
-    layout(card, frame, detail, theme, width, show_images, &mut lines);
+    layout(
+        card,
+        frame,
+        detail,
+        level,
+        theme,
+        width,
+        show_images,
+        &mut lines,
+    );
     lines.len()
 }
 
+#[allow(clippy::too_many_arguments)]
 fn layout(
     card: &ToolCallCard,
     frame: usize,
     detail: Detail,
+    level: Detail,
     theme: &Theme,
     width: usize,
     show_images: bool,
@@ -159,15 +189,17 @@ fn layout(
             code,
         )
     });
-    // TS renders the sent-message receipt rows even when the cell is
-    // collapsed; the body opens up only when expanded.
+    // The sent-message receipt rows render even when the cell is collapsed. They are agent
+    // messages of their own, so their bodies follow the conversation level, not a click on
+    // the card.
+    let messages_expanded = level.tool_output_expanded();
     if !detail.tool_output_expanded() {
-        render_sent_agent_messages(lines, &details, false, theme, width);
+        render_sent_agent_messages(lines, &details, messages_expanded, theme, width);
         render_transcript_reads(lines, &details, false, theme, width);
         return;
     }
     let has_code = render_code(lines, code, theme, width);
-    render_sent_agent_messages(lines, &details, true, theme, width);
+    render_sent_agent_messages(lines, &details, messages_expanded, theme, width);
     render_transcript_reads(lines, &details, true, theme, width);
     render_output(card, &details, lines, has_code, show_images, theme, width);
     // Image blocks render below the card when shown (TS adds these rows
@@ -217,6 +249,7 @@ fn collapsed_line(
     };
 
     let mut parts: Vec<Line> = Vec::new();
+    let mut preview_index: Option<usize> = None;
     let mut marker = marker;
     marker.push(Span::raw(" "));
     marker.push(Span::styled(language_label, muted));
@@ -224,12 +257,14 @@ fn collapsed_line(
     if let Some(bash) = dominant {
         let preview = preview_bash_command(&bash.first);
         if !preview.text.is_empty() {
+            preview_index = Some(parts.len());
             parts.push(vec![Span::styled(preview.text, dim)]);
         }
         if bash.count > 1 {
             parts.push(vec![Span::styled(format!("+{} more", bash.count - 1), dim)]);
         }
     } else if !preview.text.is_empty() {
+        preview_index = Some(parts.len());
         parts.push(vec![Span::styled(preview.text, dim)]);
     } else if !card.started {
         parts.push(vec![Span::styled("waiting for code".to_string(), dim)]);
@@ -237,6 +272,7 @@ fn collapsed_line(
     if let Some(counts) = line_counts(card, details, code) {
         parts.push(vec![Span::styled(counts, dim)]);
     }
+    let mut live_timer = false;
     if let Some(duration) = details.duration_ms {
         let label = if background.is_some() {
             format!("cell {}", format_duration(duration))
@@ -244,6 +280,16 @@ fn collapsed_line(
             format_duration(duration)
         };
         parts.push(vec![Span::styled(label, dim)]);
+    } else if let Some(started) = card
+        .started_at
+        .filter(|_| card.ended_at.is_none() || card.aborted)
+    {
+        let elapsed = card.ended_at.unwrap_or_else(std::time::Instant::now) - started;
+        parts.push(vec![Span::styled(
+            format_duration(elapsed.as_millis() as f64),
+            dim,
+        )]);
+        live_timer = card.ended_at.is_none();
     }
     if !card.result_partial {
         let error_name = details
@@ -258,6 +304,38 @@ fn collapsed_line(
     if let Some(exit_code) = background.and_then(|shell| shell.exit_code) {
         if exit_code != 0 {
             parts.push(vec![Span::styled(format!("exit {exit_code}"), error)]);
+        }
+    }
+
+    // The live timer is only useful on screen, but the summary clips
+    // from the right and the duration slot clips first: while the cell
+    // runs, the code preview gives the ticking duration room by
+    // shortening (or, if it cannot fit at all, dropping) itself. The
+    // settled card keeps its established layout — `durationMs` lands
+    // in the same slot, clipped exactly as before.
+    if live_timer {
+        let separator_width = str_width(" \u{00b7} ");
+        let used = parts
+            .iter()
+            .map(|p| crate::width::line_width(p))
+            .sum::<usize>()
+            + separator_width * parts.len().saturating_sub(1)
+            + 1;
+        if used > width {
+            let excess = used - width;
+            match preview_index {
+                Some(index) if crate::width::line_width(&parts[index]) > excess => {
+                    let part = &mut parts[index];
+                    let target = crate::width::line_width(part) - excess;
+                    if let Some(span) = part.first_mut() {
+                        span.content = crate::width::truncate_to_width(&span.content, target, "");
+                    }
+                }
+                Some(index) => {
+                    parts.remove(index);
+                }
+                None => {}
+            }
         }
     }
 

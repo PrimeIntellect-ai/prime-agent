@@ -85,6 +85,11 @@ pub struct AnthropicMessagesCompat {
     pub supports_eager_tool_input_streaming: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub supports_long_cache_retention: Option<bool>,
+    /// Whether replayed thinking blocks must carry the provider's signature. When true, unsigned
+    /// thinking is left out of the replayed history; when false, it is replayed as an unsigned
+    /// `thinking` block. Default: true for Claude models, false otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requires_thinking_signature: Option<bool>,
 }
 
 /// TS models `Model.compat` as an API-dependent conditional type; on the wire it is one of the
@@ -99,7 +104,10 @@ pub struct ModelCompat {
     pub raw: JsonMap,
 }
 
-const ANTHROPIC_COMPAT_KEYS: &[&str] = &["supportsEagerToolInputStreaming"];
+const ANTHROPIC_COMPAT_KEYS: &[&str] = &[
+    "supportsEagerToolInputStreaming",
+    "requiresThinkingSignature",
+];
 const RESPONSES_COMPAT_KEYS: &[&str] = &["sendSessionIdHeader"];
 /// Which compat object a `Model.compat` wire value carries.
 #[derive(Debug, Clone, PartialEq)]

@@ -18,10 +18,11 @@ Usage:
 
 `--catalog-assets` is the directory holding the generated bundled catalog
 assets (models.bundled.json + mcp-services.bundled.json); the packer
-hard-fails without VALIDATED assets (version gates + >= 42 transport
-tuples + >= 68 services — see scripts/release/bundle_catalog.py, the
-catalog spec §3.2 no-cold-start layer 2), exactly like assemble_artifacts.
-CI generates them from the fixture snapshot per build job; offline runs use
+hard-fails without VALIDATED assets (version gates + the transport-tuple
+and service minimums — see scripts/release/bundle_catalog.py, the catalog
+spec §3.2 no-cold-start layer 2), exactly like assemble_artifacts. The
+release workflow passes the build-gnu job's assets: the live catalog at the
+one prime-agent-catalog commit the run resolved. Offline runs use
 `bundle_catalog.py generate --fixture`.
 
 `--version` must be a BARE semver (no prerelease/continuous suffix). The

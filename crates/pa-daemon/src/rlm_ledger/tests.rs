@@ -90,6 +90,7 @@ fn spawn_rename_delete_replay_in_order() {
             child: child.to_string_lossy().into(),
             depth: 1,
             name: "worker".into(),
+            factory: None,
         })
         .unwrap();
     ledger
@@ -131,6 +132,7 @@ fn edge_is_live_reflects_tombstones_and_files() {
             child: child_path.clone(),
             depth: 1,
             name: "w".into(),
+            factory: None,
         })
         .unwrap();
     assert!(ledger.edge_is_live("sub-1", &child_path));
@@ -155,6 +157,7 @@ fn edge_is_live_reflects_tombstones_and_files() {
             child: other_path,
             depth: 1,
             name: "w2".into(),
+            factory: None,
         })
         .unwrap();
     ledger
@@ -195,6 +198,7 @@ fn edge_is_live_revalidates_paths_without_a_ledger_append() {
                 child: path.to_string_lossy().into_owned(),
                 depth: 1,
                 name: "child".into(),
+                factory: None,
             })
             .unwrap();
     }
@@ -258,6 +262,7 @@ fn a_respawned_child_id_on_a_new_path_is_live_and_the_old_one_is_not() {
                 child: child.to_string_lossy().into_owned(),
                 depth: 1,
                 name: name.into(),
+                factory: None,
             })
             .unwrap();
     };
@@ -288,6 +293,7 @@ fn dead_child_or_parent_drops_from_live_edges() {
             child: child.to_string_lossy().into(),
             depth: 1,
             name: "w".into(),
+            factory: None,
         })
         .unwrap();
     assert_eq!(ledger.live_edges().unwrap().len(), 1);
@@ -325,6 +331,7 @@ fn moved_edge_paths_resolve_through_the_session_id() {
             child: recorded_child.into(),
             depth: 1,
             name: "w".into(),
+            factory: None,
         })
         .unwrap();
 
@@ -380,6 +387,7 @@ fn the_artifact_index_updates_after_a_new_partition() {
                 child: child.into(),
                 depth: 1,
                 name: "w".into(),
+                factory: None,
             })
             .unwrap();
     };
@@ -439,6 +447,7 @@ fn live_edges_of_parent_bounds_the_liveness_work() {
             child: "/gone-root/sess-a.jsonl".into(),
             depth: 1,
             name: "a".into(),
+            factory: None,
         })
         .unwrap();
     ledger
@@ -448,6 +457,7 @@ fn live_edges_of_parent_bounds_the_liveness_work() {
             child: resident_child.to_string_lossy().into(),
             depth: 1,
             name: "b".into(),
+            factory: None,
         })
         .unwrap();
     let deleted_child = sessions_dir.join("sess-d.jsonl");
@@ -459,6 +469,7 @@ fn live_edges_of_parent_bounds_the_liveness_work() {
             child: deleted_child.to_string_lossy().into(),
             depth: 1,
             name: "d".into(),
+            factory: None,
         })
         .unwrap();
     ledger
@@ -476,6 +487,7 @@ fn live_edges_of_parent_bounds_the_liveness_work() {
                 child: format!("/gone-root/sess-f{n}-child.jsonl"),
                 depth: 1,
                 name: format!("f{n}"),
+                factory: None,
             })
             .unwrap();
     }
@@ -536,6 +548,7 @@ fn a_parent_left_in_the_archive_dir_is_a_dead_endpoint_walked_once() {
             child: child.to_string_lossy().into(),
             depth: 1,
             name: "w".into(),
+            factory: None,
         })
         .unwrap();
     let scans = replay::ARTIFACT_SCANS.with(std::cell::Cell::get);
@@ -567,6 +580,7 @@ fn live_edges_of_parent_follows_a_moved_parent() {
             child: child.to_string_lossy().into(),
             depth: 1,
             name: "w".into(),
+            factory: None,
         })
         .unwrap();
     let edges = ledger.live_edges_of_parent(&live_parent).unwrap();
@@ -594,6 +608,7 @@ fn live_edges_of_parent_follows_a_moved_parent() {
             child: sessions_dir.join("sess-c2.jsonl").to_string_lossy().into(),
             depth: 1,
             name: "w2".into(),
+            factory: None,
         })
         .unwrap();
     let edges = ledger.live_edges_of_parent(&elsewhere).unwrap();
@@ -618,6 +633,7 @@ fn duplicate_child_path_and_bad_spawn_inputs_fail_but_bad_lines_skip() {
             child: child.to_string_lossy().into(),
             depth: 1,
             name: "w".into(),
+            factory: None,
         })
         .unwrap();
     let duplicate = ledger.append_spawn(&RlmSpawnInput {
@@ -626,6 +642,7 @@ fn duplicate_child_path_and_bad_spawn_inputs_fail_but_bad_lines_skip() {
         child: child.to_string_lossy().into(),
         depth: 1,
         name: "w".into(),
+        factory: None,
     });
     assert!(duplicate.is_err());
     let depth_zero = ledger.append_spawn(&RlmSpawnInput {
@@ -634,6 +651,7 @@ fn duplicate_child_path_and_bad_spawn_inputs_fail_but_bad_lines_skip() {
         child: child.to_string_lossy().into(),
         depth: 0,
         name: "w".into(),
+        factory: None,
     });
     assert!(depth_zero.is_err());
     // A torn tail or bad line costs that record only; later appends still land.
@@ -648,6 +666,7 @@ fn duplicate_child_path_and_bad_spawn_inputs_fail_but_bad_lines_skip() {
             child: dir.join("c4.jsonl").to_string_lossy().into(),
             depth: 1,
             name: "w".into(),
+            factory: None,
         })
         .unwrap();
     let edges = ledger.edges(false).unwrap();
@@ -824,6 +843,7 @@ fn delete_amendment_carries_the_usage_snapshot() {
             child: child.to_string_lossy().into(),
             depth: 1,
             name: "w".into(),
+            factory: None,
         })
         .unwrap();
     ledger
@@ -845,6 +865,7 @@ fn delete_amendment_carries_the_usage_snapshot() {
             &child.to_string_lossy(),
             RlmLedgerDeleteReason::User,
             &usage_summary(0.40),
+            None,
         )
         .unwrap();
     let edges = ledger.edges(true).unwrap();
@@ -869,6 +890,7 @@ fn delete_amendment_carries_the_usage_snapshot() {
             &child.to_string_lossy(),
             RlmLedgerDeleteReason::User,
             &usage_summary(0.45),
+            None,
         )
         .unwrap();
     assert_eq!(
@@ -894,6 +916,7 @@ fn append_delete_with_usage_sanitizes_a_rejectable_cost() {
             child: child.to_string_lossy().into(),
             depth: 1,
             name: "w".into(),
+            factory: None,
         })
         .unwrap();
     for bad_cost in [-0.40, -0.0, f64::NAN, f64::INFINITY] {
@@ -903,6 +926,7 @@ fn append_delete_with_usage_sanitizes_a_rejectable_cost() {
                 &child.to_string_lossy(),
                 RlmLedgerDeleteReason::User,
                 &usage_summary(bad_cost),
+                None,
             )
             .unwrap();
         let edges = ledger.edges(true).expect("the ledger must stay readable");
@@ -917,6 +941,7 @@ fn append_delete_with_usage_sanitizes_a_rejectable_cost() {
             &child.to_string_lossy(),
             RlmLedgerDeleteReason::User,
             &usage_summary(0.40),
+            None,
         )
         .unwrap();
     assert_eq!(
@@ -941,6 +966,7 @@ fn tombstone_child_path_with_usage_snapshots_every_edge() {
                 child: child.to_string_lossy().into(),
                 depth: 1,
                 name: "w".into(),
+                factory: None,
             })
             .unwrap();
         ledger
@@ -956,6 +982,7 @@ fn tombstone_child_path_with_usage_snapshots_every_edge() {
             &child.to_string_lossy(),
             RlmLedgerDeleteReason::User,
             Some(&usage_summary(0.30)),
+            None,
         )
         .unwrap();
     assert_eq!(edges.len(), 2);
@@ -996,6 +1023,7 @@ fn bucket_folds_own_snapshots_post_order_without_double_counting() {
                 child: child.to_string_lossy().into(),
                 depth,
                 name: "w".into(),
+                factory: None,
             })
             .unwrap();
     };
@@ -1012,6 +1040,7 @@ fn bucket_folds_own_snapshots_post_order_without_double_counting() {
             &child_1.to_string_lossy(),
             RlmLedgerDeleteReason::User,
             &usage_summary(0.40),
+            None,
         )
         .unwrap();
     ledger
@@ -1020,6 +1049,7 @@ fn bucket_folds_own_snapshots_post_order_without_double_counting() {
             &grandchild_1.to_string_lossy(),
             RlmLedgerDeleteReason::User,
             &usage_summary(0.10),
+            None,
         )
         .unwrap();
     // The tombstoned children's transcripts are gone (a transcript
@@ -1089,6 +1119,7 @@ fn bucket_legacy_tombstones_fall_back_then_gap_to_zero() {
             child: child.to_string_lossy().into(),
             depth: 1,
             name: "w".into(),
+            factory: None,
         })
         .unwrap();
     ledger
@@ -1190,6 +1221,7 @@ fn bucket_bills_tombstoned_children_without_catalog_rows() {
                 child: child.to_string_lossy().into(),
                 depth: 1,
                 name: "w".into(),
+                factory: None,
             })
             .unwrap();
     };
@@ -1202,6 +1234,7 @@ fn bucket_bills_tombstoned_children_without_catalog_rows() {
             &snapshot_child.to_string_lossy(),
             RlmLedgerDeleteReason::User,
             &usage_summary(0.30),
+            None,
         )
         .unwrap();
     ledger
@@ -1322,6 +1355,7 @@ fn bucket_skips_recreated_live_paths() {
             child: child.to_string_lossy().into(),
             depth: 1,
             name: "w".into(),
+            factory: None,
         })
         .unwrap();
     ledger
@@ -1330,6 +1364,7 @@ fn bucket_skips_recreated_live_paths() {
             &child.to_string_lossy(),
             RlmLedgerDeleteReason::User,
             &usage_summary(0.20),
+            None,
         )
         .unwrap();
     ledger
@@ -1339,6 +1374,7 @@ fn bucket_skips_recreated_live_paths() {
             child: child.to_string_lossy().into(),
             depth: 1,
             name: "w2".into(),
+            factory: None,
         })
         .unwrap();
     let bucket = ledger.deleted_descendant_usage_by_parent().unwrap();
@@ -1368,6 +1404,7 @@ fn the_bucket_updates_after_an_append_on_the_same_ledger() {
                 child: child.to_string_lossy().into(),
                 depth: 1,
                 name: "w".into(),
+                factory: None,
             })
             .unwrap();
         ledger
@@ -1376,6 +1413,7 @@ fn the_bucket_updates_after_an_append_on_the_same_ledger() {
                 &child.to_string_lossy(),
                 RlmLedgerDeleteReason::User,
                 &usage_summary(cost),
+                None,
             )
             .unwrap();
         fs::remove_file(child).unwrap();
@@ -1420,6 +1458,7 @@ fn a_restored_tombstoned_child_stops_billing_the_parent_without_an_append() {
             child: child.to_string_lossy().into(),
             depth: 1,
             name: "child".into(),
+            factory: None,
         })
         .unwrap();
     ledger
@@ -1428,6 +1467,7 @@ fn a_restored_tombstoned_child_stops_billing_the_parent_without_an_append() {
             &child.to_string_lossy(),
             RlmLedgerDeleteReason::User,
             &usage_summary(0.25),
+            None,
         )
         .unwrap();
     let archive = dir.join("sessions-archive");
@@ -1466,6 +1506,7 @@ fn the_artifact_index_rechecks_deleted_and_relocated_transcripts_without_an_appe
             child: "/gone/child.jsonl".into(),
             depth: 1,
             name: "child".into(),
+            factory: None,
         })
         .unwrap();
     let initial = ledger.live_edges().unwrap();
@@ -1499,6 +1540,7 @@ fn artifact_misses_stay_cached_until_a_directory_changes() {
             child: "/gone/child.jsonl".into(),
             depth: 1,
             name: "child".into(),
+            factory: None,
         })
         .unwrap();
     let scans = replay::ARTIFACT_SCANS.with(std::cell::Cell::get);
@@ -1515,8 +1557,106 @@ fn artifact_misses_stay_cached_until_a_directory_changes() {
         name: "child".into(),
         deleted: None,
         deleted_usage: None,
+        deleted_usage_by_model: None,
+        factory: None,
     }];
     assert_eq!(ledger.live_edges().unwrap(), expected);
     assert_eq!(ledger.live_edges().unwrap(), expected);
     assert_eq!(replay::ARTIFACT_SCANS.with(std::cell::Cell::get), scans + 2);
+}
+
+#[test]
+fn family_edges_track_restore_and_relocation_without_a_ledger_append() {
+    let dir = temp_dir("family-disk-change");
+    let sessions = dir.join("sessions");
+    fs::create_dir_all(&sessions).unwrap();
+    let parent = sessions.join("parent.jsonl");
+    let child = sessions.join("child.jsonl");
+    fs::write(&parent, "{}").unwrap();
+    let parent = canonical_session_path(&parent);
+    fs::write(&child, "{}").unwrap();
+    let ledger = ledger_for(&dir);
+    ledger
+        .append_spawn(&RlmSpawnInput {
+            child_id: "sub".into(),
+            parent: parent.to_string_lossy().into(),
+            child: child.to_string_lossy().into(),
+            depth: 1,
+            name: "child".into(),
+            factory: None,
+        })
+        .unwrap();
+    let family_children = || -> Vec<PathBuf> {
+        ledger
+            .family_edges([parent.clone()])
+            .unwrap()
+            .into_iter()
+            .map(|edge| PathBuf::from(edge.child))
+            .collect()
+    };
+    let archived = dir.join("sessions-archive").join("child.jsonl");
+    fs::create_dir_all(archived.parent().unwrap()).unwrap();
+    fs::rename(&child, &archived).unwrap();
+    assert!(family_children().is_empty());
+    fs::rename(&archived, &child).unwrap();
+    assert_eq!(family_children(), vec![canonical_session_path(&child)]);
+    let relocated = dir.join("session-artifacts/parent/sub/child.jsonl");
+    fs::create_dir_all(relocated.parent().unwrap()).unwrap();
+    fs::rename(&child, &relocated).unwrap();
+    assert_eq!(family_children(), vec![canonical_session_path(&relocated)]);
+    fs::remove_file(&relocated).unwrap();
+    assert!(family_children().is_empty());
+}
+
+#[cfg(unix)]
+#[test]
+fn family_edges_recheck_symlink_targets_without_a_ledger_append() {
+    use std::os::unix::fs::symlink;
+    let dir = temp_dir("family-symlink");
+    let parent = dir.join("parent.jsonl");
+    let first = dir.join("first.jsonl");
+    let second = dir.join("second.jsonl");
+    let grandchild = dir.join("grandchild.jsonl");
+    for file in [&parent, &first, &second, &grandchild] {
+        fs::write(file, "{}").unwrap();
+    }
+    let ledger = ledger_for(&dir);
+    for (child_id, parent, child) in [("sub", &parent, &first), ("grand", &first, &grandchild)] {
+        ledger
+            .append_spawn(&RlmSpawnInput {
+                child_id: child_id.into(),
+                parent: parent.to_string_lossy().into(),
+                child: child.to_string_lossy().into(),
+                depth: 1,
+                name: child_id.into(),
+                factory: None,
+            })
+            .unwrap();
+    }
+    let family_children = || -> Vec<PathBuf> {
+        ledger
+            .family_edges([parent.clone()])
+            .unwrap()
+            .into_iter()
+            .map(|edge| PathBuf::from(edge.child))
+            .collect()
+    };
+    assert_eq!(
+        family_children(),
+        vec![
+            canonical_session_path(&first),
+            canonical_session_path(&grandchild)
+        ]
+    );
+    fs::remove_file(&first).unwrap();
+    symlink(&second, &first).unwrap();
+    // The retargeted child resolves to its new file; its own children,
+    // recorded under the old path's id, stay in the family.
+    assert_eq!(
+        family_children(),
+        vec![
+            canonical_session_path(&second),
+            canonical_session_path(&grandchild)
+        ]
+    );
 }

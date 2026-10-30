@@ -114,7 +114,7 @@ pub struct TranscriptPageRows {
     pub more: bool,
 }
 
-/// One `rlm.session.messages` slice ([`SessionFile::session_messages`]).
+/// One display-transcript slice ([`SessionFile::session_messages`]).
 #[derive(Debug, Clone)]
 pub struct SessionMessages {
     /// Each row's index among the matching rows, entry id, and wire message, oldest first.

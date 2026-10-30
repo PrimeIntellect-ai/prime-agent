@@ -256,18 +256,12 @@ fn at_prefix_lists_nested_fuzzy_matches() {
     std::fs::write(base.join("other.md"), "x").expect("write");
     let provider = provider(base.to_str().unwrap());
     let values = |text: &str| -> Vec<String> {
-        match provider.get_suggestions(&[text.to_string()], 0, text.chars().count(), false) {
-            Some(SuggestionLookup::Searching(search)) => search
-                .results
-                .recv()
-                .expect("the search finishes")
-                .expect("suggestions")
-                .items
-                .into_iter()
-                .map(|item| item.value)
-                .collect(),
-            other => panic!("expected a searching lookup, got {other:?}"),
-        }
+        at_suggestions(&provider, text)
+            .expect("suggestions")
+            .items
+            .into_iter()
+            .map(|item| item.value)
+            .collect()
     };
     // The exact `.hidden/partial` name sorts ahead of the
     // `partial_match.rs` prefix match; `.git` never lists.
@@ -601,17 +595,23 @@ fn render_shows_the_source_tag_as_a_trailing_segment() {
     );
 }
 
-/// The `@` suggestion items of one provider query, waiting for the background search.
-fn at_values(provider: &CombinedAutocompleteProvider, text: &str) -> Vec<CompletionItem> {
+/// One `@` provider query's answer: the built index's inline one, or the background
+/// walk's once it finishes.
+fn at_suggestions(provider: &CombinedAutocompleteProvider, text: &str) -> Option<Suggestions> {
     match provider.get_suggestions(&[text.to_string()], 0, text.chars().count(), false) {
-        Some(SuggestionLookup::Searching(search)) => search
-            .results
-            .recv()
-            .expect("the search finishes")
-            .map(|suggestions| suggestions.items)
-            .unwrap_or_default(),
-        other => panic!("expected a searching lookup, got {other:?}"),
+        Some(SuggestionLookup::Searching(search)) => {
+            search.results.recv().expect("the search finishes")
+        }
+        Some(SuggestionLookup::Ready(suggestions)) => Some(suggestions),
+        None => None,
     }
+}
+
+/// The `@` suggestion items of one provider query.
+fn at_values(provider: &CombinedAutocompleteProvider, text: &str) -> Vec<CompletionItem> {
+    at_suggestions(provider, text)
+        .map(|suggestions| suggestions.items)
+        .unwrap_or_default()
 }
 
 /// The `@` item values of one provider query.
@@ -745,6 +745,21 @@ fn at_index_matches_the_walk_suggestions() {
             "query @{query}"
         );
     }
+}
+
+#[test]
+fn at_lookup_answers_inline_from_a_built_index() {
+    let outer = parity_fixture();
+    let base = outer.path().join("base");
+    let provider = provider(base.to_str().expect("utf8"));
+    assert!(provider
+        .file_index
+        .build(&base, file_index::MAX_INDEX_ENTRIES));
+    let text = "@par";
+    assert!(matches!(
+        provider.get_suggestions(&[text.to_string()], 0, text.len(), false),
+        Some(SuggestionLookup::Ready(_))
+    ));
 }
 
 /// A xorshift generator: the random trees need no dependency.

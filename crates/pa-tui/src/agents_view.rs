@@ -14,8 +14,8 @@ use tokio::sync::mpsc;
 
 use crate::agents_view_forest::{
     ancestor_session_ids, build_rows, compute_rollups, has_session_children, resolve_selection,
-    scope_ancestors, scope_root, scope_to_subtree, AgentsViewRow, RowKind, ScopeRoot, SelectionKey,
-    SessionActivity,
+    scope_ancestors, scope_root, scope_to_subtree, subtree_contains, ActivityCounts, AgentsViewRow,
+    RowKind, ScopeRoot, SelectionKey, SessionActivity,
 };
 use crate::agents_view_state::truncate_text;
 use crate::agents_view_state::{
@@ -48,7 +48,8 @@ mod session_activity;
 
 #[cfg(test)]
 use delete::no_effect_summary;
-use delete::{spawn_delete_dispatch, DeleteAction, PendingDelete};
+pub(crate) use delete::{execute_delete_action, DeleteAction};
+use delete::{spawn_delete_dispatch, PendingDelete};
 
 mod rename;
 use rename::{spawn_rename_dispatch, Rename};
@@ -59,7 +60,8 @@ use reply::{
 };
 
 mod status;
-use status::{Status, StatusTone};
+use status::Status;
+pub(crate) use status::StatusTone;
 
 #[derive(Debug, Clone)]
 pub struct AgentsViewOptions {
@@ -68,7 +70,7 @@ pub struct AgentsViewOptions {
     pub session_dir: Option<PathBuf>,
     pub theme: String,
     pub version: String,
-    /// The session the view was opened from: anchors a fresh open's entry selection on its row.
+    /// The session the view was opened from: anchors the entry selection on its row.
     pub anchor_session_id: Option<String>,
     /// Open scoped to one session's subtree: the root lists its descendants.
     pub scope: Option<AgentsViewScope>,
@@ -313,7 +315,7 @@ pub struct AgentsViewLink {
     saved: SavedCatalog,
     /// The activity counts the previous run held: a re-entry renders the line the user opened on
     /// its first frame, so the carried selection restores onto it.
-    session_activity: std::collections::HashMap<String, SessionActivity>,
+    session_activity: ActivityCounts,
     /// The persistent shells list the previous run held, for the same first-frame restore of a
     /// shell row.
     persistent_shells: Value,
@@ -329,7 +331,7 @@ impl AgentsViewLink {
             client,
             events,
             saved: SavedCatalog::default(),
-            session_activity: std::collections::HashMap::new(),
+            session_activity: ActivityCounts::default(),
             persistent_shells: Value::Null,
             activity_fetch: None,
         })
@@ -481,8 +483,8 @@ struct AgentsViewMode {
     /// The shell whose open waits on the daemon's walk of the rest of the saved store: its
     /// session opens once the walk lists it, the orphan view once the walk ends without it.
     pending_shell_open: Option<String>,
-    /// Each live session's own shells and factory-run counts, keyed by `activeSessionId`.
-    session_activity: std::collections::HashMap<String, SessionActivity>,
+    /// The activity polls' counts behind the shells and factory-run lines.
+    session_activity: ActivityCounts,
 }
 
 /// The press state of one left click, row-scoped: the release must land on the same row.
@@ -519,21 +521,16 @@ impl AgentsViewMode {
         let selected_identity = options.selected_row_identity.clone();
         let selected_key = options.selected_key.clone();
         let keybindings = options.keybindings.clone();
-        // A fresh open (the scope-back handoff leaks an empty identity and a key with no session
-        // ids) waits on the anchor: the session the view was opened from.
-        let carried_selection = options
-            .selected_row_identity
+        // Every open waits on the anchor: the chat may have switched sessions since the carried
+        // row was opened. A scoped view never lists its own root, so that anchor arms no wait.
+        let scope_root = options
+            .scope
+            .as_ref()
+            .and_then(|scope| scope.session_id.as_deref());
+        let anchor_selection_pending = options
+            .anchor_session_id
             .as_deref()
-            .is_some_and(|identity| !identity.is_empty())
-            || options
-                .selected_key
-                .as_ref()
-                .is_some_and(|key| key.session_id.is_some() || key.active_session_id.is_some());
-        let anchor_selection_pending = !carried_selection
-            && options
-                .anchor_session_id
-                .as_deref()
-                .is_some_and(|anchor| !anchor.is_empty());
+            .is_some_and(|anchor| !anchor.is_empty() && Some(anchor) != scope_root);
         // The first run starts fresh; later runs continue the carried state.
         let incident_notice_state = options.incident_notice_state.take().unwrap_or_default();
         AgentsViewMode {
@@ -589,7 +586,7 @@ impl AgentsViewMode {
             shell_view: None,
             pending_shell_action: None,
             pending_shell_open: None,
-            session_activity: std::collections::HashMap::new(),
+            session_activity: ActivityCounts::default(),
         }
     }
 }

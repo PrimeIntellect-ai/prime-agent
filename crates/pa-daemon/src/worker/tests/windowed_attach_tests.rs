@@ -386,9 +386,8 @@ async fn pages_continue_into_pre_compaction_history_with_one_summary() {
     );
 }
 
-/// `get_session_messages` (`rlm.session.messages`) reads a slice inside the window
-/// without hydrating, its indexes counting the unloaded prefix; a slice reaching into
-/// the prefix hydrates the store.
+/// `get_session_messages` reads a slice inside the window without hydrating, its indexes
+/// counting the unloaded prefix; a slice reaching into the prefix hydrates the store.
 #[tokio::test]
 async fn session_messages_hydrate_only_for_the_unloaded_prefix() {
     let dir = session_dir();

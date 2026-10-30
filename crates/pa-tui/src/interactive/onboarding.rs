@@ -263,6 +263,7 @@ async fn drive_onboarding_pane(
                 UiInput::Submit(_)
                 | UiInput::SubmitAndSettle { .. }
                 | UiInput::SettleIdle
+                | UiInput::InputChunkEnd
                 | UiInput::Mouse(_)
                 | UiInput::WaitIdle { .. }
                 | UiInput::ScrollTop
