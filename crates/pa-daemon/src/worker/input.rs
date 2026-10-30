@@ -252,21 +252,25 @@ impl Worker {
             .and_then(Value::as_str)
             .unwrap_or_default();
         let sender = payload.get("sender").cloned().unwrap_or(Value::Null);
-        // The in-flight refine child's reply is consumed by the engine
+        // The in-flight refine child's reply is parked by the engine
         // BEFORE the generic agent-message gates (the length cap, the
         // pause hold, the suspend hold): the proposal is machine-authored
         // — bounded only by the child's own turn budget — and the wake
-        // applies regardless of the parent's interactive state
+        // consumes it regardless of the parent's interactive state
         // (fire-and-wake); a gate rejection would lose the child's only
-        // answer.
+        // answer. The delivery is answered at once (the child's send
+        // never waits on the parent's apply); the parked reply applies at
+        // the session's idle boundary, where the runner owns turn
+        // admission, so the apply's rows never interleave with a running
+        // turn's history.
         let sender_active_session_id = sender
             .get("activeSessionId")
             .and_then(Value::as_str)
             .unwrap_or_default()
             .to_string();
-        if let Some(outcome) = self
+        if let Some(()) = self
             .engine
-            .route_refine_child_reply(&sender_active_session_id, message)
+            .park_refine_child_reply(&sender_active_session_id, message)
             .await
         {
             // The consumed reply is the child's reply for the settle
@@ -274,10 +278,7 @@ impl Worker {
             if !sender_active_session_id.is_empty() {
                 self.engine.mark_child_reply(&sender_active_session_id);
             }
-            // The response receipt's target summary: composed under the
-            // core lock and RELEASED before the outcome rows emit — the
-            // emissions take the lock themselves, so the guard must not
-            // ride into them.
+            // The receipt's target summary: composed under the core lock.
             let target = {
                 let (core, inputs) = self.summary_inputs();
                 let summary = self.summary_locked(&core, inputs);
@@ -294,42 +295,10 @@ impl Worker {
                 }
                 target
             };
-            match outcome {
-                Ok((result, source)) => {
-                    // The refinement's durable rows: the TUI outcome, plus
-                    // the model-facing notice when edits applied.
-                    let outcome_row =
-                        pa_core::session_engine::refine::create_refinement_outcome_message(&result);
-                    if let Ok(value) =
-                        serde_json::to_value(pa_types::session::AgentMessage::Custom(outcome_row))
-                    {
-                        self.emit_custom_row(&value);
-                    }
-                    if result.applied_edits.iter().any(|edit| edit.applied) {
-                        let notice =
-                            pa_core::session_engine::refine::create_refinement_notice_message(
-                                &result, source,
-                            );
-                        if let Ok(value) =
-                            serde_json::to_value(pa_types::session::AgentMessage::Custom(notice))
-                        {
-                            self.emit_custom_row(&value);
-                        }
-                    }
-                    crate::user_bash::emit_session_event_frame(
-                        &self.core,
-                        &self.events,
-                        crate::worker::refine_complete_event(&result),
-                    );
-                }
-                Err(error) => {
-                    eprintln!("pa-daemon: the refinement child's reply failed to apply: {error:#}");
-                    self.emit_worker_event(json!({
-                        "type": "refine_failed",
-                        "error": format!("{error:#}"),
-                    }));
-                }
-            }
+            // Wake the runner for the parked reply's idle-boundary apply:
+            // an idle runner parks on `work_notify`, and a busy one
+            // reaches the park branch at the turn's settle.
+            self.work_notify.notify_one();
             return response_success(
                 None,
                 "worker_deliver_message",

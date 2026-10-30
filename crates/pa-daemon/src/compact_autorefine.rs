@@ -74,14 +74,20 @@ impl AgentSessionEngine {
         self.runtime
             .block_on(async { self.release_dead_refine_child_round().await });
         // A live refinement child (a manual `/refine` spawn whose reply has
-        // not landed) owns the apply lane: taking the armed round now would
-        // only fail the spawn against it and surface a spurious
-        // `refine_failed`. The trigger stays armed for a later boundary.
+        // not landed, or whose reply is parked for the idle apply) owns
+        // the apply lane: taking the armed round now would only fail the
+        // spawn against it and surface a spurious `refine_failed`. The
+        // trigger stays armed for a later boundary.
         if self
             .refine_flight
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .is_some()
+            || self
+                .pending_refine_reply
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .is_some()
         {
             return Ok(());
         }

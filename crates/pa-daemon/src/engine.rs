@@ -5,9 +5,15 @@
 
 use std::sync::Arc;
 
-/// The refine child's reply route: the wake-side apply outcome (`None` when
-/// the sender is not the session's in-flight refine child).
-pub type RefineChildReplyRoute<'a> = std::pin::Pin<
+/// The refine child's reply park: `Some(())` when the message came from
+/// the session's in-flight refine child and is parked for the idle-boundary
+/// apply; `None` otherwise.
+pub type RefineChildReplyPark<'a> =
+    std::pin::Pin<Box<dyn std::future::Future<Output = Option<()>> + Send + 'a>>;
+
+/// The parked refine reply's idle-boundary apply outcome (`None` when the
+/// engine has nothing parked).
+pub type PendingRefineApply<'a> = std::pin::Pin<
     Box<
         dyn std::future::Future<
                 Output = Option<
@@ -167,16 +173,25 @@ pub trait SessionEngine: Send + Sync {
         Ok(())
     }
 
-    /// Consume a refine child's reply at the child-reply wake: the engine's
-    /// in-flight refinement child's proposal (or its failure envelope)
-    /// applies here — the fire-and-wake contract's apply half. `None` when
-    /// the sender is not the session's in-flight refine child.
-    fn route_refine_child_reply(
+    /// Park a refine child's reply at the child-reply wake: the engine's
+    /// in-flight refinement child's proposal (or its failure envelope) is
+    /// stored for the idle-boundary apply — the fire-and-wake contract's
+    /// delivery is answered at once, and the apply never runs inside the
+    /// child's send. `None` when the sender is not the session's in-flight
+    /// refine child.
+    fn park_refine_child_reply(
         &self,
         sender_active_session_id: &str,
         message: &str,
-    ) -> RefineChildReplyRoute<'_> {
+    ) -> RefineChildReplyPark<'_> {
         let _ = (sender_active_session_id, message);
+        Box::pin(async { None })
+    }
+
+    /// Apply the parked refine reply at the session's idle boundary: the
+    /// worker's runner owns turn admission, so this never interleaves with
+    /// a running turn's rows. `None` when the engine has nothing parked.
+    fn apply_pending_refine_reply(&self) -> PendingRefineApply<'_> {
         Box::pin(async { None })
     }
 

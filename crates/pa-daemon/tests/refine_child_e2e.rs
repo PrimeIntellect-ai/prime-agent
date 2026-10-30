@@ -36,6 +36,12 @@ const PLAN_DELAY_MS: u64 = 4_000;
 /// the (delayed) planning call settles, with room for the spawn admission.
 const REFINE_ANSWER_BOUND_MS: u64 = 2_000;
 
+/// The mid-turn test's turn reply delay: the parent's second turn stays
+/// open past the child's reply (the child plans for [`PLAN_DELAY_MS`]),
+/// so the reply parks while the turn is still running and applies only
+/// after the turn settles.
+const TURN_DELAY_MS: u64 = 8_000;
+
 /// The refinement proposal the mock answers the child's planning call with:
 /// one memory create the wake-side apply persists into the local harness
 /// store.
@@ -54,10 +60,11 @@ enum PlanMode {
 /// An OpenAI-compatible SSE mock: the refinement child's planning request
 /// (the one carrying the refinement prompt's harness overview) is answered
 /// per [`PlanMode`] after [`PLAN_DELAY_MS`]; every other request gets the
-/// fixed turn reply.
+/// fixed turn reply after [`RefineMock::turn_delay_ms`] (zero by default).
 struct RefineMock {
     requests: Arc<Mutex<Vec<Value>>>,
     plan_mode: Arc<Mutex<PlanMode>>,
+    turn_delay_ms: Arc<Mutex<u64>>,
     port: u16,
 }
 
@@ -65,23 +72,27 @@ impl RefineMock {
     fn start() -> RefineMock {
         let requests = Arc::new(Mutex::new(Vec::new()));
         let plan_mode = Arc::new(Mutex::new(PlanMode::Proposal));
+        let turn_delay_ms = Arc::new(Mutex::new(0));
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind mock");
         let port = listener.local_addr().expect("mock addr").port();
         let requests_for_thread = Arc::clone(&requests);
         let mode_for_thread = Arc::clone(&plan_mode);
+        let delay_for_thread = Arc::clone(&turn_delay_ms);
         std::thread::spawn(move || {
             for stream in listener.incoming() {
                 let Ok(stream) = stream else { continue };
                 let requests = Arc::clone(&requests_for_thread);
                 let mode = Arc::clone(&mode_for_thread);
+                let delay = Arc::clone(&delay_for_thread);
                 std::thread::spawn(move || {
-                    let _ = serve(stream, &requests, &mode);
+                    let _ = serve(stream, &requests, &mode, &delay);
                 });
             }
         });
         RefineMock {
             requests,
             plan_mode,
+            turn_delay_ms,
             port,
         }
     }
@@ -92,6 +103,10 @@ impl RefineMock {
 
     fn set_plan_mode(&self, mode: PlanMode) {
         *self.plan_mode.lock().expect("mock lock") = mode;
+    }
+
+    fn set_turn_delay_ms(&self, delay_ms: u64) {
+        *self.turn_delay_ms.lock().expect("mock lock") = delay_ms;
     }
 
     fn planning_request_count(&self) -> usize {
@@ -212,6 +227,7 @@ fn serve(
     mut stream: TcpStream,
     requests: &Arc<Mutex<Vec<Value>>>,
     plan_mode: &Arc<Mutex<PlanMode>>,
+    turn_delay_ms: &Arc<Mutex<u64>>,
 ) -> std::io::Result<()> {
     let mut reader = BufReader::new(stream.try_clone()?);
     let body = read_body(&mut reader)?;
@@ -224,6 +240,8 @@ fn serve(
         };
         return write_sse(&mut stream, reply, &small_usage());
     }
+    let delay_ms = *turn_delay_ms.lock().expect("mock lock");
+    std::thread::sleep(Duration::from_millis(delay_ms));
     write_sse(&mut stream, "a reply", &small_usage())
 }
 
@@ -718,6 +736,139 @@ fn a_failed_child_proposal_surfaces_the_refine_failed_event() {
         assert!(
             Instant::now() < deadline,
             "the failed refinement child never tore down; rows: {rows:?}"
+        );
+        std::thread::sleep(Duration::from_millis(200));
+    }
+}
+
+/// A reply that lands while the parent's turn is still running parks
+/// instead of applying inside the delivery: the outcome and notice rows
+/// surface only after that turn settled, so the parent's history never
+/// gains a refinement notice between an in-flight assistant message and
+/// its own completion. Red when the apply runs inside the delivery: the
+/// notice's `message_end` precedes the turn's final assistant row.
+#[test]
+fn a_reply_that_lands_mid_turn_applies_only_after_the_turn_settles() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let agent_dir = dir.path().join("agent");
+    let session_dir = agent_dir.join("sessions");
+    let mock = RefineMock::start();
+    write_fixture(&agent_dir, &session_dir, &mock.url());
+    let socket = dir.path().join("daemon.sock");
+    let _supervisor = spawn_supervisor(&socket, &agent_dir, &dir.path().join("daemon.stderr"));
+    let mut client = TimedClient::connect(&socket);
+    let (session_id, _durable) = create_and_attach(&mut client, &session_dir);
+    prompt_and_wait(&mut client, "p0", &session_id, "seed turn");
+
+    // Fire: the refinement child plans (answering in PLAN_DELAY_MS) while
+    // the parent is still idle; the parent then starts a turn the mock
+    // holds open for TURN_DELAY_MS — past the child's reply.
+    let response = refine(&mut client, "r1", &session_id);
+    assert_eq!(response["success"], true, "refine failed: {response}");
+    assert_eq!(response["data"]["refinementChildSpawned"], true);
+    mock.set_turn_delay_ms(TURN_DELAY_MS);
+    prompt_and_wait(&mut client, "p1", &session_id, "second turn");
+    client.drain_events(200);
+
+    // The wake completed: the apply ran after the open turn settled.
+    let complete = wait_for_event(
+        &mut client,
+        Duration::from_secs(30),
+        "refine_complete",
+        &dir.path().join("daemon.stderr"),
+    );
+    assert_eq!(
+        complete["result"]["appliedEdits"][0]["id"], "m1",
+        "the proposal applied: {complete}"
+    );
+    assert_eq!(complete["result"]["appliedEdits"][0]["applied"], true);
+    assert!(
+        !client
+            .events
+            .iter()
+            .any(|(event, _)| event["type"] == "refine_failed"),
+        "no failed refinement surfaced on the parked-reply path"
+    );
+
+    // The ordering pin: the parent's open turn settled first — its final
+    // assistant row precedes the refinement rows and the completion
+    // event. An apply inside the delivery emits them while the turn is
+    // still streaming, before that row.
+    let assistant_end = client
+        .events
+        .iter()
+        .rposition(|(event, _)| {
+            event["type"] == "message_end" && event["message"]["role"] == "assistant"
+        })
+        .expect("the open turn's final assistant row");
+    let event_index = |name: &str, matches: &dyn Fn(&Value) -> bool| -> usize {
+        client
+            .events
+            .iter()
+            .position(|(event, _)| matches(event))
+            .unwrap_or_else(|| panic!("{name} never surfaced"))
+    };
+    let outcome_end = event_index("the refinement outcome row", &|event: &Value| {
+        event["type"] == "message_end" && event["message"]["customType"] == "refinement_outcome"
+    });
+    let notice_end = event_index("the refinement notice row", &|event: &Value| {
+        event["type"] == "message_end" && event["message"]["customType"] == "refinement_notice"
+    });
+    let complete_index = event_index("the refine_complete event", &|event: &Value| {
+        event["type"] == "refine_complete"
+    });
+    for (name, index) in [
+        ("the refinement outcome row", outcome_end),
+        ("the refinement notice row", notice_end),
+        ("the refine_complete event", complete_index),
+    ] {
+        assert!(
+            index > assistant_end,
+            "{name} (index {index}) must follow the open turn's settled row (index {assistant_end})"
+        );
+    }
+
+    // The durable session file carries the same order: the parked reply's
+    // notice row persists after the open turn's final assistant row.
+    let session_file = std::fs::read_dir(&session_dir)
+        .expect("read session dir")
+        .filter_map(std::result::Result::ok)
+        .find(|entry| entry.path().extension().and_then(|ext| ext.to_str()) == Some("jsonl"))
+        .expect("the parent's session file")
+        .path();
+    let rows: Vec<Value> = std::fs::read_to_string(&session_file)
+        .expect("read session file")
+        .lines()
+        .filter_map(|line| serde_json::from_str(line).ok())
+        .collect();
+    let durable_assistant = rows
+        .iter()
+        .rposition(|row| row["type"] == "message" && row["message"]["role"] == "assistant")
+        .expect("the durable assistant row");
+    let durable_notice = rows
+        .iter()
+        .position(|row| row["type"] == "custom_message" && row["customType"] == "refinement_notice")
+        .expect("the durable notice row");
+    assert!(
+        durable_notice > durable_assistant,
+        "the durable notice row ({durable_notice}) must follow the settled turn's assistant row ({durable_assistant})"
+    );
+    assert_eq!(
+        local_harness_state(&session_dir)["entries"]["memory"]["m1"]["title"],
+        "Tactic",
+        "the parked reply's apply wrote the harness state"
+    );
+
+    // The one-shot child still retires on the parked reply's apply.
+    let deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        let rows = rlm_children_rows(&mut client, "g2", &session_id);
+        if rows.is_empty() {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the refinement child never tore down; rows: {rows:?}"
         );
         std::thread::sleep(Duration::from_millis(200));
     }
