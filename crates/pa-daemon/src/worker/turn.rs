@@ -128,7 +128,7 @@ impl TurnRunner {
                 // threshold; the select's notified arm is the wake path — a
                 // queued delivery wins the race and the next park re-arms.
                 match self.idle_passivation_window() {
-                    Some(remaining) => {
+                    Some((_, remaining)) => {
                         tokio::select! {
                             () = self.work_notify.notified() => {}
                             () = tokio::time::sleep(remaining) => {
@@ -159,132 +159,59 @@ impl TurnRunner {
         }
     }
 
-    /// The idle-eviction window for an unowned session (TS's
-    /// `idleEvictionMinutes` consumer, worker-side; TS `canEvictWorker`
-    /// reaches roots and children alike): `Some(remaining)` when the
-    /// park state holds (unattached, not compacting, not shutting down,
-    /// no live background bash, no queued input in the lanes — TS
-    /// `isSessionActive`'s pending-prompt-admissions arm) and the
-    /// setting is a live threshold; `None` otherwise (attached
-    /// sessions, `"off"`, and any state the engine gates would reject
-    /// stay parked without a timer). The client-owned refusal is
-    /// supervisor-side (the descriptor's `ownerClientId`). The engine gate
-    /// (`SessionEngine::can_passivate_worker`) is re-checked at the fire
-    /// inside [`Self::maybe_request_idle_passivation`] — the
-    /// fresh-snapshot fence — so this window only decides whether to
-    /// arm.
-    pub(super) fn idle_passivation_window(&self) -> Option<std::time::Duration> {
-        let (attached, compacting, shutdown, queued, last_activity, cwd) = {
+    /// The worker's idle-park gate: unattached, not compacting, not shutting
+    /// down, no queued input (lanes, a suspended pump, or an input pause — a
+    /// revival would discard it or accept a post-abort prompt), and no live
+    /// background bash (a snapshot cannot resurrect a live process). Answers
+    /// `(last_activity_ms, cwd)` when the session may passivate. The engine
+    /// gate (`SessionEngine::can_passivate_worker`) and the client-owned
+    /// refusal (supervisor-side) live elsewhere.
+    fn passivation_park_state(&self) -> Option<(u64, String)> {
+        let state = {
             let core = self.core.lock().unwrap();
-            (
-                core.attached_client_ids.is_empty(),
-                core.compacting,
-                core.shutdown_requested,
-                // Queued work lives only on this resident worker, so
-                // the passivation must never discard it.
-                !core.steering.is_empty()
-                    || !core.follow_up.is_empty()
-                    || !core.pending_next_turn.is_empty()
-                    // A paused pump or an input pause keeps the session resident:
-                    // a revival starts un-suspended and would accept a post-abort prompt.
-                    || core.queued_input_suspended
-                    || self.input_pauses.paused(),
-                core.last_activity_ms,
-                core.cwd.clone(),
-            )
+            let parked = core.attached_client_ids.is_empty()
+                && !core.compacting
+                && !core.shutdown_requested
+                && core.steering.is_empty()
+                && core.follow_up.is_empty()
+                && core.pending_next_turn.is_empty()
+                && !core.queued_input_suspended
+                && !self.input_pauses.paused();
+            parked.then(|| (core.last_activity_ms, core.cwd.clone()))
         };
-        if !attached || compacting || shutdown || queued {
-            return None;
-        }
-        // A live background bash keeps the worker resident (a snapshot
-        // cannot resurrect a live process).
-        if self.user_bash.is_running() {
-            return None;
-        }
-        let settings =
-            pa_core::settings::SettingsManager::create(&cwd, &self.passivation.agent_dir);
-        let minutes = match settings.get_idle_eviction() {
-            pa_core::settings::IdleEviction::Off => return None,
-            pa_core::settings::IdleEviction::Minutes(minutes) => minutes,
-        };
-        let now = crate::util::now_ms();
-        let idle_ms = now.saturating_sub(last_activity);
-        let threshold_ms = minutes.saturating_mul(60_000);
-        Some(std::time::Duration::from_millis(
-            threshold_ms.saturating_sub(idle_ms),
-        ))
+        state.filter(|_| !self.user_bash.is_running())
     }
 
-    /// Re-check the gates on a fresh snapshot, then ask the supervisor
-    /// for the graceful stop. A failed request leaves the worker resident.
-    pub(super) async fn maybe_request_idle_passivation(&self) {
-        let (attached, compacting, shutdown, queued, last_activity, cwd) = {
-            let core = self.core.lock().unwrap();
-            (
-                core.attached_client_ids.is_empty(),
-                core.compacting,
-                core.shutdown_requested,
-                !core.steering.is_empty()
-                    || !core.follow_up.is_empty()
-                    || !core.pending_next_turn.is_empty()
-                    || core.queued_input_suspended
-                    || self.input_pauses.paused(),
-                core.last_activity_ms,
-                core.cwd.clone(),
-            )
-        };
-        // Any state change since the window armed cancels the
-        // passivation.
-        if !attached || compacting || shutdown || queued {
-            return;
-        }
-        if self.user_bash.is_running() {
-            return;
-        }
+    /// `Some((minutes, remaining))` when the park gate holds under a live
+    /// `idleEvictionMinutes` threshold; `None` keeps the worker parked
+    /// without a timer.
+    pub(super) fn idle_passivation_window(&self) -> Option<(u64, std::time::Duration)> {
+        let (last_activity, cwd) = self.passivation_park_state()?;
         let settings =
             pa_core::settings::SettingsManager::create(&cwd, &self.passivation.agent_dir);
-        let minutes = match settings.get_idle_eviction() {
-            pa_core::settings::IdleEviction::Off => return,
-            pa_core::settings::IdleEviction::Minutes(minutes) => minutes,
+        let pa_core::settings::IdleEviction::Minutes(minutes) = settings.get_idle_eviction() else {
+            return None;
         };
-        // The idle threshold still holds on the fresh clock.
-        if crate::util::now_ms().saturating_sub(last_activity) < minutes.saturating_mul(60_000) {
+        let idle_ms = crate::util::now_ms().saturating_sub(last_activity);
+        let remaining = minutes.saturating_mul(60_000).saturating_sub(idle_ms);
+        Some((minutes, std::time::Duration::from_millis(remaining)))
+    }
+
+    /// Re-check the window on a fresh snapshot, then ask the supervisor
+    /// for the graceful stop. A failed request leaves the worker resident.
+    pub(super) async fn maybe_request_idle_passivation(&self) {
+        let Some((minutes, remaining)) = self.idle_passivation_window() else {
+            return;
+        };
+        if !remaining.is_zero() || !self.engine.can_passivate_worker().await {
             return;
         }
-        // The engine gate's one definition lives with the engine
-        // (`SessionEngine::can_passivate_worker`); a failing worker stays resident.
-        if !self.engine.can_passivate_worker().await {
-            return;
-        }
-        // The post-await revalidation (the fresh bots' race findings):
-        // the engine gate's await opened a window - a bash admitted, a
-        // prompt parked in a lane, a replay prefix restored, a manual
-        // compaction started, a CLIENT ATTACHED, or the worker's own
-        // graceful SHUTDOWN starting during it must all cancel the stop
-        // (the shutdown would cancel the compaction and disconnect the
-        // new client; a stop ask under a running shutdown races the
-        // worker's own exit). The shutdown arm is stricter than TS:
-        // daemon-mode.ts `passivateSession` checks `shuttingDown` only
-        // BEFORE its fresh-snapshot await, not after it. The bash that
-        // started in the window keeps the worker resident exactly like
-        // the pre-gate check.
-        {
-            let core = self.core.lock().unwrap();
-            if core.compacting
-                || core.shutdown_requested
-                || core.queued_input_suspended
-                || !core.attached_client_ids.is_empty()
-                || !core.steering.is_empty()
-                || !core.follow_up.is_empty()
-                || !core.pending_next_turn.is_empty()
-            {
-                return;
-            }
-        }
-        if self.input_pauses.paused() {
-            return;
-        }
-        if self.user_bash.is_running() {
+        // The engine gate's await opened a window: a bash admitted, a prompt
+        // parked in a lane, a compaction started, a client attached, or the
+        // worker's own shutdown started during it must all cancel the stop
+        // (stricter than TS `passivateSession`, which checks `shuttingDown`
+        // only before its await).
+        if self.passivation_park_state().is_none() {
             return;
         }
         let command = serde_json::json!({
