@@ -1524,10 +1524,11 @@ async fn prompt_turn(
     // headless-completion status (TS `waitForHeadlessCompletion`), fetched
     // after the turn settled (the response is the run's end). A failed
     // fetch degrades to no autonomous meta (the envelope still settles
-    // without a run).
-    let autonomous_status = fetch_autonomous_status(link, &hosted_daemon_session_id, false)
-        .await
-        .ok();
+    // without a run, quiescence zeroed).
+    let (autonomous_status, outstanding_background_jobs) =
+        fetch_autonomous_status(link, &hosted_daemon_session_id, false)
+            .await
+            .map_or((None, 0), |(status, jobs)| (Some(status), jobs));
     // TS `abort.signal.aborted` after `waitForHeadlessCompletion`: queued
     // continuations (goal, post-compaction autonomous) run inside that wait.
     if turn_cancelled(&*state.lock().await, admission_id) {
@@ -1576,7 +1577,11 @@ async fn prompt_turn(
     let quiescence = types::AcpSessionUpdate::SessionInfoUpdate {
         meta: meta::prime_agent_meta(&PrimeAgentSessionMeta {
             autonomous: autonomous_meta,
-            quiescence: Some(quiescence_meta(autonomous_status.as_ref(), &children)),
+            quiescence: Some(quiescence_meta(
+                autonomous_status.as_ref(),
+                &children,
+                outstanding_background_jobs,
+            )),
             ..Default::default()
         }),
     };
@@ -1589,17 +1594,18 @@ async fn prompt_turn(
     // reaches the parent). A failed barrier or read errors the prompt; a
     // degraded status would spin the loop.
     let settled_status = loop {
-        let status = match fetch_autonomous_status(link, &hosted_daemon_session_id, true).await {
-            Ok(status) => status,
-            Err(error) => {
-                producer.finish_prompt(turn_id).await;
-                return super::turn_failure_error(
-                    &id,
-                    &error.to_string(),
-                    &format!("ACP lifecycle reconciliation failed: {error}"),
-                );
-            }
-        };
+        let (status, outstanding_background_jobs) =
+            match fetch_autonomous_status(link, &hosted_daemon_session_id, true).await {
+                Ok(status) => status,
+                Err(error) => {
+                    producer.finish_prompt(turn_id).await;
+                    return super::turn_failure_error(
+                        &id,
+                        &error.to_string(),
+                        &format!("ACP lifecycle reconciliation failed: {error}"),
+                    );
+                }
+            };
         if turn_cancelled(&*state.lock().await, admission_id) {
             producer.finish_prompt(turn_id).await;
             return cancelled_response(&id);
@@ -1619,7 +1625,8 @@ async fn prompt_turn(
             producer.finish_prompt(turn_id).await;
             return cancelled_response(&id);
         }
-        let terminal_quiescence = quiescence_meta(Some(&status), &children);
+        let terminal_quiescence =
+            quiescence_meta(Some(&status), &children, outstanding_background_jobs);
         if terminal_quiescence.outstanding_subagents != 0 {
             continue;
         }
@@ -1715,7 +1722,7 @@ async fn fetch_autonomous_status(
     link: &Arc<DaemonLink>,
     active_session_id: &str,
     wait_for_rlm_quiescence: bool,
-) -> anyhow::Result<pa_core::autonomous::AgentAutonomousStatus> {
+) -> anyhow::Result<(pa_core::autonomous::AgentAutonomousStatus, u64)> {
     let response = link
         .request_until_close(DaemonCommand::WaitForHeadlessCompletion {
             id: None,
@@ -1729,9 +1736,14 @@ async fn fetch_autonomous_status(
             .error
             .unwrap_or_else(|| "unknown error".to_string()));
     }
-    Ok(serde_json::from_value(
-        response.data.unwrap_or(Value::Null),
-    )?)
+    let data = response.data.unwrap_or(Value::Null);
+    // The bash-lane quiescence count rides the status data as an additive
+    // key; a host that predates it answers zero.
+    let outstanding_background_jobs = data
+        .get("outstandingBackgroundJobs")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    Ok((serde_json::from_value(data)?, outstanding_background_jobs))
 }
 
 /// The live child roster (`get_rlm_children` on the daemon wire; TS
@@ -1780,11 +1792,13 @@ fn outstanding_subagents(children: &[Value]) -> u64 {
         .count() as u64
 }
 
-/// TS `quiescenceMeta`: the outstanding-subagent count plus the run's
-/// remaining continuation slots, observed together at one completion point.
+/// TS `quiescenceMeta`: the outstanding-subagent count, the run's
+/// remaining continuation slots, and the bash lane's outstanding jobs,
+/// observed together at one completion point.
 fn quiescence_meta(
     status: Option<&pa_core::autonomous::AgentAutonomousStatus>,
     children: &[Value],
+    outstanding_background_jobs: u64,
 ) -> meta::PrimeAgentQuiescenceMeta {
     meta::PrimeAgentQuiescenceMeta {
         outstanding_subagents: outstanding_subagents(children),
@@ -1797,6 +1811,7 @@ fn quiescence_meta(
                     .saturating_sub(status.continuations_used)
             },
         ),
+        outstanding_background_jobs,
     }
 }
 

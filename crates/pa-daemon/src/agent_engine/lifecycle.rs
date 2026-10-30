@@ -367,7 +367,7 @@ impl AgentSessionEngine {
                 session: Arc::downgrade(built),
             });
         // The background-bash liveness probe: a deadlock-free read over the
-        // build's provisioner.
+        // build's provisioner (the handle count: `0` = no live handle).
         let provisioner = built.kernel_provisioner_weak();
         *self
             .background_bash_probe
@@ -376,7 +376,7 @@ impl AgentSessionEngine {
             provisioner
                 .upgrade()
                 .and_then(|provisioner| provisioner.manager())
-                .is_some_and(|manager| manager.has_background_work())
+                .map_or(0, |manager| manager.background_bash_handle_count())
         }));
         // The settled-child kernel release handle: the park arm stops the
         // kernel without taking the session mutex (a dead weak reference

@@ -1,0 +1,1 @@
+- The ACP terminal-quiescence observation now reports `outstandingBackgroundJobs` (live background `bash()` handles plus `[bash-done]` notifications still queued for delivery), so hosts that close episodes on quiescence no longer tear a sandbox down while a detached background job is still running.
