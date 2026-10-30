@@ -24,11 +24,11 @@ mod queue;
 pub use queue::Lane;
 pub use queue::QueuePriority;
 pub(crate) use queue::{
-    admit_autonomous_follow_up, admit_goal_follow_up, admit_kernel_notice,
-    checkpoint_queue_recovery, clear_withdrawn_progress_note, enqueue_priority,
-    gather_delivery_batch, parse_custom_message, parse_prompt_images, queue_lanes,
-    restore_queue_snapshot, restored_turn_policy, withdraw_bash_completion_notice, QueueCheckpoint,
-    QueueLanes, QueuedItem, TurnPolicy, TurnSettle, ABORTED_TURN_SETTLE_ERROR,
+    admit_autonomous_follow_up, admit_goal_follow_up, admit_inbox_notice, admit_inbox_reminder,
+    admit_kernel_notice, checkpoint_queue_recovery, clear_withdrawn_progress_note,
+    enqueue_priority, gather_delivery_batch, parse_custom_message, parse_prompt_images,
+    queue_lanes, restore_queue_snapshot, restored_turn_policy, withdraw_bash_completion_notice,
+    QueueCheckpoint, QueueLanes, QueuedItem, TurnPolicy, TurnSettle, ABORTED_TURN_SETTLE_ERROR,
     PROMPT_ABORTED_BEFORE_DELIVERY, QUEUED_INPUT_SUSPENDED, QUEUED_PROMPT_DELETED,
     SIDE_QUESTION_SETTLE_TIMEOUT,
 };
@@ -615,10 +615,17 @@ impl Worker {
                 // The kernel-notice wake seam (TS `_promptInjectedMessage`
                 // for `bash.completed` and `factory.progress`): the handlers
                 // validate, the sinks admit/withdraw through the queue lanes.
+                // With the agent inbox enabled (default), the notice's message
+                // lands in the session's durable inbox and ONE short steering
+                // notice wakes instead of the full row.
                 let notice_engine = std::sync::Arc::downgrade(concrete);
                 let notice_core = Arc::clone(&core);
                 let notice_notify = Arc::clone(&work_notify);
                 let notice_recovery = Arc::clone(&recovery);
+                let notice_agent_dir = config.agent_dir.clone();
+                // The coalescing batch the queued notice row covers (routing
+                // state, reset when the row delivers or clears).
+                let arrivals_for_sink = pa_core::session_engine::inbox::InboxArrivals::default();
                 let notice_sink: crate::engine::KernelNoticeSink = Arc::new(move |notice| {
                     let Some(engine) = notice_engine.upgrade() else {
                         return;
@@ -626,16 +633,41 @@ impl Worker {
                     if engine.session_is_closed() {
                         return;
                     }
+                    // Revalidated inside the admission's lock section: the
+                    // close paths mark the session BEFORE clearing the lanes.
+                    let closed = || engine.session_is_closed();
+                    if crate::agent_inbox::inbox_enabled(&engine.cwd(), &notice_agent_dir) {
+                        if let (Some(inbox), Some(fields)) = (
+                            engine.inbox(),
+                            pa_core::session_engine::inbox::inbox_notice_fields(&notice),
+                        ) {
+                            admit_inbox_notice(
+                                &notice_recovery,
+                                &notice_core,
+                                &notice_notify,
+                                &inbox,
+                                &arrivals_for_sink,
+                                fields,
+                                closed,
+                            );
+                            return;
+                        }
+                    }
                     admit_kernel_notice(
                         &notice_recovery,
                         &notice_core,
                         &notice_notify,
                         notice,
-                        // Revalidated inside the admission's lock section: the
-                        // close paths mark the session BEFORE clearing the lanes.
-                        || engine.session_is_closed(),
+                        closed,
                     );
                 });
+                crate::agent_inbox::spawn_inbox_reminder(
+                    std::sync::Arc::downgrade(concrete),
+                    &core,
+                    &work_notify,
+                    &recovery,
+                    &config.agent_dir,
+                );
                 let withdraw_core = Arc::clone(&core);
                 let withdraw_recovery = Arc::clone(&recovery);
                 let withdraw_engine = Arc::downgrade(concrete);
@@ -1082,6 +1114,8 @@ mod prompt_image_tests;
 
 #[cfg(test)]
 mod compaction_admission_tests;
+#[cfg(test)]
+mod inbox_queue_tests;
 #[cfg(test)]
 mod recovery_verdict_tests;
 #[cfg(test)]

@@ -48,6 +48,10 @@ pub struct SessionEngineConfig {
     pub extra_builtin_skill_overrides: Vec<String>,
     pub rlm_subagent_host: Option<Arc<dyn super::rlm_host::RlmSubagentHost>>,
     pub rlm_usage_store: Option<Arc<dyn super::rlm_usage::RlmChildUsageStore>>,
+    /// The daemon-owned agent inbox whose `rlm.inbox.read`/`rlm.inbox.count`
+    /// host requests register when supplied; daemonless embeddings pass
+    /// `None` and keep their direct notice-row steering.
+    pub inbox: Option<Arc<super::inbox::SessionInbox>>,
     /// Announces every accepted `rlm.progress.note`; `None` keeps the store
     /// the only surface.
     pub progress_note_emit: Option<super::rlm_host::RlmProgressNoteEmit>,
@@ -250,6 +254,7 @@ pub async fn create_session(mut config: SessionEngineConfig) -> anyhow::Result<S
             subagent_host: config.rlm_subagent_host.clone(),
             usage_store: config.rlm_usage_store.clone(),
             progress_note_emit: config.progress_note_emit.clone(),
+            inbox: config.inbox.clone(),
         },
         config.queued_goal_context_purge.clone(),
         config.cron_store.clone(),

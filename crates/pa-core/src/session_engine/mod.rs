@@ -22,6 +22,7 @@ pub mod harness_digest;
 pub mod headless;
 pub mod host_requests;
 pub mod image_model_routing;
+pub mod inbox;
 pub mod ipython_state;
 pub mod late_sent_messages;
 pub mod messages;

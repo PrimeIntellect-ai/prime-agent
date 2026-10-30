@@ -1,7 +1,8 @@
 //! Re-adoption wake e2e: the wake paths of a session whose worker is
 //! re-adopted across a supervisor kill -9 + relaunch. The bash-completion
 //! notice must WAKE the idle session (`bash.completed`, TS async handler;
-//! the frozen-watcher incident); the scheduled-jobs wake keeps firing.
+//! the frozen-watcher incident) — the notice lands in the session inbox and
+//! its short steering notice wakes; the scheduled-jobs wake keeps firing.
 #![allow(clippy::large_futures)]
 // 64-bit-only targets; the narrowing casts sit at bounded OS boundaries.
 #![allow(
@@ -419,21 +420,37 @@ fn a_detached_bash_completion_wakes_the_idle_session_across_a_supervisor_restart
             .then_some(())
     });
 
-    // THE ASSERT: the detached command finishes after the re-adoption and its completion
-    // notice WAKES the idle session — the bash-done row lands and the woken turn runs to its reply.
+    // THE ASSERT: the detached command finishes after the re-adoption and its
+    // completion notice WAKES the idle session — the message lands in the
+    // durable inbox, its short steering notice wakes, and the woken turn
+    // runs to its reply.
     let messages = wait_until(Duration::from_mins(1), || {
         let messages = client.messages(&active_id);
-        (messages.contains("bash-done") && messages.contains("woken by the bash-done notice"))
-            .then_some(messages)
+        (messages.contains("1 new message (bash-done)")
+            && messages.contains("woken by the bash-done notice"))
+        .then_some(messages)
     });
     assert!(
-        messages.contains("[bash-done pid:"),
-        "the bash-done notice never landed: {messages}"
+        messages.contains("[inbox "),
+        "the inbox arrival notice never landed: {messages}"
+    );
+    let journal = session_file
+        .parent()
+        .and_then(Path::parent)
+        .expect("session file grandparent")
+        .join("session-artifacts")
+        .join(&session_id)
+        .join("inbox.jsonl");
+    let inbox = std::fs::read_to_string(&journal)
+        .unwrap_or_else(|error| panic!("read {}: {error}", journal.display()));
+    assert!(
+        inbox.contains("RW_WAKE_DONE"),
+        "the completion message never journaled: {inbox}"
     );
     let file = std::fs::read_to_string(&session_file).expect("session file");
     assert!(
-        file.contains("async_bash_completion"),
-        "the async_bash_completion row never persisted"
+        !file.contains("async_bash_completion"),
+        "no full notice row steers while the inbox is enabled"
     );
 
     // Teardown: stop the session through the live supervisor so the worker (and

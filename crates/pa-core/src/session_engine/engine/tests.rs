@@ -91,6 +91,8 @@ async fn engine_runs_tool_loop_and_persists() {
         extra_builtin_skill_overrides: vec![],
         rlm_subagent_host: None,
         rlm_usage_store: None,
+
+        inbox: None,
         progress_note_emit: None,
         rlm_depth: None,
         daemonless: true,
@@ -200,6 +202,8 @@ async fn spawned_child_prompt_stamps_its_depth() {
         extra_builtin_skill_overrides: vec![],
         rlm_subagent_host: None,
         rlm_usage_store: None,
+
+        inbox: None,
         progress_note_emit: None,
         rlm_depth: Some(2),
         daemonless: true,
@@ -272,6 +276,8 @@ async fn oauth_creds_unlock_generic_mcp_gating_in_new_sessions() {
             extra_builtin_skill_overrides: vec![],
             rlm_subagent_host: None,
             rlm_usage_store: None,
+
+            inbox: None,
             progress_note_emit: None,
             rlm_depth: None,
             daemonless: true,
@@ -461,6 +467,8 @@ async fn create_session_appends_missing_resume_settings_rows() {
         extra_builtin_skill_overrides: vec![],
         rlm_subagent_host: None,
         rlm_usage_store: None,
+
+        inbox: None,
         progress_note_emit: None,
         rlm_depth: None,
         daemonless: true,
@@ -843,6 +851,8 @@ async fn late_receipts_recorded_before_the_row_lands_apply_on_landing() {
         extra_builtin_skill_overrides: vec![],
         rlm_subagent_host: None,
         rlm_usage_store: None,
+
+        inbox: None,
         progress_note_emit: None,
         rlm_depth: None,
         daemonless: true,

@@ -1257,6 +1257,7 @@ async fn parent_renames_a_child_end_to_end() {
             subagent_host: Some(Arc::clone(&children) as Arc<dyn RlmSubagentHost>),
             usage_store: None,
             progress_note_emit: None,
+            inbox: None,
         },
         None,
         None,

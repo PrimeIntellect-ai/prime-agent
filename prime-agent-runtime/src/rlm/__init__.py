@@ -105,6 +105,35 @@ class RLMChildResult:
     replied_since_task: bool | None = None
 
 
+@dataclass(frozen=True)
+class RLMInboxMessage:
+    """One machine-generated notice waiting in the session inbox.
+
+    `inbox_class` is `bash-done`, `factory-progress`, or `child-notice`;
+    `arrived_at_ms` is the epoch-ms arrival time; `sender` is the
+    command for a bash completion, the run id for a factory milestone;
+    `meta` carries the notice's metadata (pid/command/exitCode or the
+    run's fields).
+    """
+
+    id: str
+    inbox_class: str
+    arrived_at_ms: int
+    sender: str | None
+    text: str
+    meta: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class RLMInboxCount:
+    """The inbox snapshot `count()` returns: the waiting count, the oldest
+    arrival time, and the per-class breakdown."""
+
+    count: int
+    oldest_arrived_at_ms: int | None
+    classes: dict[str, int]
+
+
 def _spawn_handle_from_payload(payload: Any) -> RLMSpawnHandle:
     if not isinstance(payload, dict):
         raise RuntimeError("rlm.spawn returned an invalid spawn handle")
@@ -490,6 +519,78 @@ async def progress_note(message: str) -> RLMProgressNoteResult:
     return RLMProgressNoteResult(accepted=accepted, retry_after_ms=retry_after_ms)
 
 
+def _inbox_message_from_payload(payload: Any) -> RLMInboxMessage:
+    if not isinstance(payload, dict):
+        raise RuntimeError("rlm.inbox.read returned an invalid message entry")
+    message_id = payload.get("id")
+    inbox_class = payload.get("class")
+    arrived_at_ms = payload.get("arrivedAtMs")
+    text = payload.get("text")
+    if not isinstance(message_id, str) or not message_id:
+        raise RuntimeError("rlm.inbox.read entry is missing id")
+    if not isinstance(inbox_class, str) or not inbox_class:
+        raise RuntimeError("rlm.inbox.read entry has invalid class")
+    if not isinstance(arrived_at_ms, int) or isinstance(arrived_at_ms, bool):
+        raise RuntimeError("rlm.inbox.read entry has invalid arrivedAtMs")
+    if not isinstance(text, str):
+        raise RuntimeError("rlm.inbox.read entry has invalid text")
+    sender = payload.get("sender")
+    if sender is not None and not isinstance(sender, str):
+        raise RuntimeError("rlm.inbox.read entry has invalid sender")
+    meta = payload.get("meta")
+    if not isinstance(meta, dict):
+        raise RuntimeError("rlm.inbox.read entry has invalid meta")
+    return RLMInboxMessage(
+        id=message_id,
+        inbox_class=inbox_class,
+        arrived_at_ms=arrived_at_ms,
+        sender=sender,
+        text=text,
+        meta=meta,
+    )
+
+
+async def inbox_read() -> list[RLMInboxMessage]:
+    """Read and drain the session inbox: every waiting machine-generated
+    notice (bash completions, factory milestones) returns in arrival
+    order with its arrival time, and the inbox empties.
+
+    Machine notices accumulate in the daemon-owned inbox instead of
+    steering their full rows; a short steering notice announces their
+    arrival, and this call is how the agent reads them.
+    """
+    payload = await host_request("rlm.inbox.read")
+    messages = payload.get("messages")
+    if not isinstance(messages, list):
+        raise RuntimeError("rlm.inbox.read returned an invalid messages list")
+    return [_inbox_message_from_payload(entry) for entry in messages]
+
+
+async def inbox_count() -> RLMInboxCount:
+    """Count the session inbox's waiting messages without draining them:
+    the total, the oldest arrival's epoch-ms time, and the per-class
+    breakdown (`bash-done`, `factory-progress`, ...)."""
+    payload = await host_request("rlm.inbox.count")
+    count = payload.get("count")
+    if not isinstance(count, int) or isinstance(count, bool):
+        raise RuntimeError("rlm.inbox.count returned an invalid count")
+    oldest_arrived_at_ms = payload.get("oldestArrivedAtMs")
+    if oldest_arrived_at_ms is not None and (
+        not isinstance(oldest_arrived_at_ms, int) or isinstance(oldest_arrived_at_ms, bool)
+    ):
+        raise RuntimeError("rlm.inbox.count returned an invalid oldestArrivedAtMs")
+    classes = payload.get("classes")
+    if not isinstance(classes, dict) or not all(
+        isinstance(value, int) and not isinstance(value, bool) for value in classes.values()
+    ):
+        raise RuntimeError("rlm.inbox.count returned an invalid classes breakdown")
+    return RLMInboxCount(
+        count=count,
+        oldest_arrived_at_ms=oldest_arrived_at_ms,
+        classes=classes,
+    )
+
+
 async def delete_subagent(target: str | RLMSubagent | RLMSpawnHandle) -> RLMSubagent:
     """Delete one running or retained direct child from the current parent session.
 
@@ -582,6 +683,19 @@ class _HarnessProxy:
 
 
 _harness_state = _HarnessProxy()
+
+
+class _RLMInboxNamespace:
+    """The session inbox of machine-generated notices:
+    ``await rlm.inbox.read()`` drains and returns the waiting messages;
+    ``await rlm.inbox.count()`` counts them without draining.
+    """
+
+    async def read(self) -> list[RLMInboxMessage]:
+        return await inbox_read()
+
+    async def count(self) -> RLMInboxCount:
+        return await inbox_count()
 
 
 class _RLMFactoryNamespace:
@@ -694,6 +808,7 @@ class _RLMNamespace:
         return await collect(targets, timeout_ms=timeout_ms)
 
     factory = _RLMFactoryNamespace()
+    inbox = _RLMInboxNamespace()
 
     def __call__(self, *args: Any, **kwargs: Any) -> Any:
         raise TypeError(_NOT_CALLABLE_MESSAGE)
@@ -727,6 +842,8 @@ __all__ = [
     "McpToolError",
     "NotEnabled",
     "RLMCreateSessionHandle",
+    "RLMInboxCount",
+    "RLMInboxMessage",
     "RLMModel",
     "RLMProgressNoteResult",
     "RLMSpawnHandle",
@@ -741,6 +858,8 @@ __all__ = [
     "get_harness_state",
     "harness",
     "host_request",
+    "inbox_count",
+    "inbox_read",
     "list_subagents",
     "persistent_shells",
     "progress_note",
