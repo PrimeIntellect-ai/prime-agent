@@ -816,6 +816,7 @@ async fn a_decision_child_spawn_runs_the_decision_engine_end_to_end() {
         "the edge names the parent session file for recovery"
     );
     assert_eq!(edge.name, "system-1", "the edge carries the spawn name");
+
     // The decision flag has exactly one durable home — the persisted create
     // command's `decisionChild` key — while the runtime metadata carries the
     // ordinary subagent identity every lifecycle gate accepts.
@@ -861,23 +862,58 @@ async fn a_decision_child_spawn_runs_the_decision_engine_end_to_end() {
         admitted["success"], true,
         "the decision request prompt failed: {admitted}"
     );
-    // The reply lands in the parent's session file as the agent-message
-    // row the parent reads at its next wake — the follow-up delivery the
-    // decision child's answers ride.
-    let reply = wait_until(Duration::from_secs(20), || {
-        std::fs::read_to_string(&parent.session_file)
+    // The replies land in the parent's session file as the agent-message
+    // rows the parent reads at its next wake — the follow-up delivery the
+    // decision child's answers ride. The kickoff's ready answer is the
+    // first tagged reply: its null seq distinguishes it from the
+    // request's answer.
+    let replies = wait_until(Duration::from_secs(20), || {
+        let rows: Vec<Value> = std::fs::read_to_string(&parent.session_file)
             .expect("read the parent session file")
             .lines()
             .filter_map(|line| serde_json::from_str::<Value>(line).ok())
-            .find_map(|row| {
+            .filter_map(|row| {
                 let message = row.get("details")?.get("message")?.as_str()?;
                 let reply: Value = serde_json::from_str(message).ok()?;
                 (reply["type"] == json!("decision_api.decision")).then_some(reply)
             })
+            .collect();
+        (rows.len() >= 2).then_some(rows)
     });
+    assert!(
+        replies
+            .iter()
+            .any(|reply| reply["seq"] == Value::Null && reply["note"] == "Decision child ready."),
+        "the kickoff's ready answer is the child's first tagged reply: {replies:?}"
+    );
+    let reply = replies
+        .iter()
+        .find(|reply| reply["seq"] == json!(42))
+        .expect("the request's answer reply");
     assert_eq!(reply["seq"], json!(42), "the reply carries its seq");
     assert_eq!(reply["model"], "decision-fixture/clef", "{reply}");
     assert_eq!(reply["decision"]["choice"], "left", "{reply}");
+    // The spawn task settled ready long before this request answered, so
+    // its settle tail has run: the ledger display row still says
+    // `running`, because a decision child is a service — a completed
+    // display would stop the update roster from reviving a child meant
+    // to serve.
+    let child_session_dir = entries[0].session_dir.clone();
+    let display: Value = wait_until(Duration::from_secs(10), || {
+        let file = Path::new(&child_session_dir).join("rlm-subagent.json");
+        serde_json::from_str(&std::fs::read_to_string(file).ok()?).ok()?
+    });
+    assert_eq!(
+        display["status"], "running",
+        "a decision child meant to serve never completes its ledger display: {display}"
+    );
+    // The ready answer was the child's reply, so the spawn's settle
+    // watcher owes the parent no exit notice.
+    let session_file = std::fs::read_to_string(&parent.session_file).unwrap_or_default();
+    assert!(
+        !session_file.contains("no-reply"),
+        "a replied decision child never receives the no-reply exit notice"
+    );
 }
 
 #[tokio::test]

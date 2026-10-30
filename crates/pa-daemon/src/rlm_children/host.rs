@@ -193,6 +193,7 @@ impl RlmSubagentHost for SupervisorChildSessions {
                     model: model.clone(),
                     label: rlm_child_label(&request.prompt),
                     started_at_ms: now_ms(),
+                    decision_child: request.decision_child,
                     settled_status: None,
                     settled: false,
                     answer_preview: None,

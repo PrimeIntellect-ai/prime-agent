@@ -598,6 +598,7 @@ fn ledger_child_records(
                 },
                 |display| display.created_at,
             ),
+            decision_child: false,
             settled_status: Some(
                 if display
                     .as_ref()
