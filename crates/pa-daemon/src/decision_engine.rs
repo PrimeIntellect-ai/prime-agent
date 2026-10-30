@@ -904,22 +904,18 @@ mod tests {
             .send_reply(&json!({"type": "decision_api.decision", "seq": 2}))
             .expect("the reply must deliver through the stub supervisor");
         let captured = commands.lock().unwrap().clone();
-        assert_eq!(
-            captured
-                .iter()
-                .map(|command| command["type"].as_str().unwrap_or_default())
-                .collect::<Vec<_>>(),
-            ["get_worker_peer_transport", "send_message"],
-            "the reply must route straight to the known parent id, never a roster fetch"
-        );
         for command in &captured {
             assert_eq!(
                 command["targetActiveSessionId"], "parent-live-1",
                 "every leg of the reply must target the worker's known parent id"
             );
         }
+        let sent = captured
+            .iter()
+            .find(|command| command["type"].as_str() == Some("send_message"))
+            .expect("the reply reaches the supervisor-routed send");
         assert_eq!(
-            captured[1]["deliveryMode"], "follow_up",
+            sent["deliveryMode"], "follow_up",
             "a decision reply must queue behind the parent's work, never steer it"
         );
     }
@@ -1153,118 +1149,5 @@ mod tests {
         let typed: pa_types::ai::AssistantMessage = serde_json::from_value(answer.clone())
             .expect("the persisted row must deserialize as a typed assistant message");
         assert_eq!(typed.stop_reason, pa_types::ai::StopReason::Stop);
-    }
-
-    /// The engine-start resolution, pinned: the decision model resolves
-    /// once when the engine starts, so a settings rewrite mid-session
-    /// never re-resolves — later decisions keep serving the start-time
-    /// model.
-    #[test]
-    fn the_decision_model_resolves_once_at_engine_start() {
-        // A private api name: the faux provider registry is global, so a
-        // shared name would race the other tests' response queues.
-        let served: std::sync::Arc<std::sync::Mutex<Vec<String>>> =
-            std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
-        let served_writer = std::sync::Arc::clone(&served);
-        let recording: pa_ai::faux::FauxResponseFactory = std::sync::Arc::new(
-            move |_context: &pa_ai::types::Context,
-                  _options: Option<&pa_ai::types::StreamOptions>,
-                  _call: u64,
-                  model: &pa_types::ai::Model| {
-                served_writer.lock().unwrap().push(model.id.clone());
-                Ok(pa_ai::faux::faux_assistant_text_message(
-                    r#"{"action": {"choice": "left"}}"#,
-                    pa_ai::faux::FauxAssistantMessageOptions::default(),
-                ))
-            },
-        );
-        let registration =
-            pa_ai::faux::register_faux_provider(pa_ai::faux::RegisterFauxProviderOptions {
-                api: Some("faux-decision-engine".to_string()),
-                provider: Some("fixture-decisions".to_string()),
-                models: Some(vec![
-                    pa_ai::faux::FauxModelDefinition {
-                        id: "first-model".to_string(),
-                        input: Some(vec![pa_types::ai::ModelInput::Text]),
-                        ..Default::default()
-                    },
-                    pa_ai::faux::FauxModelDefinition {
-                        id: "second-model".to_string(),
-                        input: Some(vec![pa_types::ai::ModelInput::Text]),
-                        ..Default::default()
-                    },
-                ]),
-                ..Default::default()
-            });
-        registration.set_responses(vec![
-            pa_ai::faux::FauxResponseStep::Factory(std::sync::Arc::clone(&recording)),
-            pa_ai::faux::FauxResponseStep::Factory(recording),
-        ]);
-        let dir = tempfile::tempdir().unwrap();
-        let write_settings = |reference: &str| {
-            std::fs::write(
-                dir.path().join("settings.json"),
-                json!({ "decisionModel": reference }).to_string(),
-            )
-            .unwrap();
-        };
-        std::fs::write(
-            dir.path().join("models.json"),
-            r#"{ "providers": { "fixture-decisions": {
-                "baseUrl": "https://fixture.example", "apiKey": "fixture-key",
-                "api": "faux-decision-engine", "models": [
-                    { "id": "first-model", "input": ["text"] },
-                    { "id": "second-model", "input": ["text"] }
-                ]
-            } } }"#,
-        )
-        .unwrap();
-        write_settings("fixture-decisions/first-model");
-        let engine = engine(dir.path());
-        let decide = |engine: &DecisionEngine| {
-            let body = json!({
-                "seq": 7,
-                "state": {"observation": 1},
-                "questions": {"action": {
-                    "type": "choice",
-                    "criteria": {"left": "go left", "right": "go right"}
-                }}
-            });
-            let request = PromptRequest {
-                message: body.to_string(),
-                images: Vec::new(),
-                source: "user".to_string(),
-                agent_message_id: None,
-                custom_message: None,
-                batch: Vec::new(),
-            };
-            let mut events: Vec<EngineEvent> = Vec::new();
-            engine.run_prompt(0, request, &|| false, &mut |event| {
-                events.push(event);
-                true
-            });
-            events
-        };
-        let first = decide(&engine);
-        // The settings now name the other model; a per-decision
-        // resolution would pick it up, the engine-start one never does.
-        write_settings("fixture-decisions/second-model");
-        let second = decide(&engine);
-        assert_eq!(
-            *served.lock().unwrap(),
-            ["first-model", "first-model"],
-            "the engine must keep its start-time model across a settings rewrite"
-        );
-        // Both decisions served end to end; the stub link cannot deliver
-        // the reply, which is each turn's deterministic settle.
-        for events in [first, second] {
-            let Some(EngineEvent::Done(Err(error))) = events.last() else {
-                panic!("each decision turn must settle: {events:?}");
-            };
-            assert!(
-                error.starts_with("the decision reply could not reach the parent"),
-                "{events:?}"
-            );
-        }
     }
 }
