@@ -907,8 +907,10 @@ pub async fn create_session(mut config: SessionEngineConfig) -> anyhow::Result<S
     }
     let goal_driver = wiring.runtime.goal_driver().clone();
     // Each row the session's durable store appends that bills a model call
-    // outside the agent loop charges the running goal and telemetry run.
-    let charge_goal = goal_driver.lock().await.billed_row_recorder();
+    // outside the agent loop charges the running goal and telemetry run; each
+    // child usage attribution charges the goal (the producer counts its telemetry).
+    let charge_goal = std::sync::Arc::new(goal_driver.lock().await.billed_row_recorder());
+    wiring.rlm_usage.set_goal_charge(charge_goal.clone());
     let charge_run = telemetry.clone();
     wiring
         .rlm_usage

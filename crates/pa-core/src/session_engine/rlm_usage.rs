@@ -217,6 +217,9 @@ fn target_assistant_usage(session: &SessionManager, target_id: &str) -> std::io:
         })
 }
 
+/// Counts one attributed child usage batch toward the session's goal.
+pub type GoalCharge = std::sync::Arc<dyn Fn(&Usage) + Send + Sync>;
+
 /// Per-origin batches in first-seen order.
 #[derive(Debug, Clone)]
 pub struct RlmChildUsageReport {
@@ -239,6 +242,8 @@ pub struct RlmChildUsageAttributions {
     /// The `rlm_child_*` session counters' handle (`None` in sessions
     /// without telemetry — subagents never double-report).
     telemetry: std::sync::Mutex<Option<std::sync::Arc<super::telemetry::SessionTelemetry>>>,
+    /// Charges the session's goal with each created row's child usage.
+    goal_charge: std::sync::Mutex<Option<GoalCharge>>,
     /// The successor a rebuild handed observation to; a post-rebuild
     /// chain never silently drops a late batch.
     forward: std::sync::Mutex<Option<std::sync::Arc<RlmChildUsageAttributions>>>,
@@ -254,6 +259,7 @@ impl RlmChildUsageAttributions {
             bases: tokio::sync::Mutex::new(HashMap::new()),
             children: std::sync::Mutex::new(HashMap::new()),
             telemetry: std::sync::Mutex::new(None),
+            goal_charge: std::sync::Mutex::new(None),
             forward: std::sync::Mutex::new(None),
             fallback: std::sync::Mutex::new(None),
         }
@@ -274,6 +280,17 @@ impl RlmChildUsageAttributions {
     /// Panics if the telemetry state mutex is poisoned.
     pub fn set_telemetry(&self, telemetry: std::sync::Arc<super::telemetry::SessionTelemetry>) {
         *self.telemetry.lock().expect("rlm usage telemetry lock") = Some(telemetry);
+    }
+
+    /// Bind the session goal's charge
+    /// ([`super::goal_driver::GoalDriver::billed_row_recorder`]): a goal's
+    /// budget counts its subagents' spend, deleted children included.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the goal charge mutex is poisoned.
+    pub fn set_goal_charge(&self, charge: GoalCharge) {
+        *self.goal_charge.lock().expect("rlm usage goal charge lock") = Some(charge);
     }
 
     /// The child attributes to the parent's last assistant row; that row's usage becomes the
@@ -312,7 +329,7 @@ impl RlmChildUsageAttributions {
     ///
     /// # Panics
     ///
-    /// Panics if the forward, children, or telemetry state mutexes are poisoned.
+    /// Panics if the forward, children, goal charge, or telemetry state mutexes are poisoned.
     pub async fn record_child_usage(&self, report: RlmChildUsageReport) -> bool {
         let forward = self.forward.lock().expect("rlm usage forward lock").clone();
         if let Some(forward) = forward {
@@ -362,6 +379,15 @@ impl RlmChildUsageAttributions {
                         ChildUsageAppendResult::Existing(aggregate) => (aggregate, false),
                     };
                     bases.insert(target_id.clone(), aggregate);
+                    if let Some(charge) = self
+                        .goal_charge
+                        .lock()
+                        .expect("rlm usage goal charge lock")
+                        .as_ref()
+                        .filter(|_| created)
+                    {
+                        charge(&usage);
+                    }
                     if let Some(telemetry) = self
                         .telemetry
                         .lock()
@@ -1123,5 +1149,45 @@ mod tests {
             1,
             "the complete disk row survives the failed acknowledgment and must be reused"
         );
+    }
+
+    /// A goal's budget counts its subagents: each created attribution row charges the goal once
+    /// (a retried report finds its row and charges nothing), a deleted child's recorded spend
+    /// stays charged, and the mint consult stops a goal the children pushed over its budget.
+    #[tokio::test]
+    async fn child_usage_charges_the_goal_and_stops_its_next_continuation() {
+        use crate::goals::GoalStatus;
+        use crate::session_engine::goal_driver::GoalDriver;
+        let (_tmp, manager) = manager_with_assistant(usage_block(10, 5, 0, 0, 15, 0.0));
+        let mut driver = GoalDriver::new();
+        driver
+            .start(&mut *manager.lock().await, "work", Some(100))
+            .unwrap();
+        let producer = producer(manager.clone());
+        producer.set_goal_charge(std::sync::Arc::new(driver.billed_row_recorder()));
+        let report = |child: &str, input, output| RlmChildUsageReport {
+            report_id: format!("report-{child}"),
+            rlm_child_id: child.to_string(),
+            batches: vec![(
+                ChildUsageOrigin::SpawnTask,
+                usage_block(input, output, 1_000, 0, 0, 0.0),
+            )],
+        };
+        producer.register_spawn("deleted").await;
+        producer.register_spawn("live").await;
+        assert!(producer.record_child_usage(report("deleted", 30, 10)).await);
+        producer.forget_child("deleted").await;
+        let live = report("live", 50, 20);
+        assert!(producer.record_child_usage(live.clone()).await);
+        assert!(producer.record_child_usage(live).await);
+
+        let mut session = manager.lock().await;
+        assert!(driver
+            .next_continuation_message(&mut session, None)
+            .unwrap()
+            .is_none());
+        assert_eq!(driver.state().status, GoalStatus::BudgetLimited);
+        // Input + output only, like the goal's own turns: cache reads never charge.
+        assert_eq!(driver.state().tokens_used, 40 + 70);
     }
 }
