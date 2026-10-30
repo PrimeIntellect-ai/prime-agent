@@ -61,16 +61,10 @@ impl Inner {
             .and_then(Value::as_str)
             .filter(|t| !t.is_empty())
             .ok_or_else(|| anyhow!("host request payload must have a string type"))?;
-        if let Some(handler) = self.options.host_handlers.get(request_type).cloned() {
-            return handler(HostRequestPayload { data: data.clone() }).await;
-        }
         if request_type == END_TURN_REQUEST_TYPE {
-            // The manager's own answer for the sanctioned turn-end request
-            // when no host handler owns it (the registry wins otherwise):
-            // mark the executing cell, and the flag rides the settled result
-            // so the turn ends once the batch settles — nothing is queued
-            // and no wake fires. A harness without this manager answers the
-            // generic error below, so the call raises in its kernels.
+            // The manager's own answer: mark the executing cell, and the
+            // flag rides the settled result so the turn ends once the
+            // batch settles.
             let execution = lock(&self.guarded)
                 .active_execution
                 .clone()
@@ -78,9 +72,15 @@ impl Inner {
             lock(&execution.buffers).ended_turn = true;
             return Ok(json!({ "endedTurn": true }));
         }
-        Err(anyhow!(
-            "host request type \"{request_type}\" is not available in this session"
-        ))
+        let handler = self
+            .options
+            .host_handlers
+            .get(request_type)
+            .ok_or_else(|| {
+                anyhow!("host request type \"{request_type}\" is not available in this session")
+            })?
+            .clone();
+        handler(HostRequestPayload { data: data.clone() }).await
     }
 
     /// Wait (bounded) for the in-flight host request tasks to settle.

@@ -74,11 +74,8 @@ pub const BASH_COMMAND_DISPLAY_MIME: &str = "application/vnd.prime-agent.bash-co
 pub const BASH_COMPLETED_REQUEST_TYPE: &str = "bash.completed";
 
 /// The kernel host request that ends the turn from inside a cell
-/// (`rlm.end_turn()`). The host-request dispatch answers it by marking the
-/// executing cell's result, so the turn ends once the batch settles; a host
-/// that registered its own handler wins instead. Without the manager (a
-/// foreign harness) the request answers with the generic not-available
-/// error, so the call raises in the kernel instead of silently no-opping.
+/// (`rlm.end_turn()`). The host-request dispatch answers it by marking
+/// the executing cell's result, so the turn ends once the batch settles.
 pub const END_TURN_REQUEST_TYPE: &str = "rlm.end_turn";
 
 pub const EXECUTE_STATUS_OK: &str = "ok";
