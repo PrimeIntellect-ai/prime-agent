@@ -72,6 +72,14 @@ Connect Slack from `/mcp` or run `/mcp login slack` inside Prime Agent to search
 your workspace and use Slack tools. See the [Slack connector guide](docs/slack-mcp.md)
 for OAuth setup and troubleshooting.
 
+## Google Drive and Google Sheets
+
+Connect Google's official Drive and Sheets MCP servers with your own Google
+OAuth client: add them to `mcpServers` with `clientId`, `clientSecret`,
+`callbackPort`, and `scopes`, then run `/mcp login <name>`. See the
+[Google Drive and Google Sheets guide](docs/google-workspace-mcp.md) for the
+Google Cloud setup and the tool mapping.
+
 ## Clipboard over SSH and tmux
 
 Prime Agent uses the local clipboard tool (such as `pbcopy`) when available. In tmux it asks the attached tmux client to forward a clipboard buffer if that client advertises the `Ms` capability. This works with tmux's default `set-clipboard external`, unlike application-origin OSC 52. Without tmux, remote copies request delivery using OSC 52. Terminal requests cannot confirm that your local clipboard changed, so Prime Agent reports them as unconfirmed.

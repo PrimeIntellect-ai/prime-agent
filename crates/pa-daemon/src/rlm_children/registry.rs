@@ -417,10 +417,10 @@ impl SupervisorChildSessionsInner {
                 })
             };
             if let Some(notice) = notice {
-                self.deliver_terminal_notice(super::create_rlm_child_terminal_notice(
-                    &notice,
-                    super::now_ms(),
-                ))
+                self.deliver_terminal_notice(
+                    record,
+                    super::create_rlm_child_terminal_notice(&notice, super::now_ms()),
+                )
                 .await;
             }
         }
@@ -618,6 +618,7 @@ fn ledger_child_records(
             live_observation: None,
             direct_observation: Arc::new(Mutex::new(())),
             notice_delivered: true,
+            factory: edge.factory.is_some(),
             prompt_admitted: true,
             error: None,
             closed_by_parent: false,

@@ -294,6 +294,7 @@ async fn a_settled_child_passivates_stays_listable_and_revives_by_agent_message(
             name: Some("parked-kid".to_string()),
             model: None,
             thinking: None,
+            cwd: None,
             spawned_by_request_id: None,
             factory: None,
         })
@@ -612,6 +613,7 @@ async fn a_parent_rename_after_a_revival_and_second_passivation_reaches_the_chil
             name: Some("parked-kid".to_string()),
             model: None,
             thinking: None,
+            cwd: None,
             spawned_by_request_id: None,
             factory: None,
         })

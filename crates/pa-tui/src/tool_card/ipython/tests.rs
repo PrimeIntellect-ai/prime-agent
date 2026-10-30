@@ -559,6 +559,93 @@ fn bash_minority_cell_stays_python() {
     assert_eq!(bash_dominated_stats(&card), None);
 }
 
+fn edit_cell_card() -> ToolCallCard {
+    cell_card(
+        "await edit.run('src/app.py', 'x = 1', 'x = 2')",
+        json!({
+            "status": "ok",
+            "durationMs": 5,
+            "result": "'Edited src/app.py'",
+            "diffs": [{ "path": "src/app.py", "diff": "-10 x = 1\n+10 x = 2\n 11 y = 3\n    ..." }],
+        }),
+        false,
+        false,
+    )
+}
+
+fn trimmed_rows(lines: &[Line]) -> Vec<String> {
+    lines
+        .iter()
+        .skip(1)
+        .map(|line| text_of(line).trim_end().to_string())
+        .collect()
+}
+
+#[test]
+fn edit_diffs_collapse_to_a_file_summary_line_in_overview() {
+    let card = edit_cell_card();
+    let summary = vec!["    \u{2570}\u{2500} src/app.py +1 -1".to_string()];
+    let lines = render(
+        &card,
+        0,
+        Detail::Overview,
+        Detail::Overview,
+        &theme(),
+        40,
+        true,
+    );
+    assert_eq!(trimmed_rows(&lines), summary);
+    // A click-expanded card keeps the conversation level's collapsed diff.
+    let toggled = render(&card, 0, Detail::All, Detail::Overview, &theme(), 40, true);
+    assert!(!trimmed_rows(&toggled)
+        .iter()
+        .any(|row| row.contains("10 + x = 2")));
+}
+
+#[test]
+fn edit_diffs_expand_to_numbered_rows_in_details() {
+    let card = edit_cell_card();
+    let lines = render(
+        &card,
+        0,
+        Detail::Details,
+        Detail::Details,
+        &theme(),
+        40,
+        true,
+    );
+    assert_eq!(
+        trimmed_rows(&lines),
+        vec![
+            "    \u{2570}\u{2500} src/app.py +1 -1".to_string(),
+            "  10 - x = 1".to_string(),
+            "  10 + x = 2".to_string(),
+            "  11   y = 3".to_string(),
+            "       ...".to_string(),
+        ]
+    );
+    // Full-width rows on the diff backgrounds.
+    assert_eq!(text_of(&lines[2]).chars().count(), 40);
+    assert_eq!(
+        lines[3][1].style,
+        theme()
+            .fg_style(ThemeColor::ToolDiffAdded)
+            .patch(theme().bg_style(crate::theme::ThemeBg::ToolDiffAddedBg))
+    );
+    assert_eq!(
+        count(
+            &card,
+            0,
+            Detail::Details,
+            Detail::Details,
+            &theme(),
+            40,
+            true
+        ),
+        lines.len()
+    );
+}
+
 #[test]
 fn an_aborted_cell_freezes_its_duration_from_card_timestamps() {
     let now = std::time::Instant::now();

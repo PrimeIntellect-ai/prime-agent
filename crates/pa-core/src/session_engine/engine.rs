@@ -54,6 +54,9 @@ pub struct SessionEngineConfig {
     /// The session's depth in the RLM recursion tree (0 for top-level
     /// sessions); gates the `refine.*` host requests.
     pub rlm_depth: Option<u32>,
+    /// Whether this session is a factory state's child (its spawn carried a
+    /// factory run tag); selects the child prompt's factory line.
+    pub factory_child: bool,
     /// Whether the session runs without a daemon: nothing outside the
     /// session itself (no scheduler, no bash-completion wake) starts a
     /// turn. Set explicitly by the embedding; print sessions are
@@ -596,6 +599,7 @@ pub async fn create_session(mut config: SessionEngineConfig) -> anyhow::Result<S
             // A spawned child's prompt must read "depth: N (not root)" with
             // the child-agent reply doctrine, never the root identity.
             rlm_depth: config.rlm_depth,
+            factory_child: config.factory_child,
             daemonless: config.daemonless,
             can_spawn: config.rlm_subagent_host.is_some(),
             generic_mcp_servers,

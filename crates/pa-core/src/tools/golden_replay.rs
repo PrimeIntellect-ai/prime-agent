@@ -273,6 +273,44 @@ async fn golden_ipython_group_matches_ts() {
     assert_eq!(checked, corpus["caseCount"].as_u64().expect("caseCount"));
 }
 
+/// Cell edits reach the result details as the edit tool's numbered diff text.
+#[tokio::test]
+async fn ipython_details_carry_the_cell_edit_diffs() {
+    let diff = |start_line| crate::kernel::shared::KernelDiffDisplay {
+        path: "src/app.py".to_string(),
+        old_str: "x = 1".to_string(),
+        new_str: "x = 2".to_string(),
+        start_line,
+    };
+    let result = ExecuteResult {
+        diffs: vec![diff(Some(10)), diff(None)],
+        ..ExecuteResult::default()
+    };
+    let options = IpythonToolOptions {
+        provisioner: Arc::new(MockProvisioner {
+            kernel: Arc::new(MockKernel {
+                executions: Mutex::new(vec![MockOutcome::Ok(Box::new(result))]),
+                exec_calls: AtomicUsize::new(0),
+                next_index: AtomicUsize::new(0),
+            }),
+            ensure_calls: AtomicUsize::new(0),
+            kill_calls: AtomicUsize::new(0),
+        }),
+        ui: None,
+        on_late_sent_agent_message: None,
+    };
+    let result = ipython::execute_ipython(&options, "edit()", None, None, None)
+        .await
+        .expect("cell executes");
+    assert_eq!(
+        result.details.expect("details")["diffs"],
+        serde_json::json!([
+            { "path": "src/app.py", "diff": "-10 x = 1\n+10 x = 2" },
+            { "path": "src/app.py", "diff": "-1 x = 1\n+1 x = 2" },
+        ])
+    );
+}
+
 #[test]
 fn golden_schema_group_matches_ts() {
     let corpus = corpus("schema");

@@ -1,10 +1,13 @@
 //! The `ipython` tool-call card: a fixed collapsed summary line (marker,
-//! language, preview, line counts, duration, error name), plus in expanded
+//! language, preview, line counts, duration, error name), per-file edit
+//! summaries (with diff rows when edit diffs expand), plus in expanded
 //! mode the full cell source and output. The top line never changes with
 //! expansion, so toggling detail never shifts the layout.
 
+mod diffs;
 mod output;
 
+use diffs::render_diffs;
 use output::render_output;
 use serde_json::Value;
 
@@ -107,9 +110,10 @@ fn cell_code(card: &ToolCallCard) -> &str {
         .unwrap_or_default()
 }
 
-/// Render the ipython cell card: the fixed summary line, then the expanded
-/// code and output rows when the card's `detail` is `all`. The sent agent
-/// messages' bodies follow the conversation `level` instead.
+/// Render the ipython cell card: the fixed summary line, the edit
+/// summaries, then the expanded code and output rows when the card's
+/// `detail` is `all`. Edit diff rows and the sent agent messages' bodies
+/// follow the conversation `level`, never a card's own click toggle.
 #[must_use]
 pub fn render(
     card: &ToolCallCard,
@@ -157,6 +161,8 @@ pub(super) fn count(
     lines.len()
 }
 
+// One more than clippy's limit: the paint/count sink rides beside the
+// render inputs so both traversals share this single layout.
 #[allow(clippy::too_many_arguments)]
 fn layout(
     card: &ToolCallCard,
@@ -189,18 +195,25 @@ fn layout(
             code,
         )
     });
-    // The sent-message receipt rows render even when the cell is collapsed. They are agent
-    // messages of their own, so their bodies follow the conversation level, not a click on
-    // the card.
-    let messages_expanded = level.tool_output_expanded();
-    if !detail.tool_output_expanded() {
-        render_sent_agent_messages(lines, &details, messages_expanded, theme, width);
-        render_transcript_reads(lines, &details, false, theme, width);
+    // Edit summaries, sent-message receipts, and transcript reads show even
+    // when the cell is collapsed; code and output open up only when
+    // expanded. The sent messages are agent messages of their own, so their
+    // bodies follow the conversation level, not a click on the card.
+    let expanded = detail.tool_output_expanded();
+    let has_code = expanded && render_code(lines, code, theme, width);
+    render_diffs(
+        lines,
+        &details.diffs,
+        has_code,
+        level.edit_diffs_expanded(),
+        theme,
+        width,
+    );
+    render_sent_agent_messages(lines, &details, level.tool_output_expanded(), theme, width);
+    render_transcript_reads(lines, &details, expanded, theme, width);
+    if !expanded {
         return;
     }
-    let has_code = render_code(lines, code, theme, width);
-    render_sent_agent_messages(lines, &details, messages_expanded, theme, width);
-    render_transcript_reads(lines, &details, true, theme, width);
     render_output(card, &details, lines, has_code, show_images, theme, width);
     // Image blocks render below the card when shown (TS adds these rows
     // for every tool shell).

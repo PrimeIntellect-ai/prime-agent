@@ -29,8 +29,8 @@ use pa_core::session_engine::rlm_host::{
 };
 
 use crate::rlm_child_model::{
-    assert_thinking_supported, cap_text, compact_rlm_text, resolve_child_model, rlm_child_label,
-    ANSWER_TEXT_MAX_CHARS,
+    assert_thinking_supported, cap_text, compact_rlm_text, resolve_child_cwd, resolve_child_model,
+    rlm_child_label, ANSWER_TEXT_MAX_CHARS,
 };
 use crate::supervisor_link::SupervisorLink;
 use crate::util::now_ms;
@@ -189,6 +189,9 @@ struct ChildRecord {
     /// The terminal notice was claimed: exactly one of the settle watcher,
     /// the delete path, or a late natural settle delivers it.
     notice_delivered: bool,
+    /// A factory state's child: the factory reads its settle through
+    /// collect, so no terminal notice reaches the parent conversation.
+    factory: bool,
     /// The task prompt was admitted; never settle a pre-prompt child (it
     /// is idle with an empty queue by construction).
     prompt_admitted: bool,
@@ -773,6 +776,7 @@ impl SupervisorChildSessions {
                 live_observation: None,
                 direct_observation: Arc::new(Mutex::new(())),
                 notice_delivered: false,
+                factory: false,
                 prompt_admitted: true,
                 error: None,
                 closed_by_parent: false,

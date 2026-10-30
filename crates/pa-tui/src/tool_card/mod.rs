@@ -113,9 +113,9 @@ pub fn working_icon(frame: usize) -> &'static str {
 }
 
 /// Render one tool-call card through its tool shell. `detail` is the card's own level (a click
-/// flips it); `level` is the conversation level, which the python card's sent agent messages
-/// follow. `show_images` (the `terminal.showImages` setting) renders metadata rows or
-/// `[Image: ...]` placeholders.
+/// flips it); `level` is the conversation level, which the python card's edit diffs and sent
+/// agent messages follow. `show_images` (the `terminal.showImages` setting) renders metadata
+/// rows or `[Image: ...]` placeholders.
 #[must_use]
 pub fn render_tool_card(
     card: &ToolCallCard,

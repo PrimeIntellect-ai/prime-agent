@@ -62,6 +62,7 @@ fn record_with_file(child_id: &str, session_file: &Path) -> Arc<Mutex<ChildRecor
         live_observation: None,
         direct_observation: Arc::new(Mutex::new(())),
         notice_delivered: false,
+        factory: false,
         prompt_admitted: true,
         error: None,
         closed_by_parent: false,

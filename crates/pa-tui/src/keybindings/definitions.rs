@@ -319,10 +319,6 @@ pub const APP_KEYBINDINGS: &[(&str, KeybindingDefinition)] = &[
     ),
     ("app.subagents.focus", def!(&["alt+a"], "Focus activity")),
     (
-        "app.heartbeats.openSelected",
-        def!(&["right"], "Open selected heartbeat"),
-    ),
-    (
         "app.editor.external",
         def!(&["ctrl+g"], "Open external editor"),
     ),
@@ -374,6 +370,7 @@ pub const APP_KEYBINDINGS: &[(&str, KeybindingDefinition)] = &[
         "app.modal.back",
         def!(&["left"], "Go back / close the current dialog"),
     ),
+    ("app.modal.open", def!(&["right"], "Open the selected row")),
     (
         "app.agents.reply",
         def!(&["space"], "Reply to selected agent"),

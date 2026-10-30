@@ -10,10 +10,13 @@ use std::sync::Arc;
 
 use serde_json::json;
 
+mod diff;
+
 use crate::tools::tool_definition::{
     AbortSignal, ExecutionMode, OnUpdate, ToolContentBlock, ToolDefinition, ToolExecutionResult,
     ToolUpdate,
 };
+use diff::generate_diff_string;
 
 /// Mime types the model context accepts as images.
 pub const IMAGE_MIME_TYPES: [&str; 4] = ["image/jpeg", "image/png", "image/gif", "image/webp"];
@@ -53,6 +56,8 @@ pub struct ExecuteResult {
     pub background_output: Option<String>,
     pub error: Option<KernelErrorInfo>,
     pub attachments: Vec<KernelAttachment>,
+    /// File edits displayed by this cell, in order.
+    pub diffs: Vec<crate::kernel::shared::KernelDiffDisplay>,
     /// Agent messages sent from this cell, in order (TS
     /// `sentAgentMessages` on the tool-result details).
     pub sent_agent_messages: Vec<crate::kernel::shared::KernelSentAgentMessage>,
@@ -475,6 +480,22 @@ pub async fn execute_ipython(
             "traceback": error.traceback,
         });
         details["errorEname"] = json!(error.ename);
+    }
+    if !r.diffs.is_empty() {
+        details["diffs"] = json!(r
+            .diffs
+            .iter()
+            .map(|diff| {
+                let start_line = diff
+                    .start_line
+                    .and_then(|line| usize::try_from(line).ok())
+                    .unwrap_or(1);
+                json!({
+                    "path": diff.path,
+                    "diff": generate_diff_string(&diff.old_str, &diff.new_str, 4, start_line),
+                })
+            })
+            .collect::<Vec<_>>());
     }
     if !r.sent_agent_messages.is_empty() {
         details["sentAgentMessages"] = json!(r

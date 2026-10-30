@@ -281,6 +281,9 @@ pub struct AgentSessionEngine {
     /// This session's RLM recursion depth (0 for top-level): gates the kernel `refine.*` host
     /// requests.
     rlm_depth: std::sync::atomic::AtomicU32,
+    /// Whether this session runs a factory state (its create carried a
+    /// factory run tag): selects the child prompt's factory line.
+    factory_child: std::sync::atomic::AtomicBool,
     /// The depth bound's source stamp (`default` | `env` | `global` |
     /// `inherited` | `chat`).
     rlm_max_depth_source: std::sync::Mutex<&'static str>,
