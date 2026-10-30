@@ -422,6 +422,10 @@ const WIRE_FIXTURES: &[(&str, &str)] = &[
         "get_session_messages",
         r#"{"type": "get_session_messages", "activeSessionId": "sess", "start": -10, "limit": 10, "roles": ["*"]}"#,
     ),
+    (
+        "search_session_content",
+        r#"{"type": "search_session_content", "query": "backoff"}"#,
+    ),
 ];
 
 #[test]
