@@ -1,5 +1,6 @@
 //! Streaming provider implementations ported from `packages/ai/src/providers`.
 
+pub mod acp;
 pub mod anthropic;
 pub mod azure_openai_responses;
 pub mod bedrock;

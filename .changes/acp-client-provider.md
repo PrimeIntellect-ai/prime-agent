@@ -1,0 +1,1 @@
+- Added an `acp` provider that drives an external Agent Client Protocol agent over stdio: set a custom model's `api` to `acp` and its `baseUrl` to the agent command. The agent keeps its own login and tools; permission requests from it are rejected.
