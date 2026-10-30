@@ -579,10 +579,14 @@ impl SupervisorChildSessionsInner {
                 self.emit_child_update(record).await;
                 // Only a successful run completes the display (TS
                 // `completeRlmSubagentRuntime`); a cancelled or failed run
-                // stays `running`, which a restart relists as `error`.
+                // stays `running`, which a restart relists as `error`. A
+                // decision child never completes here: its spawn task is a
+                // readiness handshake, not its run — the child is meant to
+                // serve after the settle, and a completed display would
+                // stop the update roster from reviving it.
                 let completed = {
                     let record = record.lock().await;
-                    matches!(record.run.verdict(), Some(RunVerdict::Done))
+                    (matches!(record.run.verdict(), Some(RunVerdict::Done)) && !record.decision_child)
                         .then(|| (record.session_dir.clone(), record.rlm_child_id.clone()))
                 };
                 if let Some((session_dir, child_id)) = completed {

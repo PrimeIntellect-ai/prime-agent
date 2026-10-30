@@ -204,6 +204,7 @@ impl RlmSubagentHost for SupervisorChildSessions {
                     label: rlm_child_label(&request.prompt),
                     started_at_ms: now_ms(),
                     run: RunState::running(),
+                    decision_child: request.decision_child,
                     answer_preview: None,
                     answer_text: None,
                     answer_captured: false,
