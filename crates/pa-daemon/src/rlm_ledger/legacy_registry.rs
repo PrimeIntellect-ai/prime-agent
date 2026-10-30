@@ -66,6 +66,12 @@ pub struct RlmSubagentDisplayEntry {
     pub model: Option<Value>,
     #[serde(default)]
     pub status: String,
+    /// The create key's decision-child flag (`decisionChild`), projected
+    /// at adoption so a reseeded registry can carry it (a decision
+    /// child's display legitimately stays `running`, so the flag is what
+    /// keeps a reseed from misreading a serving child as a crashed run).
+    #[serde(default)]
+    pub decision_child: bool,
     #[serde(default)]
     pub created_at: u64,
 }
