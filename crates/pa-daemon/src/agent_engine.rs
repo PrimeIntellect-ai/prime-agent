@@ -151,6 +151,14 @@ pub struct AgentSessionEngine {
     /// row. `None` outside a daemon worker.
     pub(crate) kernel_notice_sink: std::sync::Mutex<Option<crate::engine::KernelNoticeSink>>,
     pub(crate) bash_consumed_sink: std::sync::Mutex<Option<crate::engine::BashConsumedSink>>,
+    /// The current session's agent inbox store (the notice sink routes
+    /// `bash.completed`/`factory.progress` messages into it); set at
+    /// every session build.
+    pub(crate) inbox:
+        std::sync::Mutex<Option<std::sync::Arc<pa_core::session_engine::inbox::SessionInbox>>>,
+    /// The live agent handle: the eager turn-abort funnel's target, mirrored
+    /// because a running turn holds the core session's mutex.
+    pub(crate) turn_agent: std::sync::Mutex<Option<std::sync::Arc<pa_agent::agent::Agent>>>,
     pub(crate) quota_park: std::sync::Arc<std::sync::Mutex<Option<QuotaParkState>>>,
     /// Whether the settled turn parked: the park's pause, not the goal's death.
     pub(crate) quota_parked_this_run: std::sync::Arc<std::sync::atomic::AtomicBool>,

@@ -24,6 +24,7 @@
 )]
 pub mod acp;
 pub mod agent_engine;
+pub mod agent_inbox;
 pub mod agent_message_broadcast;
 pub mod agent_message_ingest;
 pub mod agent_messaging;
