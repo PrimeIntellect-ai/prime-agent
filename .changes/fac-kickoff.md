@@ -1,0 +1,1 @@
+- Factory children now get their task prompt as soon as they are spawned, instead of waiting up to 60 s for the parent's current turn to end.

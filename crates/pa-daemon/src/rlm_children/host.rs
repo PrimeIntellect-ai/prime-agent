@@ -249,10 +249,11 @@ impl RlmSubagentHost for SupervisorChildSessions {
             // continuation request reaches the provider first (see
             // `wait_turn_done`). A spawn admitted while the parent is idle
             // (a background kernel task, e.g. a factory run) has no turn
-            // to wait for.
+            // to wait for. Factory-tagged background tasks also bypass an
+            // active parent turn; ordinary mid-turn spawns still wait.
             let spawning_turn = {
                 let turn = *this.parent_turn.borrow();
-                turn.running.then_some(turn.completed)
+                (turn.running && request.factory.is_none()).then_some(turn.completed)
             };
             tokio::spawn(async move {
                 if let Some(generation) = spawning_turn {
