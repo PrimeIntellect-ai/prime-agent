@@ -741,7 +741,9 @@ async fn a_decision_child_spawn_runs_the_decision_engine_end_to_end() {
         model: None,
         thinking: None,
         decision_child: true,
+        cwd: None,
         spawned_by_request_id: None,
+        factory: None,
     };
     let handle = children
         .spawn(request)
