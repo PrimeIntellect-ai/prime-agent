@@ -111,3 +111,16 @@ revocation/errors; bytes already sent cannot be recalled. Recovery belongs to al
 live hosts sharing the agent directory and cancels when the last host disappears.
 Catch-up uses at most three delivery cycles per pending entry, honors Retry-After,
 and releases upload capacity during retry waits; exhaustion retains durable intent.
+
+
+`AgentSession::abort_background_compaction` is the synchronous cancellation seam
+for explicit Stop. It cancels speculative summarization and invalidates prepared
+results without taking the session lock; ordinary turn completion preserves the
+flight. Hosts may mirror a weak core-session handle to reach it while a turn owns
+their session mutex. Compaction preparation, stale-prefix validation, and commit
+remain owned by pa-core; no new dependency or wire surface is introduced.
+
+Hosts with cancellable boundary admission use
+`AgentSession::auto_compaction_now_with_abort`, aborting that boundary signal
+before resetting the background epoch. A stopped boundary cannot launch new work
+in the replacement epoch; uncancellable callers retain `auto_compaction_now`.
