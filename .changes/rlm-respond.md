@@ -1,0 +1,1 @@
+- `rlm.respond(text)` sends text to the user from the Python REPL as the agent's own reply (markdown renders); it also becomes the answer to a parent agent or in print mode.
