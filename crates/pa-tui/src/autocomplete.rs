@@ -29,6 +29,7 @@ pub struct CompletionItem {
 pub enum SuggestionKind {
     SlashCommand,
     File,
+    Emoji,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

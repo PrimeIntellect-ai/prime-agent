@@ -12,6 +12,7 @@ crossterm = { version = "0.28", features = ["event-stream"] }
 unicode-width = "0.2"
 unicode-properties = "0.1"
 unicode-segmentation = "1"
+emojis = "0.9"
 fancy-regex = "0.14"
 url = "2"
 regex = "1"

@@ -48,6 +48,7 @@ const TAB_LAYOUT: &[TabLayout] = &[
             "editor-padding",
             "autocomplete-max-visible",
             "show-hardware-cursor",
+            "emoji-shortcodes",
         ],
     },
     TabLayout {

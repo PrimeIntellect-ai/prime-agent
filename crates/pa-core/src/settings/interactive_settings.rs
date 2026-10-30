@@ -196,6 +196,20 @@ impl SettingsManager {
         self.save_global_scope(&["showHardwareCursor"])
     }
 
+    /// `emojiShortcodes` (default true).
+    #[must_use]
+    pub fn get_emoji_shortcodes(&self) -> bool {
+        self.settings().emoji_shortcodes.unwrap_or(true)
+    }
+
+    /// # Errors
+    ///
+    /// Returns an error when the global settings scope cannot be saved.
+    pub fn set_emoji_shortcodes(&mut self, enabled: bool) -> Result<()> {
+        self.global_mut().emoji_shortcodes = Some(enabled);
+        self.save_global_scope(&["emojiShortcodes"])
+    }
+
     #[must_use]
     pub fn get_editor_padding_x(&self) -> u64 {
         self.settings().editor_padding_x.unwrap_or(0)

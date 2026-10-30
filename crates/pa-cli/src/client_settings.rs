@@ -178,6 +178,13 @@ impl ClientSettings for CliClientSettings {
         bool
     );
     setting!(
+        emoji_shortcodes,
+        set_emoji_shortcodes,
+        get_emoji_shortcodes,
+        set_emoji_shortcodes,
+        bool
+    );
+    setting!(
         editor_padding_x,
         set_editor_padding_x,
         get_editor_padding_x,
