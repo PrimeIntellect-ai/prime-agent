@@ -361,6 +361,23 @@ pub enum DaemonCommand {
         /// Cancel session-owned work too when it has not started delivery.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         cancel_owned: Option<bool>,
+        /// Read-only: report the admission's status without cancelling a
+        /// waiting admission or aborting an owned one (the ACP steering
+        /// receipt asks whether the prompt's own turn is running).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        probe: Option<bool>,
+        #[serde(flatten)]
+        rest: JsonMap,
+    },
+    /// Wait for (or, with `probe`, peek at) one steered run's turn settle:
+    /// the ACP steering layer tracks per-steer outcomes with this.
+    WaitForSteerRun {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
+        active_session_id: String,
+        run_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        probe: Option<bool>,
         #[serde(flatten)]
         rest: JsonMap,
     },

@@ -354,6 +354,48 @@ impl PromptParams {
     }
 }
 
+/// The `session/steering` request params (the mid-turn steering extension,
+/// nano-rlm #205 ported): text blocks injected into the running turn.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SteeringParams {
+    pub session_id: String,
+    pub prompt: Vec<Value>,
+    /// `_meta.steering.idleBehavior`: `promptRequired` (the default, the
+    /// nano-rlm receipt shape) or `queued` (the port's opt-in: an idle
+    /// steer runs as the session's next turn).
+    pub idle_behavior: Option<String>,
+    /// The optional `messageId` (nano-rlm #205 retry dedup). Accepted and
+    /// ignored — the declared divergence: the daemon steer lane has no
+    /// per-message identity surface. A non-empty string is valid; anything
+    /// else is the request's own invalid-params error.
+    pub message_id: Option<Value>,
+}
+
+impl SteeringParams {
+    /// Parse `session/steering` params. The blocks stay raw: the handler
+    /// admits only text blocks, so a non-text block is the request's own
+    /// invalid-params error, never dropped input.
+    pub fn parse(params: &Value) -> SteeringParams {
+        SteeringParams {
+            session_id: params
+                .get("sessionId")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string(),
+            prompt: params
+                .get("prompt")
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default(),
+            idle_behavior: params
+                .pointer("/_meta/steering/idleBehavior")
+                .and_then(Value::as_str)
+                .map(str::to_string),
+            message_id: params.get("messageId").cloned(),
+        }
+    }
+}
+
 /// The `session/set_config_option` request params.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SetConfigOptionParams {
@@ -403,7 +445,7 @@ pub fn initialize_result(product_version: &str) -> InitializeResult {
             title: "Prime Agent".to_string(),
             version: product_version.to_string(),
         },
-        meta: super::meta::prime_agent_meta(&super::meta::PrimeAgentSessionMeta::default()),
+        meta: super::meta::steering_advertisement_meta(),
     }
 }
 
@@ -426,7 +468,10 @@ mod tests {
                     "sessionCapabilities": { "close": {} },
                 },
                 "agentInfo": { "name": "prime-agent", "title": "Prime Agent", "version": "9.9.9" },
-                "_meta": { "ai.primeintellect.prime-agent": {} },
+                "_meta": {
+                    "ai.primeintellect.prime-agent": { "steering": { "supported": true } },
+                    "steering": { "supported": true }
+                },
             })
         );
     }

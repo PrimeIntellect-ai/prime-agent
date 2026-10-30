@@ -181,6 +181,9 @@ pub struct Worker {
     /// Worker-side prompt admissions: the registry the supervisor's
     /// forwarded `cancel_prompt_admission` reads.
     pub(crate) prompt_admissions: crate::prompt_admission::WorkerAdmissions,
+    /// Per-steer run tracking: the ACP steering layer's `runId` registry
+    /// (register at enqueue, settle at the item's turn end).
+    pub(crate) steer_runs: crate::steer_runs::SteerRunTable,
     /// The scheduling surface: the session's cron/heartbeat store plus the
     /// scheduler firing due jobs into the queue (jobs rebind on replacement).
     pub(crate) scheduled: std::sync::Arc<crate::scheduled_jobs::ScheduledJobs>,
@@ -368,6 +371,7 @@ impl Worker {
         // The worker's prompt-admission registry: shared with the turn
         // runner (the commit happens at turn start).
         let prompt_admissions = crate::prompt_admission::WorkerAdmissions::new();
+        let steer_runs = crate::steer_runs::SteerRunTable::new();
         // Created before the session engine: `rlm_heartbeat.*` requests
         // write the shared cron store.
         let user_bash = std::sync::Arc::new(crate::user_bash::UserBash::new());
@@ -785,6 +789,7 @@ impl Worker {
             input_pauses,
             navigation,
             prompt_admissions,
+            steer_runs,
             scheduled,
             herdr: std::sync::Arc::clone(&herdr_slot),
             herdr_generation: std::sync::Arc::clone(&herdr_generation),
