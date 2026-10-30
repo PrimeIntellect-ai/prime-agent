@@ -242,15 +242,11 @@ impl AgentSessionEngine {
 mod tests {
     use super::*;
     use crate::agent_engine::tests::{admit, faux_engine_with_settings};
-    use crate::agent_engine::FAUX_TEST_LOCK;
     use pa_core::session_engine::turn_boundary::PendingRefine;
     use serde_json::json;
 
     #[test]
     fn requested_refinement_emits_its_durable_outcome_before_completion() {
-        let _faux = FAUX_TEST_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let (mut engine, dir) = faux_engine_with_settings(
             &json!({"responses": [
                 {"text": "seed reply"},

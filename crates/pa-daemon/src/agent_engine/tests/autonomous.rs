@@ -71,9 +71,6 @@ fn autonomous_limit_stops_the_run_without_a_row() {
 
 #[test]
 fn autonomous_gate_pass_and_failure_drive_the_loop() {
-    let _faux = FAUX_TEST_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
     // The gate passes only on its second run (a counter file in the cwd).
     let dir = tempfile::TempDir::new().unwrap();
     let gate = format!(
@@ -182,9 +179,6 @@ impl pa_core::autonomous::AutonomousDriver for ScriptedDriver {
 
 #[test]
 fn the_turn_loop_is_driven_by_the_driver_trait() {
-    let _faux = FAUX_TEST_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let dir = tempfile::TempDir::new().unwrap();
     let engine = std::sync::Arc::new(
         AgentSessionEngine::new(AgentEngineConfig {

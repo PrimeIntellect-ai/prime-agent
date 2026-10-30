@@ -4,15 +4,11 @@ use crate::engine::PromptBatchRow;
 
 /// `get_commands` enumerates the session's skills as `skill:<name>`
 /// commands, including before the first prompt (the read seam demand-builds
-/// the core session). The faux provider registers under `FAUX_TEST_LOCK`
-/// on a blocking thread (the lock is std, so it never rides an await).
+/// the core session).
 #[tokio::test]
 async fn get_commands_enumerates_skills_before_the_first_prompt() {
     use crate::engine::SessionEngine as _;
     let (engine, _dir) = tokio::task::spawn_blocking(|| {
-        let _faux = FAUX_TEST_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let dir = tempfile::TempDir::new().unwrap();
         let agent_dir = dir.path().join("agent");
         let skill_dir = agent_dir.join("skills").join("demo-skill");
@@ -42,7 +38,7 @@ async fn get_commands_enumerates_skills_before_the_first_prompt() {
         .unwrap();
         let engine = std::sync::Arc::new(engine);
         engine.register_arc();
-        // Register under the lock; the async section resolves the cached model.
+        // Register here; the async section resolves the cached model.
         let model = engine.resolve_model().expect("faux model");
         drop(model);
         (engine, dir)
@@ -89,13 +85,9 @@ async fn get_commands_enumerates_skills_before_the_first_prompt() {
 
 /// The built engine carries the durable file's header id, not the in-memory
 /// manager's fresh one, and keeps it across a replacement build (#3618). The
-/// faux registry is process-global, so the whole test holds `FAUX_TEST_LOCK`
-/// and drives the async seams on the engine's own runtime.
+/// test drives the async seams on the engine's own runtime.
 #[test]
 fn the_built_session_carries_the_durable_header_id_across_rebuilds() {
-    let _faux = FAUX_TEST_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let dir = tempfile::TempDir::new().unwrap();
     let mut store =
         crate::session_store::SessionFile::create(dir.path().to_str().unwrap_or("/tmp"), None, 0);
@@ -373,9 +365,6 @@ fn run_skill_prompt_body(
     prompt: &str,
     batch: &[&str],
 ) -> (std::sync::Arc<AgentSessionEngine>, Vec<EngineEvent>) {
-    let _faux = FAUX_TEST_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let dir = tempfile::TempDir::new().unwrap();
     let skill_dir = dir.path().join("agent").join("skills").join("demo-skill");
     std::fs::create_dir_all(&skill_dir).unwrap();
@@ -549,15 +538,11 @@ fn a_bare_invocation_of_a_close_tagged_body_still_floors() {
 
 /// The branch summary call carries the request's durable session id even
 /// when no core session is built (a `/tree` summary right after a resume
-/// races the create's background build). The faux registry is
-/// process-global, so the test holds `FAUX_TEST_LOCK`; the recorder
-/// registration replaces the script's provider for the summary call.
+/// races the create's background build). The recorder registration
+/// replaces the script's provider for the summary call.
 #[test]
 fn an_unbuilt_engine_branch_summary_carries_the_request_session_id() {
     use crate::engine::SessionEngine as _;
-    let _faux = FAUX_TEST_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let dir = tempfile::TempDir::new().unwrap();
     let engine = AgentSessionEngine::new(AgentEngineConfig {
         cwd: dir.path().to_path_buf(),
@@ -575,10 +560,10 @@ fn an_unbuilt_engine_branch_summary_carries_the_request_session_id() {
         queued_steering_probe: None,
     })
     .unwrap();
-    engine.resolve_model().expect("faux model");
+    let model = engine.resolve_model().expect("faux model");
     assert!(engine.session.blocking_lock().is_none(), "no session built");
     let recorder = pa_ai::faux::register_faux_provider(pa_ai::faux::RegisterFauxProviderOptions {
-        api: Some("faux".to_string()),
+        api: Some(model.api),
         provider: Some("faux".to_string()),
         ..Default::default()
     });

@@ -36,15 +36,9 @@ use crate::image_route::ImageRoute;
 use crate::rlm_children::{ParentIdentity, SupervisorChildSessions, DEFAULT_RLM_MAX_DEPTH};
 
 // The test mass (the faux harness and the in-file unit battery) moved to
-// the child module at the same tree position (agent_engine::tests); the
-// FAUX_TEST_LOCK re-export keeps the facade's FAUX_TEST_LOCK paths stable
-// for the sibling test modules (overflow_compaction, compact_autorefine,
-// session_navigation).
+// the child module at the same tree position (agent_engine::tests).
 #[cfg(test)]
 pub(crate) mod tests;
-
-#[cfg(test)]
-pub(crate) use tests::FAUX_TEST_LOCK;
 
 mod goalcore;
 mod lifecycle;

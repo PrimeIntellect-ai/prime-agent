@@ -192,10 +192,6 @@ mod tests {
     use pa_core::session_engine::slash_commands::{parse_session_command, SlashCommandRegistry};
     use serde_json::json;
 
-    /// One test at a time over the global faux registry (the same contract `print_goal` and
-    /// `print_boundary` tests hold).
-    static FAUX_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
-
     type Frames = std::sync::Arc<std::sync::Mutex<Vec<Value>>>;
 
     fn capture_sink() -> (Frames, crate::print_goal::EventSink) {
@@ -456,7 +452,6 @@ mod tests {
 
     #[tokio::test]
     async fn goal_status_stream_matches_ts() {
-        let _guard = FAUX_TEST_LOCK.lock().await;
         let test = bed(script(&json!([]))).await;
         assert_eq!(run_command(&test, "/goal status").await, None);
         assert_eq!(
@@ -499,7 +494,6 @@ mod tests {
 
     #[tokio::test]
     async fn goal_start_admits_the_continuation() {
-        let _guard = FAUX_TEST_LOCK.lock().await;
         let test = bed(script(&json!([{"text": "goal turn reply"}]))).await;
         assert_eq!(run_command(&test, "/goal ship it").await, None);
         // The queued continuation ran to the faux queue's exhaustion and the terminal error failed
@@ -538,7 +532,6 @@ mod tests {
     /// empty clear keeps the plain status.
     #[tokio::test]
     async fn goal_clear_answers_the_action_it_took() {
-        let _guard = FAUX_TEST_LOCK.lock().await;
         // One scripted reply: the start's continuation turn consumes it, the next
         // mint hits the exhausted faux queue — a goal record is what a clear removes.
         let test = bed(script(&json!([{"text": "goal turn reply"}]))).await;
@@ -581,7 +574,6 @@ mod tests {
 
     #[tokio::test]
     async fn compact_skip_warns_without_a_row() {
-        let _guard = FAUX_TEST_LOCK.lock().await;
         let test = bed(script(&json!([]))).await;
         assert_eq!(run_command(&test, "/compact").await, None);
         assert_eq!(
@@ -604,7 +596,6 @@ mod tests {
 
     #[tokio::test]
     async fn failed_command_carries_the_raw_error() {
-        let _guard = FAUX_TEST_LOCK.lock().await;
         // Two long seed turns consume the queue; the compactable session's /compact then fails its
         // summarizer call.
         let settings = json!({

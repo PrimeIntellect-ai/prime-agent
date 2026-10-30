@@ -11,9 +11,8 @@ use pa_agent::types::{AssistantMessage, StopReason};
 use super::provider_park::{is_quota_block_failure, ParkDecisionCallback};
 use super::provider_retry::{
     has_provider_stream_failure, is_agent_lifecycle_failure, is_context_overflow_failure,
-    is_faux_provider_queue_exhausted, is_permanent_provider_failure_kind,
-    is_unsupported_tool_failure, jittered_delay_ms, provider_retry_delay,
-    provider_stream_failure_kind, provider_stream_failure_retry_after_ms,
+    is_permanent_provider_failure_kind, is_unsupported_tool_failure, jittered_delay_ms,
+    provider_retry_delay, provider_stream_failure_kind, provider_stream_failure_retry_after_ms,
     provider_stream_failure_status, retry_jitter_rand01, ProviderRetryDelay, ProviderRetryPolicy,
 };
 
@@ -99,7 +98,6 @@ where
         // Non-retryable failures never enter the retry bookkeeping: a
         // permanent failure only closes the active retry.
         let non_retryable = is_agent_lifecycle_failure(&message)
-            || is_faux_provider_queue_exhausted(&message)
             // A context overflow can never succeed unchanged: the
             // compact-and-retry recovery owns it.
             || is_context_overflow_failure(&message, context_window)
