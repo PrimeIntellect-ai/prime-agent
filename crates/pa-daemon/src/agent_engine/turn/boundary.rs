@@ -94,27 +94,29 @@ impl AgentSessionEngine {
                 .expect("auto compaction abort lock") = Some(std::sync::Arc::clone(&controller));
         }
         let consumption = {
-            let guard = self.session.blocking_lock();
-            let Some(engine) = guard.as_deref() else {
+            let engine = self.session.blocking_lock().clone();
+            let Some(engine) = engine else {
                 self.clear_auto_compaction_abort(&controller);
                 return BoundaryRun::Proceed;
             };
             let consumed = self.runtime.block_on(async {
-                engine
-                    .consume_turn_boundary_requests(
-                        &model,
-                        api_key,
-                        global_harness_dir,
-                        Some(&signal),
-                    )
+                let compaction = engine
+                    .consume_pending_compaction(&model, api_key.clone(), Some(&signal))
+                    .await;
+                if let Some(pending) = engine
+                    .start_pending_refinement(&model, api_key, global_harness_dir)
                     .await
+                {
+                    self.report_background_refinement(pending);
+                }
+                compaction
             });
             self.clear_auto_compaction_abort(&controller);
             consumed
         };
         let mut stopped_for_compaction = false;
         let mut compacted = false;
-        match consumption.compaction {
+        match consumption {
             Some(Ok(pa_core::session_engine::compact_session::CompactOutcome::Ran(run))) => {
                 // The post-compaction kernel notice goes out before the settled end;
                 // its pair precedes `compaction_end`.
@@ -194,42 +196,6 @@ impl AgentSessionEngine {
             }
             None => {}
         }
-        match consumption.refinement {
-            Some(Ok(refinement)) => {
-                let outcome =
-                    pa_core::session_engine::refine::create_refinement_outcome_message(&refinement);
-                if !emit(EngineEvent::CustomMessage(
-                    crate::session_commands::custom_message_value(&outcome),
-                )) {
-                    return BoundaryRun::Cancelled;
-                }
-                if refinement.applied_edits.iter().any(|edit| edit.applied) {
-                    let notice = pa_core::session_engine::refine::create_refinement_notice_message(
-                        &refinement,
-                        pa_core::session_engine::refine::RefinementSource::SelfRefine,
-                    );
-                    if !emit(EngineEvent::CustomMessage(
-                        crate::session_commands::custom_message_value(&notice),
-                    )) {
-                        return BoundaryRun::Cancelled;
-                    }
-                }
-                if let Ok(result) = serde_json::to_value(&refinement) {
-                    if !emit(EngineEvent::RefineComplete { result }) {
-                        return BoundaryRun::Cancelled;
-                    }
-                }
-            }
-            Some(Err(error)) => {
-                eprintln!("pa-daemon: requested refinement failed: {error:#}");
-                if !emit(EngineEvent::RefineFailed {
-                    error: format!("{error:#}"),
-                }) {
-                    return BoundaryRun::Cancelled;
-                }
-            }
-            None => {}
-        }
         if stopped_for_compaction {
             BoundaryRun::StoppedForCompaction { compacted }
         } else {
@@ -247,7 +213,7 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn requested_refinement_emits_its_durable_outcome_before_completion() {
+    fn requested_refinement_commits_its_durable_outcome_row() {
         let _faux = FAUX_TEST_LOCK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -275,32 +241,25 @@ mod tests {
                     global: false,
                 }));
         }
-        let mut events = Vec::new();
-        let boundary = engine.run_turn_boundary(&mut |event| {
-            events.push(event);
-            true
-        });
+        let (send, receive) = std::sync::mpsc::channel();
+        *engine.refinement_completion_sink.lock().unwrap() =
+            Some(std::sync::Arc::new(move |pending| {
+                send.send(pending).unwrap();
+            }));
+        let boundary = engine.run_turn_boundary(&mut |_| true);
         assert!(matches!(boundary, BoundaryRun::Proceed));
-        let outcomes: Vec<_> = events
+        let pending = receive
+            .try_recv()
+            .expect("completion handed to background sink");
+        let committed = engine.runtime.block_on(pending).unwrap().unwrap();
+        let outcomes = committed
+            .rows
             .iter()
-            .enumerate()
-            .filter(|(_, event)| {
-                matches!(event, EngineEvent::CustomMessage(row) if row["customType"] == "refinement_outcome")
-            })
-            .map(|(index, _)| index)
-            .collect();
+            .filter(|row| row.custom_type == "refinement_outcome")
+            .count();
         assert_eq!(
-            outcomes.len(),
-            1,
+            outcomes, 1,
             "one durable outcome, including a no-op refinement"
-        );
-        let completed = events
-            .iter()
-            .position(|event| matches!(event, EngineEvent::RefineComplete { .. }))
-            .expect("refinement completed");
-        assert!(
-            outcomes[0] < completed,
-            "persist the outcome before announcing completion"
         );
     }
 }

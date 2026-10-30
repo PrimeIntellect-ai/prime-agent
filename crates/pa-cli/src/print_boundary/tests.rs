@@ -194,7 +194,11 @@ async fn admit_with_harness_dir(
     engine.session.agent().wait_for_idle().await;
     boundary
         .run_at_settled_turn(engine, model, None, global_harness_dir)
-        .await
+        .await?;
+    // Existing outcome tests observe background completion explicitly. The
+    // held-planner regression below exercises admission before this wait.
+    boundary.wait_for_refinement_reports().await;
+    Ok(())
 }
 
 /// The mid-turn-request shape: a `compact.run` scheduled DURING a turn
@@ -214,7 +218,9 @@ async fn admit_turn_with_scheduled_request(
     engine.session.agent().wait_for_idle().await;
     boundary
         .run_at_settled_turn(engine, model, None, std::path::PathBuf::new())
-        .await
+        .await?;
+    boundary.wait_for_refinement_reports().await;
+    Ok(())
 }
 
 async fn outcome_rows(engine: &SessionEngine) -> Vec<pa_types::session::CustomMessageEntry> {
@@ -1606,6 +1612,7 @@ async fn compact_trigger_drains_at_disposal_off_the_stream() {
     boundary
         .drain_compact_auto_refine_at_disposal(&engine, &model, None, global_dir)
         .await;
+    boundary.wait_for_refinement_reports().await;
     let rows = refine_rows(&engine).await;
     assert_eq!(rows.len(), 2, "the durable rows persisted");
     assert_eq!(rows[0].custom_type, "refinement_outcome");
@@ -1807,3 +1814,5 @@ async fn overflow_error_with_compaction_disabled_ends_without_recovery() {
         .expect("the settled error turn");
     assert_eq!(last.error_message.as_deref(), Some(OVERFLOW_ERROR));
 }
+
+mod refinement_nonblocking;

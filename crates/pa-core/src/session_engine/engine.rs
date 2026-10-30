@@ -869,6 +869,9 @@ pub async fn create_session(mut config: SessionEngineConfig) -> anyhow::Result<S
     // push straight into the live session's queue.
     session.adopt_next_turn_rows(boot_notice_rows);
 
+    // `refine.status` answers from the session's own flight counter: the
+    // same Arc every refinement run holds its flight guard on.
+    turn_boundary.bind_refinements_in_flight(session.refinements_in_flight.clone());
     turn_boundary.bind(super::turn_boundary::TurnBoundaryRuntime {
         agent,
         session: wiring.session.clone(),
@@ -1031,7 +1034,16 @@ impl SessionEngine {
     /// The session's cached Codex WebSocket closes with it (TS `cleanupSessionResources` on
     /// dispose), so a worker that replaces its session does not hold the old socket until the
     /// idle expiry.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the refinement-cancellation mutex is poisoned.
     pub async fn dispose_kernel(&self) {
+        self.session
+            .refinement_cancel
+            .lock()
+            .expect("refinement cancellation lock")
+            .abort();
         if let Some(session_id) = self.session.agent().session_id() {
             pa_ai::codex_debug::close_websocket_sessions(Some(session_id));
         }

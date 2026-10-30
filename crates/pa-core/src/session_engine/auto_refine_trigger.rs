@@ -34,7 +34,7 @@ pub(crate) struct CompactAutoRefineState {
     in_flight: bool,
     /// A branch move bumps it; a round started on an older version drops
     /// its result — a review against the abandoned branch never applies.
-    branch_version: u64,
+    pub(super) branch_version: u64,
     /// An approving review retained behind an active agent turn: the next
     /// serviced boundary runs its refinement without a new review call.
     pending_review: Option<AutoRefineReview>,
@@ -99,6 +99,13 @@ impl AgentSession {
         state.pending = false;
         state.pending_review = None;
         state.branch_version += 1;
+        drop(state);
+        let mut cancel = self
+            .refinement_cancel
+            .lock()
+            .expect("refinement cancellation lock");
+        cancel.abort();
+        *cancel = pa_agent::abort::AbortController::new();
     }
 
     /// # Panics
@@ -129,6 +136,7 @@ impl AgentSession {
         global_harness_dir: std::path::PathBuf,
         surface: CompactAutoRefineSurface,
     ) -> anyhow::Result<Option<RefinementResult>> {
+        let cancel = self.refinement_signal();
         let gates = self.auto_refine_gates();
         let (retained_review, settled_turns, branch_version) = {
             let mut state = self
@@ -180,7 +188,7 @@ impl AgentSession {
             // The branch fence: a branch move since the retained round's start
             // dropped this review — the refinement never starts.
             if self.compact_auto_refine_branch_version_unchanged(branch_version) {
-                self.run_approved_refine(review, model, api_key, global_harness_dir)
+                self.run_approved_refine(review, model, api_key, global_harness_dir, cancel)
                     .await
                     .map(AutoRefineRound::Ran)
             } else {
@@ -208,9 +216,15 @@ impl AgentSession {
                         // round resolved against a bumped version never applies.
                         Ok(AutoRefineRound::Declined)
                     } else {
-                        self.run_approved_refine(&review, model, api_key, global_harness_dir)
-                            .await
-                            .map(AutoRefineRound::Ran)
+                        self.run_approved_refine(
+                            &review,
+                            model,
+                            api_key,
+                            global_harness_dir,
+                            cancel,
+                        )
+                        .await
+                        .map(AutoRefineRound::Ran)
                     }
                 }
                 Err(error) => Err(error),
