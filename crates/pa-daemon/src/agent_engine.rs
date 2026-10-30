@@ -164,11 +164,11 @@ pub struct AgentSessionEngine {
     /// (a compaction run holds it).
     pub(crate) autonomous_boundary:
         std::sync::Mutex<Option<crate::autonomous_continuation::AutonomousBoundaryMirror>>,
-    /// `true` while the kernel still runs background `bash()` handles, so the
-    /// continuation gates hold their turns without the session mutex. `None`
-    /// (unwired) answers `false`.
+    /// The count of live kernel background `bash()` handles (`0` = none),
+    /// so the continuation gates and the quiescence observation read the
+    /// kernel manager without the session mutex. `None` (unwired) answers `0`.
     pub(crate) background_bash_probe:
-        std::sync::Mutex<Option<std::sync::Arc<dyn Fn() -> bool + Send + Sync>>>,
+        std::sync::Mutex<Option<std::sync::Arc<dyn Fn() -> usize + Send + Sync>>>,
     /// The current session's stop-with-snapshot handle, adopted as a weak
     /// provisioner reference (the park arm never takes the session mutex).
     /// `None` when no session is built.

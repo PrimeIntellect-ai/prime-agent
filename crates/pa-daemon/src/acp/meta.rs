@@ -16,12 +16,17 @@ pub struct PrimeAgentCwdMeta {
     pub actual: String,
 }
 
-/// Observed subagent and autonomous-continuation counts at a completion point.
+/// Observed subagent, autonomous-continuation, and background-bash-job
+/// counts at a completion point.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PrimeAgentQuiescenceMeta {
     pub outstanding_subagents: u64,
     pub remaining_autonomous_continuations: u64,
+    /// Live background `bash()` handles plus completed jobs whose
+    /// `[bash-done]` wake is still pending delivery: the work the bash
+    /// lane will still wake the session for.
+    pub outstanding_background_jobs: u64,
 }
 
 /// Producer-side ordering of an update inside its prompt turn.
@@ -335,14 +340,21 @@ mod tests {
     fn quiescence_serializes_camel_case() {
         let wrapped = prime_agent_meta(&PrimeAgentSessionMeta {
             quiescence: Some(PrimeAgentQuiescenceMeta {
-                outstanding_subagents: 0,
-                remaining_autonomous_continuations: 0,
+                outstanding_subagents: 1,
+                remaining_autonomous_continuations: 2,
+                outstanding_background_jobs: 3,
             }),
             ..Default::default()
         });
+        // Additive: the two TS fields keep their camelCase shape and the
+        // background-job count rides alongside.
         assert_eq!(
             wrapped[PRIME_AGENT_META_NAMESPACE]["quiescence"],
-            json!({ "outstandingSubagents": 0, "remainingAutonomousContinuations": 0 })
+            json!({
+                "outstandingSubagents": 1,
+                "remainingAutonomousContinuations": 2,
+                "outstandingBackgroundJobs": 3,
+            })
         );
     }
 }
