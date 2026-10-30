@@ -151,7 +151,11 @@ pub fn stream_once(
     let stream_options = pa_ai::types::SimpleStreamOptions {
         base: pa_ai::types::StreamOptions {
             temperature: options.temperature,
-            max_tokens: options.max_tokens,
+            // The session turn request carries its output budget explicitly
+            // (the #3807 pattern): the implicit catalog budget raised to the
+            // turn floor so reasoning burn leaves text room — never above the
+            // catalog max, explicit configuration honored.
+            max_tokens: pa_ai::turn_request_max_tokens(model, options.max_tokens),
             signal: Some(cancel.clone()),
             api_key,
             // A request that pins its transport (side questions ride SSE so they stay off the
@@ -430,6 +434,78 @@ mod tests {
                 (model.id.clone(), Some(pa_types::ai::ServiceTier::Priority)),
                 (model.id, None),
             ]
+        );
+        registration.unregister();
+    }
+
+    /// The session turn request carries its output budget explicitly (the
+    /// #3807 floor pattern at the turn seam): the implicit catalog budget
+    /// raised to the turn floor — never above the model's catalog maximum
+    /// output, so the 85-catalog-models class below 16k keeps its own
+    /// budget — while a roomy catalog model keeps the 32k request ceiling.
+    #[tokio::test]
+    async fn the_turn_request_carries_the_floored_budget_on_the_wire() {
+        let registration =
+            pa_ai::faux::register_faux_provider(pa_ai::faux::RegisterFauxProviderOptions {
+                api: Some("turn-budget-test".to_owned()),
+                models: Some(vec![
+                    pa_ai::faux::FauxModelDefinition {
+                        id: "small-catalog".to_owned(),
+                        name: Some("Small Catalog".to_owned()),
+                        reasoning: Some(false),
+                        input: Some(vec![pa_types::ai::ModelInput::Text]),
+                        cost: None,
+                        context_window: Some(128_000),
+                        max_tokens: Some(8_192),
+                    },
+                    pa_ai::faux::FauxModelDefinition {
+                        id: "roomy-catalog".to_owned(),
+                        name: Some("Roomy Catalog".to_owned()),
+                        reasoning: Some(false),
+                        input: Some(vec![pa_types::ai::ModelInput::Text]),
+                        cost: None,
+                        context_window: Some(400_000),
+                        max_tokens: Some(131_072),
+                    },
+                ]),
+                ..Default::default()
+            });
+        let received = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let captured = received.clone();
+        let factory =
+            pa_ai::faux::FauxResponseStep::Factory(Arc::new(move |_, options, _, model| {
+                captured.lock().unwrap().push((
+                    model.id.clone(),
+                    options.and_then(|options| options.max_tokens),
+                ));
+                Ok(pa_ai::faux::faux_assistant_text_message(
+                    "ok",
+                    pa_ai::faux::FauxAssistantMessageOptions::default(),
+                ))
+            }));
+        registration.set_responses(vec![factory.clone(), factory]);
+        for id in ["small-catalog", "roomy-catalog"] {
+            let model = registration
+                .get_model_by_id(id)
+                .expect("the registered model");
+            let mut stream = stream_once(
+                &model,
+                None,
+                None,
+                None,
+                LlmContext::default(),
+                StreamRequestOptions::default(),
+            )
+            .unwrap();
+            stream.result().await.unwrap();
+        }
+        assert_eq!(
+            *received.lock().unwrap(),
+            vec![
+                ("small-catalog".to_owned(), Some(8_192)),
+                ("roomy-catalog".to_owned(), Some(32_000)),
+            ],
+            "the 8k catalog maximum stays (the floor never lifts past it); the roomy model keeps the request ceiling"
         );
         registration.unregister();
     }

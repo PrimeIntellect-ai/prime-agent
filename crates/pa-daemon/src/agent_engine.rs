@@ -18,7 +18,7 @@ use pa_core::session_engine::agent_messaging::{
 };
 use pa_core::session_engine::engine::{SessionEngine as CoreSessionEngine, SessionEngineConfig};
 use pa_core::session_engine::provider_adapter::{
-    json_round_trip, map_thinking_level, switchable_stream_fn, ProviderTarget,
+    json_round_trip, map_thinking_level, model_thinking_level, switchable_stream_fn, ProviderTarget,
 };
 use pa_core::session_engine::session_commands::{
     execute_session_command, SessionCommandExecution, SessionCommandParams,
@@ -52,7 +52,8 @@ mod turn_types;
 
 use turn_types::{
     aborted_message, drop_trailing_assistant, retry_event_to_engine_event, BoundaryRun,
-    TurnAdmission, TurnOnce, TurnPrompt, TurnResult,
+    TurnAdmission, TurnOnce, TurnPrompt, TurnResult, EMPTY_REPLY_RETRY_INSTRUCTION,
+    EMPTY_REPLY_TURN_ERROR,
 };
 
 mod model;

@@ -10,6 +10,7 @@ use serde_json::Map;
 mod abort;
 mod autonomous;
 mod compaction;
+mod empty_reply;
 mod failover_facts;
 mod goal;
 mod mcp_settings;
