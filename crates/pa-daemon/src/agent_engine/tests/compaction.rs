@@ -2144,11 +2144,13 @@ fn an_in_run_background_crossing_starts_a_flight_without_yielding_the_tool_run()
     let turn_calls = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
     let summarize_calls = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
     let summarize_issued = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let issued_before_final_turn = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let route = {
         let turn_messages = std::sync::Arc::clone(&turn_messages);
         let turn_calls = std::sync::Arc::clone(&turn_calls);
         let summarize_calls = std::sync::Arc::clone(&summarize_calls);
         let summarize_issued = std::sync::Arc::clone(&summarize_issued);
+        let issued_before_final_turn = std::sync::Arc::clone(&issued_before_final_turn);
         move |context: &pa_types::ai::Context,
               _: Option<&pa_ai::types::StreamOptions>,
               _: u64,
@@ -2181,6 +2183,10 @@ fn an_in_run_background_crossing_starts_a_flight_without_yielding_the_tool_run()
                     }
                     std::thread::sleep(std::time::Duration::from_millis(10));
                 }
+                issued_before_final_turn.store(
+                    summarize_issued.load(std::sync::atomic::Ordering::SeqCst),
+                    std::sync::atomic::Ordering::SeqCst,
+                );
             }
             Ok(reply.expect("a scripted turn response"))
         }
@@ -2231,7 +2237,7 @@ fn an_in_run_background_crossing_starts_a_flight_without_yielding_the_tool_run()
         "the background flight's summarize issued"
     );
     assert!(
-        summarize_issued.load(std::sync::atomic::Ordering::SeqCst),
+        issued_before_final_turn.load(std::sync::atomic::Ordering::SeqCst),
         "the summarize issued before the run's next model turn answered"
     );
     registration.unregister();
