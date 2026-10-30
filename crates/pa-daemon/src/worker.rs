@@ -40,8 +40,9 @@ use create::{active_session_id_of, worker_server_capabilities};
 // session_summary/SummaryInputs serve the in-crate test modules only, so allow the unused import.
 #[allow(unused_imports)]
 pub(crate) use summary::{
-    compact_action_label, emit_worker_event_with, persist_custom_row, push_roster_delta,
-    session_snapshot, session_summary, RosterPushContext, SummaryInputs,
+    broadcast_custom_row_locked, compact_action_label, emit_worker_event_locked,
+    emit_worker_event_with, persist_custom_row, push_roster_delta, session_snapshot,
+    session_summary, RosterPushContext, SummaryInputs,
 };
 use turn::TurnRunner;
 
@@ -295,6 +296,8 @@ impl Worker {
             created: false,
             attached_client_ids: Vec::new(),
             abort_requested: false,
+            turn_cancelled: false,
+            turn_completed: false,
             suppress_aborted_row: false,
             shutdown_requested: false,
             last_activity_ms: 0,
@@ -846,8 +849,8 @@ impl Worker {
     /// no destructors, so the caller must have settled the close first).
     async fn exit_after_close(&self) -> ! {
         // Shutdown keeps the resume entry and exits the process (TS
-        // `closeKeepsResumeEntry("shutdown")`).
-        let _ = self.record_recovery(false, "shutdown");
+        // `closeKeepsResumeEntry("shutdown")`); `handle_shutdown` already
+        // recorded the recovery verdict.
         self.close_listener_then_cleanup_socket().await;
         std::process::exit(0)
     }
@@ -859,7 +862,7 @@ impl Worker {
             "pa-daemon worker {}: registration refused (the supervisor no longer owns this identity); retiring",
             std::process::id()
         );
-        let _ = self.handle_shutdown().await;
+        let _ = self.handle_shutdown(&json!({})).await;
         self.exit_after_close().await;
     }
 }
@@ -921,8 +924,8 @@ fn emit_refinement_row(
     review_session_id: &str,
     message: &Value,
 ) -> bool {
+    let mut core = core.lock().unwrap();
     {
-        let mut core = core.lock().unwrap();
         let Some(store) = core.store.as_mut() else {
             return false;
         };
@@ -943,16 +946,7 @@ fn emit_refinement_row(
             }),
         );
     }
-    emit_worker_event_with(
-        core,
-        events,
-        json!({ "type": "message_start", "message": message }),
-    );
-    emit_worker_event_with(
-        core,
-        events,
-        json!({ "type": "message_end", "message": message }),
-    );
+    broadcast_custom_row_locked(&mut core, events, message);
     true
 }
 

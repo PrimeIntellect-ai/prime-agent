@@ -66,8 +66,8 @@ impl AgentSessionEngine {
         let cwd = std::sync::Arc::new(std::sync::RwLock::new(config.cwd.clone()));
         // The ACP MCP store (auth storage construction is blocking, off the hot async paths).
         let agent_dir = config.agent_dir.clone();
-        // Settings-declared user servers; re-read per resolve so `mcp.refresh` sees settings
-        // changes.
+        // Executable MCP settings and catalog sources are user/global only.
+        // Re-read per resolve so refresh sees user changes without project overrides.
         let mcp_cwd = std::sync::Arc::clone(&cwd);
         let mcp_agent_dir = agent_dir.clone();
         let catalog_cwd = std::sync::Arc::clone(&cwd);
@@ -84,7 +84,7 @@ impl AgentSessionEngine {
                 let settings = pa_core::settings::SettingsManager::create(&mcp_cwd, &mcp_agent_dir);
                 Some(
                     settings
-                        .settings()
+                        .global_settings()
                         .mcp_servers
                         .clone()
                         .unwrap_or_default()
@@ -108,7 +108,7 @@ impl AgentSessionEngine {
                 let settings =
                     pa_core::settings::SettingsManager::create(&catalog_cwd, &catalog_agent_dir);
                 settings
-                    .settings()
+                    .global_settings()
                     .mcp_catalog_sources
                     .clone()
                     .unwrap_or_default()
@@ -1054,7 +1054,7 @@ impl AgentSessionEngine {
         // The engine session stays non-persisted (the worker owns the
         // durable file); the configured session dir leads, the file's
         // parent is the fallback.
-        let session_manager = match self
+        let mut session_manager = match self
             .config
             .session_dir
             .as_deref()
@@ -1068,6 +1068,19 @@ impl AgentSessionEngine {
             }
             None => pa_core::session::manager::SessionManager::in_memory(&cwd),
         };
+        // The in-memory manager takes the durable file's header id, as TS's engine opened the
+        // durable file: provider requests key prompt caching, Codex socket reuse, and session
+        // headers on it, so it must survive a resume in a new worker, a replacement build, and
+        // a daemon restart. A pathless session keeps the manager's own id.
+        if let Some(header) = session_file
+            .as_deref()
+            .and_then(pa_core::session::manager::read_session_header)
+        {
+            session_manager.new_session(&pa_core::session::manager::NewSessionOptions {
+                id: Some(header.id),
+                ..Default::default()
+            });
+        }
         if let Some(children) = &self.children {
             children.set_model(format!("{}/{}", model.provider, model.id));
         }

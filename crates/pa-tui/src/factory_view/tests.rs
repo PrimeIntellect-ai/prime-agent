@@ -1,7 +1,7 @@
 //! The `/factory` view's battery: the snapshot parsing, the diagram's
 //! highlighted rendering (asserted per span, so removing the active-node
-//! marking fails the test — the mutation check), the picker keyset (the
-//! arrows + Enter + Esc loop and the in-page action rows), the repaint
+//! marking fails the test — the mutation check), the key loop (the row
+//! walk, the session open, and the two-press stop), the repaint
 //! hysteresis, and the scale battery (the complex machine and the
 //! fifteen-run world: selection stability, the dock's liveness count,
 //! the render window, the refresh markers, and the churn discipline).
@@ -302,6 +302,28 @@ fn the_diagram_renders_states_edges_and_the_fired_marker() {
     assert!(
         joined.contains("1 transitions"),
         "the transitions_fired stat: {joined}"
+    );
+}
+
+/// A python state paints its callable where a subagent state paints its
+/// subagent name.
+#[test]
+fn a_python_state_renders_its_callable() {
+    let mut snapshot = scripted_snapshot();
+    snapshot["machine"]["states"][0] = json!({
+        "id": "collect", "entry": true, "lifecycle": "task", "maxEntries": 1, "retries": 0,
+        "python": "my_tools.gh.open_prs"
+    });
+    let runs = parse_factory_runs(&runs_response(&snapshot));
+    assert_eq!(
+        runs[0].states[0].python.as_deref(),
+        Some("my_tools.gh.open_prs")
+    );
+    let mut view = FactoryView::new(runs, 40);
+    let joined = frame_text(&mut view).join("\n");
+    assert!(
+        joined.contains("collect (py my_tools.gh.open_prs)"),
+        "{joined}"
     );
 }
 
@@ -631,143 +653,237 @@ fn the_empty_state_names_the_surface() {
         joined.contains("move"),
         "the hint names the arrows: {joined}"
     );
-    assert!(joined.contains("actions"), "{joined}");
-    assert!(joined.contains("close"), "{joined}");
+    assert!(joined.contains("open"), "{joined}");
+    assert!(joined.contains("back"), "{joined}");
 }
 
-/// The picker keyset (arrows + Enter + Esc — the heartbeats/bash pages'
-/// family): the arrows move the run selection, Enter opens the selected
-/// run's in-page action rows (stop/resume, the offered set derived from
-/// the run's state) and runs the tracked action, Esc backs out of the
-/// action rows before it closes the page.
+/// The selected row as `(run id, state id)`.
+fn selected_row(view: &FactoryView) -> (String, Option<String>) {
+    let row = view.selected.clone().expect("a row is selected");
+    (row.run_id, row.state_id)
+}
+
+/// Select a run's header directly (the many-run battery targets a run
+/// without walking every row above it).
+fn select_run(view: &mut FactoryView, run_id: &str) {
+    view.selected = Some(FactoryRow::header(run_id));
+}
+
+fn row(run_id: &str, state_id: Option<&str>) -> (String, Option<String>) {
+    (run_id.to_string(), state_id.map(str::to_string))
+}
+
+/// The arrows walk the run headers and the states that ran a session,
+/// flattened across panels (newest run first); a state without a child —
+/// never entered, or entered with no child spawned yet — is skipped and
+/// paints dim, never accent. Both ends clamp.
 #[test]
-fn the_key_loop_resolves_the_orchestration_actions() {
-    let runs = parse_factory_runs(&two_run_response());
-    let mut view = FactoryView::new(runs, 40);
-    // The feed: the newest run is selected, the arrows walk the feed —
-    // down reads older, up reads newer, and both ends clamp.
-    assert_eq!(
-        view.selected_run().map(|run| run.run_id.clone()),
-        Some("run-def67890".to_string())
-    );
-    let _ = view.handle_key("down", &kb());
-    assert_eq!(view.selected, 1);
-    let _ = view.handle_key("down", &kb());
-    assert_eq!(view.selected, 1, "down clamps at the oldest run");
-    let _ = view.handle_key("up", &kb());
-    assert_eq!(view.selected, 0);
-    let _ = view.handle_key("up", &kb());
-    assert_eq!(view.selected, 0, "up clamps at the newest run");
-    // The letters are not page keys (the keyset is arrows + Enter + Esc):
-    // j/k/s/r move nothing and act on nothing (the mutation check: a
-    // restored j/k arm moves the selection and fails this pin).
-    for letter in ["j", "k", "s", "r", "m"] {
-        assert_eq!(view.handle_key(letter, &kb()), FactoryViewAction::None);
-        assert_eq!(view.selected, 0, "{letter} moved nothing");
+fn the_arrows_walk_headers_and_session_states_across_panels() {
+    let mut response = two_run_response();
+    // The newest run's `fixing` entered but spawned no child yet.
+    response["runs"][1]["nodes"][2]["status"] = json!("running");
+    response["runs"][1]["nodes"][2]["entries"] =
+        json!([ { "index": 0, "status": "running", "error": null } ]);
+    let mut view = FactoryView::new(parse_factory_runs(&response), 80);
+    let expected = [
+        row("run-def67890", None),
+        row("run-def67890", Some("collect")),
+        row("run-def67890", Some("reviewing")),
+        row("run-abc12345", None),
+        row("run-abc12345", Some("collect")),
+        row("run-abc12345", Some("reviewing")),
+    ];
+    assert_eq!(selected_row(&view), expected[0]);
+    for want in &expected[1..] {
+        let _ = view.handle_key("down", &kb());
+        assert_eq!(&selected_row(&view), want);
     }
-    assert_eq!(
-        view.selected_run().map(|run| run.run_id.clone()),
-        Some("run-def67890".to_string()),
-        "no letter changed the focused run"
+    let _ = view.handle_key("down", &kb());
+    assert_eq!(selected_row(&view), expected[5], "down clamps");
+    for want in expected[..5].iter().rev() {
+        let _ = view.handle_key("up", &kb());
+        assert_eq!(&selected_row(&view), want);
+    }
+    let _ = view.handle_key("up", &kb());
+    assert_eq!(selected_row(&view), expected[0], "up clamps");
+    // The selected row carries the marker; the session-less state paints
+    // dim even though it is active.
+    let _ = view.handle_key("down", &kb());
+    let text = frame_text(&mut view);
+    assert!(
+        text.iter().any(|row| row.starts_with(" ▸ ✓ collect")),
+        "{text:?}"
     );
-    // Enter opens the selected run's action rows: a running run offers
-    // exactly stop, the block names the run, and the hint flips to the
-    // action grammar.
-    assert_eq!(view.handle_key("enter", &kb()), FactoryViewAction::None);
-    let rows = frame_text(&mut view);
-    let joined = rows.join("\n");
-    assert!(joined.contains("actions: second-run"), "{joined}");
-    assert!(joined.contains("▸ Stop the run"), "{joined}");
-    assert!(joined.contains("action · Enter run · Esc back"), "{joined}");
-    // Enter runs the tracked action: the stop rides the SELECTED run.
+    let spans = frame_spans(&mut view);
+    let paints = |color: ThemeColor| {
+        spans
+            .iter()
+            .flatten()
+            .any(|span| span.content == "fixing" && span.style == theme().fg_style(color))
+    };
+    assert!(paints(ThemeColor::Dim) && !paints(ThemeColor::Accent));
+}
+
+/// Enter and → open the selected state's LATEST child (a retry overwrites
+/// the instance's child; a later entry's child wins); on a header they
+/// open nothing.
+#[test]
+fn enter_and_right_open_the_latest_child_and_headers_open_nothing() {
+    let mut snapshot = scripted_snapshot();
+    snapshot["nodes"][1]["instances"] = json!([
+        { "index": 0, "entry": 0, "status": "done", "attempt": 2, "child": "child-2-retry", "durationMs": 5, "error": null },
+        { "index": 0, "entry": 1, "status": "running", "attempt": 1, "child": "child-5", "durationMs": 0, "error": null },
+        { "index": 1, "entry": 1, "status": "pending", "attempt": 0, "child": null, "durationMs": null, "error": null }
+    ]);
+    let mut view = FactoryView::new(parse_factory_runs(&runs_response(&snapshot)), 40);
+    for key in ["enter", "right"] {
+        assert_eq!(view.handle_key(key, &kb()), FactoryViewAction::None);
+    }
+    let _ = view.handle_key("down", &kb());
+    let open = |child: &str| FactoryViewAction::Open {
+        child_id: child.to_string(),
+    };
+    assert_eq!(view.handle_key("enter", &kb()), open("child-1"));
+    let _ = view.handle_key("down", &kb());
+    assert_eq!(view.handle_key("enter", &kb()), open("child-5"));
+    assert_eq!(view.handle_key("right", &kb()), open("child-5"));
+}
+
+/// The accident this page had: on a live run, repeated navigation —
+/// →→, Enter Enter, on the header or a running state — never stops or
+/// resumes anything (paused, so both run actions are on offer).
+#[test]
+fn navigation_never_stops_or_resumes_a_run() {
+    let mut runs = parse_factory_runs(&runs_response(&scripted_snapshot()));
+    runs[0].state = Some("paused".to_string());
+    let mut view = FactoryView::new(runs, 40);
+    for _ in 0..3 {
+        for key in ["right", "right", "enter", "enter"] {
+            let action = view.handle_key(key, &kb());
+            assert!(
+                matches!(
+                    action,
+                    FactoryViewAction::None | FactoryViewAction::Open { .. }
+                ),
+                "{key} on {:?} acted: {action:?}",
+                selected_row(&view)
+            );
+        }
+        let _ = view.handle_key("down", &kb());
+    }
+}
+
+/// The stop's two-press grammar (the agents view's `app.agents.delete`):
+/// the first press arms the selected row and the footer asks to confirm,
+/// a second press on the same row stops it — the run on a header, the
+/// running child on a state — and any other key between the presses
+/// disarms and does nothing else. A state whose child settled offers no
+/// stop.
+#[test]
+fn the_stop_key_arms_then_stops_the_selected_row() {
+    let mut view = FactoryView::new(parse_factory_runs(&runs_response(&scripted_snapshot())), 40);
+    let hint = |view: &mut FactoryView| frame_text(view).last().cloned().unwrap_or_default();
+    assert!(
+        hint(&mut view).contains("stop"),
+        "a live header offers stop"
+    );
+    assert_eq!(view.handle_key("ctrl+x", &kb()), FactoryViewAction::None);
+    assert!(
+        hint(&mut view).contains("stop review-loop? Ctrl+X again to confirm"),
+        "{}",
+        hint(&mut view)
+    );
     assert_eq!(
-        view.handle_key("enter", &kb()),
+        view.handle_key("ctrl+x", &kb()),
         FactoryViewAction::Stop {
-            run_id: "run-def67890".to_string()
+            run_id: "run-abc12345".to_string()
         }
     );
-    // Right mirrors Enter and Left mirrors Esc: Right opens the action
-    // rows, Left backs out to the feed, then Left closes the page.
-    assert_eq!(view.handle_key("right", &kb()), FactoryViewAction::None);
-    assert!(
-        frame_text(&mut view)
-            .join("\n")
-            .contains("actions: second-run"),
-        "right did not open the action rows"
-    );
-    assert_eq!(view.handle_key("left", &kb()), FactoryViewAction::None);
-    assert!(
-        !frame_text(&mut view)
-            .join("\n")
-            .contains("actions: second-run"),
-        "left did not back out of the action rows"
-    );
-    assert_eq!(view.handle_key("left", &kb()), FactoryViewAction::Close);
-    // A rebound horizontal arrow keeps its configured action: with Left
-    // bound to tui.select.up, Left walks the feed instead of closing
-    // (the fallback runs only when no configured binding matches).
-    let rebound: KeybindingsManager = KeybindingsManager::with_user_bindings(
-        serde_json::from_value(json!({"tui.select.up": ["left"]})).unwrap(),
-    );
-    let _ = view.handle_key("down", &rebound);
-    assert_eq!(view.selected, 1);
-    assert_eq!(view.handle_key("left", &rebound), FactoryViewAction::None);
-    assert_eq!(view.selected, 0, "rebound Left walks the feed, not Close");
+    // Any other key between the presses disarms and does nothing else:
+    // the arrow does not move, Esc does not close.
+    for key in ["down", "escape", "enter"] {
+        let _ = view.handle_key("ctrl+x", &kb());
+        assert_eq!(view.handle_key(key, &kb()), FactoryViewAction::None);
+        assert_eq!(selected_row(&view), row("run-abc12345", None));
+        assert_eq!(
+            view.handle_key("ctrl+x", &kb()),
+            FactoryViewAction::None,
+            "{key} disarmed: the next press re-arms"
+        );
+        let _ = view.handle_key("left", &kb());
+    }
+    // A settled child offers no stop; the running child stops.
     let _ = view.handle_key("down", &kb());
-    // Esc backs out of the action rows to the feed, then closes.
-    let _ = view.handle_key("enter", &kb());
-    assert_eq!(view.handle_key("escape", &kb()), FactoryViewAction::None);
-    assert!(
-        frame_text(&mut view).join("\n").contains("Enter actions"),
-        "Esc returns the feed's hint"
-    );
-    // The real key id for the Escape key is "escape" (`key_event_to_id`)
-    // — the page must close on it (the mutation check: matching only
-    // "esc" strands the Escape key).
+    assert!(!hint(&mut view).contains("stop"), "{}", hint(&mut view));
+    assert_eq!(view.handle_key("ctrl+x", &kb()), FactoryViewAction::None);
+    assert_eq!(view.handle_key("ctrl+x", &kb()), FactoryViewAction::None);
+    let _ = view.handle_key("down", &kb());
+    let _ = view.handle_key("ctrl+x", &kb());
+    assert!(hint(&mut view).contains("stop review-loop/reviewing?"));
     assert_eq!(
-        view.handle_key("escape", &kb()),
-        FactoryViewAction::Close,
-        "the Escape key closes the page"
+        view.handle_key("ctrl+x", &kb()),
+        FactoryViewAction::StopChild {
+            child_id: "child-2".to_string(),
+            label: "review-loop/reviewing".to_string()
+        }
     );
-    assert_eq!(view.handle_key("esc", &kb()), FactoryViewAction::Close);
-    assert_eq!(view.handle_key("ctrl+c", &kb()), FactoryViewAction::Close);
-    // A paused run offers the pause complement first — resume — then
-    // stop; the arrows walk the offered set, Enter runs the tracked
-    // one.
+    // A retry that replaces the armed child disarms: the next press arms
+    // the new child, never stops it unconfirmed.
+    let _ = view.handle_key("ctrl+x", &kb());
+    let mut retried = scripted_snapshot();
+    retried["nodes"][1]["instances"][0]["child"] = json!("child-9");
+    view.apply_runs(parse_factory_runs(&runs_response(&retried)));
+    assert_eq!(view.handle_key("ctrl+x", &kb()), FactoryViewAction::None);
+    assert_eq!(
+        view.handle_key("ctrl+x", &kb()),
+        FactoryViewAction::StopChild {
+            child_id: "child-9".to_string(),
+            label: "review-loop/reviewing".to_string()
+        }
+    );
+    // A fold that settles the armed child disarms it.
+    let _ = view.handle_key("ctrl+x", &kb());
+    let mut settled = scripted_snapshot();
+    settled["nodes"][1]["instances"][0]["status"] = json!("done");
+    view.apply_runs(parse_factory_runs(&runs_response(&settled)));
+    assert!(!hint(&mut view).contains("again to confirm"));
+    assert_eq!(view.handle_key("ctrl+x", &kb()), FactoryViewAction::None);
+}
+
+/// `r` resumes the selected row's run only while it is paused (no
+/// confirmation); the footer offers it exactly then.
+#[test]
+fn r_resumes_only_a_paused_run() {
+    let mut view = FactoryView::new(parse_factory_runs(&runs_response(&scripted_snapshot())), 40);
+    assert_eq!(view.handle_key("r", &kb()), FactoryViewAction::None);
+    assert!(!frame_text(&mut view).join("\n").contains("r resume"));
     let mut paused = parse_factory_runs(&runs_response(&scripted_snapshot()));
     paused[0].state = Some("paused".to_string());
     let mut view = FactoryView::new(paused, 40);
-    let _ = view.handle_key("enter", &kb());
-    let rows = frame_text(&mut view);
-    let joined = rows.join("\n");
-    assert!(joined.contains("▸ Resume the run"), "{joined}");
-    assert!(joined.contains("Stop the run"), "{joined}");
-    // The tracked action is resume (the complement first); walking down
-    // lands on stop, and Enter runs stop.
+    let _ = view.handle_key("down", &kb());
+    assert!(frame_text(&mut view).join("\n").contains("r resume"));
     assert_eq!(
-        view.handle_key("enter", &kb()),
+        view.handle_key("r", &kb()),
         FactoryViewAction::Resume {
             run_id: "run-abc12345".to_string()
         }
     );
-    let _ = view.handle_key("enter", &kb());
-    let _ = view.handle_key("down", &kb());
-    assert_eq!(
-        view.handle_key("enter", &kb()),
-        FactoryViewAction::Stop {
-            run_id: "run-abc12345".to_string()
-        }
+}
+
+/// ← and Esc (the real `escape` key id), `esc`, and ctrl+c close the
+/// page; a rebound Left keeps its configured action.
+#[test]
+fn left_and_escape_close_the_page() {
+    let mut view = FactoryView::new(parse_factory_runs(&two_run_response()), 40);
+    for key in ["left", "escape", "esc", "ctrl+c"] {
+        assert_eq!(view.handle_key(key, &kb()), FactoryViewAction::Close);
+    }
+    let rebound: KeybindingsManager = KeybindingsManager::with_user_bindings(
+        serde_json::from_value(json!({"tui.select.up": ["left"]})).unwrap(),
     );
-    // A fully terminal run offers nothing: Enter answers no rows.
-    let mut terminal = parse_factory_runs(&runs_response(&scripted_snapshot()));
-    terminal[0].state = Some("done".to_string());
-    terminal[0].usage.as_mut().unwrap().running = 0;
-    let mut view = FactoryView::new(terminal, 40);
-    assert_eq!(view.handle_key("enter", &kb()), FactoryViewAction::None);
-    assert!(
-        !frame_text(&mut view).join("\n").contains("actions: "),
-        "a terminal run opens no action rows"
-    );
+    let _ = view.handle_key("down", &rebound);
+    assert_eq!(view.handle_key("left", &rebound), FactoryViewAction::None);
+    assert_eq!(selected_row(&view), row("run-def67890", None));
 }
 
 /// The repaint hysteresis: an unchanged snapshot applies without a
@@ -873,53 +989,40 @@ fn the_runs_list_reads_newest_first_and_opens_on_the_newest_run() {
     );
 }
 
-/// Two runs: the selection moves down the feed, and a refresh keeps
-/// the selection on the SAME RUN, never the same index — a newer run
-/// folding in on top moves the selected run down the list without
-/// stealing the selection, and a run that left the batch returns the
-/// selection to the feed's head (the mutation check: index-tracking
-/// jumps to the new newest run and fails the fold assertions).
+/// A refresh keeps the selection on the SAME ROW, never the same index:
+/// a newer run folding in on top shifts every index without stealing the
+/// selection, a state that lost its session falls back to its run's
+/// header, and a run that left the batch hands the selection to the
+/// first row (the newest run's header).
 #[test]
-fn multiple_runs_keep_the_selection_on_the_same_run() {
-    let runs = parse_factory_runs(&two_run_response());
-    let mut view = FactoryView::new(runs, 40);
-    // The page opens on the newest run.
-    assert_eq!(
-        view.selected_run().map(|run| run.run_id.clone()),
-        Some("run-def67890".to_string())
-    );
-    // The down arrow moves the selection down the feed, to the older run.
-    let _ = view.handle_key("down", &kb());
-    assert_eq!(view.selected, 1);
-    assert_eq!(
-        view.selected_run().map(|run| run.run_id.clone()),
-        Some("run-abc12345".to_string())
-    );
-    // An unchanged refresh keeps the selection on the same run id.
-    view.apply_runs(parse_factory_runs(&two_run_response()));
-    assert_eq!(
-        view.selected_run().map(|run| run.run_id.clone()),
-        Some("run-abc12345".to_string())
-    );
-    // A run created after both folds in on top: the selected run moves
-    // down the list (index 1 becomes index 2) and the selection stays
-    // on the same run — the same index would be the new newest run.
+fn a_fold_keeps_the_selection_on_the_same_row() {
+    let mut view = FactoryView::new(parse_factory_runs(&two_run_response()), 40);
+    for _ in 0..5 {
+        let _ = view.handle_key("down", &kb());
+    }
+    assert_eq!(selected_row(&view), row("run-abc12345", Some("reviewing")));
     view.apply_runs(parse_factory_runs(&three_run_response()));
-    assert_eq!(view.selected, 2);
     assert_eq!(
-        view.selected_run().map(|run| run.run_id.clone()),
-        Some("run-abc12345".to_string()),
-        "the selection stays on the same run, not the same index"
+        selected_row(&view),
+        row("run-abc12345", Some("reviewing")),
+        "a newer run on top never steals the selection"
     );
-    // The selected run leaves the batch (the wire cap's oldest-end trim
-    // dropped it): the selection returns to the feed's head, the newest
-    // run.
+    let mut without_session = three_run_response();
+    without_session["runs"][0]["nodes"][1]["instances"] = json!([]);
+    view.apply_runs(parse_factory_runs(&without_session));
+    assert_eq!(
+        selected_row(&view),
+        row("run-abc12345", None),
+        "a vanished state falls back to its run's header"
+    );
     view.apply_runs(parse_factory_runs(&later_pair_response()));
     assert_eq!(
-        view.selected_run().map(|run| run.run_id.clone()),
-        Some("run-ghi13579".to_string()),
-        "a run that left the batch returns the selection to the head"
+        selected_row(&view),
+        row("run-ghi13579", None),
+        "a run that left the batch hands the selection to the first row"
     );
+    view.apply_runs(Vec::new());
+    assert!(view.selected.is_none(), "no runs, nothing selected");
 }
 
 /// The degenerate budget (a sub-chrome viewport on a short terminal):
@@ -933,7 +1036,7 @@ fn the_degenerate_budget_still_honors_the_viewport() {
     let rows = frame_text(&mut one_row);
     assert_eq!(rows.len(), 1, "a 1-row viewport renders exactly one row");
     assert!(
-        rows[0].contains("close"),
+        rows[0].contains("back"),
         "the tail-clip keeps the hint: {:?}",
         rows[0]
     );
@@ -941,7 +1044,7 @@ fn the_degenerate_budget_still_honors_the_viewport() {
     let rows = frame_text(&mut two_rows);
     assert_eq!(rows.len(), 2, "a 2-row viewport renders exactly two rows");
     assert!(
-        rows[1].contains("close"),
+        rows[1].contains("back"),
         "the hint is the last row: {:?}",
         rows[1]
     );
@@ -968,7 +1071,7 @@ fn the_budget_window_keeps_the_hint_and_the_selected_panel() {
     );
     // The key hint stays painted (the trailing chrome never truncates).
     assert!(
-        joined.contains("Enter actions"),
+        joined.contains("Enter/→ open"),
         "the key hint stays painted: {joined}"
     );
     // The default selection is the newest run: its header stays visible
@@ -986,7 +1089,7 @@ fn the_budget_window_keeps_the_hint_and_the_selected_panel() {
     // follows the selection, keeps the hint, and drops the newest
     // panel instead.
     let mut selected_older = FactoryView::new(parse_factory_runs(&two_run_response()), 8);
-    let _ = selected_older.handle_key("down", &kb());
+    select_run(&mut selected_older, "run-abc12345");
     let rows = frame_text(&mut selected_older);
     let joined = rows.join("\n");
     assert!(
@@ -994,7 +1097,7 @@ fn the_budget_window_keeps_the_hint_and_the_selected_panel() {
         "the view stays inside the budget: {joined}"
     );
     assert!(
-        joined.contains("Enter actions"),
+        joined.contains("Enter/→ open"),
         "the key hint stays painted: {joined}"
     );
     assert!(
@@ -1348,13 +1451,6 @@ fn world_w07_stopping() -> serde_json::Value {
     reply
 }
 
-/// The world with run w09 resumed (it was paused).
-fn world_w09_resumed() -> serde_json::Value {
-    let mut reply = world_response();
-    reply["runs"].as_array_mut().expect("runs")[9]["state"] = json!("running");
-    reply
-}
-
 /// A burst of five brand-new runs folded in on top of the world (the
 /// newest runs render first, the feed grows by five in one tick).
 fn world_with_burst() -> serde_json::Value {
@@ -1547,26 +1643,18 @@ fn the_dock_count_reads_one_liveness_rule_across_many_runs() {
 #[test]
 fn selection_stays_on_the_same_run_across_a_many_run_churn() {
     let mut view = FactoryView::new(parse_factory_runs(&world_response()), 400);
-    // The head is the newest run; seven downs walk to run #7 among
-    // fifteen.
+    // The head is the newest run.
     assert_eq!(
         view.selected_run().map(|run| run.run_id.clone()),
         Some("run-w14".to_string()),
         "the page opens on the feed's head"
     );
-    for _ in 0..7 {
-        let _ = view.handle_key("down", &kb());
-    }
-    assert_eq!(
-        view.selected_run().map(|run| run.run_id.clone()),
-        Some("run-w07".to_string())
-    );
+    select_run(&mut view, "run-w07");
     // Fold two: three new runs folded in on top, the two oldest left
     // the batch, the done-with-residents pair settled. The selection
     // stays on run w07 — at a NEW index (the same index would name a
     // different run).
     view.apply_runs(parse_factory_runs(&world_fold_two()));
-    assert_eq!(view.selected, 10, "the fold moved the run down the feed");
     assert_eq!(
         view.selected_run().map(|run| run.run_id.clone()),
         Some("run-w07".to_string()),
@@ -1598,7 +1686,7 @@ fn fifteen_panels_window_to_the_focus_on_a_small_viewport() {
         rows.len()
     );
     assert!(
-        rows.last().is_some_and(|row| row.contains("close")),
+        rows.last().is_some_and(|row| row.contains("back")),
         "the hint paints as the chrome's last row: {:?}",
         rows.last()
     );
@@ -1609,11 +1697,9 @@ fn fifteen_panels_window_to_the_focus_on_a_small_viewport() {
         "the newest panel renders first: {}",
         rows.join("\n")
     );
-    // Seven downs: the window slides to the focused run — its header
-    // paints, the head panel drops instead, and the hint survives.
-    for _ in 0..7 {
-        let _ = view.handle_key("down", &kb());
-    }
+    // Focus run #7: the window slides to it — its header paints, the
+    // head panel drops instead, and the hint survives.
+    select_run(&mut view, "run-w07");
     let rows = frame_text(&mut view);
     let joined = rows.join("\n");
     assert!(rows.len() <= 26, "the windowed frame stays in budget");
@@ -1626,18 +1712,33 @@ fn fifteen_panels_window_to_the_focus_on_a_small_viewport() {
         "the head panel dropped instead of the chrome: {joined}"
     );
     assert!(
-        rows.last().is_some_and(|row| row.contains("close")),
+        rows.last().is_some_and(|row| row.contains("back")),
         "the hint still paints after the slide"
+    );
+    // A selected state deep inside a tall panel: the window slides to
+    // the row itself, so the open/stop target stays visible.
+    let mut short = FactoryView::new(parse_factory_runs(&world_response()), 10);
+    short.selected = Some(FactoryRow {
+        run_id: "run-w07".to_string(),
+        state_id: Some("watchdog".to_string()),
+    });
+    let rows = frame_text(&mut short);
+    assert!(rows.len() <= 10);
+    assert!(
+        rows.iter()
+            .any(|row| row.contains("▸") && row.contains("watchdog")),
+        "the selected state paints: {}",
+        rows.join("\n")
     );
     // Degenerate budgets honor the viewport exactly.
     let mut one_row = FactoryView::new(parse_factory_runs(&world_response()), 1);
     let rows = frame_text(&mut one_row);
     assert_eq!(rows.len(), 1);
-    assert!(rows[0].contains("close"), "{:?}", rows[0]);
+    assert!(rows[0].contains("back"), "{:?}", rows[0]);
     let mut three_rows = FactoryView::new(parse_factory_runs(&world_response()), 3);
     let rows = frame_text(&mut three_rows);
     assert_eq!(rows.len(), 3);
-    assert!(rows[2].contains("close"), "{:?}", rows[2]);
+    assert!(rows[2].contains("back"), "{:?}", rows[2]);
 }
 
 /// The refresh tick across the fifteen-run world: the changed marker
@@ -1746,48 +1847,25 @@ fn the_refresh_tick_lights_only_notice_worthy_changes_across_many_runs() {
     );
 }
 
-/// Orchestration at scale: the Enter path targets THE FOCUSED run among
+/// Orchestration at scale: the stop targets THE FOCUSED run among
 /// fifteen — no cross-run leakage — and the stop's immediate refresh
 /// updates its panel to stopping without losing the selection. The
-/// offered set reads the run's state: a paused run offers the resume
-/// complement first, a done-with-residents run keeps its stop (the
-/// residents teardown), a terminal run offers nothing. The open action
-/// rows stay honest across a fold: a state change under them clamps
-/// the tracked action to what the run still offers, and a run that
-/// leaves the batch closes them (the mutation check: confirming a
-/// blindly tracked action would fire a stale resume here).
+/// offered actions read the run's state: a paused run resumes, a
+/// done-with-residents run keeps its stop (the residents teardown), a
+/// terminal run offers nothing, and a fold that ends the armed run's
+/// stop disarms it (the mutation check: a blindly kept arm would fire a
+/// stale stop here).
 #[test]
 fn orchestration_targets_the_focused_run_among_many() {
     let mut view = FactoryView::new(parse_factory_runs(&world_response()), 400);
-    // Walk to run #7 and stop it through the action rows.
-    for _ in 0..7 {
-        let _ = view.handle_key("down", &kb());
-    }
-    assert_eq!(
-        view.selected_run().map(|run| run.run_id.clone()),
-        Some("run-w07".to_string())
-    );
-    let _ = view.handle_key("enter", &kb());
-    let rows = frame_text(&mut view);
-    assert!(
-        rows.join("\n").contains("actions: world-run-7"),
-        "the action rows name the focused run"
-    );
-    assert_eq!(
-        view.handle_key("enter", &kb()),
-        FactoryViewAction::Stop {
-            run_id: "run-w07".to_string()
-        },
-        "the stop rides the focused run, none other"
-    );
-    // The stop landed: the immediate refresh folds the stopping state
-    // — the panel updates, the selection never moves.
+    let stop = |run_id: &str| FactoryViewAction::Stop {
+        run_id: run_id.to_string(),
+    };
+    select_run(&mut view, "run-w07");
+    let _ = view.handle_key("ctrl+x", &kb());
+    assert_eq!(view.handle_key("ctrl+x", &kb()), stop("run-w07"));
     view.apply_runs(parse_factory_runs(&world_w07_stopping()));
-    assert_eq!(
-        view.selected_run().map(|run| run.run_id.clone()),
-        Some("run-w07".to_string()),
-        "stopping a run never loses the selection"
-    );
+    assert_eq!(selected_row(&view), row("run-w07", None));
     let rows = frame_text(&mut view);
     assert!(
         panel_rows(&rows, "factory: world-run-7")
@@ -1795,96 +1873,25 @@ fn orchestration_targets_the_focused_run_among_many() {
             .any(|row| row.contains("— stopping")),
         "the stopped run's panel reads stopping"
     );
-    // A paused run offers the resume complement first: walk to w09
-    // (two up from w07) and resume it.
-    for _ in 0..2 {
-        let _ = view.handle_key("up", &kb());
-    }
+    // A paused run resumes.
+    select_run(&mut view, "run-w09");
     assert_eq!(
-        view.selected_run().map(|run| run.run_id.clone()),
-        Some("run-w09".to_string())
-    );
-    let _ = view.handle_key("enter", &kb());
-    let rows = frame_text(&mut view);
-    let joined = rows.join("\n");
-    assert!(joined.contains("actions: world-run-9"), "{joined}");
-    assert!(joined.contains("▸ Resume the run"), "{joined}");
-    assert!(joined.contains("Stop the run"), "{joined}");
-    assert_eq!(
-        view.handle_key("enter", &kb()),
+        view.handle_key("r", &kb()),
         FactoryViewAction::Resume {
             run_id: "run-w09".to_string()
         }
     );
-    // The action rows stay honest across a fold: reopen w09's rows
-    // (paused, resume tracked), fold the world where w09 already
-    // resumed — resume is no longer offered, the tracked action clamps
-    // to stop, and Enter runs stop, never a stale resume.
-    let mut view = FactoryView::new(parse_factory_runs(&world_response()), 400);
-    for _ in 0..5 {
-        let _ = view.handle_key("down", &kb());
-    }
-    assert_eq!(
-        view.selected_run().map(|run| run.run_id.clone()),
-        Some("run-w09".to_string())
-    );
-    let _ = view.handle_key("enter", &kb());
-    view.apply_runs(parse_factory_runs(&world_w09_resumed()));
-    let rows = frame_text(&mut view);
-    let joined = rows.join("\n");
-    assert!(
-        joined.contains("actions: world-run-9"),
-        "the rows stay open on the run: {joined}"
-    );
-    assert!(
-        !joined.contains("Resume the run"),
-        "the clamped rows offer only what the run still offers: {joined}"
-    );
-    assert!(joined.contains("▸ Stop the run"), "{joined}");
-    assert_eq!(
-        view.handle_key("enter", &kb()),
-        FactoryViewAction::Stop {
-            run_id: "run-w09".to_string()
-        },
-        "the confirmation runs the offered action, never a stale resume"
-    );
-    // A done-with-residents run keeps its stop (the residents
-    // teardown): w11 sits two up from w09.
-    let mut view = FactoryView::new(parse_factory_runs(&world_response()), 400);
-    for _ in 0..3 {
-        let _ = view.handle_key("down", &kb());
-    }
-    assert_eq!(
-        view.selected_run().map(|run| run.run_id.clone()),
-        Some("run-w11".to_string())
-    );
-    let _ = view.handle_key("enter", &kb());
-    let rows = frame_text(&mut view);
-    let joined = rows.join("\n");
-    assert!(joined.contains("actions: world-run-11"), "{joined}");
-    assert!(
-        !joined.contains("Resume the run"),
-        "a done run never offers resume: {joined}"
-    );
-    assert!(joined.contains("▸ Stop the run"), "{joined}");
-    assert_eq!(
-        view.handle_key("enter", &kb()),
-        FactoryViewAction::Stop {
-            run_id: "run-w11".to_string()
-        }
-    );
+    // A done-with-residents run keeps its stop; the fold that stops its
+    // residents ends the offer and disarms the armed stop.
+    select_run(&mut view, "run-w11");
+    let _ = view.handle_key("ctrl+x", &kb());
+    view.apply_runs(parse_factory_runs(&world_fold_two()));
+    assert_eq!(view.handle_key("ctrl+x", &kb()), FactoryViewAction::None);
+    assert!(view.armed.is_none(), "a run without a stop never arms");
     // A terminal run offers nothing.
-    let _ = view.handle_key("up", &kb());
-    let _ = view.handle_key("up", &kb());
-    assert_eq!(
-        view.selected_run().map(|run| run.run_id.clone()),
-        Some("run-w13".to_string())
-    );
-    assert_eq!(view.handle_key("enter", &kb()), FactoryViewAction::None);
-    assert!(
-        !frame_text(&mut view).join("\n").contains("actions: "),
-        "a terminal run opens no action rows"
-    );
+    select_run(&mut view, "run-w13");
+    let _ = view.handle_key("ctrl+x", &kb());
+    assert_eq!(view.handle_key("ctrl+x", &kb()), FactoryViewAction::None);
 }
 
 /// Rapid-change churn (the serialized fold discipline at scale): one
@@ -1898,13 +1905,7 @@ fn orchestration_targets_the_focused_run_among_many() {
 #[test]
 fn rapid_churn_keeps_the_folded_page_coherent() {
     let mut view = FactoryView::new(parse_factory_runs(&world_response()), 400);
-    for _ in 0..7 {
-        let _ = view.handle_key("down", &kb());
-    }
-    assert_eq!(
-        view.selected_run().map(|run| run.run_id.clone()),
-        Some("run-w07".to_string())
-    );
+    select_run(&mut view, "run-w07");
     // The busy tick: a five-run burst folds in on top while four runs
     // change shape underneath.
     assert!(view.apply_runs(parse_factory_runs(&world_churn_tick())));
@@ -1913,7 +1914,6 @@ fn rapid_churn_keeps_the_folded_page_coherent() {
         Some("run-w07".to_string()),
         "the selection tracks the same run through the burst"
     );
-    assert_eq!(view.selected, 12, "five new runs folded in on top");
     // Exactly the four changed runs light the marker — the burst's new
     // runs paint none, the untouched runs none.
     let rows = frame_text(&mut view);
@@ -1947,7 +1947,7 @@ fn rapid_churn_keeps_the_folded_page_coherent() {
         joined.contains("▸ factory: world-run-7 — running"),
         "{joined}"
     );
-    assert!(joined.contains("Enter actions"), "{joined}");
+    assert!(joined.contains("Enter/→ open"), "{joined}");
     // The focused run vanishes mid-orchestration: the selection hands
     // back to the head, and the very next keypress resolves against
     // the folded batch — never a stale index.
@@ -1962,15 +1962,9 @@ fn rapid_churn_keeps_the_folded_page_coherent() {
         Some("run-w19".to_string()),
         "the vanished run hands the selection back to the head"
     );
-    let _ = view.handle_key("enter", &kb());
-    assert!(
-        frame_text(&mut view)
-            .join("\n")
-            .contains("actions: world-run-19"),
-        "the keypress after the fold opens the head's rows"
-    );
+    let _ = view.handle_key("ctrl+x", &kb());
     assert_eq!(
-        view.handle_key("enter", &kb()),
+        view.handle_key("ctrl+x", &kb()),
         FactoryViewAction::Stop {
             run_id: "run-w19".to_string()
         }
@@ -1983,8 +1977,8 @@ fn rapid_churn_keeps_the_folded_page_coherent() {
         let _ = view.apply_runs(parse_factory_runs(&world_churn_tick()));
     }
     assert_eq!(
-        view.selected_run().map(|run| run.run_id.clone()),
-        Some("run-w16".to_string()),
+        selected_row(&view),
+        row("run-w19", Some("watchdog")),
         "every keypress resolved against the folded batch"
     );
 }

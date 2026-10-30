@@ -24,27 +24,16 @@ pub(crate) mod tools;
 // Tool-definition contract.
 pub use tools::tool_definition::{
     AbortSignal, ExecuteFn, ExecuteFuture, ExecutionMode, OnUpdate, PrepareArgumentsFn,
-    ToolContentBlock, ToolDefinition, ToolExecutionResult, ToolUpdate, WrappedTool,
+    ToolContentBlock, ToolDefinition, ToolExecutionResult, ToolUpdate,
 };
 
-// Path-resolution helper the CLI's `@file` expansion shares with the
-// tools (cwd-relative resolve with the macOS filename variants).
+// Path-resolution helper for the CLI's `@file` expansion (cwd-relative
+// resolve with the macOS filename variants).
 pub use tools::path_utils::resolve_read_path;
 
 // Result-rendering helpers: the image metadata pair the daemon's snapshot
 // elision consumes alongside the tool renderers (narrow re-export).
 pub use tools::render_utils::{get_image_dimensions_prefix, IMAGE_DIMENSIONS_PREFIX_BYTES};
-
-// bash tool: definition + local/remote execution seam.
-pub use tools::bash::{
-    create_bash_tool_definition, create_bash_tool_definition_with_options, BashOperations,
-    BashSpawnContext, BashSpawnHook, BashToolOptions, LocalBashOperations,
-};
-
-// edit tool: definition + filesystem operations seam.
-pub use tools::edit::{
-    create_edit_tool_definition, prepare_edit_arguments, EditOperations, LocalEditOperations,
-};
 
 // ipython tool: definition + kernel lifecycle seam (RLM bootstrap included).
 pub use tools::ipython::{

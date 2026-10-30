@@ -2,7 +2,7 @@
 //! roster deltas, the stop-path passivation, and the `roster_update` pushes subscribers receive.
 
 use serde_json::Map;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -15,7 +15,6 @@ use crate::lease::canonical_session_path;
 use crate::protocol::{response_failure, response_success, DaemonResponse};
 use crate::registry::ResidentWorker;
 use crate::supervisor::{ClientRouting, Supervisor, ROUTE_TIMEOUT_MS};
-use crate::supervisor_roster_seed::family_descends_from;
 
 /// `worker_roster_delta`'s parsed frame. `sequence` feeds the stale-delta
 /// gate (the per-worker watermark drops a delayed older snapshot);
@@ -271,13 +270,15 @@ impl Supervisor {
         // The stopping worker's family view — live edges and surviving
         // resident roots — decides each subagent row's fate; a ledger
         // failure degrades to an empty view.
-        let ledger_view = self.live_edges_and_parents().await;
-        let empty_view: (
-            Vec<crate::rlm_ledger::RlmLedgerEdge>,
-            HashMap<PathBuf, PathBuf>,
-        ) = (Vec::new(), HashMap::new());
-        let (_, parent_by_child) = ledger_view.as_ref().unwrap_or(&empty_view);
         let roots = self.roster_seed_roots().await;
+        let ledger_view: Option<HashSet<PathBuf>> = self
+            .rlm_spawn_ledger_for(None)
+            .await
+            .ok()
+            .and_then(|ledger| ledger.family_edges(roots).ok())
+            .map(|edges| edges.into_iter().map(|edge| edge.child.into()).collect());
+        let empty_view = HashSet::new();
+        let anchored_children = ledger_view.as_ref().unwrap_or(&empty_view);
         // The stop's own ledger event: an RLM delete tombstoned its child
         // before the stop began, and the shutdown route was the
         // transcript's flush barrier, so the fold beside the ledger view
@@ -346,11 +347,7 @@ impl Supervisor {
                         .get("sessionFile")
                         .and_then(Value::as_str)
                         .is_some_and(|file| {
-                            parent_by_child
-                                .get(&canonical_session_path(Path::new(file)))
-                                .is_some_and(|parent| {
-                                    family_descends_from(parent_by_child, parent, &roots)
-                                })
+                            anchored_children.contains(&canonical_session_path(Path::new(file)))
                         });
                 if !ephemeral && entry.queued_child != Some(true) && anchored {
                     let passivated =
@@ -364,7 +361,7 @@ impl Supervisor {
             // The seeded unowned rows outlived their departed root and
             // flashed as top-level rows: settle them with the same anchor
             // verdict as the owned rows, scoped to the snapshot.
-            if ledger_view.is_ok() {
+            if ledger_view.is_some() {
                 for entry in &unowned_at_start {
                     if roster
                         .get(&entry.agent_id)
@@ -388,11 +385,7 @@ impl Supervisor {
                         .get("sessionFile")
                         .and_then(Value::as_str)
                         .is_some_and(|file| {
-                            parent_by_child
-                                .get(&canonical_session_path(Path::new(file)))
-                                .is_some_and(|parent| {
-                                    family_descends_from(parent_by_child, parent, &roots)
-                                })
+                            anchored_children.contains(&canonical_session_path(Path::new(file)))
                         });
                     if !anchored {
                         roster.delete(&entry.agent_id);

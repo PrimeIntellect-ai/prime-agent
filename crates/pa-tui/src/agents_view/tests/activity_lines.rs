@@ -73,7 +73,7 @@ fn enter_on_a_nested_factory_line_opens_the_child_with_the_factory_panel() {
         opened.selection,
         SessionSelection::Attach("c-live".to_string())
     );
-    assert_eq!(opened.panel, Some(SessionPanel::FactoryRuns));
+    assert_eq!(opened.panel, Some(SessionPanel::FactoryRuns { row: None }));
     assert_eq!(opened.expanded_ancestors, vec!["p".to_string()]);
 }
 

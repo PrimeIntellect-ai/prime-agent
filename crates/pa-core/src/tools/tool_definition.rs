@@ -104,15 +104,6 @@ pub struct ToolDefinition {
 }
 
 impl ToolDefinition {
-    /// Built-in tool name used for replay in recorded sessions.
-    #[must_use]
-    pub fn replay_built_in_tool_name(&self) -> Option<&str> {
-        match self.name.as_str() {
-            "bash" | "edit" | pa_types::ai::PYTHON_TOOL_NAME => Some(self.name.as_str()),
-            _ => None,
-        }
-    }
-
     /// The wire `Tool` sent to providers (name, description, parameters).
     #[must_use]
     pub fn to_tool(&self) -> Tool {
@@ -121,64 +112,5 @@ impl ToolDefinition {
             description: self.description.clone(),
             parameters: self.parameters.clone(),
         }
-    }
-}
-
-/// Wrap a `ToolDefinition` into the plain executable form used by the agent
-/// runtime (TS: `wrapToolDefinition`).
-#[allow(dead_code)]
-pub fn wrap_tool_definition(definition: &ToolDefinition) -> WrappedTool {
-    WrappedTool {
-        name: definition.name.clone(),
-        label: definition.label.clone(),
-        description: definition.description.clone(),
-        parameters: definition.parameters.clone(),
-        prepare_arguments: definition.prepare_arguments,
-        execute: definition.execute.clone(),
-    }
-}
-
-/// An `AgentTool`: the execution-facing projection of a definition.
-#[derive(Clone)]
-pub struct WrappedTool {
-    pub name: String,
-    pub label: String,
-    pub description: String,
-    pub parameters: serde_json::Value,
-    pub prepare_arguments: Option<PrepareArgumentsFn>,
-    pub execute: ExecuteFn,
-}
-
-impl WrappedTool {
-    /// Run the wrapped tool once.
-    ///
-    /// # Errors
-    ///
-    /// Returns the wrapped tool's own execution error.
-    pub async fn execute(
-        &self,
-        tool_call_id: &str,
-        params: serde_json::Value,
-        signal: Option<AbortSignal>,
-        on_update: Option<OnUpdate>,
-    ) -> anyhow::Result<ToolExecutionResult> {
-        let f = self.execute.clone();
-        f(tool_call_id, params, signal, on_update).await
-    }
-}
-
-/// Synthesize a minimal [`ToolDefinition`] from a plain executable tool
-/// (TS: `createToolDefinitionFromAgentTool`).
-#[allow(dead_code)]
-pub fn tool_definition_from_wrapped(tool: &WrappedTool) -> ToolDefinition {
-    ToolDefinition {
-        name: tool.name.clone(),
-        label: tool.label.clone(),
-        description: tool.description.clone(),
-        prompt_snippet: String::new(),
-        parameters: tool.parameters.clone(),
-        execution_mode: None,
-        prepare_arguments: tool.prepare_arguments,
-        execute: tool.execute.clone(),
     }
 }

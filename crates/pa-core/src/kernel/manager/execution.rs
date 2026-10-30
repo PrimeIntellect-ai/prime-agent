@@ -307,7 +307,7 @@ fn cell_watchdog_note(execution: &ActiveExecution) -> Option<String> {
     Some(format!(
         "[watchdog] Cell exceeded the {} python_repl budget (ran {}). Move long shell work to \
 bash() (it auto-backgrounds past its yield window) and split long python work into smaller \
-cells. Intentional long awaits (yield_after, rlm.collect timeouts) can ignore this note.",
+cells. Intentional long awaits (rlm.collect timeouts) can ignore this note.",
         humanize_ms(timeout_ms),
         humanize_ms(elapsed_ms),
     ))

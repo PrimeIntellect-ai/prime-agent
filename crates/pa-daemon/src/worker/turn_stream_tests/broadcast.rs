@@ -70,6 +70,7 @@ async fn turn_session_events_with_custom_message(
     runner
         .run_turn(
             engine,
+            Lane::Steering,
             vec![QueuedItem {
                 priority: QueuePriority::Background,
                 preview: None,
@@ -198,7 +199,7 @@ async fn a_delivered_agent_message_turn_emits_the_custom_row() {
         Arc::new(ScriptedEngine::from_value(&json!({ "responses": ["ack"] })).unwrap_or_default());
     let runner = burst_runner(Arc::clone(&engine));
     let mut subscription = runner.events.subscribe();
-    runner.run_turn(engine, vec![item]).await;
+    runner.run_turn(engine, Lane::Steering, vec![item]).await;
     let mut events = Vec::new();
     while let Ok(frame) = subscription.try_recv() {
         if frame.outbound_type == "session_event" {

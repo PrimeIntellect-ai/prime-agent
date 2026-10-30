@@ -5,8 +5,8 @@ use super::{
     anyhow, bail, join_all, json, list_sessions, mpsc, name_unavailable_error, paths,
     reservation_key, response_failure, response_line, response_success, subscribers, Arc,
     DaemonCommand, DaemonResponse, DaemonSessionLifecycle, NameScope, Outbound, Path, PathBuf,
-    ResidentWorker, Result, RouteAdmission, Supervisor, Value, ROUTE_TIMEOUT_MS,
-    SUMMARY_TIMEOUT_MS,
+    ResidentWorker, Result, RosterFamilySeedOwner, RouteAdmission, Supervisor, Value,
+    ROUTE_TIMEOUT_MS, SUMMARY_TIMEOUT_MS,
 };
 use crate::session_scan::list_sessions_with;
 
@@ -663,7 +663,9 @@ impl Supervisor {
             Some(DaemonSessionLifecycle::ClientOwned) => Some(client_id),
             _ => None,
         };
-        let (resident, create_summary) = self.launch_worker(command, owner_client_id).await?;
+        let (resident, create_summary) = self
+            .launch_worker(command, owner_client_id, RosterFamilySeedOwner::Create)
+            .await?;
         // The single-flight stays held through the spawn admission below: an admission
         // failure tears the resident down, and a concurrent open that had just reused it
         // would hold a summary for a gone worker. The ledger is the only topology store.
@@ -676,9 +678,7 @@ impl Supervisor {
             let _ = self.stop_worker(&resident).await;
             return Err(error);
         }
-        // The admission settled: the single-flight may release (a
-        // concurrent open's classification now finds a durable resident).
-        drop(opening_guard);
+        // Keep concurrent opens behind the first family's edge-only seed.
         // Prefer a fresh get_state, but a degraded one falls back to the authoritative
         // create summary instead of failing the spawn.
         let summary = match self
@@ -700,19 +700,22 @@ impl Supervisor {
         // write (its counter raises the resident's stale-delta watermark).
         self.write_roster_summary_for_resident(&resident, &summary)
             .await;
-        // The new root's passive family renders immediately from the ledger edges, then
-        // one bounded background hydration fills each seeded row's display fields. The root
-        // is the CREATE response's session file (a mid-replay get_state must not skip it).
         if let Some(root) = summary
             .get("sessionFile")
             .and_then(Value::as_str)
             .or_else(|| create_summary.get("sessionFile").and_then(Value::as_str))
         {
-            let seeded = self.seed_roster_family_edges(Path::new(&root)).await;
+            let seeded = self.seed_roster_family_edges(Path::new(root)).await;
             if !seeded.is_empty() {
-                self.spawn_seeded_hydration(seeded);
+                drop(self.spawn_seeded_hydration(seeded));
             }
+            let supervisor = Arc::clone(self);
+            drop(tokio::spawn(async move {
+                let refreshed = supervisor.refresh_deleted_descendant_usage().await;
+                supervisor.push_roster_update(refreshed, Vec::new());
+            }));
         }
+        drop(opening_guard);
         Ok(summary)
     }
 

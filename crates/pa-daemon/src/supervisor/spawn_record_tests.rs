@@ -294,7 +294,9 @@ async fn a_fresh_create_spawn_record_keeps_the_unsynced_shape() {
     };
 
     let _ = crate::descriptor::atomic_write_probe::take_under(&supervisor.descriptor_dir);
-    let outcome = supervisor.launch_worker(&create, None).await;
+    let outcome = supervisor
+        .launch_worker(&create, None, RosterFamilySeedOwner::Registration)
+        .await;
     assert!(
         outcome.is_err(),
         "no live worker: the fresh launch fails at the probe"
