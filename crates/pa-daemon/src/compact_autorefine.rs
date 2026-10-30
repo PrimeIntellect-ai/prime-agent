@@ -33,16 +33,6 @@ impl AgentSessionEngine {
         }
     }
 
-    /// Count one settled non-error assistant turn into the round's turn
-    /// counter (TS `_assistantTurnsSinceAutoRefine`'s `message_end` increment).
-    pub(crate) fn note_settled_turn_since_auto_refine_review(&self) {
-        let guard = self.session.blocking_lock();
-        if let Some(engine) = guard.as_deref() {
-            self.runtime
-                .block_on(async { engine.session.note_settled_turn_since_auto_refine_review() });
-        }
-    }
-
     /// The shared round body (the `compact` command path and the turn
     /// settle both run it): the pending pre-check, the TS busy gates, the
     /// pa-core round take, then the refinement child's spawn. The gates

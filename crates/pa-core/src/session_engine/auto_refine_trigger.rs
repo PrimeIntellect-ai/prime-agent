@@ -28,7 +28,6 @@ pub(crate) struct CompactAutoRefineState {
     /// stamps the cooldown window.
     last_review_at: Option<u64>,
     /// Settled non-error assistant turns since the last round.
-    settled_turns_since_review: u32,
     /// A refinement child the round spawned and whose reply has not
     /// applied yet: a second consumption re-arms the trigger instead of
     /// stacking a second child.
@@ -64,15 +63,6 @@ impl AgentSession {
             .pending
     }
 
-    /// # Panics
-    ///
-    /// Panics if the compact auto-refine state mutex is poisoned.
-    pub fn note_settled_turn_since_auto_refine_review(&self) {
-        self.compact_auto_refine
-            .lock()
-            .expect("compact auto-refine state lock")
-            .settled_turns_since_review += 1;
-    }
 
     /// Drop the armed trigger — a branch move or a disposal abandons the
     /// conversation the trigger was armed against.
@@ -141,7 +131,6 @@ impl AgentSession {
         state.in_flight = true;
         // Every fresh attempt stamps the cooldown and resets the counter.
         state.last_review_at = Some(now_millis());
-        state.settled_turns_since_review = 0;
         Some(RefineOptions {
             global: false,
             instructions: Some(auto_refine_instructions(AUTO_REFINE_COMPACT_REASON)),
@@ -299,8 +288,6 @@ mod tests {
     #[tokio::test]
     async fn a_taken_round_carries_the_auto_instructions_and_consumes_the_trigger() {
         let session = session(true).await;
-        session.note_settled_turn_since_auto_refine_review();
-        session.note_settled_turn_since_auto_refine_review();
         session.mark_compact_auto_refine_pending();
         let options = session
             .take_compact_auto_refine_round(CompactAutoRefineSurface::Checkpoint)
