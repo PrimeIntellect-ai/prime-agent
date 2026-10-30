@@ -160,7 +160,6 @@ async fn a_billed_row_counts_into_the_run_cost() {
         ))
         .await;
     engine.telemetry.as_ref().unwrap().end().await.unwrap();
-    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
     let costs: Vec<serde_json::Value> = mock
         .events()
         .iter()
