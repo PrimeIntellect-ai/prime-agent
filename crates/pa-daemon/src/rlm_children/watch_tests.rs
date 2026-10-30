@@ -452,7 +452,6 @@ async fn a_factory_child_settles_without_a_parent_notice() {
             thinking: None,
             cwd: None,
             spawned_by_request_id: None,
-            cwd: None,
             factory: Some(pa_core::session_engine::rlm_host::RlmFactoryTag {
                 run_id: "run".to_string(),
                 spec_id: "spec".to_string(),
