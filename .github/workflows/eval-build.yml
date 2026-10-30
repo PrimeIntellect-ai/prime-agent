@@ -1,0 +1,87 @@
+name: eval-build (single-target candidate tarball)
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: eval-build-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+
+jobs:
+  build:
+    name: eval-tarball (x86_64-unknown-linux-gnu)
+    runs-on: ubuntu-24.04
+    container:
+      image: mirror.gcr.io/library/ubuntu@sha256:b8b6ee6aa931ecd9d0d952abc34dc0e5f7c6a30c6bb71b079fe399fde0329c02
+    defaults:
+      run:
+        shell: bash
+    permissions:
+      contents: read
+    timeout-minutes: 60
+    outputs:
+      built_sha:
+        description: short sha of the built ref
+        value: ${{ steps.sha.outputs.sha }}
+    steps:
+      - name: Install build prerequisites
+        run: |
+          set -euo pipefail
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            build-essential curl ca-certificates python3 git binutils
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Trust the mounted checkout
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+      - id: sha
+        name: Record the built sha
+        run: echo "sha=$(git rev-parse --short=8 HEAD)" >> "$GITHUB_OUTPUT"
+      - uses: dtolnay/rust-toolchain@ce678459e9fc7500d337468f904b95f1b5c10b5e
+        with:
+          targets: x86_64-unknown-linux-gnu
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          key: x86_64-unknown-linux-gnu-glibc235
+      - name: Build (release, locked)
+        run: cargo build --release --locked --target x86_64-unknown-linux-gnu -j 4 -p pa-cli --bin prime-agent
+      - name: Split the shipped binary
+        run: |
+          set -euo pipefail
+          python3 scripts/release/split_debug.py \
+            --binary "target/x86_64-unknown-linux-gnu/release/prime-agent" \
+            --shipped "target/x86_64-unknown-linux-gnu/dist/prime-agent" \
+            --out "target/x86_64-unknown-linux-gnu/dist" \
+            --version "0.10.1-eval" \
+            --target "x86_64-unknown-linux-gnu"
+      - name: Generate bundled catalog assets (live catalog)
+        run: |
+          set -euo pipefail
+          python3 scripts/release/bundle_catalog.py generate --network \
+            --out "target/x86_64-unknown-linux-gnu/catalog-assets"
+      - name: Assemble tarball + manifest
+        run: |
+          set -euo pipefail
+          python3 scripts/release/assemble_artifacts.py \
+            --repo-root . \
+            --version "0.10.1-eval" \
+            --target "x86_64-unknown-linux-gnu" \
+            --binary "target/x86_64-unknown-linux-gnu/dist/prime-agent" \
+            --decoder "target/x86_64-unknown-linux-gnu/dist/prime-agent-0.10.1-eval-linux-x64.debug.gz" \
+            --catalog-assets "target/x86_64-unknown-linux-gnu/catalog-assets" \
+            --out-dir "target/x86_64-unknown-linux-gnu/dist"
+          cat "target/x86_64-unknown-linux-gnu/dist/manifest.json"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: eval-tarball
+          path: |
+            target/x86_64-unknown-linux-gnu/dist/prime-agent-0.10.1-eval-linux-x64.tar.gz
+            target/x86_64-unknown-linux-gnu/dist/manifest.json
