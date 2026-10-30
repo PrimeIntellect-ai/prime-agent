@@ -677,6 +677,13 @@ impl SettingsManager {
         self.merged.theme.as_deref()
     }
 
+    /// The `statusLine` command (merged global/project read); `None` renders
+    /// the built-in chrome.
+    #[must_use]
+    pub fn get_status_line(&self) -> Option<pa_types::status_line::StatusLineSpec> {
+        self.merged.status_line.clone()
+    }
+
     /// Global-only read of the two known values; anything else is unset.
     #[must_use]
     pub fn get_update_channel(&self) -> Option<UpdateChannel> {

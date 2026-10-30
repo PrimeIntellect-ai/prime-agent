@@ -16,6 +16,7 @@ pub mod platform;
 pub mod session;
 pub mod skill_blocks;
 pub mod slash_commands;
+pub mod status_line;
 pub mod themes;
 pub mod usage;
 

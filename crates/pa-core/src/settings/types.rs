@@ -279,6 +279,10 @@ pub struct Settings {
     pub steering_mode: Option<QueueModeSetting>,
     pub follow_up_mode: Option<QueueModeSetting>,
     pub theme: Option<String>,
+    /// `statusLine` (the TS-era `ctx.ui.setFooter` successor): the user
+    /// command whose stdout renders as the TUI footer rows; unset renders
+    /// the built-in chrome.
+    pub status_line: Option<pa_types::status_line::StatusLineSpec>,
     pub compaction: Option<CompactionSettings>,
     pub auto_refine: Option<AutoRefineSettings>,
     /// Master switch for harness creation and context loading; unset preserves enabled behavior.

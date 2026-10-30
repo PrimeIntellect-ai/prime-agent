@@ -24,6 +24,7 @@ const KNOWN_FIELDS: &[&str] = &[
     "steeringMode",
     "followUpMode",
     "theme",
+    "statusLine",
     "compaction",
     "autoRefine",
     "harnessRefinements",
