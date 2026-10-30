@@ -255,9 +255,12 @@ impl pa_tui::interactive::InteractionTelemetry for CliInteractionTelemetry {
 
     fn agents_view_action(
         &self,
-        _action: &'static str,
+        action: &'static str,
     ) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
         self.count("tui_agents_action_count");
+        if action == "content_search" {
+            self.count("tui_agents_content_search_count");
+        }
         Box::pin(std::future::ready(()))
     }
 
@@ -388,6 +391,8 @@ mod tests {
         let telemetry = CliInteractionTelemetry::new(dir.path().to_path_buf(), agent_dir.clone());
         telemetry.scroll_used("page", false).await;
         telemetry.hyperlinks_active(true).await;
+        telemetry.agents_view_action("renamed").await;
+        telemetry.agents_view_action("content_search").await;
         telemetry.client_exit("session_request", false).await;
         telemetry.client_exit("ctrl_d", false).await;
         let mirror = std::fs::read_to_string(agent_dir.join("telemetry.jsonl")).unwrap();
@@ -399,6 +404,8 @@ mod tests {
         assert_eq!(exits.len(), 2);
         assert_eq!(exits[0]["properties"]["tui_scroll_count"], 1);
         assert_eq!(exits[0]["properties"]["tui_hyperlinks_enabled"], true);
+        assert_eq!(exits[0]["properties"]["tui_agents_action_count"], 2);
+        assert_eq!(exits[0]["properties"]["tui_agents_content_search_count"], 1);
         assert!(exits[1]["properties"].get("tui_scroll_count").is_none());
         assert!(exits[1]["properties"]
             .get("tui_hyperlinks_enabled")

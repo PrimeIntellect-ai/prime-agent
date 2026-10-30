@@ -565,6 +565,18 @@ pub enum DaemonCommand {
         #[serde(flatten)]
         rest: JsonMap,
     },
+    /// The saved sessions whose user or assistant message text contains `query`
+    /// (case-insensitive). Rust-native extension, advertised by the `session_content_search`
+    /// capability.
+    SearchSessionContent {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        session_dir: Option<String>,
+        query: String,
+        #[serde(flatten)]
+        rest: JsonMap,
+    },
     TailPersistentShell {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         id: Option<String>,

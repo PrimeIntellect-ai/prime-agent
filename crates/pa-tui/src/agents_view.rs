@@ -19,8 +19,8 @@ use crate::agents_view_forest::{
 };
 use crate::agents_view_state::truncate_text;
 use crate::agents_view_state::{
-    build_layout, filter_empty_sessions, filter_unified_sessions, parse_search_query,
-    reconcile_unified_sessions, section_title, RowLayout, Section,
+    build_layout, filter_by_session_ids, filter_empty_sessions, filter_unified_sessions,
+    parse_search_query, reconcile_unified_sessions, section_title, RowLayout, Section,
 };
 
 /// The scope a scoped view opened on (TS `AgentsViewScopeKey` plus the display name): lists this
@@ -41,6 +41,7 @@ mod render;
 use render::cell;
 use render::Renderer;
 
+mod content_search;
 mod delete;
 mod heartbeats;
 mod persistent_shells;
@@ -303,6 +304,11 @@ enum UiInput {
     },
     /// One shells/factory-runs fetch cycle landed: the activity lines re-count.
     SessionActivityLoaded(Vec<session_activity::ActivityRead>),
+    /// One `search_session_content` scan for `query` landed: the matching session ids.
+    ContentSearchLoaded {
+        query: String,
+        outcome: Result<Vec<String>, String>,
+    },
 }
 
 /// The flow's roster connection: one daemon connection alive across the flow's view runs, so a
@@ -322,6 +328,8 @@ pub struct AgentsViewLink {
     /// An unfinished cycle follows the roster link across session handoffs; re-entry consumes
     /// its result instead of starting another batch while these requests still wait.
     activity_fetch: Option<tokio::sync::oneshot::Receiver<Vec<session_activity::ActivityRead>>>,
+    /// The previous run searched message text: a re-entry keeps the mode its carried query ran in.
+    content_search: bool,
 }
 
 impl AgentsViewLink {
@@ -334,6 +342,7 @@ impl AgentsViewLink {
             session_activity: ActivityCounts::default(),
             persistent_shells: Value::Null,
             activity_fetch: None,
+            content_search: false,
         })
     }
 
@@ -366,6 +375,8 @@ struct AgentsViewMode {
     rows: Vec<AgentsViewRow>,
     selected: usize,
     query: String,
+    /// The full-text mode of the search field and its daemon scan state.
+    content_search: content_search::ContentSearch,
     /// The status line: rendered at the bottom hint row in its tone, expired by the
     /// loop's deadline arm, sticky lines cleared by the next key.
     status: Option<Status>,
@@ -587,6 +598,7 @@ impl AgentsViewMode {
             pending_shell_action: None,
             pending_shell_open: None,
             session_activity: ActivityCounts::default(),
+            content_search: content_search::ContentSearch::default(),
         }
     }
 }
@@ -767,6 +779,7 @@ async fn run_agents_view_surface(
         .map(|link| std::mem::take(&mut link.persistent_shells))
         .unwrap_or_default();
     let mut activity_fetch = link.as_mut().and_then(|link| link.activity_fetch.take());
+    let content_search_carried = link.as_ref().is_some_and(|link| link.content_search);
     // This pane may arrive already in TUI state (the chat's teardown preserves it), so a
     // roster-link failure here must hand the terminal back before the error escapes.
     let (client, mut events, roster, saved) = match open_roster_link(&options, link).await {
@@ -792,6 +805,10 @@ async fn run_agents_view_surface(
     mode.saved_more = saved.more;
     mode.session_activity = session_activity;
     mode.persistent_shells = persistent_shells;
+    mode.content_search.supported = client.supports_server_capability(content_search::CAPABILITY);
+    mode.content_search.enabled = mode.content_search.supported && content_search_carried;
+    mode.content_search
+        .arm(&mode.query, tokio::time::Instant::now());
     mode.rebuild_rows();
     // The notice from the log's bounded tail paints on the FIRST frame, before the interval's
     // first tick.
@@ -1111,6 +1128,9 @@ async fn run_agents_view_surface(
                         }
                     }
                 },
+                UiInput::ContentSearchLoaded { query, outcome } => {
+                    mode.apply_content_search(query, outcome);
+                }
                 UiInput::SessionActivityLoaded(reads) => {
                     mode.apply_session_activity(reads);
                     activity_fetch_at = Some(
@@ -1144,6 +1164,7 @@ async fn run_agents_view_surface(
             // precondition passes, so the arms below must never unwrap an Option.
             let flush_at = saved_flush;
             let shells_at = shells_fetch_at;
+            let content_search_at = mode.content_search.deadline();
             let status_at = mode.status_expiry(std::time::Instant::now());
             tokio::select! {
                     maybe_event = events.recv() => {
@@ -1248,6 +1269,17 @@ async fn run_agents_view_surface(
                             &client,
                             mode.live_session_ids(),
                         ));
+                    }
+                    // The debounced message-text scan: the paused query goes to the daemon.
+                    () = async {
+                        match content_search_at {
+                            Some(at) => tokio::time::sleep_until(at).await,
+                            None => std::future::pending().await,
+                        }
+                    } => {
+                        if let Some(query) = mode.content_search.take_due() {
+                            content_search::spawn_fetch(&client, ui_tx.clone(), session_dir.clone(), query);
+                        }
                     }
                     // The incident-notice poll's wake-up: the drain below the select
                     // does the refresh, so the arm only ends the wait.
@@ -1414,6 +1446,7 @@ async fn run_agents_view_surface(
             session_activity: std::mem::take(&mut mode.session_activity),
             persistent_shells: std::mem::take(&mut mode.persistent_shells),
             activity_fetch,
+            content_search: mode.content_search.enabled,
         })
     } else {
         client.close();
@@ -1486,6 +1519,7 @@ fn is_daemon_answer(input: &UiInput) -> bool {
             | UiInput::PersistentShellTail { .. }
             | UiInput::PersistentShellKilled { .. }
             | UiInput::SessionActivityLoaded(_)
+            | UiInput::ContentSearchLoaded { .. }
     )
 }
 

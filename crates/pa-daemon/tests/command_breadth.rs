@@ -536,6 +536,10 @@ const WIRE_FIXTURES: &[(&str, &str)] = &[
         "get_session_messages",
         r#"{"type": "get_session_messages", "activeSessionId": "sess", "start": -10, "limit": 10, "roles": ["*"]}"#,
     ),
+    (
+        "search_session_content",
+        r#"{"type": "search_session_content", "query": "backoff"}"#,
+    ),
 ];
 
 /// The accept list is the TS list, in TS order, then the Rust-native supervisor/worker frames.
@@ -568,6 +572,7 @@ fn known_command_types_match_the_ts_list() {
                     | "tail_persistent_shell"
                     | "kill_persistent_shell"
                     | "get_session_messages"
+                    | "search_session_content"
             ),
             "unexpected non-TS command type: {extra}"
         );
