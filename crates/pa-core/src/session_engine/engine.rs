@@ -272,7 +272,7 @@ pub async fn create_session(mut config: SessionEngineConfig) -> anyhow::Result<S
     // pin), like the request-timing snapshot above.
     let factory_allowed_models = settings.get_allowed_models();
     // Captured before `settings` moves into the resource loader: the
-    // per-cell watchdog budget (default 60s, `0` disables).
+    // default cell time limit (default 60s, `0` disables).
     let python_cell_timeout_ms = settings.get_python_cell_timeout_ms();
     let (mcp_skill_overrides, mcp_generic_servers, built_manager) =
         mcp_gating(&settings, config.agent_dir.clone()).await?;
@@ -490,9 +490,9 @@ pub async fn create_session(mut config: SessionEngineConfig) -> anyhow::Result<S
         .await
         .map_err(|join| anyhow::anyhow!("websearch key resolve join failed: {join}"))?
     };
-    // The per-cell watchdog: daemon-backed sessions arm the settings budget
-    // (default 60s, `0` disables); daemonless sessions keep `await bash()`
-    // unbounded by design (#3523), so their cells are never annotated.
+    // The cell time limit: daemon-backed sessions arm the settings default
+    // (60s, `0` disables); daemonless sessions keep `await bash()`
+    // unbounded by design (#3523), so their cells are never interrupted.
     let cell_timeout_ms =
         super::runtime_wiring::arm_cell_timeout_ms(config.daemonless, python_cell_timeout_ms);
     let provisioner = super::runtime_wiring::kernel_provisioner(

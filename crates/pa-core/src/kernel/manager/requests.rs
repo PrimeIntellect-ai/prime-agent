@@ -304,7 +304,6 @@ impl ReplKernelManager {
             restores_namespace,
             buffers: Mutex::new(buffers),
             result_tx: Mutex::new(Some(result_tx)),
-            cell_started: Mutex::new(None),
             opts,
         });
         {
@@ -312,21 +311,42 @@ impl ReplKernelManager {
             g.active_execution = Some(execution.clone());
         }
 
-        // Abort watcher: interrupts the kernel out-of-band, then force-aborts
-        // after the grace window if the runtime did not settle the cell.
-        if let Some(signal) = execution.opts.signal.clone() {
+        // Abort watcher: on an abort, or when the cell outlives its time limit,
+        // interrupts the kernel out-of-band, then force-aborts after the grace
+        // window if the runtime did not settle the cell. The limit's clock
+        // starts here, as the request goes on the wire (no await separates the
+        // two): queue wait and kernel boot are excluded.
+        let cell_timeout_ms = execution.opts.cell_timeout_ms.filter(|ms| *ms > 0);
+        if execution.opts.signal.is_some() || cell_timeout_ms.is_some() {
+            let signal = execution.opts.signal.clone();
             // Weak on both sides: a never-fired signal leaves this watcher pending forever, and a
             // strong manager would pin the kernel past the last manager's drop.
             let inner = Arc::downgrade(&self.inner);
             let weak_exec = Arc::downgrade(&execution);
             tokio::spawn(async move {
-                signal.cancelled().await;
+                let timed_out_after_ms = tokio::select! {
+                    () = async {
+                        match &signal {
+                            Some(signal) => signal.cancelled().await,
+                            None => std::future::pending().await,
+                        }
+                    } => None,
+                    () = async {
+                        match cell_timeout_ms {
+                            Some(ms) => tokio::time::sleep(Duration::from_millis(ms)).await,
+                            None => std::future::pending().await,
+                        }
+                    } => cell_timeout_ms,
+                };
                 let Some(execution) = weak_exec.upgrade() else {
                     return;
                 };
                 let Some(inner) = inner.upgrade() else {
                     return;
                 };
+                if timed_out_after_ms.is_some() {
+                    lock(&execution.buffers).timed_out_after_ms = timed_out_after_ms;
+                }
                 // A blocked request write holds the stdin mutex. Do not let an
                 // interrupt queued behind it postpone the force-abort forever.
                 // Dropping the interrupt at this deadline cannot tear its
@@ -376,9 +396,6 @@ impl ReplKernelManager {
             (send_task, stdin_retire)
         };
 
-        // The cell's own window starts as its frame goes on the wire: boot and
-        // queue wait are excluded so a cold kernel cannot trip the watchdog.
-        *lock(&execution.cell_started) = Some(Instant::now());
         let mut settled_result: Option<anyhow::Result<InternalExecuteResult>> = None;
         let send_outcome: anyhow::Result<()> = {
             let send_promise = &mut send_task;

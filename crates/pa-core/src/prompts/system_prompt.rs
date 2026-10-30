@@ -310,6 +310,10 @@ fn session_role_section(options: &BuildSystemPromptOptions, has_ipython: bool) -
             "`await bash(cmd)` waits at most 1 second. If the command is still running, it returns a snapshot: `r.running` is True, `r.exit_code` is None, `r.output` is the output so far, and `r.handle` is the live handle. A completed result has `r.running` False and an integer `r.exit_code`. The command keeps running after a snapshot; end the turn and collect the final result on the `[bash-done]` notification."
                 .to_string(),
         );
+        lines.push(
+            "Do not run long blocking work in a cell; start long Python work as an asyncio task and check on it in later cells."
+                .to_string(),
+        );
     } else {
         lines.push(
             "This session has no Python REPL (`python_repl` tool): the programmatic tools described above are unavailable here."

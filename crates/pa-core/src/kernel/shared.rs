@@ -211,6 +211,9 @@ pub struct ExecuteResult {
     pub status: ExecuteStatus,
     pub error: Option<KernelError>,
     pub duration_ms: u64,
+    /// The [`ExecuteOptions::cell_timeout_ms`] limit that interrupted this
+    /// cell; `None` when the cell settled on its own or was aborted.
+    pub timed_out_after_ms: Option<u64>,
 }
 
 /// Options for one `execute` call.
@@ -228,13 +231,12 @@ pub struct ExecuteOptions {
     pub internal: bool,
     /// The protocol repair's own request; exempt from waiting on the repair it belongs to.
     pub protocol_repair: bool,
-    /// Per-cell watchdog budget in milliseconds. When non-zero, a cell whose own
-    /// run (request on the wire -> done event) outlives the budget still settles
-    /// ok and keeps its own result; a teaching note is appended to its stderr
-    /// instead of a quiet over-budget success. The kernel is never killed: the
-    /// note lands only after the cell settles, so the serial execution queue and
-    /// the namespace are untouched. `None` and zero disable the watchdog; the
-    /// runtime bootstrap never arms it.
+    /// Per-cell time limit in milliseconds, measured from the request going on
+    /// the wire (queue wait and kernel boot excluded). A cell that outlives it
+    /// is interrupted exactly like an aborted one (interrupt, then force-abort
+    /// after the grace window), and its result carries
+    /// [`ExecuteResult::timed_out_after_ms`]. `None` and zero disable it; the
+    /// runtime bootstrap and state ops never arm it.
     pub cell_timeout_ms: Option<u64>,
 }
 

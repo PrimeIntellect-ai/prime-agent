@@ -18,6 +18,10 @@
           "code": {
             "type": "string",
             "description": "Python code to execute in the persistent Python REPL. Use the target project's own environment for project imports, tests, scripts, CLIs, and dependency checks instead of direct kernel imports."
+          },
+          "timeout": {
+            "type": "integer",
+            "description": "Seconds before this cell is interrupted (default 60 unless the user configured otherwise, max 180)."
           }
         }
       }
