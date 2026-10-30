@@ -274,31 +274,6 @@ fn sender_parent_edge_is(
     false
 }
 
-/// Whether a delivery's sender is THIS session's parent: the sender's
-/// live or persisted identity matches the durable parent edge this
-/// session recorded at its create (the endpoint carries no session file
-/// of its own, so the ids decide).
-fn sender_is_parent_of(sender: &Value, core: &SessionCore) -> bool {
-    let sender_id = |key: &str| {
-        sender
-            .get(key)
-            .and_then(Value::as_str)
-            .filter(|value| !value.is_empty())
-    };
-    for (key, edge) in [
-        ("activeSessionId", core.parent_active_session_id.as_deref()),
-        ("sessionId", core.parent_session_id.as_deref()),
-    ] {
-        if edge
-            .filter(|value| !value.is_empty())
-            .is_some_and(|parent| sender_id(key) == Some(parent))
-        {
-            return true;
-        }
-    }
-    false
-}
-
 impl Worker {
     /// Build the worker: core, engine, and the sink/hook wiring between them.
     ///

@@ -2,8 +2,8 @@
 //! operations, and agent-message delivery.
 use super::{
     enqueue_priority, json, oneshot, parse_custom_message, parse_prompt_images, response_success,
-    sender_is_child_of, sender_is_parent_of, AgentFamilyRelationship, AgentMessagePromptPayload,
-    Lane, QueueCheckpoint, QueuePriority, QueuedItem, TurnPolicy, Worker, AGENT_MESSAGE_SOURCE,
+    sender_is_child_of, AgentFamilyRelationship, AgentMessagePromptPayload, Lane, QueueCheckpoint,
+    QueuePriority, QueuedItem, TurnPolicy, Worker, AGENT_MESSAGE_SOURCE,
     DEFAULT_AGENT_MESSAGE_MAX_PENDING_PER_SESSION, QUEUED_INPUT_SUSPENDED,
 };
 
@@ -293,61 +293,16 @@ impl Worker {
             .find_map(|key| sender.get(*key).and_then(Value::as_str))
             .unwrap_or("unknown")
             .to_string();
-        // The sender's family edge derives from the durable edges alone,
-        // never the runtime kind. The child edge labels every delivery
-        // (only this session's children carry the `child:` prefix; every
-        // other edge renders by name), while the parent edge resolves
-        // only for engines that route decision events — the decision
-        // engine alone reads it, and only as `Parent`.
-        let (from_relationship, sender_relationship) = {
+        // The relationship label derives from the sender's durable parent edge,
+        // never the runtime kind alone: a subagent spawned by a DIFFERENT parent
+        // is not this session's child.
+        let from_relationship = {
             let core = self
                 .core
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            (
-                sender_is_child_of(&sender, &core).then_some(AgentFamilyRelationship::Child),
-                (self.engine.routes_decision_events() && sender_is_parent_of(&sender, &core))
-                    .then_some(AgentFamilyRelationship::Parent),
-            )
+            sender_is_child_of(&sender, &core).then_some(AgentFamilyRelationship::Child)
         };
-        // The Decision API routing seam: a tagged decision message the
-        // engine consumes starts no turn (the parent's `decision_api.goal`
-        // messages land in the decision child's goal input). The engine
-        // authorizes the sender by the resolved edge, so a sibling's or an
-        // unaffiliated sender's goal tags route as ordinary messages
-        // instead of into the goal input.
-        if self
-            .engine
-            .route_decision_api_event(sender_relationship, &sender_name, message)
-        {
-            let (core, inputs) = self.summary_inputs();
-            let summary = self.summary_locked(&core, inputs);
-            let mut target = json!({
-                "activeSessionId": summary.active_session_id.clone().unwrap_or_default(),
-                "sessionId": summary.session_id,
-                "runtimeKind": summary
-                    .runtime_kind
-                    .clone()
-                    .unwrap_or_else(|| "top-level".to_string()),
-            });
-            if let Some(name) = summary.session_name.filter(|name| !name.is_empty()) {
-                target["sessionName"] = json!(name);
-            }
-            return response_success(
-                None,
-                "worker_deliver_message",
-                Some(json!({
-                    "id": pa_core::session_engine::agent_messaging::create_agent_session_message_id(),
-                    "source": AGENT_MESSAGE_SOURCE,
-                    "target": target,
-                    "from": sender,
-                    "message": message,
-                    "deliveryMode": "steer",
-                    "deliveryStatus": "delivered",
-                    "deliveredAt": crate::util::now_iso(),
-                })),
-            );
-        }
         let prompt = pa_core::session_engine::agent_messaging::create_agent_session_message_prompt(
             &AgentMessagePromptPayload {
                 message: message.to_string(),
