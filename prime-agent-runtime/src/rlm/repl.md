@@ -76,7 +76,10 @@ runtime keeps serving. Closing stdin is equivalent to `shutdown`.
 - `{"event":"done","id":str,"status":"ok"|"error"}` — exactly one per id'd
   request, always after all of that request's other events. A snapshot `done`
   adds `saved`, `skipped`, `pruned`, `bytes`; a restore `done` adds `restored`,
-  `failed`; a `list_names` `done` adds `names`; a failed snapshot/restore adds
+  `failed`; a `list_names` `done` adds `names`; an execute `done` adds
+  `user_tasks`, the count of live asyncio tasks the cell left running (the
+  runtime's own excluded; the host keeps the kernel resident while it is
+  non-zero); a failed snapshot/restore adds
   `reason`. Bash activity `done` carries `activities` (list), `tail` (tail),
   or `killed` (kill); `status:"error"` with `reason` on unknown IDs.
   The daemon advertises `kernel_bash_activity`; clients poll `list_kernel_bash`

@@ -322,12 +322,12 @@ fn can_passivate_worker_mirrors_the_release_gates_and_adds_the_registry_rule() {
     assert!(engine
         .runtime
         .block_on(crate::engine::SessionEngine::can_passivate_worker(&*engine)));
-    // A live background bash handle blocks the passivation, and the release consumes
-    // the same gate: the probe never fires while a handle runs.
+    // Live kernel background work blocks the passivation, and the release consumes
+    // the same gate: the probe never fires while that work runs.
     *engine
-        .background_bash_probe
+        .background_work_probe
         .lock()
-        .expect("background bash probe lock") = Some(std::sync::Arc::new(|| true));
+        .expect("background work probe lock") = Some(std::sync::Arc::new(|| true));
     assert!(!engine
         .runtime
         .block_on(crate::engine::SessionEngine::can_passivate_worker(&*engine)));
@@ -338,9 +338,9 @@ fn can_passivate_worker_mirrors_the_release_gates_and_adds_the_registry_rule() {
         ));
     assert_eq!(fired.load(std::sync::atomic::Ordering::SeqCst), 0);
     *engine
-        .background_bash_probe
+        .background_work_probe
         .lock()
-        .expect("background bash probe lock") = None;
+        .expect("background work probe lock") = None;
     *engine
         .registered_jobs_probe
         .lock()

@@ -687,12 +687,30 @@ async def _handle_execute(req: dict[str, Any], ns: dict[str, Any]) -> None:
             _send({"event": "result", "id": cell_id, "text": result_text})
         if error is not None:
             _send(error)
-        _send({"event": "done", "id": cell_id, "status": status})
+        _send({"event": "done", "id": cell_id, "status": status, "user_tasks": _user_task_count()})
     finally:
         execution.owner = None
         execution.finished.set()
         _current_cell_execution.reset(execution_token)
         _current_cell.reset(cell_token)
+
+
+# Packages whose tasks the runtime starts itself (bash completion notices, MCP sessions). anyio
+# task-group children never outlive the task that opened their group, so that task decides.
+_RUNTIME_TASK_PACKAGES = frozenset({"rlm", "mcp", "anyio"})
+
+
+def _user_task_count() -> int:
+    """Live asyncio tasks a cell left running: the host keeps the kernel resident while any remain."""
+    count = 0
+    for task in asyncio.all_tasks(_loop):
+        if task is _serve_task or task in _mcp_status_tasks:
+            continue
+        frame = getattr(task.get_coro(), "cr_frame", None)
+        module = frame.f_globals.get("__name__", "") if frame is not None else ""
+        if module.partition(".")[0] not in _RUNTIME_TASK_PACKAGES:
+            count += 1
+    return count
 
 
 def _drain_output() -> None:

@@ -303,6 +303,9 @@ struct Guarded {
     protocol_repair: Option<Arc<RepairHandle>>,
     kernel_stderr: String,
     background_bash_handles: HashMap<String, i32>,
+    /// Live asyncio tasks the last cell left running (the runtime's own excluded), as reported on
+    /// its done frame; refreshed at cell boundaries only.
+    live_user_tasks: u64,
     handled_host_request_ids: (HashSet<String>, VecDeque<String>),
     /// Late agent-message handlers keyed by request id, insertion-ordered with eviction.
     late_handlers: VecDeque<(String, LateSentAgentMessageCallback)>,
@@ -447,6 +450,7 @@ impl ReplKernelManager {
                 protocol_repair: None,
                 kernel_stderr: String::new(),
                 background_bash_handles: HashMap::new(),
+                live_user_tasks: 0,
                 handled_host_request_ids: (HashSet::new(), VecDeque::new()),
                 late_handlers: VecDeque::new(),
                 pending_done_waiters: HashMap::new(),
@@ -477,8 +481,18 @@ impl ReplKernelManager {
         self.inner.options.session_id.as_deref()
     }
 
+    /// Work that dies with the kernel: live background `bash()` handles or asyncio tasks a cell
+    /// left running. Keeps the kernel resident at park and idle passivation.
     #[must_use]
     pub fn has_background_work(&self) -> bool {
+        let g = lock(&self.inner.guarded);
+        !g.background_bash_handles.is_empty() || g.live_user_tasks > 0
+    }
+
+    /// Live background `bash()` handles only: their completion notice is the wake-up a held
+    /// continuation waits for (an asyncio task has none, so it must never hold one).
+    #[must_use]
+    pub fn has_background_bash(&self) -> bool {
         !lock(&self.inner.guarded).background_bash_handles.is_empty()
     }
 
