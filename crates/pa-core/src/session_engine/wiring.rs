@@ -109,16 +109,18 @@ impl AgentSession {
 
     /// Record one billed model call made outside the agent loop. A failed
     /// append is logged; the call's result stands either way. Once handed
-    /// off, the append survives cancellation of this caller.
+    /// off, the append survives cancellation of this caller, and it lands
+    /// only in this session.
     pub async fn record_model_usage(&self, usage: Option<model_usage::ModelUsage>) {
         let Some(usage) = usage else {
             return;
         };
+        let session_id = self.session_id().await;
         let store = std::sync::Arc::clone(&self.usage_store);
         // The task owns the resolved bill before the first await. Dropping
         // its JoinHandle detaches the append instead of dropping the bill.
         let recording = tokio::spawn(async move {
-            if let Err(error) = store.append_model_usage(usage).await {
+            if let Err(error) = store.append_model_usage(session_id, usage).await {
                 eprintln!("pa-core: model usage row not persisted: {error}");
             }
         });

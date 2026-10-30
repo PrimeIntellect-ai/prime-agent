@@ -89,8 +89,14 @@ pub trait RlmChildUsageStore: Send + Sync {
         origin: Option<ChildUsageOrigin>,
     ) -> RlmChildUsageFuture<'_, std::io::Result<ChildUsageAppendResult>>;
 
-    fn append_model_usage(&self, usage: ModelUsage)
-        -> RlmChildUsageFuture<'_, std::io::Result<()>>;
+    /// Append one [`ModelUsage`] row to the transcript of `session_id`, the
+    /// session the bill was made in. A store that has since moved to another
+    /// session refuses the row instead of charging the replacement.
+    fn append_model_usage(
+        &self,
+        session_id: String,
+        usage: ModelUsage,
+    ) -> RlmChildUsageFuture<'_, std::io::Result<()>>;
 }
 
 pub(crate) struct SessionUsageStore(pub(crate) std::sync::Arc<tokio::sync::Mutex<SessionManager>>);
@@ -154,8 +160,10 @@ impl RlmChildUsageStore for SessionUsageStore {
         })
     }
 
+    /// The wrapped manager stays on one session for the store's lifetime.
     fn append_model_usage(
         &self,
+        _session_id: String,
         usage: ModelUsage,
     ) -> RlmChildUsageFuture<'_, std::io::Result<()>> {
         let session = std::sync::Arc::clone(&self.0);
@@ -917,9 +925,10 @@ mod tests {
 
         fn append_model_usage(
             &self,
+            session_id: String,
             usage: ModelUsage,
         ) -> RlmChildUsageFuture<'_, std::io::Result<()>> {
-            self.store.append_model_usage(usage)
+            self.store.append_model_usage(session_id, usage)
         }
     }
 
@@ -1006,9 +1015,10 @@ mod tests {
 
         fn append_model_usage(
             &self,
+            session_id: String,
             usage: ModelUsage,
         ) -> RlmChildUsageFuture<'_, std::io::Result<()>> {
-            self.store.append_model_usage(usage)
+            self.store.append_model_usage(session_id, usage)
         }
     }
 
