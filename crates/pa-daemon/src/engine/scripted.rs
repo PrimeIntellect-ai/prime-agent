@@ -304,10 +304,19 @@ impl SessionEngine for ScriptedEngine {
             emit(cancelled());
             return;
         }
-        // The batched co-delivery rows: one accepted user row per batched
-        // message, in delivery order — images ride after the text.
+        // The batched co-delivery rows, in delivery order: a notification's
+        // custom row as itself, otherwise one accepted user row per batched
+        // message — images ride after the text.
         let mut batch_rows = Vec::new();
         for row in &request.batch {
+            if let Some(custom) = &row.custom_message {
+                batch_rows.push(custom.clone());
+                if !emit(EngineEvent::CustomMessage(custom.clone())) {
+                    emit(cancelled());
+                    return;
+                }
+                continue;
+            }
             let mut content = vec![json!({ "type": "text", "text": row.text })];
             for image in &row.images {
                 let mut block = match serde_json::to_value(image) {

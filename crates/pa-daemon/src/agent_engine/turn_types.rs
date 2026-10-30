@@ -39,10 +39,10 @@ pub(crate) enum TurnPrompt {
         images: Vec<pa_agent::types::ImageContent>,
         batch: Vec<crate::engine::PromptBatchRow>,
     },
-    /// An injected custom row (goal continuations, RLM child terminal
-    /// notices): the admission carries the row itself, so the transcript
+    /// Injected custom rows (goal continuations, a notification run): the
+    /// admission carries the rows themselves, in order, so the transcript
     /// holds one representation.
-    Injected(pa_types::session::CustomMessage),
+    Injected(Vec<pa_types::session::CustomMessage>),
 }
 
 /// What the turn-boundary consumption did to the run.

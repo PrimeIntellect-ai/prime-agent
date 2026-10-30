@@ -2,10 +2,10 @@
 //! engine, and settles the result.
 use super::{
     checkpoint_queue_recovery, compact_action_label, create_daemon_event_meta,
-    emit_refinement_event_for_session, emit_refinement_row, gather_delivery_batch, json, oneshot,
+    emit_refinement_event_for_session, emit_refinement_row, gather_delivery, json, oneshot,
     session_snapshot, AssistantSnapshot, DaemonOutbound, EngineEvent, EventPump, Lane, Map, Notify,
-    OutboundFrame, PromptRequest, QueueCheckpoint, QueuedItem, Result, SessionActionSnapshot,
-    SessionCore, SessionEngine, TurnSettle, Value, WorkerRecoveryJournal,
+    OutboundFrame, PromptRequest, QueueCheckpoint, QueuedItem, Result, RunBoundary,
+    SessionActionSnapshot, SessionCore, SessionEngine, TurnSettle, Value, WorkerRecoveryJournal,
     ABORTED_TURN_SETTLE_ERROR,
 };
 
@@ -43,6 +43,8 @@ pub(super) struct PassivationContext {
 
 impl TurnRunner {
     pub(super) async fn run(self) {
+        // No run precedes the first pickup.
+        let mut boundary = RunBoundary::RunEnd;
         loop {
             let engine = self.engine.clone();
             let item: Option<(Lane, Vec<QueuedItem>)> = {
@@ -56,34 +58,24 @@ impl TurnRunner {
                 }
                 // A cleared suspension alone must not admit: a manual
                 // compaction is a busy state the resume sites do NOT clear.
-                if self.input_pauses.paused() || core.queued_input_suspended || core.compacting {
+                if self.input_pauses.paused()
+                    || core.queued_input_suspended
+                    || core.compacting
+                    || (core.steering.is_empty() && core.follow_up.is_empty())
+                {
                     core.busy = false;
                     None
-                } else if core.steering.front().is_some() {
-                    let items = gather_delivery_batch(&mut core, Lane::Steering);
-                    core.running_admission_ids = items
-                        .iter()
-                        .filter_map(|item| item.admission_id.clone())
-                        .collect();
-                    core.busy = true;
-                    core.abort_requested = false;
-                    core.retry_abort_requested = false;
-                    core.running_tool_calls.clear();
-                    Some((Lane::Steering, items))
-                } else if core.follow_up.front().is_some() {
-                    let items = gather_delivery_batch(&mut core, Lane::FollowUp);
-                    core.running_admission_ids = items
-                        .iter()
-                        .filter_map(|item| item.admission_id.clone())
-                        .collect();
-                    core.busy = true;
-                    core.abort_requested = false;
-                    core.retry_abort_requested = false;
-                    core.running_tool_calls.clear();
-                    Some((Lane::FollowUp, items))
                 } else {
-                    core.busy = false;
-                    None
+                    let (lane, items) = gather_delivery(&mut core, boundary);
+                    core.running_admission_ids = items
+                        .iter()
+                        .filter_map(|item| item.admission_id.clone())
+                        .collect();
+                    core.busy = true;
+                    core.abort_requested = false;
+                    core.retry_abort_requested = false;
+                    core.running_tool_calls.clear();
+                    Some((lane, items))
                 }
             };
             if let Some((lane, items)) = item {
@@ -109,8 +101,9 @@ impl TurnRunner {
                     let _ = self.emit_action_update(&snapshot);
                 }
                 self.push_roster_delta();
-                self.run_turn(engine, lane, items).await;
+                boundary = self.run_turn(engine, lane, items).await;
             } else {
+                boundary = RunBoundary::RunEnd;
                 self.idle_notify.notify_waiters();
                 // Every park re-stamps the activity end: the idle-eviction
                 // window measures from the TRUE last activity.
@@ -308,15 +301,16 @@ impl TurnRunner {
     }
 
     /// One delivery: the first item anchors the turn and the rest ride
-    /// as co-delivered user rows of the same run.
+    /// as co-delivered rows of the same run (user rows, or the custom rows
+    /// of a notification run). Returns how the run stopped.
     pub(super) async fn run_turn(
         &self,
         engine: std::sync::Arc<dyn SessionEngine>,
         lane: Lane,
         mut items: Vec<QueuedItem>,
-    ) {
+    ) -> RunBoundary {
         let Some((first, batched)) = items.split_first() else {
-            return;
+            return RunBoundary::RunEnd;
         };
         self.emit_turn_event(json!({ "type": "agent_start" }));
         self.emit_turn_event(json!({ "type": "turn_start" }));
@@ -337,6 +331,7 @@ impl TurnRunner {
                 .map(|item| crate::engine::PromptBatchRow {
                     text: item.message.clone(),
                     images: item.images.clone(),
+                    custom_message: item.custom_message.clone(),
                 })
                 .collect(),
             message: first.message.clone(),
@@ -434,6 +429,9 @@ impl TurnRunner {
             // The engine's own terminal `turn_end` frame keeps the
             // trailing `Done` fallback silent.
             let mut engine_turn_ended = false;
+            // Whether the run's last turn executed tool calls: a completed
+            // run that stops there was cut before its next model call.
+            let mut ends_on_tool_results = false;
             // The picked batch's accepted rows (primary, then one per
             // batched item) that passed the abort gate and persisted.
             let mut accepted_rows = 0usize;
@@ -451,8 +449,9 @@ impl TurnRunner {
                 // TS still broadcasts for an interrupted turn: aborted row/tool settle
                 // frames and the trailing `Done` (a dropped Done hung `prompt_and_wait`
                 // forever).
-                if matches!(event, EngineEvent::TurnEnd { .. }) {
+                if let EngineEvent::TurnEnd { tool_results, .. } = &event {
                     engine_turn_ended = true;
+                    ends_on_tool_results = !tool_results.is_empty();
                 }
                 if matches!(event, EngineEvent::AgentEnd { .. }) {
                     engine_agent_end_seen.store(true, std::sync::atomic::Ordering::SeqCst);
@@ -1062,8 +1061,9 @@ impl TurnRunner {
                 engine.set_prompt_context_boundary(prompt_context_leaf);
             }
             engine.run_prompt(prompt_index, request, &aborted_probe, &mut emit);
+            ends_on_tool_results
         });
-        let _ = turn.await;
+        let ends_on_tool_results = turn.await.unwrap_or(false);
         let accepted_rows = accepted_prefix.load(std::sync::atomic::Ordering::SeqCst);
         // The emit path is joined: a stale parked partial must not
         // surface after the settle events.
@@ -1075,7 +1075,9 @@ impl TurnRunner {
             let mut core = self.core.lock().unwrap();
             // A shutdown never loses admitted input: the batch items whose
             // transcript row never persisted exist nowhere else, so they
-            // return to the front of their lane, in order.
+            // return to the front of the delivery's lane, in order (a
+            // carried follow-up notification run stays with the steering
+            // run it joined; the next pickup delivers them together again).
             if core.shutdown_requested && !core.turn_cancelled {
                 let lane_items = match lane {
                     Lane::Steering => &mut core.steering,
@@ -1176,6 +1178,13 @@ impl TurnRunner {
         // The turn is fully unwound: the waiting prompt now resolves, so
         // a client's next request always observes the idle session.
         let settled_outcome = turn_outcome.lock().unwrap().take();
+        // An aborted or failed run ended; only a completed one can be a cut.
+        let boundary =
+            if ends_on_tool_results && matches!(settled_outcome, Some(TurnSettle::Completed)) {
+                RunBoundary::MidRun
+            } else {
+                RunBoundary::RunEnd
+            };
         if let Some(result) = settled_outcome {
             for done in items_done {
                 let _ = done.send(result.clone());
@@ -1255,6 +1264,7 @@ impl TurnRunner {
                 }
             });
         }
+        boundary
     }
 
     /// The post-turn queue projection: an unchanged snapshot stays

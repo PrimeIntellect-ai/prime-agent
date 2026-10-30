@@ -194,7 +194,7 @@ async fn run_session_command(
     if let Some(continuation) = execution.continuation_message {
         engine
             .session
-            .prompt_injected_message(&continuation)
+            .prompt_injected_message(std::slice::from_ref(&continuation))
             .await
             .map_err(|error| format!("{error:#}"))?;
         engine.session.agent().wait_for_idle().await;

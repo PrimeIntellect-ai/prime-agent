@@ -381,9 +381,9 @@ impl AgentSessionEngine {
                             .await
                             .map(|_| ())
                     }
-                    TurnPrompt::Injected(message) => engine
+                    TurnPrompt::Injected(rows) => engine
                         .session
-                        .prompt_injected_message(message)
+                        .prompt_injected_message(rows)
                         .await
                         .map(|_| ()),
                 }

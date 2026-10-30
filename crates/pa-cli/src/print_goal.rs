@@ -609,7 +609,7 @@ impl PrintGoalSurface {
             .await?;
         engine
             .session
-            .prompt_injected_message(message)
+            .prompt_injected_message(std::slice::from_ref(message))
             .await
             .map_err(|error| format!("{error:#}"))?;
         engine.session.agent().wait_for_idle().await;
@@ -652,7 +652,7 @@ impl PrintGoalSurface {
             .await?;
         engine
             .session
-            .prompt_injected_message(message)
+            .prompt_injected_message(std::slice::from_ref(message))
             .await
             .map_err(|error| format!("{error:#}"))?;
         engine.session.agent().wait_for_idle().await;

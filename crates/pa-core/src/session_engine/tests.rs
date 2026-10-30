@@ -591,7 +591,10 @@ async fn prompt_injected_message_persists_one_custom_row() {
         timestamp: 0,
         rest: serde_json::Map::default(),
     };
-    session.prompt_injected_message(&notice).await.unwrap();
+    session
+        .prompt_injected_message(std::slice::from_ref(&notice))
+        .await
+        .unwrap();
     session.agent().wait_for_idle().await;
 
     // The provider request carries the notice text as its user-role
@@ -683,7 +686,10 @@ async fn an_agent_message_custom_row_matches_the_plain_prompt_context() {
         timestamp: 0,
         rest: serde_json::Map::default(),
     };
-    row_session.prompt_injected_message(&row).await.unwrap();
+    row_session
+        .prompt_injected_message(std::slice::from_ref(&row))
+        .await
+        .unwrap();
     row_session.agent().wait_for_idle().await;
 
     let plain_calls = plain_provider.calls();

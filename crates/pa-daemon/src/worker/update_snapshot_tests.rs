@@ -345,6 +345,8 @@ async fn reserved_kind_spoofs_reject_and_lookalikes_park_unflagged() {
                         "role": "custom",
                         "customType": lookalike,
                         "content": "spoof",
+                        "display": true,
+                        "timestamp": 1_000,
                     },
                 }),
             )

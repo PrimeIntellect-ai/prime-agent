@@ -21,6 +21,17 @@ impl Lane {
     }
 }
 
+/// How the previous run stopped, as the turn runner saw it: the delivery
+/// after a [`RunBoundary::MidRun`] cut leaves the follow-up lane waiting.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RunBoundary {
+    /// The steering probe stopped the run between tool turns.
+    MidRun,
+    /// The run finished on its own, was aborted or failed, or there was no
+    /// run (first pickup, idle wake, worker restart).
+    RunEnd,
+}
+
 /// How long the close paths (`shutdown`, `kill`) wait for aborted side
 /// question runs to queue their terminal cancelled events: headroom, not a gate.
 pub(crate) const SIDE_QUESTION_SETTLE_TIMEOUT: Duration = Duration::from_secs(3);
@@ -165,6 +176,18 @@ pub(crate) struct QueuedItem {
     pub(crate) forced_batch: bool,
 }
 
+impl QueuedItem {
+    /// An automated notification: a queued custom row (bash completion,
+    /// agent message, child notice, heartbeat, goal context) that is neither
+    /// a direct prompt admission nor a session command. Contiguous
+    /// notifications deliver together as one turn; anything else is a boundary.
+    pub(crate) fn is_notification(&self) -> bool {
+        self.custom_message.is_some()
+            && self.policy != TurnPolicy::Direct
+            && crate::session_commands::parse_prompt_session_command(&self.message).is_none()
+    }
+}
+
 /// Parse the wire `images` array: entries without payload data or a
 /// mime type are dropped, not failed — the text still admits.
 pub(crate) fn parse_prompt_images(payload: &Value) -> Vec<pa_agent::types::ImageContent> {
@@ -195,8 +218,10 @@ pub(crate) struct QueueLanes {
 }
 
 /// The wire `customMessage` of a prompt/follow-up command: an injected custom
-/// row that replaces the turn's user row. `Err` rejects loudly — a malformed
-/// notice must not degrade into a plain prompt.
+/// row that replaces the turn's user row. It must parse to the session shape the
+/// delivery persists (`role: "custom"`, `customType`, `content`, `display`,
+/// `timestamp`). `Err` rejects loudly — a malformed notice must not degrade into a
+/// plain prompt, nor fail the notification run it would join.
 pub(crate) fn parse_custom_message(value: Option<&Value>) -> Result<Option<Value>, String> {
     let Some(value) = value else {
         return Ok(None);
@@ -204,21 +229,15 @@ pub(crate) fn parse_custom_message(value: Option<&Value>) -> Result<Option<Value
     if value.is_null() {
         return Ok(None);
     }
-    let invalid = "Invalid customMessage: expected a custom message object with a customType";
-    let Some(object) = value.as_object() else {
-        return Err(invalid.to_string());
-    };
-    if object.get("role").and_then(Value::as_str) != Some("custom") {
-        return Err(invalid.to_string());
+    match serde_json::from_value::<pa_types::session::AgentMessage>(value.clone()) {
+        Ok(pa_types::session::AgentMessage::Custom(custom)) if !custom.custom_type.is_empty() => {
+            Ok(Some(value.clone()))
+        }
+        Ok(_) => Err(
+            "Invalid customMessage: expected a custom message object with a customType".to_string(),
+        ),
+        Err(error) => Err(format!("Invalid customMessage: {error}")),
     }
-    let custom_type = object
-        .get("customType")
-        .and_then(Value::as_str)
-        .filter(|kind| !kind.is_empty());
-    if custom_type.is_none() {
-        return Err(invalid.to_string());
-    }
-    Ok(Some(value.clone()))
 }
 
 /// One queue-lane recovery checkpoint: the verdict and the persisted
@@ -318,10 +337,30 @@ pub(crate) fn queue_lanes(core: &SessionCore) -> QueueLanes {
     }
 }
 
-/// The lane's front item anchors the delivery; under queue mode "all" — or
-/// the forced steering batch — the same-class prefix behind it joins as
-/// co-delivered rows of ONE turn. A non-batchable front delivers solo.
-pub(crate) fn gather_delivery_batch(core: &mut SessionCore, lane: Lane) -> Vec<QueuedItem> {
+/// The next delivery and the lane it anchors in: steering first, then
+/// follow-up. At a run end the follow-up lane is due anyway, so a steering
+/// notification run that empties its lane carries follow-up's leading
+/// notification run into the same delivery. After a mid-run cut the
+/// follow-up lane keeps waiting.
+pub(crate) fn gather_delivery(
+    core: &mut SessionCore,
+    boundary: RunBoundary,
+) -> (Lane, Vec<QueuedItem>) {
+    if core.steering.is_empty() {
+        return (Lane::FollowUp, gather_delivery_batch(core, Lane::FollowUp));
+    }
+    let mut batch = gather_delivery_batch(core, Lane::Steering);
+    if core.steering.is_empty() && batch[0].is_notification() && boundary == RunBoundary::RunEnd {
+        batch.extend(take_notification_run(&mut core.follow_up));
+    }
+    (Lane::Steering, batch)
+}
+
+/// The lane's front item anchors the delivery. A notification front takes
+/// the contiguous notification run behind it; otherwise, under queue mode
+/// "all" — or the forced steering batch — the same-class prefix of plain
+/// rows joins as co-delivered rows of ONE turn. Any other front delivers solo.
+fn gather_delivery_batch(core: &mut SessionCore, lane: Lane) -> Vec<QueuedItem> {
     let (items, mode) = match lane {
         Lane::Steering => (&mut core.steering, core.steering_mode.as_str()),
         Lane::FollowUp => (&mut core.follow_up, core.follow_up_mode.as_str()),
@@ -344,8 +383,10 @@ pub(crate) fn gather_delivery_batch(core: &mut SessionCore, lane: Lane) -> Vec<Q
     {
         core.forced_all_steering = false;
     }
-    if first.custom_message.is_some()
-        || first.policy == TurnPolicy::Direct
+    if first.is_notification() {
+        return take_notification_run(items);
+    }
+    if first.policy == TurnPolicy::Direct
         || crate::session_commands::parse_prompt_session_command(&first.message).is_some()
     {
         batch.push(items.pop_front().expect("front checked"));
@@ -366,6 +407,15 @@ pub(crate) fn gather_delivery_batch(core: &mut SessionCore, lane: Lane) -> Vec<Q
         }
     }
     batch
+}
+
+/// The contiguous notification run at the lane's front, in arrival order.
+fn take_notification_run(items: &mut VecDeque<QueuedItem>) -> Vec<QueuedItem> {
+    let mut run = Vec::new();
+    while items.front().is_some_and(QueuedItem::is_notification) {
+        run.push(items.pop_front().expect("front checked"));
+    }
+    run
 }
 
 /// Queue snapshot restore from the worker recovery journal (crash/respawn

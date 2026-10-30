@@ -19,10 +19,11 @@ impl AgentSession {
         self.prompt_with_images(text, Vec::new(), options).await
     }
 
-    /// Admit an injected custom message as the turn's prompt (TS
+    /// Admit injected custom messages as the turn's prompt (TS
     /// `_promptInjectedMessage`): the loop context and transcript hold ONE
-    /// representation — the custom row itself — while the provider request
-    /// carries its user-role view; never template-expanded or command-parsed.
+    /// representation — the custom rows themselves, in order — while the
+    /// provider request carries their user-role view; never template-expanded
+    /// or command-parsed.
     ///
     /// # Errors
     ///
@@ -30,7 +31,7 @@ impl AgentSession {
     /// agent rejects the prompt.
     pub async fn prompt_injected_message(
         &self,
-        message: &pa_types::session::CustomMessage,
+        messages: &[pa_types::session::CustomMessage],
     ) -> anyhow::Result<PromptOutcome> {
         let state = self.agent.state().await;
         let busy = state.is_streaming;
@@ -44,14 +45,17 @@ impl AgentSession {
             prompt_messages.push(digest_row);
         }
         prompt_messages.extend(self.take_next_turn_rows().await);
-        let custom_row = session_message_to_loop(&SessionAgentMessage::Custom(message.clone()))
-            .ok_or_else(|| anyhow::anyhow!("injected custom message conversion failed"))?;
+        for message in messages {
+            prompt_messages.push(
+                session_message_to_loop(&SessionAgentMessage::Custom(message.clone()))
+                    .ok_or_else(|| anyhow::anyhow!("injected custom message conversion failed"))?,
+            );
+        }
         // The dispatch-time routing fires for every dispatched turn; injected
         // rows do not re-run the route decision (a goal objective start's
         // images ride the row's content and the row runs on the session's
         // model), so a route left by the previous turn clears here.
         self.apply_image_model_routing(&[], &[]).await?;
-        prompt_messages.push(custom_row);
         self.agent
             .prompt(pa_agent::agent::AgentPromptInput::Messages(prompt_messages))
             .await?;

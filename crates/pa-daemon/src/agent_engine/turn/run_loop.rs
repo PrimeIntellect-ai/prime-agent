@@ -78,7 +78,9 @@ impl AgentSessionEngine {
                             pa_core::session_engine::provider_park::QUOTA_RESUME_MARKER_TEXT;
                         let wake_probe = match &prompt {
                             TurnPrompt::User { text, .. } => text == marker,
-                            TurnPrompt::Injected(row) => row.content.text() == marker,
+                            TurnPrompt::Injected(rows) => {
+                                rows.iter().any(|row| row.content.text() == marker)
+                            }
                         };
                         self.runtime.block_on(self.resume_quota_park(wake_probe));
                     }

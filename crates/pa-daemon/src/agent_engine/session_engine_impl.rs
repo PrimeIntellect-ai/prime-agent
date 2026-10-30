@@ -1370,28 +1370,42 @@ impl SessionEngine for AgentSessionEngine {
                 )) {
                     return;
                 }
-                self.run_turns(TurnPrompt::Injected(message), aborted, &mut emit);
+                self.run_turns(TurnPrompt::Injected(vec![message]), aborted, &mut emit);
             } else {
                 emit(EngineEvent::Done(Ok(())));
             }
             return;
         }
-        // The injected custom row parses to its session shape first: an
-        // unparseable row fails the turn, not double-represents it.
+        // The injected custom rows (the primary plus a notification run's
+        // batched rows) parse to their session shape first: an unparseable
+        // row fails the turn, not double-represents it.
         let injected = match &request.custom_message {
             Some(custom) => {
-                match serde_json::from_value::<pa_types::session::AgentMessage>(custom.clone()) {
-                    Ok(pa_types::session::AgentMessage::Custom(parsed)) => Some(parsed),
-                    Ok(_) => {
-                        emit(EngineEvent::Done(Err(
-                            "injected custom message must carry role \"custom\"".to_string(),
-                        )));
-                        return;
-                    }
+                let rows = std::iter::once(custom)
+                    .chain(
+                        request
+                            .batch
+                            .iter()
+                            .filter_map(|row| row.custom_message.as_ref()),
+                    )
+                    .map(|row| {
+                        match serde_json::from_value::<pa_types::session::AgentMessage>(row.clone())
+                        {
+                            Ok(pa_types::session::AgentMessage::Custom(parsed)) => Ok(parsed),
+                            Ok(_) => {
+                                Err("injected custom message must carry role \"custom\""
+                                    .to_string())
+                            }
+                            Err(error) => {
+                                Err(format!("injected custom message parse failed: {error}"))
+                            }
+                        }
+                    })
+                    .collect::<Result<Vec<_>, String>>();
+                match rows {
+                    Ok(rows) => Some(rows),
                     Err(error) => {
-                        emit(EngineEvent::Done(Err(format!(
-                            "injected custom message parse failed: {error}"
-                        ))));
+                        emit(EngineEvent::Done(Err(error)));
                         return;
                     }
                 }
@@ -1423,9 +1437,16 @@ impl SessionEngine for AgentSessionEngine {
         if !emit(accepted) {
             return;
         }
-        // The batched co-delivery rows: one accepted user row per batched
-        // message, in delivery order, already expanded above.
+        // The batched co-delivery rows, in delivery order: a notification's
+        // custom row as itself, otherwise one accepted user row per batched
+        // message, already expanded above.
         for row in &request.batch {
+            if let Some(custom) = &row.custom_message {
+                if !emit(EngineEvent::CustomMessage(custom.clone())) {
+                    return;
+                }
+                continue;
+            }
             let text = row.text.clone();
             let mut content = vec![json!({ "type": "text", "text": text })];
             for image in &row.images {
@@ -1447,7 +1468,7 @@ impl SessionEngine for AgentSessionEngine {
             }
         }
         let turn_prompt = match injected {
-            Some(custom) => TurnPrompt::Injected(custom),
+            Some(rows) => TurnPrompt::Injected(rows),
             None => TurnPrompt::User {
                 text: request.message.clone(),
                 images: request.images.clone(),
@@ -1461,7 +1482,7 @@ impl SessionEngine for AgentSessionEngine {
             TurnPrompt::User { images, batch, .. } => {
                 !images.is_empty() || batch.iter().any(|row| !row.images.is_empty())
             }
-            TurnPrompt::Injected(message) => Self::custom_message_carries_images(message),
+            TurnPrompt::Injected(rows) => rows.iter().any(Self::custom_message_carries_images),
         };
         if let Err(refusal) = self.arm_image_turn_route(carries_images) {
             emit(EngineEvent::Done(Err(refusal)));
