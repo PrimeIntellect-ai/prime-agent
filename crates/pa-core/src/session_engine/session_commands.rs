@@ -34,6 +34,9 @@ pub struct SessionCommandParams<'a> {
     pub api_key: Option<String>,
     pub global_harness_dir: std::path::PathBuf,
     pub autonomous: &'a mut AutonomousRuntimeState,
+    /// Cancels `/compact`, including its `PreCompact` hook. Hosts pass the
+    /// signal their compaction interrupt routes already abort.
+    pub compaction_abort: Option<pa_agent::abort::AbortSignal>,
 }
 
 /// A completed compaction to persist: the session record plus the
@@ -232,7 +235,12 @@ async fn execute_compact(
     let instructions = (!command.args.is_empty()).then_some(command.args.as_str());
     let outcome = engine
         .session
-        .compact(instructions, params.model, params.api_key.clone(), None)
+        .compact(
+            instructions,
+            params.model,
+            params.api_key.clone(),
+            params.compaction_abort.as_ref(),
+        )
         .await
         .map_err(|error| format!("{error:#}"))?;
     match outcome {
@@ -538,6 +546,7 @@ mod tests {
                 api_key: None,
                 global_harness_dir: std::path::PathBuf::from("/tmp"),
                 autonomous: &mut autonomous,
+                compaction_abort: None,
             },
             &command("autonomous", "on --max-turns 5"),
             &mut execution,

@@ -242,6 +242,14 @@ impl RpcSession {
         }
         let mut adopted_lease = None;
         let mut request = request;
+        let end_reason = match &request {
+            RpcEngineRequest::New { .. } => {
+                pa_core::session_engine::engine::SessionEndReason::Clear
+            }
+            RpcEngineRequest::Open { .. } => {
+                pa_core::session_engine::engine::SessionEndReason::Other
+            }
+        };
         // Retire the pumps spawned against the replaced engine BEFORE the
         // settle: a queued pump waking during the wait sees the moved epoch;
         // the in-flight gate retires a pump KICKED mid-settle.
@@ -352,9 +360,16 @@ impl RpcSession {
         // permit, because it may not be parked yet). Its kick against the
         // retired engine is dropped by the pump's liveness checks.
         let retired_bash_wake = Arc::clone(&handle.bash_wake);
+        let retired_end = handle.engine.session_end_hook();
         *handle = replacement;
         retired_bash_wake.notify_one();
         *self.subscription.lock().await = Some(subscription);
+        // The replaced session's SessionEnd runs after the swap, outside the
+        // handle guard, within its own bounded budget.
+        drop(handle);
+        if let Some(hook) = retired_end {
+            hook(end_reason).await;
+        }
         Ok(())
     }
 

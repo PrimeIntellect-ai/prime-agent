@@ -62,34 +62,6 @@ impl SessionManager {
         Ok(id)
     }
 
-    /// Register exact durable user rows that the worker already accepted while
-    /// the lazy engine built. The current prompt replays them into the agent in
-    /// this order; their `MessageEnd` events must reuse these rows rather than
-    /// append another copy. This is admission identity, never content deduplication.
-    ///
-    /// # Errors
-    /// An ID does not name a retained user row.
-    pub fn replay_admitted_user_rows(&mut self, ids: Vec<String>) -> std::io::Result<()> {
-        for id in &ids {
-            if !matches!(
-                self.retained_entries()
-                    .iter()
-                    .find(|entry| entry.id() == Some(id.as_str())),
-                Some(FileEntry::Message {
-                    message: AgentMessage::User(_),
-                    ..
-                })
-            ) {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::InvalidInput,
-                    format!("admitted user row {id} is absent from the retained transcript"),
-                ));
-            }
-        }
-        self.admitted_user_rows = ids.into();
-        Ok(())
-    }
-
     /// Append a conversation message with the TS `_appendEntry` retained-write
     /// contract: a failed disk write keeps the row in the live index (the loop
     /// already owns it), the error surfacing for logging only.
@@ -97,18 +69,6 @@ impl SessionManager {
         &mut self,
         message: AgentMessage,
     ) -> (String, Option<std::io::Error>) {
-        let admitted = match &message {
-            AgentMessage::User(_) => self.admitted_user_rows.pop_front(),
-            AgentMessage::Assistant(_)
-            | AgentMessage::ToolResult(_)
-            | AgentMessage::BashExecution(_)
-            | AgentMessage::Custom(_)
-            | AgentMessage::BranchSummary(_)
-            | AgentMessage::CompactionSummary(_) => None,
-        };
-        if let Some(id) = admitted {
-            return (id, None);
-        }
         if matches!(message, AgentMessage::Assistant(_)) {
             self.has_assistant_entry = true;
         }

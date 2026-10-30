@@ -33,6 +33,60 @@ fn test_model() -> Model {
     }
 }
 
+#[tokio::test]
+async fn tool_hooks_can_omit_history_while_default_callbacks_keep_it() {
+    use pa_agent::agent_loop::ToolHookContextMode;
+
+    for mode in [ToolHookContextMode::default(), ToolHookContextMode::Omit] {
+        let model = test_model();
+        let provider = Arc::new(ScriptedProvider::new(model.clone()));
+        provider.push_tool_call_turn(
+            None,
+            vec![("call-1", "echo", serde_json::json!({"text": "hi"}))],
+        );
+        provider.push_text_turn("done");
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let before_seen = Arc::clone(&seen);
+        let after_seen = Arc::clone(&seen);
+        let mut options = AgentOptions {
+            initial_state: pa_agent::agent::AgentInitialState {
+                system_prompt: Some("system context".into()),
+                model: Some(model),
+                tools: Some(vec![EchoTool::new("echo")]),
+                ..Default::default()
+            },
+            stream_fn: Some(provider.stream_fn()),
+            before_tool_call: Some(Arc::new(move |context, _| {
+                before_seen.lock().unwrap().push((
+                    context.context.system_prompt,
+                    context.context.messages.len(),
+                    context.context.tools.len(),
+                ));
+                Box::pin(async { Ok(None) })
+            })),
+            after_tool_call: Some(Arc::new(move |context, _| {
+                after_seen.lock().unwrap().push((
+                    context.context.system_prompt,
+                    context.context.messages.len(),
+                    context.context.tools.len(),
+                ));
+                Box::pin(async { Ok(None) })
+            })),
+            ..Default::default()
+        };
+        if mode == ToolHookContextMode::Omit {
+            options.tool_hook_context = mode;
+        }
+        let agent = Agent::new(options);
+        agent.prompt("user prompt").await.unwrap();
+        let expected = match mode {
+            ToolHookContextMode::Full => ("system context".to_string(), 2, 1),
+            ToolHookContextMode::Omit => (String::new(), 0, 0),
+        };
+        assert_eq!(*seen.lock().unwrap(), vec![expected.clone(), expected]);
+    }
+}
+
 /// Echo tool: returns its `text` argument, optionally after a delay and/or
 /// failing; records concurrent executions.
 struct EchoTool {

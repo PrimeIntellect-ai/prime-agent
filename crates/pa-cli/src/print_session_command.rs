@@ -113,6 +113,7 @@ pub(crate) async fn execute_prompt_session_command(
             api_key,
             global_harness_dir,
             autonomous: &mut autonomous,
+            compaction_abort: None,
         };
         execute_session_command(engine, &mut params, command, images).await
     };

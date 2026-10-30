@@ -10,11 +10,12 @@ use crate::types::{
 };
 
 use super::abort::{
-    poll_messages_unless_aborted, race_with_abort, settle_post_turn, PostTurnResult,
+    create_aborted_assistant_message, poll_messages_unless_aborted, race_with_abort,
+    settle_post_turn, PostTurnResult,
 };
 use super::response::stream_assistant_response;
 use super::tools::execute_tool_calls;
-use super::{AgentEventSink, AgentLoopConfig};
+use super::{AgentEventSink, AgentLoopConfig, Continuation};
 
 // Direct port of the TS turn loop.
 #[allow(clippy::too_many_lines)]
@@ -27,9 +28,16 @@ pub(crate) async fn run_loop(
     stream_fn: Option<&StreamFn>,
 ) -> anyhow::Result<()> {
     let mut first_turn = true;
+    let mut stop_hook_active = false;
     let mut last_turn: Option<ShouldStopAfterTurnContext> = None;
-    let mut pending_messages =
-        poll_messages_unless_aborted(config.get_steering_messages.as_ref(), signal).await?;
+    // Submitted batches pass the input gate where they are polled; internal
+    // continuations do not. A rejected batch is dropped and the loop goes on.
+    let mut pending_messages = admit_batch(
+        poll_messages_unless_aborted(config.get_steering_messages.as_ref(), signal).await?,
+        config,
+        signal,
+    )
+    .await?;
 
     macro_rules! should_stop_before_turn {
         () => {
@@ -66,6 +74,68 @@ pub(crate) async fn run_loop(
                     .await?;
                     current_context.messages.push(message.clone());
                     new_messages.push(message);
+                }
+            }
+
+            if let Some(before_model) = &config.before_model {
+                let gate = settle_post_turn(
+                    race_with_abort(
+                        before_model(config.model.clone(), signal.cloned().unwrap_or_default()),
+                        signal,
+                    ),
+                    signal,
+                )
+                .await;
+                match gate {
+                    Ok(PostTurnResult::Completed(rows)) => {
+                        for message in rows {
+                            emit(AgentEvent::MessageStart {
+                                message: message.clone(),
+                            })
+                            .await?;
+                            emit(AgentEvent::MessageEnd {
+                                message: message.clone(),
+                            })
+                            .await?;
+                            current_context.messages.push(message.clone());
+                            new_messages.push(message);
+                        }
+                    }
+                    // Same settlement as an abort during the provider request.
+                    Ok(PostTurnResult::Aborted) => {
+                        let message = create_aborted_assistant_message(config, None);
+                        let message = AgentMessage::from(message);
+                        emit(AgentEvent::MessageStart {
+                            message: message.clone(),
+                        })
+                        .await?;
+                        emit(AgentEvent::MessageEnd {
+                            message: message.clone(),
+                        })
+                        .await?;
+                        current_context.messages.push(message.clone());
+                        new_messages.push(message.clone());
+                        emit(AgentEvent::TurnEnd {
+                            message,
+                            tool_results: Vec::new(),
+                        })
+                        .await?;
+                        emit(AgentEvent::AgentEnd {
+                            messages: new_messages.clone(),
+                        })
+                        .await?;
+                        return Ok(());
+                    }
+                    // A session gate stopped the next model request: the run
+                    // closes without a failure row and the caller gets the reason.
+                    Err(error) if error.downcast_ref::<super::InputRejected>().is_some() => {
+                        emit(AgentEvent::AgentEnd {
+                            messages: new_messages.clone(),
+                        })
+                        .await?;
+                        return Err(error);
+                    }
+                    Err(error) => return Err(error),
                 }
             }
 
@@ -161,7 +231,12 @@ pub(crate) async fn run_loop(
             }
 
             let steering_messages_result = settle_post_turn(
-                poll_messages_unless_aborted(config.get_steering_messages.as_ref(), signal),
+                async {
+                    let polled =
+                        poll_messages_unless_aborted(config.get_steering_messages.as_ref(), signal)
+                            .await?;
+                    admit_batch(polled, config, signal).await
+                },
                 signal,
             )
             .await?;
@@ -192,7 +267,12 @@ pub(crate) async fn run_loop(
             break;
         }
         let follow_up_messages_result = settle_post_turn(
-            poll_messages_unless_aborted(config.get_follow_up_messages.as_ref(), signal),
+            async {
+                let polled =
+                    poll_messages_unless_aborted(config.get_follow_up_messages.as_ref(), signal)
+                        .await?;
+                admit_batch(polled, config, signal).await
+            },
             signal,
         )
         .await?;
@@ -214,18 +294,18 @@ pub(crate) async fn run_loop(
         if should_stop_before_turn!() {
             break;
         }
-        let continuation_messages_result = match last_turn.clone() {
+        let continuation_result = match last_turn.clone() {
             Some(context) => {
-                let continuation_op: crate::BoxFut<'static, anyhow::Result<Vec<AgentMessage>>> =
+                let continuation_op: crate::BoxFut<'static, anyhow::Result<Continuation>> =
                     match config.get_continuation_messages.as_ref() {
                         Some(hook) => hook(context, signal.cloned().unwrap_or_default()),
-                        None => Box::pin(async { Ok(Vec::new()) }),
+                        None => Box::pin(async { Ok(Continuation::NaturalStop) }),
                     };
                 settle_post_turn(race_with_abort(continuation_op, signal), signal).await?
             }
-            None => PostTurnResult::Completed(Vec::new()),
+            None => PostTurnResult::Completed(Continuation::Held),
         };
-        let continuation_messages = match continuation_messages_result {
+        let natural_stop = match continuation_result {
             PostTurnResult::Aborted => {
                 emit(AgentEvent::AgentEnd {
                     messages: new_messages.clone(),
@@ -233,11 +313,79 @@ pub(crate) async fn run_loop(
                 .await?;
                 return Ok(());
             }
-            PostTurnResult::Completed(messages) => messages,
+            PostTurnResult::Completed(Continuation::Messages(messages)) if !messages.is_empty() => {
+                pending_messages = messages;
+                continue;
+            }
+            PostTurnResult::Completed(Continuation::Messages(_) | Continuation::Held) => false,
+            PostTurnResult::Completed(Continuation::NaturalStop) => true,
         };
-        if !continuation_messages.is_empty() {
-            pending_messages = continuation_messages;
-            continue;
+
+        // Only a natural stop reaches the final Stop hook: a held boundary
+        // belongs to the host's own pending work.
+        if let (true, Some(final_stop), Some(context)) =
+            (natural_stop, &config.final_stop, &last_turn)
+        {
+            // Stop commands can run for minutes, so an abort here is a
+            // normal action: it ends the finished run cleanly.
+            let boundary = settle_post_turn(
+                async {
+                    let continuation = race_with_abort(
+                        final_stop(
+                            context.message.clone(),
+                            stop_hook_active,
+                            signal.cloned().unwrap_or_default(),
+                        ),
+                        signal,
+                    )
+                    .await?;
+                    crate::abort::throw_if_aborted_signal(signal)?;
+                    // Commands may take time. Input that arrived meanwhile
+                    // still owns the boundary before a hook continuation.
+                    if should_stop_before_turn!() {
+                        return Ok(StopBoundary::Finish);
+                    }
+                    let mut arrived =
+                        poll_messages_unless_aborted(config.get_steering_messages.as_ref(), signal)
+                            .await?;
+                    if arrived.is_empty() {
+                        arrived = poll_messages_unless_aborted(
+                            config.get_follow_up_messages.as_ref(),
+                            signal,
+                        )
+                        .await?;
+                    }
+                    let arrived = admit_batch(arrived, config, signal).await?;
+                    if !arrived.is_empty() {
+                        return Ok(StopBoundary::Input(arrived));
+                    }
+                    if stop_hook_active || continuation.is_empty() {
+                        return Ok(StopBoundary::Finish);
+                    }
+                    // Hook feedback is a new user submission; autonomous and
+                    // goal continuations above keep their internal provenance.
+                    let continuation = admit_batch(continuation, config, signal).await?;
+                    Ok(if continuation.is_empty() {
+                        StopBoundary::Finish
+                    } else {
+                        StopBoundary::Continuation(continuation)
+                    })
+                },
+                signal,
+            )
+            .await?;
+            match boundary {
+                PostTurnResult::Aborted | PostTurnResult::Completed(StopBoundary::Finish) => {}
+                PostTurnResult::Completed(StopBoundary::Input(messages)) => {
+                    pending_messages = messages;
+                    continue;
+                }
+                PostTurnResult::Completed(StopBoundary::Continuation(messages)) => {
+                    stop_hook_active = true;
+                    pending_messages = messages;
+                    continue;
+                }
+            }
         }
 
         break;
@@ -248,6 +396,54 @@ pub(crate) async fn run_loop(
     })
     .await?;
     Ok(())
+}
+
+/// What the natural-stop boundary decided after the Stop hook.
+enum StopBoundary {
+    Finish,
+    /// Submitted input that arrived while the hook ran.
+    Input(Vec<AgentMessage>),
+    /// Admitted hook feedback for one more turn.
+    Continuation(Vec<AgentMessage>),
+}
+
+/// Pass a submitted batch through the input gate. A vetoed batch is dropped
+/// (the gate already reported it); any other gate error propagates.
+async fn admit_batch(
+    messages: Vec<AgentMessage>,
+    config: &AgentLoopConfig,
+    signal: Option<&AbortSignal>,
+) -> anyhow::Result<Vec<AgentMessage>> {
+    if messages.is_empty() {
+        return Ok(messages);
+    }
+    match before_input_batch(&messages, config, signal).await {
+        Ok(rows) => Ok(messages.into_iter().chain(rows).collect()),
+        Err(error) if error.downcast_ref::<super::InputRejected>().is_some() => Ok(Vec::new()),
+        Err(error) => Err(error),
+    }
+}
+
+/// Run the input gate; returns the rows it admits after the batch.
+pub(crate) async fn before_input_batch(
+    messages: &[AgentMessage],
+    config: &AgentLoopConfig,
+    signal: Option<&AbortSignal>,
+) -> anyhow::Result<Vec<AgentMessage>> {
+    match &config.before_input {
+        Some(before_input) => {
+            race_with_abort(
+                before_input(
+                    messages.to_vec(),
+                    config.model.clone(),
+                    signal.cloned().unwrap_or_default(),
+                ),
+                signal,
+            )
+            .await
+        }
+        None => Ok(Vec::new()),
+    }
 }
 
 pub(crate) fn clone_context(context: &AgentContext) -> AgentContext {

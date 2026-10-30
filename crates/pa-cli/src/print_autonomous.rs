@@ -9,6 +9,7 @@
 use std::sync::Arc;
 
 use pa_agent::agent::Agent;
+use pa_agent::agent_loop::Continuation;
 use pa_agent::types::AgentMessage;
 use pa_core::session_engine::engine::SessionEngine;
 use pa_types::ai::Model;
@@ -33,19 +34,22 @@ pub(crate) fn wire_continuation_hook(
     let weak_autonomous = Arc::downgrade(autonomous);
     let weak_root = root_node.map(Arc::downgrade);
     let model = Arc::new(model.clone());
-    agent.set_continuation_hook(Some(Arc::new(move |context, _signal| {
+    agent.set_continuation_hook(Some(Arc::new(move |context, signal| {
         let weak_engine = weak_engine.clone();
         let weak_goal = weak_goal.clone();
         let weak_autonomous = weak_autonomous.clone();
         let weak_root = weak_root.clone();
         let model = Arc::clone(&model);
         Box::pin(async move {
+            if signal.is_aborted() {
+                return Ok(Continuation::Held);
+            }
             let (Some(engine), Some(goal), Some(autonomous)) = (
                 weak_engine.upgrade(),
                 weak_goal.upgrade(),
                 weak_autonomous.upgrade(),
             ) else {
-                return Ok(Vec::new());
+                return Ok(Continuation::Held);
             };
             // Without the inline-subagent runtime no descendant work
             // exists: both arms mint as before.
@@ -58,7 +62,7 @@ pub(crate) fn wire_continuation_hook(
                 .await
             {
                 NaturalContinuation::QueuedInput | NaturalContinuation::RequestedCompaction => {
-                    Ok(Vec::new())
+                    Ok(Continuation::Held)
                 }
                 NaturalContinuation::ThresholdDue => {
                     // Unsettled inline-subagent work holds the mint (the
@@ -66,37 +70,38 @@ pub(crate) fn wire_continuation_hook(
                     // post-settle drive decides, the boundary still
                     // compacts.
                     if unsettled_rlm_work && autonomous.hold_rlm_continuation().await {
-                        return Ok(Vec::new());
+                        return Ok(Continuation::Held);
                     }
                     // The autonomous continuation the threshold arm owes: the run ends,
                     // the boundary compacts, the driver admits the held turn.
                     if let Some(text) = autonomous.follow_up_text(&context.message).await {
                         autonomous.hold_threshold_continuation(text).await;
                     }
-                    Ok(Vec::new())
+                    Ok(Continuation::Held)
                 }
                 NaturalContinuation::HeldForRlmWork => {
                     // The goal deferral rides the driver's owed flag; the
                     // run ends and the quiescence drive delivers it after
                     // the settle.
-                    Ok(Vec::new())
+                    Ok(Continuation::Held)
                 }
-                NaturalContinuation::GoalRow(row) => Ok(vec![*row]),
+                NaturalContinuation::GoalRow(row) => Ok(Continuation::Messages(vec![*row])),
                 NaturalContinuation::FallThrough => {
-                    // The natural autonomous mint runs as the next turn
-                    // of the same run; while inline-subagent work is
-                    // unsettled only a flag is held (nothing is spent
-                    // pre-settle) and the drive decides after the settle.
+                    // Hold autonomous work until inline descendants settle;
+                    // final Stop must not compete with that boundary owner.
                     if unsettled_rlm_work && autonomous.hold_rlm_continuation().await {
-                        return Ok(Vec::new());
+                        return Ok(Continuation::Held);
                     }
-                    match autonomous.follow_up_text(&context.message).await {
-                        Some(text) => Ok(vec![autonomous_continuation_row(&text)]),
-                        None => Ok(Vec::new()),
-                    }
+                    Ok(match autonomous.follow_up_text(&context.message).await {
+                        Some(text) => {
+                            Continuation::Messages(vec![autonomous_continuation_row(&text)])
+                        }
+                        None if signal.is_aborted() => Continuation::Held,
+                        None => Continuation::NaturalStop,
+                    })
                 }
             }
-        }) as pa_agent::BoxFut<'static, anyhow::Result<Vec<AgentMessage>>>
+        }) as pa_agent::BoxFut<'static, anyhow::Result<Continuation>>
     })));
 }
 

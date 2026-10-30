@@ -231,6 +231,22 @@ pub fn kill_pid(_pid: i32, _signal: Signal) -> bool {
     false
 }
 
+/// Kill only an owned process group, never falling back to its leader PID.
+/// The leader may already have been reaped and its PID reused. Returns true
+/// only when the group signal was delivered; an absent group returns false.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[must_use]
+pub(crate) fn kill_process_group_only(pgid: i32) -> bool {
+    if pgid <= 0 {
+        return false;
+    }
+    nix::sys::signal::killpg(
+        nix::unistd::Pid::from_raw(pgid),
+        nix::sys::signal::Signal::SIGKILL,
+    )
+    .is_ok()
+}
+
 /// Kill a process and all its children: the process group first (`bash()`
 /// children run detached in a new group), then the bare pid as fallback.
 /// Returns true when either signal was delivered (TS `killProcessTree`).

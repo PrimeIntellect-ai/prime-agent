@@ -42,6 +42,9 @@ pub struct RpcState {
     /// The context-rebuilding commands' serialization lane (`compact`,
     /// `refine`): they must not interleave.
     pub session_ops: Arc<tokio::sync::Mutex<()>>,
+    /// Cancels manual compactions (summarizer and `PreCompact` hook): the
+    /// `abort` command and the SIGTERM/SIGHUP exits reach every live one.
+    pub(crate) manual_compaction_cancel: Arc<crate::compaction_cancel::CompactionCancellation>,
 }
 
 impl RpcState {
@@ -214,6 +217,7 @@ pub async fn handle_command(state: &Arc<RpcState>, command: protocol::RpcCommand
         "prompt" => prompt_commands::prompt(state, &payload).await,
         "steer" | "follow_up" => prompt_commands::steer_or_follow_up(state, &payload, name).await,
         "abort" => {
+            state.manual_compaction_cancel.abort();
             state.session.handle().await.engine.session.agent().abort();
             state.pump_suspended.store(true, Ordering::SeqCst);
             Ok(ResponseData::Absent)
@@ -374,6 +378,7 @@ async fn compact(state: &Arc<RpcState>, payload: &Value) -> Result<ResponseData,
         .get("customInstructions")
         .and_then(Value::as_str)
         .map(str::to_string);
+    let operation = state.manual_compaction_cancel.register();
     // The handle guard stays held through the compaction: a replacement
     // cannot dispose the kernel or land a `set_model` mid-compaction.
     let handle = state.session.handle().await;
@@ -404,7 +409,12 @@ async fn compact(state: &Arc<RpcState>, payload: &Value) -> Result<ResponseData,
     state.writer.drain_within(COMPACT_FRAME_FLUSH_BUDGET).await;
     let outcome = engine
         .session
-        .compact(instructions.as_deref(), &model, api_key, None)
+        .compact(
+            instructions.as_deref(),
+            &model,
+            api_key,
+            Some(&operation.signal()),
+        )
         .await;
     state.compacting.fetch_sub(1, Ordering::SeqCst);
     // The parked rows deliver after the rebuild settles, never into its

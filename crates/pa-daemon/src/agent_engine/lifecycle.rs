@@ -492,7 +492,6 @@ impl AgentSessionEngine {
                     .map(pa_core::session::window::WindowedSessionStore::entries)
             })
             .or(shared_branch.as_deref());
-        let mut admitted_user_ids = Vec::new();
         if std::env::var_os("PA_COMPACTION_TRACE").is_some() {
             pa_core::session_engine::compaction_trace::trace(
                 "daemon.lazy_restore_boundary",
@@ -512,26 +511,12 @@ impl AgentSessionEngine {
         let prompt_context = match prompt_context_boundary.as_ref() {
             Some(boundary) => {
                 let mut after_boundary = matches!(boundary, PromptContextBoundary::Empty);
-                if let Some(entries) = entries {
-                    for entry in entries {
-                        if after_boundary {
-                            if let Some(id) = entry.id().filter(|_| {
-                                matches!(
-                                    entry,
-                                    pa_types::session::FileEntry::Message {
-                                        message: pa_types::session::AgentMessage::User(_),
-                                        ..
-                                    }
-                                )
-                            }) {
-                                admitted_user_ids.push(id.to_string());
-                            }
-                        } else if matches!(boundary, PromptContextBoundary::Leaf(leaf)
-                            if entry.id() == Some(leaf.as_str()))
-                        {
-                            after_boundary = true;
-                        }
-                    }
+                if let PromptContextBoundary::Leaf(leaf) = boundary {
+                    after_boundary = entries.is_some_and(|entries| {
+                        entries
+                            .iter()
+                            .any(|entry| entry.id() == Some(leaf.as_str()))
+                    });
                 }
                 match boundary {
                     PromptContextBoundary::Leaf(leaf) => {
@@ -558,7 +543,6 @@ impl AgentSessionEngine {
                 &serde_json::json!({
                     "priorUserRows": prompt_context.as_ref().map(|messages| messages.iter().filter(|message|
                         matches!(message, pa_types::session::AgentMessage::User(_))).count()),
-                    "replayedUserRows": admitted_user_ids.len(),
                 }),
             );
         }
@@ -619,12 +603,6 @@ impl AgentSessionEngine {
         }
         if let Some(entries) = pending_branch {
             built.session.rebuild_branch_context(entries).await?;
-            built
-                .session
-                .shared_persistence()
-                .lock()
-                .await
-                .replay_admitted_user_rows(admitted_user_ids)?;
             if let Some(messages) = prompt_context {
                 built
                     .session
@@ -656,12 +634,6 @@ impl AgentSessionEngine {
             built.session.rebuild_branch_context(entries).await?;
             self.flush_pending_stale_goal_terminal().await;
         }
-        built
-            .session
-            .shared_persistence()
-            .lock()
-            .await
-            .replay_admitted_user_rows(admitted_user_ids)?;
         if let Some(messages) = prompt_context {
             built
                 .session
@@ -670,7 +642,7 @@ impl AgentSessionEngine {
                 .await;
         }
         self.restore_quota_park(built).await;
-        // The walk and replay allocated transient trees several times the
+        // The walk allocated transient trees several times the
         // retained size: release the freed heap.
         pa_types::memory_release::trim_freed_heap();
         self.finish_prompt_context_adoption(prompt_context_boundary.as_ref());
@@ -904,12 +876,24 @@ impl AgentSessionEngine {
         let model = self.session_model()?;
         self.ensure_core_session(&model)?;
         let api_key = self.resolve_request_api_key(&model);
+        // Typed `/compact` takes the compaction abort slot for its run, so
+        // `abort_compaction` and the shutdown/replacement aborts cancel it
+        // (summarizer and PreCompact hook) like an automatic compaction.
+        let controller = (command.name == "compact")
+            .then(|| std::sync::Arc::new(pa_agent::abort::AbortController::new()));
+        if let Some(controller) = &controller {
+            *self
+                .auto_compaction_abort
+                .lock()
+                .expect("auto compaction abort lock") = Some(std::sync::Arc::clone(controller));
+        }
         let mut autonomous = self.autonomous.blocking_lock();
         let mut params = SessionCommandParams {
             model: &model,
             api_key,
             global_harness_dir: self.config.agent_dir.clone(),
             autonomous: &mut autonomous,
+            compaction_abort: controller.as_ref().map(|controller| controller.signal()),
         };
         // The lock covers the clone only: the command below can run a summarizer call, so the
         // mutex must not ride it.
@@ -918,9 +902,13 @@ impl AgentSessionEngine {
             .blocking_lock()
             .clone()
             .expect("session built by ensure_core_session");
-        Ok(self
+        let execution = self
             .runtime
-            .block_on(async { execute_session_command(&core, &mut params, command, images).await }))
+            .block_on(async { execute_session_command(&core, &mut params, command, images).await });
+        if let Some(controller) = &controller {
+            self.clear_auto_compaction_abort(controller);
+        }
+        Ok(execution)
     }
 
     /// The current explicit selection (create-config flags over the

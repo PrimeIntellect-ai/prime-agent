@@ -108,7 +108,34 @@ pub struct SessionEngineConfig {
     pub on_late_sent_agent_message: Option<crate::tools::ipython::LateSentAgentMessageHandler>,
 }
 
+/// Why a session ended, reported as the `SessionEnd` hook's `reason`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SessionEndReason {
+    /// The session was replaced by a fresh one (`new_session`), Codex's `clear`.
+    Clear,
+    /// Every other close: shutdown, kill, passivation, switch, import, fork.
+    Other,
+}
+
+impl SessionEndReason {
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Clear => "clear",
+            Self::Other => "other",
+        }
+    }
+}
+
+/// Cloneable graceful-close work. Hosts copy the handle while selecting their
+/// engine, release all session locks, then await it before exiting or
+/// replacing the runtime. It runs only for a session whose `SessionStart` gate
+/// ran, so every `SessionStart` has one matching `SessionEnd`.
+pub type SessionEndHook =
+    Arc<dyn Fn(SessionEndReason) -> pa_agent::BoxFut<'static, ()> + Send + Sync>;
+
 pub struct SessionEngine {
+    session_end_hook: Option<SessionEndHook>,
     pub session: AgentSession,
     pub skills: Vec<crate::skills::Skill>,
     /// Skill-loading diagnostics; the connection resource snapshot
@@ -212,6 +239,26 @@ pub async fn create_session(mut config: SessionEngineConfig) -> anyhow::Result<S
                     .as_ref()
                     .map(|path| path.display().to_string())
             })
+    };
+    // Construction is inert: configuration and commands are deferred until a
+    // tool boundary. Opening or restoring a session never starts hook work.
+    // Subagents run tool and prompt hooks too, tagged with Codex's
+    // `agent_id`/`agent_type`, so a policy cannot be bypassed via rlm.spawn.
+    let is_subagent = config.rlm_depth.unwrap_or(0) > 0;
+    let tool_hooks = {
+        // Daemon mirrors are in-memory managers with a fresh local id;
+        // the host supplies the durable session identity for its ledger.
+        let session_id = config.semantic_edges.as_ref().map_or_else(
+            || session_manager.get_session_id().to_string(),
+            |identity| identity.session_id.clone(),
+        );
+        Some(super::hooks::ToolHooks::new(
+            cwd.clone(),
+            config.agent_dir.clone(),
+            session_id.clone(),
+            conversation_log.clone(),
+            is_subagent.then_some(session_id),
+        ))
     };
     let (settings, trace_consent) =
         crate::agent_traces::ContinuousTraceUpload::load_settings(&cwd, &config.agent_dir);
@@ -650,6 +697,9 @@ pub async fn create_session(mut config: SessionEngineConfig) -> anyhow::Result<S
     }
     // Session entries cross through the shared wire shape (same conversion
     // the compaction rebuild uses).
+    if let Some(hooks) = &tool_hooks {
+        hooks.lifecycle.mark_resume_from_history(&existing_messages);
+    }
     let initial_messages = if existing_messages.is_empty() {
         None
     } else {
@@ -696,7 +746,39 @@ pub async fn create_session(mut config: SessionEngineConfig) -> anyhow::Result<S
         }
         None => timing_stream_fn,
     };
+    if let Some(hooks) = &tool_hooks {
+        hooks
+            .lifecycle
+            .set_deferred_rows(Arc::clone(&boot_notice_rows));
+    }
     let agent = Agent::new(AgentOptions {
+        before_input: tool_hooks.as_ref().map(|hooks| {
+            let lifecycle = Arc::clone(&hooks.lifecycle);
+            Arc::new(move |users, model: pa_agent::types::Model, signal| {
+                let lifecycle = Arc::clone(&lifecycle);
+                Box::pin(lifecycle.input(users, model.id, signal))
+                    as pa_agent::BoxFut<'static, anyhow::Result<Vec<pa_agent::types::AgentMessage>>>
+            }) as pa_agent::agent_loop::BeforeInputFn
+        }),
+        before_model: tool_hooks.as_ref().map(|hooks| {
+            let lifecycle = Arc::clone(&hooks.lifecycle);
+            Arc::new(move |model: pa_agent::types::Model, signal| {
+                let lifecycle = Arc::clone(&lifecycle);
+                Box::pin(async move { lifecycle.start(&model.id, signal).await })
+                    as pa_agent::BoxFut<'static, anyhow::Result<Vec<pa_agent::types::AgentMessage>>>
+            }) as pa_agent::agent_loop::BeforeModelFn
+        }),
+        final_stop: tool_hooks.as_ref().map(|hooks| {
+            let lifecycle = Arc::clone(&hooks.lifecycle);
+            Arc::new(move |message, active, signal| {
+                let lifecycle = Arc::clone(&lifecycle);
+                Box::pin(async move { lifecycle.stop(message, active, signal).await })
+                    as pa_agent::BoxFut<'static, anyhow::Result<Vec<pa_agent::types::AgentMessage>>>
+            }) as pa_agent::agent_loop::FinalStopFn
+        }),
+        tool_hook_context: pa_agent::agent_loop::ToolHookContextMode::Omit,
+        before_tool_call: tool_hooks.as_ref().map(|hooks| Arc::clone(&hooks.before)),
+        after_tool_call: tool_hooks.as_ref().map(|hooks| Arc::clone(&hooks.after)),
         // Every request in the session carries this identity: providers key prompt caching
         // (`prompt_cache_key`), session headers, and WebSocket/`previous_response_id` reuse on it
         // (TS `sdk.ts` passes `sessionManager.getSessionId()`).
@@ -746,6 +828,28 @@ pub async fn create_session(mut config: SessionEngineConfig) -> anyhow::Result<S
     });
 
     let agent = Arc::new(agent);
+    if let Some(hooks) = &tool_hooks {
+        // Weak: the agent's callbacks own the hook runtime that owns this sink.
+        hooks.runtime.set_on_notice(super::hooks::notice_sink(
+            Arc::downgrade(&agent),
+            Arc::clone(&boot_notice_rows),
+        ));
+        let run_id = Arc::clone(&hooks.run_id);
+        agent
+            .subscribe(move |event, _signal| {
+                // The external turn identity names an admitted Prime run,
+                // shared by all of its tool calls. No provider response id or
+                // tool invocation id is substituted for this boundary.
+                if matches!(event, pa_agent::types::AgentEvent::AgentStart) {
+                    *run_id
+                        .write()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                        uuid::Uuid::new_v4().to_string();
+                }
+                Box::pin(async { Ok(()) })
+            })
+            .await;
+    }
     // The in-process bash-notice sinks bind their agent late: their
     // handlers registered before the agent existed.
     *bash_notice_agent
@@ -785,6 +889,9 @@ pub async fn create_session(mut config: SessionEngineConfig) -> anyhow::Result<S
         &wiring.session,
     )));
     session.set_auto_refine(auto_refine_allowed, auto_refine_gates);
+    session.lifecycle_hooks = tool_hooks
+        .as_ref()
+        .map(|hooks| Arc::clone(&hooks.lifecycle));
     session.set_agent_dir(config.agent_dir.clone());
     // Keep the context descriptor even while disabled, so re-enabling can load it.
     session.harness_digest = Some(digest_context);
@@ -898,6 +1005,14 @@ pub async fn create_session(mut config: SessionEngineConfig) -> anyhow::Result<S
     // telemetry handle (installed once the telemetry composition decided
     // whether this session reports at all).
     if let Some(telemetry) = telemetry.as_ref() {
+        if let Some(hooks) = &tool_hooks {
+            let telemetry = Arc::downgrade(telemetry);
+            hooks.runtime.set_on_execute(Arc::new(move || {
+                if let Some(telemetry) = telemetry.upgrade() {
+                    telemetry.note_feature_outcome("hooks", "initiated", None);
+                }
+            }));
+        }
         session.set_skill_telemetry(telemetry.clone());
         // Same lifetime for the `rlm_child_*` session counters: the
         // producer's flush counts through this handle.
@@ -919,6 +1034,11 @@ pub async fn create_session(mut config: SessionEngineConfig) -> anyhow::Result<S
             allowed_models: factory_allowed_models,
         });
     Ok(SessionEngine {
+        // SessionEnd belongs to the root; a subagent's close is not session end.
+        session_end_hook: tool_hooks
+            .as_ref()
+            .filter(|_| !is_subagent)
+            .map(|hooks| Arc::clone(&hooks.finish)),
         session,
         skills: resources.skills,
         skill_diagnostics: resources.skill_diagnostics,
@@ -938,6 +1058,12 @@ pub async fn create_session(mut config: SessionEngineConfig) -> anyhow::Result<S
 }
 
 impl SessionEngine {
+    /// Snapshot the idempotent graceful-close hook without retaining the engine
+    /// or its session locks. Runtime replacement and kernel revival do not call it.
+    pub fn session_end_hook(&self) -> Option<SessionEndHook> {
+        self.session_end_hook.clone()
+    }
+
     /// After a model switch, the `model.info` handler and the usage
     /// estimate's context window follow the model the session now runs.
     pub fn update_model_facts(&self, model: &pa_types::ai::Model) {

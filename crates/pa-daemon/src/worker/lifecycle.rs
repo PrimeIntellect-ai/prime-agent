@@ -109,6 +109,9 @@ impl Worker {
         if let Some(agent_engine) = &self.agent_engine {
             agent_engine.dispose_kernel().await;
         }
+        self.engine
+            .end_session_hooks(pa_core::session_engine::engine::SessionEndReason::Other)
+            .await;
         self.engine.end_telemetry().await;
         self.release_session_lease();
         // The worker's quit (TS `session_shutdown` reason `quit`): the
@@ -142,7 +145,10 @@ impl Worker {
     /// swapping onto the replacement file: the queued actions cancel, the runs
     /// abort and settle, then the runtime retires and the RLM children close.
     /// Tree moves never run this (the kernel stays warm).
-    pub(crate) async fn teardown_for_replacement(&self) -> anyhow::Result<()> {
+    pub(crate) async fn teardown_for_replacement(
+        &self,
+        reason: pa_core::session_engine::engine::SessionEndReason,
+    ) -> anyhow::Result<()> {
         // Mark the session closed before the children close: the marker keeps
         // settle retries from minting continuations into the retiring session.
         if let Some(agent_engine) = &self.agent_engine {
@@ -156,6 +162,9 @@ impl Worker {
         self.compaction.abort();
         self.tree_navigation.abort();
         self.await_replacement_settled().await;
+        // The replaced session ends here, after its work settled and before
+        // its runtime retires, so its SessionStart has a matching SessionEnd.
+        self.engine.end_session_hooks(reason).await;
         self.engine.teardown_for_replacement().await;
         // A close failure rethrows out of the teardown: the
         // replacement fails with the old runtime already retired.

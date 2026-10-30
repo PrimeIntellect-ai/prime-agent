@@ -663,12 +663,17 @@ impl TurnRunner {
                 }
                 // The `committing`/`running` transitions ride the events that mark the moments.
                 let mut action_frame: Option<SessionActionSnapshot> = None;
+                // A hook diagnostic can land while admission is still pending;
+                // it commits nothing.
                 if !emitting_prefix_rows.get()
                     && !active_committed
-                    && matches!(
-                        event,
-                        EngineEvent::UserMessage(_) | EngineEvent::CustomMessage(_)
-                    )
+                    && (matches!(event, EngineEvent::UserMessage(_))
+                        || matches!(
+                            &event,
+                            EngineEvent::CustomMessage(message)
+                                if message.get("customType").and_then(Value::as_str)
+                                    != Some(pa_core::session_engine::messages::HOOK_NOTICE_CUSTOM_TYPE)
+                        ))
                 {
                     active_committed = true;
                     if let Some(active) = core.active_action.as_mut() {
@@ -1027,8 +1032,9 @@ impl TurnRunner {
                 }
             }
             emitting_prefix_rows.set(false);
-            // Sample the worker-owned leaf in memory before accepted rows
-            // persist. The engine stays lazy and the accepted event stays first.
+            // Sample the worker-owned leaf in memory before the turn runs: the
+            // lazy engine restores context through it. Accepted user rows
+            // persist only after core admission, inside the run.
             let (file_backed, prompt_context_leaf) = {
                 let core = core.lock().unwrap();
                 core.store.as_ref().map_or((false, None), |store| {

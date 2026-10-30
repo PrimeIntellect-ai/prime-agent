@@ -240,11 +240,16 @@ async fn rpc_mode_main(options: &RunOptions) -> Result<i32, String> {
     let mut initial_lease = None;
     let parts = build_headless_engine_parts(options, "rpc", &mut initial_lease).await?;
     if let Some(goal) = &config.initial_goal {
-        parts
+        if let Err(error) = parts
             .engine
             .seed_initial_goal(&goal.objective, goal.token_budget.map(u64::from))
             .await
-            .map_err(|error| format!("{error:#}"))?;
+        {
+            if let Some(hook) = parts.engine.session_end_hook() {
+                hook(pa_core::session_engine::engine::SessionEndReason::Other).await;
+            }
+            return Err(format!("{error:#}"));
+        }
     }
     let factory = rpc_engine_factory(options);
     let mut engine_handle = pa_daemon::rpc::session::RpcEngineHandle::from(parts);
@@ -431,26 +436,30 @@ async fn print_mode_main(
     .await?;
     let engine = std::sync::Arc::new(headless.engine);
     crate::print_rlm::adopt_built_engine(&root_node, &engine, &headless.model).await;
-    // The CLI `--goal` seed: a fresh root branch starts the goal; a resumed
-    // branch keeps its persisted goal. Depth 0 only — the print session is a root.
-    if let Some(goal) = &options.config.initial_goal {
-        engine
-            .seed_initial_goal(&goal.objective, goal.token_budget.map(u64::from))
-            .await
-            .map_err(|error| format!("{error:#}"))?;
+    let result = async {
+        // A resumed branch keeps its persisted goal; only a fresh root seeds it.
+        if let Some(goal) = &options.config.initial_goal {
+            engine
+                .seed_initial_goal(&goal.objective, goal.token_budget.map(u64::from))
+                .await
+                .map_err(|error| format!("{error:#}"))?;
+        }
+        run_prompts_and_emit(
+            &engine,
+            &headless.model,
+            headless.api_key.clone(),
+            options,
+            &root_node,
+        )
+        .await
     }
-    let exit = run_prompts_and_emit(
-        &engine,
-        &headless.model,
-        headless.api_key.clone(),
-        options,
-        &root_node,
-    )
     .await;
-    // No inline descendant outlives the print process: kernels get their
-    // final snapshot, drivers join, runs abort (every exit path).
+    // Settle descendant teardown on every exit before the root's final hook.
     crate::print_rlm::dispose_inline_subagents(&root_node).await;
-    exit
+    if let Some(hook) = engine.session_end_hook() {
+        hook(pa_core::session_engine::engine::SessionEndReason::Other).await;
+    }
+    result
 }
 
 /// One engine build for every headless embedding: the scripted
@@ -1514,6 +1523,34 @@ async fn run_prompts_and_emit(
                 .await,
         );
     }
+    // Hook diagnostics reach a headless user on stderr in both output modes; json
+    // mode also streams the row itself.
+    let hook_notices = engine
+        .session
+        .agent()
+        .subscribe(|event, _signal| {
+            if let pa_agent::types::AgentEvent::MessageEnd {
+                message: pa_agent::types::AgentMessage::Custom(custom),
+            } = &event
+            {
+                if custom
+                    .payload
+                    .get("customType")
+                    .and_then(serde_json::Value::as_str)
+                    == Some(pa_core::session_engine::messages::HOOK_NOTICE_CUSTOM_TYPE)
+                {
+                    if let Some(text) = custom
+                        .payload
+                        .get("content")
+                        .and_then(serde_json::Value::as_str)
+                    {
+                        eprintln!("Warning: {text}");
+                    }
+                }
+            }
+            Box::pin(async { Ok(()) })
+        })
+        .await;
     // The goal continuation surface: wired in every output mode — the loop runs in text mode too,
     // only silently.
     let goal = std::sync::Arc::new(crate::print_goal::PrintGoalSurface::new(json_mode));
@@ -1642,6 +1679,7 @@ async fn run_prompts_and_emit(
     // exit 1 — no later prompts ran, and the disposal drain still runs.
     if let Some(error) = command_failure {
         eprintln!("{error}");
+        hook_notices.unsubscribe().await;
         goal_accounting.unsubscribe().await;
         accounting.unsubscribe().await;
         if let Some(subscription) = unsubscribe {
@@ -1728,6 +1766,7 @@ async fn run_prompts_and_emit(
         }
         break;
     }
+    hook_notices.unsubscribe().await;
     goal_accounting.unsubscribe().await;
     accounting.unsubscribe().await;
     if let Some(subscription) = unsubscribe {

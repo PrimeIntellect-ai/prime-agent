@@ -64,6 +64,8 @@ pub const REFINEMENT_OUTCOME_CUSTOM_TYPE: &str = "refinement_outcome";
 pub const PROVIDER_RETRY_OUTCOME_CUSTOM_TYPE: &str = "provider_retry_outcome";
 /// Wire twin of `pa_core::prompts::model_prompts::MODEL_PROMPT_ERROR_CUSTOM_TYPE`.
 pub const MODEL_PROMPT_ERROR_CUSTOM_TYPE: &str = "model_prompt_error";
+/// Wire twin of `pa_core::session_engine::messages::HOOK_NOTICE_CUSTOM_TYPE`.
+pub const HOOK_NOTICE_CUSTOM_TYPE: &str = "hook_notice";
 
 /// Which agent-message side a row renders: the received transcript rows, or the
 /// sent/queued ipython cell receipts. The direction word folds into the
@@ -194,7 +196,7 @@ pub fn custom_message_entries(message: &Value) -> Vec<ChatEntry> {
                 },
             }]
         }
-        MODEL_PROMPT_ERROR_CUSTOM_TYPE => vec![ChatEntry::Status {
+        MODEL_PROMPT_ERROR_CUSTOM_TYPE | HOOK_NOTICE_CUSTOM_TYPE => vec![ChatEntry::Status {
             text: content,
             kind: crate::chat::StatusKind::Warning,
         }],

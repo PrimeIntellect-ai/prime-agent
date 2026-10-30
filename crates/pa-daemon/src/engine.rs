@@ -201,6 +201,17 @@ pub trait SessionEngine: Send + Sync {
     /// request always reaches the provider before a child's first turn.
     fn on_turn_done(&self) {}
 
+    /// Run the bounded, advisory end hooks for the live root session. Call only
+    /// after session work settles, without retaining transport or session locks:
+    /// at shutdown/kill and before a whole-session replacement retires the
+    /// runtime. Detachment does not end the session.
+    fn end_session_hooks(
+        &self,
+        _reason: pa_core::session_engine::engine::SessionEndReason,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + '_>> {
+        Box::pin(std::future::ready(()))
+    }
+
     /// Finalize session telemetry at session close: emit `agent session
     /// ended` and flush once. Best-effort: never fail or block shutdown.
     fn end_telemetry(

@@ -38,6 +38,45 @@ pub type TransformContextFn = Arc<
 /// Resolves the system prompt immediately before each LLM call.
 pub type GetSystemPromptFn = Arc<dyn Fn() -> String + Send + Sync>;
 
+/// A [`BeforeInputFn`] veto: the batch is not admitted. At run entry the run
+/// ends with this error and records no failure row; a batch rejected mid-run is
+/// dropped and the loop continues at its normal boundary. The gate reports the
+/// reason to the user itself; any other gate error fails the run.
+#[derive(Debug, thiserror::Error)]
+#[error("{0}")]
+pub struct InputRejected(pub String);
+
+/// Gates an external input batch before any of its rows enter context or persistence.
+/// Returns [`InputRejected`] to veto the batch. Rows it returns are admitted
+/// right after the batch (for example hook-supplied model context).
+pub type BeforeInputFn = Arc<
+    dyn Fn(
+            Vec<AgentMessage>,
+            Model,
+            AbortSignal,
+        ) -> crate::BoxFut<'static, anyhow::Result<Vec<AgentMessage>>>
+        + Send
+        + Sync,
+>;
+/// Deferred session initialization at a cancellable model boundary. Rows it
+/// returns enter context before the model request.
+pub type BeforeModelFn = Arc<
+    dyn Fn(Model, AbortSignal) -> crate::BoxFut<'static, anyhow::Result<Vec<AgentMessage>>>
+        + Send
+        + Sync,
+>;
+/// Consulted only on a natural final stop ([`Continuation::NaturalStop`]).
+/// The boolean says a stop-hook continuation has already run in this root run.
+pub type FinalStopFn = Arc<
+    dyn Fn(
+            crate::types::AssistantMessage,
+            bool,
+            AbortSignal,
+        ) -> crate::BoxFut<'static, anyhow::Result<Vec<AgentMessage>>>
+        + Send
+        + Sync,
+>;
+
 /// Resolves an API key dynamically for each LLM call.
 pub type GetApiKeyFn =
     Arc<dyn Fn(String) -> crate::BoxFut<'static, anyhow::Result<Option<String>>> + Send + Sync>;
@@ -58,12 +97,25 @@ pub type ShouldStopBeforeTurnFn = Arc<dyn Fn() -> bool + Send + Sync>;
 pub type PollMessagesFn =
     Arc<dyn Fn() -> crate::BoxFut<'static, anyhow::Result<Vec<AgentMessage>>> + Send + Sync>;
 
-/// Returns continuation messages when the agent would otherwise stop.
+/// The host's decision when the agent would otherwise stop.
+#[derive(Debug)]
+pub enum Continuation {
+    /// Rows the loop runs as the next turn of this run.
+    Messages(Vec<AgentMessage>),
+    /// The host owns this boundary (queued input, compaction, goal or
+    /// background work): the run ends without the final Stop hook.
+    Held,
+    /// A genuine natural stop: the final Stop hook may run.
+    NaturalStop,
+}
+
+/// Decides how the agent continues when it would otherwise stop. Without one,
+/// every stop is natural.
 pub type GetContinuationMessagesFn = Arc<
     dyn Fn(
             GetContinuationMessagesContext,
             AbortSignal,
-        ) -> crate::BoxFut<'static, anyhow::Result<Vec<AgentMessage>>>
+        ) -> crate::BoxFut<'static, anyhow::Result<Continuation>>
         + Send
         + Sync,
 >;
@@ -87,6 +139,29 @@ pub type AfterToolCallFn = Arc<
         + Send
         + Sync,
 >;
+
+/// Select the history snapshot supplied to tool callbacks. Metadata-only hooks
+/// can omit it to avoid copying the conversation at every tool boundary.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ToolHookContextMode {
+    /// Preserve the full context contract for existing callback consumers.
+    #[default]
+    Full,
+    /// Supply an empty context; tool, arguments and result remain available.
+    Omit,
+}
+
+impl ToolHookContextMode {
+    pub(crate) fn snapshot(
+        self,
+        context: &crate::types::AgentContext,
+    ) -> crate::types::AgentContext {
+        match self {
+            Self::Full => run::clone_context(context),
+            Self::Omit => crate::types::AgentContext::default(),
+        }
+    }
+}
 
 #[derive(Clone)]
 pub struct AgentLoopConfig {
@@ -116,6 +191,10 @@ pub struct AgentLoopConfig {
     pub tool_progress: crate::types::ToolProgressCadence,
     pub before_tool_call: Option<BeforeToolCallFn>,
     pub after_tool_call: Option<AfterToolCallFn>,
+    pub tool_hook_context: ToolHookContextMode,
+    pub before_input: Option<BeforeInputFn>,
+    pub before_model: Option<BeforeModelFn>,
+    pub final_stop: Option<FinalStopFn>,
 }
 
 impl AgentLoopConfig {
@@ -144,6 +223,10 @@ impl AgentLoopConfig {
             tool_progress: crate::types::ToolProgressCadence::default(),
             before_tool_call: None,
             after_tool_call: None,
+            tool_hook_context: ToolHookContextMode::default(),
+            before_input: None,
+            before_model: None,
+            final_stop: None,
         }
     }
 

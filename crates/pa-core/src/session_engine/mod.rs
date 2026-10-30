@@ -50,6 +50,12 @@ pub mod turn_boundary;
 
 mod admission;
 mod compaction_arms;
+#[cfg(all(test, unix))]
+mod compaction_hook_tests;
+mod hooks;
+mod lifecycle;
+#[cfg(all(test, unix))]
+mod lifecycle_tests;
 mod wiring;
 
 use std::sync::Arc;
@@ -118,8 +124,14 @@ fn standard_message(message: &pa_agent::types::AgentMessage) -> Option<&pa_agent
     Some(message)
 }
 
+/// Awaits the host's asynchronous transcript writes for everything the
+/// session has emitted so far. Installed by hosts (the daemon worker) whose
+/// durable transcript lags the session's events.
+pub type TranscriptFlush = Arc<dyn Fn() -> pa_agent::BoxFut<'static, ()> + Send + Sync>;
+
 /// The session-bound agent: admission rules + persistence over the loop.
 pub struct AgentSession {
+    lifecycle_hooks: Option<Arc<lifecycle::LifecycleHooks>>,
     agent: Arc<Agent>,
     session: Arc<tokio::sync::Mutex<SessionManager>>,
     prompt_templates: Vec<PromptTemplate>,
@@ -232,6 +244,7 @@ impl AgentSession {
             })
             .await;
         let this = Self {
+            lifecycle_hooks: None,
             agent,
             session,
             prompt_templates,
@@ -291,6 +304,9 @@ impl AgentSession {
             session.adopt_window(window);
             session.active_context().messages
         };
+        if let Some(hooks) = &self.lifecycle_hooks {
+            hooks.mark_resume_from_history(&messages);
+        }
         self.agent
             .set_messages(
                 messages

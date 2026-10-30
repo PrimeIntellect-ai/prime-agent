@@ -5,6 +5,8 @@
 
 use std::sync::Arc;
 
+use pa_agent::agent_loop::Continuation;
+
 use pa_core::session_engine::provider_adapter::json_round_trip;
 
 use crate::agent_engine::AgentSessionEngine;
@@ -53,16 +55,22 @@ impl AgentSessionEngine {
             let weak = weak.clone();
             Box::pin(async move {
                 let Some(engine) = weak.upgrade() else {
-                    return Ok(Vec::new());
+                    return Ok(Continuation::Held);
                 };
                 // An aborted run mints no continuation — a kill that lands
                 // mid-turn never rolls one more zombie turn.
                 if signal.is_aborted() || engine.session_is_closed() {
-                    return Ok(Vec::new());
+                    return Ok(Continuation::Held);
                 }
-                Ok(engine.autonomous_continuation_rows(&context.message).await)
-            })
-                as pa_agent::BoxFut<'static, anyhow::Result<Vec<pa_agent::types::AgentMessage>>>
+                let decision = engine.autonomous_continuation(&context.message).await;
+                // A run aborted or closed during the consult is no natural stop.
+                if matches!(decision, Continuation::NaturalStop)
+                    && (signal.is_aborted() || engine.session_is_closed())
+                {
+                    return Ok(Continuation::Held);
+                }
+                Ok(decision)
+            }) as pa_agent::BoxFut<'static, anyhow::Result<Continuation>>
         })));
     }
 
@@ -78,26 +86,27 @@ impl AgentSessionEngine {
 
     /// The hook's consult for one settled turn (TS `_getContinuationMessages`):
     /// `Continue` mints the continuation user row the agent loop runs as
-    /// the next turn of the same run; a hold or a stop mints nothing.
-    pub(crate) async fn autonomous_continuation_rows(
+    /// the next turn of the same run; a hold mints nothing and keeps the
+    /// boundary; only a driver stop with nothing pending is a natural stop.
+    pub(crate) async fn autonomous_continuation(
         self: &Arc<Self>,
         message: &pa_agent::types::AssistantMessage,
-    ) -> Vec<pa_agent::types::AgentMessage> {
+    ) -> Continuation {
         // A closed session (killed/stopped) mints no continuation.
         if self.session_is_closed() {
-            return Vec::new();
+            return Continuation::Held;
         }
         // Queued session input owns the boundary before any continuation work.
         if self.session_input_queued() {
-            return Vec::new();
+            return Continuation::Held;
         }
         // The goal arm takes exclusive priority (an active goal owns the boundary).
         if self.goal_owns_continuation_wakeup().await {
-            return Vec::new();
+            return Continuation::Held;
         }
         // A pending requested compaction consumes the stop.
         if self.requested_compaction_scheduled().await {
-            return Vec::new();
+            return Continuation::Held;
         }
         // Unsettled RLM work or a live background bash handle holds the continuation.
         if self.has_unsettled_rlm_work().await || self.has_live_background_bash_handles() {
@@ -109,7 +118,7 @@ impl AgentSessionEngine {
             if !self.has_live_background_bash_handles() && !self.has_unsettled_rlm_work().await {
                 self.retry_owed_autonomous_continuation();
             }
-            return Vec::new();
+            return Continuation::Held;
         }
         // The threshold arm: the crossing turn mints the continuation BEFORE the loop
         // stops; the settled boundary compacts and hands the held text to the queue lanes.
@@ -120,14 +129,16 @@ impl AgentSessionEngine {
                     .lock()
                     .expect("held autonomous continuation lock") = Some(text);
             }
-            return Vec::new();
+            return Continuation::Held;
         }
         match self.autonomous_follow_up_text(message).await {
-            Some(text) => vec![pa_core::autonomous::autonomous_continuation_loop_row(
-                &text,
-                pa_core::autonomous::now_millis(),
-            )],
-            None => Vec::new(),
+            Some(text) => {
+                Continuation::Messages(vec![pa_core::autonomous::autonomous_continuation_loop_row(
+                    &text,
+                    pa_core::autonomous::now_millis(),
+                )])
+            }
+            None => Continuation::NaturalStop,
         }
     }
 

@@ -35,6 +35,15 @@ use super::{compaction, harness_digest, messages, session_message_to_loop};
 #[cfg(test)]
 mod tests;
 
+/// Why compaction was requested, exposed to command hooks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CompactionTrigger {
+    /// An explicit user or model compaction request.
+    Manual,
+    /// Context threshold or overflow recovery.
+    Auto,
+}
+
 pub struct CompactOptions<'a> {
     pub model: pa_types::ai::Model,
     /// Resolved API key (None falls back to provider env resolution).

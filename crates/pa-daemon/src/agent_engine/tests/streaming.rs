@@ -1,12 +1,16 @@
 //! The streaming tests (prompt content, live assistant updates, the final message).
 use super::*;
 
-/// Images ride as multimodal blocks after the text, even when the model
-/// turn cannot run.
+/// Admitted images ride as multimodal blocks after the text.
 #[test]
 fn prompt_images_ride_the_user_message_content() {
-    let dir = tempfile::TempDir::new().unwrap();
-    let engine = bare_engine(dir.path());
+    let _faux = FAUX_TEST_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let (engine, _dir) = faux_engine_with_settings(
+        &json!({"engine": "faux", "responses": [{"text": "image accepted"}]}),
+        0,
+    );
     let mut events: Vec<EngineEvent> = Vec::new();
     engine.run_prompt(
         0,
@@ -188,9 +192,9 @@ fn agent_engine_streams_updates_and_final_message() {
     assert_eq!(events.last(), Some(&EngineEvent::Done(Ok(()))));
 }
 
-/// The worker persists the accepted row before the lazy core builds. Its
-/// pre-admission leaf must keep that row out of restored model history, while
-/// repeated text and image blocks remain distinct turns after a runtime rebuild.
+/// The lazy core builds from the worker's pre-admission leaf, and the accepted
+/// user row is persisted only after core admission, exactly once. Repeated text
+/// and image blocks remain distinct turns after a runtime rebuild.
 #[test]
 fn lazy_build_restores_only_the_pre_admission_prompt_context() {
     let _faux = FAUX_TEST_LOCK
@@ -228,8 +232,14 @@ fn lazy_build_restores_only_the_pre_admission_prompt_context() {
         if prompt_index == 2 {
             engine.runtime.block_on(engine.retire_session_runtime());
         }
+        if prompt_index != 1 {
+            assert!(
+                engine.session.blocking_lock().is_none(),
+                "session remains lazy until real work starts"
+            );
+        }
         engine.set_prompt_context_boundary(store.leaf_id().map(str::to_string));
-        let mut accepted = false;
+        let mut accepted = 0;
         let mut model_user_content = None;
         let mut result = None;
         engine.run_prompt(
@@ -249,13 +259,15 @@ fn lazy_build_restores_only_the_pre_admission_prompt_context() {
             &mut |event| {
                 match event {
                     EngineEvent::UserMessage(message) => {
-                        if prompt_index != 1 {
-                            assert!(
-                                engine.session.blocking_lock().is_none(),
-                                "accepted prompt must render before the lazy session builds"
-                            );
-                        }
-                        accepted = true;
+                        // User rows now originate after core admission, inside
+                        // the runtime. The session exists and its selection lock
+                        // must be free while the worker forwards/persists the row.
+                        assert!(engine
+                            .session
+                            .try_lock()
+                            .expect("session lock released before user forwarding")
+                            .is_some());
+                        accepted += 1;
                         store
                             .persist_entry("message", json!({ "message": message }))
                             .expect("worker persists accepted prompt");
@@ -282,7 +294,7 @@ fn lazy_build_restores_only_the_pre_admission_prompt_context() {
             },
         );
         engine.on_turn_done();
-        assert!(accepted);
+        assert_eq!(accepted, 1, "one accepted user row per prompt");
         assert_eq!(result, Some(Ok(())));
         assert_eq!(
             model_user_content,

@@ -1,4 +1,4 @@
-use super::compact_session::CompactOutcome;
+use super::compact_session::{CompactOutcome, CompactionTrigger};
 use super::{
     compaction, compaction_trace, ipython_state, provider_adapter, rebuilt_loop_messages, refine,
     session_message_to_loop, standard_message, AgentMessage, AgentSession, FileEntry,
@@ -164,6 +164,57 @@ impl AgentSession {
         api_key: Option<String>,
         abort: Option<&pa_agent::abort::AbortSignal>,
     ) -> anyhow::Result<CompactOutcome> {
+        self.compact_with_trigger(
+            custom_instructions,
+            model,
+            api_key,
+            abort,
+            CompactionTrigger::Manual,
+        )
+        .await
+    }
+
+    /// Compact with the origin supplied to the `PreCompact` hook. The hook runs
+    /// here, under whatever guards the host holds for the compaction, and the
+    /// host's `abort` signal cancels it like the summarizer.
+    ///
+    /// # Errors
+    ///
+    /// Returns cancellation, hook stop, summarizer, or persistence errors.
+    /// Ineligible sessions return a normal skipped outcome without running hooks.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the compaction summary sink slot's mutex is poisoned.
+    pub async fn compact_with_trigger(
+        &self,
+        custom_instructions: Option<&str>,
+        model: &pa_types::ai::Model,
+        api_key: Option<String>,
+        abort: Option<&pa_agent::abort::AbortSignal>,
+        trigger: CompactionTrigger,
+    ) -> anyhow::Result<CompactOutcome> {
+        pa_agent::abort::throw_if_aborted_signal(abort)?;
+        if self
+            .lifecycle_hooks
+            .as_ref()
+            .is_some_and(|hooks| hooks.might_run_precompact())
+        {
+            // An ineligible session skips without running the hook. No
+            // external command runs under the persistence lock.
+            {
+                let session = self.session.lock().await;
+                if let Err(skip) = super::compact_session::prepare_compaction(
+                    session.retained_entries(),
+                    self.compaction_settings().keep_recent_tokens,
+                ) {
+                    return Ok(CompactOutcome::Skipped(skip.user_message()));
+                }
+            }
+            self.before_compaction_hook(trigger, custom_instructions, model, abort)
+                .await?;
+            pa_agent::abort::throw_if_aborted_signal(abort)?;
+        }
         compaction_trace::trace(
             "compact.enter",
             &serde_json::json!({
@@ -190,6 +241,7 @@ impl AgentSession {
             summary_delta,
             semantic_edges: self.semantic_edges(),
         };
+        // The hook runs once per invocation, outside the conflict retry loop.
         // The flight spans the attempts, the rebuilt-context replace, and
         // the kernel-state notice: every path here REPLACES the live loop
         // context, and the other replacers — `refine_with_refiner`'s
@@ -210,6 +262,7 @@ impl AgentSession {
         let loop_messages: Vec<AgentMessage> = rebuilt_loop_messages(rebuilt);
         let rebuilt_message_count = loop_messages.len();
         self.agent.set_messages(loop_messages).await;
+        self.mark_compaction_hook();
         compaction_trace::trace(
             "compact.rebuilt_context",
             &serde_json::json!({ "messages": rebuilt_message_count }),
@@ -376,9 +429,11 @@ impl AgentSession {
             session.adopt_entries(branch_entries);
             crate::session_engine::compact_session::rebuilt_context_after_compaction(&session)
         };
-        self.agent
-            .set_messages(rebuilt_loop_messages(rebuilt))
-            .await;
+        if let Some(hooks) = &self.lifecycle_hooks {
+            hooks.mark_resume_from_history(&rebuilt);
+        }
+        let messages = rebuilt_loop_messages(rebuilt);
+        self.agent.set_messages(messages).await;
         Ok(())
     }
 

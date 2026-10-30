@@ -9,7 +9,7 @@ use serde_json::Value;
 
 use crate::agent_engine::AgentSessionEngine;
 use crate::engine::EngineEvent;
-use pa_core::session_engine::compact_session::CompactOutcome;
+use pa_core::session_engine::compact_session::{CompactOutcome, CompactionTrigger};
 use pa_core::session_engine::messages::{CompactionOutcomeKind, CompactionOutcomeReason};
 
 /// The outcome of one turn-boundary threshold check.
@@ -106,7 +106,13 @@ impl AgentSessionEngine {
             let compact = async {
                 engine
                     .session
-                    .compact(None, &model, api_key, Some(&signal))
+                    .compact_with_trigger(
+                        None,
+                        &model,
+                        api_key,
+                        Some(&signal),
+                        CompactionTrigger::Auto,
+                    )
                     .await
             };
             let outcome = self

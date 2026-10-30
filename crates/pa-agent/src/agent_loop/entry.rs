@@ -20,16 +20,38 @@ pub async fn run_agent_loop(
     signal: Option<&AbortSignal>,
     stream_fn: Option<&StreamFn>,
 ) -> anyhow::Result<Vec<AgentMessage>> {
-    let mut new_messages: Vec<AgentMessage> = prompts.clone();
+    let mut new_messages: Vec<AgentMessage> = Vec::new();
     let mut current_context = AgentContext {
         system_prompt: context.system_prompt.clone(),
         tools: context.tools.clone(),
         messages: context.messages.clone(),
     };
-    current_context.messages.extend(prompts.iter().cloned());
-
     emit(AgentEvent::AgentStart).await?;
     emit(AgentEvent::TurnStart).await?;
+    let context_rows = match super::run::before_input_batch(&prompts, config, signal).await {
+        Ok(rows) => rows,
+        Err(error) => {
+            // Nothing was admitted: a veto or a cancellation at the gate closes
+            // the run without a failure row. The caller still gets the error.
+            let error = if crate::abort::is_abort_error(&error) {
+                let reason = error.to_string();
+                error.context(super::InputRejected(reason))
+            } else {
+                error
+            };
+            if error.downcast_ref::<super::InputRejected>().is_some() {
+                emit(AgentEvent::AgentEnd {
+                    messages: Vec::new(),
+                })
+                .await?;
+            }
+            return Err(error);
+        }
+    };
+    let mut prompts = prompts;
+    prompts.extend(context_rows);
+    current_context.messages.extend(prompts.iter().cloned());
+    new_messages.extend(prompts.iter().cloned());
     for prompt in &prompts {
         emit(AgentEvent::MessageStart {
             message: prompt.clone(),

@@ -12,7 +12,7 @@ use crate::abort::{AbortController, AbortSignal};
 use crate::agent_loop::{
     AfterToolCallFn, AgentEventSink, AgentLoopConfig, BeforeToolCallFn, ConvertToLlmFn,
     GetContinuationMessagesFn, PollMessagesFn, ShouldStopAfterTurnFn, ShouldStopBeforeTurnFn,
-    TransformContextFn,
+    ToolHookContextMode, TransformContextFn,
 };
 use crate::stream::StreamFn;
 use crate::types::{
@@ -95,6 +95,10 @@ pub struct AgentOptions {
     pub get_api_key: Option<crate::agent_loop::GetApiKeyFn>,
     pub before_tool_call: Option<BeforeToolCallFn>,
     pub after_tool_call: Option<AfterToolCallFn>,
+    pub tool_hook_context: ToolHookContextMode,
+    pub before_input: Option<crate::agent_loop::BeforeInputFn>,
+    pub before_model: Option<crate::agent_loop::BeforeModelFn>,
+    pub final_stop: Option<crate::agent_loop::FinalStopFn>,
     pub should_stop_after_turn: Option<ShouldStopAfterTurnFn>,
     pub should_stop_before_turn: Option<ShouldStopBeforeTurnFn>,
     pub get_continuation_messages: Option<GetContinuationMessagesFn>,
@@ -335,6 +339,10 @@ struct AgentInner {
     get_api_key: Option<crate::agent_loop::GetApiKeyFn>,
     before_tool_call: Option<BeforeToolCallFn>,
     after_tool_call: Option<AfterToolCallFn>,
+    tool_hook_context: ToolHookContextMode,
+    before_input: Option<crate::agent_loop::BeforeInputFn>,
+    before_model: Option<crate::agent_loop::BeforeModelFn>,
+    final_stop: Option<crate::agent_loop::FinalStopFn>,
     should_stop_after_turn: Option<ShouldStopAfterTurnFn>,
     should_stop_before_turn: Option<ShouldStopBeforeTurnFn>,
     /// The natural-turn-end continuation hook: settable after construction so the session engine
@@ -580,6 +588,10 @@ impl AgentInner {
         config.tool_progress = self.tool_progress;
         config.before_tool_call.clone_from(&self.before_tool_call);
         config.after_tool_call.clone_from(&self.after_tool_call);
+        config.tool_hook_context = self.tool_hook_context;
+        config.before_input.clone_from(&self.before_input);
+        config.before_model.clone_from(&self.before_model);
+        config.final_stop.clone_from(&self.final_stop);
         config
     }
 
@@ -621,7 +633,13 @@ impl AgentInner {
         }
 
         let result = executor(run_signal, run_override).await;
-        if let Err(error) = &result {
+        // A rejected input batch already closed its run and was reported by
+        // the gate: it is not a run failure and records no failure row.
+        if let Some(error) = result.as_ref().err().filter(|error| {
+            error
+                .downcast_ref::<crate::agent_loop::InputRejected>()
+                .is_none()
+        }) {
             let aborted = self
                 .current_signal()
                 .is_some_and(|signal| signal.is_aborted());
@@ -798,6 +816,10 @@ impl Agent {
             get_api_key: options.get_api_key,
             before_tool_call: options.before_tool_call,
             after_tool_call: options.after_tool_call,
+            tool_hook_context: options.tool_hook_context,
+            before_input: options.before_input,
+            before_model: options.before_model,
+            final_stop: options.final_stop,
             should_stop_after_turn: options.should_stop_after_turn,
             should_stop_before_turn: options.should_stop_before_turn,
             get_continuation_messages: Mutex::new(options.get_continuation_messages),
