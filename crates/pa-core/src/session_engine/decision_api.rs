@@ -328,7 +328,10 @@ fn parse_decision_answer(reply: &str, criteria: &[(String, String)]) -> anyhow::
 }
 
 /// Validate the parsed `answers` value into its `action` object: the choice
-/// must name one of the requested actions; confidence clamps to `0..=1`.
+/// must name one of the requested actions; confidence clamps to `0..=1`;
+/// probabilities must be finite, within `0..=1`, and named among the
+/// requested actions — a share outside that contract refuses the answer
+/// instead of passing a degenerate choice through.
 fn decision_answer(answers: &Value, criteria: &[(String, String)]) -> anyhow::Result<Value> {
     let actions: Vec<&str> = criteria.iter().map(|(name, _)| name.as_str()).collect();
     let Some(answer) = answers.get("action").and_then(Value::as_object) else {
@@ -352,9 +355,22 @@ fn decision_answer(answers: &Value, criteria: &[(String, String)]) -> anyhow::Re
         Some(entries) => {
             let mut parsed = serde_json::Map::new();
             for (name, share) in entries {
-                if let Some(value) = share.as_f64().and_then(finite_or_none) {
-                    parsed.insert(name.clone(), json!(value));
+                if !actions.contains(&name.as_str()) {
+                    bail!(
+                        "the decision model returned a probability for unrequested action {name:?}"
+                    );
                 }
+                let Some(value) = share.as_f64().and_then(finite_or_none) else {
+                    bail!(
+                        "the decision model returned an invalid probability for action {name:?}"
+                    );
+                };
+                if !(0.0..=1.0).contains(&value) {
+                    bail!(
+                        "the decision model returned an out-of-range probability for action {name:?}"
+                    );
+                }
+                parsed.insert(name.clone(), json!(value));
             }
             Value::Object(parsed)
         }
@@ -1204,6 +1220,17 @@ mod tests {
             "{\"action\": \"left\"}",
             "{\"action\": {\"choice\": \"up\"}}",
             "{\"action\": {\"choice\": 3}}",
+        ] {
+            assert!(parse_decision_answer(bad, &criteria).is_err(), "{bad}");
+        }
+        // Probabilities validate like the choice: a share for an
+        // unrequested action, a non-number, and a number outside `0..=1`
+        // all refuse instead of passing a degenerate answer through.
+        for bad in [
+            r#"{"action": {"choice": "right", "probabilities": {"jump": 0.5}}}"#,
+            r#"{"action": {"choice": "right", "probabilities": {"right": "half"}}}"#,
+            r#"{"action": {"choice": "right", "probabilities": {"right": 1.5}}}"#,
+            r#"{"action": {"choice": "right", "probabilities": {"right": -0.1}}}"#,
         ] {
             assert!(parse_decision_answer(bad, &criteria).is_err(), "{bad}");
         }
