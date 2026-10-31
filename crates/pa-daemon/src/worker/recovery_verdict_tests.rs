@@ -160,19 +160,19 @@ async fn a_bash_completion_notice_on_a_busy_session_queues_a_visible_steer_row()
     let _ = std::fs::remove_dir_all(worker.config.socket_path.parent().unwrap());
 }
 
-/// A turn-held pacing notice queues like a completion: a visible steer row
-/// that cuts the busy turn at its next boundary.
+/// A turn-held pacing notice queues like a completion on a busy session — a
+/// visible steer row that cuts the turn at its next boundary — and the
+/// held gate keeps it quiet once the delivery settled.
 #[tokio::test]
-async fn a_turn_held_notice_on_a_busy_session_queues_a_visible_steer_row() {
+async fn a_turn_held_notice_queues_on_a_busy_session_and_stays_quiet_when_idle() {
     let worker = created_worker_with_journal().await;
     worker.core.lock().unwrap().busy = true;
     let notify = Arc::new(Notify::new());
-    admit_kernel_notice(
+    admit_turn_held_notice(
         &worker.recovery,
         &worker.core,
         &notify,
         crate::engine::KernelNotice::turn_held(60_000),
-        || false,
     );
     let core = worker.core.lock().unwrap();
     let item = core
@@ -197,6 +197,22 @@ async fn a_turn_held_notice_on_a_busy_session_queues_a_visible_steer_row() {
         WorkerRecoveryJournal::read_interrupted(&worker.config.recovery_journal_path),
         "the pacing notice admission is live work"
     );
+    // The held gate: a settled delivery must not be woken by the pacing
+    // notice.
+    worker.core.lock().unwrap().busy = false;
+    admit_turn_held_notice(
+        &worker.recovery,
+        &worker.core,
+        &notify,
+        crate::engine::KernelNotice::turn_held(60_000),
+    );
+    let core = worker.core.lock().unwrap();
+    assert_eq!(
+        core.steering.len(),
+        1,
+        "the idle session refuses the pacing notice"
+    );
+    drop(core);
     let _ = std::fs::remove_dir_all(worker.config.socket_path.parent().unwrap());
 }
 
