@@ -147,12 +147,16 @@ def enumerate_units() -> list[dict]:
     return sorted(units, key=lambda u: u["id"])
 
 
-def run_unit(unit: dict) -> dict:
+def unit_command(unit: dict) -> list[str]:
     # `--workspace` (not `-p PKG`) gives every integration test the feature set
     # of the bins step, so a shard builds its dependencies once; target names
     # are unique across the workspace, so `--test NAME` selects one binary.
     scope = ["--workspace"] if unit["kind"] == "test" else ["-p", unit["package"]]
-    cmd = ["cargo", "test", "--locked", *scope, *unit["target_args"]]
+    return ["cargo", "test", "--locked", *scope, *unit["target_args"]]
+
+
+def run_unit(unit: dict) -> dict:
+    cmd = unit_command(unit)
     start = time.monotonic()
     # Streaming (not capture-then-print) so a hung binary is attributable from
     # the live log: the unit header is printed before the invocation starts.
@@ -333,7 +337,7 @@ def main() -> int:
     results = []
     for u in mine:
         print(f"[shard {args.shard}/{args.total}] RUN {u['id']} "
-              f"(cargo test --locked -p {u['package']} {' '.join(u['target_args'])})")
+              f"({' '.join(unit_command(u))})")
         result = run_unit(u)
         verdict = "PASS" if result["rc"] == 0 else f"FAIL rc={result['rc']}"
         print(f"[shard {args.shard}/{args.total}] {verdict} {u['id']} "
