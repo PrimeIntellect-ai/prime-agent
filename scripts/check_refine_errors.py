@@ -104,33 +104,29 @@ def observe(binary, root, case, receipt):
             spawned = client.call('refine', activeSessionId=active,
                                  instructions='Fixture no-op refinement')
             assert isinstance(spawned, dict) and spawned.get('refinementChildSpawned'), spawned
-            # The parked reply applies at the session's idle boundary, which
-            # the worker turn runner reaches after a turn settles: drive one
-            # prompt turn so the failure envelope lands in the transcript.
-            client.call('prompt', activeSessionId=active, message='Wait for the refine outcome.')
+            # The failed child's reply wakes the parent as a refine_failed
+            # event on the daemon log - the e2e pin's read surface. Await
+            # the event and lift the failure message from it.
             import time as _time
             deadline = _time.monotonic() + 60.0
             actual = None
-            sessions_dir = root / 'agent' / 'sessions'
             while _time.monotonic() < deadline:
-                import glob as _glob
-                for transcript in _glob.glob(str(sessions_dir / '*.jsonl')):
-                    text = open(transcript, encoding='utf-8', errors='replace').read()
-                    hit = None
-                    for needle in ('Refinement failed: ', 'Refiner did not return a JSON object'):
-                        index = text.rfind(needle)
-                        if index >= 0:
-                            tail = text[index:].split(chr(34))[0]
-                            tail = tail.split(chr(10))[0]
-                            hit = tail
+                log_text = (root / 'daemon.log').read_text(errors='replace') if (root / 'daemon.log').exists() else ''
+                index = log_text.rfind('refine_failed')
+                if index >= 0:
+                    window = log_text[index:index + 2000]
+                    err_index = window.find('"error"')
+                    if err_index >= 0:
+                        rest = window[err_index:]
+                        first_quote = rest.find('"')
+                        second_quote = rest.find('"', first_quote + 1) if first_quote >= 0 else -1
+                        third = rest.find('"', second_quote + 1) if second_quote >= 0 else -1
+                        if third > second_quote > first_quote >= 0:
+                            actual = rest[second_quote + 1:third]
+                            actual = actual.replace('\\n', chr(10)).replace('\\\"', chr(34))
                             break
-                    if hit:
-                        actual = hit
-                        break
-                if actual:
-                    break
                 _time.sleep(0.25)
-            assert actual, 'the refine failure never landed in the session transcript'
+            assert actual, 'the refine_failed event never landed in the daemon log'
             assert len(server.requests) >= 1, server.requests
             receipt.update(actual_error=actual, ts_observed_error=TS_OBSERVED[case],
                            parity_equal=actual == TS_OBSERVED[case])
