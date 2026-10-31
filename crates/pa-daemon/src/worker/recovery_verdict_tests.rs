@@ -160,6 +160,46 @@ async fn a_bash_completion_notice_on_a_busy_session_queues_a_visible_steer_row()
     let _ = std::fs::remove_dir_all(worker.config.socket_path.parent().unwrap());
 }
 
+/// A turn-held pacing notice queues like a completion: a visible steer row
+/// that cuts the busy turn at its next boundary.
+#[tokio::test]
+async fn a_turn_held_notice_on_a_busy_session_queues_a_visible_steer_row() {
+    let worker = created_worker_with_journal().await;
+    worker.core.lock().unwrap().busy = true;
+    let notify = Arc::new(Notify::new());
+    admit_kernel_notice(
+        &worker.recovery,
+        &worker.core,
+        &notify,
+        crate::engine::KernelNotice::turn_held(60_000),
+        || false,
+    );
+    let core = worker.core.lock().unwrap();
+    let item = core
+        .steering
+        .front()
+        .expect("the turn-held notice queues on the steering lane");
+    let row = item.custom_message.as_ref().expect("the injected row");
+    assert_eq!(
+        row.get("customType").and_then(Value::as_str),
+        Some("turn_held_notice"),
+        "the row is the turn-held notice: {row}"
+    );
+    assert!(
+        item.message
+            .starts_with("[turn-held] This turn has been open for 60s."),
+        "the turn runs on the notice content: {item:?}"
+    );
+    assert!(item.queue_visible, "the busy session keeps a visible row");
+    assert_eq!(item.policy, TurnPolicy::Queued);
+    drop(core);
+    assert!(
+        WorkerRecoveryJournal::read_interrupted(&worker.config.recovery_journal_path),
+        "the pacing notice admission is live work"
+    );
+    let _ = std::fs::remove_dir_all(worker.config.socket_path.parent().unwrap());
+}
+
 /// The withdrawal settles the busy evidence so the journal never promises a replay.
 #[tokio::test]
 async fn bash_consumed_withdraws_the_undelivered_notice_and_settles() {
