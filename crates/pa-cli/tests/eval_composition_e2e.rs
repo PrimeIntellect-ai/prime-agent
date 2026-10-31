@@ -368,13 +368,13 @@ fn text_mode_verifier_pass_prints_the_final_answer() {
     );
 }
 
-/// The autonomous contract without gates: a budget limit stops the run and
-/// exits one with the TS "stopped before terminal evidence" line; the stop
-/// writes no row.
+/// The autonomous contract without gates: the spent budget mints the one
+/// finalize wake, its turn settles, and the limit stop exits one with the TS
+/// "stopped before terminal evidence" line; the stop writes no row.
 #[test]
 fn autonomous_limit_without_gates_exits_one_without_a_row() {
     let home = isolated_home();
-    let script = json!({ "responses": ["still working", "more work"] });
+    let script = json!({ "responses": ["still working", "more work", "finalizing"] });
     let (stdout, stderr, code) = run(
         home.path(),
         &[
@@ -387,7 +387,7 @@ fn autonomous_limit_without_gates_exits_one_without_a_row() {
         &script,
     );
     assert_eq!(code, 1, "stderr: {stderr}");
-    assert_eq!(stdout, "more work\n");
+    assert_eq!(stdout, "finalizing\n");
     assert!(
         stderr.starts_with(
             "Autonomous run stopped before terminal evidence; maxContinuations reached (1/1)"
@@ -403,11 +403,22 @@ fn autonomous_limit_without_gates_exits_one_without_a_row() {
                 && entry["customType"] == "autonomous_status"),
         "entries: {entries:?}"
     );
+    // The only continuation carries the last-call text; the exhausted budget
+    // adds exactly one finalize wake.
     assert!(
         entries.iter().any(|entry| {
             entry["type"] == "message"
                 && entry["message"]["role"] == "user"
-                && text_of(&entry["message"]).starts_with("[autonomous-continuation]")
+                && text_of(&entry["message"]).starts_with("[autonomous-continuation: last-call]")
+        }),
+        "entries: {entries:?}"
+    );
+    assert!(
+        entries.iter().any(|entry| {
+            entry["type"] == "message"
+                && entry["message"]["role"] == "user"
+                && text_of(&entry["message"])
+                    .starts_with("[autonomous-continuation: finalize-wake]")
         }),
         "entries: {entries:?}"
     );
