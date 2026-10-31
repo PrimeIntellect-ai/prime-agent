@@ -195,15 +195,18 @@ mod tests {
             guide.contains("| `Ctrl+Z` | Suspend to background |"),
             "{guide}"
         );
+        let alt = crate::keybindings::format_key_text("alt");
         assert!(
-            guide.contains(
-                "| `Shift+Ctrl+\u{2191}` / `Shift+Alt+\u{2193}` | Select one paragraph |"
-            ),
+            guide.contains(&format!(
+                "| `Shift+Ctrl+\u{2191}` / `Shift+{alt}+\u{2193}` | Select one paragraph |"
+            )),
             "{guide}"
         );
         assert!(guide.contains("Select to start / end of text"), "{guide}");
         assert!(
-            guide.contains("| `Alt+\u{2191}` / `Alt+\u{2193}` | Browse and edit queued messages |"),
+            guide.contains(&format!(
+                "| `{alt}+\u{2191}` / `{alt}+\u{2193}` | Browse and edit queued messages |"
+            )),
             "{guide}"
         );
     }
@@ -217,7 +220,11 @@ mod tests {
         );
         let kb = KeybindingsManager::with_user_bindings(cfg);
         let guide = hotkeys_guide(&kb);
-        assert!(guide.contains("| `Ctrl+Alt+X` | Cycle overview"), "{guide}");
+        let alt = crate::keybindings::format_key_text("alt");
+        assert!(
+            guide.contains(&format!("| `Ctrl+{alt}+X` | Cycle overview")),
+            "{guide}"
+        );
         assert!(!guide.contains("`Ctrl+O`"), "{guide}");
     }
 
@@ -231,6 +238,6 @@ mod tests {
         let kb = KeybindingsManager::with_user_bindings(cfg);
         let guide = hotkeys_guide(&kb);
         assert!(guide.contains("| `` | Cycle overview"), "{guide}");
-        assert!(!guide.contains("Ctrl+O"), "{guide}");
+        assert!(!guide.contains("`Ctrl+O`"), "{guide}");
     }
 }
