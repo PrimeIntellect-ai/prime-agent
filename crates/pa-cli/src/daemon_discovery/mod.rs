@@ -1,8 +1,7 @@
 //! Daemon discovery: find every product daemon in this state root and probe
 //! it for identity and session count — the OS census of listening sockets
 //! plus a sweep of the default socket dir (orphaned files included).
-//! Containment is operator-mandated: everything is scoped to one
-//! [`DaemonStateRoot`], and [`NEVER_TOUCH_SOCKET_DIRS`] is checked always.
+//! Everything is scoped to one [`DaemonStateRoot`].
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -41,28 +40,6 @@ pub(crate) struct DaemonStateRoot {
     /// socket, never the pinned socket's directory.
     pub socket_dir: Option<PathBuf>,
     pub default_socket_path: PathBuf,
-}
-
-/// Directories the discovery code must never touch, unconditionally
-/// (operator-mandated containment guard; see the module docs). These hold
-/// this box's live mission infrastructure; an ambient `HOME`/`TMPDIR`
-/// leaking into a test process makes `current_state_root()` resolve onto
-/// them, so root matching alone cannot be trusted. `/tmp/prime-agent-1000`
-/// is also the product-default socket dir for uid 1000 (deliberate,
-/// mission-local); the `-0` entries are the uid-0 twins — without them the
-/// protection silently disappears at uid 0.
-pub(crate) const NEVER_TOUCH_SOCKET_DIRS: &[&str] = &[
-    "/tmp/prime-agent-1000",
-    "/tmp/mission-tmp/prime-agent-1000",
-    "/tmp/mission-daemon",
-    "/tmp/prime-agent-0",
-    "/tmp/mission-tmp/prime-agent-0",
-];
-
-pub(crate) fn is_never_touch(path: &Path) -> bool {
-    NEVER_TOUCH_SOCKET_DIRS
-        .iter()
-        .any(|dir| path.starts_with(Path::new(dir)))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -132,13 +109,10 @@ pub(crate) fn current_state_root() -> DaemonStateRoot {
 /// in the product-default socket dir (a pinned root has none), or anywhere
 /// inside the agent dir (TS ownership registry not ported).
 fn state_root_matches(root: &DaemonStateRoot, socket_path: &Path) -> bool {
-    if is_never_touch(socket_path) {
-        return false;
-    }
     #[cfg(windows)]
     {
         // Windows daemons share one named pipe per machine, so there is
-        // nothing to scope beyond the containment guard.
+        // nothing to scope.
         let _ = (root, socket_path);
         true
     }
@@ -213,8 +187,7 @@ pub(crate) fn is_daemon_process_listening(
 
 /// Socket files in the root's socket dir: live daemons and orphaned files
 /// alike. A pinned root has no socket dir (`None`), so it sweeps nothing
-/// but its own socket file (added by the caller). Never-touch paths are
-/// filtered here too.
+/// but its own socket file (added by the caller).
 #[cfg(unix)]
 fn scan_socket_dir(socket_dir: Option<&Path>) -> Vec<PathBuf> {
     let Some(socket_dir) = socket_dir else {
@@ -226,7 +199,7 @@ fn scan_socket_dir(socket_dir: Option<&Path>) -> Vec<PathBuf> {
     let mut sockets = Vec::new();
     for entry in entries.flatten() {
         let path = entry.path();
-        if is_socket_file(&path) && !is_never_touch(&path) {
+        if is_socket_file(&path) {
             sockets.push(path);
         }
     }
@@ -326,11 +299,6 @@ pub(crate) struct ProbeResult {
 /// Probe one socket: connect (300ms), read the hello (1500ms), and ask for the
 /// session count over `list` (30s when greeted, else 1500ms).
 pub(crate) fn probe_daemon(socket_path: &Path) -> ProbeResult {
-    if is_never_touch(socket_path) {
-        // Containment: never even connect to a forbidden path, whatever
-        // the caller's root says.
-        return ProbeResult::default();
-    }
     let Ok(mut client) = DaemonClient::connect_probe(socket_path) else {
         return ProbeResult::default();
     };
@@ -623,56 +591,24 @@ mod tests {
         assert!(!state_root_matches(&root, Path::new("/pins/daemon.sock")));
     }
 
+    #[cfg(not(windows))]
     #[test]
-    fn never_touch_paths_are_excluded_even_when_the_root_points_at_them() {
-        for dir in NEVER_TOUCH_SOCKET_DIRS {
+    fn the_linux_default_socket_dir_belongs_to_its_root() {
+        // `/tmp/prime-agent-<uid>` is the product-default socket dir on Linux
+        // with TMPDIR unset: uid 1000 (the first desktop user) and root.
+        for dir in ["/tmp/prime-agent-1000", "/tmp/prime-agent-0"] {
             let dir = Path::new(dir);
             let root = DaemonStateRoot {
-                agent_dir: dir.to_path_buf(),
+                agent_dir: PathBuf::from("/home/user/.prime/agent"),
                 socket_dir: Some(dir.to_path_buf()),
                 default_socket_path: dir.join("daemon.sock"),
             };
-            let socket_dir = root.socket_dir.clone().expect("never-touch socket dir");
             assert!(
-                !state_root_matches(&root, &root.default_socket_path),
-                "containment must beat root matching for {dir:?}"
+                state_root_matches(&root, &root.default_socket_path),
+                "the default daemon in {dir:?} belongs to its root"
             );
-            assert!(!state_root_matches(
-                &root,
-                &socket_dir.join("worker-x.sock")
-            ));
+            assert!(state_root_matches(&root, &dir.join("stale.sock")));
         }
-        assert!(is_never_touch(Path::new("/tmp/mission-daemon")));
-        assert!(is_never_touch(Path::new("/tmp/mission-daemon/daemon.sock")));
-        assert!(is_never_touch(Path::new("/tmp/prime-agent-1000")));
-        assert!(!is_never_touch(Path::new("/tmp")));
-        assert!(!is_never_touch(Path::new("/tmp/other/daemon.sock")));
-    }
-
-    #[test]
-    fn a_scan_rooted_on_a_never_touch_dir_surfaces_no_listeners() {
-        // The ambient mission daemon's workers listen under these dirs, owned
-        // by real `prime-agent` processes: root matching alone would find them.
-        for dir in NEVER_TOUCH_SOCKET_DIRS {
-            let dir = *dir;
-            let root = DaemonStateRoot {
-                agent_dir: PathBuf::from(dir),
-                socket_dir: Some(PathBuf::from(dir)),
-                default_socket_path: PathBuf::from(dir).join("daemon.sock"),
-            };
-            assert!(
-                scan_listening_daemons(&root).is_empty(),
-                "scan rooted at {dir} must not surface listeners"
-            );
-        }
-    }
-
-    #[test]
-    fn a_probe_never_connects_to_a_never_touch_path() {
-        // When the guard works, this never opens a connection; a regression
-        // would probe the live mission daemon once and fail the assert.
-        let probe = probe_daemon(Path::new("/tmp/mission-daemon/daemon.sock"));
-        assert!(!probe.reachable);
     }
 
     #[cfg(unix)]

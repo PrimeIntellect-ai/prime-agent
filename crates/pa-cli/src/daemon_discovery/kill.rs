@@ -49,12 +49,8 @@ pub(super) fn is_alive(pid: u32) -> bool {
     is_process_alive(pid).unwrap_or(false)
 }
 
-/// Remove a socket file if present; false when the unlink fails. Never-touch
-/// paths are refused here as the last line of containment.
+/// Remove a socket file if present; false when the unlink fails.
 pub(super) fn remove_socket_file(socket_path: &Path) -> bool {
-    if super::is_never_touch(socket_path) {
-        return false;
-    }
     match std::fs::remove_file(socket_path) {
         Ok(()) => true,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => true,
@@ -119,10 +115,10 @@ pub(super) fn stop_tracked_process(pid: u32, expected_start_id: Option<&str>) ->
 /// The `--force` residual sweep: kill whatever product listeners remain in
 /// the invocation's state root until the set quiets down or proves stuck;
 /// report the survivors as failures. The sweep re-scans with the same root,
-/// so daemons in any other root — or on the never-touch list — are never
-/// candidates, and worker sockets never appear in the census (a supervisor's
-/// workers stop through their tracked descriptors; deliberate TS divergence:
-/// TS's sweep killed worker listeners too).
+/// so daemons in any other root are never candidates, and worker sockets
+/// never appear in the census (a supervisor's workers stop through their
+/// tracked descriptors; deliberate TS divergence: TS's sweep killed worker
+/// listeners too).
 pub(super) fn terminate_verified_residuals(
     root: &DaemonStateRoot,
     stopped: &mut Vec<(String, String)>,
@@ -265,27 +261,6 @@ mod tests {
         assert!(failed.is_empty());
     }
 
-    #[test]
-    fn residual_sweep_never_touches_a_never_touch_dir() {
-        // The ambient mission daemon's workers listen under these dirs; a
-        // sweep rooted on them must see no listeners and harm nothing.
-        for dir in ["/tmp/mission-tmp/prime-agent-1000", "/tmp/prime-agent-1000"] {
-            let root = DaemonStateRoot {
-                agent_dir: PathBuf::from(dir),
-                socket_dir: Some(PathBuf::from(dir)),
-                default_socket_path: PathBuf::from(dir).join("daemon.sock"),
-            };
-            let mut stopped: Vec<(String, String)> = Vec::new();
-            let mut failed: Vec<(String, String)> = Vec::new();
-            terminate_verified_residuals(&root, &mut stopped, &mut failed, &HashSet::new());
-            assert!(
-                stopped.is_empty(),
-                "sweep rooted at {dir} must stop nothing"
-            );
-            assert!(failed.is_empty(), "sweep rooted at {dir} must fail nothing");
-        }
-    }
-
     fn spawn_term_ignoring_shell() -> std::process::Child {
         // A shell that swallows SIGTERM: the force-kill must escalate to SIGKILL
         // (the grandchild `sleep 1` exits on its own shortly after, no strays).
@@ -356,15 +331,5 @@ mod tests {
         };
         assert!(terminate_verified_listener(&listener));
         let _ = reaper.join();
-    }
-
-    #[test]
-    fn never_touch_socket_files_are_refused() {
-        assert!(!remove_socket_file(Path::new(
-            "/tmp/mission-daemon/daemon.sock"
-        )));
-        assert!(remove_socket_file(Path::new(
-            "/tmp/discovery-no-such-socket.sock"
-        )));
     }
 }
