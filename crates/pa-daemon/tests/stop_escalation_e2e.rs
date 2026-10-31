@@ -88,6 +88,39 @@ fn process_alive(pid: u32) -> bool {
     !state.starts_with('Z') && !state.starts_with('X')
 }
 
+/// SIGSTOP the worker and wait until every one of its threads is parked:
+/// `kill` returns once the stop is queued, and a runtime thread still running
+/// serves the next command before it stops.
+fn freeze(pid: u32) {
+    let status = Command::new("kill")
+        .arg("-STOP")
+        .arg(pid.to_string())
+        .status()
+        .expect("SIGSTOP the worker");
+    assert!(status.success(), "SIGSTOP must reach the worker");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !all_threads_stopped(pid) {
+        assert!(Instant::now() < deadline, "the worker never stopped");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+/// Whether every `/proc/<pid>/task/<tid>/stat` reads `T` (stopped).
+fn all_threads_stopped(pid: u32) -> bool {
+    let Ok(tasks) = std::fs::read_dir(format!("/proc/{pid}/task")) else {
+        return false;
+    };
+    let states: Vec<Option<char>> = tasks
+        .flatten()
+        .map(|task| {
+            let stat = std::fs::read_to_string(task.path().join("stat")).ok()?;
+            let (_, rest) = stat.rsplit_once(')')?;
+            rest.split_whitespace().next()?.chars().next()
+        })
+        .collect();
+    !states.is_empty() && states.iter().all(|state| *state == Some('T'))
+}
+
 struct Client {
     reader: BufReader<UnixStream>,
     writer: UnixStream,
@@ -275,12 +308,7 @@ fn a_hung_worker_is_killed_within_the_escalation_window_and_its_lease_frees() {
 
     // SIGSTOP freezes the worker's command pump: the routed kill and the
     // stop's graceful `shutdown` both go unanswered.
-    let stopped = Command::new("kill")
-        .arg("-STOP")
-        .arg(worker_pid.to_string())
-        .status()
-        .expect("SIGSTOP the worker");
-    assert!(stopped.success(), "SIGSTOP must reach the worker");
+    freeze(worker_pid);
 
     // THE STOP: the route times out; the stop completes anyway (TS's
     // root-kill `finally`) and escalates.
