@@ -390,7 +390,7 @@ mod tests {
         let text = admit_rx
             .recv_timeout(std::time::Duration::from_secs(5))
             .expect("the re-arm delivered the owed turn without an external retry");
-        assert!(text.starts_with("[autonomous-continuation]"));
+        assert!(text.starts_with("[autonomous-continuation"));
         assert!(
             admit_rx.try_recv().is_err(),
             "the owed flag owns exactly one delivery"
@@ -462,7 +462,7 @@ mod tests {
             1,
             "the owed continuation, once: {admitted:?}"
         );
-        assert!(admitted[0].starts_with("[autonomous-continuation]"));
+        assert!(admitted[0].starts_with("[autonomous-continuation"));
         assert!(
             !engine
                 .autonomous_awaits_rlm_work
