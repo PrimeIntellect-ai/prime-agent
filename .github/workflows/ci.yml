@@ -336,7 +336,9 @@ jobs:
       # behavior is unchanged.
       - name: Build the workspace bins (sibling-binary parity for the e2e suites)
         if: steps.selection.outputs.units != '0'
-        run: cargo build --locked --workspace --bins
+        # --examples pulls in dev-dependencies, so the bins build with the same
+        # feature set as the test units below (CI-only; release jobs unaffected).
+        run: cargo build --locked --workspace --bins --examples
       # The kernel e2e suites resolve the ambient kernel venv; left to
       # bootstrap lazily, the first session prewarm starts it mid-shard and
       # the next kernel unit fails against the half-built venv (run
