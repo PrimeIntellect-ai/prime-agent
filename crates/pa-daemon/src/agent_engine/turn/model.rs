@@ -86,10 +86,8 @@ impl AgentSessionEngine {
                 };
             }
         };
-        // The delivery's cancel flag is consulted at the admission, before
-        // the agent run registers: an abort landing in the [pickup,
-        // registration] window is otherwise lost. Delivery-scoped by
-        // construction.
+        // The delivery's cancel flag, consulted before the run starts; the
+        // later consults live in `run_turn_once`.
         if aborted() {
             return TurnResult::Aborted;
         }

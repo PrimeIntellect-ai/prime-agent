@@ -182,23 +182,16 @@ fn run_turn(client: &mut Client, session_id: &str, message: &str, id: &str) {
     assert_eq!(idle["success"], true, "wait_for_idle failed: {idle}");
 }
 
-/// Poll for a kernel cell's receipt content (the cell writes its verdict;
-/// an empty read is the create-before-write window, not a verdict yet).
-fn await_receipt(receipt: &Path) -> String {
-    let deadline = Instant::now() + Duration::from_mins(1);
-    loop {
-        if let Ok(content) = std::fs::read_to_string(receipt) {
-            if !content.is_empty() {
-                return content;
-            }
-        }
-        assert!(
-            Instant::now() < deadline,
-            "kernel cell receipt never appeared at {}",
-            receipt.display()
-        );
-        std::thread::sleep(Duration::from_millis(50));
-    }
+/// A kernel cell's receipt, read once its turn settled: the cell wrote its
+/// verdict, or its traceback to `error_receipt`, before the turn ended.
+fn read_receipt(receipt: &Path, error_receipt: &Path) -> String {
+    std::fs::read_to_string(receipt).unwrap_or_else(|_| {
+        panic!(
+            "no kernel cell receipt at {}; the cell failed: {}",
+            receipt.display(),
+            std::fs::read_to_string(error_receipt).unwrap_or_else(|_| "<no error record>".into())
+        )
+    })
 }
 
 fn create_parent(
@@ -363,13 +356,8 @@ fn a_deleted_running_child_records_the_cancel_edge() {
 
     // Turn 1: the kernel cell spawns the child mid-turn.
     run_turn(&mut client, &parent_id, "spawn the kid", "t1");
-    let spawned: Value =
-        serde_json::from_str(&await_receipt(&spawn_receipt)).expect("spawn receipt json");
-    assert!(
-        !spawn_error.exists(),
-        "the spawn cell failed: {}",
-        std::fs::read_to_string(&spawn_error).unwrap_or_default()
-    );
+    let spawned: Value = serde_json::from_str(&read_receipt(&spawn_receipt, &spawn_error))
+        .expect("spawn receipt json");
     let child_id = spawned["rlm_child_id"]
         .as_str()
         .expect("child id")
@@ -381,13 +369,8 @@ fn a_deleted_running_child_records_the_cancel_edge() {
 
     // Turn 2: the kernel cell deletes the running child mid-turn.
     run_turn(&mut client, &parent_id, "delete the kid", "t2");
-    let deleted: Value =
-        serde_json::from_str(&await_receipt(&delete_receipt)).expect("delete receipt json");
-    assert!(
-        !delete_error.exists(),
-        "the delete cell failed: {}",
-        std::fs::read_to_string(&delete_error).unwrap_or_default()
-    );
+    let deleted: Value = serde_json::from_str(&read_receipt(&delete_receipt, &delete_error))
+        .expect("delete receipt json");
     assert_eq!(deleted["rlm_child_id"], json!(child_id));
     assert_eq!(
         deleted["status"], "cancelled",

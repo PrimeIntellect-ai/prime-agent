@@ -1,0 +1,1 @@
+- Fixed an abort or kill that landed while a turn was starting: it was ignored until the model's first streamed output (so `rlm.delete_subagent` on a just-started child could time out); the turn now cancels as soon as its run starts.
