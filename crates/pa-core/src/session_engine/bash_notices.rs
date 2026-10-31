@@ -46,6 +46,18 @@ impl KernelNotice {
             preview_label: ASYNC_BASH_COMPLETION_PREVIEW_LABEL,
         }
     }
+
+    /// The `[turn-held]` pacing notice for one delivery that outlived the
+    /// worker's turn-held window: it rides the same steering lane as a
+    /// bash completion, so the queued row cuts the held turn at its next
+    /// boundary and delivers as the next turn's injected prompt.
+    #[must_use]
+    pub fn turn_held(elapsed_ms: u64) -> Self {
+        Self {
+            row: messages::create_turn_held_message(elapsed_ms, crate::autonomous::now_millis()),
+            preview_label: messages::TURN_HELD_PREVIEW_LABEL,
+        }
+    }
 }
 
 /// The queue-admission seam for one kernel notice (the daemon worker's

@@ -1,7 +1,7 @@
 //! One agent turn: the runner that admits queued input, drives the
 //! engine, and settles the result.
 use super::{
-    checkpoint_queue_recovery, compact_action_label, create_daemon_event_meta,
+    admit_kernel_notice, checkpoint_queue_recovery, compact_action_label, create_daemon_event_meta,
     emit_refinement_event_for_session, emit_refinement_row, gather_delivery_batch, json, oneshot,
     session_snapshot, AssistantSnapshot, DaemonOutbound, EngineEvent, EventPump, Lane, Map, Notify,
     OutboundFrame, PromptRequest, QueueCheckpoint, QueuedItem, Result, SessionActionSnapshot,
@@ -10,6 +10,14 @@ use super::{
 };
 
 use std::sync::{Arc, Mutex};
+
+/// The `[turn-held]` pacing window: one delivery held busy past this bound
+/// admits a single `[turn-held]` teaching notice on the steering lane, so the
+/// queued row cuts the held turn at its next boundary and delivers as the
+/// next turn's prompt. Matches the default python cell budget
+/// (`DEFAULT_PYTHON_CELL_TIMEOUT_MS`, 60s): a turn held past the cell
+/// budget is waiting, not working.
+const TURN_HELD_WINDOW: std::time::Duration = std::time::Duration::from_secs(60);
 
 pub(super) struct TurnRunner {
     pub(crate) core: Arc<Mutex<SessionCore>>,
@@ -319,6 +327,41 @@ impl TurnRunner {
         };
         self.emit_turn_event(json!({ "type": "agent_start" }));
         self.emit_turn_event(json!({ "type": "turn_start" }));
+        // The `[turn-held]` pacing window: exactly one notice per delivery
+        // held busy past [`TURN_HELD_WINDOW`]. The window's closure is the
+        // admission's own lock section (the `session_is_closed` seam), so
+        // the gate — same delivery still busy, nothing queued to cut it
+        // already, not compacting or shutting down — is atomic with the
+        // queue push. A queued row stops the held turn at its next
+        // boundary (the queued-steering probe) and delivers as the next
+        // turn's prompt; the timer dies with the delivery at the join.
+        let turn_held_window = {
+            let core = Arc::clone(&self.core);
+            let recovery = Arc::clone(&self.recovery);
+            let work_notify = Arc::clone(&self.work_notify);
+            let held_gate = {
+                let core = Arc::clone(&core);
+                move || {
+                    let core = core.lock().unwrap();
+                    core.busy
+                        && core.steering.is_empty()
+                        && !core.compacting
+                        && !core.shutdown_requested
+                }
+            };
+            tokio::spawn(async move {
+                tokio::time::sleep(TURN_HELD_WINDOW).await;
+                admit_kernel_notice(
+                    &recovery,
+                    &core,
+                    &work_notify,
+                    pa_core::session_engine::bash_notices::KernelNotice::turn_held(
+                        TURN_HELD_WINDOW.as_millis() as u64,
+                    ),
+                    held_gate,
+                );
+            })
+        };
         // The pane reporter's run boundary (TS `agent_start`): working.
         self.herdr.lock().unwrap().run_started();
 
@@ -1047,6 +1090,10 @@ impl TurnRunner {
             engine.run_prompt(prompt_index, request, &aborted_probe, &mut emit);
         });
         let _ = turn.await;
+        // The delivery's end disarms its [turn-held] pacing window: a
+        // timer that never fired must not cut a later delivery, and one
+        // mid-admission completes atomically (the admission's lock section).
+        turn_held_window.abort();
         // The emit path is joined: a stale parked partial must not
         // surface after the settle events.
         coalescer.close();
