@@ -77,6 +77,8 @@ impl MockSupervisor {
                 Err(_) => return,
             }
         };
+        // macOS inherits O_NONBLOCK from the listener on accept; the request loop blocks.
+        stream.set_nonblocking(false).expect("blocking mock stream");
         let mut writer = stream.try_clone().expect("clone mock socket");
         let mut reader = BufReader::new(stream);
 

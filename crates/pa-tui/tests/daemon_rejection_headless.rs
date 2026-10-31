@@ -128,6 +128,8 @@ impl SharedAnswers {
         reason = "mock daemon request loop: one match arm per scripted request method"
     )]
     fn serve_connection(self: std::sync::Arc<Self>, stream: UnixStream) {
+        // macOS inherits O_NONBLOCK from the listener on accept; the request loop blocks.
+        stream.set_nonblocking(false).expect("blocking mock stream");
         let mut writer = stream.try_clone().expect("clone mock socket");
         let mut reader = BufReader::new(stream);
 

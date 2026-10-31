@@ -53,6 +53,7 @@ fn kill_worker(pid: u32) {
     }
 }
 
+#[cfg(target_os = "linux")]
 fn process_alive(pid: u32) -> bool {
     std::fs::read_to_string(format!("/proc/{pid}/stat")).is_ok_and(|stat| {
         let rest = stat
@@ -63,6 +64,7 @@ fn process_alive(pid: u32) -> bool {
     })
 }
 
+#[cfg(target_os = "linux")]
 fn child_pids_of(ppid: u32) -> Vec<u32> {
     let mut pids = Vec::new();
     let entries = std::fs::read_dir("/proc").expect("read /proc");
@@ -86,6 +88,30 @@ fn child_pids_of(ppid: u32) -> Vec<u32> {
         }
     }
     pids
+}
+
+/// The children of `ppid` without `/proc`: one `ps` listing of every pid's parent.
+#[cfg(not(target_os = "linux"))]
+fn child_pids_of(parent_pid: u32) -> Vec<u32> {
+    let output = Command::new("ps")
+        .args(["-A", "-o", "pid=,ppid="])
+        .output()
+        .expect("run ps");
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(|line| {
+            let mut fields = line.split_whitespace();
+            let pid = fields.next()?.parse().ok()?;
+            let parent: u32 = fields.next()?.parse().ok()?;
+            (parent == parent_pid).then_some(pid)
+        })
+        .collect()
+}
+
+/// Liveness without `/proc`: the platform probe, which also reads zombies as dead.
+#[cfg(not(target_os = "linux"))]
+fn process_alive(pid: u32) -> bool {
+    pa_types::platform::process::is_process_alive(pid).unwrap_or(false)
 }
 
 fn graceful_shutdown(socket: &Path) {

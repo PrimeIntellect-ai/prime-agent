@@ -322,6 +322,9 @@ fn orphan_exit_never_unlinks_a_replacement_bound_on_the_worker_path() {
 /// must remove it so a respawn does not wait out the stale-socket path.
 /// The still-ours directions of the other two call sites are pinned by the
 /// in-tree controls named in the module doc.
+// `unix_listener_definitely_closed` never claims closure off Linux (a full
+// backlog also refuses there), so the exit deliberately keeps the file.
+#[cfg(target_os = "linux")]
 #[test]
 fn routed_shutdown_removes_the_workers_own_socket_file() {
     let dir = tempfile::TempDir::new().expect("temp dir");

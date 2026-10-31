@@ -1308,13 +1308,15 @@ mod tests {
         let mock = dir.path().join("mock-ui");
         std::fs::write(
             &mock,
-            "#!/bin/sh\nprintf 'diagnostic before missing paint\\n'\nexec /bin/cat\n",
+            "#!/bin/sh\nprintf 'diagnostic before missing paint\\n'\n",
         )
         .expect("write mock UI");
         std::fs::set_permissions(&mock, std::fs::Permissions::from_mode(0o700))
             .expect("executable mock");
         ctx.binary = mock;
-        ctx.liveness = Duration::from_secs(1);
+        // The mock exits without painting, so the launch fails at its exit; the
+        // liveness bound only covers a slow first exec (seconds on a loaded macOS).
+        ctx.liveness = Duration::from_secs(30);
         let dump = dir.path().join("failed-streams/first.bin");
         let launched = Launch::spawn(
             &ctx,
