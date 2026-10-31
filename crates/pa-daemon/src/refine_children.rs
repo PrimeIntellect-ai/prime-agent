@@ -298,7 +298,10 @@ impl AgentSessionEngine {
                     core.session.finish_compact_auto_refine_round();
                 }
                 self.teardown_refine_child(rlm_child_id);
-                bail!("the refinement failed: {error}");
+                // The pinned prefix (the old in-process refiner's
+                // `{failure}` label): a failed model pass surfaces as
+                // "Refinement failed: <reason>" on refine_failed.
+                bail!("Refinement failed: {error}");
             }
         }
         // The apply re-reads the target harness state fresh and applies the

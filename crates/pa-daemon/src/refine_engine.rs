@@ -215,10 +215,14 @@ impl RefineEngine {
             })],
             tools: None,
         };
-        // The request carries no output clamp: the child's turn derives
-        // its budget from the model exactly like any other spawned turn.
+        // The planning turn derives its budget from the model like any
+        // other spawned turn; pinning the default onto the request keeps
+        // the wire budget and the Length failure surface naming the same
+        // number (the old in-process refiner's `reply_text` contract).
+        let output_budget = pa_ai::default_request_max_tokens(&model);
         let mut stream_options =
             pa_ai::types::SimpleStreamOptions::from_base(pa_ai::types::StreamOptions {
+                max_tokens: output_budget,
                 api_key,
                 headers,
                 ..Default::default()
@@ -230,9 +234,20 @@ impl RefineEngine {
                 pa_ai::complete_simple(&model, &context, Some(stream_options)).await
             })
             .map_err(|error| anyhow::anyhow!("the refinement model request failed: {error:?}"))?;
+        // The model pass's own terminal reasons are the child's failure:
+        // a reply cut off at its output limit or failed by the provider is
+        // an error that says so, never parsed as JSON (the old
+        // in-process refiner's `reply_text` taxonomy; the parent's
+        // envelope prefix composes the full "Refinement failed: ..." line).
         match reply.stop_reason {
+            pa_types::ai::StopReason::Length => anyhow::bail!(
+                "the model hit its output limit ({} tokens, {}/{})",
+                output_budget.map_or_else(|| "no".to_string(), |tokens| tokens.to_string()),
+                reply.provider,
+                reply.model
+            ),
             pa_types::ai::StopReason::Error => anyhow::bail!(
-                "the refinement model call failed: {}",
+                "{}",
                 reply
                     .error_message
                     .unwrap_or_else(|| "unknown provider error".to_string())

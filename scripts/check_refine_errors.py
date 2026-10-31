@@ -98,6 +98,11 @@ def observe(binary, root, case, receipt):
                 'telemetryDisabled': True, 'noExtensions': True, 'noContextFiles': True})
             active = created.get('activeSessionId') or created.get('id')
             assert active, created
+            # The refine outcome rides the session's event plane, which only
+            # an attached client receives (the e2e pins attach the same
+            # way): subscribe this connection before the spawn so no event
+            # is missed.
+            client.call('attach', activeSessionId=active)
             # Fire-and-wake: the refine RPC returns a spawn receipt; the
             # failure text lands later via the parked reply applied at the
             # idle boundary. Await the outcome in the session transcript.
@@ -114,9 +119,9 @@ def observe(binary, root, case, receipt):
                                  instructions='Fixture no-op refinement')
             assert isinstance(spawned, dict) and spawned.get('refinementChildSpawned'), spawned
             # The failed child's reply wakes the parent as a refine_failed
-            # event frame on the client wire - the e2e pin's read surface.
-            # Drain the wire with a benign catalog call each round and lift
-            # the failure message from the event frame.
+            # session_event frame on the attached client's wire - the e2e
+            # pin's read surface. Drain the wire with a benign catalog call
+            # each round and lift the failure message from the event frame.
             import time as _time
             deadline = _time.monotonic() + 60.0
             actual = None
@@ -126,8 +131,10 @@ def observe(binary, root, case, receipt):
                 except Exception:
                     pass
                 for frame in client.wire:
-                    if isinstance(frame, dict) and frame.get('type') == 'refine_failed':
-                        actual = frame.get('error')
+                    if (isinstance(frame, dict) and frame.get('type') == 'session_event'
+                            and isinstance(frame.get('event'), dict)
+                            and frame['event'].get('type') == 'refine_failed'):
+                        actual = frame['event'].get('error')
                         break
                 if actual:
                     break
