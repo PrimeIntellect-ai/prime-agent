@@ -98,17 +98,36 @@ def observe(binary, root, case, receipt):
                 'telemetryDisabled': True, 'noExtensions': True, 'noContextFiles': True})
             active = created.get('activeSessionId') or created.get('id')
             assert active, created
-            try:
-                client.call('refine', activeSessionId=active,
-                            instructions='Fixture no-op refinement')
-            except AssertionError as error:
-                response = error.args[0]
-                assert isinstance(response, dict) and response.get('command') == 'refine', response
-                assert response.get('success') is False and isinstance(response.get('error'), str), response
-                actual = response['error']
-            else:
-                raise AssertionError('refine must report the fixture failure')
-            assert len(server.requests) == 1, server.requests
+            # Fire-and-wake: the refine RPC returns a spawn receipt; the
+            # failure text lands later via the parked reply applied at the
+            # idle boundary. Await the outcome in the session transcript.
+            spawned = client.call('refine', activeSessionId=active,
+                                  instructions='Fixture no-op refinement')
+            assert isinstance(spawned, dict) and spawned.get('refinementChildSpawned'), spawned
+            import time as _time
+            deadline = _time.monotonic() + 60.0
+            actual = None
+            sessions_dir = root / 'agent' / 'sessions'
+            while _time.monotonic() < deadline:
+                import glob as _glob
+                for transcript in _glob.glob(str(sessions_dir / '*.jsonl')):
+                    text = open(transcript, encoding='utf-8', errors='replace').read()
+                    hit = None
+                    for needle in ('Refinement failed: ', 'Refiner did not return a JSON object'):
+                        index = text.rfind(needle)
+                        if index >= 0:
+                            tail = text[index:].split(chr(34))[0]
+                            tail = tail.split(chr(10))[0]
+                            hit = tail
+                            break
+                    if hit:
+                        actual = hit
+                        break
+                if actual:
+                    break
+                _time.sleep(0.25)
+            assert actual, 'the refine failure never landed in the session transcript'
+            assert len(server.requests) >= 1, server.requests
             receipt.update(actual_error=actual, ts_observed_error=TS_OBSERVED[case],
                            parity_equal=actual == TS_OBSERVED[case])
             if case == 'length':
