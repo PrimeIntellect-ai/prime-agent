@@ -78,6 +78,12 @@ def _set_completion_notices_wired(wired: bool) -> None:
     _completion_notices_wired = wired
 
 
+def _completion_notices_are_wired() -> bool:
+    """Read the wiring flag (module-attribute imports of `rlm.bash` bind the
+    `bash()` function, not the module, so the flag needs an importable seam)."""
+    return _completion_notices_wired
+
+
 # One stderr hint per degrade, budgeted per kernel (nano-rlm's
 # MAX_LONG_RUN_NOTES shape): the first few degrades teach the contract, later
 # ones stay quiet.
@@ -1296,7 +1302,11 @@ class PersistentBashHandle(BashHandle):
         return f"<BashHandle persistent pid={self._pid} {state} command={self.command!r}>"
 
 
-def bash(command: str, persistent: bool = False) -> BashHandle:
+def bash(
+    command: str,
+    persistent: bool = False,
+    **unknown: Any,
+) -> BashHandle:
     """Start a shell command immediately; await the handle for the result.
 
     `await bash(cmd)` is a one-shot: cancelling the await (e.g. an interrupt)
@@ -1330,6 +1340,19 @@ def bash(command: str, persistent: bool = False) -> BashHandle:
     polled, so its result and completion notice lag by up to a second; its
     exit_code is -1 when it was killed before recording a status.
     """
+    if unknown:
+        # Invented wait parameters (`timeout=`) are the recurring failure the
+        # eval traces show: the model reaches for a common API shape, loses the
+        # cell to a bare TypeError, and flails. Decline with the real
+        # signature and the parked-turn alternative instead.
+        raise TypeError(
+            "bash() takes command, persistent — not "
+            + ", ".join(f"{name!r}" for name in sorted(unknown))
+            + ". There is no wait or timeout parameter: launch the command "
+            "(bash() returns immediately and auto-backgrounds it) and end "
+            "the turn; a [bash-done] notification resumes you. An await "
+            "always yields after 1 second."
+        )
     if not isinstance(command, str) or not command:
         raise TypeError("command must be a non-empty str")
     if persistent:
