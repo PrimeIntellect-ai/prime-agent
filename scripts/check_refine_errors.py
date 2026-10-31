@@ -102,8 +102,12 @@ def observe(binary, root, case, receipt):
             # failure text lands later via the parked reply applied at the
             # idle boundary. Await the outcome in the session transcript.
             spawned = client.call('refine', activeSessionId=active,
-                                  instructions='Fixture no-op refinement')
+                                 instructions='Fixture no-op refinement')
             assert isinstance(spawned, dict) and spawned.get('refinementChildSpawned'), spawned
+            # The parked reply applies at the session's idle boundary, which
+            # the worker turn runner reaches after a turn settles: drive one
+            # prompt turn so the failure envelope lands in the transcript.
+            client.call('prompt', activeSessionId=active, message='Wait for the refine outcome.')
             import time as _time
             deadline = _time.monotonic() + 60.0
             actual = None
