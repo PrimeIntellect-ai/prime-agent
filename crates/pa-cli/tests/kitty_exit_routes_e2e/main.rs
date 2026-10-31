@@ -740,6 +740,8 @@ impl PtyReader {
 fn spawn_child(route: Route, socket: &Path, slave: &OwnedFd, known_terminal: bool) -> Child {
     fn claim_controlling_tty(fd: i32) -> std::io::Result<()> {
         nix::unistd::setsid()?;
+        // TIOCSCTTY is already the request type on Linux and a `u32` on macOS.
+        #[allow(clippy::cast_lossless)]
         let rc = unsafe { libc::ioctl(fd, libc::TIOCSCTTY as libc::c_ulong, 0) };
         if rc < 0 {
             return Err(std::io::Error::last_os_error());

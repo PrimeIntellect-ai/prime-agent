@@ -293,6 +293,7 @@ pub(crate) struct Termios {
     oflag: libc::tcflag_t,
     cflag: libc::tcflag_t,
     lflag: libc::tcflag_t,
+    #[cfg(target_os = "linux")]
     line: libc::cc_t,
     cc: [libc::cc_t; libc::NCCS],
 }
@@ -308,17 +309,21 @@ impl Termios {
             oflag: raw.c_oflag,
             cflag: raw.c_cflag,
             lflag: raw.c_lflag,
+            #[cfg(target_os = "linux")]
             line: raw.c_line,
             cc: raw.c_cc,
         }
     }
 
     pub(crate) fn delta_is_empty(&self, other: &Termios) -> bool {
+        #[cfg(target_os = "linux")]
+        if self.line != other.line {
+            return false;
+        }
         self.iflag == other.iflag
             && self.oflag == other.oflag
             && self.cflag == other.cflag
             && self.lflag == other.lflag
-            && self.line == other.line
             && self.cc == other.cc
     }
 
@@ -529,6 +534,8 @@ pub(crate) fn spawn_child(spec: &ChildSpec, socket: &Path, slave: &OwnedFd) -> C
     // and claim the pty slave as the controlling terminal.
     pub(crate) fn claim_controlling_tty(fd: i32) -> std::io::Result<()> {
         nix::unistd::setsid()?;
+        // TIOCSCTTY is already the request type on Linux and a `u32` on macOS.
+        #[allow(clippy::cast_lossless)]
         let rc = unsafe { libc::ioctl(fd, libc::TIOCSCTTY as libc::c_ulong, 0) };
         if rc < 0 {
             return Err(std::io::Error::last_os_error());
