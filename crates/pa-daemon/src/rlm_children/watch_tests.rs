@@ -444,6 +444,7 @@ async fn a_factory_child_settles_without_a_parent_notice() {
     sessions
         .spawn(RlmSpawnRequest {
             prompt: "f20 child task".to_string(),
+            cwd: None,
             name: Some("f20-worker".to_string()),
             model: None,
             thinking: None,
