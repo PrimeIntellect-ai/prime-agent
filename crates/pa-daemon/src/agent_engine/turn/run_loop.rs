@@ -33,6 +33,10 @@ impl AgentSessionEngine {
             .store(false, std::sync::atomic::Ordering::SeqCst);
         self.threshold_checks_enabled
             .store(true, std::sync::atomic::Ordering::SeqCst);
+        // Each new run (one prompt wait) may mint its own finalize wake at
+        // budget exhaustion; a run admitted as the wake text keeps the spent
+        // flag, so the wake cannot chain into itself.
+        self.arm_finalize_wake(&prompt);
         // Whether a loop-boundary frame already passed in this item: the
         // worker's run-opening frames are the first run's, so the engine
         // forwards the later runs' opening frames.
@@ -206,6 +210,28 @@ impl AgentSessionEngine {
             emit(EngineEvent::Done(Ok(())));
             return;
         }
+    }
+
+    /// Arm the run's finalize wake: each new prompt wait may mint one wake at
+    /// budget exhaustion, except a run admitted as the wake itself (the
+    /// spent flag stays, so the wake cannot chain into itself).
+    pub(in crate::agent_engine) fn arm_finalize_wake(&self, prompt: &TurnPrompt) {
+        let is_wake = match prompt {
+            TurnPrompt::User { text, .. } => {
+                text.starts_with(pa_core::autonomous::AUTONOMOUS_FINALIZE_WAKE_PREFIX)
+            }
+            TurnPrompt::Injected(row) => row
+                .content
+                .text()
+                .starts_with(pa_core::autonomous::AUTONOMOUS_FINALIZE_WAKE_PREFIX),
+        };
+        if is_wake {
+            return;
+        }
+        self.runtime.block_on(async {
+            let mut state = self.autonomous.lock().await;
+            state.finalize_wake_used = false;
+        });
     }
 
     /// The hosted session's agent loop, building the session on first use.
