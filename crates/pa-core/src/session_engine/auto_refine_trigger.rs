@@ -63,7 +63,6 @@ impl AgentSession {
             .pending
     }
 
-
     /// Drop the armed trigger — a branch move or a disposal abandons the
     /// conversation the trigger was armed against.
     ///
