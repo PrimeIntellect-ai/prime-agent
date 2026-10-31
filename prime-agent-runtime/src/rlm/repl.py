@@ -2012,6 +2012,14 @@ def main() -> None:
     _loop = asyncio.new_event_loop()
     asyncio.set_event_loop(_loop)
     queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
+    # The kernel owns its signal mask. A host that blocks SIGINT on the
+    # spawning thread (tokio-style signal handling) leaks that mask through
+    # fork+exec — an inherited-blocked SIGINT silences the whole interrupt
+    # machinery: user interrupts and the cell span guard raise a signal
+    # that never delivers, and a stuck cell wedges the session until the
+    # agent clock. Unblock before arming the handler.
+    if hasattr(signal, "pthread_sigmask"):
+        signal.pthread_sigmask(signal.SIG_UNBLOCK, {signal.SIGINT})
     signal.signal(signal.SIGINT, _sigint_handler)
     threading.Thread(target=_read_requests, args=(stdin_fd, queue), daemon=True).start()
 
