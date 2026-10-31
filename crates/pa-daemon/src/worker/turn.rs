@@ -1,12 +1,12 @@
 //! One agent turn: the runner that admits queued input, drives the
 //! engine, and settles the result.
 use super::{
-    admit_kernel_notice, checkpoint_queue_recovery, compact_action_label, create_daemon_event_meta,
-    emit_refinement_event_for_session, emit_refinement_row, gather_delivery_batch, json, oneshot,
-    session_snapshot, AssistantSnapshot, DaemonOutbound, EngineEvent, EventPump, Lane, Map, Notify,
-    OutboundFrame, PromptRequest, QueueCheckpoint, QueuedItem, Result, SessionActionSnapshot,
-    SessionCore, SessionEngine, TurnSettle, Value, WorkerRecoveryJournal,
-    ABORTED_TURN_SETTLE_ERROR,
+    admit_turn_held_notice, checkpoint_queue_recovery, compact_action_label,
+    create_daemon_event_meta, emit_refinement_event_for_session, emit_refinement_row,
+    gather_delivery_batch, json, oneshot, session_snapshot, AssistantSnapshot, DaemonOutbound,
+    EngineEvent, EventPump, Lane, Map, Notify, OutboundFrame, PromptRequest, QueueCheckpoint,
+    QueuedItem, Result, SessionActionSnapshot, SessionCore, SessionEngine, TurnSettle, Value,
+    WorkerRecoveryJournal, ABORTED_TURN_SETTLE_ERROR,
 };
 
 use std::sync::{Arc, Mutex};
@@ -328,37 +328,27 @@ impl TurnRunner {
         self.emit_turn_event(json!({ "type": "agent_start" }));
         self.emit_turn_event(json!({ "type": "turn_start" }));
         // The `[turn-held]` pacing window: exactly one notice per delivery
-        // held busy past [`TURN_HELD_WINDOW`]. The window's closure is the
-        // admission's own lock section (the `session_is_closed` seam), so
-        // the gate — same delivery still busy, nothing queued to cut it
-        // already, not compacting or shutting down — is atomic with the
-        // queue push. A queued row stops the held turn at its next
-        // boundary (the queued-steering probe) and delivers as the next
-        // turn's prompt; the timer dies with the delivery at the join.
+        // held busy past [`TURN_HELD_WINDOW`]. The admission's held gate
+        // (same delivery still busy, nothing queued to cut it already, not
+        // compacting or shutting down) runs inside its ONE lock section —
+        // never through a re-locking closed-check closure, which would
+        // self-deadlock the session. A queued row stops the held turn at
+        // its next boundary (the queued-steering probe) and delivers as
+        // the next turn's prompt; the timer dies with the delivery at the
+        // join.
         let turn_held_window = {
             let core = Arc::clone(&self.core);
             let recovery = Arc::clone(&self.recovery);
             let work_notify = Arc::clone(&self.work_notify);
-            let held_gate = {
-                let core = Arc::clone(&core);
-                move || {
-                    let core = core.lock().unwrap();
-                    core.busy
-                        && core.steering.is_empty()
-                        && !core.compacting
-                        && !core.shutdown_requested
-                }
-            };
             tokio::spawn(async move {
                 tokio::time::sleep(TURN_HELD_WINDOW).await;
-                admit_kernel_notice(
+                admit_turn_held_notice(
                     &recovery,
                     &core,
                     &work_notify,
                     pa_core::session_engine::bash_notices::KernelNotice::turn_held(
                         TURN_HELD_WINDOW.as_millis() as u64,
                     ),
-                    held_gate,
                 );
             })
         };

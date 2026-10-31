@@ -24,7 +24,7 @@ mod queue;
 pub use queue::Lane;
 pub use queue::QueuePriority;
 pub(crate) use queue::{
-    admit_autonomous_follow_up, admit_goal_follow_up, admit_kernel_notice,
+    admit_autonomous_follow_up, admit_goal_follow_up, admit_kernel_notice, admit_turn_held_notice,
     checkpoint_queue_recovery, clear_withdrawn_progress_note, enqueue_priority,
     gather_delivery_batch, parse_custom_message, parse_prompt_images, queue_lanes,
     restore_queue_snapshot, restored_turn_policy, withdraw_bash_completion_notice, QueueCheckpoint,

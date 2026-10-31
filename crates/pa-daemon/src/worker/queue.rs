@@ -582,6 +582,61 @@ pub(crate) fn admit_kernel_notice(
     work_notify.notify_one();
 }
 
+/// Admit one turn-held pacing notice: the same steering-lane admission as a
+/// kernel notice, but the daemon-side held gate — the delivery is still
+/// busy, nothing is queued to cut it already, not compacting, not shutting
+/// down — runs inside the ONE lock section with the push. The gate must
+/// never arrive as the `session_is_closed` closure: that seam is invoked
+/// while the admission already holds the core lock, so a re-locking closure
+/// self-deadlocks the session.
+pub(crate) fn admit_turn_held_notice(
+    recovery: &std::sync::Mutex<Option<WorkerRecoveryJournal>>,
+    core: &Arc<Mutex<SessionCore>>,
+    work_notify: &Arc<Notify>,
+    notice: crate::engine::KernelNotice,
+) {
+    let crate::engine::KernelNotice { row, preview_label } = notice;
+    let content = match &row.content {
+        pa_types::ai::UserContent::Text(text) => text.clone(),
+        pa_types::ai::UserContent::Blocks(_) => String::new(),
+    };
+    let mut core_guard = core.lock().unwrap();
+    if !core_guard.busy
+        || !core_guard.steering.is_empty()
+        || core_guard.compacting
+        || core_guard.shutdown_requested
+    {
+        // The held gate refused: the delivery settled (or something else
+        // already queued to cut it), so the pacing notice stays quiet.
+        return;
+    }
+    core_guard.steering.push_back(QueuedItem {
+        priority: QueuePriority::Background,
+        preview: Some(format!("{preview_label}: {content}")),
+        message: content,
+        custom_message: Some(crate::session_commands::custom_message_value(&row)),
+        agent_message: None,
+        queue_key: None,
+        admission_id: None,
+        images: Vec::new(),
+        done: None,
+        queue_visible: true,
+        policy: TurnPolicy::Queued,
+        forced_batch: false,
+    });
+    drop(core_guard);
+    // The busy-evidence checkpoint: the notice is undelivered live
+    // work until its turn settles.
+    checkpoint_queue_recovery(
+        recovery,
+        core,
+        QueueCheckpoint::Admitted {
+            operation: "steer_queued",
+        },
+    );
+    work_notify.notify_one();
+}
+
 /// Withdraw one queued bash completion notice: the kernel read the result
 /// before the notice delivered (pids are reused, so the command disambiguates).
 pub(crate) fn withdraw_bash_completion_notice(
