@@ -226,7 +226,11 @@ pub fn accept_within_idle_window(listener: &UnixListener) -> Option<UnixStream> 
     let idle_until = Instant::now() + Duration::from_millis(1500);
     loop {
         match listener.accept() {
-            Ok((stream, _)) => return Some(stream),
+            Ok((stream, _)) => {
+                // macOS inherits O_NONBLOCK from the listener on accept; the serve loops block.
+                stream.set_nonblocking(false).expect("blocking mock stream");
+                return Some(stream);
+            }
             Err(error) if error.kind() == ErrorKind::WouldBlock => {
                 if Instant::now() >= idle_until {
                     return None;

@@ -340,9 +340,10 @@ fn the_reply_hints_follow_the_target_state() {
     );
     let mut with_text = armed_live();
     with_text.handle_key("h");
+    let alt = crate::keybindings::format_key_text("alt");
     assert_eq!(
         flat(&with_text.render_hints(120, None)),
-        "Enter send   Alt+Enter queue   Esc/Ctrl+C cancel"
+        format!("Enter send   {alt}+Enter queue   Esc/Ctrl+C cancel")
     );
     let saved = armed_saved();
     assert_eq!(
