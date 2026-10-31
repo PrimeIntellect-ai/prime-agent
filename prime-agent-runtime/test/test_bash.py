@@ -1845,6 +1845,27 @@ class PersistentBashTest(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(self.handle_for(gone.pid))
         self.assertEqual(self.files(), [])
 
+class BashInventedKwargsTest(unittest.TestCase):
+    """The invented-kwarg teaching surface: `timeout=` (the eval trace's
+    recurring invention) is declined with the real signature and the
+    parked-turn alternative, never a bare TypeError."""
+
+    def test_invented_kwargs_teach_the_real_signature(self):
+        with self.assertRaises(TypeError) as ctx:
+            bash("echo hi", timeout=600)
+        message = str(ctx.exception)
+        self.assertIn("command, yield_after, persistent", message)
+        self.assertIn("'timeout'", message)
+        self.assertIn("[bash-done]", message)
+        self.assertIn("end the turn", message)
+
+    def test_positional_call_is_untouched(self):
+        handle = bash("echo okay")
+        try:
+            self.assertIn("okay", handle.output())
+        finally:
+            handle.kill()
+
 
 if __name__ == "__main__":
     unittest.main()

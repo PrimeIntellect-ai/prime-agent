@@ -3376,5 +3376,63 @@ class OwnerExitWaitTest(unittest.TestCase):
         sleep.assert_called_once()
 
 
+class CellSpanGuardTest(unittest.TestCase):
+    """The in-cell span guard: a cell still running at the budget is
+    interrupted through the SIGINT path and settles as a teaching error
+    (CellSpanGuard); short cells run untouched, the kernel stays usable,
+    and `PRIME_AGENT_CELL_SPAN_GUARD_SECONDS=0` disables the guard."""
+
+    def guarded_repl(self, seconds: str) -> ReplProcess:
+        repl = ReplProcess(env={"PRIME_AGENT_CELL_SPAN_GUARD_SECONDS": seconds})
+        self.addCleanup(repl.close)
+        repl.ready()
+        return repl
+
+    def test_long_compute_cell_is_interrupted_with_the_teaching_error(self):
+        # Pure compute: no banned shape, invisible to the discipline screen,
+        # and blocking — exactly the single-giant-cell shape the boundary
+        # notices cannot reach.
+        repl = self.guarded_repl("0.5")
+        repl.send({"type": "execute", "id": "long", "code": "n = 0\nwhile True:\n    n += 1"})
+        events = repl.until_done("long")
+        error = one(events, "error")
+        self.assertIsNotNone(error)
+        self.assertEqual(error["ename"], "CellSpanGuard")
+        self.assertIn("0.5s inline budget", error["evalue"])
+        self.assertIn("[cell-span]", "\n".join(error["traceback"]))
+        self.assertIn("bash()", "\n".join(error["traceback"]))
+        self.assertEqual(one(events, "done")["status"], "error")
+        # The kernel stays usable and the interrupted cell's prior state
+        # persists in the namespace.
+        events = repl.execute("after", "n > 0")
+        self.assertEqual(one(events, "result")["text"], "True")
+        self.assertEqual(one(events, "done")["status"], "ok")
+
+    def test_await_suspended_cell_is_interrupted_at_the_budget(self):
+        repl = self.guarded_repl("0.5")
+        repl.send({"type": "execute", "id": "parked", "code": "import asyncio\nawait asyncio.get_running_loop().create_future()"})
+        events = repl.until_done("parked")
+        error = one(events, "error")
+        self.assertIsNotNone(error)
+        self.assertEqual(error["ename"], "CellSpanGuard")
+        self.assertEqual(one(events, "done")["status"], "error")
+
+    def test_short_cells_run_untouched(self):
+        repl = self.guarded_repl("1")
+        events = repl.execute("quick", "40 + 2")
+        self.assertEqual(one(events, "result")["text"], "42")
+        self.assertEqual(one(events, "done")["status"], "ok")
+
+    def test_zero_disables_the_guard(self):
+        repl = self.guarded_repl("0")
+        # 1.5s of sleep would clear the decline screen (literal sleeps under
+        # 5s) and outlive a 1s budget: only a disabled guard lets it finish.
+        events = repl.execute("slow", "import time\ntime.sleep(1.5)\nseen = True")
+        self.assertIsNone(one(events, "error"))
+        self.assertEqual(one(events, "done")["status"], "ok")
+        events = repl.execute("check", "seen")
+        self.assertEqual(one(events, "result")["text"], "True")
+
+
 if __name__ == "__main__":
     unittest.main()

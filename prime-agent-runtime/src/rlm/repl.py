@@ -109,6 +109,22 @@ _sigint_target: str | None = None
 _finishing_rid: str | None = None
 _handoff_interrupted = False
 
+# The in-cell span guard: the same cell budget the Rust watchdog notes
+# (`DEFAULT_PYTHON_CELL_TIMEOUT_MS`, 60s), reached INTO the cell. The
+# watchdog teaches only after the settle; the guard interrupts a cell still
+# running at the budget, so one giant cell — pure compute, no banned shape,
+# invisible to the discipline screen — cannot hold the turn until the agent
+# timeout. The interrupt rides the SIGINT path and the cell's error event
+# teaches the parked-turn alternative. `0` (or an unparsable value) disables.
+try:
+    _CELL_SPAN_GUARD_SECONDS = max(
+        0.0, float(os.environ.get("PRIME_AGENT_CELL_SPAN_GUARD_SECONDS", "60"))
+    )
+except ValueError:
+    _CELL_SPAN_GUARD_SECONDS = 60.0
+# Request ids the span guard interrupted (a request may still be unwinding).
+_span_guard_fired: set[str] = set()
+
 
 def _send(event: dict[str, Any]) -> None:
     """Write one protocol frame; the locked single write keeps frames atomic."""
@@ -594,6 +610,55 @@ def _interrupt_event(cell_id: str, exc: BaseException) -> dict[str, Any]:
     return {"event": "error", "id": cell_id, "ename": "KeyboardInterrupt", "evalue": "", "traceback": lines}
 
 
+def _arm_span_guard(rid: str) -> threading.Timer | None:
+    """Arm the in-cell budget timer for one user cell; `cancel()` disarms.
+
+    The timer rides the request-interrupt path (a per-rid target, dropped for
+    finished or unknown requests), so a guard that fires after the cell's
+    settle can never leak onto a later request. `_finish_locked` reaps any
+    parked entry.
+    """
+    if _CELL_SPAN_GUARD_SECONDS <= 0:
+        return None
+
+    def fire() -> None:
+        # Mark before interrupting: the flag is what decides between the
+        # teaching event and a bare KeyboardInterrupt in the except arms.
+        _span_guard_fired.add(rid)
+        _request_interrupt(rid)
+
+    timer = threading.Timer(_CELL_SPAN_GUARD_SECONDS, fire)
+    timer.daemon = True
+    timer.start()
+    return timer
+
+
+def _span_guard_event(rid: str, exc: BaseException) -> dict[str, Any]:
+    """The span guard's teaching error: where the cell was interrupted, plus
+    the parked-turn alternative (bash() auto-backgrounds; a [bash-done]
+    notice resumes) — the in-cell sibling of the Rust watchdog's post-hoc
+    note."""
+    stack = _cell_stack(traceback.extract_tb(exc.__traceback__))
+    lines = ["Traceback (most recent call last):\n"] if stack else []
+    if stack:
+        lines.extend(stack.format())
+    lines.append(
+        f"CellSpanGuard: python cell interrupted at the {_CELL_SPAN_GUARD_SECONDS:g}s "
+        "inline budget; prior REPL state persists.\n"
+        "[cell-span] Long work belongs in bash() — launch it there (it "
+        "auto-backgrounds) and end the turn; a [bash-done] notification "
+        "resumes you. Split long compute into smaller cells; do not hold "
+        "the turn inside one.\n"
+    )
+    return {
+        "event": "error",
+        "id": rid,
+        "ename": "CellSpanGuard",
+        "evalue": f"python cell interrupted at the {_CELL_SPAN_GUARD_SECONDS:g}s inline budget",
+        "traceback": _cap_traceback_lines([_cap_text(line) for line in lines]),
+    }
+
+
 # ── the discipline screen: banned in-cell shapes ────────────────────────────
 #
 # The shipped prompt's contract bans waiting and process spawning from cells
@@ -785,10 +850,14 @@ async def _run_guarded(task: asyncio.Task[Any], rid: str) -> tuple[str, Any, dic
         value = await task
         return "ok", value, None
     except asyncio.CancelledError as exc:
+        if rid in _span_guard_fired:
+            return "error", None, _span_guard_event(rid, exc)
         if _active["interrupted"]:
             return "error", None, _interrupt_event(rid, exc)
         return "error", None, _error_event(rid, exc)
     except BaseException as exc:  # noqa: BLE001 - every cell failure becomes an error event
+        if rid in _span_guard_fired:
+            return "error", None, _span_guard_event(rid, exc)
         return "error", None, _error_event(rid, exc)
     finally:
         with _interrupt_lock:
@@ -827,13 +896,24 @@ async def _handle_execute(req: dict[str, Any], ns: dict[str, Any]) -> None:
         assert _loop is not None
         task = _loop.create_task(_run_codes(codes, ns))
         execution.owner = task
-        status, value, error = await _run_guarded(task, cell_id)
+        # The in-cell span guard: armed for user cells only (declines return
+        # above; internal requests never take this path), disarmed at settle.
+        span_guard = _arm_span_guard(cell_id)
+        try:
+            status, value, error = await _run_guarded(task, cell_id)
+        finally:
+            if span_guard is not None:
+                span_guard.cancel()
         result_text: str | None = None
         try:
             if _consume_handoff_interrupt() and status == "ok":
                 # SIGINT landed between the task's completion and the finishing
                 # phase: it targeted this request, so cancel its remaining work.
-                status, error = "error", _error_event(cell_id, KeyboardInterrupt())
+                status, error = "error", (
+                    _span_guard_event(cell_id, KeyboardInterrupt())
+                    if cell_id in _span_guard_fired
+                    else _error_event(cell_id, KeyboardInterrupt())
+                )
             if status == "ok" and has_trailing and value is not None:
                 try:
                     ns["_"] = value
@@ -853,6 +933,7 @@ async def _handle_execute(req: dict[str, Any], ns: dict[str, Any]) -> None:
             _send(error)
         _send({"event": "done", "id": cell_id, "status": status})
     finally:
+        _span_guard_fired.discard(cell_id)
         execution.owner = None
         execution.finished.set()
         _current_cell_execution.reset(execution_token)

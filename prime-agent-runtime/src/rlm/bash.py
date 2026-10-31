@@ -1310,7 +1310,25 @@ class PersistentBashHandle(BashHandle):
         return f"<BashHandle persistent pid={self._pid} {state} command={self.command!r}>"
 
 
-def bash(command: str, yield_after: float | None = None, persistent: bool = False) -> BashHandle:
+def bash(
+    command: str,
+    yield_after: float | None = None,
+    persistent: bool = False,
+    **unknown: Any,
+) -> BashHandle:
+    if unknown:
+        # Invented wait parameters (`timeout=`) are the recurring failure the
+        # eval traces show: the model reaches for a common API shape, loses the
+        # cell to a bare TypeError, and flails. Decline with the real
+        # signature and the parked-turn alternative instead.
+        raise TypeError(
+            "bash() takes command, yield_after, persistent — not "
+            + ", ".join(f"{name!r}" for name in sorted(unknown))
+            + ". There is no wait or timeout parameter: launch the command "
+            "(bash() returns immediately and auto-backgrounds it) and end "
+            "the turn; a [bash-done] notification resumes you. A short "
+            "inline wait is bounded by yield_after."
+        )
     """Start a shell command immediately; await the handle for the result.
 
     `await bash(cmd)` is a one-shot: cancelling the await (e.g. an interrupt)
