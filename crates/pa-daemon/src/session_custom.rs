@@ -239,8 +239,12 @@ impl Worker {
         )
     }
 
-    /// `refine { instructions?, rollbackId?, global? }` (TS `session.refine`): run the
-    /// refinement, emit the durable outcome and notice rows, and answer the `RefinementResult`.
+    /// `refine { instructions?, rollbackId?, global? }` (TS `session.refine`): the
+    /// mechanical rollback applies inline (answering its `RefinementResult`); every
+    /// planning refinement is the refinement child's — the command spawns it and
+    /// returns immediately (fire-and-wake), and the child's proposal applies on
+    /// its reply's arrival (the reply's wake emits the durable outcome and notice
+    /// rows and the `refine_complete` event).
     pub(crate) async fn handle_refine(&self, payload: &Value) -> DaemonResponse {
         if let Err(response) = self.require_created("refine") {
             return response;
@@ -260,9 +264,26 @@ impl Worker {
                 .unwrap_or(false),
         };
         let engine = std::sync::Arc::clone(&self.engine);
-        let result = tokio::task::spawn_blocking(move || engine.run_refinement(options))
-            .await
-            .unwrap_or_else(|error| Err(anyhow::anyhow!("refinement task failed: {error}")));
+        let is_rollback = options.rollback_id.is_some();
+        let result = tokio::task::spawn_blocking(move || {
+            if is_rollback {
+                engine.run_rollback_refinement(options)
+            } else {
+                engine
+                    .spawn_refinement_child(
+                        options,
+                        pa_core::session_engine::refine::RefinementSource::User,
+                    )
+                    .map(|child_id| {
+                        serde_json::json!({
+                            "refinementChildSpawned": true,
+                            "rlmChildId": child_id,
+                        })
+                    })
+            }
+        })
+        .await
+        .unwrap_or_else(|error| Err(anyhow::anyhow!("refinement task failed: {error}")));
         let result = match result {
             Ok(result) => result,
             Err(error) => {
@@ -273,7 +294,12 @@ impl Worker {
                 return response_failure(None, "refine", &format!("{error:#}"), None);
             }
         };
-        // The refinement's durable rows: the TUI outcome, plus the model-facing
+        // The spawned child answers immediately; its proposal's outcome rows
+        // and completion event arrive on its reply's wake.
+        if result.get("refinementChildSpawned") == Some(&serde_json::json!(true)) {
+            return response_success(None, "refine", Some(result));
+        }
+        // The rollback's durable rows: the TUI outcome, plus the model-facing
         // notice when edits applied.
         if let Ok(typed) =
             serde_json::from_value::<pa_core::refinement::RefinementResult>(result.clone())

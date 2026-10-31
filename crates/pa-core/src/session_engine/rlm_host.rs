@@ -145,6 +145,10 @@ pub struct RlmSpawnRequest {
     pub thinking: Option<String>,
     /// Working directory; the host resolves relative paths against the session cwd.
     pub cwd: Option<String>,
+    /// The refine-child spawn kind: `true` spawns the refinement child (a
+    /// `rlm.spawn kind="refine"` child that runs the refinement protocol
+    /// instead of the agent engine).
+    pub refine_child: bool,
     /// The parent's in-flight turn request the spawn anchors to (TS
     /// `spawnedByRequestId`): `None` for a spawn outside an active run.
     pub spawned_by_request_id: Option<String>,
@@ -662,8 +666,18 @@ fn spawn_request_from_payload(prompt: &str, data: &Value) -> anyhow::Result<RlmS
     reject_unsupported_kwargs(
         &kwargs,
         OPERATION,
-        &["name", "model", "thinking", "cwd", "factory"],
+        &["name", "model", "thinking", "cwd", "factory", "kind"],
     )?;
+    let refine_child = match optional_string_kwarg(&kwargs, "kind", OPERATION)? {
+        None => false,
+        Some("refine") => true,
+        Some(other) => {
+            anyhow::bail!(
+                "rlm.spawn kind must be \"refine\" when given, not {other:?}. Only the refinement \
+                 child has a kind."
+            )
+        }
+    };
     let name = optional_string_kwarg(&kwargs, "name", OPERATION)?;
     let name = normalize_requested_rlm_subagent_session_name(name, OPERATION)?;
     if let Some(name) = &name {
@@ -689,6 +703,7 @@ fn spawn_request_from_payload(prompt: &str, data: &Value) -> anyhow::Result<RlmS
         model,
         thinking,
         cwd,
+        refine_child,
         spawned_by_request_id: None,
         factory,
     })
@@ -1364,7 +1379,34 @@ mod tests {
                 state_id: "build".to_string(),
             })
         );
+        assert!(!requests[0].refine_child);
         drop(requests);
+
+        // The refine-child kind parses into the spawn request; unknown
+        // kinds refuse.
+        call(
+            &wiring,
+            "rlm.run",
+            json!({ "prompt": "p", "kwargs": { "name": "w", "kind": "refine" } }),
+        )
+        .await
+        .unwrap();
+        let requests = spawn_requests.lock().await;
+        assert_eq!(requests.len(), 2);
+        assert!(requests[1].refine_child);
+        drop(requests);
+        let error = call(
+            &wiring,
+            "rlm.run",
+            json!({ "prompt": "p", "kwargs": { "name": "w", "kind": "oracle" } }),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "rlm.spawn kind must be \"refine\" when given, not \"oracle\". Only the refinement \
+             child has a kind."
+        );
 
         // Validation: prompt type, unsupported kwargs, name rules.
         let error = call(&wiring, "rlm.run", json!({ "kwargs": {} }))

@@ -98,17 +98,49 @@ def observe(binary, root, case, receipt):
                 'telemetryDisabled': True, 'noExtensions': True, 'noContextFiles': True})
             active = created.get('activeSessionId') or created.get('id')
             assert active, created
+            # The refine outcome rides the session's event plane, which only
+            # an attached client receives (the e2e pins attach the same
+            # way): subscribe this connection before the spawn so no event
+            # is missed.
+            client.call('attach', activeSessionId=active)
+            # Fire-and-wake: the refine RPC returns a spawn receipt; the
+            # failure text lands later via the parked reply applied at the
+            # idle boundary. Await the outcome in the session transcript.
+            # The e2e seeds one turn before refine: the worker turn runner
+            # must exist for the child's reply wake to park-apply and emit
+            # the refine_failed event. Drive the seed turn first (its own
+            # model call hits the fixture and errors - the worker still
+            # runs, settles, and keeps its idle loop).
             try:
-                client.call('refine', activeSessionId=active,
-                            instructions='Fixture no-op refinement')
-            except AssertionError as error:
-                response = error.args[0]
-                assert isinstance(response, dict) and response.get('command') == 'refine', response
-                assert response.get('success') is False and isinstance(response.get('error'), str), response
-                actual = response['error']
-            else:
-                raise AssertionError('refine must report the fixture failure')
-            assert len(server.requests) == 1, server.requests
+                client.call('prompt', activeSessionId=active, message='seed turn')
+            except Exception:
+                pass
+            spawned = client.call('refine', activeSessionId=active,
+                                 instructions='Fixture no-op refinement')
+            assert isinstance(spawned, dict) and spawned.get('refinementChildSpawned'), spawned
+            # The failed child's reply wakes the parent as a refine_failed
+            # session_event frame on the attached client's wire - the e2e
+            # pin's read surface. Drain the wire with a benign catalog call
+            # each round and lift the failure message from the event frame.
+            import time as _time
+            deadline = _time.monotonic() + 60.0
+            actual = None
+            while _time.monotonic() < deadline:
+                try:
+                    client.call('list_saved_sessions', cwd=str(root), scope='all')
+                except Exception:
+                    pass
+                for frame in client.wire:
+                    if (isinstance(frame, dict) and frame.get('type') == 'session_event'
+                            and isinstance(frame.get('event'), dict)
+                            and frame['event'].get('type') == 'refine_failed'):
+                        actual = frame['event'].get('error')
+                        break
+                if actual:
+                    break
+                _time.sleep(0.5)
+            assert actual, 'the refine_failed event never arrived on the client wire'
+            assert len(server.requests) >= 1, server.requests
             receipt.update(actual_error=actual, ts_observed_error=TS_OBSERVED[case],
                            parity_equal=actual == TS_OBSERVED[case])
             if case == 'length':

@@ -284,6 +284,9 @@ pub struct RlmSessionIdentity {
 pub struct SemanticSpawnOrigin {
     pub parent_session_id: Option<String>,
     pub spawned_by_request_id: Option<String>,
+    /// The spawn's kind was `refine` (`rlm.spawn kind="refine"`): the
+    /// refinement child, whose registered ledger line carries the kind.
+    pub refine_child: bool,
 }
 
 /// The resource snapshot for a session without a resource surface (the TS

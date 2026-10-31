@@ -179,21 +179,25 @@ def emit(data: dict[str, Any]) -> None:
 async def spawn(
     prompt: str,
     *,
-    name: str,
+    name: str | None = None,
     model: str | None = None,
     thinking: str | None = None,
     cwd: str | None = None,
+    kind: str | None = None,
 ) -> RLMSpawnHandle:
     """Spawn a recursive Prime Agent child and return once its task is admitted.
 
-    ``name`` is required and must be unique among siblings.
-    ``model`` selects a child with an exact ``provider/model`` selector.
-    ``thinking`` sets the child reasoning level (e.g. 'off', 'low', 'medium', 'high');
-    defaults to the parent level; levels invalid for the resolved model fail the spawn.
-    ``cwd`` starts the child in that directory (relative to the session cwd); defaults
-    to the session cwd.
+    ``name`` names the child and must be unique among siblings (omitted only for
+    the unnamed ``kind="refine"`` one-shot). ``model`` selects a child with an
+    exact ``provider/model`` selector. ``thinking`` sets the child
+    reasoning level (e.g. 'off', 'low', 'medium', 'high'); defaults to the parent
+    level; levels invalid for the resolved model fail the spawn. ``cwd`` starts
+    the child in that directory (relative to the session cwd); defaults to the
+    session cwd. ``kind`` selects the refinement child when given as ``"refine"``
+    (an unnamed one-shot child that runs the refinement protocol); any other
+    value is refused.
     """
-    return await _spawn(prompt, name=name, model=model, thinking=thinking, cwd=cwd)
+    return await _spawn(prompt, name=name, model=model, thinking=thinking, cwd=cwd, kind=kind)
 
 
 async def _spawn(
@@ -204,12 +208,25 @@ async def _spawn(
     thinking: str | None = None,
     cwd: str | None = None,
     factory: dict[str, str] | None = None,
+    kind: str | None = None,
 ) -> RLMSpawnHandle:
     """``spawn`` plus the factory executor's run tag (``{runId, specId,
     stateId}``), which the host records on the child's ledger spawn edge."""
     if not isinstance(prompt, str):
         raise TypeError(f"prompt must be str, got {type(prompt).__name__}")
-    kwargs: dict[str, Any] = {"name": name}
+    if kind is None:
+        if not isinstance(name, str) or not name:
+            raise TypeError("spawn() missing a non-empty child name (kind='refine' is the only unnamed spawn)")
+        kwargs: dict[str, Any] = {"name": name}
+    elif kind == "refine":
+        if name is not None and (not isinstance(name, str) or not name):
+            raise TypeError(f"name must be a non-empty str, got {name!r}")
+        kwargs: dict[str, Any] = {}
+        if name is not None:
+            kwargs["name"] = name
+        kwargs["kind"] = kind
+    else:
+        raise TypeError('kind must be "refine" when given')
     if model is not None:
         kwargs["model"] = model
     if thinking is not None:
@@ -660,12 +677,13 @@ class _RLMNamespace:
         self,
         prompt: str,
         *,
-        name: str,
+        name: str | None = None,
         model: str | None = None,
         thinking: str | None = None,
         cwd: str | None = None,
+        kind: str | None = None,
     ) -> RLMSpawnHandle:
-        return await spawn(prompt, name=name, model=model, thinking=thinking, cwd=cwd)
+        return await spawn(prompt, name=name, model=model, thinking=thinking, cwd=cwd, kind=kind)
 
     async def create_session(
         self,
