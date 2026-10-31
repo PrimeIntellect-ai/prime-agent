@@ -58,6 +58,9 @@ pub struct ToolExecutionResult {
     pub content: Vec<ToolContentBlock>,
     pub details: Option<serde_json::Value>,
     pub is_error: bool,
+    /// Hint that the agent should stop after the current tool batch; the
+    /// bridged `AgentToolResult` carries it to the loop.
+    pub terminate: Option<bool>,
 }
 
 impl ToolExecutionResult {
@@ -66,6 +69,7 @@ impl ToolExecutionResult {
             content: vec![ToolContentBlock::text(text)],
             details: None,
             is_error: false,
+            terminate: None,
         }
     }
 }

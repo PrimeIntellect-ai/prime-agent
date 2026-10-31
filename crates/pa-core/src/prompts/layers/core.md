@@ -23,6 +23,7 @@ The harness often sends messages to the agent. These are user messages starting 
     - `.duration: float`
 - `edit.run(path: str, old_str: str, new_str: str) -> str`: the primary method for editing files. async, exact-unique-match; the `edit` module is callable with the same arguments (`await edit(path=..., old_str=..., new_str=...)`)
 - `attach_image(*paths: str) -> str`: loads images directly into context if the agent's model is vision-capable, errors otherwise
+- `rlm.end_turn()`: async; the sanctioned terminal programmatic call — ends the turn (any other tool calls in the same message still execute first, then no further assistant response follows); raises where the host does not support it, never a silent no-op
 
 ## Subagents
 

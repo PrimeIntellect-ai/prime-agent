@@ -626,7 +626,7 @@ pub struct AfterToolCallResult {
     pub details: Option<serde_json::Value>,
     pub is_error: Option<bool>,
     /// Hint that the agent should stop after the current tool batch. Early
-    /// termination only happens when every finalized tool result in the batch
+    /// termination happens when any finalized tool result in the batch
     /// sets this to true.
     pub terminate: Option<bool>,
 }

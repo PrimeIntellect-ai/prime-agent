@@ -2,7 +2,7 @@
 //! (harness/goal/etc.) and their settle/exit waits.
 
 use super::{
-    anyhow, json, lock, Arc, Duration, HostRequestPayload, Inner, Value,
+    anyhow, json, lock, Arc, Duration, HostRequestPayload, Inner, Value, END_TURN_REQUEST_TYPE,
     MAX_HANDLED_HOST_REQUEST_IDS,
 };
 
@@ -61,6 +61,17 @@ impl Inner {
             .and_then(Value::as_str)
             .filter(|t| !t.is_empty())
             .ok_or_else(|| anyhow!("host request payload must have a string type"))?;
+        if request_type == END_TURN_REQUEST_TYPE {
+            // The manager's own answer: mark the executing cell, and the
+            // flag rides the settled result so the turn ends once the
+            // batch settles.
+            let execution = lock(&self.guarded)
+                .active_execution
+                .clone()
+                .ok_or_else(|| anyhow!("rlm.end_turn has no running cell to end the turn for"))?;
+            lock(&execution.buffers).ended_turn = true;
+            return Ok(json!({ "endedTurn": true }));
+        }
         let handler = self
             .options
             .host_handlers
