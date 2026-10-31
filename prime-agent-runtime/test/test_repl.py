@@ -4461,6 +4461,25 @@ class CellSpanGuardTest(unittest.TestCase):
         events = repl.execute("check", "seen")
         self.assertEqual(one(events, "result")["text"], "True")
 
+    def test_guard_fires_even_when_the_host_blocked_sigint(self):
+        # A host that blocks SIGINT on the spawning thread (tokio-style signal
+        # handling) leaks that mask through fork+exec; the kernel must own its
+        # mask and unblock SIGINT at startup, or no interrupt -- user abort or
+        # the span guard -- can ever land in a stuck cell.
+        if not hasattr(signal, "pthread_sigmask"):
+            self.skipTest("POSIX signal masks required")
+        signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGINT})
+        try:
+            repl = self.guarded_repl()
+        finally:
+            signal.pthread_sigmask(signal.SIG_UNBLOCK, {signal.SIGINT})
+        events = self.execute_limited(repl, "stuck", "n = 0\nwhile True:\n    n += 1", 500)
+        error = one(events, "error")
+        self.assertIsNotNone(error, f"events: {events}")
+        self.assertEqual(error["ename"], "CellSpanGuard")
+        self.assertEqual(one(events, "done")["status"], "error")
+
+
 
 class SpanGuardBudgetTest(unittest.TestCase):
     """The guard's clock arithmetic: the host's limit is the budget, the
