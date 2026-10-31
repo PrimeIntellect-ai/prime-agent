@@ -195,12 +195,14 @@ impl Client {
 #[test]
 fn stale_active_id_rebinds_after_worker_replacement() {
     let dir = tempfile::TempDir::new().expect("temp dir");
-    let socket = dir.path().join("daemon.sock");
-    let agent_dir = dir.path().join("agent");
+    // Canonical, so the paths the daemon reports (canonicalized) match.
+    let root = dir.path().canonicalize().expect("canonical temp dir");
+    let socket = root.join("daemon.sock");
+    let agent_dir = root.join("agent");
     std::fs::create_dir_all(&agent_dir).expect("agent dir");
     let _daemon = spawn_daemon(&socket, &agent_dir);
 
-    let script_path = dir.path().join("script.json");
+    let script_path = root.join("script.json");
     std::fs::write(
         &script_path,
         serde_json::json!({ "responses": [
@@ -211,7 +213,7 @@ fn stale_active_id_rebinds_after_worker_replacement() {
     )
     .expect("write script");
     let create_config = serde_json::json!({
-        "cwd": dir.path().to_string_lossy(),
+        "cwd": root.to_string_lossy(),
         "sessionDir": agent_dir.join("sessions").to_string_lossy(),
         "script": script_path.to_string_lossy(),
     });

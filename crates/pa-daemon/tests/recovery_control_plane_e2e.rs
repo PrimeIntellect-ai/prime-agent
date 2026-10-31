@@ -19,7 +19,8 @@
     clippy::struct_excessive_bools,
     clippy::struct_field_names
 )]
-#![cfg(unix)]
+// The worker census reads /proc.
+#![cfg(target_os = "linux")]
 
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;

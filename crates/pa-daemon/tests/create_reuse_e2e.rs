@@ -316,14 +316,16 @@ fn create_over_a_live_worker_answers_the_live_binding() {
 #[test]
 fn the_lease_owner_names_the_live_worker_not_a_stale_inherited_id() {
     let dir = tempfile::TempDir::new().expect("temp dir");
-    let socket = dir.path().join("daemon.sock");
-    let agent_dir = dir.path().join("agent");
+    // Canonical, so the paths the daemon reports (canonicalized) match.
+    let root = dir.path().canonicalize().expect("canonical temp dir");
+    let socket = root.join("daemon.sock");
+    let agent_dir = root.join("agent");
     std::fs::create_dir_all(&agent_dir).expect("agent dir");
     let _daemon = spawn_daemon(&socket, &agent_dir, Some("stale-owner-245ddb974b6d"));
 
-    let script_path = write_script(dir.path(), &["one scripted"]);
+    let script_path = write_script(&root, &["one scripted"]);
     let create_config = json!({
-        "cwd": dir.path().to_string_lossy(),
+        "cwd": root.to_string_lossy(),
         "sessionDir": agent_dir.join("sessions").to_string_lossy(),
         "script": script_path.to_string_lossy(),
     });
@@ -331,9 +333,8 @@ fn the_lease_owner_names_the_live_worker_not_a_stale_inherited_id() {
     let (worker_id, _created) = create_session(&mut client, "c1", &create_config);
     let session_file = session_file_of(&mut client, &worker_id, "s1");
 
-    // The lease the live worker wrote for the session file: a file acquired before it
-    // existed is keyed by its raw path (the canonicalize fallback), so the test
-    // locates the lease by the owner's sessionPath.
+    // The lease the live worker wrote for the session file, located by the
+    // owner's sessionPath.
     let leases_dir = agent_dir.join("session-leases");
     let owner: Value = std::fs::read_dir(&leases_dir)
         .expect("session-leases directory")
@@ -356,14 +357,16 @@ fn the_lease_owner_names_the_live_worker_not_a_stale_inherited_id() {
 #[test]
 fn create_over_a_dead_workers_file_launches_and_rebinds() {
     let dir = tempfile::TempDir::new().expect("temp dir");
-    let socket = dir.path().join("daemon.sock");
-    let agent_dir = dir.path().join("agent");
+    // Canonical, so the paths the daemon reports (canonicalized) match.
+    let root = dir.path().canonicalize().expect("canonical temp dir");
+    let socket = root.join("daemon.sock");
+    let agent_dir = root.join("agent");
     std::fs::create_dir_all(&agent_dir).expect("agent dir");
     let _daemon = spawn_daemon(&socket, &agent_dir, None);
 
-    let script_path = write_script(dir.path(), &["first scripted", "second scripted"]);
+    let script_path = write_script(&root, &["first scripted", "second scripted"]);
     let create_config = json!({
-        "cwd": dir.path().to_string_lossy(),
+        "cwd": root.to_string_lossy(),
         "sessionDir": agent_dir.join("sessions").to_string_lossy(),
         "script": script_path.to_string_lossy(),
     });

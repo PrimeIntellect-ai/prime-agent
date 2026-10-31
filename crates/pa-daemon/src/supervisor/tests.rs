@@ -1026,7 +1026,7 @@ async fn worker_probe_fails_at_the_deadline_and_names_the_worker() {
 
 #[tokio::test]
 async fn worker_probe_accepts_a_live_socket() {
-    let dir = std::env::temp_dir().join(format!("pa-probe-{}", uuid::Uuid::new_v4()));
+    let dir = Path::new("/tmp").join(format!("pa-probe-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(&dir).unwrap();
     let socket = dir.join("live.sock");
     let listener = pa_types::platform::transport::bind_transport(&socket)
@@ -2220,7 +2220,7 @@ async fn the_stopped_childs_delete_removes_its_row_and_bills_the_parent() {
 #[tokio::test]
 async fn a_ledger_delete_never_tombstones_an_unrelated_edge_sharing_the_child_id() {
     let dir = tempfile::TempDir::new().unwrap();
-    let agent_dir = dir.path().join("agent");
+    let agent_dir = dir.path().canonicalize().unwrap().join("agent");
     let sessions_dir = agent_dir.join("sessions");
     std::fs::create_dir_all(&sessions_dir).unwrap();
     let supervisor = Arc::new(

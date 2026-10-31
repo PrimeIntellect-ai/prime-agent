@@ -6,7 +6,8 @@
 //!
 //! The process-table scans diff against a baseline snapshot, so ambient kernels never
 //! interfere; tests skip (with a note) on machines without a live kernel install.
-#![cfg(unix)]
+// The kernel census scans /proc: Linux only.
+#![cfg(target_os = "linux")]
 
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;

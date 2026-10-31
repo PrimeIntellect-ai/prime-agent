@@ -19,7 +19,8 @@
     clippy::struct_excessive_bools,
     clippy::struct_field_names
 )]
-#![cfg(unix)]
+// Every probe reads /proc (fd tables, process state, limits): Linux only.
+#![cfg(target_os = "linux")]
 
 use std::collections::HashMap;
 use std::fmt::Write as _;
