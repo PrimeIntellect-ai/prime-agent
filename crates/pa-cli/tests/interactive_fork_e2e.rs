@@ -77,6 +77,7 @@ impl Drop for Supervisor {
     }
 }
 
+#[cfg(target_os = "linux")]
 fn child_pids_of(ppid: u32) -> Vec<u32> {
     let mut pids = Vec::new();
     let entries = std::fs::read_dir("/proc").expect("read /proc");
@@ -105,6 +106,7 @@ fn child_pids_of(ppid: u32) -> Vec<u32> {
 
 /// Liveness that ignores zombies: an unreaped child keeps its `/proc`
 /// entry, so path existence alone would call an exited process alive.
+#[cfg(target_os = "linux")]
 fn process_alive(pid: u32) -> bool {
     let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) else {
         return false;
@@ -114,6 +116,30 @@ fn process_alive(pid: u32) -> bool {
     };
     let state = rest.split_whitespace().next().unwrap_or_default();
     !state.starts_with('Z') && !state.starts_with('X')
+}
+
+/// The children of `ppid` without `/proc`: one `ps` listing of every pid's parent.
+#[cfg(not(target_os = "linux"))]
+fn child_pids_of(parent_pid: u32) -> Vec<u32> {
+    let output = Command::new("ps")
+        .args(["-A", "-o", "pid=,ppid="])
+        .output()
+        .expect("run ps");
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(|line| {
+            let mut fields = line.split_whitespace();
+            let pid = fields.next()?.parse().ok()?;
+            let parent: u32 = fields.next()?.parse().ok()?;
+            (parent == parent_pid).then_some(pid)
+        })
+        .collect()
+}
+
+/// Liveness without `/proc`: the platform probe, which also reads zombies as dead.
+#[cfg(not(target_os = "linux"))]
+fn process_alive(pid: u32) -> bool {
+    pa_types::platform::process::is_process_alive(pid).unwrap_or(false)
 }
 
 fn kill_worker(pid: u32) {
@@ -363,9 +389,12 @@ fn find_subsequence(haystack: &[u8], needle: &[u8]) -> Option<usize> {
 #[tokio::test]
 async fn interactive_fork_launch_copies_and_the_daemon_opens_the_fork() {
     let dir = tempfile::TempDir::new().expect("temp dir");
-    let agent_dir = dir.path().join("agent");
+    // The fork header records the launch's resolved cwd; macOS temp dirs sit
+    // behind the /var -> /private/var symlink.
+    let root = dir.path().canonicalize().expect("canonical temp dir");
+    let agent_dir = root.join("agent");
     let session_dir = agent_dir.join("sessions");
-    let cwd = dir.path().join("project");
+    let cwd = root.join("project");
     std::fs::create_dir_all(&session_dir).expect("sessions dir");
     std::fs::create_dir_all(&cwd).expect("project dir");
     // The home has onboarding behind it: a completed first run is the only
@@ -374,7 +403,7 @@ async fn interactive_fork_launch_copies_and_the_daemon_opens_the_fork() {
     pa_core::settings::SettingsManager::create(&cwd, &agent_dir)
         .set_onboarding_shown(true)
         .expect("onboarding flag");
-    let socket = dir.path().join("daemon.sock");
+    let socket = root.join("daemon.sock");
     let supervisor = spawn_supervisor(&socket, &agent_dir, &session_dir);
 
     // The source session: a real print-mode run of the real binary (the
@@ -417,13 +446,13 @@ async fn interactive_fork_launch_copies_and_the_daemon_opens_the_fork() {
     // The scripted engine indexes responses by the prompt ordinal
     // (message_count / 2): the copied exchange occupies index 0, so the
     // first LIVE turn runs at index 1.
-    let fork_script = dir.path().join("script-fork.json");
+    let fork_script = root.join("script-fork.json");
     std::fs::write(
         &fork_script,
         json!({ "responses": ["copied exchange slot", "forkfollowanswer"] }).to_string(),
     )
     .expect("write fork script");
-    let outcome = dir.path().join("outcome");
+    let outcome = root.join("outcome");
     let pty = openpty(
         Some(&Winsize {
             ws_row: 24,
@@ -527,6 +556,12 @@ async fn interactive_fork_launch_copies_and_the_daemon_opens_the_fork() {
     pty_reader.write(b"\x04");
     let deadline = Instant::now() + Duration::from_secs(30);
     loop {
+        // Keep draining: the teardown's writes block on a full pty buffer
+        // (macOS's is small) and the child never reaches its exit.
+        let mut buffer = [0u8; 8192];
+        if let Ok(n) = pty_reader.file.read(&mut buffer) {
+            pty_reader.output.extend_from_slice(&buffer[..n]);
+        }
         if let Some(status) = child.try_wait().expect("child status") {
             assert!(status.success(), "the interactive child failed: {status}");
             break;

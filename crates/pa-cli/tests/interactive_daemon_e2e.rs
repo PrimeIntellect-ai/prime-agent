@@ -110,6 +110,7 @@ impl Drop for DetachedDaemon {
     }
 }
 
+#[cfg(target_os = "linux")]
 fn child_pids_of(ppid: u32) -> Vec<u32> {
     let mut pids = Vec::new();
     let entries = std::fs::read_dir("/proc").expect("read /proc");
@@ -138,6 +139,7 @@ fn child_pids_of(ppid: u32) -> Vec<u32> {
 
 /// Liveness that ignores zombies: a detached child nobody reaps keeps its
 /// `/proc` entry, so path existence alone would call an exited process alive.
+#[cfg(target_os = "linux")]
 fn process_alive(pid: u32) -> bool {
     let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) else {
         return false;
@@ -148,6 +150,30 @@ fn process_alive(pid: u32) -> bool {
     };
     let state = rest.split_whitespace().next().unwrap_or_default();
     !state.starts_with('Z') && !state.starts_with('X')
+}
+
+/// The children of `ppid` without `/proc`: one `ps` listing of every pid's parent.
+#[cfg(not(target_os = "linux"))]
+fn child_pids_of(parent_pid: u32) -> Vec<u32> {
+    let output = Command::new("ps")
+        .args(["-A", "-o", "pid=,ppid="])
+        .output()
+        .expect("run ps");
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(|line| {
+            let mut fields = line.split_whitespace();
+            let pid = fields.next()?.parse().ok()?;
+            let parent: u32 = fields.next()?.parse().ok()?;
+            (parent == parent_pid).then_some(pid)
+        })
+        .collect()
+}
+
+/// Liveness without `/proc`: the platform probe, which also reads zombies as dead.
+#[cfg(not(target_os = "linux"))]
+fn process_alive(pid: u32) -> bool {
+    pa_types::platform::process::is_process_alive(pid).unwrap_or(false)
 }
 
 /// Shut the supervisor down by protocol and assert it, its workers, and its
@@ -188,6 +214,9 @@ fn assert_daemon_stops_clean(socket: &Path) {
         );
         std::thread::sleep(Duration::from_millis(50));
     }
+    // Only Linux can prove the listener closed (`unix_listener_definitely_closed`);
+    // elsewhere the exit cleanup keeps the file for the next bind to reclaim.
+    #[cfg(target_os = "linux")]
     assert!(
         !socket.exists(),
         "the spawned supervisor removed its socket file"
@@ -274,6 +303,8 @@ async fn run_headless_bounded(
 /// Kill supervisors leaked by earlier runs (a dead binary runs no `Drop`, so
 /// its daemons are reparented to init): a daemon matches when its socket dir
 /// is a `tempfile`-created `.tmpXXXXXX` dir and its parent is dead.
+/// Linux only: it walks `/proc`, and pairs with the Linux-only parent-death signal.
+#[cfg(target_os = "linux")]
 fn sweep_orphan_test_daemons() {
     static SWEEPED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
     if SWEEPED.set(()).is_err() {
@@ -344,6 +375,7 @@ fn sweep_orphan_test_daemons() {
 
 #[allow(clippy::zombie_processes)]
 fn spawn_supervisor(dir: &Path) -> Supervisor {
+    #[cfg(target_os = "linux")]
     sweep_orphan_test_daemons();
     let socket = dir.join("daemon.sock");
     let agent_dir = dir.join("agent");
@@ -2486,18 +2518,20 @@ async fn tui_renders_and_fires_user_keybindings_from_settings() {
         .await
         .expect("interactive run");
     let rendered = outcome.frames.join("\n");
+    // The host label: macOS renders alt as Option.
+    let override_key = pa_tui::keybindings::format_key_text("ctrl+alt+x");
 
     // The hint renders the user's binding, not the default (operator directive 2026-09-28).
     assert!(
-        rendered.contains("Collapsed mode (Ctrl+Alt+X to expand)"),
+        rendered.contains(&format!("Collapsed mode ({override_key} to expand)")),
         "the prompt-context hint renders the override:\n{rendered}"
     );
     assert!(
-        rendered.contains("Details mode (Ctrl+Alt+X to expand)"),
+        rendered.contains(&format!("Details mode ({override_key} to expand)")),
         "the override key cycled conversation detail:\n{rendered}"
     );
     assert!(
-        !rendered.contains("Expanded mode (Ctrl+Alt+X to collapse)"),
+        !rendered.contains(&format!("Expanded mode ({override_key} to collapse)")),
         "the default ctrl+o must not cycle after the override:\n{rendered}"
     );
     assert!(
@@ -2514,8 +2548,11 @@ async fn tui_renders_and_fires_user_keybindings_from_settings() {
         "the End key jumped the panel to the guide's bottom:\n{rendered}"
     );
     // The removed default key is gone (no other default binding uses ctrl+o).
+    // A whole key label only: macOS's `Ctrl+Option+X` starts with `Ctrl+O`.
     assert!(
-        !rendered.contains("Ctrl+O"),
+        !rendered
+            .match_indices("Ctrl+O")
+            .any(|(at, label)| !rendered[at + label.len()..].starts_with(char::is_alphanumeric)),
         "the hotkeys guide must not show the removed default:\n{rendered}"
     );
     // The guide stayed out of the transcript (the operator's no-flooding
@@ -2526,7 +2563,7 @@ async fn tui_renders_and_fires_user_keybindings_from_settings() {
         "the hotkeys guide never lands in the transcript:\n{last}"
     );
     assert!(
-        last.contains("Details mode (Ctrl+Alt+X to expand)"),
+        last.contains(&format!("Details mode ({override_key} to expand)")),
         "the dock returned after the panel closed:\n{last}"
     );
     drop(supervisor);

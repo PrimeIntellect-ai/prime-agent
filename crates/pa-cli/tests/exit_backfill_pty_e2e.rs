@@ -332,9 +332,14 @@ impl ExitBackfillHarness {
 impl Drop for ExitBackfillHarness {
     fn drop(&mut self) {
         // A panicking wait must never leak the pty child (it owns its
-        // session's controlling terminal).
+        // session's controlling terminal). Reap while draining: macOS holds
+        // an exiting process in the tty close until its queued output is read.
         let _ = self.child.kill();
-        let _ = self.child.wait();
+        while matches!(self.child.try_wait(), Ok(None)) {
+            let mut buffer = [0u8; 8192];
+            let _ = self.master.file.read(&mut buffer);
+            std::thread::sleep(Duration::from_millis(5));
+        }
     }
 }
 

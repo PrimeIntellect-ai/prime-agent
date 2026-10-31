@@ -528,17 +528,24 @@ impl VerdictHarness {
     }
 
     fn finish(mut self) {
+        self.kill_and_reap();
+    }
+
+    /// Kill the child and reap it while draining the master: macOS holds an
+    /// exiting process in the tty close until its queued output is read.
+    fn kill_and_reap(&mut self) {
         let _ = self.child.kill();
-        // Reap the child so no zombie is left behind.
-        let _ = self.child.wait();
+        while matches!(self.child.try_wait(), Ok(None)) {
+            self.master.drain_once();
+            std::thread::sleep(Duration::from_millis(5));
+        }
     }
 }
 
 impl Drop for VerdictHarness {
     fn drop(&mut self) {
         // A panicking wait must never leak the pty child.
-        let _ = self.child.kill();
-        let _ = self.child.wait();
+        self.kill_and_reap();
     }
 }
 
