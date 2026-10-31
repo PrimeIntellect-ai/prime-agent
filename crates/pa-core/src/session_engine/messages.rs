@@ -50,6 +50,12 @@ pub const FACTORY_PROGRESS_PREVIEW_LABEL: &str = "Factory progress";
 /// The queue-strip preview label for a parked heartbeat fire; the queued row reads
 /// `Heartbeat prompt: <content>` instead of the lane-labeled preview.
 pub const HEARTBEAT_PROMPT_PREVIEW_LABEL: &str = "Heartbeat prompt";
+/// The durable row the kernel's waiting keepalive admits on the owning
+/// session's steering lane: one paced notice per window while background
+/// commands run and the session is parked.
+pub const BASH_WAITING_NOTICE_CUSTOM_TYPE: &str = "bash_waiting_notice";
+/// The queue-strip label the waiting keepalive's queued row carries.
+pub const BASH_WAITING_PREVIEW_LABEL: &str = "Waiting on background commands";
 /// The durable row the worker's turn-held pacing window admits on the
 /// session's steering lane: one notice per delivery that stays busy past
 /// the window, cutting the held turn at its next boundary.
@@ -238,6 +244,38 @@ pub fn create_async_bash_completion_message(
             "command": command,
             "exitCode": exit_code,
         })),
+        timestamp,
+        rest: serde_json::Map::default(),
+    }
+}
+
+/// The waiting keepalive notice: `[waiting] ...`, one paced row per window
+/// while background commands run and the session is parked, keeping the
+/// session's idle clocks warm and the parked-turn contract visible.
+#[must_use]
+pub fn create_bash_waiting_message(
+    pids: &[u32],
+    commands: &[String],
+    count: usize,
+    timestamp: u64,
+) -> pa_types::session::CustomMessage {
+    let mut described = String::new();
+    for (pid, command) in pids.iter().zip(commands) {
+        let _ = write!(described, " pid {pid} `{command}`;");
+    }
+    let more = count.saturating_sub(pids.len());
+    if more > 0 {
+        let _ = write!(described, " and {more} more");
+    }
+    let content = format!(
+        "[waiting] Background work still running: {count} command(s) —{described}. \
+No action needed — end the turn and park; a [bash-done] notification wakes you as each finishes."
+    );
+    pa_types::session::CustomMessage {
+        custom_type: BASH_WAITING_NOTICE_CUSTOM_TYPE.to_string(),
+        content: UserContent::Text(content),
+        display: true,
+        details: Some(serde_json::json!({ "pids": pids, "count": count })),
         timestamp,
         rest: serde_json::Map::default(),
     }
@@ -772,6 +810,41 @@ state
         let details = message.details.unwrap();
         assert_eq!(details["runCount"], 1);
         assert_eq!(details["lastRunAt"], "2026-09-22T00:10:00.000Z");
+    }
+
+    #[test]
+    fn bash_waiting_message_matches_the_ts_shape() {
+        let message = create_bash_waiting_message(
+            &[7227, 7228],
+            &["heavy.py alpha".into(), "heavy.py beta".into()],
+            2,
+            1_000,
+        );
+        assert_eq!(message.custom_type, "bash_waiting_notice");
+        assert!(message.display);
+        assert_eq!(message.timestamp, 1_000);
+        let UserContent::Text(text) = &message.content else {
+            panic!("the notice is text content: {message:?}");
+        };
+        assert!(
+            text.starts_with("[waiting] Background work still running: 2 command(s)"),
+            "{text}"
+        );
+        assert!(text.contains("pid 7227 `heavy.py alpha`"), "{text}");
+        assert!(
+            text.contains("end the turn and park"),
+            "the notice teaches the parked-turn contract: {text}"
+        );
+        let details = message.details.unwrap();
+        assert_eq!(details["pids"], serde_json::json!([7227, 7228]));
+        assert_eq!(details["count"], 2);
+        // Capped descriptions carry the remainder count.
+        let message = create_bash_waiting_message(&[42], &["build.sh".into()], 5, 2_000);
+        let UserContent::Text(text) = &message.content else {
+            panic!("the notice is text content: {message:?}");
+        };
+        assert!(text.contains("pid 42 `build.sh`"), "{text}");
+        assert!(text.contains("and 4 more"), "{text}");
     }
 
     #[test]

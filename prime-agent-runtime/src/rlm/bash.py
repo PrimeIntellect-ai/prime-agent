@@ -148,6 +148,80 @@ _live_lock = threading.Lock()
 _hook_installed = False
 _hook_lock = threading.Lock()
 
+# ── the waiting keepalive: paced notices for parked sessions ───────────────
+#
+# A parked session with live background work races every idle clock: the
+# eval's idle close can end the session mid-wait (the work never lands), and
+# the product's own idle passivation gate sees user bash, not kernel handles.
+# While any handle is live and no request is in flight, pace one [waiting]
+# notice per window so the session's activity clock stays fresh and the
+# parked-turn contract stays taught — the model stops inventing watcher
+# loops to keep its own session alive. `0` (or unparsable) disables.
+try:
+    _WAITING_KEEPALIVE_SECONDS = max(
+        0.0, float(os.environ.get("PRIME_AGENT_BASH_WAITING_KEEPALIVE_SECONDS", "240"))
+    )
+except ValueError:
+    _WAITING_KEEPALIVE_SECONDS = 240.0
+_WAITING_TICK_SECONDS = 15.0
+_waiting_keepalive_task: "asyncio.Task[None] | None" = None
+
+
+def _start_waiting_keepalive() -> None:
+    """Arm the keepalive loop once, on the first detached background launch."""
+    global _waiting_keepalive_task
+    if _waiting_keepalive_task is not None or _WAITING_KEEPALIVE_SECONDS <= 0:
+        return
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return
+    _waiting_keepalive_task = loop.create_task(_waiting_keepalive_loop())
+
+
+async def _waiting_keepalive_loop() -> None:
+    """Pace one [waiting] notice per window while background commands run.
+
+    Skips ticks while a request is in flight (the session's own turn keeps
+    the clocks warm) and stops firing once the last handle settles — its own
+    [bash-done] wake takes over. A host without the handler (an older
+    daemon) answers with an error: disable instead of re-asking every
+    window.
+    """
+    from . import repl
+
+    tick = min(_WAITING_TICK_SECONDS, _WAITING_KEEPALIVE_SECONDS / 4.0)
+    last_sent = 0.0
+    while True:
+        await asyncio.sleep(tick)
+        if _WAITING_KEEPALIVE_SECONDS <= 0:
+            continue
+        live = []
+        with _live_lock:
+            live = [handle for handle in _live_handles if handle.running]
+        if not live:
+            continue
+        if repl.request_in_flight():
+            continue
+        now = time.monotonic()
+        if now - last_sent < _WAITING_KEEPALIVE_SECONDS:
+            continue
+        last_sent = now
+        shown = live[:_COMPLETION_NOTICE_COMMAND_CAP]
+        pids = [handle.pid for handle in shown]
+        commands = [_capped(handle.command) for handle in shown]
+        try:
+            await repl.host_request(
+                {
+                    "type": "bash.waiting",
+                    "pids": pids,
+                    "commands": commands,
+                    "count": len(live),
+                }
+            )
+        except (OSError, RuntimeError):
+            return
+
 # bash(persistent=True): every session's persistent shells live in one home
 # under the agent dir (the cross-language contract pa-daemon reads): per shell
 # a <id>.json record assigned to its session (RLM_SESSION_ID, the durable
@@ -832,6 +906,10 @@ class BashHandle:
         except RuntimeError:
             return
         from . import repl
+
+        # The first detached launch arms the waiting keepalive: parked
+        # sessions with live background work stay awake on paced notices.
+        _start_waiting_keepalive()
 
         activity = {"id": self._activity_id, "pid": self._pid, "active": True}
         # Publish synchronously before bash() returns and the creating cell can end.

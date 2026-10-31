@@ -122,6 +122,14 @@ def reply_ok(repl: ReplProcess, request: dict) -> None:
     repl.send({"type": "host_reply", "id": request["id"], "data": {"status": "ok", "result": {}}})
 
 
+def wait_for_host_request_of_type(repl: ReplProcess, kind: str) -> dict:
+    """Read protocol events until the next host_request whose data.type is `kind`."""
+    while True:
+        event = repl.read_event()
+        if event.get("event") == "host_request" and event.get("data", {}).get("type") == kind:
+            return event
+
+
 class ReplTest(unittest.TestCase):
     def setUp(self) -> None:
         self.repl = ReplProcess()
@@ -3451,6 +3459,56 @@ class CellSpanGuardTest(unittest.TestCase):
         self.assertEqual(one(events, "done")["status"], "ok")
         events = repl.execute("check", "seen")
         self.assertEqual(one(events, "result")["text"], "True")
+
+
+class WaitingKeepaliveTest(unittest.TestCase):
+    """The waiting keepalive: a parked session with live background commands
+    paces [waiting] host requests so idle clocks never close it mid-wait;
+    a session with no live work stays quiet, and the env knob disables."""
+
+    def kept_repl(self, seconds: str) -> ReplProcess:
+        repl = ReplProcess(env={"PRIME_AGENT_BASH_WAITING_KEEPALIVE_SECONDS": seconds})
+        self.addCleanup(repl.close)
+        repl.ready()
+        return repl
+
+    def test_parked_session_paces_waiting_notices_while_background_work_runs(self):
+        repl = self.kept_repl("0.5")
+        repl.execute(
+            "launch",
+            "from rlm import bash\nh = bash('sleep 3; echo done')\nprint('launched', h.pid)",
+        )
+        waiting = wait_for_host_request_of_type(repl, "bash.waiting")
+        data = waiting["data"]
+        self.assertEqual(len(data["pids"]), 1)
+        self.assertGreaterEqual(data["count"], 1)
+        self.assertIn("sleep 3", data["commands"][0])
+        reply_ok(repl, waiting)
+        # The keepalive paces: another one arrives while the command still runs.
+        second = wait_for_host_request_of_type(repl, "bash.waiting")
+        reply_ok(repl, second)
+        # The completion notice still fires for the finished command.
+        done = wait_for_host_request_of_type(repl, "bash.completed")
+        reply_ok(repl, done)
+
+    def test_no_waiting_notice_without_live_background_work(self):
+        repl = self.kept_repl("0.5")
+        repl.execute("quick", "print('idle session')")
+        try:
+            event = repl.read_event(timeout=2.0)
+        except TimeoutError:
+            return
+        self.assertNotEqual(event.get("event"), "host_request", "nothing should request the host")
+
+    def test_zero_disables_the_keepalive(self):
+        repl = self.kept_repl("0")
+        repl.execute(
+            "launch",
+            "from rlm import bash\nh = bash('sleep 2; echo done')\nprint('launched', h.pid)",
+        )
+        # Only the completion notice may request the host — never a waiting row.
+        done = wait_for_host_request_of_type(repl, "bash.completed")
+        reply_ok(repl, done)
 
 
 if __name__ == "__main__":

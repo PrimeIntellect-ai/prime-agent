@@ -624,6 +624,21 @@ impl Worker {
                     if engine.session_is_closed() {
                         return;
                     }
+                    // A [waiting] keepalive is only for the parked session: a
+                    // busy session's own turn keeps its clocks warm, and a
+                    // queued waiting row would only add boundary noise. The
+                    // kernel skips in-flight ticks too; this closes the race.
+                    if notice.row.custom_type
+                        == pa_core::session_engine::messages::BASH_WAITING_NOTICE_CUSTOM_TYPE
+                    {
+                        let busy = {
+                            let core = notice_core.lock().unwrap();
+                            core.busy || core.compacting
+                        };
+                        if busy {
+                            return;
+                        }
+                    }
                     admit_kernel_notice(
                         &notice_recovery,
                         &notice_core,

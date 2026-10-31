@@ -58,6 +58,22 @@ impl KernelNotice {
             preview_label: messages::TURN_HELD_PREVIEW_LABEL,
         }
     }
+
+    /// The `[waiting]` keepalive for a parked session whose background
+    /// commands are still running: one paced notice per window so idle
+    /// clocks never close a session mid-wait.
+    #[must_use]
+    pub fn bash_waiting(pids: &[u32], commands: &[String], count: usize) -> Self {
+        Self {
+            row: messages::create_bash_waiting_message(
+                pids,
+                commands,
+                count,
+                crate::autonomous::now_millis(),
+            ),
+            preview_label: messages::BASH_WAITING_PREVIEW_LABEL,
+        }
+    }
 }
 
 /// The queue-admission seam for one kernel notice (the daemon worker's
@@ -114,6 +130,18 @@ pub fn register_kernel_notice_host_handlers(
             })
         }),
     );
+    let waiting = Arc::clone(&notice);
+    handlers.register(
+        "bash.waiting",
+        host_handler(move |payload| {
+            let waiting = waiting.clone();
+            Box::pin(async move {
+                let notice = validate_bash_waiting(&payload.data)?;
+                waiting(notice);
+                Ok(serde_json::json!({}))
+            })
+        }),
+    );
     handlers.register(
         "factory.progress",
         host_handler(move |payload| {
@@ -139,6 +167,51 @@ fn validate_completion(data: &Value) -> anyhow::Result<KernelNotice> {
         &consumed.command,
         exit_code,
     ))
+}
+
+/// The kernel's waiting keepalive payload (`_waiting_keepalive_loop` in
+/// `rlm/bash.py`): one non-empty array of positive integer pids, the
+/// same-length array of non-empty command strings, and a `count` of live
+/// commands at least as large as the pid list (the payload caps the
+/// described commands).
+fn validate_bash_waiting(data: &Value) -> anyhow::Result<KernelNotice> {
+    let pids: Vec<u32> = data
+        .get("pids")
+        .and_then(Value::as_array)
+        .filter(|pids| !pids.is_empty())
+        .and_then(|pids| {
+            pids.iter()
+                .map(|pid| {
+                    pid.as_u64()
+                        .filter(|pid| *pid > 0 && u32::try_from(*pid).is_ok())
+                        .map(|pid| pid as u32)
+                })
+                .collect::<Option<Vec<_>>>()
+        })
+        .ok_or_else(|| anyhow::anyhow!("bash.waiting pids must be positive integers"))?;
+    let commands: Vec<String> = data
+        .get("commands")
+        .and_then(Value::as_array)
+        .filter(|commands| commands.len() == pids.len())
+        .and_then(|commands| {
+            commands
+                .iter()
+                .map(|command| {
+                    command
+                        .as_str()
+                        .filter(|command| !command.is_empty())
+                        .map(str::to_string)
+                })
+                .collect::<Option<Vec<_>>>()
+        })
+        .ok_or_else(|| anyhow::anyhow!("bash.waiting commands must be non-empty strings"))?;
+    let count = data
+        .get("count")
+        .and_then(Value::as_u64)
+        .filter(|count| *count >= pids.len() as u64)
+        .ok_or_else(|| anyhow::anyhow!("bash.waiting count must cover the pids"))?
+        as usize;
+    Ok(KernelNotice::bash_waiting(&pids, &commands, count))
 }
 
 /// TS `createAsyncBashConsumedHostHandler` validation: a positive integer pid and a
