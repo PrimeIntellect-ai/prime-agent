@@ -1866,6 +1866,23 @@ class BashInventedKwargsTest(unittest.TestCase):
         finally:
             handle.kill()
 
+class NoticeOutputTailTest(unittest.TestCase):
+    """The completion notice's output tail: the last lines ride the wake, so
+    a completion delivers the result instead of a pointer a wake must
+    retrieve."""
+
+    def test_short_output_rides_untouched(self):
+        self.assertEqual(bash_module._notice_output_tail("all done\n"), "all done\n")
+        self.assertEqual(bash_module._notice_output_tail(""), "")
+
+    def test_long_output_caps_at_the_head_keeping_the_tail(self):
+        long_output = "y" * 10_000
+        tail = bash_module._notice_output_tail(long_output)
+        marker = "... [output truncated at the head]\n"
+        self.assertTrue(tail.startswith(marker))
+        self.assertEqual(len(tail), len(marker) + bash_module._COMPLETION_NOTICE_OUTPUT_CAP)
+        self.assertTrue(tail.endswith("y" * 10))
+
 
 if __name__ == "__main__":
     unittest.main()

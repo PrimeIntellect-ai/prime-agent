@@ -230,20 +230,33 @@ pub fn create_async_bash_completion_message(
     pid: u32,
     command: &str,
     exit_code: i64,
+    output: Option<&str>,
     timestamp: u64,
 ) -> pa_types::session::CustomMessage {
     // TS `JSON.stringify(details.command)`: the quoted, escaped command.
     let encoded_command = serde_json::to_string(command).unwrap_or_default();
-    let content = format!("[bash-done pid:{pid} exit:{exit_code}]\n\nCommand: {encoded_command}");
+    // The result rides the wake: a completion notice that only points at the
+    // handle makes every wake cost a retrieval turn. The tail is pre-capped
+    // kernel-side; an empty or absent tail keeps the pointer-only shape.
+    let mut content =
+        format!("[bash-done pid:{pid} exit:{exit_code}]\n\nCommand: {encoded_command}");
+    let output = output.filter(|output| !output.is_empty());
+    if let Some(output) = output {
+        let _ = write!(content, "\n\nOutput (tail):\n{output}");
+    }
+    let mut details = serde_json::json!({
+        "pid": pid,
+        "command": command,
+        "exitCode": exit_code,
+    });
+    if let Some(output) = output {
+        details["output"] = serde_json::json!(output);
+    }
     pa_types::session::CustomMessage {
         custom_type: ASYNC_BASH_COMPLETION_CUSTOM_TYPE.to_string(),
         content: UserContent::Text(content),
         display: true,
-        details: Some(serde_json::json!({
-            "pid": pid,
-            "command": command,
-            "exitCode": exit_code,
-        })),
+        details: Some(details),
         timestamp,
         rest: serde_json::Map::default(),
     }
@@ -880,8 +893,13 @@ state
 
     #[test]
     fn async_bash_completion_message_matches_the_ts_shape() {
-        let message =
-            create_async_bash_completion_message(4321, "sleep 12; echo RW_WAKE_DONE", 0, 1_000);
+        let message = create_async_bash_completion_message(
+            4321,
+            "sleep 12; echo RW_WAKE_DONE",
+            0,
+            None,
+            1_000,
+        );
         assert_eq!(message.custom_type, "async_bash_completion");
         assert!(message.display);
         assert_eq!(message.timestamp, 1_000);
@@ -896,12 +914,32 @@ state
         assert_eq!(details["pid"], 4321);
         assert_eq!(details["command"], "sleep 12; echo RW_WAKE_DONE");
         assert_eq!(details["exitCode"], 0);
-        let message = create_async_bash_completion_message(11, "echo \"done\" && exit 2", 2, 2_000);
+        let message =
+            create_async_bash_completion_message(11, "echo \"done\" && exit 2", 2, None, 2_000);
         assert_eq!(message.timestamp, 2_000);
         assert!(matches!(message.content, UserContent::Text(text)
             if text.starts_with("[bash-done pid:11 exit:2]\n\nCommand: \"echo \\\"done\\\" && exit 2\"")));
         let details = message.details.unwrap();
         assert_eq!(details["exitCode"], 2);
+        // The output tail rides the wake when the kernel sends one.
+        let message =
+            create_async_bash_completion_message(7, "make gates", 0, Some("gates ok\n"), 3_000);
+        let UserContent::Text(text) = &message.content else {
+            panic!("the notice is text content: {message:?}");
+        };
+        assert!(
+            text.ends_with("Output (tail):\ngates ok\n"),
+            "the tail renders after the command: {text}"
+        );
+        let details = message.details.unwrap();
+        assert_eq!(details["output"], "gates ok\n");
+        // An empty tail keeps the pointer-only shape.
+        let message = create_async_bash_completion_message(8, "silent", 0, Some(""), 4_000);
+        assert!(
+            !matches!(&message.content, UserContent::Text(text) if text.contains("Output")),
+            "an empty tail renders no output section: {message:?}"
+        );
+        assert!(message.details.unwrap().get("output").is_none());
     }
 
     #[test]

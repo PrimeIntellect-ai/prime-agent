@@ -1292,6 +1292,7 @@ class ReplTest(unittest.TestCase):
                 "pid": pid,
                 "command": "sleep 0.05; printf detached",
                 "exitCode": 0,
+                "output": "detached",
             },
         )
         reply_ok(self.repl, request)
@@ -1322,6 +1323,7 @@ class ReplTest(unittest.TestCase):
                 "pid": pid,
                 "command": "sleep 0.6; printf degraded",
                 "exitCode": 0,
+                "output": "degraded",
             },
         )
         reply_ok(self.repl, request)
@@ -3508,6 +3510,25 @@ class WaitingKeepaliveTest(unittest.TestCase):
         )
         # Only the completion notice may request the host — never a waiting row.
         done = wait_for_host_request_of_type(repl, "bash.completed")
+        reply_ok(repl, done)
+
+class CompletionNoticeOutputTest(unittest.TestCase):
+    """The bash.completed host request carries the command's output tail: a
+    wake that delivers the result instead of a pointer the model must
+    retrieve."""
+
+    def test_completion_notice_carries_the_output_tail(self):
+        repl = ReplProcess()
+        self.addCleanup(repl.close)
+        repl.ready()
+        repl.execute(
+            "launch",
+            "from rlm import bash\nh = bash('sleep 0.2; echo RESULT-LINE')\nprint('launched', h.pid)",
+        )
+        done = wait_for_host_request_of_type(repl, "bash.completed")
+        data = done["data"]
+        self.assertIn("RESULT-LINE", data["output"], f"payload: {data}")
+        self.assertEqual(data["exitCode"], 0)
         reply_ok(repl, done)
 
 
