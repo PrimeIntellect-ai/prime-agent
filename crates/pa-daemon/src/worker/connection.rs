@@ -316,6 +316,11 @@ impl Worker {
         let subscription = self.events.subscribe();
         let entry_seq = self.events.current_seq() + 1;
         let sink = Arc::new(ConnectionSink::new(Arc::clone(&writer), entry_seq));
+        {
+            let mut sinks = self.connection_sinks.lock().unwrap();
+            sinks.retain(|sink| sink.strong_count() > 0);
+            sinks.push(Arc::downgrade(&sink));
+        }
         // daemon_hello goes out immediately on every connection. The
         // factory lane's advertisement gate reads the settings file
         // (metadata plus a locked read on a cache miss) — off the
