@@ -101,6 +101,15 @@ def observe(binary, root, case, receipt):
             # Fire-and-wake: the refine RPC returns a spawn receipt; the
             # failure text lands later via the parked reply applied at the
             # idle boundary. Await the outcome in the session transcript.
+            # The e2e seeds one turn before refine: the worker turn runner
+            # must exist for the child's reply wake to park-apply and emit
+            # the refine_failed event. Drive the seed turn first (its own
+            # model call hits the fixture and errors - the worker still
+            # runs, settles, and keeps its idle loop).
+            try:
+                client.call('prompt', activeSessionId=active, message='seed turn')
+            except Exception:
+                pass
             spawned = client.call('refine', activeSessionId=active,
                                  instructions='Fixture no-op refinement')
             assert isinstance(spawned, dict) and spawned.get('refinementChildSpawned'), spawned
