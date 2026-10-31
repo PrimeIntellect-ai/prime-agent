@@ -235,6 +235,65 @@ fn abort_racing_the_admission_prefix_settles_the_turn_before_the_provider_call()
     );
 }
 
+/// The rest of that window: an abort flagged after the admission consult but
+/// before the run registers finds no run for `Agent::abort` to cancel. The
+/// registered run honours the flag at once instead of holding the turn until
+/// the provider's first streamed event (here a 60 s hold).
+#[test]
+fn abort_flagged_before_the_run_registers_cancels_the_registered_run() {
+    let _faux = FAUX_TEST_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let (engine, _engine_dir) = faux_engine_with_settings(
+        &serde_json::json!({ "responses": [{ "text": "held reply", "delayMs": 60000 }] }),
+        1,
+    );
+    let engine = std::sync::Arc::new(engine);
+    let turn_engine = std::sync::Arc::clone(&engine);
+    let (settled_tx, settled_rx) = std::sync::mpsc::channel::<Vec<EngineEvent>>();
+    let turn = std::thread::spawn(move || {
+        // The flag reads set exactly once a run is registered: every consult
+        // before the registration sees it clear, like an abort landing in between.
+        let probe_engine = std::sync::Arc::clone(&turn_engine);
+        let run_registered = move || {
+            probe_engine
+                .turn_agent
+                .lock()
+                .unwrap()
+                .as_ref()
+                .is_some_and(|agent| agent.signal().is_some())
+        };
+        let mut events: Vec<EngineEvent> = Vec::new();
+        turn_engine.run_prompt(
+            0,
+            PromptRequest {
+                batch: Vec::new(),
+                images: Vec::new(),
+                message: "held turn for the late abort".to_string(),
+                source: "user".to_string(),
+                agent_message_id: None,
+                custom_message: None,
+            },
+            &run_registered,
+            &mut |event| {
+                events.push(event);
+                true
+            },
+        );
+        let _ = settled_tx.send(events);
+    });
+    let events = settled_rx
+        .recv_timeout(std::time::Duration::from_secs(10))
+        .expect("the flagged turn settles at registration, not after the 60s hold");
+    turn.join().unwrap();
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, EngineEvent::DoneAborted)),
+        "the flagged turn settles aborted: {events:?}"
+    );
+}
+
 #[test]
 fn settled_turn_emits_the_terminal_turn_end_payload() {
     let _faux = FAUX_TEST_LOCK
