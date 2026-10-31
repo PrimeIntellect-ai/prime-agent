@@ -105,28 +105,25 @@ def observe(binary, root, case, receipt):
                                  instructions='Fixture no-op refinement')
             assert isinstance(spawned, dict) and spawned.get('refinementChildSpawned'), spawned
             # The failed child's reply wakes the parent as a refine_failed
-            # event on the daemon log - the e2e pin's read surface. Await
-            # the event and lift the failure message from it.
+            # event frame on the client wire - the e2e pin's read surface.
+            # Drain the wire with a benign catalog call each round and lift
+            # the failure message from the event frame.
             import time as _time
             deadline = _time.monotonic() + 60.0
             actual = None
             while _time.monotonic() < deadline:
-                log_text = (root / 'daemon.log').read_text(errors='replace') if (root / 'daemon.log').exists() else ''
-                index = log_text.rfind('refine_failed')
-                if index >= 0:
-                    window = log_text[index:index + 2000]
-                    err_index = window.find('"error"')
-                    if err_index >= 0:
-                        rest = window[err_index:]
-                        first_quote = rest.find('"')
-                        second_quote = rest.find('"', first_quote + 1) if first_quote >= 0 else -1
-                        third = rest.find('"', second_quote + 1) if second_quote >= 0 else -1
-                        if third > second_quote > first_quote >= 0:
-                            actual = rest[second_quote + 1:third]
-                            actual = actual.replace('\\n', chr(10)).replace('\\\"', chr(34))
-                            break
-                _time.sleep(0.25)
-            assert actual, 'the refine_failed event never landed in the daemon log'
+                try:
+                    client.call('list_saved_sessions', cwd=str(root), scope='all')
+                except Exception:
+                    pass
+                for frame in client.wire:
+                    if isinstance(frame, dict) and frame.get('type') == 'refine_failed':
+                        actual = frame.get('error')
+                        break
+                if actual:
+                    break
+                _time.sleep(0.5)
+            assert actual, 'the refine_failed event never arrived on the client wire'
             assert len(server.requests) >= 1, server.requests
             receipt.update(actual_error=actual, ts_observed_error=TS_OBSERVED[case],
                            parity_equal=actual == TS_OBSERVED[case])
