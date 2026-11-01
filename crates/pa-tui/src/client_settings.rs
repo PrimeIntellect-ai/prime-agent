@@ -69,6 +69,14 @@ pub trait ClientSettings: Send + Sync {
     fn scrollback_flush(&self) -> bool {
         false
     }
+    /// Persists `terminal.scrollbackFlush` to the global scope.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err` when the settings store fails.
+    fn set_scrollback_flush(&self, _enabled: bool) -> Result<()> {
+        Ok(())
+    }
     /// Persists `terminal.showTerminalProgress` to the global scope.
     ///
     /// # Errors

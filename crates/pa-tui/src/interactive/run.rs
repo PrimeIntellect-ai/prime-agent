@@ -1775,9 +1775,8 @@ async fn run_interactive_surface(
                 if interval_elapsed {
                     // The settle's one-shot flush request: every gate resolves HERE, at the
                     // paint call site (nothing runs between this and the flush, and the
-                    // paint bracket stays free of the settings store's disk read). A page
-                    // fetch the arm could not see may have started since, and the settings
-                    // read stays live so a toggle applies without a restart.
+                    // cached settings seam keeps the read off the paint bracket). A page
+                    // fetch the arm could not see may have started since.
                     let scrollback = if scrollback_flush_pending {
                         crate::app::ScrollbackFlush::Settle {
                             scrollback_flush: options
@@ -1797,7 +1796,8 @@ async fn run_interactive_surface(
                         // with the error row (its dirty repaints it) instead of a fatal
                         // teardown.
                         session.error_row(&format!("scrollback flush failed: {error}"), &mut view);
-                    } else if painted.scrolled_scrollback {
+                    }
+                    if painted.scrolled_scrollback {
                         session.track_scrollback_flush();
                     }
                     last_render_at = Some(Instant::now());

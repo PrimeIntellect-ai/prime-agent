@@ -6,10 +6,60 @@
 use super::AgentView;
 use crate::Line;
 
+/// The process's scrollback memory: per live session, the row-text bases both flushes diff
+/// against. The bases outlive the per-run `AgentView`: the agents-view flow re-enters a
+/// session in the same process and terminal, so a fresh view must resume the previous run's
+/// bases or its first settle re-appends the whole transcript into the same scrollback. An
+/// entry is bounded by its session's transcript and lives for the process's lifetime.
+#[derive(Default)]
+struct ScrollbackBases {
+    transcript: Vec<String>,
+    frame: Vec<String>,
+}
+
+/// The bases keyed by scrollback session: the per-session entries the flushes take from and
+/// store back into.
+static SCROLLBACK_BASES: std::sync::OnceLock<
+    std::sync::Mutex<std::collections::HashMap<String, ScrollbackBases>>,
+> = std::sync::OnceLock::new();
+
+/// Remove and return one session's bases (empty for a session never flushed).
+fn take_scrollback_bases(session: &str) -> ScrollbackBases {
+    scrollback_bases()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .remove(session)
+        .unwrap_or_default()
+}
+
+/// Put one session's bases back, replacing whatever the take left out.
+fn store_scrollback_bases(session: &str, bases: ScrollbackBases) {
+    scrollback_bases()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .insert(session.to_string(), bases);
+}
+
+/// The lock guards the map only: tests can panic while holding it, so a poisoned lock
+/// unwraps to the data (see the e2e's `HARNESS_LOCK` pattern).
+fn scrollback_bases(
+) -> &'static std::sync::Mutex<std::collections::HashMap<String, ScrollbackBases>> {
+    SCROLLBACK_BASES.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+/// A fresh view's key before any session claims it: daemon session ids are UUID-shaped, so
+/// these never collide.
+pub(super) fn next_anonymous_scrollback_session() -> String {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    format!("view:{n}")
+}
+
 impl AgentView {
     /// Stream the changed rows of the inline layout to `out` as the main-screen flush: the one
     /// output path that writes into the user's native scrollback, so its byte stream is
-    /// parity-frozen. `self.flushed_frame` is the diff base.
+    /// parity-frozen. The session store's `frame` base (see `ScrollbackBases`) is the diff
+    /// base.
     ///
     /// - rows extending the flushed frame append into scrollback;
     /// - a change above the flushed tail repaints the last screenful
@@ -29,8 +79,9 @@ impl AgentView {
         let sparse = self.sparse_enabled;
         let layout = self.layout_pass(width);
         self.sparse_enabled = sparse;
+        let mut bases = take_scrollback_bases(&self.scrollback_session);
         let mut sink = FlushSink {
-            flushed: std::mem::take(&mut self.flushed_frame),
+            flushed: std::mem::take(&mut bases.frame),
             texts: Vec::new(),
             ring: std::collections::VecDeque::new(),
             chunk: String::new(),
@@ -38,28 +89,36 @@ impl AgentView {
             appending: false,
             repaint: false,
         };
-        sink.feed(out, &layout.splash)?;
-        let mut preceded_by_tool_activity = false;
-        for (index, entry) in self.chat.iter().enumerate() {
-            let rows =
-                self.render_entry(index, entry, width, index == 0, preceded_by_tool_activity);
-            sink.feed(out, &rows)?;
-            preceded_by_tool_activity = Self::is_compact_neighbor(entry);
+        let result = (|| -> std::io::Result<()> {
+            sink.feed(out, &layout.splash)?;
+            let mut preceded_by_tool_activity = false;
+            for (index, entry) in self.chat.iter().enumerate() {
+                let rows =
+                    self.render_entry(index, entry, width, index == 0, preceded_by_tool_activity);
+                sink.feed(out, &rows)?;
+                preceded_by_tool_activity = Self::is_compact_neighbor(entry);
+            }
+            sink.feed(out, &layout.tail)?;
+            let dock = self.render_dock(width);
+            sink.feed(out, &dock)?;
+            sink.finish(out)
+        })();
+        // A write error loses the frame base: the failed exit flush re-dumps next time, but
+        // the transcript half the settle diffs against must survive.
+        match result {
+            Ok(()) => bases.frame = std::mem::take(&mut sink.texts),
+            Err(_) => bases.frame = Vec::new(),
         }
-        sink.feed(out, &layout.tail)?;
-        let dock = self.render_dock(width);
-        sink.feed(out, &dock)?;
-        sink.finish(out)?;
-        self.flushed_frame = std::mem::take(&mut sink.texts);
-        Ok(())
+        store_scrollback_bases(&self.scrollback_session, bases);
+        result
     }
 
     /// Stream the turn-settled transcript delta to `out` as the automatic scrollback flush:
     /// unlike `stream_flush_to` this writes ONLY the chat-entry rows, with their own diff base
-    /// (`self.flushed_transcript_rows`), so the dock, tail, and splash never land in scrollback
-    /// and a settle never rewrites rows that already scrolled. Returns whether any rows
-    /// appended (a reset, an unchanged transcript, or a mid-run suspend that already wrote
-    /// them appends nothing).
+    /// (the session store's `transcript` half), so the dock, tail, and splash never land in
+    /// scrollback and a settle never rewrites rows that already scrolled. Returns whether any
+    /// rows appended (a reset, an unchanged transcript, or a mid-run suspend that already
+    /// wrote them appends nothing).
     ///
     /// - the FIRST flush of a run steps one line down before its rows: the main screen's
     ///   cursor sits at the end of the shell line that launched the TUI, and a bare row write
@@ -74,12 +133,13 @@ impl AgentView {
     ///   already in scrollback are durable, so a retry never duplicates them (this path runs
     ///   again, unlike the exit flush).
     ///
-    /// The exit path's shared base (`self.flushed_frame`) is re-seeded with the full inline row
-    /// texts WITHOUT writing them whenever rows already reached scrollback (a successful
-    /// append, or the durable prefix of a failed one): the next suspend/exit flush must start
-    /// from the current frame instead of re-appending the transcript. A reset seeds NOTHING:
-    /// it wrote no rows, and the exit flush's repaint is what puts the rewritten region on the
-    /// visible screen.
+    /// The exit path's shared base (the session store's `frame` half) is re-seeded with the
+    /// full inline row texts WITHOUT writing them whenever this flush writes anything or
+    /// fails mid-write: the next suspend/exit flush must start from the current frame instead
+    /// of re-appending the transcript. The seed is always the FULL frame, even after a
+    /// mid-flush error: the rows the failed write never landed stay a scrollback gap until
+    /// the next settle appends them. A reset seeds NOTHING: it wrote no rows, and the exit
+    /// flush's repaint is what puts the rewritten region on the visible screen.
     ///
     /// # Errors
     ///
@@ -89,17 +149,21 @@ impl AgentView {
         out: &mut dyn std::io::Write,
         width: usize,
     ) -> std::io::Result<bool> {
+        let sparse = self.sparse_enabled;
         let layout = self.layout_pass(width);
+        self.sparse_enabled = sparse;
         let rows = self.transcript_rows(width);
         let texts: Vec<String> = rows.iter().map(row_text_of).collect();
-        let base = std::mem::take(&mut self.flushed_transcript_rows);
+        let mut bases = take_scrollback_bases(&self.scrollback_session);
+        let base = std::mem::take(&mut bases.transcript);
         let changed_prefix = texts
             .iter()
             .zip(base.iter())
             .any(|(text, flushed)| text.as_str() != flushed.as_str());
         if changed_prefix || texts.len() < base.len() {
             // An edited or re-rendered transcript is a scrollback gap, never a rewrite.
-            self.flushed_transcript_rows = texts;
+            bases.transcript = texts;
+            store_scrollback_bases(&self.scrollback_session, bases);
             return Ok(false);
         }
         let mut chunk = String::new();
@@ -114,8 +178,9 @@ impl AgentView {
             crate::interactive::write_flush_rows(&mut chunk, std::slice::from_ref(row));
             if chunk.len() >= CHUNK_BYTES {
                 if let Err(error) = out.write_all(chunk.as_bytes()) {
-                    self.flushed_transcript_rows = texts[..written].to_vec();
-                    self.seed_flushed_frame(&layout.splash, &rows, &layout.tail, width);
+                    bases.transcript = texts[..written].to_vec();
+                    bases.frame = self.seeded_frame(&layout.splash, &rows, &layout.tail, width);
+                    store_scrollback_bases(&self.scrollback_session, bases);
                     return Err(error);
                 }
                 chunk.clear();
@@ -127,16 +192,18 @@ impl AgentView {
         }
         if !chunk.is_empty() {
             if let Err(error) = out.write_all(chunk.as_bytes()) {
-                self.flushed_transcript_rows = texts[..written].to_vec();
-                self.seed_flushed_frame(&layout.splash, &rows, &layout.tail, width);
+                bases.transcript = texts[..written].to_vec();
+                bases.frame = self.seeded_frame(&layout.splash, &rows, &layout.tail, width);
+                store_scrollback_bases(&self.scrollback_session, bases);
                 return Err(error);
             }
             chunk.clear();
             crate::exit_guard::note_exit_progress();
         }
         let appended = base.len() < texts.len();
-        self.flushed_transcript_rows = texts;
-        self.seed_flushed_frame(&layout.splash, &rows, &layout.tail, width);
+        bases.transcript = texts;
+        bases.frame = self.seeded_frame(&layout.splash, &rows, &layout.tail, width);
+        store_scrollback_bases(&self.scrollback_session, bases);
         Ok(appended)
     }
 
@@ -146,7 +213,9 @@ impl AgentView {
     /// parity-frozen byte stream is untouched.
     pub(crate) fn rebase_transcript_delta_base(&mut self, width: usize) {
         let rows = self.transcript_rows(width);
-        self.flushed_transcript_rows = rows.iter().map(row_text_of).collect();
+        let mut bases = take_scrollback_bases(&self.scrollback_session);
+        bases.transcript = rows.iter().map(row_text_of).collect();
+        store_scrollback_bases(&self.scrollback_session, bases);
     }
 
     /// The chat-entry rows with the same per-entry rendering `stream_flush_to` uses: the
@@ -163,24 +232,23 @@ impl AgentView {
         rows
     }
 
-    /// Replace the exit path's diff base with the current full inline row texts WITHOUT
-    /// writing them: a settle already wrote the transcript into scrollback, so the next
-    /// suspend/exit flush must not append it again.
-    fn seed_flushed_frame(
+    /// The current full inline row texts, WITHOUT writing them: a settle already wrote the
+    /// transcript into scrollback, so the next suspend/exit flush must not append it again.
+    fn seeded_frame(
         &mut self,
         splash: &[crate::Line],
         transcript_rows: &[crate::Line],
         tail: &[crate::Line],
         width: usize,
-    ) {
+    ) -> Vec<String> {
         let dock = self.render_dock(width);
-        self.flushed_frame = splash
+        splash
             .iter()
             .chain(transcript_rows)
             .chain(tail)
             .chain(dock.iter())
             .map(row_text_of)
-            .collect();
+            .collect()
     }
 }
 

@@ -65,6 +65,7 @@ fn tabs_partition_the_settings_rows() {
                 vec![
                     "theme",
                     "terminal-progress",
+                    "scrollback-flush",
                     "clear-on-shrink",
                     "show-images",
                     "auto-resize-images",
