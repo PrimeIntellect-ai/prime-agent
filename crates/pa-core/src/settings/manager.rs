@@ -414,20 +414,33 @@ impl SettingsManager {
     }
 
     /// `agentTraces.enabled`: unset means OFF — trace sharing is opt-in, exactly the TS default.
+    /// Requires an explicit global opt-in (`global.agent_traces.enabled == Some(true)`), while
+    /// allowing `project` or `runtime_overrides` scopes to veto (`enabled: false`) trace uploads
+    /// for sensitive workspaces. An untrusted repository's `.prime/settings.json` must never
+    /// upgrade a global `false` or unset state to `true`.
     #[must_use]
     pub fn get_agent_traces_enabled(&self) -> bool {
-        self.merged
+        let global_opted_in = self
+            .global
             .agent_traces
             .as_ref()
             .and_then(|traces| traces.enabled)
-            .unwrap_or(false)
+            .unwrap_or(false);
+        let not_vetoed = [
+            self.project.agent_traces.as_ref(),
+            self.runtime_overrides.agent_traces.as_ref(),
+        ]
+        .iter()
+        .all(|scope| scope.and_then(|traces| traces.enabled).unwrap_or(true));
+        global_opted_in && not_vetoed
     }
 
     /// Whether a trace-sharing choice was ever written: the `agentTraces.enabled` key
-    /// present in the merged settings. Only a fresh home (no choice written) is asked, once.
+    /// present in the global settings. Project-scoped `.prime/settings.json` files must
+    /// not mark a fresh home as having completed the consent prompt.
     #[must_use]
     pub fn agent_traces_choice_written(&self) -> bool {
-        self.merged
+        self.global
             .agent_traces
             .as_ref()
             .and_then(|traces| traces.enabled)
@@ -1223,6 +1236,35 @@ mod tests {
         assert!(manager.agent_traces_choice_written());
         manager.set_agent_traces_enabled(true).unwrap();
         assert!(manager.agent_traces_choice_written());
+    }
+
+    #[test]
+    fn project_settings_cannot_override_global_agent_traces_opt_out_or_unset() {
+        let storage: Arc<dyn SettingsStorage> =
+            Arc::new(super::super::storage::InMemorySettingsStorage::default());
+        storage
+            .with_lock(SettingsScope::Project, &mut |_| {
+                Some(r#"{ "agentTraces": { "enabled": true } }"#.into())
+            })
+            .unwrap();
+        let mut manager = SettingsManager::from_storage(storage.clone());
+        assert!(!manager.get_agent_traces_enabled());
+        assert!(!manager.agent_traces_choice_written());
+
+        manager.set_agent_traces_enabled(false).unwrap();
+        manager.reload().unwrap();
+        assert!(!manager.get_agent_traces_enabled());
+        assert!(manager.agent_traces_choice_written());
+
+        // When global is explicitly opted in, a project scope can still veto (disable) it.
+        manager.set_agent_traces_enabled(true).unwrap();
+        storage
+            .with_lock(SettingsScope::Project, &mut |_| {
+                Some(r#"{ "agentTraces": { "enabled": false } }"#.into())
+            })
+            .unwrap();
+        manager.reload().unwrap();
+        assert!(!manager.get_agent_traces_enabled());
     }
 
     #[test]

@@ -410,6 +410,29 @@ async fn the_active_git_context_walks_leaf_to_root() {
 }
 
 #[test]
+fn active_git_context_strips_embedded_http_credentials() {
+    let fixture = Fixture::new();
+    let session = fixture.session_dir.join("cred.jsonl");
+    std::fs::write(
+        &session,
+        concat!(
+            "{\"type\":\"session\",\"id\":\"s\",\"timestamp\":\"t\",\"cwd\":\"/w\"}\n",
+            "{\"type\":\"git_state\",\"id\":\"g1\",\"parentId\":null,\"git\":{\"repoUrl\":\"https://x-access-token:ghp_secret123@github.com/org/private-repo.git\",\"commit\":\"def456\"}}\n",
+        ),
+    )
+    .expect("session file");
+    let body = std::fs::read_to_string(&session).expect("body");
+    let header = read_trace_session_header(&session).expect("header");
+    assert_eq!(
+        active_git_context(&body, &header),
+        (
+            Some("https://github.com/org/private-repo.git".to_string()),
+            Some("def456".to_string())
+        )
+    );
+}
+
+#[test]
 fn the_content_preview_splits_head_and_tail() {
     let body = "0123456789abcdef".repeat(4);
     // The marker takes 33 chars of the window; the remaining 6 split

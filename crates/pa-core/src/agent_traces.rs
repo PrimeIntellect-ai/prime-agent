@@ -365,6 +365,25 @@ fn resolve_parent_session_path(session_file: &Path, parent_session: &str) -> Pat
     }
 }
 
+/// Strip embedded HTTP(S) userinfo credentials (e.g. `https://x-access-token:ghp_...@github.com/org/repo`)
+/// before attaching `repoUrl` to uploaded trace headers or previews.
+fn sanitize_git_repo_url(raw: &str) -> String {
+    for scheme in ["https://", "http://"] {
+        if let Some(rest) = raw.strip_prefix(scheme) {
+            let authority_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+            let authority = &rest[..authority_end];
+            if let Some(at_pos) = authority.rfind('@') {
+                let host_part = &authority[at_pos + 1..];
+                if !host_part.is_empty() {
+                    return format!("{scheme}{host_part}{}", &rest[authority_end..]);
+                }
+            }
+            return raw.to_string();
+        }
+    }
+    raw.to_string()
+}
+
 /// Leaf-to-root walk: the first `git_state` on the active branch's chain wins.
 fn active_git_context(
     body: &str,
@@ -426,7 +445,7 @@ fn active_git_context(
                 let repo = git
                     .get("repoUrl")
                     .and_then(Value::as_str)
-                    .map(str::to_string);
+                    .map(sanitize_git_repo_url);
                 let commit = git
                     .get("commit")
                     .and_then(Value::as_str)
@@ -437,7 +456,10 @@ fn active_git_context(
         current = entry.parent_id.as_deref().and_then(find);
     }
     (
-        header.git.as_ref().and_then(|git| git.repo_url.clone()),
+        header
+            .git
+            .as_ref()
+            .and_then(|git| git.repo_url.as_deref().map(sanitize_git_repo_url)),
         header.git.as_ref().and_then(|git| git.commit.clone()),
     )
 }
