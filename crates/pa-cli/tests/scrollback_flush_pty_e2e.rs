@@ -129,7 +129,9 @@ fn the_exit_flush_kill_switch_suppresses_the_auto_flush() {
 
     let mark = harness.output().len();
     harness.submit("hello");
-    harness.wait_from_mark(mark, b"first answer", "the turn streamed");
+    harness
+        .master
+        .wait_from(mark, b"first answer", "the turn streamed");
     harness.settle();
     let output = harness.output();
     assert!(
@@ -148,17 +150,13 @@ struct ScrollbackHarness {
 }
 
 impl ScrollbackHarness {
-    fn type_text(&mut self, text: &str) {
+    fn submit(&mut self, text: &str) {
         // One keystroke at a time: a single burst write to the pty can drop
         // characters on the slow virtiofs-backed test host.
         for ch in text.chars() {
             self.write(ch.to_string().as_bytes());
             std::thread::sleep(Duration::from_millis(15));
         }
-    }
-
-    fn submit(&mut self, text: &str) {
-        self.type_text(text);
         self.write(b"\r");
     }
 
@@ -195,10 +193,6 @@ impl ScrollbackHarness {
 
     fn wait_from_start(&mut self, needle: &[u8], what: &str) {
         self.master.wait_from(0, needle, what);
-    }
-
-    fn wait_from_mark(&mut self, mark: usize, needle: &[u8], what: &str) {
-        self.master.wait_from(mark, needle, what);
     }
 
     /// Wait for the settled turn's scrollback flush: the alt-screen leave, the turn's rows,
