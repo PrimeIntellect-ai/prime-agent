@@ -1,22 +1,40 @@
 //! The interactive client-settings seam implementation: every call opens the
-//! file-backed settings manager over the run's directories.
+//! file-backed settings manager over the run's directories, except the
+//! paint-gated `scrollbackFlush` read, cached at construction.
 
 use anyhow::Result;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use pa_tui::client_settings::ClientSettings;
 
 /// The seam handle the interactive run carries.
-#[derive(Clone)]
 pub struct CliClientSettings {
     cwd: PathBuf,
     agent_dir: PathBuf,
+    scrollback_flush: AtomicBool,
+}
+
+impl Clone for CliClientSettings {
+    fn clone(&self) -> Self {
+        Self {
+            cwd: self.cwd.clone(),
+            agent_dir: self.agent_dir.clone(),
+            scrollback_flush: AtomicBool::new(self.scrollback_flush.load(Ordering::Relaxed)),
+        }
+    }
 }
 
 impl CliClientSettings {
     pub fn new(cwd: PathBuf, agent_dir: PathBuf) -> Arc<Self> {
-        Arc::new(Self { cwd, agent_dir })
+        let scrollback_flush =
+            pa_core::settings::SettingsManager::create(&cwd, &agent_dir).get_scrollback_flush();
+        Arc::new(Self {
+            cwd,
+            agent_dir,
+            scrollback_flush: AtomicBool::new(scrollback_flush),
+        })
     }
 
     fn manager(&self) -> pa_core::settings::SettingsManager {
@@ -138,8 +156,18 @@ impl ClientSettings for CliClientSettings {
         set_show_terminal_progress,
         bool
     );
+    /// Cached at construction: the settle-paint gate reads it every armed
+    /// frame, so the read must not touch settings files per turn.
     fn scrollback_flush(&self) -> bool {
-        self.manager().get_scrollback_flush()
+        self.scrollback_flush.load(Ordering::Relaxed)
+    }
+
+    /// Persists first: the cache refreshes only when the write landed, so
+    /// the in-menu toggle applies without a restart.
+    fn set_scrollback_flush(&self, enabled: bool) -> Result<()> {
+        self.manager().set_scrollback_flush(enabled)?;
+        self.scrollback_flush.store(enabled, Ordering::Relaxed);
+        Ok(())
     }
     setting!(
         image_auto_resize,
@@ -320,6 +348,7 @@ mod tests {
         let settings = CliClientSettings::new(dir.path().to_path_buf(), agent_dir.clone());
 
         assert!(settings.show_images());
+        assert!(settings.scrollback_flush());
         assert!(!settings.quiet_startup());
         assert_eq!(settings.idle_eviction_minutes(), "90");
         assert_eq!(settings.mermaid_rendering_mode(), "streaming");

@@ -889,6 +889,49 @@ fn a_suspend_before_the_first_settle_rebases_the_empty_base() {
     );
 }
 
+/// The agents-view loop re-enters a session in the same process and terminal: the fresh
+/// view must resume the previous run's bases instead of re-appending the transcript into
+/// the same scrollback.
+#[test]
+fn a_reentered_session_appends_only_its_new_rows() {
+    let session = "the reentered session";
+    let mut first = view();
+    first.bind_scrollback_session(session);
+    first.chrome.version = "0.0.0".to_string();
+    first.chrome.cwd = "/w".to_string();
+    first.chrome.chat_name = "w".to_string();
+    first.push(TranscriptItem::UserMessage {
+        text: "the earlier turn".to_string(),
+    });
+    assert!(!transcript_delta_bytes(&mut first, 80).is_empty());
+    drop(first);
+
+    let mut reentry = view();
+    reentry.bind_scrollback_session(session);
+    reentry.chrome.version = "0.0.0".to_string();
+    reentry.chrome.cwd = "/w".to_string();
+    reentry.chrome.chat_name = "w".to_string();
+    reentry.push(TranscriptItem::UserMessage {
+        text: "the earlier turn".to_string(),
+    });
+    // The re-entered run's suspend/exit flush starts from the first run's bases: the
+    // transcript never lands in the same scrollback twice.
+    assert!(
+        flush_bytes(&mut reentry, 80, 24).is_empty(),
+        "the re-entered run's suspend/exit flush re-appends nothing"
+    );
+    reentry.push(TranscriptItem::UserMessage {
+        text: "the settled turn".to_string(),
+    });
+    let appended = transcript_delta_bytes(&mut reentry, 80);
+    let joined = String::from_utf8_lossy(&appended);
+    assert!(joined.contains("the settled turn"));
+    assert!(
+        !joined.contains("the earlier turn"),
+        "the re-entered run's first settle appends only the new rows"
+    );
+}
+
 #[test]
 fn transcript_delta_flush_advances_the_base_to_the_durable_prefix_on_error() {
     let mut v = view();
