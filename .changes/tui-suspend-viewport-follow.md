@@ -1,0 +1,1 @@
+- Fixed the transcript view following output again after suspending the TUI with Ctrl+Z.
