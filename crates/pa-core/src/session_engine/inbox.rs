@@ -199,7 +199,9 @@ impl SessionInbox {
     /// message the collection already answered leaves the store (and
     /// the journal's pending set) instead of waiting for a `read`. Pids
     /// are reused, so the command disambiguates — the same pair the
-    /// queued-row withdrawal matches.
+    /// queued-row withdrawal matches. Journal first, then the store
+    /// (the push/drain order): a crash between them never resurrects
+    /// a collected message.
     pub fn withdraw_bash_completion(&self, pid: u32, command: &str) -> Option<InboxMessage> {
         let mut state = self
             .state
@@ -210,14 +212,11 @@ impl SessionInbox {
                 && message.meta.get("pid").and_then(Value::as_u64) == Some(u64::from(pid))
                 && message.meta.get("command").and_then(Value::as_str) == Some(command)
         })?;
-        let withdrawn = state.messages.remove(position);
+        let id = state.messages[position].id.clone();
         self.append_journal(
-            &serde_json::to_value(InboxRecord::Withdrawn {
-                id: withdrawn.id.clone(),
-            })
-            .unwrap_or(Value::Null),
+            &serde_json::to_value(InboxRecord::Withdrawn { id }).unwrap_or(Value::Null),
         );
-        Some(withdrawn)
+        Some(state.messages.remove(position))
     }
 
     /// Read drains: the waiting messages return in arrival order and
@@ -638,6 +637,37 @@ mod tests {
             3_000,
         );
         assert_eq!(next.id, "inbox-3", "the id counter replayed");
+    }
+
+    /// The withdrawal's crash window is the order of its two steps: the
+    /// Withdrawn record must be durable before the store drops the
+    /// message (the push/drain order), because a torn write between
+    /// them resurrects the collected bash-done on restart. The window
+    /// has no runtime seam — both steps run under the state lock, and
+    /// a failed append leaves the same journal either way — so the pin
+    /// holds the function's own source order and goes red when the
+    /// remove moves ahead of the journal append.
+    #[test]
+    fn the_withdrawal_journals_before_the_store_remove() {
+        let source = include_str!("inbox.rs");
+        let function = source
+            .split_once("pub fn withdraw_bash_completion")
+            .expect("the source names the withdrawal");
+        let body = function
+            .1
+            .split_once("\n    }\n")
+            .expect("the withdrawal closes its section")
+            .0;
+        let journal = body
+            .find("append_journal")
+            .expect("the withdrawal journals");
+        let remove = body
+            .find("state.messages.remove(position)")
+            .expect("the withdrawal removes from the store");
+        assert!(
+            journal < remove,
+            "the Withdrawn record must reach the journal before the store removes the message"
+        );
     }
 
     /// The journal appends one line per push and drain, and an open
