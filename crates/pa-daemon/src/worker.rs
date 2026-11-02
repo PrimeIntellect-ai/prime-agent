@@ -308,6 +308,7 @@ impl Worker {
             last_action_snapshot: Some(SessionActionSnapshot::default()),
             rlm_depth: 0,
             runtime_kind: "top-level".to_string(),
+            decision_child: false,
             rlm_child_id: None,
             parent_active_session_id: None,
             parent_session_id: None,
@@ -391,6 +392,11 @@ impl Worker {
         // decision engine instead of the agent engine.
         let decision_child =
             std::env::var_os(WORKER_DECISION_CHILD_ENV).is_some_and(|value| value == "1");
+        // The flag reaches the summary (`decisionChild`): the agents view
+        // hides System 1 children from the user; costs still roll up.
+        if decision_child {
+            core.lock().unwrap().decision_child = true;
+        }
         let (engine, agent_engine): (
             std::sync::Arc<dyn SessionEngine>,
             Option<std::sync::Arc<crate::agent_engine::AgentSessionEngine>>,

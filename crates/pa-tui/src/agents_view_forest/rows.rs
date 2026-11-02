@@ -12,7 +12,9 @@ use crate::agents_view_state::{
     UnifiedRecord,
 };
 use crate::bash_view::ShellCounts;
-use crate::subagents::{is_subagent_summary, summary_identity_keys, summary_parent_keys};
+use crate::subagents::{
+    is_decision_child_summary, is_subagent_summary, summary_identity_keys, summary_parent_keys,
+};
 
 struct BaseRow {
     kind: RowKind,
@@ -70,6 +72,12 @@ pub(crate) fn build_rows<S: std::hash::BuildHasher + Default>(
     let mut base: Vec<BaseRow> = Vec::with_capacity(records.len());
     for (position, record) in records.iter().enumerate() {
         let summary = summary_for_record(record);
+        // The Decision API child (`decisionChild`): a System 1 server the
+        // user never interacts with — no row renders, while its record
+        // stays in the rollups so the parent's spend still covers it.
+        if is_decision_child_summary(&summary) {
+            continue;
+        }
         let kind = if !is_direct_scope_child(&summary)
             && (is_subagent_summary(&summary)
                 || records

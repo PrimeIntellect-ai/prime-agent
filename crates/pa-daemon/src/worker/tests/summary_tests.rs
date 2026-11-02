@@ -71,6 +71,18 @@ fn sender_child_edge_decides_the_relationship_label() {
 }
 
 #[test]
+fn the_decision_child_flag_reaches_the_summary() {
+    let plain = SessionCore::test_core(None, "/tmp".to_string());
+    assert_eq!(session_summary(&plain, inputs()).decision_child, None);
+    let mut decision = SessionCore::test_core(None, "/tmp".to_string());
+    decision.decision_child = true;
+    let summary = session_summary(&decision, inputs());
+    assert_eq!(summary.decision_child, Some(true));
+    let wire = serde_json::to_value(&summary).expect("wire");
+    assert_eq!(wire["decisionChild"], json!(true));
+}
+
+#[test]
 fn summary_lifecycle_is_message_based() {
     let empty = SessionCore::test_core(None, "/tmp".to_string());
     assert_eq!(session_summary(&empty, inputs()).lifecycle, "draft");
