@@ -701,13 +701,17 @@ impl Worker {
             return response;
         }
         let core = self.core.lock().unwrap();
+        // The newest non-empty assistant text: an ended turn's final
+        // assistant row may hold only the tool call, so the answer sits in
+        // the last assistant row with text (the file fallback's rule).
         let text = core.store.as_ref().and_then(|store| {
             store
                 .messages()
                 .into_iter()
                 .rev()
-                .find(|message| crate::types::message_role(message) == Some("assistant"))
+                .filter(|message| crate::types::message_role(message) == Some("assistant"))
                 .map(|message| crate::types::message_text(&message))
+                .find(|text| !text.is_empty())
         });
         response_success(
             None,

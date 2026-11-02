@@ -100,7 +100,9 @@ pub struct HeadlessTerminalResult {
 }
 
 /// Pick the terminal result from the message suffix: compaction outcomes
-/// are collected, notices skipped, the first substantive message primary.
+/// are collected, notices skipped, the batch's tool results stepped over
+/// (an ended turn settles on them; its assistant message is the answer),
+/// the first substantive message primary.
 pub fn select_headless_terminal_result(messages: &[AgentMessage]) -> HeadlessTerminalResult {
     let mut index: i64 = messages.len() as i64 - 1;
     let mut compaction_outcomes: Vec<CompactionOutcome> = Vec::new();
@@ -133,6 +135,11 @@ pub fn select_headless_terminal_result(messages: &[AgentMessage]) -> HeadlessTer
                 }
                 _ => break,
             },
+            // An ended turn settles on its batch's tool results: step over
+            // them to the assistant message that issued the calls.
+            AgentMessage::ToolResult(_) => {
+                index -= 1;
+            }
             _ => break,
         }
     }
@@ -183,7 +190,8 @@ mod tests {
     use super::*;
     use crate::autonomous::{AgentAutonomousStatus, AutonomousLimitReason};
     use pa_types::ai::{
-        AssistantContentBlock, AssistantMessage, StopReason, TextContent, UserContent, UserMessage,
+        AssistantContentBlock, AssistantMessage, StopReason, TextContent, ToolCall,
+        ToolResultMessage, UserContent, UserContentBlock, UserMessage,
     };
     use pa_types::session::{CompactionSummaryMessage, CustomMessage};
 
@@ -241,6 +249,53 @@ mod tests {
         let mut exit_code = 0;
         assert!(primary.stderr_text(&mut exit_code).is_none());
         assert_eq!(exit_code, 0);
+    }
+
+    #[test]
+    fn an_ended_turns_tool_results_step_back_to_their_assistant_answer() {
+        // A turn ended on `rlm.end_turn()`: the assistant message carried
+        // the answer text alongside the python_repl call, and the settled
+        // suffix is its tool result. Headless print answers with that
+        // assistant message, not with nothing.
+        let mut assistant = text_assistant("the answer", StopReason::ToolUse);
+        if let AgentMessage::Assistant(message) = &mut assistant {
+            message
+                .content
+                .push(AssistantContentBlock::ToolCall(ToolCall {
+                    id: "call-1".to_string(),
+                    name: "python_repl".to_string(),
+                    arguments: serde_json::Map::default(),
+                    thought_signature: None,
+                    rest: serde_json::Map::default(),
+                }));
+        }
+        let messages = vec![
+            AgentMessage::User(UserMessage {
+                content: UserContent::Text("go".to_string()),
+                timestamp: 0,
+                rest: serde_json::Map::default(),
+            }),
+            assistant,
+            AgentMessage::ToolResult(ToolResultMessage {
+                tool_call_id: "call-1".to_string(),
+                tool_name: "python_repl".to_string(),
+                content: vec![UserContentBlock::Text(TextContent {
+                    text: "{'endedTurn': True}\nturn ended".to_string(),
+                    text_signature: None,
+                    rest: serde_json::Map::default(),
+                })],
+                details: None,
+                is_error: false,
+                timestamp: 0,
+                rest: serde_json::Map::default(),
+            }),
+        ];
+        let result = select_headless_terminal_result(&messages);
+        assert_eq!(
+            result.primary.unwrap().stdout_text().as_deref(),
+            Some("the answer"),
+            "the ended turn must print the batch's assistant answer"
+        );
     }
 
     #[test]
