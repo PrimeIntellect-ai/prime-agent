@@ -685,6 +685,15 @@ pub(crate) fn admit_inbox_notice(
             Lane::Steering
         } else {
             lane
+        // The journal-failure clause: a memory-only inbox says so in the
+        // notice that wakes (the degradation is agent-visible, not just
+        // a daemon-log line).
+        let text = match inbox.persistence_error() {
+            Some(_) => format!(
+                "{text} {}",
+                pa_core::session_engine::inbox::INBOX_PERSISTENCE_ERROR_CLAUSE
+            ),
+            None => text,
         };
         // The replacement pattern the scheduler's queue keys use: the
         // fresh row replaces the coalesced one instead of stacking.
@@ -829,6 +838,20 @@ pub(crate) fn admit_inbox_reminder(
     session_is_closed: impl Fn() -> bool,
     engine: Option<&crate::agent_engine::AgentSessionEngine>,
 ) {
+    let (count, oldest_arrived_at_ms, _) = inbox.count();
+    if count == 0 {
+        return;
+    }
+    let waited_ms =
+        pa_core::autonomous::now_millis().saturating_sub(oldest_arrived_at_ms.unwrap_or_default());
+    let message = match inbox.persistence_error() {
+        Some(_) => format!(
+            "{} {}",
+            pa_core::session_engine::inbox::reminder_notice(count, waited_ms),
+            pa_core::session_engine::inbox::INBOX_PERSISTENCE_ERROR_CLAUSE
+        ),
+        None => pa_core::session_engine::inbox::reminder_notice(count, waited_ms),
+    };
     let mut core_guard = core.lock().unwrap();
     if session_is_closed() {
         return;
