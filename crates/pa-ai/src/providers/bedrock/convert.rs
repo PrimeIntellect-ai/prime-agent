@@ -173,7 +173,8 @@ pub fn build_system_prompt(
 /// Bedrock Converse rejects consecutive user messages ("A conversation must alternate between user
 /// and assistant roles"). A user turn that follows another one joins it: this happens when an
 /// assistant reply with no content (a turn ended with no text) is dropped, or when a user message
-/// follows tool results. Tool results stay first because they always open their user turn.
+/// follows tool results. Tool results always follow their assistant turn, so they open their own
+/// user turn.
 fn push_user_turn(result: &mut Vec<Value>, mut content: Vec<Value>) {
     if let Some(blocks) = result
         .last_mut()
@@ -325,7 +326,7 @@ pub fn convert_messages(
                     j += 1;
                 }
                 i = j;
-                push_user_turn(&mut result, tool_results);
+                result.push(json!({ "role": "user", "content": tool_results }));
             }
         }
     }

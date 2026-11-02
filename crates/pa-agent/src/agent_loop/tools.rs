@@ -273,10 +273,8 @@ pub(crate) struct PreparedToolCall {
 
 /// The batch terminate rule: ANY terminating result ends the turn, not
 /// every one. Models emit work calls and the sanctioned `rlm.end_turn()`
-/// in one message; the strict all-results rule would ignore the yield,
-/// stream another assistant message, and reintroduce the no-op churn
-/// (`rlm.end_turn`'s design pins this any-rule). Every call in the batch
-/// still executes before the turn ends.
+/// in one message. Every call in the batch still executes before the turn
+/// ends.
 fn should_terminate_tool_batch(finalized_calls: &[FinalizedToolCallOutcome]) -> bool {
     !finalized_calls.is_empty()
         && finalized_calls

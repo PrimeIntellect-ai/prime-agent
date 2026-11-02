@@ -69,7 +69,13 @@ impl Inner {
                 .active_execution
                 .clone()
                 .ok_or_else(|| anyhow!("rlm.end_turn has no running cell to end the turn for"))?;
-            lock(&execution.buffers).ended_turn = true;
+            let mut buffers = lock(&execution.buffers);
+            // A cell that settled between the clone and this write could
+            // not carry the flag: answer the error, never a silent no-op.
+            if buffers.settled {
+                return Err(anyhow!("rlm.end_turn arrived after its cell settled"));
+            }
+            buffers.ended_turn = true;
             return Ok(json!({ "endedTurn": true }));
         }
         let handler = self
