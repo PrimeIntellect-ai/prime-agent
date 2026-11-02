@@ -569,11 +569,8 @@ async fn a_withdrawal_racing_an_arrival_settles_both() {
 /// A journal write failure names the memory-only degradation in the
 /// notice text: the arrival row and the reminder both carry the clause,
 /// and a recovered journal drops it on the next notice.
-#[cfg(unix)]
 #[tokio::test]
 async fn a_journal_failure_marks_the_notice_memory_only() {
-    use std::os::unix::fs::PermissionsExt as _;
-
     let (worker, inbox, arrivals, notify) = routing_state();
     worker.dispatch("clear_queue", &json!({})).await;
     let journal = worker
@@ -582,7 +579,10 @@ async fn a_journal_failure_marks_the_notice_memory_only() {
         .parent()
         .unwrap()
         .join(pa_core::session_engine::inbox::INBOX_JOURNAL_FILE);
-    std::fs::set_permissions(&journal, std::fs::Permissions::from_mode(0o444)).unwrap();
+    // A directory in the journal's place fails the append even when the
+    // tests run as root (chmod alone does not).
+    std::fs::remove_file(&journal).unwrap();
+    std::fs::create_dir(&journal).unwrap();
     admit_inbox_notice(
         &worker.recovery,
         &worker.core,
@@ -617,7 +617,7 @@ async fn a_journal_failure_marks_the_notice_memory_only() {
     // A recovered journal drops the clause on the next notice: the
     // coalesced arrival row re-renders without it once a write succeeds,
     // and the next reminder cycle replaces the reminder's stale clause.
-    std::fs::set_permissions(&journal, std::fs::Permissions::from_mode(0o644)).unwrap();
+    std::fs::remove_dir(&journal).unwrap();
     admit_inbox_notice(
         &worker.recovery,
         &worker.core,
@@ -639,6 +639,90 @@ async fn a_journal_failure_marks_the_notice_memory_only() {
         assert!(
             !message.contains(pa_core::session_engine::inbox::INBOX_PERSISTENCE_ERROR_CLAUSE),
             "the recovered journal's notices are clean: {rows:?}"
+        );
+    }
+    let _ = std::fs::remove_dir_all(worker.config.socket_path.parent().unwrap());
+}
+
+/// The withdrawal's re-renders keep the memory-only clause: a trimmed
+/// batch's arrival row and a live-count reminder never lose the
+/// degradation their rows were queued with (a re-render that rebuilt the
+/// bare text would silence a failed journal's visibility).
+#[tokio::test]
+async fn a_withdrawals_rerender_keeps_the_persistence_error_clause() {
+    let (worker, inbox, arrivals, notify) = routing_state();
+    worker.dispatch("clear_queue", &json!({})).await;
+    worker.core.lock().unwrap().busy = true;
+    let journal = worker
+        .config
+        .recovery_journal_path
+        .parent()
+        .unwrap()
+        .join(pa_core::session_engine::inbox::INBOX_JOURNAL_FILE);
+    // A directory in the journal's place fails the append even when the
+    // tests run as root (chmod alone does not).
+    std::fs::remove_file(&journal).unwrap();
+    std::fs::create_dir(&journal).unwrap();
+    admit_inbox_notice(
+        &worker.recovery,
+        &worker.core,
+        &notify,
+        &inbox,
+        &arrivals,
+        bash_done_notice(4321, "sleep 1"),
+        || false,
+    );
+    admit_inbox_notice(
+        &worker.recovery,
+        &worker.core,
+        &notify,
+        &inbox,
+        &arrivals,
+        inbox_notice(
+            pa_core::session_engine::inbox::INBOX_CLASS_FACTORY_PROGRESS,
+            "second",
+        ),
+        || false,
+    );
+    admit_inbox_reminder(&worker.recovery, &worker.core, &notify, &inbox, || false);
+    withdraw_bash_completion_notice(
+        &worker.recovery,
+        &worker.core,
+        Some((&inbox, &arrivals)),
+        &crate::engine::BashConsumedNotice {
+            pid: 4321,
+            command: "sleep 1".to_string(),
+        },
+        None,
+    );
+    let milestone = inbox
+        .drain()
+        .pop()
+        .expect("the milestone survived the withdrawal");
+    let rows = steering_rows(&worker);
+    assert_eq!(
+        rows.len(),
+        2,
+        "the re-rendered arrival row and reminder row: {rows:?}"
+    );
+    let (expected_preview, expected_text) =
+        pa_core::session_engine::inbox::arrival_notice(std::slice::from_ref(&milestone), 1);
+    let expected_text = inbox.with_persistence_error_clause(expected_text);
+    assert_eq!(
+        rows[0],
+        (expected_text, Some(expected_preview), true),
+        "the arrival row re-rendered over the trimmed batch with the clause"
+    );
+    assert!(
+        rows[1]
+            .0
+            .starts_with("[inbox reminder] 1 messages still waiting"),
+        "the reminder re-rendered with the live count: {rows:?}"
+    );
+    for (message, _, _) in &rows {
+        assert!(
+            message.ends_with(pa_core::session_engine::inbox::INBOX_PERSISTENCE_ERROR_CLAUSE),
+            "the re-rendered rows keep the memory-only clause: {rows:?}"
         );
     }
     let _ = std::fs::remove_dir_all(worker.config.socket_path.parent().unwrap());

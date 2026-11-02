@@ -642,13 +642,7 @@ pub(crate) fn admit_inbox_notice(
         // The journal-failure clause: a memory-only inbox says so in the
         // notice that wakes (the degradation is agent-visible, not just
         // a daemon-log line).
-        let text = match inbox.persistence_error() {
-            Some(_) => format!(
-                "{text} {}",
-                pa_core::session_engine::inbox::INBOX_PERSISTENCE_ERROR_CLAUSE
-            ),
-            None => text,
-        };
+        let text = inbox.with_persistence_error_clause(text);
         // The replacement pattern the scheduler's queue keys use: the
         // fresh row replaces the coalesced one instead of stacking.
         core_guard
@@ -705,14 +699,9 @@ pub(crate) fn admit_inbox_reminder(
     }
     let waited_ms =
         pa_core::autonomous::now_millis().saturating_sub(oldest_arrived_at_ms.unwrap_or_default());
-    let message = match inbox.persistence_error() {
-        Some(_) => format!(
-            "{} {}",
-            pa_core::session_engine::inbox::reminder_notice(count, waited_ms),
-            pa_core::session_engine::inbox::INBOX_PERSISTENCE_ERROR_CLAUSE
-        ),
-        None => pa_core::session_engine::inbox::reminder_notice(count, waited_ms),
-    };
+    let message = inbox.with_persistence_error_clause(
+        pa_core::session_engine::inbox::reminder_notice(count, waited_ms),
+    );
     let mut core_guard = core.lock().unwrap();
     if session_is_closed() {
         return;
@@ -838,6 +827,7 @@ pub(crate) fn withdraw_bash_completion_notice(
                 {
                     let (preview, text) =
                         pa_core::session_engine::inbox::arrival_notice(&batch, count);
+                    let text = inbox.with_persistence_error_clause(text);
                     for item in &mut core_guard.steering {
                         if item.queue_key.as_deref() == Some(INBOX_ARRIVAL_QUEUE_KEY) {
                             item.message.clone_from(&text);
@@ -856,7 +846,9 @@ pub(crate) fn withdraw_bash_completion_notice(
                 // have changed: re-render it with the live count and wait.
                 let waited_ms = pa_core::autonomous::now_millis()
                     .saturating_sub(oldest_arrived_at_ms.unwrap_or_default());
-                let reminder = pa_core::session_engine::inbox::reminder_notice(count, waited_ms);
+                let reminder = inbox.with_persistence_error_clause(
+                    pa_core::session_engine::inbox::reminder_notice(count, waited_ms),
+                );
                 for item in &mut core_guard.steering {
                     if item.queue_key.as_deref() == Some(INBOX_REMINDER_QUEUE_KEY)
                         && item.message != reminder

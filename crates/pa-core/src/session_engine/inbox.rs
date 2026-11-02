@@ -194,6 +194,19 @@ impl SessionInbox {
             .clone()
     }
 
+    /// One notice text with the degradation named while the journal's
+    /// last write failed (the arrival, reminder, and withdrawal
+    /// re-render sites share this decoration, so a re-rendered queued row
+    /// never loses the clause its row was queued with).
+    #[must_use]
+    pub fn with_persistence_error_clause(&self, text: String) -> String {
+        if self.persistence_error().is_some() {
+            format!("{text} {INBOX_PERSISTENCE_ERROR_CLAUSE}")
+        } else {
+            text
+        }
+    }
+
     /// Append one message: durable journal first, then the store. The
     /// id is a fresh monotonic `inbox-<n>`.
     pub fn push(&self, notice: InboxNotice, arrived_at_ms: u64) -> InboxMessage {
@@ -712,8 +725,6 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn a_journal_write_failure_surfaces_and_clears_on_success() {
-        use std::os::unix::fs::PermissionsExt as _;
-
         let dir = tempfile::tempdir().unwrap();
         let journal = dir.path().join(INBOX_JOURNAL_FILE);
         let inbox = SessionInbox::open(Some(dir.path()));
@@ -722,7 +733,10 @@ mod tests {
             1_000,
         );
         assert_eq!(inbox.persistence_error(), None, "the first write succeeded");
-        std::fs::set_permissions(&journal, std::fs::Permissions::from_mode(0o444)).unwrap();
+        // A directory in the journal's place fails the append even when
+        // the tests run as root (chmod alone does not).
+        std::fs::remove_file(&journal).unwrap();
+        std::fs::create_dir(&journal).unwrap();
         inbox.push(
             notice(
                 "sleep 2",
@@ -741,7 +755,7 @@ mod tests {
         );
         // The in-process surface stays truthful: both messages wait.
         assert_eq!(inbox.count().0, 2);
-        std::fs::set_permissions(&journal, std::fs::Permissions::from_mode(0o644)).unwrap();
+        std::fs::remove_dir(&journal).unwrap();
         inbox.push(
             notice("sleep 3", INBOX_CLASS_BASH_DONE, "third", json!({"pid": 3})),
             3_000,
