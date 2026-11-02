@@ -344,13 +344,13 @@ jobs:
       - name: Bootstrap the kernel venv (ready before the kernel e2e units)
         if: steps.selection.outputs.units != '0'
         run: ./target/debug/prime-agent --prime-agent-bootstrap
-      - name: Prepare pinned TS link-frame comparison binary
-        if: matrix.shard == 1 && steps.selection.outputs.units != '0' && hashFiles('scripts/check_link_frames.py') != ''
+      - name: Prepare pinned TS frame comparison binary
+        if: matrix.shard == 1 && steps.selection.outputs.units != '0' && hashFiles('scripts/check_link_frames.py', 'scripts/check_ipython_diff_frames.py') != ''
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          reference="${RUNNER_TEMP}/link-frame-ts-reference"
+          reference="${RUNNER_TEMP}/frame-ts-reference"
           mkdir -p "${reference}/package"
           gh release download v0.9.8 --repo "${GITHUB_REPOSITORY}" \
             --pattern prime-agent-0.9.8-linux-x64.tar.gz --dir "${reference}"

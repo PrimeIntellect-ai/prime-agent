@@ -157,7 +157,7 @@ fn the_list_hint_drops_unbound_keys() {
         "the emptied back binding drops the arrow: {text:?}"
     );
     let mut cfg = crate::keybindings::KeybindingsConfig::new();
-    cfg.insert("app.heartbeats.openSelected".to_string(), Vec::new());
+    cfg.insert("app.modal.open".to_string(), Vec::new());
     let kb = KeybindingsManager::with_user_bindings(cfg);
     let picker = HeartbeatsPicker::new(entries(), None, None, 24);
     let frame = picker.render(&theme(), 70, &kb);

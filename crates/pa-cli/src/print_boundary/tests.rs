@@ -132,6 +132,7 @@ async fn faux_engine_with_telemetry(
         rlm_usage_store: None,
         progress_note_emit: None,
         rlm_depth: None,
+        factory_child: false,
         daemonless: true,
         model_info: Some(model.clone()),
         prewarm_ipython_kernel: None,

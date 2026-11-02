@@ -1,0 +1,1 @@
+- Edits made with the python tool's `edit` skill now show in the ipython cell card: one `path +N -M` summary line per edited file, and the numbered diff rows at the Details and All levels. The python highlighter no longer crashes the TUI on some non-ASCII text.

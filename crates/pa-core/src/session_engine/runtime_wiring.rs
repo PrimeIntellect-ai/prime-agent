@@ -461,6 +461,7 @@ fn convert_execute_result(
                 data: attachment.data,
             })
             .collect(),
+        diffs: result.diffs.unwrap_or_default(),
         sent_agent_messages: result.sent_agent_messages.unwrap_or_default(),
         bash_commands: result.bash_commands,
         timed_out_after_ms: result.timed_out_after_ms,

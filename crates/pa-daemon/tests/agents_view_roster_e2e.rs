@@ -424,6 +424,7 @@ async fn rlm_children_key_the_roster_by_parent_path_and_child_id() {
             name: Some("child-a".to_string()),
             model: None,
             thinking: None,
+            cwd: None,
             spawned_by_request_id: None,
             factory: None,
         })
