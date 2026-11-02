@@ -101,6 +101,16 @@ pub(crate) fn summary_identity_keys(summary: &Value) -> Vec<String> {
 /// Whether a summary is a spawned subagent (TS `isSubagentSummary`): the
 /// runtime kind decides when present; summaries from daemons that predate
 /// it still carry subagent linkage and never surface as top-level agents.
+/// Whether a summary belongs to a Decision API child (`decisionChild`):
+/// the agents view hides these System 1 children from the user; their
+/// spend still rolls into the parent's cost.
+pub(crate) fn is_decision_child_summary(summary: &Value) -> bool {
+    summary
+        .get("decisionChild")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+}
+
 pub(crate) fn is_subagent_summary(summary: &Value) -> bool {
     match summary.get("runtimeKind").and_then(Value::as_str) {
         Some(kind) => kind == "subagent",
@@ -285,6 +295,12 @@ pub fn entry_status(entry: &Value) -> AgentRosterStatus {
 pub fn count_descendants(roster: &[Value], parent: &SessionIdentity) -> SubagentCounts {
     let mut counts = SubagentCounts::default();
     for (entry, depth) in descendant_entries_with_depth(roster, parent) {
+        // The Decision API child's summary (`decisionChild`): a System 1
+        // server, not an interactive agent — the user never sees or
+        // manages it, so it never counts in the user-facing readout.
+        if entry.get("summary").is_some_and(is_decision_child_summary) {
+            continue;
+        }
         counts.total += 1;
         match entry_status(entry) {
             AgentRosterStatus::Running => {
@@ -377,6 +393,27 @@ mod tests {
         assert_eq!(counts.running_nested, 0);
         assert_eq!(counts.idle, 1);
         assert_eq!(counts.inactive, 1);
+    }
+
+    #[test]
+    fn decision_children_never_count() {
+        let mut decision = child_summary("dc", "p1", "subagent");
+        decision["decisionChild"] = json!(true);
+        let roster = vec![
+            entry("parent", &parent_summary("p1"), "idle"),
+            entry("c1", &child_summary("c1", "p1", "subagent"), "running"),
+            entry("dc", &decision, "running"),
+        ];
+        let counts = count_descendants(
+            &roster,
+            &SessionIdentity::new(
+                Some("p1-live".to_string()),
+                Some("p1".to_string()),
+                Some("/sessions/p1.jsonl".to_string()),
+            ),
+        );
+        assert_eq!(counts.total, 1);
+        assert_eq!(counts.running, 1);
     }
 
     #[test]
