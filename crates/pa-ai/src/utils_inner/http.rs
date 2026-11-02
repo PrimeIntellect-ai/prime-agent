@@ -17,7 +17,15 @@ static H2_ALPN_CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
 
 /// The HTTP/1.1 client every provider shares, pinned with `http1_only()` so that enabling the
 /// reqwest `http2` feature (bedrock) cannot change the transport of any other provider.
-fn client() -> &'static reqwest::Client {
+/// Caller-owned transports outside the providers (pa-core's decision path) ride it too, reusing
+/// one pool and one TLS handshake instead of paying a `ClientBuilder::build`'s trust-store reload
+/// per call.
+///
+/// # Panics
+///
+/// Never: the builder sets only transport/pool options, and its certificate
+/// roots were already filtered on load.
+pub fn client() -> &'static reqwest::Client {
     CLIENT.get_or_init(|| {
         crate::utils_inner::tls::http_client_builder()
             .http1_only()

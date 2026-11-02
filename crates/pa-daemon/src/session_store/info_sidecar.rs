@@ -25,7 +25,7 @@ use super::info::{session_info_cache, SessionScanState};
 /// no bump: the plain `Deserialize` (no `deny_unknown_fields`) ignores the
 /// stale key, and the remaining state is exactly what this build's fold
 /// would have written, so the store stays warm.
-const INFO_SIDECAR_VERSION: u32 = 2;
+const INFO_SIDECAR_VERSION: u32 = 3;
 
 /// The on-disk envelope: the version gate plus the scan state.
 #[derive(Serialize, Deserialize)]
