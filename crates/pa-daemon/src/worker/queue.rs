@@ -739,10 +739,17 @@ pub(crate) fn admit_inbox_reminder(
 }
 
 /// Withdraw one queued bash completion notice: the kernel read the result
-/// before the notice delivered (pids are reused, so the command disambiguates).
+/// before the notice delivered (pids are reused, so the command
+/// disambiguates). The same collection drains the notice's inbox message
+/// (the auto-read-on-collection parity): the kernel already read the
+/// result through its handle, so the pushed bash-done must not wait for
+/// an explicit `rlm.inbox.read()`, and the queued inbox rows must not
+/// promise it.
 pub(crate) fn withdraw_bash_completion_notice(
     recovery: &std::sync::Mutex<Option<WorkerRecoveryJournal>>,
     core: &Arc<Mutex<SessionCore>>,
+    inbox: Option<&std::sync::Arc<pa_core::session_engine::inbox::SessionInbox>>,
+    arrivals: Option<&pa_core::session_engine::inbox::InboxArrivals>,
     notice: &crate::engine::BashConsumedNotice,
     engine: Option<&dyn crate::engine::SessionEngine>,
 ) {
@@ -767,7 +774,68 @@ pub(crate) fn withdraw_bash_completion_notice(
         }
         before != core_guard.steering.len() + core_guard.follow_up.len()
     };
-    if removed {
+    // The collected job's inbox message leaves the store like a read would
+    // drain it; the queued rows that announced it stop promising it.
+    let withdrawn_message =
+        inbox.and_then(|inbox| inbox.withdraw_bash_completion(notice.pid, &notice.command));
+    let mut inbox_row_dropped = false;
+    if let (Some(inbox), Some(withdrawn)) = (inbox, withdrawn_message) {
+        let batch = arrivals.map(|arrivals| {
+            let mut batch = arrivals.lock().unwrap();
+            batch.retain(|message| message.id != withdrawn.id);
+            batch
+        });
+        let (count, _, _) = inbox.count();
+        let mut core_guard = core.lock().unwrap();
+        if count == 0 {
+            // An emptied inbox drops its queued wake rows (a coalesced
+            // arrival row, a reminder): both would announce an empty
+            // inbox.
+            let before = core_guard.steering.len() + core_guard.follow_up.len();
+            let not_inbox_row = |item: &QueuedItem| {
+                !matches!(
+                    item.queue_key.as_deref(),
+                    Some(INBOX_ARRIVAL_QUEUE_KEY | INBOX_REMINDER_QUEUE_KEY)
+                )
+            };
+            core_guard.steering.retain(not_inbox_row);
+            core_guard.follow_up.retain(not_inbox_row);
+            inbox_row_dropped = before != core_guard.steering.len() + core_guard.follow_up.len();
+        } else if let Some(batch) = batch.filter(|batch| !batch.is_empty()) {
+            // The queued arrival row still covers waiting arrivals:
+            // re-render it over the trimmed batch and the live count.
+            let coalescing = core_guard
+                .steering
+                .iter()
+                .chain(core_guard.follow_up.iter())
+                .any(|item| item.queue_key.as_deref() == Some(INBOX_ARRIVAL_QUEUE_KEY));
+            if coalescing {
+                let (preview, text) = pa_core::session_engine::inbox::arrival_notice(&batch, count);
+                for item in &mut core_guard.steering {
+                    if item.queue_key.as_deref() == Some(INBOX_ARRIVAL_QUEUE_KEY) {
+                        item.message.clone_from(&text);
+                        item.preview = Some(preview.clone());
+                    }
+                }
+                for item in &mut core_guard.follow_up {
+                    if item.queue_key.as_deref() == Some(INBOX_ARRIVAL_QUEUE_KEY) {
+                        item.message.clone_from(&text);
+                        item.preview = Some(preview.clone());
+                    }
+                }
+            }
+        } else {
+            // The queued arrival row covered only the withdrawn message:
+            // drop its now-empty wake (older waiting messages keep the
+            // reminder).
+            let not_arrival_row =
+                |item: &QueuedItem| item.queue_key.as_deref() != Some(INBOX_ARRIVAL_QUEUE_KEY);
+            core_guard.steering.retain(not_arrival_row);
+            core_guard.follow_up.retain(not_arrival_row);
+            inbox_row_dropped = true;
+        }
+    }
+    if removed || inbox_row_dropped {
         // The withdrawal refreshes the verdict so a consumed notice cannot keep
         // busy=true promising a revive the withdrawn row would replay.
         checkpoint_queue_recovery(

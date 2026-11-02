@@ -3,7 +3,10 @@
 //! per session instead of steering their full rows, plus the
 //! `rlm.inbox.read`/`rlm.inbox.count` host requests the agent reads
 //! them with. The durable journal (`inbox.jsonl` under the session dir)
-//! replays on open, so a daemon restart keeps unread messages.
+//! replays on open, so a daemon restart keeps unread messages. A bash
+//! completion the kernel collected through its handle withdraws its
+//! message (`bash.consumed`), so a collected job leaves nothing
+//! waiting.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -112,14 +115,19 @@ pub struct SessionInbox {
     state: Mutex<InboxState>,
 }
 
-/// One journal record: a message arrival, a drain marker, or the id
-/// counter's high-water mark (compaction persists it so a drained
-/// restart never reuses a spent id).
+/// One journal record: a message arrival, a drain marker, one
+/// message's withdrawal (the consumed-bash path), or the id counter's
+/// high-water mark (compaction persists it so a drained restart never
+/// reuses a spent id).
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "kind", rename_all = "camelCase")]
 enum InboxRecord {
     Message(InboxMessage),
     Drained,
+    /// The id of one withdrawn message.
+    Withdrawn {
+        id: String,
+    },
     #[serde(rename_all = "camelCase")]
     Counter {
         next_id: u64,
@@ -184,6 +192,32 @@ impl SessionInbox {
         );
         state.messages.push(message.clone());
         message
+    }
+
+    /// Withdraw one bash completion: the kernel read the finished
+    /// command's result through its handle before the notice delivered
+    /// (`bash.consumed`), so the message the collection already answered
+    /// leaves the store (and the journal's pending set) instead of
+    /// waiting for a `read`. Pids are reused, so the command
+    /// disambiguates — the same pair the queued-row withdrawal matches.
+    pub fn withdraw_bash_completion(&self, pid: u32, command: &str) -> Option<InboxMessage> {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let position = state.messages.iter().position(|message| {
+            message.class == INBOX_CLASS_BASH_DONE
+                && message.meta.get("pid").and_then(Value::as_u64) == Some(u64::from(pid))
+                && message.meta.get("command").and_then(Value::as_str) == Some(command)
+        })?;
+        let withdrawn = state.messages.remove(position);
+        self.append_journal(
+            &serde_json::to_value(InboxRecord::Withdrawn {
+                id: withdrawn.id.clone(),
+            })
+            .unwrap_or(Value::Null),
+        );
+        Some(withdrawn)
     }
 
     /// Read drains: the waiting messages return in arrival order and
@@ -317,6 +351,9 @@ fn replay_journal(journal: &Path) -> (Vec<InboxMessage>, u64, bool) {
                 messages.push(message);
             }
             InboxRecord::Drained => messages.clear(),
+            InboxRecord::Withdrawn { id } => {
+                messages.retain(|message| message.id != id);
+            }
             InboxRecord::Counter { next_id: high } => next_id = next_id.max(high),
         }
     }
@@ -494,6 +531,113 @@ mod tests {
             3_000,
         );
         assert_eq!(third.id, "inbox-3");
+    }
+
+    /// A collected bash completion withdraws its own message: the
+    /// pid+command pair matches (pids are reused), a different command
+    /// under the same pid stays, and an unknown pair withdraws nothing.
+    #[test]
+    fn withdraw_bash_completion_drains_only_the_matching_message() {
+        let inbox = SessionInbox::in_memory();
+        inbox.push(
+            notice(
+                "sleep 1",
+                INBOX_CLASS_BASH_DONE,
+                "first",
+                json!({"pid": 11, "command": "sleep 1", "exitCode": 0}),
+            ),
+            1_000,
+        );
+        let second = inbox.push(
+            notice(
+                "sleep 2",
+                INBOX_CLASS_BASH_DONE,
+                "second",
+                json!({"pid": 11, "command": "sleep 2", "exitCode": 0}),
+            ),
+            2_000,
+        );
+        let kept = inbox.push(
+            notice(
+                "r1",
+                INBOX_CLASS_FACTORY_PROGRESS,
+                "milestone",
+                json!({"pid": 11, "runId": "r1"}),
+            ),
+            3_000,
+        );
+        assert_eq!(second.id, "inbox-2");
+        assert!(
+            inbox.withdraw_bash_completion(11, "make targets").is_none(),
+            "an unmatched pair withdraws nothing"
+        );
+        let withdrawn = inbox
+            .withdraw_bash_completion(11, "sleep 1")
+            .expect("the matching pair withdraws");
+        assert_eq!(withdrawn.text, "first");
+        assert_eq!(
+            withdrawn.meta,
+            json!({"pid": 11, "command": "sleep 1", "exitCode": 0})
+        );
+        let drained = inbox.drain();
+        assert_eq!(
+            drained,
+            vec![second, kept],
+            "only the matching pair withdrew"
+        );
+    }
+
+    /// A withdrawn message does not survive a restart: the journal's
+    /// withdrawal record removes it from the replayed pending set, and
+    /// the id counter keeps counting past it.
+    #[test]
+    fn a_withdrawn_message_does_not_survive_a_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        {
+            let inbox = SessionInbox::open(Some(dir.path()));
+            inbox.push(
+                notice(
+                    "sleep 1",
+                    INBOX_CLASS_BASH_DONE,
+                    "collected",
+                    json!({"pid": 11, "command": "sleep 1"}),
+                ),
+                1_000,
+            );
+            inbox.push(
+                notice(
+                    "sleep 2",
+                    INBOX_CLASS_BASH_DONE,
+                    "waiting",
+                    json!({"pid": 12, "command": "sleep 2"}),
+                ),
+                2_000,
+            );
+            let withdrawn = inbox
+                .withdraw_bash_completion(11, "sleep 1")
+                .expect("the collected message withdraws");
+            assert_eq!(withdrawn.id, "inbox-1");
+        }
+        let inbox = SessionInbox::open(Some(dir.path()));
+        let drained = inbox.drain();
+        let replayed = InboxMessage {
+            id: "inbox-2".to_string(),
+            class: INBOX_CLASS_BASH_DONE.to_string(),
+            arrived_at_ms: 2_000,
+            sender: Some("sleep 2".to_string()),
+            text: "waiting".to_string(),
+            meta: json!({"pid": 12, "command": "sleep 2"}),
+        };
+        assert_eq!(
+            drained,
+            vec![replayed],
+            "the restart replayed only the unwithdrawn message"
+        );
+        let next = inbox.push(
+            notice("echo", INBOX_CLASS_BASH_DONE, "next", json!({})),
+            3_000,
+        );
+        assert_eq!(next.id, "inbox-3", "the id counter replayed");
     }
 
     /// The journal appends one line per push and drain, and an open

@@ -35,6 +35,17 @@ fn inbox_notice(class: &'static str, text: &str) -> pa_core::session_engine::inb
     }
 }
 
+/// One bash-done arrival with the meta the withdrawal matches (the
+/// command's pid and command disambiguate the completion).
+fn bash_done_notice(pid: u32, command: &str) -> pa_core::session_engine::inbox::InboxNotice {
+    pa_core::session_engine::inbox::InboxNotice {
+        class: pa_core::session_engine::inbox::INBOX_CLASS_BASH_DONE,
+        sender: Some(command.to_string()),
+        text: format!("[bash-done pid:{pid} exit:0]"),
+        meta: serde_json::json!({ "pid": pid, "command": command, "exitCode": 0 }),
+    }
+}
+
 /// One test's routing state: a journal-backed worker core plus a fresh
 /// inbox store (the session dir the worker's journal lives under).
 type InboxRoutingState = (
@@ -278,6 +289,165 @@ async fn the_reminder_repeats_while_the_inbox_stays_unread() {
         queue_key.as_deref(),
         Some("inbox:reminder"),
         "the reminder carries its coalescing key: {queue_key:?}"
+    );
+    let _ = std::fs::remove_dir_all(worker.config.socket_path.parent().unwrap());
+}
+
+/// The collected-handle pin: the kernel read the finished command through
+/// its handle (`bash.consumed`), so its withdrawal drains the pushed
+/// inbox message without an explicit read — the count drops to zero, the
+/// queued wake row stops promising it, and the journal replays the
+/// withdrawal across a restart.
+#[tokio::test]
+async fn a_collected_handle_drains_its_inbox_message_and_row() {
+    let (worker, inbox, arrivals, notify) = routing_state();
+    worker.dispatch("clear_queue", &json!({})).await;
+    admit_inbox_notice(
+        &worker.recovery,
+        &worker.core,
+        &notify,
+        &inbox,
+        &arrivals,
+        bash_done_notice(4321, "sleep 1"),
+        || false,
+    );
+    assert_eq!(inbox.count().0, 1, "the arrival pushed one message");
+    assert_eq!(steering_rows(&worker).len(), 1, "one queued notice row");
+    withdraw_bash_completion_notice(
+        &worker.recovery,
+        &worker.core,
+        Some(&inbox),
+        Some(&arrivals),
+        &crate::engine::BashConsumedNotice {
+            pid: 4321,
+            command: "sleep 1".to_string(),
+        },
+        None,
+    );
+    assert_eq!(
+        inbox.count(),
+        (0, None, std::collections::BTreeMap::new()),
+        "the collection drained the message without a read"
+    );
+    assert!(
+        steering_rows(&worker).is_empty(),
+        "no wake row promises a drained message"
+    );
+    // The restart replays the withdrawal: the journal's pending set is
+    // empty.
+    let session_dir = worker
+        .config
+        .recovery_journal_path
+        .parent()
+        .unwrap()
+        .to_path_buf();
+    let reopened = pa_core::session_engine::inbox::SessionInbox::open(Some(&session_dir));
+    assert_eq!(
+        reopened.count(),
+        (0, None, std::collections::BTreeMap::new()),
+        "the withdrawal survived the restart"
+    );
+    let _ = std::fs::remove_dir_all(worker.config.socket_path.parent().unwrap());
+}
+
+/// A withdrawal inside a covered batch re-renders the queued row: the
+/// remaining arrivals stay announced with the live count.
+#[tokio::test]
+async fn a_withdrawal_inside_a_covered_batch_rerenders_the_queued_row() {
+    let (worker, inbox, arrivals, notify) = routing_state();
+    worker.dispatch("clear_queue", &json!({})).await;
+    worker.core.lock().unwrap().busy = true;
+    admit_inbox_notice(
+        &worker.recovery,
+        &worker.core,
+        &notify,
+        &inbox,
+        &arrivals,
+        bash_done_notice(4321, "sleep 1"),
+        || false,
+    );
+    admit_inbox_notice(
+        &worker.recovery,
+        &worker.core,
+        &notify,
+        &inbox,
+        &arrivals,
+        inbox_notice(
+            pa_core::session_engine::inbox::INBOX_CLASS_FACTORY_PROGRESS,
+            "second",
+        ),
+        || false,
+    );
+    let rows = steering_rows(&worker);
+    assert_eq!(rows.len(), 1);
+    assert!(
+        rows[0].0.contains("+2 arrived") && rows[0].0.contains("total 2"),
+        "the queued row covers the batch: {rows:?}"
+    );
+    withdraw_bash_completion_notice(
+        &worker.recovery,
+        &worker.core,
+        Some(&inbox),
+        Some(&arrivals),
+        &crate::engine::BashConsumedNotice {
+            pid: 4321,
+            command: "sleep 1".to_string(),
+        },
+        None,
+    );
+    assert_eq!(inbox.count().0, 1, "the factory milestone still waits");
+    let rows = steering_rows(&worker);
+    assert_eq!(rows.len(), 1, "the re-rendered row stays queued: {rows:?}");
+    assert!(
+        rows[0].0.contains("1 new message (factory-progress)")
+            && rows[0].0.contains("total waiting: 1"),
+        "the row re-rendered over the trimmed batch: {rows:?}"
+    );
+    let _ = std::fs::remove_dir_all(worker.config.socket_path.parent().unwrap());
+}
+
+/// An emptied inbox drops every queued inbox row: a stale reminder must
+/// not wake the agent to an empty inbox either.
+#[tokio::test]
+async fn a_withdrawal_that_empties_the_inbox_drops_the_queued_reminder_too() {
+    let (worker, inbox, arrivals, notify) = routing_state();
+    worker.dispatch("clear_queue", &json!({})).await;
+    admit_inbox_notice(
+        &worker.recovery,
+        &worker.core,
+        &notify,
+        &inbox,
+        &arrivals,
+        bash_done_notice(4321, "sleep 1"),
+        || false,
+    );
+    admit_inbox_reminder(&worker.recovery, &worker.core, &notify, &inbox, || false);
+    let rows = steering_rows(&worker);
+    assert_eq!(
+        rows.len(),
+        2,
+        "the arrival row and the reminder row both queue: {rows:?}"
+    );
+    withdraw_bash_completion_notice(
+        &worker.recovery,
+        &worker.core,
+        Some(&inbox),
+        Some(&arrivals),
+        &crate::engine::BashConsumedNotice {
+            pid: 4321,
+            command: "sleep 1".to_string(),
+        },
+        None,
+    );
+    assert_eq!(inbox.count().0, 0, "the collection emptied the store");
+    assert!(
+        steering_rows(&worker).is_empty(),
+        "the stale reminder row dropped with the arrival row"
+    );
+    // The sweep settled the busy evidence with it.
+    assert!(
+        !WorkerRecoveryJournal::read_interrupted(&worker.config.recovery_journal_path),
+        "no queued row still promises a wake"
     );
     let _ = std::fs::remove_dir_all(worker.config.socket_path.parent().unwrap());
 }
