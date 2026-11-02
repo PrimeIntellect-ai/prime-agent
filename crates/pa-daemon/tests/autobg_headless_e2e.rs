@@ -161,6 +161,51 @@ fn serve(mut stream: TcpStream, next: &AtomicUsize) -> std::io::Result<()> {
             ),
             chunk(&json!({}), Some("stop")),
         ],
+        // The wake turn collects the saved handle through the production
+        // wiring: the `poll()` read fires `bash.consumed`, whose
+        // withdrawal drains the pushed inbox message. The count probe runs
+        // a model round later — host requests process concurrently, so
+        // the withdrawal may land after the poll's own count would have.
+        2 => [
+            chunk(
+                &json!({
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [{
+                        "index": 0,
+                        "id": "call-bounded-2",
+                        "type": "function",
+                        "function": {
+                            "name": "python_repl",
+                            "arguments": "{\"code\": \"r = res.handle.poll()\\nprint(('COLLECTED', r.exit_code))\"}"
+                        }
+                    }]
+                }),
+                None,
+            ),
+            chunk(&json!({}), Some("tool_calls")),
+        ],
+        3 => [
+            chunk(
+                &json!({
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [{
+                        "index": 0,
+                        "id": "call-bounded-3",
+                        "type": "function",
+                        "function": {
+                            "name": "python_repl",
+                            "arguments": "{\"code\": \"from rlm import inbox\\nc = await inbox.count()\\nprint(('AFTER', c.count, dict(c.classes)))\"}"
+                        }
+                    }]
+                }),
+                None,
+            ),
+            chunk(&json!({}), Some("tool_calls")),
+        ],
+        // Every later request (the woken turn's settle and anything past
+        // it) answers with the woken reply.
         _ => [
             chunk(
                 &json!({"role": "assistant", "content": "woken by the bash-done notice"}),
@@ -443,6 +488,29 @@ fn a_bounded_bash_await_degrades_and_the_notice_wakes_the_session() {
             .is_some_and(|at| at > notice);
         woken_after_notice.then_some(messages)
     });
+
+    // The collection pin (the production wiring): the woken turn read the
+    // saved handle, its `bash.consumed` withdrawal drained the pushed
+    // message — the count dropped to zero without a read — and the
+    // journal's last record marks the withdrawal.
+    let collected = client.messages(&active_id);
+    assert!(
+        collected.contains("('COLLECTED', 0)"),
+        "the wake turn never collected the handle: {collected}"
+    );
+    assert!(
+        collected.contains("('AFTER', 0, {})"),
+        "the collection drained the inbox message without a read: {collected}"
+    );
+    let journal = std::fs::read_to_string(&inbox_journal)
+        .unwrap_or_else(|error| panic!("re-read {}: {error}", inbox_journal.display()));
+    assert!(
+        journal
+            .lines()
+            .last()
+            .is_some_and(|line| line.contains("\"kind\":\"withdrawn\"")),
+        "the collection journaled its withdrawal: {journal}"
+    );
 
     // Teardown: stop the session through the live supervisor so the worker
     // (and its kernel + the 5s sleeper) do not leak past the test.
