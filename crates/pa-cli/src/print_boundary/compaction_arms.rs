@@ -118,9 +118,11 @@ impl TurnBoundary {
                 .await;
             }
             None => {
-                // The threshold arm: the live context crossing the reserve headroom
-                // compacts before the next prompt; the pair streams in json mode.
-                if engine.session.auto_compaction_due(model).await {
+                // The threshold arm: a due compaction runs before the next
+                // prompt; the pair streams in json mode.
+                if engine.session.context_pressure(model).await
+                    == pa_core::session_engine::compaction::ContextPressure::Reserve
+                {
                     self.emit_json(&compaction_start_event(
                         CompactionOutcomeReason::Threshold.wire(),
                         None,

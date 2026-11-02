@@ -1,5 +1,13 @@
 use super::*;
 
+fn reserve_due(tokens: u64, window: u64, output: u64, settings: &CompactionSettings) -> bool {
+    let messages = [
+        super::tests::user_message("turn", 1),
+        super::tests::assistant_message(tokens, 2),
+    ];
+    context_pressure(&messages, window, output, settings) == ContextPressure::Reserve
+}
+
 #[test]
 fn default_percentage_preserves_the_current_threshold_and_strict_boundary() {
     let settings = CompactionSettings::default();
@@ -10,9 +18,9 @@ fn default_percentage_preserves_the_current_threshold_and_strict_boundary() {
         (0, 0, 0),
     ] {
         assert_eq!(compaction_threshold(window, output, &settings), expected);
-        assert!(!should_compact(expected, window, output, &settings));
+        assert!(!reserve_due(expected, window, output, &settings));
         assert_eq!(
-            should_compact(expected + 1, window, output, &settings),
+            reserve_due(expected + 1, window, output, &settings),
             expected > 0
         );
     }
@@ -38,8 +46,8 @@ fn custom_percentages_obey_both_ceilings_as_model_limits_change() {
                 .zip(expected_by_model)
         {
             assert_eq!(compaction_threshold(window, output, &settings), expected);
-            assert!(!should_compact(expected, window, output, &settings));
-            assert!(should_compact(expected + 1, window, output, &settings));
+            assert!(!reserve_due(expected, window, output, &settings));
+            assert!(reserve_due(expected + 1, window, output, &settings));
         }
     }
 }
@@ -106,7 +114,7 @@ async fn saved_percentage_applies_to_existing_sessions_without_changing_manual_b
         }
     );
     session.set_auto_compaction_enabled(false);
-    assert!(!should_compact(
+    assert!(!reserve_due(
         1_000_000,
         1_048_576,
         32_000,
@@ -122,8 +130,8 @@ fn low_percentages_leave_room_for_retained_history_and_both_summaries() {
             ..Default::default()
         };
         assert_eq!(compaction_threshold(128_000, 16_384, &settings), 52_769);
-        assert!(!should_compact(52_769, 128_000, 16_384, &settings));
-        assert!(should_compact(52_770, 128_000, 16_384, &settings));
+        assert!(!reserve_due(52_769, 128_000, 16_384, &settings));
+        assert!(reserve_due(52_770, 128_000, 16_384, &settings));
         // The hard combined model ceiling wins even if retention cannot fit.
         assert_eq!(compaction_threshold(65_536, 32_000, &settings), 17_152);
     }

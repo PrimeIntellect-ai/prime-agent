@@ -1,7 +1,7 @@
 //! The automatic threshold compaction at the daemon engine's turn boundaries: the TS
 //! `_checkCompaction` threshold arm, fired after every settled turn (`agent_end`) and
 //! before the next admitted prompt (`_runPreTurnCompaction`). The decision is pa-core's
-//! [`AgentSession::auto_compaction_due`]; this module owns the threshold event pair and
+//! [`AgentSession::auto_compaction_now`]; this module owns the threshold event pair and
 //! the persist-and-broadcast contract.
 
 use pa_agent::abort::AbortController;
@@ -43,6 +43,7 @@ impl AgentSessionEngine {
     /// pair, persisting and broadcasting exactly like the `/compact` flow.
     pub(crate) fn run_auto_compaction(
         &self,
+        aborted: &dyn Fn() -> bool,
         emit: &mut dyn FnMut(EngineEvent) -> bool,
     ) -> AutoCompactionRun {
         // TS runs the summarizer on the session's live model; a fresh
@@ -55,21 +56,54 @@ impl AgentSessionEngine {
         // TS `_thresholdCompactionNeeded` reads `_runModel()` — the routed image model
         // while a routed turn is armed — so the threshold decision compares against the
         // model that actually serves; the summarizer below stays on the session model.
-        let run_model = self
-            .armed_image_route()
-            .map_or_else(|| model.clone(), |route| route.target.model);
-        let due = {
-            let guard = self.session.blocking_lock();
-            match guard.as_deref() {
-                Some(engine) => self
-                    .runtime
-                    .block_on(async { engine.session.auto_compaction_due(&run_model).await }),
-                // No built session: the live context is empty, matching the
-                // TS pre-turn check on a fresh session.
-                None => false,
-            }
+        // The same derivation the in-run threshold hook consults through.
+        let (run_model, api_key) = crate::agent_engine::auto_compaction_inputs(
+            &self.image_route,
+            &self.selection,
+            &self.config.agent_dir,
+            &model,
+        );
+        // Register before the pressure consult and start event. Stop must
+        // cancel this boundary even if it lands before the foreground join;
+        // otherwise rejecting a cancelled background result could start a
+        // fresh summarizer after Stop.
+        let controller = std::sync::Arc::new(AbortController::new());
+        let signal = controller.signal();
+        *self
+            .auto_compaction_abort
+            .lock()
+            .expect("auto compaction abort lock") = Some(std::sync::Arc::clone(&controller));
+        // Stop may precede registration (for example just after the last
+        // assistant settled). Register first, then consult the worker flag:
+        // an earlier Stop is observed here; a later one reaches the slot.
+        // Nothing ran for this boundary, so the turn loop's own abort
+        // handling settles the run — `NotDue`, like the post-consult
+        // abort path below (`Cancelled` would stop the loop without the
+        // trailing Done settle).
+        if aborted() {
+            controller.abort();
+            self.clear_auto_compaction_abort(&controller);
+            return AutoCompactionRun::NotDue;
+        }
+        let engine = self.session.blocking_lock().clone();
+        let due = match engine {
+            Some(engine) => self.runtime.block_on(async {
+                engine
+                    .session
+                    .auto_compaction_now_with_abort(
+                        &run_model,
+                        &model,
+                        api_key.clone(),
+                        Some(&signal),
+                    )
+                    .await
+            }),
+            // No built session: the live context is empty, matching the
+            // TS pre-turn check on a fresh session.
+            None => false,
         };
-        if !due {
+        if !due || signal.is_aborted() {
+            self.clear_auto_compaction_abort(&controller);
             return AutoCompactionRun::NotDue;
         }
         // TS `_runAutoCompaction` emits the start event before the
@@ -77,23 +111,13 @@ impl AgentSessionEngine {
         if !emit(EngineEvent::CompactionStart {
             event: crate::compaction::compaction_start_event("threshold", None),
         }) {
+            self.clear_auto_compaction_abort(&controller);
             return AutoCompactionRun::Cancelled;
         }
         pa_core::session_engine::compaction_trace::trace(
             "auto.threshold_start_emitted",
             &serde_json::Value::Null,
         );
-        // TS assigns `_autoCompactionAbortController` for the run's duration: an
-        // `abort_compaction` command lands in the slot and cancels the in-flight summarizer.
-        let controller = std::sync::Arc::new(AbortController::new());
-        let signal = controller.signal();
-        {
-            *self
-                .auto_compaction_abort
-                .lock()
-                .expect("auto compaction abort lock") = Some(std::sync::Arc::clone(&controller));
-        }
-        let api_key = self.resolve_request_api_key(&model);
         // The lock covers the clone only; the summarizer call below must not ride it.
         let engine = self.session.blocking_lock().clone();
         let Some(engine) = engine else {
@@ -106,7 +130,7 @@ impl AgentSessionEngine {
             let compact = async {
                 engine
                     .session
-                    .compact(None, &model, api_key, Some(&signal))
+                    .compact_for_run_model(None, &run_model, &model, api_key, Some(&signal))
                     .await
             };
             let outcome = self

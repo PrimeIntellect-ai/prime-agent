@@ -422,7 +422,7 @@ impl AgentSessionEngine {
                             // yield. The engine owns a multi-thread runtime; the synchronous
                             // compaction boundary may re-enter it without holding async locks.
                             let outcome = tokio::task::block_in_place(|| {
-                                self.run_auto_compaction(&mut **emit)
+                                self.run_auto_compaction(aborted, &mut **emit)
                             });
                             self.threshold_checks_enabled.store(
                                 outcome.continues_threshold_checks(),

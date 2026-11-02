@@ -284,8 +284,9 @@ impl AgentSessionEngine {
             let compact = async {
                 engine
                     .session
-                    .compact(
+                    .compact_for_run_model(
                         custom_instructions.as_deref(),
+                        &run_model,
                         &model,
                         api_key,
                         Some(&signal),

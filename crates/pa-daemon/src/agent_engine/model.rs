@@ -480,15 +480,7 @@ impl AgentSessionEngine {
     }
 
     pub(crate) fn resolve_request_api_key(&self, model: &Model) -> Option<String> {
-        if let Some(api_key) = &self.current_selection().api_key {
-            return Some(api_key.clone());
-        }
-        let auth = pa_core::auth::AuthStorage::create(&self.config.agent_dir);
-        let mut registry =
-            pa_core::models::ModelRegistry::create(auth, self.config.agent_dir.join("models.json"));
-        registry
-            .get_api_key_and_headers(model, model.headers.as_ref())
-            .api_key
+        request_api_key(&self.selection, &self.config.agent_dir, model)
     }
 
     /// The primary target a failover episode restores: the captured model
@@ -529,6 +521,44 @@ impl AgentSessionEngine {
             headers,
         }
     }
+}
+
+/// The request-time api key for `model`: the live selection's key pin, then
+/// the agent-dir registry's resolved key — the one source every request seam
+/// (the boundary consult and the in-run hook alike) resolves through.
+pub(crate) fn request_api_key(
+    selection: &std::sync::RwLock<EngineModelSelection>,
+    agent_dir: &std::path::Path,
+    model: &Model,
+) -> Option<String> {
+    if let Some(api_key) = &selection.read().expect("model selection lock").api_key {
+        return Some(api_key.clone());
+    }
+    let auth = pa_core::auth::AuthStorage::create(agent_dir);
+    let mut registry = pa_core::models::ModelRegistry::create(auth, agent_dir.join("models.json"));
+    registry
+        .get_api_key_and_headers(model, model.headers.as_ref())
+        .api_key
+}
+
+/// The threshold consult's inputs off the live engine slots: the run model
+/// the pressure decision measures (the armed image route's target model
+/// while a routed episode serves, the session model otherwise) and the
+/// request api key for the session model. The boundary arm
+/// ([`AgentSessionEngine::run_auto_compaction`]) and the in-run threshold
+/// hook both resolve through here.
+pub(crate) fn auto_compaction_inputs(
+    image_route: &std::sync::Mutex<Option<crate::image_route::ImageRoute>>,
+    selection: &std::sync::RwLock<EngineModelSelection>,
+    agent_dir: &std::path::Path,
+    model: &Model,
+) -> (Model, Option<String>) {
+    let run_model = image_route
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .as_ref()
+        .map_or_else(|| model.clone(), |route| route.target.model.clone());
+    (run_model, request_api_key(selection, agent_dir, model))
 }
 
 /// The saved model context of a session file: the pinned `(provider,

@@ -57,6 +57,7 @@ use turn_types::{
 
 mod model;
 
+pub(crate) use model::auto_compaction_inputs;
 pub(crate) use model::saved_session_context_from_parts;
 
 mod config;
@@ -153,6 +154,8 @@ pub struct AgentSessionEngine {
     /// The live agent handle: the eager turn-abort funnel's target, mirrored
     /// because a running turn holds the core session's mutex.
     pub(crate) turn_agent: std::sync::Mutex<Option<std::sync::Arc<pa_agent::agent::Agent>>>,
+    /// Stop reaches speculative compaction even while a turn owns `session`.
+    pub(crate) compaction_session: std::sync::Mutex<std::sync::Weak<CoreSessionEngine>>,
     pub(crate) quota_park: std::sync::Arc<std::sync::Mutex<Option<QuotaParkState>>>,
     /// Whether the settled turn parked: the park's pause, not the goal's death.
     pub(crate) quota_parked_this_run: std::sync::Arc<std::sync::atomic::AtomicBool>,
@@ -180,8 +183,9 @@ pub struct AgentSessionEngine {
     /// The worker-owned session file (conversation-log path), set at create.
     session_file: std::sync::Mutex<Option<std::path::PathBuf>>,
     /// The authoritative model selection: the process fallback, re-bound when
-    /// a create carries explicit wire flags.
-    selection: std::sync::RwLock<EngineModelSelection>,
+    /// a create carries explicit wire flags. The in-run threshold hook and the
+    /// threshold consult share the live slot, so the selection rides an `Arc`.
+    pub(crate) selection: std::sync::Arc<std::sync::RwLock<EngineModelSelection>>,
     /// The restored-from-session decision, scoped to the file it was computed
     /// for: a revived session's saved model (or the fallback message); an
     /// explicit flag wins.
@@ -298,7 +302,9 @@ pub struct AgentSessionEngine {
     /// The image-model route armed for the dispatched episode, re-applied at
     /// every model-turn attempt so retries keep serving it; cleared when the
     /// episode settles.
-    pub(crate) image_route: std::sync::Mutex<Option<ImageRoute>>,
+    /// The in-run threshold hook reads the armed route's target model live,
+    /// so the slot rides an `Arc`.
+    pub(crate) image_route: std::sync::Arc<std::sync::Mutex<Option<ImageRoute>>>,
     /// Serializes `/reload`'s whole live-input refresh: overlapping reloads
     /// resolve the store at their own read times, so an earlier reload's
     /// already-resolved key/header pair must never land over a later
