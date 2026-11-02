@@ -184,8 +184,6 @@ async fn bash_consumed_withdraws_the_undelivered_notice_and_settles() {
         &worker.core,
         /*inbox*/
         None, // The legacy steering lane carries no inbox store.
-        /*arrivals*/
-        None,
         &crate::engine::BashConsumedNotice {
             pid: 4321,
             command: "another command".to_string(),
@@ -205,8 +203,6 @@ async fn bash_consumed_withdraws_the_undelivered_notice_and_settles() {
         &worker.core,
         /*inbox*/
         None, // The legacy steering lane carries no inbox store.
-        /*arrivals*/
-        None,
         &crate::engine::BashConsumedNotice {
             pid: 4321,
             command: "sleep 12; echo RW_WAKE_DONE".to_string(),
