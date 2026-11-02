@@ -1,0 +1,1 @@
+- Fixed `prime-agent update` failing to restore idle subagents that had been woken by a message.

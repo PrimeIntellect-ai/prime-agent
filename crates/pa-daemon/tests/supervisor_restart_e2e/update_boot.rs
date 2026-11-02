@@ -186,3 +186,130 @@ fn update_boot_revives_only_roster_kept_workers() {
         std::thread::sleep(Duration::from_millis(50));
     }
 }
+
+/// A subagent revived by a message restores on an update boot: its roster row's create command
+/// carries only the child identity (no `parentSessionFile`), and its spawn edge is already in the
+/// ledger, so the restore replay must not demand an admission.
+#[test]
+fn update_boot_restores_a_message_revived_subagent_from_its_ledger_edge() {
+    let dir = tempfile::TempDir::new().expect("temp dir");
+    let root = dir.path().canonicalize().expect("canonical temp dir");
+    let socket = root.join("daemon.sock");
+    let agent_dir = root.join("agent");
+    let sessions_dir = agent_dir.join("sessions");
+    std::fs::create_dir_all(&sessions_dir).expect("sessions dir");
+    let cwd = root.to_string_lossy().to_string();
+    let session_file = |id: &str| {
+        let file = sessions_dir.join(format!("{id}.jsonl"));
+        std::fs::write(
+            &file,
+            format!(
+                "{{\"type\":\"session\",\"version\":3,\"id\":\"{id}\",\"timestamp\":\"2026-01-01T00:00:00Z\",\"cwd\":{}}}\n",
+                json!(cwd)
+            ),
+        )
+        .expect("write session file");
+        file
+    };
+    let parent_file = session_file("parent");
+    let child_file = session_file("child");
+    pa_daemon::rlm_ledger::RlmSpawnLedger::new(&agent_dir, &sessions_dir, |_| {})
+        .append_spawn(&pa_daemon::rlm_ledger::RlmSpawnInput {
+            child_id: "sub-child".to_string(),
+            parent: parent_file.to_string_lossy().to_string(),
+            child: child_file.to_string_lossy().to_string(),
+            depth: 1,
+            name: "child".to_string(),
+            factory: None,
+        })
+        .expect("record the spawn edge");
+
+    let script_path = root.join("script.json");
+    std::fs::write(&script_path, json!({ "responses": [] }).to_string()).expect("write script");
+    let roster_path = root.join("update-roster.json");
+    std::fs::write(
+        &roster_path,
+        json!({
+            "format_version": 1,
+            "update_id": "u-e2e-revived",
+            "socket_path": socket.to_string_lossy(),
+            "created_at": "2026-01-01T00:00:00Z",
+            "supervisor": { "pid": 1, "process_start_id": "p", "generation": "g" },
+            "binary": { "from_version": "0.1", "to_version": "0.2" },
+            "sessions": [{
+                "session_id": "child",
+                "active_session_id": "child-live",
+                "session_file": child_file.to_string_lossy(),
+                "kind": "subagent",
+                "parent_session_id": "parent",
+                "rlm_depth": 1,
+                "cwd": cwd,
+                "runtime_config": { "create": {
+                    "sessionPath": child_file.to_string_lossy(),
+                    "config": {
+                        "cwd": cwd,
+                        "sessionDir": sessions_dir.to_string_lossy(),
+                        "script": script_path.to_string_lossy(),
+                        "rlmDepth": 1,
+                    },
+                    "runtimeMetadata": { "kind": "subagent", "rlmChildId": "sub-child" },
+                } },
+                "queue": { "next_turn": [], "actions": {} },
+                "in_flight": {
+                    "streaming": false, "compacting": false, "bash_running": false,
+                    "rlm_children": false, "retrying": false, "prompt_in_flight": false
+                },
+                "should_resume": false,
+            }],
+            "workers": [],
+        })
+        .to_string(),
+    )
+    .expect("write roster");
+
+    let _daemon = spawn_supervisor_env(
+        &socket,
+        &agent_dir,
+        &[(
+            pa_types::daemon::update_flow::UPDATE_ROSTER_ENV,
+            roster_path.to_string_lossy().to_string(),
+        )],
+    );
+    wait_socket_ready(&socket);
+    let deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        let (_client, hello) = Client::connect(&socket);
+        if hello["updateResume"]["complete"] == true {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "restore pass never completed: {hello}"
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
+
+    let log_path = pa_daemon::paths::daemon_log_path(&socket, &agent_dir);
+    let restore_failures: Vec<String> = std::fs::read_to_string(&log_path)
+        .unwrap_or_default()
+        .lines()
+        .filter(|line| line.contains("update restore: could not restore"))
+        .map(str::to_string)
+        .collect();
+    assert_eq!(restore_failures, Vec::<String>::new());
+    let (mut client, _hello) = Client::connect(&socket);
+    client.send_command("list1", &json!({ "type": "list" }));
+    let list = client.read_response("list1");
+    let listed: Vec<String> = list["data"]["sessions"]
+        .as_array()
+        .expect("sessions")
+        .iter()
+        .map(|summary| {
+            summary["sessionFile"]
+                .as_str()
+                .expect("session file")
+                .to_string()
+        })
+        .collect();
+    assert_eq!(listed, vec![child_file.to_string_lossy().to_string()]);
+}

@@ -743,14 +743,20 @@ impl Supervisor {
             .get("rlmDepth")
             .and_then(Value::as_u64)
             .unwrap_or(1) as u32;
-        let parent = metadata
-            .get("parentSessionFile")
-            .and_then(Value::as_str)
-            .ok_or_else(|| anyhow!("RLM child admission is missing parentSessionFile"))?;
         let child = summary
             .get("sessionFile")
             .and_then(Value::as_str)
             .ok_or_else(|| anyhow!("RLM child admission is missing the child session file"))?;
+        let ledger = self.rlm_spawn_ledger_for(None).await?;
+        let Some(parent) = metadata.get("parentSessionFile").and_then(Value::as_str) else {
+            // A child revived by a message carries only its identity: its
+            // edge and display file were recorded at its spawn, so a replay
+            // of that create (the update restore) has nothing to admit.
+            if ledger.edge_is_live(&child_id, child) {
+                return Ok(());
+            }
+            return Err(anyhow!("RLM child admission is missing parentSessionFile"));
+        };
         let session_name = summary
             .get("sessionName")
             .and_then(Value::as_str)
@@ -770,7 +776,6 @@ impl Supervisor {
                 },
                 str::to_string,
             );
-        let ledger = self.rlm_spawn_ledger_for(None).await?;
         ledger
             .append_spawn(&crate::rlm_ledger::RlmSpawnInput {
                 child_id: child_id.clone(),
