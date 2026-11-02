@@ -99,6 +99,41 @@ fn print_mode_reports_provider_errors_as_exit_one() {
     assert!(!stderr.is_empty());
 }
 
+/// A `/refine` plans in the background, but its failure still fails the run
+/// once the disposal drain has awaited it — in both output modes. A
+/// successful refinement keeps exit 0.
+#[test]
+fn print_mode_refine_command_failure_exits_one() {
+    for (refiner_reply, expected_code) in [
+        ("not json", 1),
+        (r#"{"summary":"no changes","edits":[]}"#, 0),
+    ] {
+        for json_mode in [false, true] {
+            let home = isolated_home();
+            let script = serde_json::json!({ "responses": ["first answer", refiner_reply] });
+            let mut args = vec!["-p", "hello", "/refine"];
+            if json_mode {
+                args.splice(0..0, ["--mode", "json"]);
+            }
+            let (stdout, stderr, code) = run_in_home(home.path(), &args, &script);
+            assert_eq!(
+                code, expected_code,
+                "reply {refiner_reply:?}, json {json_mode}: stdout {stdout} stderr {stderr}"
+            );
+            let reported = if json_mode {
+                stdout.contains(r#""type":"refine_failed""#)
+            } else {
+                stderr.contains("pa-cli: refinement failed:")
+            };
+            assert_eq!(
+                reported,
+                expected_code == 1,
+                "stdout {stdout} stderr {stderr}"
+            );
+        }
+    }
+}
+
 // Session persistence (headless print sessions must land on disk).
 
 fn isolated_home() -> tempfile::TempDir {

@@ -111,3 +111,14 @@ revocation/errors; bytes already sent cannot be recalled. Recovery belongs to al
 live hosts sharing the agent directory and cancels when the last host disappears.
 Catch-up uses at most three delivery cycles per pending entry, honors Retry-After,
 and releases upload capacity during retry waits; exhaustion retains durable intent.
+
+`AgentSession::start_refinement` starts an ephemeral background job and returns its
+completion handle. Session disposal or branch navigation cancels planning and idle-boundary waiting;
+a commit already writing durable state finishes its audit and context append.
+Refinement owns the harness storage and session rows; the lower-level agent
+only owns atomic admission exclusion. No new dependency is introduced.
+Completed commits remain visible after resume through the harness digest, and
+unchanged state does not append another digest. Live refinement and digest
+refresh append context rows without replacing earlier rows. This preserves the
+message prefix when the system prompt, tools, model and provider construction
+are unchanged; it does not promise cache identity across restart or compaction.
