@@ -1,1 +1,0 @@
-- agent inbox: a bash handle collected through its result now clears its own inbox message, so a collected job leaves no stale bash-done waiting for a read.

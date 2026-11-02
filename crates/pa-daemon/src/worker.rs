@@ -684,8 +684,7 @@ impl Worker {
                     withdraw_bash_completion_notice(
                         &withdraw_recovery,
                         &withdraw_core,
-                        inbox.as_ref(),
-                        Some(&arrivals_for_consumed),
+                        inbox.as_ref().map(|store| (store, &arrivals_for_consumed)),
                         &notice,
                         engine.as_deref().map(|engine| engine as &dyn SessionEngine),
                     );

@@ -195,11 +195,11 @@ impl SessionInbox {
     }
 
     /// Withdraw one bash completion: the kernel read the finished
-    /// command's result through its handle before the notice delivered
-    /// (`bash.consumed`), so the message the collection already answered
-    /// leaves the store (and the journal's pending set) instead of
-    /// waiting for a `read`. Pids are reused, so the command
-    /// disambiguates — the same pair the queued-row withdrawal matches.
+    /// command's result through its handle (`bash.consumed`), so the
+    /// message the collection already answered leaves the store (and
+    /// the journal's pending set) instead of waiting for a `read`. Pids
+    /// are reused, so the command disambiguates — the same pair the
+    /// queued-row withdrawal matches.
     pub fn withdraw_bash_completion(&self, pid: u32, command: &str) -> Option<InboxMessage> {
         let mut state = self
             .state
