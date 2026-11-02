@@ -7,8 +7,9 @@ use super::{
 };
 
 impl Inner {
-    /// Dispatch one typed request from kernel code to the registered handler
-    /// and reply over the protocol. Unhandled requests answer with an error.
+    /// Dispatch one typed request from kernel code and reply over the
+    /// protocol: the manager answers `rlm.end_turn` itself, registered
+    /// handlers answer the rest, and unhandled requests answer with an error.
     pub(crate) fn start_host_request(self: &Arc<Self>, request_id: &str, data: Value) {
         {
             let mut g = lock(&self.guarded);

@@ -72,7 +72,7 @@ pub struct ExecuteResult {
     pub timed_out_after_ms: Option<u64>,
     /// The cell ended the turn via the sanctioned `rlm.end_turn()` call:
     /// the host marked the execution, and this result terminates the tool
-    /// batch (`endedTurn` on the tool-result details).
+    /// batch (the "turn ended" note on the tool-result text).
     pub ended_turn: bool,
 }
 
@@ -531,9 +531,6 @@ pub async fn execute_ipython(
         "status": status,
         "kernelRestarted": kernel_restarted,
     });
-    if r.ended_turn {
-        details["endedTurn"] = json!(true);
-    }
     if let Some(duration) = r.duration_ms {
         details["durationMs"] = json!(duration);
     }
