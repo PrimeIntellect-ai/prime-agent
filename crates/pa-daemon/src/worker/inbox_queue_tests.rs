@@ -566,6 +566,84 @@ async fn a_withdrawal_racing_an_arrival_settles_both() {
     let _ = std::fs::remove_dir_all(worker.config.socket_path.parent().unwrap());
 }
 
+/// A journal write failure names the memory-only degradation in the
+/// notice text: the arrival row and the reminder both carry the clause,
+/// and a recovered journal drops it on the next notice.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_journal_failure_marks_the_notice_memory_only() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let (worker, inbox, arrivals, notify) = routing_state();
+    worker.dispatch("clear_queue", &json!({})).await;
+    let journal = worker
+        .config
+        .recovery_journal_path
+        .parent()
+        .unwrap()
+        .join(pa_core::session_engine::inbox::INBOX_JOURNAL_FILE);
+    std::fs::set_permissions(&journal, std::fs::Permissions::from_mode(0o444)).unwrap();
+    admit_inbox_notice(
+        &worker.recovery,
+        &worker.core,
+        &notify,
+        &inbox,
+        &arrivals,
+        bash_done_notice(4321, "sleep 1"),
+        || false,
+    );
+    let rows = steering_rows(&worker);
+    assert_eq!(rows.len(), 1);
+    assert!(
+        rows[0]
+            .0
+            .ends_with(pa_core::session_engine::inbox::INBOX_PERSISTENCE_ERROR_CLAUSE),
+        "the arrival notice carries the clause: {rows:?}"
+    );
+    // The reminder wakes with the clause too.
+    admit_inbox_reminder(&worker.recovery, &worker.core, &notify, &inbox, || false);
+    let rows = steering_rows(&worker);
+    assert_eq!(
+        rows.len(),
+        2,
+        "the reminder row queues beside the arrival: {rows:?}"
+    );
+    assert!(
+        rows[1]
+            .0
+            .ends_with(pa_core::session_engine::inbox::INBOX_PERSISTENCE_ERROR_CLAUSE),
+        "the reminder carries the clause: {rows:?}"
+    );
+    // A recovered journal drops the clause on the next notice: the
+    // coalesced arrival row re-renders without it once a write succeeds,
+    // and the next reminder cycle replaces the reminder's stale clause.
+    std::fs::set_permissions(&journal, std::fs::Permissions::from_mode(0o644)).unwrap();
+    admit_inbox_notice(
+        &worker.recovery,
+        &worker.core,
+        &notify,
+        &inbox,
+        &arrivals,
+        bash_done_notice(4322, "sleep 2"),
+        || false,
+    );
+    assert_eq!(inbox.persistence_error(), None, "the write succeeded again");
+    admit_inbox_reminder(&worker.recovery, &worker.core, &notify, &inbox, || false);
+    let rows = steering_rows(&worker);
+    assert_eq!(
+        rows.len(),
+        2,
+        "one replaced arrival row and one replaced reminder row: {rows:?}"
+    );
+    for (message, _, _) in &rows {
+        assert!(
+            !message.contains(pa_core::session_engine::inbox::INBOX_PERSISTENCE_ERROR_CLAUSE),
+            "the recovered journal's notices are clean: {rows:?}"
+        );
+    }
+    let _ = std::fs::remove_dir_all(worker.config.socket_path.parent().unwrap());
+}
+
 /// A closed session drops the arrival's wake: no row, no crash, and the
 /// store stays honest.
 #[tokio::test]
