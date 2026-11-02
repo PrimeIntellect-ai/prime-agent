@@ -69,6 +69,10 @@ async fn queue_withdrawals_clear_only_the_last_idle_notes() {
                 withdraw_bash_completion_notice(
                     &worker.recovery,
                     &worker.core,
+                    /*inbox*/
+                    None, // The legacy steering lane carries no inbox store.
+                    /*arrivals*/
+                    None,
                     &crate::engine::BashConsumedNotice {
                         pid: 4321,
                         command: "fixture command".to_string(),
