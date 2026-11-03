@@ -8,6 +8,51 @@ use std::future::Future;
 use std::io::Write as _;
 use std::pin::Pin;
 use std::sync::Mutex;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::TcpListener;
+
+#[tokio::test]
+async fn trace_upload_does_not_redirect_a_session_to_another_origin() {
+    let source = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let destination = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let source_port = source.local_addr().unwrap().port();
+    let destination_port = destination.local_addr().unwrap().port();
+    let source_task = tokio::spawn(async move {
+        let (mut socket, _) = source.accept().await.unwrap();
+        let mut buffer = [0u8; 2048];
+        socket.read(&mut buffer).await.unwrap();
+        let response = format!(
+            "HTTP/1.1 307 Temporary Redirect\r\nLocation: http://127.0.0.1:{destination_port}/collect\r\nContent-Length: 0\r\n\r\n"
+        );
+        socket.write_all(response.as_bytes()).await.unwrap();
+    });
+    let destination_task = tokio::spawn(async move {
+        let (mut socket, _) = destination.accept().await.unwrap();
+        let mut buffer = [0u8; 2048];
+        let _ = socket.read(&mut buffer).await.unwrap();
+        socket
+            .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n{}")
+            .await
+            .unwrap();
+    });
+
+    let response = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        ReqwestTraceHttp.put(
+            &format!("http://127.0.0.1:{source_port}/upload"),
+            vec![("Authorization".to_string(), "Bearer secret".to_string())],
+            "private session transcript".to_string(),
+            DEFAULT_REQUEST_TIMEOUT_MS,
+            None,
+        ),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    source_task.await.unwrap();
+    destination_task.abort();
+    assert_eq!(response.status, 307);
+}
 
 /// One captured request (url, headers, body).
 type CapturedRequest = (String, Vec<(String, String)>, String);

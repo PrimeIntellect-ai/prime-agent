@@ -116,6 +116,7 @@ impl PrimeHttp for ReqwestPrimeHttp {
         let api_key = api_key.to_string();
         Box::pin(async move {
             let client = pa_ai::utils::tls::http_client_builder()
+                .redirect(crate::http_redirect::same_origin_only())
                 .timeout(Duration::from_millis(timeout_ms))
                 .build()
                 .map_err(|error| error.to_string())?;
@@ -147,6 +148,7 @@ impl PrimeHttp for ReqwestPrimeHttp {
     ) -> Pin<Box<dyn Future<Output = Result<PrimeHttpResponse, String>> + Send + 'a>> {
         Box::pin(async move {
             let client = pa_ai::utils::tls::http_client_builder()
+                .redirect(crate::http_redirect::same_origin_only())
                 .timeout(Duration::from_millis(timeout_ms))
                 .build()
                 .map_err(|error| error.to_string())?;
@@ -704,6 +706,87 @@ mod tests {
                 body: "{}".to_string()
             }
         );
+    }
+
+    #[tokio::test]
+    async fn the_reqwest_transport_does_not_redirect_a_secret_post_to_another_origin() {
+        let source = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let destination = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let source_port = source.local_addr().unwrap().port();
+        let destination_port = destination.local_addr().unwrap().port();
+        let source_task = tokio::spawn(async move {
+            let (mut socket, _) = source.accept().await.unwrap();
+            let mut buffer = [0u8; 2048];
+            socket.read(&mut buffer).await.unwrap();
+            let response = format!(
+                "HTTP/1.1 307 Temporary Redirect\r\nLocation: http://127.0.0.1:{destination_port}/collect\r\nContent-Length: 0\r\n\r\n"
+            );
+            socket.write_all(response.as_bytes()).await.unwrap();
+        });
+        let destination_task = tokio::spawn(async move {
+            let (mut socket, _) = destination.accept().await.unwrap();
+            let mut buffer = [0u8; 2048];
+            let _ = socket.read(&mut buffer).await.unwrap();
+            socket
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n{}")
+                .await
+                .unwrap();
+        });
+
+        let response = tokio::time::timeout(
+            Duration::from_secs(2),
+            ReqwestPrimeHttp.post_json(
+                &format!("http://127.0.0.1:{source_port}/login"),
+                r#"{"private":"body-secret"}"#,
+                Some("bearer-secret"),
+                DEFAULT_REQUEST_TIMEOUT_MS,
+            ),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        source_task.await.unwrap();
+        destination_task.abort();
+        assert_eq!(response.status, 307);
+    }
+
+    #[tokio::test]
+    async fn the_reqwest_transport_keeps_same_origin_redirects() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = tokio::spawn(async move {
+            let (mut first, _) = listener.accept().await.unwrap();
+            let mut buffer = [0u8; 2048];
+            first.read(&mut buffer).await.unwrap();
+            first
+                .write_all(b"HTTP/1.1 307 Temporary Redirect\r\nLocation: /next\r\nContent-Length: 0\r\n\r\n")
+                .await
+                .unwrap();
+            drop(first);
+            let (mut second, _) = listener.accept().await.unwrap();
+            let read = second.read(&mut buffer).await.unwrap();
+            let request = String::from_utf8_lossy(&buffer[..read]);
+            assert!(request.starts_with("POST /next HTTP/1.1"));
+            second
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n{}")
+                .await
+                .unwrap();
+        });
+
+        let response = tokio::time::timeout(
+            Duration::from_secs(2),
+            ReqwestPrimeHttp.post_json(
+                &format!("http://127.0.0.1:{port}/login"),
+                "{}",
+                Some("bearer-secret"),
+                DEFAULT_REQUEST_TIMEOUT_MS,
+            ),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        server.await.unwrap();
+        assert_eq!(response.status, 200);
     }
 
     #[test]
