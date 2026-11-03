@@ -82,7 +82,7 @@ impl ProviderHttp for ReqwestProviderHttp {
                     // TS `redirect: "error"`: a redirected request
                     // fails instead of silently following.
                     if request.follow_redirects && attempt.previous().len() < 10 {
-                        attempt.follow()
+                        crate::utils_inner::tls::same_origin_redirect_policy().redirect(attempt)
                     } else {
                         attempt.error("redirect refused")
                     }

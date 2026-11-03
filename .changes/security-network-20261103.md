@@ -1,0 +1,1 @@
+- Prevented provider API keys and OAuth refresh tokens from following redirects to another server.

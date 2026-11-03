@@ -64,6 +64,26 @@ pub fn http_client_builder() -> reqwest::ClientBuilder {
     builder
 }
 
+/// Keep provider and OAuth redirects within the endpoint that received the credentials. Reqwest
+/// drops `Authorization` on some cross-host hops, but keeps provider-specific API-key headers and
+/// POST bodies (including refresh tokens) when following them.
+pub(crate) fn same_origin_redirect_policy() -> reqwest::redirect::Policy {
+    reqwest::redirect::Policy::custom(|attempt| {
+        let Some(origin) = attempt.previous().first() else {
+            return attempt.error("redirect has no original URL");
+        };
+        let target = attempt.url();
+        if origin.scheme() == target.scheme()
+            && origin.host_str() == target.host_str()
+            && origin.port_or_known_default() == target.port_or_known_default()
+        {
+            reqwest::redirect::Policy::default().redirect(attempt)
+        } else {
+            attempt.error("cross-origin redirect refused")
+        }
+    })
+}
+
 static WS_CONFIG: LazyLock<Arc<rustls::ClientConfig>> = LazyLock::new(|| {
     let mut roots = rustls::RootCertStore::empty();
     roots.add_parsable_certificates(NATIVE_CERTS.iter().cloned());
