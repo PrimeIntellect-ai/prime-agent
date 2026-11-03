@@ -167,7 +167,9 @@ impl Inner {
         let cwd = self.options.cwd.clone();
         let mut command = tokio::process::Command::new(&python);
         command
-            .args(["-m", "rlm.repl"])
+            // `-m` otherwise prepends the project cwd to sys.path, allowing
+            // a repository's `rlm` to run before a prompt.
+            .args(["-P", "-m", "rlm.repl"])
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped());

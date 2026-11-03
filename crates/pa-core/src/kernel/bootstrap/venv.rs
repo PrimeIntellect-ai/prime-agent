@@ -80,7 +80,9 @@ async fn run_async(command: &str, args: &[String]) -> anyhow::Result<()> {
     let args = args.to_vec();
     tokio::task::spawn_blocking(move || {
         let mut child = std::process::Command::new(&command);
-        child.args(&args).stdin(Stdio::null());
+        // uv otherwise discovers uv.toml/pyproject.toml from the process cwd,
+        // which may be the repository opened before the first prompt.
+        child.arg("--no-config").args(&args).stdin(Stdio::null());
         // Hidden window on Windows (TS `spawnHidden`).
         crate::platform::process::set_no_window(&mut child);
         // CPython must read UTF-8 .pth files even under a Windows legacy

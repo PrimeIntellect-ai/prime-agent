@@ -105,7 +105,7 @@ pub fn get_agent_dir() -> PathBuf {
     match std::env::var(ENV_AGENT_DIR) {
         Ok(dir) if !dir.is_empty() => expand_tilde_path(&dir),
         _ => pa_types::platform::home_dir()
-            .unwrap_or_else(|| PathBuf::from("."))
+            .expect("HOME or PRIME_AGENT_CODING_AGENT_DIR is required for agent settings")
             .join(CONFIG_DIR_NAME),
     }
 }

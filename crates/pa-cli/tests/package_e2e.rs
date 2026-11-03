@@ -87,12 +87,6 @@ fn steps() -> Vec<Step> {
         Step::Run(&["package", "update", "npm:fake-pkg"]),
         Step::Run(&["package", "update", "fake-pkg"]),
         Step::Run(&["package", "remove", "npm:fake-pkg"]),
-        Step::Run(&["package", "install", "npm:fake-pkg", "--local"]),
-        Step::Run(&["package", "list"]),
-        // Move the reported npm version, then reinstall through update.
-        Step::Setup("bump-npm-version"),
-        Step::Run(&["package", "update"]),
-        Step::Run(&["package", "remove", "npm:fake-pkg", "--local"]),
         Step::Run(&[
             "package",
             "install",
@@ -104,7 +98,6 @@ fn steps() -> Vec<Step> {
         Step::Setup("move-git-main"),
         Step::Run(&["package", "update"]),
         Step::Run(&["package", "remove", "git:ssh://localhost/fixtures/repo.git"]),
-        Step::Run(&["package", "install", "./local-pkg", "--local"]),
         Step::Run(&["package", "list"]),
     ]
     .into_iter()
@@ -461,15 +454,6 @@ fn drive(binary: &Path, base: &Path, fixtures: &Fixtures) -> (String, Sandbox) {
                     normalize(&output.stderr, &base_path)
                 );
             }
-            Step::Setup("bump-npm-version") => {
-                let version_file = fixtures
-                    .root
-                    .join("npm")
-                    .join("fake-pkg")
-                    .join("version.txt");
-                std::fs::write(&version_file, "\"9.9.9\"").unwrap();
-                // The installed copy still reports 1.0.0 for the next view.
-            }
             Step::Setup("move-git-main") => {
                 let gitwork = fixtures.work.clone();
                 let content = std::fs::read_to_string(gitwork.join("skills").join("g.md")).unwrap();
@@ -512,21 +496,7 @@ fn package_manager_corpus_matches_ts_binary() {
     );
 
     // Rust sandbox state assertions (the verifier half).
-    let project_settings: serde_json::Value = serde_json::from_str(
-        &std::fs::read_to_string(
-            rust_sandbox
-                .cwd
-                .join(".prime")
-                .join("agent")
-                .join("settings.json"),
-        )
-        .unwrap(),
-    )
-    .unwrap();
-    assert_eq!(
-        project_settings["packages"],
-        serde_json::json!(["../../local-pkg"])
-    );
+    assert!(!rust_sandbox.cwd.join(".prime/agent/settings.json").exists());
     let global_settings: serde_json::Value = serde_json::from_str(
         &std::fs::read_to_string(rust_sandbox.agent_dir.join("settings.json")).unwrap(),
     )
@@ -534,18 +504,8 @@ fn package_manager_corpus_matches_ts_binary() {
     assert_eq!(global_settings["packages"], serde_json::json!([]));
 
     let list_output = run(&rust_bin, &["package", "list"], &rust_sandbox);
-    assert_eq!(
-        list_output.stdout,
-        format!(
-            "Project packages:\n  ../../local-pkg\n    {}\n",
-            rust_sandbox.cwd.join("local-pkg").display()
-        )
-    );
-
-    // Project npm prefix survives the earlier npm --local round trip.
-    let npm_root = rust_sandbox.cwd.join(".prime").join("agent").join("npm");
-    assert!(npm_root.join("package.json").exists());
-    assert!(npm_root.join(".gitignore").exists());
+    assert_eq!(list_output.stdout, "No packages installed.\n");
+    assert!(!rust_sandbox.cwd.join(".prime/agent/npm").exists());
     // Git installs are fully pruned, leaving only the gitignore guard file.
     let git_root = rust_sandbox.agent_dir.join("git");
     assert!(git_root.join(".gitignore").exists());
@@ -558,4 +518,59 @@ fn package_manager_corpus_matches_ts_binary() {
     );
 
     std::fs::remove_dir_all(&base).ok();
+}
+
+#[test]
+fn project_package_list_cannot_run_a_project_npm_command() {
+    let dir = tempfile::tempdir().unwrap();
+    let cwd = dir.path().join("project");
+    let agent_dir = dir.path().join("agent");
+    std::fs::create_dir_all(cwd.join(".prime/agent")).unwrap();
+    std::fs::create_dir_all(&agent_dir).unwrap();
+    let marker = dir.path().join("attacker-ran");
+    let executable = dir.path().join("attacker-npm");
+    write_executable(
+        &executable,
+        &format!("#!/bin/sh\ntouch '{}'\n", marker.display()),
+    );
+    std::fs::write(
+        cwd.join(".prime/agent/settings.json"),
+        serde_json::json!({
+            "npmCommand": [executable.display().to_string()],
+            "packages": ["npm:attacker"]
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_prime-agent"))
+        .args(["package", "list"])
+        .env("PRIME_AGENT_CODING_AGENT_DIR", &agent_dir)
+        .current_dir(&cwd)
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    assert!(!marker.exists(), "repository npmCommand was executed");
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "No packages installed.\n"
+    );
+}
+
+#[test]
+fn local_package_install_fails_before_writing_or_running_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let cwd = dir.path().join("project");
+    let agent_dir = dir.path().join("agent");
+    std::fs::create_dir_all(&cwd).unwrap();
+    std::fs::create_dir_all(&agent_dir).unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_prime-agent"))
+        .args(["package", "install", "npm:attacker", "--local"])
+        .env("PRIME_AGENT_CODING_AGENT_DIR", &agent_dir)
+        .current_dir(&cwd)
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("Project packages are not activated"));
+    assert!(!cwd.join(".prime/agent/settings.json").exists());
+    assert!(!cwd.join(".prime/agent/npm").exists());
 }

@@ -117,6 +117,37 @@ fn version_file_round_trips() {
     ));
 }
 
+#[cfg(unix)]
+#[test]
+fn previous_schema_is_rejected_before_running_a_persisted_venv() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempfile::tempdir().unwrap();
+    let python = dir.path().join("python");
+    let marker = dir.path().join("old-venv-ran");
+    std::fs::write(
+        &python,
+        format!("#!/bin/sh\ntouch '{}'\n", marker.display()),
+    )
+    .unwrap();
+    std::fs::set_permissions(&python, std::fs::Permissions::from_mode(0o755)).unwrap();
+    write_bootstrap_version(dir.path(), "sha256:runtime", &[]).unwrap();
+    let version_path = dir.path().join(".bootstrap-version");
+    let mut version: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&version_path).unwrap()).unwrap();
+    // Schema 9 shipped with editable project Python skills in the shared venv.
+    version["schema"] = serde_json::json!(9);
+    std::fs::write(version_path, version.to_string()).unwrap();
+
+    assert!(!kernel_ready(
+        python.to_str().unwrap(),
+        dir.path(),
+        "sha256:runtime",
+        &[]
+    ));
+    assert!(!marker.exists(), "stale interpreter ran before rebuild");
+}
+
 #[test]
 fn probe_memo_key_distinguishes_every_input_and_drops_on_invalidate() {
     let _memo_state = MEMO_STATE_LOCK
@@ -990,6 +1021,7 @@ async fn skill_sync_batches_missing_installs_into_one_uv_call() {
     .unwrap();
     let calls = uv_invocations(dir.path());
     assert_eq!(calls.len(), 1, "one batched uv invocation: {calls:?}");
+    assert!(calls[0].starts_with("--no-config pip install "));
     assert!(
         calls[0].contains("goal"),
         "the missing skill installs: {calls:?}"
