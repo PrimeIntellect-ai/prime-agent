@@ -198,6 +198,23 @@ mod tests {
     use super::*;
     use std::io::Write;
 
+    #[test]
+    fn read_tool_range_escapes_untrusted_session_offset() {
+        // A session's tool-call arguments are JSON values. A string offset such as
+        // `<img src=x onerror=alert(1)>` must not become HTML when an exported
+        // session is opened in the viewer.
+        let read_renderer = TEMPLATE_JS
+            .split("function renderToolCall(call) {")
+            .nth(1)
+            .expect("tool call renderer")
+            .split("case 'read': {")
+            .nth(1)
+            .and_then(|tail| tail.split("case 'write': {").next())
+            .expect("read tool renderer");
+        assert!(read_renderer.contains("${escapeHtml(String(startLine))}"));
+        assert!(!read_renderer.contains("${startLine}"));
+    }
+
     fn fixture_session(dir: &Path) -> std::path::PathBuf {
         let path = dir.join("fixture-session.jsonl");
         let mut file = std::fs::File::create(&path).expect("create fixture");

@@ -1,0 +1,1 @@
+- Escaped untrusted line numbers in exported session HTML.
