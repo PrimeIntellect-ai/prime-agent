@@ -390,6 +390,51 @@ mod tests {
         addr
     }
 
+    #[tokio::test]
+    async fn configured_timeout_applies_when_request_has_a_cancel_signal() {
+        use tokio::io::AsyncReadExt;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (accepted_tx, accepted_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel::<()>();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = [0u8; 4096];
+            let _ = stream.read(&mut request).await.unwrap();
+            let _ = accepted_tx.send(());
+            let _ = release_rx.await;
+        });
+
+        let mut request = RequestOptions::new(reqwest::Method::GET, format!("http://{addr}/"));
+        request.signal = Some(CancellationToken::new());
+        request.timeout_ms = Some(200);
+        let mut send_task = tokio::spawn(send(request));
+        tokio::time::timeout(std::time::Duration::from_secs(2), accepted_rx)
+            .await
+            .unwrap()
+            .unwrap();
+        let outcome = tokio::time::timeout(std::time::Duration::from_secs(2), &mut send_task).await;
+        if outcome.is_err() {
+            send_task.abort();
+        }
+        drop(release_tx);
+        server.await.unwrap();
+        assert!(
+            outcome.is_ok(),
+            "provider request ignored its configured 200ms timeout"
+        );
+        assert!(matches!(
+            outcome,
+            Ok(Ok(Err(ProviderError::Connection(
+                ProviderConnectionError {
+                    kind: ConnectionErrorKind::Timeout,
+                    ..
+                }
+            ))))
+        ));
+    }
+
     /// A multi-byte character split across two body chunks decodes once, whole: the first chunk
     /// ends inside 你, and the server sends the rest only after that chunk was read.
     #[tokio::test]
@@ -434,50 +479,5 @@ mod tests {
             text.push_str(&chunk);
         }
         assert_eq!(text, "cut \u{FFFD}");
-    }
-
-    #[tokio::test]
-    async fn configured_timeout_applies_when_request_has_a_cancel_signal() {
-        use tokio::io::AsyncReadExt;
-
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        let (accepted_tx, accepted_rx) = tokio::sync::oneshot::channel();
-        let (release_tx, release_rx) = tokio::sync::oneshot::channel::<()>();
-        let server = tokio::spawn(async move {
-            let (mut stream, _) = listener.accept().await.unwrap();
-            let mut request = [0u8; 4096];
-            let _ = stream.read(&mut request).await.unwrap();
-            let _ = accepted_tx.send(());
-            let _ = release_rx.await;
-        });
-
-        let mut request = RequestOptions::new(reqwest::Method::GET, format!("http://{addr}/"));
-        request.signal = Some(CancellationToken::new());
-        request.timeout_ms = Some(200);
-        let mut send_task = tokio::spawn(send(request));
-        tokio::time::timeout(std::time::Duration::from_secs(2), accepted_rx)
-            .await
-            .unwrap()
-            .unwrap();
-        let outcome = tokio::time::timeout(std::time::Duration::from_secs(2), &mut send_task).await;
-        if outcome.is_err() {
-            send_task.abort();
-        }
-        drop(release_tx);
-        server.await.unwrap();
-        assert!(
-            outcome.is_ok(),
-            "provider request ignored its configured 200ms timeout"
-        );
-        assert!(matches!(
-            outcome,
-            Ok(Ok(Err(ProviderError::Connection(
-                ProviderConnectionError {
-                    kind: ConnectionErrorKind::Timeout,
-                    ..
-                }
-            ))))
-        ));
     }
 }
