@@ -1,0 +1,1 @@
+- Protected worker descriptor saves from planted temporary-file links and exposed staging permissions.
