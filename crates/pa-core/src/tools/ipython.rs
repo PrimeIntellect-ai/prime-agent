@@ -65,6 +65,9 @@ pub struct ExecuteResult {
     /// The `bash()` commands this cell started, summarized for display
     /// (`bashCommands` on the tool-result details).
     pub bash_commands: Option<crate::kernel::shared::KernelBashCommands>,
+    /// The cell's `rlm.session.messages` reads (`transcriptReads` on the
+    /// tool-result details).
+    pub transcript_reads: Vec<serde_json::Value>,
     /// The time limit that interrupted this cell, if one did.
     pub timed_out_after_ms: Option<u64>,
 }
@@ -536,6 +539,9 @@ pub async fn execute_ipython(
             "count": bash.count,
             "lines": bash.lines,
         });
+    }
+    if !r.transcript_reads.is_empty() {
+        details["transcriptReads"] = json!(r.transcript_reads);
     }
     if let Some(background) = &r.background_output {
         details["backgroundOutput"] = json!(background);

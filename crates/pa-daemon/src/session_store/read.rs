@@ -155,6 +155,7 @@ impl SessionFile {
             by_id: HashMap::new(),
             chain: Vec::new(),
             leaf_id: None,
+            branch_roles: Some(HashMap::new()),
             window: None,
             lease: None,
             child_usage_recovery: super::child_usage::ChildUsageRecovery::default(),
@@ -216,6 +217,8 @@ impl SessionFile {
             by_id: HashMap::new(),
             chain: Vec::new(),
             leaf_id: None,
+            // Stale until the first read: the recount adds the unloaded prefix's counts.
+            branch_roles: None,
             window: None,
             lease: None,
             child_usage_recovery: super::child_usage::ChildUsageRecovery::default(),
@@ -239,7 +242,7 @@ impl SessionFile {
         // The window parses the retained-target attributions BEFORE the raw
         // retained rows, so the fold runs once every row is in.
         fold_child_usage_attributions(&mut file.entries);
-        file.leaf_id = Some(window.leaf_id().to_owned());
+        file.set_leaf(Some(window.leaf_id().to_owned()));
         let settings = window.settings();
         file.window = Some(SessionWindow {
             message_count: window.message_count(),
@@ -285,7 +288,9 @@ impl SessionFile {
                 full.push_index(entry.clone());
             }
         }
-        full.leaf_id.clone_from(&self.leaf_id);
+        full.set_leaf(self.leaf_id.clone());
+        // Same leaf, same branch: the window's counts already hold the unloaded prefix.
+        full.branch_roles = self.branch_roles.take();
         full.lease.clone_from(&self.lease);
         full.trace_upload.clone_from(&self.trace_upload);
         full.child_usage_recovery
@@ -317,6 +322,7 @@ impl SessionFile {
             by_id: HashMap::new(),
             chain: Vec::new(),
             leaf_id: None,
+            branch_roles: Some(HashMap::new()),
             window: None,
             lease: None,
             child_usage_recovery: super::child_usage::ChildUsageRecovery::default(),
