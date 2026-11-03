@@ -507,7 +507,7 @@ fn machine_notices_inbox_coalesce_and_the_kill_switch_restores_steering() {
     let session_file = sessions
         .read_dir()
         .expect("sessions dir readable")
-        .filter_map(|entry| entry.ok())
+        .filter_map(std::result::Result::ok)
         .map(|entry| entry.path())
         .find(|path| path.extension().is_some_and(|ext| ext == "jsonl"))
         .expect("the session file landed in the configured session dir");

@@ -680,7 +680,8 @@ pub(crate) fn admit_inbox_notice(
 /// Admit one periodic unread reminder: while the inbox stays non-empty,
 /// a steering row repeats the waiting count (the reminderIntervalMs
 /// cycle in `agent_inbox.rs`); an empty inbox admits nothing. The queue
-/// key keeps one row — a later reminder replaces the queued one.
+/// key keeps one row — a later reminder replaces the queued one on
+/// either lane (a queued-message mutation can move it there).
 pub(crate) fn admit_inbox_reminder(
     recovery: &std::sync::Mutex<Option<WorkerRecoveryJournal>>,
     core: &Arc<Mutex<SessionCore>>,
@@ -707,6 +708,9 @@ pub(crate) fn admit_inbox_reminder(
     {
         core_guard
             .steering
+            .retain(|item| item.queue_key.as_deref() != Some(INBOX_REMINDER_QUEUE_KEY));
+        core_guard
+            .follow_up
             .retain(|item| item.queue_key.as_deref() != Some(INBOX_REMINDER_QUEUE_KEY));
         core_guard.steering.push_back(QueuedItem {
             priority: QueuePriority::Background,

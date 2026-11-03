@@ -418,7 +418,7 @@ fn a_bounded_bash_await_degrades_and_the_notice_wakes_the_session() {
     // The inbox journal is the durable copy of the completion message.
     let session_file = std::fs::read_dir(dir.join("agent").join("sessions"))
         .expect("sessions dir")
-        .filter_map(|entry| entry.ok())
+        .filter_map(std::result::Result::ok)
         .map(|entry| entry.path())
         .find(|path| path.extension().is_some_and(|ext| ext == "jsonl"))
         .expect("the session file");
