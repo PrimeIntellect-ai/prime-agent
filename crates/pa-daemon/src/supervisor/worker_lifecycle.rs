@@ -279,7 +279,7 @@ impl Supervisor {
             // The scripted-parent verification seam: a dropped key leaves
             // spawned children scriptless.
             "childScript",
-            // The refine-child flag (`rlm.spawn kind="refine"`): a
+            // The refine-child flag (`refineChild`): a
             // dropped key respawns the refinement child as a regular agent
             // session.
             "refineChild",

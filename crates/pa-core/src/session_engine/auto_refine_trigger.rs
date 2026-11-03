@@ -27,7 +27,6 @@ pub(crate) struct CompactAutoRefineState {
     /// The last round attempt's timestamp (millis); every attempt
     /// stamps the cooldown window.
     last_review_at: Option<u64>,
-    /// Settled non-error assistant turns since the last round.
     /// A refinement child the round spawned and whose reply has not
     /// applied yet: a second consumption re-arms the trigger instead of
     /// stacking a second child.
@@ -82,8 +81,8 @@ impl AgentSession {
     /// caller spawns the refinement child with the returned options;
     /// `None` is every silent outcome (no trigger, a gate drop, the
     /// cooldown, an in-flight round, or a disposal's trigger drop).
-    /// Every taken attempt stamps the cooldown and resets the counter —
-    /// the caller owes the round's `finish` either way.
+    /// Every taken attempt stamps the cooldown — the caller owes the
+    /// round's `finish` either way.
     ///
     /// # Panics
     ///
@@ -128,7 +127,7 @@ impl AgentSession {
         }
         state.pending = false;
         state.in_flight = true;
-        // Every fresh attempt stamps the cooldown and resets the counter.
+        // Every fresh attempt stamps the cooldown.
         state.last_review_at = Some(now_millis());
         Some(RefineOptions {
             global: false,

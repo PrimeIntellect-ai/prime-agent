@@ -179,8 +179,6 @@ impl Worker {
                                 .get("spawnedByRequestId")
                                 .and_then(Value::as_str)
                                 .map(str::to_string),
-                            refine_child: metadata.get("kind").and_then(Value::as_str)
-                                == Some("refine"),
                         }),
                     )
                 }

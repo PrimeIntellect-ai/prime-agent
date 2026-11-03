@@ -1,6 +1,6 @@
 //! Session-level /refine: message builders, history merge, and the
 //! prepare -> child-spawn -> wake-apply flow. The planning model pass runs
-//! in the refinement child (a daemon `rlm.spawn kind="refine"` child); the
+//! in the refinement child (a daemon `refine_child` spawn); the
 //! parent only prepares the request (the trimmed conversation plus the
 //! resolvable harness paths), then applies the child's proposal on the
 //! child-reply wake against a freshly re-read harness state.

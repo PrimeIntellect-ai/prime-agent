@@ -1,4 +1,4 @@
-//! The refinement-child e2e (`rlm.spawn kind="refine"`): the fire-and-wake
+//! The refinement-child e2e (the daemon's `refine_child` spawn): the fire-and-wake
 //! contract end to end. `/refine` spawns one refinement child and answers
 //! immediately — before the child's planning call settles — and the child's
 //! proposal lands as its child-reply: the parent wakes, re-reads the harness
@@ -55,6 +55,9 @@ enum PlanMode {
     /// Non-JSON text (the failed-proposal path: the wake surfaces the
     /// parse error visibly).
     Garbage,
+    /// An output-limit stop (the truncated-JSON path: the child fails
+    /// with the stop-reason taxonomy, naming the budget the wire carried).
+    Length,
 }
 
 /// An OpenAI-compatible SSE mock: the refinement child's planning request
@@ -193,7 +196,12 @@ fn small_usage() -> Value {
     })
 }
 
-fn write_sse(stream: &mut TcpStream, reply: &str, usage: &Value) -> std::io::Result<()> {
+fn write_sse(
+    stream: &mut TcpStream,
+    reply: &str,
+    finish_reason: &str,
+    usage: &Value,
+) -> std::io::Result<()> {
     let mut payload = String::new();
     for data in [
         chunk(
@@ -201,7 +209,7 @@ fn write_sse(stream: &mut TcpStream, reply: &str, usage: &Value) -> std::io::Res
             None,
             &small_usage(),
         ),
-        chunk(&json!({}), Some("stop"), usage),
+        chunk(&json!({}), Some(finish_reason), usage),
         json!({
             "id": "chatcmpl-test",
             "object": "chat.completion.chunk",
@@ -234,15 +242,16 @@ fn serve(
     requests.lock().expect("mock lock").push(body.clone());
     if is_refinement_plan_request(&body) {
         std::thread::sleep(Duration::from_millis(PLAN_DELAY_MS));
-        let reply = match *plan_mode.lock().expect("mock lock") {
-            PlanMode::Proposal => PROPOSAL,
-            PlanMode::Garbage => "not a plan",
+        let (reply, reason) = match *plan_mode.lock().expect("mock lock") {
+            PlanMode::Proposal => (PROPOSAL, "stop"),
+            PlanMode::Garbage => ("not a plan", "stop"),
+            PlanMode::Length => ("{\"summary\":\"cut", "length"),
         };
-        return write_sse(&mut stream, reply, &small_usage());
+        return write_sse(&mut stream, reply, reason, &small_usage());
     }
     let delay_ms = *turn_delay_ms.lock().expect("mock lock");
     std::thread::sleep(Duration::from_millis(delay_ms));
-    write_sse(&mut stream, "a reply", &small_usage())
+    write_sse(&mut stream, "a reply", "stop", &small_usage())
 }
 
 struct Supervisor {
@@ -294,6 +303,17 @@ fn spawn_supervisor(socket: &Path, agent_dir: &Path, stderr_path: &Path) -> Supe
 }
 
 fn write_fixture(agent_dir: &Path, session_dir: &Path, mock_url: &str) {
+    write_fixture_with_window(agent_dir, session_dir, mock_url, 128_000);
+}
+
+/// The fixture writer with a chosen `contextWindow`: the small-window
+/// variant makes the facade's input clamp bite the planning budget.
+fn write_fixture_with_window(
+    agent_dir: &Path,
+    session_dir: &Path,
+    mock_url: &str,
+    context_window: u64,
+) {
     std::fs::create_dir_all(session_dir).expect("session dir");
     std::fs::write(
         agent_dir.join("models.json"),
@@ -308,7 +328,7 @@ fn write_fixture(agent_dir: &Path, session_dir: &Path, mock_url: &str) {
                             "id": "mock-1",
                             "name": "Mock 1",
                             "api": "openai-completions",
-                            "contextWindow": 128_000,
+                            "contextWindow": context_window,
                             "maxTokens": 4096,
                         }
                     ]
@@ -609,20 +629,22 @@ fn refine_spawns_a_child_that_applies_on_its_reply_wake() {
         "the refine answer waited {answer_elapsed:?} — it must not hold for the child"
     );
 
-    // The registry row carries the kind: the child's own ledger line
-    // registers as a refinement child.
+    // The child's own ledger line registers its spawn provenance: the
+    // parent edge anchors the refinement child's registration (its
+    // `refineChild` kind rides the durable create's runtimeMetadata,
+    // where the spawn records it once for the whole session).
     let deadline = Instant::now() + Duration::from_secs(10);
     let registered = loop {
         let ledger = child_ledger(&agent_dir, &durable_session_id, &child_id);
         let registered = ledger
             .iter()
-            .find(|event| event["type"] == "session_registered" && event["refine_child"] == true);
+            .find(|event| event["type"] == "session_registered");
         if let Some(registered) = registered {
             break registered.clone();
         }
         assert!(
             Instant::now() < deadline,
-            "the child never registered its refine kind; ledger: {ledger:?}"
+            "the child never registered its spawn provenance; ledger: {ledger:?}"
         );
         std::thread::sleep(Duration::from_millis(100));
     };
@@ -660,6 +682,46 @@ fn refine_spawns_a_child_that_applies_on_its_reply_wake() {
         mock.planning_request_count(),
         1,
         "exactly one planning call (the child's, never the parent's)"
+    );
+
+    // The planning pass bills on the parent's totals: the child's answer
+    // row carries the model reply's usage and stop reason, so the wake's
+    // usage attribution folds the planning call into a durable
+    // `child_usage_attributed` row (origin: the spawn task, the mock's
+    // usage shape: input 10, output 5).
+    let session_file = std::fs::read_dir(&session_dir)
+        .expect("read session dir")
+        .filter_map(std::result::Result::ok)
+        .find(|entry| entry.path().extension().and_then(|ext| ext.to_str()) == Some("jsonl"))
+        .expect("the parent's session file")
+        .path();
+    let attribution_deadline = Instant::now() + Duration::from_secs(20);
+    let attributed_row = loop {
+        let rows: Vec<Value> = std::fs::read_to_string(&session_file)
+            .expect("read session file")
+            .lines()
+            .filter_map(|line| serde_json::from_str(line).ok())
+            .collect();
+        let attributed = rows
+            .iter()
+            .find(|row| row["type"] == "child_usage_attributed");
+        if let Some(attributed) = attributed {
+            break attributed.clone();
+        }
+        assert!(
+            Instant::now() < attribution_deadline,
+            "the planning call never billed on the parent: no child_usage_attributed row"
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    };
+    assert_eq!(attributed_row["origin"], "spawn_task", "{attributed_row}");
+    assert_eq!(
+        attributed_row["childUsage"]["input"], 10,
+        "{attributed_row}"
+    );
+    assert_eq!(
+        attributed_row["childUsage"]["output"], 5,
+        "{attributed_row}"
     );
 
     // Teardown: the one-shot child retires after its reply's apply.
@@ -739,6 +801,83 @@ fn a_failed_child_proposal_surfaces_the_refine_failed_event() {
         );
         std::thread::sleep(Duration::from_millis(200));
     }
+}
+
+/// An output-limit stop names the budget the wire request actually
+/// carried: on a small-window model the facade's input clamp shrinks the
+/// planning budget below the model's default, and the `refine_failed` line
+/// must name the shrunk number, never the pre-facade default. Red when
+/// the child reverts to naming `default_request_max_tokens` (the message
+/// would carry the default while the wire carried the clamped budget).
+#[test]
+fn a_length_stop_names_the_budget_the_wire_carries() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let agent_dir = dir.path().join("agent");
+    let session_dir = agent_dir.join("sessions");
+    let mock = RefineMock::start();
+    mock.set_plan_mode(PlanMode::Length);
+    // The window sits under the model's default output budget (4096) plus
+    // the estimated planning input, so the facade's clamp shrinks the
+    // wire budget; the exact number is read off the captured request.
+    write_fixture_with_window(&agent_dir, &session_dir, &mock.url(), 4_800);
+    let socket = dir.path().join("daemon.sock");
+    let _supervisor = spawn_supervisor(&socket, &agent_dir, &dir.path().join("daemon.stderr"));
+    let mut client = TimedClient::connect(&socket);
+    let (session_id, _durable) = create_and_attach(&mut client, &session_dir);
+    prompt_and_wait(&mut client, "p0", &session_id, "seed turn");
+
+    let response = refine(&mut client, "r1", &session_id);
+    assert_eq!(response["success"], true, "refine failed: {response}");
+    assert_eq!(response["data"]["refinementChildSpawned"], true);
+
+    let failed = wait_for_event(
+        &mut client,
+        Duration::from_secs(20),
+        "refine_failed",
+        &dir.path().join("daemon.stderr"),
+    );
+    let error = failed["error"].as_str().unwrap_or_default();
+    let marker = "the model hit its output limit (";
+    let start = error
+        .find(marker)
+        .unwrap_or_else(|| panic!("the failure names the output limit: {error}"))
+        + marker.len();
+    let end = match error[start..].find(" tokens") {
+        Some(offset) => start + offset,
+        None => panic!("the failure names the token count: {error}"),
+    };
+    let named: u64 = error[start..end]
+        .parse()
+        .unwrap_or_else(|_| panic!("the token count parses: {error}"));
+
+    // The number the message names is the number the wire carried: the
+    // captured planning request's `max_tokens`, and the clamp bit (the
+    // default budget is 4096 — the unclamped number a revert would name).
+    let requests = mock.requests.lock().expect("mock lock");
+    let planning = requests
+        .iter()
+        .find(|body| is_refinement_plan_request(body))
+        .expect("the captured planning request");
+    let wire_budget = planning["max_tokens"]
+        .as_u64()
+        .or_else(|| planning["max_completion_tokens"].as_u64())
+        .expect("the planning request's output budget");
+    assert_eq!(
+        named, wire_budget,
+        "the Length failure must name the wire budget: {error}"
+    );
+    assert!(
+        wire_budget < 4_096,
+        "the clamp must bite on the small-window model: the wire budget is {wire_budget}"
+    );
+    drop(requests);
+    assert!(
+        client
+            .events
+            .iter()
+            .all(|(event, _)| event["type"] != "refine_complete"),
+        "no completion event on the length path"
+    );
 }
 
 /// A reply that lands while the parent's turn is still running parks

@@ -502,16 +502,13 @@ async fn refine(state: &Arc<RpcState>, payload: &Value) -> Result<ResponseData, 
     // The handle guard stays held through the refinement: no replacement
     // or `set_model` interleaves before the file writes.
     let handle = state.session.handle().await;
-    let model = handle.model.clone();
-    let api_key = handle.api_key.clone();
     let engine = handle.engine.clone();
     let global_harness_dir = pa_core::refinement::get_global_harness_state_dir(&state.agent_dir);
     // Refine appends durable rows into the live loop context; it shares
     // compact's one-command-at-a-time serialization.
     let _ops = state.session_ops.lock().await;
-    let _ = (&model, api_key);
     // The planning refinement is the refinement child's — a daemon
-    // `rlm.spawn kind="refine"` child. The RPC surface hosts a core
+    // `refine_child` spawn. The RPC surface hosts a core
     // engine without the daemon's child runtime, so only the mechanical
     // rollback runs inline; every other refinement refuses.
     if options.rollback_id.is_none() {

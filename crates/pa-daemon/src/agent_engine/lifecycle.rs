@@ -681,6 +681,23 @@ impl AgentSessionEngine {
         Ok(())
     }
 
+    /// Register one refinement child's spawn with the usage attribution:
+    /// the engine-side twin of the kernel spawn path's `register_spawn`
+    /// (`rlm.run`'s own handler). The refinement child spawns outside the
+    /// kernel bridge, so its planning rows bill on the parent only when
+    /// the engine registers the spawn itself — the child's usage folds
+    /// into the parent's last assistant row's aggregate at its settle.
+    pub(crate) async fn register_refine_child_usage(&self, rlm_child_id: &str) {
+        let producer = self
+            .usage_producer
+            .lock()
+            .expect("usage producer lock")
+            .clone();
+        if let Some(producer) = producer {
+            producer.register_spawn(rlm_child_id).await;
+        }
+    }
+
     /// Clear only the boundary this completed adoption observed. A failed
     /// build keeps it for the demand retry, and a newer captured leaf survives.
     fn finish_prompt_context_adoption(&self, adopted: Option<&PromptContextBoundary>) {

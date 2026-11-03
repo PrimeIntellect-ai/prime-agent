@@ -87,7 +87,7 @@ impl RlmSubagentHost for SupervisorChildSessions {
             // worker of the tree: refusing it at the limit would lock
             // every depth-2 session (or any session with a lowered max
             // depth) out of `refine.run()` and the compaction-triggered
-            // refinement, so `kind="refine"` never spends the budget.
+            // refinement, so the `refine_child` spawn never spends the budget.
             if !request.refine_child && identity.rlm_depth >= identity.rlm_max_depth {
                 bail!(rlm_depth_limit_error(
                     identity.rlm_depth,
@@ -133,9 +133,8 @@ impl RlmSubagentHost for SupervisorChildSessions {
                     "rlm.spawn",
                 )?;
                 let mut runtime_metadata = json!({
-                    // The refine child (`rlm.spawn kind="refine"`): its
-                    // worker boots the refinement protocol instead of the
-                    // agent engine.
+                    // The refine child: its worker boots the refinement
+                    // protocol instead of the agent engine.
                     "kind": if request.refine_child { "refine" } else { "subagent" },
                     "rlmChildId": child_id,
                     "parentActiveSessionId": this.parent_active_session_id,
@@ -188,6 +187,7 @@ impl RlmSubagentHost for SupervisorChildSessions {
                     direct_observation: Arc::new(Mutex::new(())),
                     notice_delivered: false,
                     factory: request.factory.is_some(),
+                    refine_child: request.refine_child,
                     prompt_admitted: false,
                     error: None,
                     closed_by_parent: false,

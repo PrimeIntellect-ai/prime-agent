@@ -192,6 +192,10 @@ struct ChildRecord {
     /// A factory state's child: the factory reads its settle through
     /// collect, so no terminal notice reaches the parent conversation.
     factory: bool,
+    /// The refinement child (the daemon's `refine_child` spawn): a
+    /// one-shot planning pass whose record the registry retires at its
+    /// own settle — no engine-side teardown.
+    refine_child: bool,
     /// The task prompt was admitted; never settle a pre-prompt child (it
     /// is idle with an empty queue by construction).
     prompt_admitted: bool,
@@ -791,6 +795,7 @@ impl SupervisorChildSessions {
                 direct_observation: Arc::new(Mutex::new(())),
                 notice_delivered: false,
                 factory: false,
+                refine_child: false,
                 prompt_admitted: true,
                 error: None,
                 closed_by_parent: false,

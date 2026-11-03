@@ -1,13 +1,16 @@
 //! The refinement-child orchestration on the daemon engine: the
-//! fire-and-wake flow. `/refine` spawns one `rlm.spawn kind="refine"` child
-//! with the prepared request and returns immediately — the session lock
+//! fire-and-wake flow. `/refine` spawns one refinement child
+//! (`refine_child` in the spawn request, `runtimeMetadata.kind = "refine"`
+//! on its durable create) with the prepared request and returns immediately
+//! — the session lock
 //! and the compaction flight are never held; the child's proposal lands as
 //! the standard child-reply notification, the delivery is answered at once
 //! (the child's send never waits on the parent's apply), and the parked
 //! reply applies at the session's idle boundary — the runner owns turn
 //! admission, so the apply's rows never interleave with a running turn's
-//! history. The apply re-reads the harness state fresh, records the
-//! refinement event, and tears the child down.
+//! history. The apply re-reads the harness state fresh and records the
+//! refinement event; the child's registry record retires at its own
+//! settle, so the one-shot child never orphans in the roster.
 
 use std::path::PathBuf;
 use std::sync::{Arc, PoisonError};
@@ -39,14 +42,9 @@ pub(crate) struct PendingRefineReply {
     pub reply: String,
 }
 
-/// How long the settle teardown keeps waiting for the child to settle
-/// before giving up (the delete refuses a still-running child).
-const REFINEMENT_TEARDOWN_SLICES: u32 = 300;
-const REFINEMENT_TEARDOWN_SLICE_MS: u64 = 2_000;
-
 impl AgentSessionEngine {
     /// Spawn the refinement child (fire): prepare the request, admit one
-    /// `rlm.spawn kind="refine"` child with it, and return once the child
+    /// `refine_child` spawn with it, and return once the child
     /// is admitted — the child's proposal applies on its reply's arrival.
     ///
     /// # Errors
@@ -91,8 +89,8 @@ impl AgentSessionEngine {
 
     /// A refinement child that died without replying releases its flight
     /// and the compact round it carried, so the cadence never wedges
-    /// behind the in-flight guard (the wake-side teardown covers
-    /// replying children).
+    /// behind the in-flight guard (the registry retires the record at the
+    /// settle it observed, whichever way the child ended).
     pub(crate) async fn release_dead_refine_child_round(&self) {
         let Some(children) = self.children.clone() else {
             return;
@@ -142,7 +140,6 @@ impl AgentSessionEngine {
                 core.session.finish_compact_auto_refine_round();
             }
         }
-        self.teardown_refine_child(rlm_child_id);
     }
 
     /// The spawn body after the flight check: the prepare, the admission,
@@ -207,6 +204,11 @@ impl AgentSessionEngine {
                 global_harness_dir,
             });
         }
+        // The planning pass bills on the parent's totals: register the
+        // spawn with the usage attribution (the kernel path's own
+        // `register_spawn`), so the child's answer-row usage folds in at
+        // its settle.
+        self.register_refine_child_usage(&rlm_child_id).await;
         Ok(rlm_child_id)
     }
 
@@ -263,16 +265,15 @@ impl AgentSessionEngine {
     }
 
     /// Apply one in-flight refine child's reply through the existing apply
-    /// machinery, then finish the compact-trigger round the child carried
-    /// and tear the child down — on every outcome, so no refine child
-    /// orphans and no round stays in flight.
+    /// machinery, then finish the compact-trigger round the child carried —
+    /// on every outcome, so no round stays in flight (the child's record
+    /// retires at its settle, registry-side).
     async fn apply_flight_reply(
         &self,
         flight: RefineChildFlight,
         reply: &str,
     ) -> anyhow::Result<RefinementResult> {
-        let (rlm_child_id, prepared, source, global_harness_dir) = (
-            flight.rlm_child_id.clone(),
+        let (prepared, source, global_harness_dir) = (
             flight.prepared,
             flight.source,
             flight.global_harness_dir.clone(),
@@ -297,7 +298,6 @@ impl AgentSessionEngine {
                 if source == RefinementSource::Auto {
                     core.session.finish_compact_auto_refine_round();
                 }
-                self.teardown_refine_child(rlm_child_id);
                 // The pinned prefix (the old in-process refiner's
                 // `{failure}` label): a failed model pass surfaces as
                 // "Refinement failed: <reason>" on refine_failed.
@@ -313,52 +313,7 @@ impl AgentSessionEngine {
         if source == RefinementSource::Auto {
             core.session.finish_compact_auto_refine_round();
         }
-        self.teardown_refine_child(rlm_child_id);
         result
-    }
-
-    /// The settle teardown: the refinement child is one-shot, so its reply's
-    /// apply retires the child (the delete refuses a still-running child
-    /// until it settles). Bounded: a wedged child surfaces through its own
-    /// failure notice, and the registry's unreachable give-up settles it.
-    fn teardown_refine_child(&self, rlm_child_id: String) {
-        let Some(children) = self.children.clone() else {
-            return;
-        };
-        tokio::spawn(retire_refine_child(
-            children,
-            rlm_child_id,
-            REFINEMENT_TEARDOWN_SLICES,
-            REFINEMENT_TEARDOWN_SLICE_MS,
-        ));
-    }
-}
-
-/// The teardown body: poll the delete until the child settles on its own.
-/// A child still wedged when the window expires is killed and its record
-/// retired — no refine child orphans in the registry and its slot frees.
-async fn retire_refine_child(
-    children: std::sync::Arc<crate::rlm_children::SupervisorChildSessions>,
-    rlm_child_id: String,
-    slices: u32,
-    slice_ms: u64,
-) {
-    for _ in 0..slices {
-        if matches!(
-            children.delete_inactive_subagent(&rlm_child_id).await,
-            Ok("deleted" | "not_found")
-        ) {
-            return;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(slice_ms)).await;
-    }
-    children.cancel_child_run(&rlm_child_id).await;
-    tokio::time::sleep(std::time::Duration::from_millis(slice_ms)).await;
-    if !matches!(
-        children.delete_inactive_subagent(&rlm_child_id).await,
-        Ok("deleted" | "not_found")
-    ) {
-        eprintln!("pa-daemon: the refinement child {rlm_child_id} never settled for teardown");
     }
 }
 

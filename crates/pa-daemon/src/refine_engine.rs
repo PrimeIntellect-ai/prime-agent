@@ -1,4 +1,4 @@
-//! The refinement child engine (`rlm.spawn kind="refine"`): a spawned
+//! The refinement child engine (the daemon's `refine_child` spawn): a spawned
 //! session whose one prompt is one refinement request — the planning model
 //! pass over the parent's conversation. The request envelope carries the
 //! resolvable harness paths, never a snapshot: the child reads the harness
@@ -95,9 +95,10 @@ impl RefineEngine {
     }
 
     /// Open the refinement child's semantic-edge ledger: the registration
-    /// line carries the kind (`refine_child: true`), so the spawn kind
-    /// survives durably. The one planning pass is the refinement protocol,
-    /// not an agent turn, so it records no request rows.
+    /// line carries its parent provenance (the spawn's `refineChild` kind
+    /// survives durably in the durable create's runtimeMetadata). The one
+    /// planning pass is the refinement protocol, not an agent turn, so it
+    /// records no request rows.
     fn open_semantic_edges(&self, identity: &crate::engine::RlmSessionIdentity) {
         let Some(session_file) = identity.session_file.as_deref().map(Path::new) else {
             return;
@@ -112,7 +113,6 @@ impl RefineEngine {
                 ),
                 parent_session_id: origin.and_then(|spawn| spawn.parent_session_id.clone()),
                 spawned_by_request_id: origin.and_then(|spawn| spawn.spawned_by_request_id.clone()),
-                refine_child: true,
             },
         );
         *self
@@ -160,8 +160,13 @@ impl RefineEngine {
     /// Serve the one refinement request: read the harness state and the
     /// refinement history from the envelope's paths, run one completion
     /// with the refinement system prompt, and answer with the proposal
-    /// JSON text.
-    fn serve(&self, request: &Value) -> anyhow::Result<String> {
+    /// JSON text plus the model reply's usage and stop reason — the
+    /// answer row carries both, so child-usage attribution bills the
+    /// planning pass on the parent's totals.
+    fn serve(
+        &self,
+        request: &Value,
+    ) -> anyhow::Result<(String, pa_types::ai::Usage, pa_types::ai::StopReason)> {
         let global_dir = request
             .get("globalHarnessDir")
             .and_then(Value::as_str)
@@ -228,6 +233,12 @@ impl RefineEngine {
                 ..Default::default()
             });
         stream_options.reasoning = self.requested_reasoning(&model);
+        // The failure surface names the budget the wire request actually
+        // carries — after the facade's input clamp and the budget-folding
+        // providers' thinking fold — read from pa-ai's own helper, never
+        // the pre-facade default (which `complete_simple` may still shrink
+        // or fold before the provider sees it).
+        let sent_budget = pa_ai::simple_request_max_tokens(&model, &context, Some(&stream_options));
         let reply = self
             .runtime
             .block_on(async move {
@@ -242,7 +253,7 @@ impl RefineEngine {
         match reply.stop_reason {
             pa_types::ai::StopReason::Length => anyhow::bail!(
                 "the model hit its output limit ({} tokens, {}/{})",
-                output_budget.map_or_else(|| "no".to_string(), |tokens| tokens.to_string()),
+                sent_budget.map_or_else(|| "no".to_string(), |tokens| tokens.to_string()),
                 reply.provider,
                 reply.model
             ),
@@ -257,20 +268,12 @@ impl RefineEngine {
             }
             _ => {}
         }
-        let text = reply
-            .content
-            .iter()
-            .filter_map(|block| match block {
-                pa_types::ai::AssistantContentBlock::Text(text) => Some(text.text.clone()),
-                _ => None,
-            })
-            .collect::<Vec<_>>()
-            .join("\n");
+        let text = Self::reply_text(&reply);
         anyhow::ensure!(
             !text.trim().is_empty(),
             "the refinement model returned no proposal text"
         );
-        Ok(text)
+        Ok((text, reply.usage, reply.stop_reason))
     }
 
     /// The create selection's thinking level, defaulting to the model's
@@ -329,10 +332,42 @@ impl RefineEngine {
         ))
     }
 
+    /// The text of the planning reply (the proposal JSON).
+    fn reply_text(reply: &pa_types::ai::AssistantMessage) -> String {
+        reply
+            .content
+            .iter()
+            .filter_map(|block| match block {
+                pa_types::ai::AssistantContentBlock::Text(text) => Some(text.text.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
     /// The transcript row pair for the child's answer: the assistant update
-    /// and the final message.
-    fn answer_rows(provider: &str, model: &str, text: &str) -> (EngineEvent, EngineEvent) {
+    /// and the final message. The final row carries the planning reply's
+    /// usage and stop reason, the same shape as an ordinary assistant
+    /// completion, so the child-usage walk bills the planning pass.
+    fn answer_rows(
+        provider: &str,
+        model: &str,
+        text: &str,
+        usage: Option<pa_types::ai::Usage>,
+        stop_reason: Option<pa_types::ai::StopReason>,
+    ) -> (EngineEvent, EngineEvent) {
         let now = crate::util::now_ms();
+        let mut message = json!({
+            "role": "assistant", "content": text,
+            "provider": provider, "model": model,
+            "timestamp": now,
+        });
+        if let Some(stop_reason) = stop_reason {
+            message["stopReason"] = serde_json::to_value(stop_reason).unwrap_or_default();
+        }
+        if let Some(usage) = usage {
+            message["usage"] = serde_json::to_value(usage).unwrap_or_default();
+        }
         (
             EngineEvent::AssistantUpdate {
                 message: AssistantSnapshot::Wire(json!({
@@ -342,11 +377,7 @@ impl RefineEngine {
                 })),
                 stream_event: None,
             },
-            EngineEvent::AssistantMessage(json!({
-                "role": "assistant", "content": text,
-                "provider": provider, "model": model,
-                "timestamp": now,
-            })),
+            EngineEvent::AssistantMessage(message),
         )
     }
 }
@@ -473,13 +504,22 @@ impl SessionEngine for RefineEngine {
         // Serve the one refinement request; every failure answers the
         // parent with the tagged error envelope before the turn ends, so
         // the wake-side consumption surfaces it.
-        let (reply, text) = match serde_json::from_str::<Value>(&raw) {
+        // The answer row's usage rides the success path only: a failed
+        // planning pass bills nothing (the usage walk folds non-error,
+        // non-aborted completions), and the failure rows name their own
+        // error instead.
+        let (reply, text, usage, stop_reason) = match serde_json::from_str::<Value>(&raw) {
             Ok(parsed)
                 if parsed.get("type").and_then(Value::as_str)
                     == Some(pa_core::refinement::executor::REFINEMENT_REQUEST_TYPE) =>
             {
                 match self.serve(&parsed) {
-                    Ok(proposal) => (proposal, "The refinement proposal was sent to the parent."),
+                    Ok((proposal, usage, stop_reason)) => (
+                        proposal,
+                        "The refinement proposal was sent to the parent.",
+                        Some(usage),
+                        Some(stop_reason),
+                    ),
                     Err(error) => (
                         json!({
                             "type": REFINEMENT_ERROR_REPLY_TYPE,
@@ -487,6 +527,8 @@ impl SessionEngine for RefineEngine {
                         })
                         .to_string(),
                         "The refinement request failed; the error was sent to the parent.",
+                        None,
+                        None,
                     ),
                 }
             }
@@ -497,6 +539,8 @@ impl SessionEngine for RefineEngine {
                 })
                 .to_string(),
                 "The refinement child refuses a non-request prompt.",
+                None,
+                None,
             ),
         };
         if let Err(error) = self.send_reply(reply) {
@@ -505,7 +549,7 @@ impl SessionEngine for RefineEngine {
             ))));
             return;
         }
-        let (update, message) = Self::answer_rows(&provider, &model, text);
+        let (update, message) = Self::answer_rows(&provider, &model, text, usage, stop_reason);
         for event in [update, message] {
             if !emit(event) {
                 emit(cancelled());

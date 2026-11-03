@@ -892,42 +892,10 @@ async fn a_child_spawned_mid_turn_prompts_after_the_parent_turn_completes() {
     gate.release.notify_one();
 }
 
-/// The spawn-wait polarity, ordinary half: the detached task prompt
-/// holds for the parent's turn boundary — the parent's provider
-/// continuation reaches the model first (see `wait_turn_done`) — and
-/// `notify_turn_done` releases it. Red when an inverted wait releases
-/// the ordinary child's prompt before the boundary.
-#[tokio::test]
-async fn an_ordinary_childs_prompt_holds_until_the_turn_boundary() {
-    let (follow_up_tx, mut follow_up_rx) = mpsc::unbounded_channel();
-    let (sessions, _kill_rx) =
-        sessions_with_fake_supervisor(follow_up_tx, 0, FakeKill::Success, FakeChild::Healthy).await;
-    sessions.notify_turn_started();
-    spawn_child(&sessions).await;
-    // Held: no boundary has fired, so the child never received its prompt
-    // and the watcher has no settled notice to deliver.
-    let held =
-        tokio::time::timeout(std::time::Duration::from_millis(300), follow_up_rx.recv()).await;
-    assert!(
-        held.is_err(),
-        "the ordinary child's prompt must hold for the parent's turn boundary"
-    );
-    // Released: the boundary fires and the settled notice lands.
-    sessions.notify_turn_done();
-    let follow_up = tokio::time::timeout(std::time::Duration::from_secs(10), follow_up_rx.recv())
-        .await
-        .expect("the released prompt must settle into the notice")
-        .expect("the follow_up channel stays open");
-    assert_eq!(
-        follow_up["customMessage"]["customType"], "rlm_child_terminal_notice",
-        "the released child's notice: {follow_up}"
-    );
-}
-
 /// The recursion budget bounds subagents only: at a maxed-out depth (a
 /// depth-2 leaf under the default max of 2) an ordinary spawn refuses
-/// with the depth-limit error, while a refinement child (`rlm.spawn
-/// kind="refine"`) still admits — refinement is its parent's one-shot
+/// with the depth-limit error, while a refinement child (`refine_child`)
+/// still admits — refinement is its parent's one-shot
 /// planning pass, so refusing it at the limit would lock every depth-2
 /// session out of `refine.run()` and the compaction-triggered
 /// refinement. Red when the `!refine_child` skip is lost: the ordinary
@@ -988,7 +956,7 @@ async fn a_refine_child_spawns_past_the_recursion_limit_while_an_ordinary_child_
 }
 
 /// The spawn-wait polarity, refinement half: a refinement child
-/// (`rlm.spawn kind="refine"`) skips the turn-boundary wait — its one
+/// (`refine_child`) skips the turn-boundary wait — its one
 /// planning prompt never contends with the parent's provider continuation
 /// and `/refine` fires off-turn, so a boundary would idle the child for
 /// its whole budget. Red when the skip is lost (the refinement child
@@ -1021,6 +989,55 @@ async fn a_refine_childs_prompt_skips_the_turn_boundary_wait() {
         follow_up["customMessage"]["customType"], "rlm_child_terminal_notice",
         "the refinement child's notice: {follow_up}"
     );
+}
+
+/// The registry retires a refinement child at its own settle: the
+/// watcher observed the run's end, so the one-shot record leaves the
+/// roster on its own — the engine never polls for it. Red when the
+/// retire is dropped: the completed record lingers like an ordinary
+/// subagent's row.
+#[tokio::test]
+async fn a_refine_child_record_retires_at_its_settle() {
+    let (follow_up_tx, mut follow_up_rx) = mpsc::unbounded_channel();
+    let (sessions, _kill_rx) =
+        sessions_with_fake_supervisor(follow_up_tx, 0, FakeKill::Success, FakeChild::Healthy).await;
+    sessions
+        .spawn(RlmSpawnRequest {
+            prompt: "refinement planning pass".to_string(),
+            name: None,
+            model: None,
+            thinking: None,
+            cwd: None,
+            spawned_by_request_id: None,
+            refine_child: true,
+            factory: None,
+        })
+        .await
+        .expect("the refinement child spawn must succeed against the fake supervisor");
+    let follow_up = tokio::time::timeout(std::time::Duration::from_secs(10), follow_up_rx.recv())
+        .await
+        .expect("the refinement child settles")
+        .expect("the follow_up channel stays open");
+    assert_eq!(
+        follow_up["customMessage"]["customType"], "rlm_child_terminal_notice",
+        "the refinement child's notice: {follow_up}"
+    );
+    // The settle retired the record: the roster empties on its own.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    loop {
+        let rows = sessions
+            .list_subagents()
+            .await
+            .expect("the roster read succeeds");
+        if rows.is_empty() {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the settled refinement child never retired; rows: {rows:?}"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    }
 }
 
 /// A `collect` that lands while the task prompt is still in flight reads
@@ -2000,7 +2017,6 @@ fn seeded_parent_recorder() -> (
         session_id: "parent-lead".to_string(),
         parent_session_id: None,
         spawned_by_request_id: None,
-        refine_child: false,
     };
     let started = SemanticEdgeLedgerEvent::RequestStarted {
         request_id: "parent-request-1".to_string(),
@@ -2021,7 +2037,6 @@ fn seeded_parent_recorder() -> (
         ledger_path: Some(ledger_path.clone()),
         parent_session_id: None,
         spawned_by_request_id: None,
-        refine_child: false,
     }));
     (recorder, ledger_path, dir)
 }
@@ -2914,6 +2929,7 @@ fn an_already_settled_child_never_re_scores_as_an_unreachable_error() {
         direct_observation: Arc::new(Mutex::new(())),
         notice_delivered: false,
         factory: false,
+        refine_child: false,
         prompt_admitted: true,
         error: None,
         closed_by_parent: false,
@@ -2988,6 +3004,7 @@ async fn the_unreachable_give_up_skips_the_exit_capture_when_a_capture_stands() 
         direct_observation: Arc::new(Mutex::new(())),
         notice_delivered: false,
         factory: false,
+        refine_child: false,
         prompt_admitted: true,
         error: None,
         closed_by_parent: false,

@@ -57,7 +57,7 @@ pub const WORKER_SUPERVISOR_SOCKET_ENV: &str = "PRIME_AGENT_INTERNAL_DAEMON_SUPE
 pub const WORKER_RECOVERY_JOURNAL_ENV: &str = "PRIME_AGENT_INTERNAL_DAEMON_WORKER_RECOVERY_JOURNAL";
 /// Scripted-engine script file for faux sessions (integration harness).
 pub const WORKER_SCRIPT_ENV: &str = "PRIME_AGENT_INTERNAL_DAEMON_WORKER_SCRIPT";
-/// The refinement child flag (`rlm.spawn kind="refine"`): the worker
+/// The refinement child flag (`refineChild`): the worker
 /// builds the refinement engine instead of the agent engine.
 pub const WORKER_REFINE_CHILD_ENV: &str = "PRIME_AGENT_INTERNAL_DAEMON_WORKER_REFINE_CHILD";
 /// Worker socket path (supervisor passes it explicitly).

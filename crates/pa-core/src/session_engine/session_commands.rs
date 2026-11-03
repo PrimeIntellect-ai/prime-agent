@@ -255,8 +255,8 @@ async fn execute_compact(
 }
 
 /// `/refine`: the mechanical rollback applies inline (no model pass); the
-/// planning refinement is the refinement child's — a daemon `rlm.spawn
-/// kind="refine"` child — so this layer only refuses without the daemon and
+/// planning refinement is the refinement child's — a daemon `refine_child`
+/// spawn — so this layer only refuses without the daemon and
 /// leaves the spawn to the daemon-backed session command hosts.
 async fn execute_refine(
     engine: &SessionEngine,

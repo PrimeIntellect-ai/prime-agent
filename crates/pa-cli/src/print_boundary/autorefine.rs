@@ -1,6 +1,6 @@
 //! The print runtime's refinement surface: the compact-trigger auto-refine
 //! and the requested refinement are the refinement child's — a daemon
-//! `rlm.spawn kind="refine"` child — so the headless boundary never runs a
+//! `refine_child` spawn — so the headless boundary never runs a
 //! planning pass. Its one refine duty is the refusal: a model-requested
 //! refinement taken at the boundary answers the daemon-required failure
 //! visibly (json mode's `refine_failed`), never a silent drop.

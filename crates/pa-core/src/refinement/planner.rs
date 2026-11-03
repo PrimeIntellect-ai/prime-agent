@@ -11,15 +11,22 @@ pub const REFINEMENT_SYSTEM_PROMPT: &str = "You are Prime Agent's /refine contin
 
 /// Trim the conversation tail so the spawn request fits the child model's
 /// context window: the conversation keeps its newest tail (binary search on
-/// the kept length, front-trimmed with the omission marker). The request
-/// carries no output clamp — the child's turn derives its own budget.
+/// the kept length, front-trimmed with the omission marker). The reserve
+/// covers the envelope head exactly and the child's system prompt exactly;
+/// the harness overview and the merged history the child renders from disk
+/// stay behind the fixed overhead (main's reserve math left those
+/// unreserved too, and an oversized request fails loudly through
+/// `refine_failed`). The request carries no output clamp — the child's
+/// turn derives its own budget.
 #[must_use]
 pub fn trim_conversation_to_context(
     context_window: u64,
     request_head: &str,
     conversation: &str,
 ) -> String {
-    let overhead = request_head.len() as u64 + REFINEMENT_REQUEST_OVERHEAD_BYTES;
+    let overhead = request_head.len() as u64
+        + REFINEMENT_SYSTEM_PROMPT.len() as u64
+        + REFINEMENT_REQUEST_OVERHEAD_BYTES;
     let budget = context_window.saturating_sub(overhead).max(1);
     if conversation.len() as u64 <= budget {
         return conversation.to_string();
@@ -50,8 +57,11 @@ pub fn trim_conversation_to_context(
     )
 }
 
-/// Rough fixed headroom for the request envelope around the trimmed
-/// conversation (the JSON keys, the sections, and the system prompt).
+/// Rough fixed headroom beyond the exactly reserved envelope head and
+/// system prompt: the user prompt's fixed sections plus slack for the
+/// harness overview and the refinement history the child renders from
+/// disk at plan time (the same sections main's reserve math left
+/// unreserved).
 const REFINEMENT_REQUEST_OVERHEAD_BYTES: u64 = 4_096;
 
 pub const TRUNCATED_JSON_ERROR: &str = "the model stopped before completing its JSON object. This usually means the output budget was exhausted; retry with a smaller request.";

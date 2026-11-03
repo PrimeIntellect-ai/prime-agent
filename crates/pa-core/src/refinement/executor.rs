@@ -1,7 +1,7 @@
 //! The refinement executor: the refinement child's planning surface (the
 //! spawn request envelope and the model prompt), the proposal parse, the
 //! rollback plan, and the apply machinery. The model pass itself runs in
-//! the refinement child — a daemon `rlm.spawn kind="refine"` child — so
+//! the refinement child — a daemon `refine_child` spawn — so
 //! this module owns no provider call.
 
 use super::planner::{
@@ -176,8 +176,29 @@ pub struct RefinementRequest {
     pub session_history: Vec<RefinementResult>,
 }
 
+/// The planning conversation's tail cap, in chars — the old in-process
+/// refiner's `conversation_text(messages, 80_000)`: the serialized
+/// conversation keeps its newest `80_000` chars on every model, so a
+/// 200k-or-larger window cannot multiply the planning input, the child's
+/// session file (which stores the envelope twice: the kickoff row and its
+/// `details.message`), and the auto-refine round's per-compaction cost.
+pub const REFINEMENT_CONVERSATION_CAP_CHARS: usize = 80_000;
+
+/// Keep the conversation's newest `cap` chars — a silent tail slice on
+/// chars (the old refiner's cap), never splitting a UTF-8 sequence.
+#[must_use]
+pub fn tail_cap_conversation(conversation: &str, cap: usize) -> String {
+    let count = conversation.chars().count();
+    if count <= cap {
+        return conversation.to_string();
+    }
+    conversation.chars().skip(count - cap).collect()
+}
+
 /// Build the refinement child's spawn prompt: the JSON request envelope
-/// carrying the conversation trimmed to the child model's context window.
+/// carrying the conversation tail-capped at
+/// [`REFINEMENT_CONVERSATION_CAP_CHARS`] and then trimmed to the child
+/// model's context window.
 #[must_use]
 pub fn refinement_spawn_prompt(
     request: &RefinementRequest,
@@ -200,11 +221,14 @@ pub fn refinement_spawn_prompt(
     }
     // The trim needs the envelope's own head room: serialize it once with
     // the conversation slot empty, then trim the conversation against the
-    // model's window minus that head.
+    // model's window minus that head. The char cap rides ahead of the
+    // window trim: the tail cap bounds the planning input on every model,
+    // the window trim fits the small-window ones.
     let mut head = envelope.clone();
     head["conversation"] = serde_json::json!("");
     let request_head = head.to_string();
-    let trimmed = trim_conversation_to_context(context_window, &request_head, conversation);
+    let capped = tail_cap_conversation(conversation, REFINEMENT_CONVERSATION_CAP_CHARS);
+    let trimmed = trim_conversation_to_context(context_window, &request_head, &capped);
     envelope["conversation"] = serde_json::json!(trimmed);
     serde_json::to_string(&envelope).unwrap_or_default()
 }
@@ -323,6 +347,7 @@ pub fn apply_refinement_plan(
 
 #[cfg(test)]
 mod tests {
+    use super::super::planner::REFINEMENT_SYSTEM_PROMPT;
     use super::*;
 
     #[test]
@@ -436,14 +461,76 @@ mod tests {
         // in-memory session has no file for the child to read).
         assert_eq!(parsed["refinementHistory"][0]["summary"], "note it");
         assert_eq!(parsed["refinementHistory"][0]["id"], "refine_1");
+        // The 80k char cap rides ahead of the window trim: the capped
+        // tail fits the 100k window whole, so the trim adds no marker.
+        let carried = parsed["conversation"].as_str().unwrap();
+        assert_eq!(carried.chars().count(), REFINEMENT_CONVERSATION_CAP_CHARS);
+        assert!(carried.chars().all(|c| c == 'x'));
+        // The window trim still bounds small-window models: the same
+        // conversation on a 10k window carries the marker and the
+        // trimmed tail.
+        let prompt = refinement_spawn_prompt(&request, 10_000, &conversation);
+        let parsed: serde_json::Value = serde_json::from_str(&prompt).unwrap();
         let carried = parsed["conversation"].as_str().unwrap();
         assert!(carried.starts_with("[Earlier conversation omitted to fit the model context.]"));
-        // The byte budget: the head plus the carried tail stays inside the window.
-        assert!((carried.len() as u64) < 100_000);
+        assert!((carried.len() as u64) < 10_000);
         // A short conversation rides whole, with no omission marker.
         let whole = refinement_spawn_prompt(&request, 100_000, "short conversation");
         let parsed: serde_json::Value = serde_json::from_str(&whole).unwrap();
         assert_eq!(parsed["conversation"], "short conversation");
+    }
+
+    #[test]
+    fn the_spawn_prompt_caps_the_conversation_at_80k_chars() {
+        let request = RefinementRequest {
+            global: false,
+            instructions: None,
+            local_harness_dir: None,
+            global_harness_dir: "/global/harness".to_string(),
+            session_history: vec![],
+        };
+        // A 1M-window model: the window trim never fires, so the 80k char
+        // cap is the only bound — the cap the old in-process refiner kept
+        // (`conversation_text(messages, 80_000)`), so a large window never
+        // multiplies the planning input or the child's stored envelope.
+        let conversation = "y".repeat(900_000);
+        let prompt = refinement_spawn_prompt(&request, 1_000_000, &conversation);
+        let parsed: serde_json::Value = serde_json::from_str(&prompt).unwrap();
+        let carried = parsed["conversation"].as_str().unwrap();
+        assert_eq!(carried.chars().count(), REFINEMENT_CONVERSATION_CAP_CHARS);
+        assert!(carried.chars().all(|c| c == 'y'));
+        // The cap is a silent tail slice: the newest chars survive, no
+        // omission marker.
+        assert!(!carried.contains("omitted"));
+        // A conversation under the cap rides whole.
+        let whole = refinement_spawn_prompt(&request, 1_000_000, "short conversation");
+        let parsed: serde_json::Value = serde_json::from_str(&whole).unwrap();
+        assert_eq!(parsed["conversation"], "short conversation");
+        // The cap never splits a UTF-8 sequence: a multi-byte tail keeps
+        // whole code points.
+        let utf8_tail: String = "é".repeat(REFINEMENT_CONVERSATION_CAP_CHARS + 5);
+        let prompt = refinement_spawn_prompt(&request, 1_000_000, &utf8_tail);
+        let parsed: serde_json::Value = serde_json::from_str(&prompt).unwrap();
+        let carried = parsed["conversation"].as_str().unwrap();
+        assert_eq!(carried.chars().count(), REFINEMENT_CONVERSATION_CAP_CHARS);
+        assert!(carried.chars().all(|c| c == 'é'));
+    }
+
+    #[test]
+    fn the_window_trim_reserves_the_childs_system_prompt() {
+        // The child's real completion adds REFINEMENT_SYSTEM_PROMPT on top
+        // of the envelope; the trim reserves it exactly, so a conversation
+        // that would fit the envelope alone is still front-trimmed.
+        let request_head = r#"{"type":"refinement.request","conversation":""}"#;
+        let head = request_head.len() as u64;
+        let window = head + REFINEMENT_SYSTEM_PROMPT.len() as u64 + 500;
+        let conversation = "z".repeat(900);
+        let trimmed = trim_conversation_to_context(window, request_head, &conversation);
+        assert!(
+            trimmed.starts_with("[Earlier conversation omitted to fit the model context.]"),
+            "the conversation that fits the envelope but not the system prompt must trim: {trimmed}"
+        );
+        assert!(trimmed.len() < conversation.len());
     }
 
     #[test]

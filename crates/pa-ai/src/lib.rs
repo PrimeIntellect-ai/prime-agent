@@ -32,9 +32,14 @@ pub mod codex_debug {
         reset_debug_stats as reset_websocket_debug_stats, WebSocketDebugStats,
     };
 }
-pub use providers::simple_options::{default_request_max_tokens, effective_request_max_tokens};
+pub use providers::simple_options::{
+    default_request_max_tokens, effective_request_max_tokens, folded_request_max_tokens_at,
+};
 pub use registry::{Provider, ProviderRegistry};
-pub use stream::{complete, complete_simple, stream, stream_simple};
+pub use stream::{
+    clamped_request_max_tokens, complete, complete_simple, simple_request_max_tokens, stream,
+    stream_simple,
+};
 
 // Cross-crate surface consumed by the agent layer (pa-ai owned).
 pub mod utils {

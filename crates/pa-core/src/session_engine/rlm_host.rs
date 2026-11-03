@@ -145,9 +145,10 @@ pub struct RlmSpawnRequest {
     pub thinking: Option<String>,
     /// Working directory; the host resolves relative paths against the session cwd.
     pub cwd: Option<String>,
-    /// The refine-child spawn kind: `true` spawns the refinement child (a
-    /// `rlm.spawn kind="refine"` child that runs the refinement protocol
-    /// instead of the agent engine).
+    /// The refine-child spawn flag: `true` spawns the refinement child
+    /// (a child that runs the refinement protocol instead of the agent
+    /// engine). The daemon's refine command sets it on its own spawn; the
+    /// kernel surface never does.
     pub refine_child: bool,
     /// The parent's in-flight turn request the spawn anchors to (TS
     /// `spawnedByRequestId`): `None` for a spawn outside an active run.
@@ -679,18 +680,8 @@ fn spawn_request_from_payload(prompt: &str, data: &Value) -> anyhow::Result<RlmS
     reject_unsupported_kwargs(
         &kwargs,
         OPERATION,
-        &["name", "model", "thinking", "cwd", "factory", "kind"],
+        &["name", "model", "thinking", "cwd", "factory"],
     )?;
-    let refine_child = match optional_string_kwarg(&kwargs, "kind", OPERATION)? {
-        None => false,
-        Some("refine") => true,
-        Some(other) => {
-            anyhow::bail!(
-                "rlm.spawn kind must be \"refine\" when given, not {other:?}. Only the refinement \
-                 child has a kind."
-            )
-        }
-    };
     let name = optional_string_kwarg(&kwargs, "name", OPERATION)?;
     let name = normalize_requested_rlm_subagent_session_name(name, OPERATION)?;
     if let Some(name) = &name {
@@ -716,7 +707,13 @@ fn spawn_request_from_payload(prompt: &str, data: &Value) -> anyhow::Result<RlmS
         model,
         thinking,
         cwd,
-        refine_child,
+        // The kernel surface spawns ordinary subagents only: the refinement
+        // child is the daemon engine's own spawn (`spawn_refine_child`),
+        // never a model-initiated `kind="refine"` call — the refinement
+        // protocol (the flight, the park, the apply) lives behind the
+        // engine's refine command, and a kernel-spawned refine child
+        // would boot the refinement engine with no flight recorded.
+        refine_child: false,
         spawned_by_request_id: None,
         factory,
     })
@@ -1414,33 +1411,20 @@ mod tests {
                 state_id: "build".to_string(),
             })
         );
-        assert!(!requests[0].refine_child);
         drop(requests);
 
-        // The refine-child kind parses into the spawn request; unknown
-        // kinds refuse.
-        call(
+        // The kernel surface spawns ordinary subagents only: a `kind`
+        // kwarg is unsupported, exactly like any other unknown kwarg.
+        let error = call(
             &wiring,
             "rlm.run",
             json!({ "prompt": "p", "kwargs": { "name": "w", "kind": "refine" } }),
         )
         .await
-        .unwrap();
-        let requests = spawn_requests.lock().await;
-        assert_eq!(requests.len(), 2);
-        assert!(requests[1].refine_child);
-        drop(requests);
-        let error = call(
-            &wiring,
-            "rlm.run",
-            json!({ "prompt": "p", "kwargs": { "name": "w", "kind": "oracle" } }),
-        )
-        .await
         .unwrap_err();
-        assert_eq!(
-            error.to_string(),
-            "rlm.spawn kind must be \"refine\" when given, not \"oracle\". Only the refinement \
-             child has a kind."
+        assert!(
+            error.to_string().contains("Unsupported rlm.spawn kwargs"),
+            "the kind kwarg must refuse as unsupported: {error}"
         );
 
         // Validation: prompt type, unsupported kwargs, name rules.

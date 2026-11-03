@@ -632,6 +632,9 @@ impl SupervisorChildSessionsInner {
                 self.deliver_settle_notice(record).await;
                 // A settled child releases an owed goal continuation.
                 self.fire_settle_hook(record).await;
+                // The one-shot refinement child retires at its settle —
+                // the registry observed it, so it owns the teardown.
+                self.retire_refine_child_record(record).await;
                 return;
             }
             // Still running (a timed-out slice or a re-queued continuation):
@@ -870,6 +873,7 @@ impl SupervisorChildSessionsInner {
         self.record_child_return(record).await;
         self.deliver_terminal_notice(record, message).await;
         self.fire_settle_hook(record).await;
+        self.retire_refine_child_record(record).await;
         true
     }
 

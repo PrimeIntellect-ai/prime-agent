@@ -936,10 +936,6 @@ impl SessionEngine for AgentSessionEngine {
                     .semantic_spawn
                     .as_ref()
                     .and_then(|spawn| spawn.spawned_by_request_id.clone()),
-                refine_child: identity
-                    .semantic_spawn
-                    .as_ref()
-                    .is_some_and(|spawn| spawn.refine_child),
             }
         });
         *self

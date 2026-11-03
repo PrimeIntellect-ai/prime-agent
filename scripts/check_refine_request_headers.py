@@ -20,16 +20,24 @@ from check_saved_catalog import CatalogClient
 from lifecycle_lib import OwnedProcesses, TAG, digest, env_for, finish
 
 
+class IdentityServer(Server):
+    def __init__(self, scenario):
+        super().__init__(scenario)
+        self.ready = threading.Condition()
+
+
 class IdentityHandler(Handler):
     def do_POST(self):
         self.server.received_headers.append(dict(self.headers))
         super().do_POST()
+        with self.server.ready:
+            self.server.ready.notify_all()
 
 
 def observe(binary, root, receipt):
     env = env_for(root)
     env[TAG] = str(root)
-    server = Server('refine')
+    server = IdentityServer('refine')
     server.received_headers = []
     server.RequestHandlerClass = IdentityHandler
     thread = threading.Thread(target=server.serve_forever, daemon=True)
@@ -72,10 +80,12 @@ def observe(binary, root, receipt):
             # The refine wire is fire-and-wake: the spawned refinement child
             # plans asynchronously after the RPC returns (the synchronous
             # in-process refiner call this check was written for is gone),
-            # so the planning request is awaited with observable readiness.
-            deadline = time.monotonic() + 60
-            while not server.requests and time.monotonic() < deadline:
-                time.sleep(0.05)
+            # so the planning request is awaited on the handler's readiness
+            # signal — the sibling checks' Condition pattern, never a
+            # sleep poll that can only fail on a later assert.
+            with server.ready:
+                assert server.ready.wait_for(lambda: bool(server.requests), timeout=60), \
+                    f'the planning POST never arrived: {server.error}' 
             assert len(server.received_headers) == len(server.requests) == 1, server.requests
             headers = {key.lower(): value for key, value in server.received_headers[0].items()}
             actual = {key: headers.get(key) for key in ('authorization', 'x-prime-team-id')}
