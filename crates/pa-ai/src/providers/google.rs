@@ -299,7 +299,7 @@ async fn run_stream(
     }
 
     if response.status >= 400 {
-        let body = response.read_all_text().await.unwrap_or_default();
+        let body = response.read_error_text().await.unwrap_or_default();
         // The genai `ApiError` carries no `.error` object for the TS classifier (its `code` is
         // numeric): the class name is the provider error type and the classified form carries no
         // detail.

@@ -262,7 +262,7 @@ async fn run_stream(
         .cloned();
 
     if response.status >= 400 {
-        let body = response.read_all_text().await.unwrap_or_default();
+        let body = response.read_error_text().await.unwrap_or_default();
         return Err(ProviderError::from_http_status_body(
             response.status,
             &body,

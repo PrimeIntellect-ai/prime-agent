@@ -15,6 +15,22 @@ use crate::utils::stream_failure::{
 static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
 static H2_ALPN_CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
 
+/// Error bodies are diagnostics, not streamed model output. One MiB leaves ample room for normal
+/// provider JSON errors while bounding an untrusted peer's in-memory error payload.
+pub(crate) const MAX_ERROR_BODY_BYTES: usize = 1024 * 1024;
+
+/// Append the largest UTF-8 prefix that fits in the shared error-body budget. The boolean also
+/// handles a final multi-byte character that cannot fit in the remaining byte budget.
+pub(crate) fn append_bounded_error_text(out: &mut String, chunk: &str) -> bool {
+    let remaining = MAX_ERROR_BODY_BYTES.saturating_sub(out.len());
+    let mut end = remaining.min(chunk.len());
+    while !chunk.is_char_boundary(end) {
+        end -= 1;
+    }
+    out.push_str(&chunk[..end]);
+    chunk.len() >= remaining
+}
+
 /// The HTTP/1.1 client every provider shares, pinned with `http1_only()` so that enabling the
 /// reqwest `http2` feature (bedrock) cannot change the transport of any other provider.
 fn client() -> &'static reqwest::Client {
@@ -180,6 +196,20 @@ impl HttpResponse {
         }
         Ok(out)
     }
+
+    /// Read text from an error response, stopping once the diagnostic budget is full.
+    pub async fn read_error_text(&mut self) -> Result<String, ProviderError> {
+        let mut out = String::new();
+        while out.len() < MAX_ERROR_BODY_BYTES {
+            let Some(chunk) = self.next_text().await? else {
+                break;
+            };
+            if append_bounded_error_text(&mut out, &chunk) {
+                break;
+            }
+        }
+        Ok(out)
+    }
 }
 
 pub struct RequestOptions {
@@ -337,7 +367,11 @@ pub async fn post_json(
     })
     .await?;
     let status = response.status;
-    let text = response.read_all_text().await?;
+    let text = if status >= 400 {
+        response.read_error_text().await?
+    } else {
+        response.read_all_text().await?
+    };
     let parsed = if text.trim().is_empty() {
         serde_json::Value::Null
     } else {
@@ -350,6 +384,62 @@ pub async fn post_json(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A provider can advertise an arbitrarily large error body and keep the connection open.
+    /// Both content-length and chunked diagnostics must finish after the bounded prefix.
+    #[tokio::test]
+    async fn error_text_stops_at_the_diagnostic_budget_without_waiting_for_eof() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        for chunked in [false, true] {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            let (close_tx, close_rx) = tokio::sync::oneshot::channel();
+            let server = tokio::spawn(async move {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut request = [0u8; 4096];
+                socket.read(&mut request).await.unwrap();
+                let framing = if chunked {
+                    "Transfer-Encoding: chunked".to_string()
+                } else {
+                    format!("Content-Length: {}", MAX_ERROR_BODY_BYTES * 2)
+                };
+                let head = format!(
+                    "HTTP/1.1 500 Internal Server Error\r\n{framing}\r\nConnection: close\r\n\r\n"
+                );
+                socket.write_all(head.as_bytes()).await.unwrap();
+                let body = vec![b'x'; MAX_ERROR_BODY_BYTES + 1024];
+                if chunked {
+                    socket
+                        .write_all(format!("{:x}\r\n", body.len()).as_bytes())
+                        .await
+                        .unwrap();
+                }
+                socket.write_all(&body).await.unwrap();
+                if chunked {
+                    socket.write_all(b"\r\n").await.unwrap();
+                }
+                close_rx.await.unwrap();
+            });
+
+            let mut response = send(RequestOptions::new(
+                reqwest::Method::GET,
+                format!("http://{addr}/"),
+            ))
+            .await
+            .unwrap();
+            let body = tokio::time::timeout(
+                std::time::Duration::from_secs(2),
+                response.read_error_text(),
+            )
+            .await
+            .expect("error diagnostic must not wait for the rest of the body")
+            .unwrap();
+            assert_eq!(body, "x".repeat(MAX_ERROR_BODY_BYTES));
+            close_tx.send(()).unwrap();
+            server.await.unwrap();
+        }
+    }
 
     /// Serve one plain-text body split across two writes. The second write is held until `hold`
     /// fires, so the chunk boundary lands where the caller put it.

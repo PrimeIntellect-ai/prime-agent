@@ -1,0 +1,1 @@
+- Limited oversized provider error diagnostics to 1 MiB to prevent unbounded memory growth.

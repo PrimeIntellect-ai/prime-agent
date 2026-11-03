@@ -94,11 +94,19 @@ impl H2Response {
         }
     }
 
-    /// Read the entire body as text (for error responses).
-    pub(crate) async fn read_all_text(&mut self) -> Result<String, ProviderError> {
+    /// Read only the diagnostic prefix of an error response.
+    pub(crate) async fn read_error_text(&mut self) -> Result<String, ProviderError> {
         let mut out = String::new();
-        while let Some(chunk) = self.next_bytes().await? {
-            out.push_str(&String::from_utf8_lossy(&chunk));
+        while out.len() < crate::utils_inner::http::MAX_ERROR_BODY_BYTES {
+            let Some(chunk) = self.next_bytes().await? else {
+                break;
+            };
+            if crate::utils_inner::http::append_bounded_error_text(
+                &mut out,
+                &String::from_utf8_lossy(&chunk),
+            ) {
+                break;
+            }
         }
         Ok(out)
     }

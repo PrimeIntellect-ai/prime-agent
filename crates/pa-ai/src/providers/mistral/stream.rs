@@ -301,7 +301,7 @@ async fn run_stream(
     }
 
     if response.status >= 400 {
-        let body = response.read_all_text().await.unwrap_or_default();
+        let body = response.read_error_text().await.unwrap_or_default();
         return Err(mistral_http_error(
             response.status,
             &body,
