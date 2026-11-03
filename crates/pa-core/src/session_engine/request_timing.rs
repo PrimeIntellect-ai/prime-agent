@@ -104,10 +104,13 @@ impl RequestTimingLog {
             std::fs::create_dir_all(self.path.parent().unwrap_or_else(|| Path::new(".")))?;
             // Best-effort rotation: keep appending when the rotate fails.
             let _ = self.rotate_if_needed();
-            let mut file = std::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(&self.path)?;
+            let mut options = std::fs::OpenOptions::new();
+            options.create(true).append(true);
+            crate::platform::perms::set_private_mode(&mut options);
+            let mut file = options.open(&self.path)?;
+            // A legacy log may already have loose permissions. Tighten the
+            // opened inode before any diagnostic detail is appended.
+            crate::platform::perms::restrict_open_file(&file)?;
             file.write_all(line.as_bytes())?;
             file.flush()
         };
@@ -125,6 +128,11 @@ impl RequestTimingLog {
         if size <= self.max_bytes {
             return Ok(());
         }
+        // Rotation retains the old log, so tighten it before moving it to
+        // the `.old` name as well.
+        let file = std::fs::OpenOptions::new().append(true).open(&self.path)?;
+        crate::platform::perms::restrict_open_file(&file)?;
+        drop(file);
         // Drop any prior `.old` first: the rename fails on Windows if the
         // destination exists.
         let rotated = self.path.with_extension("jsonl.old");

@@ -14,6 +14,30 @@ use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
 /// the process env is global across parallel test threads.
 static REQUEST_TIMING_ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
+#[cfg(unix)]
+#[test]
+fn request_timing_log_and_rotation_are_private() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("agent.jsonl");
+    let mut log = RequestTimingLog::at(&path);
+    let mode = |path: &Path| std::fs::metadata(path).unwrap().permissions().mode() & 0o777;
+
+    log.info("private error detail", Map::new());
+    assert_eq!(mode(&path), 0o600, "new log must be private");
+
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+    log.info("another private detail", Map::new());
+    assert_eq!(mode(&path), 0o600, "existing log must be tightened");
+
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+    log.max_bytes = 1;
+    log.info("after rotation", Map::new());
+    assert_eq!(mode(&path.with_extension("jsonl.old")), 0o600);
+    assert_eq!(mode(&path), 0o600);
+}
+
 fn test_model() -> pa_agent::types::Model {
     pa_agent::types::Model {
         id: "bench/bench-model".to_string(),

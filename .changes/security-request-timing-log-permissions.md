@@ -1,0 +1,1 @@
+- Kept request-timing diagnostic logs private before writing or rotating them.
