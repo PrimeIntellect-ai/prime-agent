@@ -200,8 +200,11 @@ async def end_turn() -> dict[str, Any]:
     task's call attributes to that cell, not the task), the cell's tool
     result confirms the turn ended, and no further assistant response is
     streamed for the run. Other tool calls in the same message still
-    execute first. Raises where the host does not support the call (a
-    foreign harness): it never silently no-ops.
+    execute first; the turn ends when the batch's end-turn call finishes
+    Ok (one is enough). The turn returns to the user while background work
+    keeps running: the remaining jobs keep running and their completion
+    notices collect the results. Raises where the host does not support
+    the call (a foreign harness): it never silently no-ops.
     """
     return await host_request("rlm.end_turn", {})
 

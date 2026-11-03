@@ -13,15 +13,23 @@
 //! `rlm.end_turn()`; the kernel marks the cell, the tool result carries
 //! the "turn ended" confirmation, the batch terminates, and no further
 //! assistant response is streamed (the pushed second turn stays
-//! unconsumed). No model call: the `ScriptedProvider` answers from the
-//! pushed turns.
+//! unconsumed). The settled ruling's second half is pinned too: the turn
+//! returns to the user while the cell's detached `bash()` job keeps
+//! running, and its `[bash-done]` completion notice lands on the agent
+//! AFTER the turn returned, collecting the result. No model call: the
+//! `ScriptedProvider` answers from the pushed turns.
 #![cfg(unix)]
 
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use pa_agent::scripted::{tool_call_turn_steps, ScriptedProvider, ScriptedTurn};
 use pa_core::session::manager::SessionManager;
+use pa_core::session_engine::bash_notices::BashNoticeWake;
 use pa_core::session_engine::engine::{create_session, SessionEngineConfig};
+use pa_core::session_engine::messages::ASYNC_BASH_COMPLETION_CUSTOM_TYPE;
 use pa_core::session_engine::PromptOptions;
 use serde_json::json;
 
@@ -135,17 +143,28 @@ async fn an_end_turn_cell_ends_the_turn_without_another_assistant_response() {
 
     let model = scripted_model();
     let provider = std::sync::Arc::new(ScriptedProvider::new(model.clone()));
-    // One tool-call turn: the cell ends the turn through the sanctioned
-    // call. The pushed second turn exists to catch a revert of the
-    // terminate mapping: the loop would ask for another assistant
-    // response and consume it.
+    // The daemonless bash-notice wake (the same registration seam the
+    // daemon worker keeps): the detached job's completion row steers
+    // onto the session's agent and fires the wake.
+    let wakes = Arc::new(AtomicUsize::new(0));
+    let wake = {
+        let wakes = Arc::clone(&wakes);
+        Arc::new(move || {
+            wakes.fetch_add(1, Ordering::SeqCst);
+        }) as BashNoticeWake
+    };
+
+    // One tool-call turn: the cell starts a detached `bash()` job, then
+    // ends the turn through the sanctioned call. The pushed second turn
+    // exists to catch a revert of the terminate mapping: the loop would
+    // ask for another assistant response and consume it.
     provider.push_turn(ScriptedTurn::Events(tool_call_turn_steps(
         &model,
         Some("ending the turn"),
         vec![(
             "call-1",
             "python_repl",
-            json!({ "code": "result = await rlm.end_turn()\nresult" }),
+            json!({ "code": "h = bash('sleep 3 && echo background-marker')\nresult = await rlm.end_turn()\nresult" }),
         )],
     )));
     provider.push_text_turn("never reached");
@@ -186,7 +205,7 @@ async fn an_end_turn_cell_ends_the_turn_without_another_assistant_response() {
         mcp_manager: None,
         prewarm_ipython_kernel: None,
         on_background_work_settled: None,
-        bash_notice_wake: None,
+        bash_notice_wake: Some(wake),
         queued_goal_context_purge: None,
     })
     .await
@@ -200,6 +219,14 @@ async fn an_end_turn_cell_ends_the_turn_without_another_assistant_response() {
         outcome,
         pa_core::session_engine::PromptOutcome::Prompt,
         "the prompt must reach the model loop"
+    );
+    // The settled ruling's first half: the turn returned to the user
+    // while the detached `bash()` job was still running — no completion
+    // notice has landed yet, and the ended turn did not wait for it.
+    assert_eq!(
+        wakes.load(Ordering::SeqCst),
+        0,
+        "the background job must still be running when the ended turn returns"
     );
 
     // The tool result rows land in the session transcript.
@@ -221,5 +248,50 @@ async fn an_end_turn_cell_ends_the_turn_without_another_assistant_response() {
     assert!(
         serialized.contains("{'endedTurn': True}"),
         "the cell must surface the host reply: {serialized}"
+    );
+
+    // The settled ruling's second half: the background job keeps running
+    // after the turn returned, and its completion notice lands on the
+    // agent afterwards — the `[bash-done` row that collects the result.
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while wakes.load(Ordering::SeqCst) == 0 {
+        assert!(
+            Instant::now() < deadline,
+            "the background job's completion notice never landed: {serialized}"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let queued = engine.session.agent().remove_queued_messages(|_| true);
+    assert_eq!(
+        queued.len(),
+        1,
+        "exactly the background job's notice row queued on the agent: {queued:?}"
+    );
+    let pa_agent::types::AgentMessage::Custom(custom) = &queued[0] else {
+        panic!("the queued row is the completion notice: {queued:?}");
+    };
+    assert_eq!(
+        custom
+            .payload
+            .get("customType")
+            .and_then(serde_json::Value::as_str),
+        Some(ASYNC_BASH_COMPLETION_CUSTOM_TYPE)
+    );
+    let notice_text = custom
+        .payload
+        .get("content")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default();
+    assert!(
+        notice_text.contains("[bash-done pid:"),
+        "the notice carries the completion header: {notice_text}"
+    );
+    assert!(
+        notice_text.contains("exit:0"),
+        "the background job completed cleanly after the turn returned: {notice_text}"
+    );
+    assert!(
+        notice_text.contains("sleep 3"),
+        "the notice names the detached command: {notice_text}"
     );
 }
