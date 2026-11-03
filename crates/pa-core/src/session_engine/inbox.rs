@@ -28,8 +28,6 @@ pub const INBOX_JOURNAL_FILE: &str = "inbox.jsonl";
 pub const INBOX_CLASS_BASH_DONE: &str = "bash-done";
 /// The `factory.progress` notice class label.
 pub const INBOX_CLASS_FACTORY_PROGRESS: &str = "factory-progress";
-/// The RLM child terminal notice class label (stage 2 routing).
-pub const INBOX_CLASS_CHILD_NOTICE: &str = "child-notice";
 
 /// The coalescing batch state the daemon's notice sink owns: the
 /// arrivals the currently queued short-notice row covers (reset when the
@@ -114,18 +112,26 @@ pub struct SessionInbox {
     state: Mutex<InboxState>,
 }
 
-/// One journal record: a message arrival, or a drain marker.
+/// One journal record: a message arrival, a drain marker, or the id
+/// counter's high-water mark (compaction persists it so a drained
+/// restart never reuses a spent id).
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "kind", rename_all = "camelCase")]
 enum InboxRecord {
     Message(InboxMessage),
     Drained,
+    #[serde(rename_all = "camelCase")]
+    Counter {
+        next_id: u64,
+    },
 }
 
 impl SessionInbox {
     /// Open the inbox over one session dir: replay the journal and
     /// rewrite it compacted to the pending messages (bounded growth
-    /// across restarts). A missing or unreadable journal starts empty;
+    /// across restarts). A missing journal starts empty; a journal
+    /// that cannot be read starts empty but stays untouched, so the
+    /// compaction never writes the unread state over its records;
     /// journal write failures degrade to in-process durability only.
     #[must_use]
     pub fn open(dir: Option<&Path>) -> Self {
@@ -135,15 +141,16 @@ impl SessionInbox {
             let _ = std::fs::create_dir_all(dir);
         }
         let journal = dir.map(|dir| dir.join(INBOX_JOURNAL_FILE));
-        let (messages, next_id) = journal
+        let (messages, next_id, readable) = journal
             .as_deref()
-            .map(replay_journal)
-            .unwrap_or_else(|| (Vec::new(), 0));
+            .map_or((Vec::new(), 0, true), replay_journal);
         let inbox = Self {
             journal,
             state: Mutex::new(InboxState { messages, next_id }),
         };
-        inbox.compact_journal();
+        if readable {
+            inbox.compact_journal();
+        }
         inbox
     }
 
@@ -231,8 +238,9 @@ impl SessionInbox {
         }
     }
 
-    /// Rewrite the journal to the pending messages (called at open, so
-    /// drained history never outlives a restart).
+    /// Rewrite the journal to the id counter and the pending messages
+    /// (called at open, so drained history never outlives a restart
+    /// and the counter never resets to zero on a drained restart).
     fn compact_journal(&self) {
         let Some(journal) = &self.journal else {
             return;
@@ -242,6 +250,12 @@ impl SessionInbox {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let mut lines = String::new();
+        let counter = serde_json::to_value(InboxRecord::Counter {
+            next_id: state.next_id,
+        })
+        .unwrap_or(Value::Null);
+        lines.push_str(&serde_json::to_string(&counter).unwrap_or_default());
+        lines.push('\n');
         for message in &state.messages {
             let record =
                 serde_json::to_value(InboxRecord::Message(message.clone())).unwrap_or(Value::Null);
@@ -249,7 +263,8 @@ impl SessionInbox {
             lines.push('\n');
         }
         let tmp = journal.with_extension("jsonl.tmp");
-        let rewrite = std::fs::write(&tmp, lines).and_then(|()| std::fs::rename(&tmp, journal));
+        let rewrite =
+            std::fs::write(&tmp, lines).and_then(|()| crate::platform::rename_onto(&tmp, journal));
         if let Err(error) = rewrite {
             eprintln!(
                 "pa-daemon: inbox journal compaction failed ({}): {error}",
@@ -259,12 +274,33 @@ impl SessionInbox {
     }
 }
 
-/// Replay one journal: apply every record in order.
-fn replay_journal(journal: &Path) -> (Vec<InboxMessage>, u64) {
-    let content = std::fs::read_to_string(journal).unwrap_or_default();
+/// Replay one journal: apply every complete record in order. A torn
+/// tail (a crash mid-append) degrades to the records that parse — the
+/// compacted rewrite that follows drops the fragment. A journal that
+/// cannot be read at all returns unreadable so the open never compacts
+/// over it. Returns the pending messages, the id counter's high-water
+/// mark, and whether the journal was readable.
+fn replay_journal(journal: &Path) -> (Vec<InboxMessage>, u64, bool) {
+    let bytes = match std::fs::read(journal) {
+        Ok(bytes) => bytes,
+        // A missing journal starts fresh; the open's compaction
+        // creates it. Any other read failure starts memory-only and
+        // keeps the journal untouched, like the write failures below.
+        Err(error) if error.kind() != std::io::ErrorKind::NotFound => {
+            eprintln!(
+                "pa-daemon: inbox journal read failed ({}): {error}",
+                journal.display()
+            );
+            return (Vec::new(), 0, false);
+        }
+        Err(_) => return (Vec::new(), 0, true),
+    };
     let mut messages = Vec::new();
     let mut next_id = 0;
-    for line in content.lines() {
+    for line in bytes.split(|byte| *byte == b'\n') {
+        let Ok(line) = std::str::from_utf8(line) else {
+            continue;
+        };
         let Ok(record) = serde_json::from_str::<InboxRecord>(line.trim()) else {
             continue;
         };
@@ -281,9 +317,10 @@ fn replay_journal(journal: &Path) -> (Vec<InboxMessage>, u64) {
                 messages.push(message);
             }
             InboxRecord::Drained => messages.clear(),
+            InboxRecord::Counter { next_id: high } => next_id = next_id.max(high),
         }
     }
-    (messages, next_id)
+    (messages, next_id, true)
 }
 
 /// UTC `HH:MM` of one epoch-ms timestamp (the notice time signature).
@@ -486,10 +523,14 @@ mod tests {
                 2_000,
             );
         }
-        // The in-process compaction rewrote the journal to the pending
-        // messages: one line each.
+        // The in-process compaction rewrote the journal to the id
+        // counter record plus the pending messages: one line each.
         let content = std::fs::read_to_string(&journal).unwrap();
-        assert_eq!(content.lines().count(), 2, "journal: {content}");
+        assert_eq!(content.lines().count(), 3, "journal: {content}");
+        assert!(
+            content.starts_with("{\"kind\":\"counter\""),
+            "the counter record leads: {content}"
+        );
         // The simulated restart: a fresh open replays both messages.
         let inbox = SessionInbox::open(Some(dir.path()));
         let (count, oldest, classes) = inbox.count();
@@ -529,6 +570,105 @@ mod tests {
         let inbox = SessionInbox::open(Some(dir.path()));
         let (count, _, _) = inbox.count();
         assert_eq!(count, 1, "the torn tail is skipped, the record replays");
+    }
+
+    /// A torn append ending in invalid UTF-8 (a crash mid-write of a
+    /// multi-byte character) still replays the complete records: the
+    /// journal is replayed per record, never decoded as one string, and
+    /// the compaction rewrites it without the fragment.
+    #[test]
+    fn a_torn_tail_with_invalid_utf8_replays_the_complete_records() {
+        let dir = tempfile::tempdir().unwrap();
+        let journal = dir.path().join(INBOX_JOURNAL_FILE);
+        let mut file = std::fs::File::create(&journal).unwrap();
+        let record = serde_json::to_value(InboxRecord::Message(message(
+            "inbox-1",
+            INBOX_CLASS_BASH_DONE,
+            1_000,
+            "done",
+        )))
+        .unwrap();
+        writeln!(file, "{}", serde_json::to_string(&record).unwrap()).unwrap();
+        // The torn tail: a partial record whose last write stopped mid
+        // multi-byte character (invalid UTF-8, no newline).
+        file.write_all(b"{\"kind\":\"message\",\"id\":\"inbox-2\",\"text\":\"ca")
+            .unwrap();
+        file.write_all(&[0xc3]).unwrap();
+        drop(file);
+        let inbox = SessionInbox::open(Some(dir.path()));
+        let (count, _, _) = inbox.count();
+        assert_eq!(count, 1, "the complete record replays");
+        // The compaction dropped the fragment: the journal is valid
+        // UTF-8 again, holding the counter record and the message.
+        let content = std::fs::read_to_string(&journal).unwrap();
+        assert_eq!(content.lines().count(), 2, "journal: {content}");
+        assert!(
+            content.starts_with("{\"kind\":\"counter\"") && content.contains("\"inbox-1\""),
+            "the rewrite kept the record and dropped the fragment: {content}"
+        );
+    }
+
+    /// A journal that cannot be read at all (here: the path is a
+    /// directory) starts empty but is never compacted over: the open
+    /// leaves the unread journal and its records untouched.
+    #[test]
+    fn an_unreadable_journal_is_never_compacted_over() {
+        let dir = tempfile::tempdir().unwrap();
+        let journal = dir.path().join(INBOX_JOURNAL_FILE);
+        std::fs::create_dir(&journal).unwrap();
+        let inbox = SessionInbox::open(Some(dir.path()));
+        assert_eq!(inbox.count(), (0, None, BTreeMap::new()));
+        assert!(journal.is_dir(), "the unread journal is left untouched");
+        assert!(
+            !journal.with_extension("jsonl.tmp").exists(),
+            "the skipped compaction wrote no throwaway tmp"
+        );
+    }
+
+    /// The id counter survives a drained restart: the compacted journal
+    /// carries the counter record, so a fresh replay keeps ids monotonic
+    /// instead of reissuing a spent id.
+    #[test]
+    fn the_id_counter_survives_a_drained_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let journal = dir.path().join(INBOX_JOURNAL_FILE);
+        {
+            let inbox = SessionInbox::open(Some(dir.path()));
+            inbox.push(
+                notice("sleep 1", INBOX_CLASS_BASH_DONE, "first", json!({"pid": 1})),
+                1_000,
+            );
+            inbox.push(
+                notice(
+                    "sleep 2",
+                    INBOX_CLASS_BASH_DONE,
+                    "second",
+                    json!({"pid": 2}),
+                ),
+                2_000,
+            );
+            inbox.drain();
+        }
+        {
+            // The reopen replays the drain and compacts: only the
+            // counter record remains (the high-water mark, not zero).
+            let reopened = SessionInbox::open(Some(dir.path()));
+            assert_eq!(reopened.count(), (0, None, BTreeMap::new()));
+            let content = std::fs::read_to_string(&journal).unwrap();
+            assert_eq!(content.lines().count(), 1, "journal: {content}");
+            assert!(
+                content.contains("\"counter\"") && content.contains("\"nextId\":2"),
+                "the counter record persists: {content}"
+            );
+        }
+        // The restart over the drained journal still counts past the
+        // spent ids.
+        let reopened = SessionInbox::open(Some(dir.path()));
+        let next = reopened.push(
+            notice("echo 3", INBOX_CLASS_BASH_DONE, "third", json!({})),
+            3_000,
+        );
+        assert_eq!(next.id, "inbox-3", "the drained counter replayed");
     }
 
     /// The notice fields project one bash completion and one factory
