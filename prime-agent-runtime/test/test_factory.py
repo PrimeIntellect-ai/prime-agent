@@ -5892,6 +5892,30 @@ class FactoryExecutorTest(_ExecutorTestCase):
             error, "no JSON object containing output 'verdict' in the upstream answer"
         )
 
+    def test_terminal_object_survives_prose_delimiters(self) -> None:
+        # Macroscope + Bugbot (PR #3906): the scan applied JSON quote and
+        # brace rules from the start of the answer, so prose that left a
+        # quote or a brace open nested or hid a valid tail object; syntax
+        # tracks within candidate objects only, so a settle that mentions a
+        # block or leaves a quote open still binds
+        stray_quote = 'The gate said "all green, and\n\n{"verdict": "pass"}'
+        self.assertEqual(_parse_json_output(stray_quote, "verdict"), ("pass", None))
+        stray_brace = 'here is the { stray brace in prose\n\n{"verdict": "pass"}'
+        self.assertEqual(_parse_json_output(stray_brace, "verdict"), ("pass", None))
+        between = '{"verdict": "stale"} and "so on\n\n{"verdict": "last"}'
+        self.assertEqual(_parse_json_output(between, "verdict"), ("last", None))
+        # a truncated emit owns the tail: an unterminated object never
+        # binds its nested spans, and the same failure sentence reads
+        truncated = '{"outer": {"verdict": "x"}'
+        value, error = _parse_json_output(truncated, "verdict")
+        self.assertIsNone(value)
+        self.assertIn("no JSON object containing output 'verdict'", error)
+        # prose delimiters change nothing for the non-terminal contract
+        not_terminal = '{"verdict": "pass"}\nAll checks green, "done."'
+        value, error = _parse_json_output(not_terminal, "verdict")
+        self.assertIsNone(value)
+        self.assertIn("no JSON object containing output 'verdict'", error)
+
     def test_guard_primitives_json_strict_and_defensive(self) -> None:
         outputs = {"verdict": {"approved": True, "count": 1.0, "tags": ["a"]}}
         when = lambda **kw: {"output": "verdict", **kw}  # noqa: E731

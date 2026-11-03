@@ -1281,36 +1281,59 @@ def _terminal_json_object(answer: str) -> str | None:
     punctuation such as fence fragments, dashes, or dots, never letters,
     digits, quotes, or more brackets -- follows. That is the settle shape
     the strict fence contract rejected: a JSON tail emitted as plain text
-    after prose, an unclosed fence, or a dirty tail. An object followed by
-    prose or by a later incomplete emit stays non-terminal -- the
-    whole-answer fallback and the truncation error own those cases -- and
-    the output-name check applies to this candidate exactly as to a fence.
+    after prose, an unclosed fence, or a dirty tail. Prose is never JSON
+    syntax: quotes outside an object do not open strings, and a brace in
+    prose only opens a candidate where it starts a string key -- so a
+    settle that mentions a block or leaves a quote open still finds its
+    terminal object. An object followed by prose or by a later incomplete
+    emit stays non-terminal -- the whole-answer fallback and the
+    truncation error own those cases -- an unterminated candidate owns the
+    tail (a truncated emit never binds), and the output-name check applies
+    to this candidate exactly as to a fence.
     """
-    depth = 0
-    start: int | None = None
+    length = len(answer)
     last: tuple[int, int] | None = None
-    in_string = False
-    escaped = False
-    for index, char in enumerate(answer):
-        if in_string:
-            if escaped:
-                escaped = False
-            elif char == "\\":
-                escaped = True
-            elif char == '"':
-                in_string = False
+    index = 0
+    while index < length:
+        if answer[index] != "{":
+            index += 1
             continue
-        if char == '"':
-            in_string = True
-        elif char == "{":
-            if depth == 0:
-                start = index
-            depth += 1
-        elif char == "}" and depth:
-            depth -= 1
-            if depth == 0 and start is not None:
-                last = (start, index + 1)
-                start = None
+        # a candidate opens only where its brace starts a string key; a
+        # stray brace in prose is not syntax and hides nothing
+        cursor = index + 1
+        while cursor < length and answer[cursor].isspace():
+            cursor += 1
+        if cursor == length or answer[cursor] != '"':
+            index += 1
+            continue
+        depth = 1
+        in_string = False
+        escaped = False
+        while cursor < length:
+            char = answer[cursor]
+            if in_string:
+                if escaped:
+                    escaped = False
+                elif char == "\\":
+                    escaped = True
+                elif char == '"':
+                    in_string = False
+            elif char == '"':
+                in_string = True
+            elif char == "{":
+                depth += 1
+            elif char == "}":
+                depth -= 1
+                if depth == 0:
+                    last = (index, cursor + 1)
+                    cursor += 1
+                    break
+            cursor += 1
+        if depth:
+            # an unterminated candidate is a truncated emit: it owns the
+            # tail, so nothing later binds
+            return None
+        index = cursor
     if last is None:
         return None
     if any(char.isalnum() or char in "\"'{}[]\\" for char in answer[last[1] :]):
