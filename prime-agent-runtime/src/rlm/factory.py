@@ -1272,6 +1272,52 @@ def _suffixed_spawn_form(base: str, candidate: str) -> bool:
     return True
 
 
+def _terminal_json_object(answer: str) -> str | None:
+    """The bare JSON object that terminates the answer, if one does.
+
+    A string-aware balanced-brace scan walks the answer's top-level object
+    spans (braces inside string literals never count); the terminal object
+    is the last balanced span that only benign residue -- whitespace or
+    punctuation such as fence fragments, dashes, or dots, never letters,
+    digits, quotes, or more brackets -- follows. That is the settle shape
+    the strict fence contract rejected: a JSON tail emitted as plain text
+    after prose, an unclosed fence, or a dirty tail. An object followed by
+    prose or by a later incomplete emit stays non-terminal -- the
+    whole-answer fallback and the truncation error own those cases -- and
+    the output-name check applies to this candidate exactly as to a fence.
+    """
+    depth = 0
+    start: int | None = None
+    last: tuple[int, int] | None = None
+    in_string = False
+    escaped = False
+    for index, char in enumerate(answer):
+        if in_string:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+            continue
+        if char == '"':
+            in_string = True
+        elif char == "{":
+            if depth == 0:
+                start = index
+            depth += 1
+        elif char == "}" and depth:
+            depth -= 1
+            if depth == 0 and start is not None:
+                last = (start, index + 1)
+                start = None
+    if last is None:
+        return None
+    if any(char.isalnum() or char in "\"'{}[]\\" for char in answer[last[1] :]):
+        return None
+    return answer[last[0] : last[1]]
+
+
 def _parse_json_output(
     answer: str, output_name: str, *, truncated_at: int | None = None
 ) -> tuple[Any, str | None]:
@@ -1280,13 +1326,19 @@ def _parse_json_output(
     Prefers the fenced `````json`` block whose object contains the output
     name, scanning trailing blocks first (an answer with several fences,
     e.g. a verdict block followed by a summary block, binds from whichever
-    block carries the port), then falls back to parsing the whole answer.
-    Returns ``(value, None)`` or ``(None, error_sentence)``. A capture cut
-    at the binding cap (``truncated_at``) names the size and the cap in the
-    error, so a too-large fenced JSON reads as a size problem, not a
-    missing output.
+    block carries the port), then the answer's terminal bare JSON object
+    (``_terminal_json_object``), then falls back to parsing the whole
+    answer. The output-name requirement is the same for every shape: only
+    an object that contains the port binds, so widening the accepted
+    shapes never widens the contract. Returns ``(value, None)`` or
+    ``(None, error_sentence)``. A capture cut at the binding cap
+    (``truncated_at``) names the size and the cap in the error, so a
+    too-large fenced JSON reads as a size problem, not a missing output.
     """
     candidates: list[str] = list(reversed(_FENCED_JSON_RE.findall(answer)))
+    terminal = _terminal_json_object(answer)
+    if terminal is not None:
+        candidates.append(terminal)
     candidates.append(answer.strip())
     for candidate in candidates:
         try:
@@ -5361,8 +5413,9 @@ the cap, fails to capture, and fails the producing state through its
   source that offers no value is not a value, so the dependent that
   declared the input optional proceeds). A state's own declared outputs
   capture from its settle's full answer: a declared port that binds no
-  value — no parseable fenced JSON for it, or a payload past the
-  executor's capture cap — is retried once and then FAILS the producing
+  value — no parseable JSON for it (a fenced ```json block, or a bare
+  JSON object ending the answer), or a payload past the executor's
+  capture cap — is retried once and then FAILS the producing
   entry as a task failure (`retries`, then `failure_policy`, apply, and
   the answer stays preserved under `needs_verify`), so a valueless
   settle never reaches a dependent's bind. A required self-input is
@@ -5666,9 +5719,10 @@ watched = await rlm.factory.watch(result["run_id"], 30)
 - Outputs bind from the child's full final answer (the collect envelope
   carries it; the executor caps its own capture at 65,536 characters,
   the same bound the daemon puts on the envelope's answer text): a
-  fenced json output block binds whole as long as it fits that cap, so
-  keep declared outputs compact — the rosters and ledger previews stay
-  ~160 characters — and let the full answer live in the child's session.
+  fenced json output block binds whole as long as it fits that cap (a
+  bare JSON object that ends the answer binds too), so keep declared
+  outputs compact — the rosters and ledger previews stay ~160 characters
+  — and let the full answer live in the child's session.
 - Run registries live in kernel memory: a kernel restart loses `status`
   for old runs, but the children keep running under the supervisor
   (`rlm.list_subagents` sees them). Stop runs before restarting, or
