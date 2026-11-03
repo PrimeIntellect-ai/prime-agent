@@ -182,6 +182,7 @@ async def spawn(
     name: str,
     model: str | None = None,
     thinking: str | None = None,
+    cwd: str | None = None,
 ) -> RLMSpawnHandle:
     """Spawn a recursive Prime Agent child and return once its task is admitted.
 
@@ -189,8 +190,10 @@ async def spawn(
     ``model`` selects a child with an exact ``provider/model`` selector.
     ``thinking`` sets the child reasoning level (e.g. 'off', 'low', 'medium', 'high');
     defaults to the parent level; levels invalid for the resolved model fail the spawn.
+    ``cwd`` starts the child in that directory (relative to the session cwd); defaults
+    to the session cwd.
     """
-    return await _spawn(prompt, name=name, model=model, thinking=thinking)
+    return await _spawn(prompt, name=name, model=model, thinking=thinking, cwd=cwd)
 
 
 async def _spawn(
@@ -199,6 +202,7 @@ async def _spawn(
     name: str,
     model: str | None = None,
     thinking: str | None = None,
+    cwd: str | None = None,
     factory: dict[str, str] | None = None,
 ) -> RLMSpawnHandle:
     """``spawn`` plus the factory executor's run tag (``{runId, specId,
@@ -210,6 +214,8 @@ async def _spawn(
         kwargs["model"] = model
     if thinking is not None:
         kwargs["thinking"] = thinking
+    if cwd is not None:
+        kwargs["cwd"] = cwd
     if factory is not None:
         kwargs["factory"] = factory
     # Wire type stays "rlm.run" so kernels and hosts of different versions stay compatible.
@@ -657,8 +663,9 @@ class _RLMNamespace:
         name: str,
         model: str | None = None,
         thinking: str | None = None,
+        cwd: str | None = None,
     ) -> RLMSpawnHandle:
-        return await spawn(prompt, name=name, model=model, thinking=thinking)
+        return await spawn(prompt, name=name, model=model, thinking=thinking, cwd=cwd)
 
     async def create_session(
         self,

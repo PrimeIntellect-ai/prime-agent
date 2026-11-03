@@ -37,6 +37,7 @@ async fn scripted_engine(
         image_model_router: None,
         steering_mode: None,
         follow_up_mode: None,
+        factory_child: false,
         cwd,
         agent_dir: tmp.path().join("agent"),
         mcp_manager: None,

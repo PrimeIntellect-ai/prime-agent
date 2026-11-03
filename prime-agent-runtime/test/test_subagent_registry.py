@@ -62,7 +62,7 @@ class RlmSubagentRegistryTest(unittest.TestCase):
 
         self.assertEqual(subagents[0].status, "error")
 
-    def test_forwards_orchestrator_chosen_name_and_model_to_host(self) -> None:
+    def test_forwards_orchestrator_chosen_name_model_and_cwd_to_host(self) -> None:
         host_request = AsyncMock(
             return_value={
                 "rlm_child_id": "sub-a1b2c3d4",
@@ -78,6 +78,7 @@ class RlmSubagentRegistryTest(unittest.TestCase):
                     "check the API",
                     name="api-reviewer",
                     model="deepseek/deepseek-v4-flash",
+                    cwd="../api",
                 )
             )
 
@@ -88,6 +89,7 @@ class RlmSubagentRegistryTest(unittest.TestCase):
                 "kwargs": {
                     "name": "api-reviewer",
                     "model": "deepseek/deepseek-v4-flash",
+                    "cwd": "../api",
                 },
             },
         )

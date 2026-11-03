@@ -437,7 +437,9 @@ impl BashView {
             };
             return self.move_selection(delta);
         }
-        if kb.matches(key, "tui.select.confirm") {
+        if kb.matches(key, "tui.select.confirm")
+            || (self.mode == Mode::List && kb.matches(key, "app.modal.open"))
+        {
             return self.confirm_selection();
         }
         BashViewAction::None
@@ -763,26 +765,27 @@ impl BashView {
         self.detail_region_rows.set(rendered);
         lines
     }
-    /// The list's bottom hint: an override that empties the back binding drops
-    /// its key (the hint never advertises a key the handler does not take).
+    /// The list's bottom hint: an override that empties the open or back
+    /// binding drops its key (the hint never advertises a key the handler
+    /// does not take).
     fn list_hint(kb: &KeybindingsManager) -> String {
         let key = |binding: &str, fallback: &str| {
             kb.first_key(binding)
                 .map_or_else(|| fallback.to_string(), |key| format_key_text(&key))
         };
-        let close = match kb.first_key("app.modal.back") {
-            Some(back) => format!(
-                "{}/{}",
-                format_key_text(&back),
-                key("tui.select.cancel", "Esc")
-            ),
+        let bound = |binding: &str| kb.first_key(binding).map(|key| format_key_text(&key));
+        let open = match bound("app.modal.open") {
+            Some(open) => format!("{}/{open}", key("tui.select.confirm", "Enter")),
+            None => key("tui.select.confirm", "Enter"),
+        };
+        let close = match bound("app.modal.back") {
+            Some(back) => format!("{back}/{}", key("tui.select.cancel", "Esc")),
             None => key("tui.select.cancel", "Esc"),
         };
         format!(
-            "{}/{} move \u{b7} {} open \u{b7} {close} close",
+            "{}/{} move \u{b7} {open} open \u{b7} {close} close",
             key("tui.select.up", "\u{2191}"),
             key("tui.select.down", "\u{2193}"),
-            key("tui.select.confirm", "Enter"),
         )
     }
 

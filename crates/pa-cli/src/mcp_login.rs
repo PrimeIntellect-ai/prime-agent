@@ -30,28 +30,30 @@ pub(crate) fn cli_mcp_manager(cwd: &std::path::Path, agent_dir: &std::path::Path
     let user_agent_dir = agent_dir.to_path_buf();
     let catalog_cwd = cwd.to_path_buf();
     let catalog_agent_dir = agent_dir.to_path_buf();
+    let user_servers: pa_core::mcp::UserServersFn = std::sync::Arc::new(move || {
+        let settings = pa_core::settings::SettingsManager::create(&user_cwd, &user_agent_dir);
+        Some(
+            settings
+                .global_settings()
+                .mcp_servers
+                .clone()
+                .unwrap_or_default()
+                .into_iter()
+                .filter_map(|(server, config)| {
+                    serde_json::from_value::<McpServerConfig>(config)
+                        .ok()
+                        .map(|parsed| (server, parsed))
+                })
+                .collect(),
+        )
+    });
+    let oauth_user_servers = std::sync::Arc::clone(&user_servers);
     McpManager::new(McpManagerOptions {
         auth_storage: AuthStorage::create_with_oauth(
             agent_dir,
-            std::sync::Arc::new(pa_core::mcp::McpOAuth::new()),
+            std::sync::Arc::new(pa_core::mcp::McpOAuth::new(oauth_user_servers)),
         ),
-        get_user_servers: Box::new(move || {
-            let settings = pa_core::settings::SettingsManager::create(&user_cwd, &user_agent_dir);
-            Some(
-                settings
-                    .global_settings()
-                    .mcp_servers
-                    .clone()
-                    .unwrap_or_default()
-                    .into_iter()
-                    .filter_map(|(server, config)| {
-                        serde_json::from_value::<McpServerConfig>(config)
-                            .ok()
-                            .map(|parsed| (server, parsed))
-                    })
-                    .collect(),
-            )
-        }),
+        get_user_servers: Box::new(move || user_servers()),
         begin_login: None,
         agent_dir: Some(agent_dir.to_path_buf()),
         get_catalog_sources: Some(Box::new(move || {

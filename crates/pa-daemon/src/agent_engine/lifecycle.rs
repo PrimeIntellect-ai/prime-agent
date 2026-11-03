@@ -72,34 +72,33 @@ impl AgentSessionEngine {
         let mcp_agent_dir = agent_dir.clone();
         let catalog_cwd = std::sync::Arc::clone(&cwd);
         let catalog_agent_dir = agent_dir.clone();
+        let user_servers: pa_core::mcp::UserServersFn = std::sync::Arc::new(move || {
+            // The live cwd slot, not the construction-time cwd: the rebind must reach the MCP
+            // settings discovery.
+            let mcp_cwd = mcp_cwd.read().expect("engine cwd lock").clone();
+            let settings = pa_core::settings::SettingsManager::create(&mcp_cwd, &mcp_agent_dir);
+            Some(
+                settings
+                    .global_settings()
+                    .mcp_servers
+                    .clone()
+                    .unwrap_or_default()
+                    .into_iter()
+                    .filter_map(|(server, server_config)| {
+                        serde_json::from_value(server_config)
+                            .ok()
+                            .map(|parsed| (server, parsed))
+                    })
+                    .collect::<std::collections::HashMap<String, pa_core::mcp::McpServerConfig>>(),
+            )
+        });
+        let oauth_user_servers = std::sync::Arc::clone(&user_servers);
         let mcp = pa_core::mcp::McpManager::new(pa_core::mcp::McpManagerOptions {
             auth_storage: pa_core::auth::AuthStorage::create_with_oauth(
                 &agent_dir,
-                std::sync::Arc::new(pa_core::mcp::McpOAuth::new()),
+                std::sync::Arc::new(pa_core::mcp::McpOAuth::new(oauth_user_servers)),
             ),
-            get_user_servers: Box::new(move || {
-                // The live cwd slot, not the construction-time cwd: the rebind must reach the MCP
-                // settings discovery.
-                let mcp_cwd = mcp_cwd.read().expect("engine cwd lock").clone();
-                let settings = pa_core::settings::SettingsManager::create(&mcp_cwd, &mcp_agent_dir);
-                Some(
-                    settings
-                        .global_settings()
-                        .mcp_servers
-                        .clone()
-                        .unwrap_or_default()
-                        .into_iter()
-                        .filter_map(|(server, server_config)| {
-                            serde_json::from_value(server_config)
-                                .ok()
-                                .map(|parsed| (server, parsed))
-                        })
-                        .collect::<std::collections::HashMap<
-                            String,
-                            pa_core::mcp::McpServerConfig,
-                        >>(),
-                )
-            }),
+            get_user_servers: Box::new(move || user_servers()),
             begin_login: None,
             agent_dir: Some(agent_dir),
             get_catalog_sources: Some(Box::new(move || {
@@ -188,6 +187,7 @@ impl AgentSessionEngine {
             autonomous_queue_purge: std::sync::Mutex::new(None),
             cwd,
             rlm_depth: std::sync::atomic::AtomicU32::new(0),
+            factory_child: std::sync::atomic::AtomicBool::new(false),
             rlm_max_depth_source: std::sync::Mutex::new("default"),
             pending_max_depth: std::sync::Mutex::new(None),
             reloaded_goal_update: std::sync::Mutex::new(None),
@@ -1182,6 +1182,9 @@ impl AgentSessionEngine {
             rlm_usage_store,
             progress_note_emit,
             rlm_depth: Some(self.rlm_depth.load(std::sync::atomic::Ordering::Relaxed)),
+            factory_child: self
+                .factory_child
+                .load(std::sync::atomic::Ordering::Relaxed),
             // The worker session runs under the daemon scheduler and its wake-ups.
             daemonless: false,
             model_info: Some(model.clone()),

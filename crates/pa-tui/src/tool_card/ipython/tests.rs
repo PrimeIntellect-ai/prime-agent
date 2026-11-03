@@ -260,7 +260,15 @@ fn running_cell_summary_ticks_live_elapsed() {
             .checked_sub(std::time::Duration::from_millis(1500))
             .expect("the clock is past the start"),
     );
-    let lines = render(&card, 0, Detail::Overview, &theme(), 100, true);
+    let lines = render(
+        &card,
+        0,
+        Detail::Overview,
+        Detail::Overview,
+        &theme(),
+        100,
+        true,
+    );
     let text = text_of(&lines[0]);
     assert!(text.contains("↑ 1 lines"), "got: {text}");
     // The duration slot ticks right after the line counts: the summary's
@@ -289,7 +297,15 @@ fn running_cell_long_preview_keeps_live_duration_visible() {
             .checked_sub(std::time::Duration::from_millis(1500))
             .expect("the clock is past the start"),
     );
-    let lines = render(&card, 0, Detail::Overview, &theme(), 80, true);
+    let lines = render(
+        &card,
+        0,
+        Detail::Overview,
+        Detail::Overview,
+        &theme(),
+        80,
+        true,
+    );
     let text = text_of(&lines[0]);
     // Pre-fix this line is red: the row overflows to 95 columns and the
     // right clip eats the duration slot entirely, so the summary's last
@@ -344,7 +360,15 @@ fn aborted_cell_never_renders_done_from_a_stale_exit_code() {
     });
     let mut card = cell_card(code, details, false, false);
     card.aborted = true;
-    let lines = render(&card, 0, Detail::Overview, &theme(), 100, true);
+    let lines = render(
+        &card,
+        0,
+        Detail::Overview,
+        Detail::Overview,
+        &theme(),
+        100,
+        true,
+    );
     let text = text_of(&lines[0]);
     assert!(text.contains("\u{2717}"), "got: {text}");
     assert!(!text.contains("\u{2713}"), "got: {text}");
@@ -486,6 +510,93 @@ fn bash_minority_cell_stays_python() {
     assert_eq!(bash_dominated_stats(&card), None);
 }
 
+fn edit_cell_card() -> ToolCallCard {
+    cell_card(
+        "await edit.run('src/app.py', 'x = 1', 'x = 2')",
+        json!({
+            "status": "ok",
+            "durationMs": 5,
+            "result": "'Edited src/app.py'",
+            "diffs": [{ "path": "src/app.py", "diff": "-10 x = 1\n+10 x = 2\n 11 y = 3\n    ..." }],
+        }),
+        false,
+        false,
+    )
+}
+
+fn trimmed_rows(lines: &[Line]) -> Vec<String> {
+    lines
+        .iter()
+        .skip(1)
+        .map(|line| text_of(line).trim_end().to_string())
+        .collect()
+}
+
+#[test]
+fn edit_diffs_collapse_to_a_file_summary_line_in_overview() {
+    let card = edit_cell_card();
+    let summary = vec!["    \u{2570}\u{2500} src/app.py +1 -1".to_string()];
+    let lines = render(
+        &card,
+        0,
+        Detail::Overview,
+        Detail::Overview,
+        &theme(),
+        40,
+        true,
+    );
+    assert_eq!(trimmed_rows(&lines), summary);
+    // A click-expanded card keeps the conversation level's collapsed diff.
+    let toggled = render(&card, 0, Detail::All, Detail::Overview, &theme(), 40, true);
+    assert!(!trimmed_rows(&toggled)
+        .iter()
+        .any(|row| row.contains("10 + x = 2")));
+}
+
+#[test]
+fn edit_diffs_expand_to_numbered_rows_in_details() {
+    let card = edit_cell_card();
+    let lines = render(
+        &card,
+        0,
+        Detail::Details,
+        Detail::Details,
+        &theme(),
+        40,
+        true,
+    );
+    assert_eq!(
+        trimmed_rows(&lines),
+        vec![
+            "    \u{2570}\u{2500} src/app.py +1 -1".to_string(),
+            "  10 - x = 1".to_string(),
+            "  10 + x = 2".to_string(),
+            "  11   y = 3".to_string(),
+            "       ...".to_string(),
+        ]
+    );
+    // Full-width rows on the diff backgrounds.
+    assert_eq!(text_of(&lines[2]).chars().count(), 40);
+    assert_eq!(
+        lines[3][1].style,
+        theme()
+            .fg_style(ThemeColor::ToolDiffAdded)
+            .patch(theme().bg_style(crate::theme::ThemeBg::ToolDiffAddedBg))
+    );
+    assert_eq!(
+        count(
+            &card,
+            0,
+            Detail::Details,
+            Detail::Details,
+            &theme(),
+            40,
+            true
+        ),
+        lines.len()
+    );
+}
+
 #[test]
 fn an_aborted_cell_freezes_its_duration_from_card_timestamps() {
     let now = std::time::Instant::now();
@@ -493,8 +604,24 @@ fn an_aborted_cell_freezes_its_duration_from_card_timestamps() {
     card.started_at = now.checked_sub(std::time::Duration::from_secs(4));
     card.ended_at = now.checked_sub(std::time::Duration::from_secs(1));
     card.aborted = true;
-    let first = render(&card, 0, Detail::Overview, &theme(), 100, true);
-    let later = render(&card, 10, Detail::Overview, &theme(), 100, true);
+    let first = render(
+        &card,
+        0,
+        Detail::Overview,
+        Detail::Overview,
+        &theme(),
+        100,
+        true,
+    );
+    let later = render(
+        &card,
+        10,
+        Detail::Overview,
+        Detail::Overview,
+        &theme(),
+        100,
+        true,
+    );
     assert_eq!(
         first, later,
         "a settled timer never repaints a different duration"
