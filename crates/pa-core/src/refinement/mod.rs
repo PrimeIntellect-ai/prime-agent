@@ -483,15 +483,16 @@ fn read_refinement_history(path: &Path) -> Option<String> {
         use std::os::unix::fs::OpenOptionsExt;
         options.custom_flags(libc::O_NOFOLLOW);
     }
-    let mut file = match options.open(path) {
-        Ok(file) => file,
-        #[cfg(unix)]
+    let opened = options.open(path);
+    #[cfg(unix)]
+    let opened = match opened {
         Err(error) if error.raw_os_error() == Some(libc::ELOOP) => {
             // User-linked shared history keeps its existing permission policy.
             return std::fs::read_to_string(path).ok();
         }
-        Err(_) => return None,
+        other => other,
     };
+    let mut file = opened.ok()?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -870,10 +871,10 @@ mod tests {
             rollback_of: None,
             scope: None,
         };
-        let history_path = append_global_refinement(&dir, &result).unwrap();
+        append_global_refinement(&dir, &result).unwrap();
         #[cfg(unix)]
         assert_eq!(
-            crate::platform::perms::file_mode(&history_path),
+            crate::platform::perms::file_mode(&get_refinement_history_path(&dir)),
             Some(0o600)
         );
         let loaded = load_global_refinement_history(&dir);
