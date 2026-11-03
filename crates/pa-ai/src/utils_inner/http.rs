@@ -19,6 +19,10 @@ static H2_ALPN_CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
 /// provider JSON errors while bounding an untrusted peer's in-memory error payload.
 pub(crate) const MAX_ERROR_BODY_BYTES: usize = 1024 * 1024;
 
+/// Total time allowed to collect an error diagnostic after its response headers arrive. A total
+/// deadline also stops peers that drip bytes slowly enough to stay below the size budget.
+pub(crate) const ERROR_BODY_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
 /// Append the largest UTF-8 prefix that fits in the shared error-body budget. The boolean also
 /// handles a final multi-byte character that cannot fit in the remaining byte budget.
 pub(crate) fn append_bounded_error_text(out: &mut String, chunk: &str) -> bool {
@@ -197,11 +201,17 @@ impl HttpResponse {
         Ok(out)
     }
 
-    /// Read text from an error response, stopping once the diagnostic budget is full.
+    /// Read an error diagnostic until its size or time budget is exhausted, retaining any prefix
+    /// already received when the peer stalls.
     pub async fn read_error_text(&mut self) -> Result<String, ProviderError> {
         let mut out = String::new();
+        let deadline = tokio::time::Instant::now() + ERROR_BODY_READ_TIMEOUT;
         while out.len() < MAX_ERROR_BODY_BYTES {
-            let Some(chunk) = self.next_text().await? else {
+            let next = match tokio::time::timeout_at(deadline, self.next_text()).await {
+                Ok(result) => result?,
+                Err(_) => break,
+            };
+            let Some(chunk) = next else {
                 break;
             };
             if append_bounded_error_text(&mut out, &chunk) {
@@ -449,6 +459,54 @@ mod tests {
             close_tx.send(()).unwrap();
             server.await.unwrap();
         }
+    }
+
+    /// A peer that stalls below the byte cap must not hold an error diagnostic indefinitely.
+    #[tokio::test(start_paused = true)]
+    async fn error_text_returns_its_partial_body_after_the_deadline() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (close_tx, close_rx) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = [0u8; 4096];
+            let mut head = String::new();
+            loop {
+                let read = socket.read(&mut request).await.unwrap();
+                if read == 0 {
+                    return;
+                }
+                head.push_str(&String::from_utf8_lossy(&request[..read]));
+                if head.contains("\r\n\r\n") {
+                    break;
+                }
+            }
+            socket
+                .write_all(b"HTTP/1.1 500 Internal Server Error\r\nContent-Length: 20\r\nConnection: close\r\n\r\nshort")
+                .await
+                .unwrap();
+            close_rx.await.unwrap();
+        });
+
+        let mut response = send(RequestOptions::new(
+            reqwest::Method::GET,
+            format!("http://{addr}/"),
+        ))
+        .await
+        .unwrap();
+        let read = tokio::spawn(async move { response.read_error_text().await });
+        tokio::task::yield_now().await;
+        tokio::time::advance(std::time::Duration::from_secs(31)).await;
+        let body = tokio::time::timeout(std::time::Duration::from_secs(1), read)
+            .await
+            .expect("error diagnostic must finish after its deadline")
+            .unwrap()
+            .unwrap();
+        assert_eq!(body, "short");
+        close_tx.send(()).unwrap();
+        server.await.unwrap();
     }
 
     /// Serve one plain-text body split across two writes. The second write is held until `hold`

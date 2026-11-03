@@ -94,11 +94,17 @@ impl H2Response {
         }
     }
 
-    /// Read only the diagnostic prefix of an error response.
+    /// Read only the diagnostic prefix of an error response within the shared time budget.
     pub(crate) async fn read_error_text(&mut self) -> Result<String, ProviderError> {
         let mut out = String::new();
+        let deadline =
+            tokio::time::Instant::now() + crate::utils_inner::http::ERROR_BODY_READ_TIMEOUT;
         while out.len() < crate::utils_inner::http::MAX_ERROR_BODY_BYTES {
-            let Some(chunk) = self.next_bytes().await? else {
+            let next = match tokio::time::timeout_at(deadline, self.next_bytes()).await {
+                Ok(result) => result?,
+                Err(_) => break,
+            };
+            let Some(chunk) = next else {
                 break;
             };
             if crate::utils_inner::http::append_bounded_error_text(
@@ -520,6 +526,44 @@ mod h2_wire_tests {
             error,
             "The pending stream has been canceled\n  Deserialization error: to see the raw response, inspect the hidden field {error}.$response on this object."
         );
+    }
+
+    /// Bedrock's h2 error body also returns its diagnostic prefix if the peer holds the stream
+    /// open below the byte budget.
+    #[tokio::test(start_paused = true)]
+    async fn stalled_h2_error_body_returns_its_prefix_after_the_deadline() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (close_tx, close_rx) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            read_client_preface(&mut socket).await;
+            // HPACK static table entry 14 is `:status: 500`; leave the stream open.
+            socket
+                .write_all(&frame(0x1, 0x4, 1, &[0x8e]))
+                .await
+                .unwrap();
+            socket
+                .write_all(&frame(0x0, 0x0, 1, b"short"))
+                .await
+                .unwrap();
+            close_rx.await.unwrap();
+        });
+
+        let url = format!("http://{addr}/model/m/converse-stream");
+        let mut response = send_h2(options(url)).await.unwrap();
+        assert_eq!(response.status, 500);
+        let read = tokio::spawn(async move { response.read_error_text().await });
+        tokio::task::yield_now().await;
+        tokio::time::advance(std::time::Duration::from_secs(31)).await;
+        let body = tokio::time::timeout(std::time::Duration::from_secs(1), read)
+            .await
+            .expect("h2 error diagnostic must finish after its deadline")
+            .unwrap()
+            .unwrap();
+        assert_eq!(body, "short");
+        close_tx.send(()).unwrap();
+        server.await.unwrap();
     }
 
     /// An HTTP/1.1 answer at a prior-knowledge h2 endpoint: the pre-response protocol error, no

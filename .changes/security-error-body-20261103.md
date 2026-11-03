@@ -1,1 +1,1 @@
-- Limited oversized provider error diagnostics to 1 MiB to prevent unbounded memory growth.
+- Limited provider error diagnostics to 1 MiB and 30 seconds so oversized or stalled responses cannot hold an agent turn indefinitely.
