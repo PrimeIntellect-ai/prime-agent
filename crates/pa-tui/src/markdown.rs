@@ -717,9 +717,13 @@ fn heading_spans(text: &str, depth: usize, style: &MarkdownStyle) -> Vec<Span> {
             continue;
         }
         let underlined = s.style.add_modifier.contains(Modifier::UNDERLINED);
+        let generated_link = crate::hyperlinks::is_generated_link_style(s.style);
         s.style = taper;
         if underlined {
             s.style = s.style.add_modifier(Modifier::UNDERLINED);
+        }
+        if generated_link {
+            crate::hyperlinks::mark_generated_link(s);
         }
     }
     spans
@@ -1130,7 +1134,12 @@ pub fn to_ratatui_line(line: &Line) -> rt::Line<'static> {
     // TS `applyLineResets` normalizes every painted line right before the differential paint.
     let spans: Vec<rt::Span<'static>> = line
         .iter()
-        .map(|s| rt::Span::styled(crate::width::normalize_terminal_output(&s.content), s.style))
+        .map(|s| {
+            rt::Span::styled(
+                crate::width::normalize_terminal_output(&s.content),
+                crate::hyperlinks::paint_style(s.style),
+            )
+        })
         .collect();
     rt::Line::from(spans)
 }

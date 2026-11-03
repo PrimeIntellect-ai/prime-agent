@@ -157,7 +157,9 @@ pub fn overlay_toasts(
         // content opened one or a wrapped link carried one in from the
         // row above: the close lands before the pill's cells, and an
         // unmatched close is a terminal no-op.
-        out.push(Span::raw(crate::hyperlinks::OSC8_CLOSE.to_string()));
+        let mut close_link = Span::raw(crate::hyperlinks::OSC8_CLOSE.to_string());
+        crate::hyperlinks::mark_generated_link(&mut close_link);
+        out.push(close_link);
         // The pill sits at its right-edge column even when the covered
         // content runs short: the prefix pads up to the column first.
         let prefix_width = crate::width::line_width(&out);

@@ -353,7 +353,11 @@ pub(crate) fn render_user_block_with_style(
                 if span.style.fg == md.link_url.fg {
                     style = style.patch(md.link_url);
                 }
-                Span::styled(span.content, style)
+                let mut restyled = Span::styled(span.content, style);
+                if crate::hyperlinks::is_generated_link_style(span.style) {
+                    crate::hyperlinks::mark_generated_link(&mut restyled);
+                }
+                restyled
             })
             .collect();
         row.extend(mask.restore_line(theme, &restyled));

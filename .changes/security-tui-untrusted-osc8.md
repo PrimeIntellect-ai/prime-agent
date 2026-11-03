@@ -1,0 +1,1 @@
+- Fixed raw terminal escape sequences in agent output creating hidden clickable links.

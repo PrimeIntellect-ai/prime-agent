@@ -103,16 +103,18 @@ impl AuthPanel {
             // the visible rows would no longer match the copied or linked target.
             let budget = width.saturating_sub(2).max(1);
             let push_url_row = |lines: &mut Vec<Line>, display: &str| {
-                let linked = if crate::hyperlinks::hyperlinks_enabled() {
+                let link_enabled = crate::hyperlinks::hyperlinks_enabled();
+                let linked = if link_enabled {
                     format!("{}{display}{OSC8_CLOSE}", osc8_open(&safe))
                 } else {
                     display.to_string()
                 };
                 // At one column there is no room for the usual indent as well as the URL.
-                lines.push(vec![
-                    Span::raw(if width > 1 { " " } else { "" }),
-                    theme.fg_span(ThemeColor::Text, linked),
-                ]);
+                let mut link = theme.fg_span(ThemeColor::Text, linked);
+                if link_enabled {
+                    crate::hyperlinks::mark_generated_link(&mut link);
+                }
+                lines.push(vec![Span::raw(if width > 1 { " " } else { "" }), link]);
             };
             let mut display = String::new();
             let mut display_width = 0usize;

@@ -1,6 +1,12 @@
 use super::*;
 use std::fmt::Write as FmtWrite;
 
+fn generated_link_span(content: impl Into<String>, style: Style) -> Span {
+    let mut span = Span::styled(content, style);
+    crate::hyperlinks::mark_generated_link(&mut span);
+    span
+}
+
 #[test]
 fn review_markdown_escaped_delimiters_keep_their_emphasis() {
     let style = MarkdownStyle::default();
@@ -48,7 +54,7 @@ fn review_markdown_destinations_balance_before_a_title() {
     assert_eq!(
         spans,
         vec![
-            Span::styled(
+            generated_link_span(
                 format!(
                     "{}t{}",
                     crate::hyperlinks::osc8_open("foo(bar"),
@@ -160,7 +166,7 @@ fn review_markdown_legacy_links_keep_metadata_and_session_base() {
     assert_eq!(
         line,
         vec![
-            Span::styled(
+            generated_link_span(
                 format!(
                     "{}link{}",
                     crate::hyperlinks::osc8_open("file:///workspace/project/url"),
@@ -975,7 +981,7 @@ fn balanced_parens_in_a_link_destination_stay_intact() {
     let spans = render_inline(&format!("[math]({url})"), &style);
     assert_eq!(
         spans,
-        vec![Span::styled(
+        vec![generated_link_span(
             format!(
                 "{}math{}",
                 crate::hyperlinks::osc8_open(url),
@@ -1012,7 +1018,7 @@ fn escaped_parens_never_open_or_close_the_link_destination() {
         assert_eq!(
             super::render_inline(text, &style),
             vec![
-                Span::styled(
+                generated_link_span(
                     format!(
                         "{}a{}",
                         crate::hyperlinks::osc8_open(href),
