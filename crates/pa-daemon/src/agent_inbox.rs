@@ -60,18 +60,19 @@ pub(crate) fn reminder_interval_ms(cwd: &Path, agent_dir: &Path) -> u64 {
 /// The periodic unread reminder: while the session's inbox stays
 /// non-empty, one steering row repeats the waiting count every
 /// `reminderIntervalMs`; the interval re-reads each cycle, and an empty
-/// inbox skips the cycle (the period resets when it drains).
+/// inbox, a `0` interval, or `agentInbox.enabled: false` skips the cycle
+/// (the period resets when it drains).
 pub(crate) fn spawn_inbox_reminder(
     engine: Weak<AgentSessionEngine>,
     core: &Arc<Mutex<SessionCore>>,
     work_notify: &Arc<Notify>,
     recovery: &Arc<Mutex<Option<WorkerRecoveryJournal>>>,
-    agent_dir: &std::path::PathBuf,
+    agent_dir: &std::path::Path,
 ) {
     let core = Arc::clone(core);
     let work_notify = Arc::clone(work_notify);
     let recovery = Arc::clone(recovery);
-    let agent_dir = agent_dir.clone();
+    let agent_dir = agent_dir.to_path_buf();
     tokio::spawn(async move {
         loop {
             let interval_ms = match engine.upgrade() {
@@ -84,6 +85,12 @@ pub(crate) fn spawn_inbox_reminder(
                 interval_ms
             };
             tokio::time::sleep(std::time::Duration::from_millis(wait_ms)).await;
+            // `0` disables the reminder: this cycle admits nothing; the
+            // poll re-reads the interval next cycle, so a later settings
+            // flip re-arms it.
+            if interval_ms == 0 {
+                continue;
+            }
             let Some(engine) = engine.upgrade() else {
                 return;
             };
@@ -93,6 +100,12 @@ pub(crate) fn spawn_inbox_reminder(
             let Some(inbox) = engine.inbox() else {
                 continue;
             };
+            // The kill switch re-reads each cycle: `agentInbox.enabled:
+            // false` never wakes the agent (the notice sink applies the
+            // same setting per notice).
+            if !inbox_enabled(&engine.cwd(), &agent_dir) {
+                continue;
+            }
             let closed = {
                 let engine = std::sync::Arc::clone(&engine);
                 move || engine.session_is_closed()
