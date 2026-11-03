@@ -3,11 +3,11 @@
 
 use std::collections::HashMap;
 use std::fs;
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard, OnceLock};
 
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, bail, Result};
 
 pub const CONFIG_DIR_NAME: &str = ".prime/agent";
 
@@ -54,6 +54,7 @@ pub trait SettingsStorage: Send + Sync {
 pub struct FileSettingsStorage {
     global_path: PathBuf,
     project_path: PathBuf,
+    project_root: PathBuf,
 }
 
 use crate::platform::lock_dir::LockDir as LockGuard;
@@ -64,9 +65,11 @@ const STALE_AFTER: std::time::Duration = std::time::Duration::from_secs(10);
 impl FileSettingsStorage {
     pub fn new(cwd: impl Into<PathBuf>, agent_dir: impl Into<PathBuf>) -> Self {
         let agent_dir: PathBuf = agent_dir.into();
+        let project_root: PathBuf = cwd.into();
         FileSettingsStorage {
             global_path: agent_dir.join("settings.json"),
-            project_path: cwd.into().join(CONFIG_DIR_NAME).join("settings.json"),
+            project_path: project_root.join(CONFIG_DIR_NAME).join("settings.json"),
+            project_root,
         }
     }
 
@@ -75,6 +78,49 @@ impl FileSettingsStorage {
             SettingsScope::Global => &self.global_path,
             SettingsScope::Project => &self.project_path,
         }
+    }
+
+    /// Resolve the existing file or closest existing ancestor. Project settings
+    /// may share a file inside the project, but must not read an external file
+    /// that a checked-out repository linked into `.prime/agent`.
+    fn project_path_within_root(&self, path: &Path) -> Result<PathBuf> {
+        let root = fs::canonicalize(&self.project_root)?;
+        let mut candidate = path;
+        loop {
+            match fs::symlink_metadata(candidate) {
+                Ok(_) => {
+                    let resolved = fs::canonicalize(candidate)?;
+                    if !resolved.starts_with(&root) {
+                        bail!("Project settings path escapes the project root");
+                    }
+                    return Ok(resolved);
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    candidate = candidate
+                        .parent()
+                        .ok_or_else(|| anyhow!("Project settings path has no parent"))?;
+                }
+                Err(error) => return Err(error.into()),
+            }
+        }
+    }
+
+    fn read_file(&self, scope: SettingsScope, path: &Path) -> Result<String> {
+        if scope == SettingsScope::Global {
+            return Ok(fs::read_to_string(path)?);
+        }
+        let mut file = fs::File::open(path)?;
+        // Verify the file actually opened, not only the path checked before
+        // open: a swapped symlink cannot make an outside file pass the check.
+        let opened = file.metadata()?;
+        let resolved = self.project_path_within_root(path)?;
+        let checked = fs::metadata(resolved)?;
+        if stat_identity(&opened).is_none() || stat_identity(&opened) != stat_identity(&checked) {
+            bail!("Project settings path changed while reading");
+        }
+        let mut content = String::new();
+        file.read_to_string(&mut content)?;
+        Ok(content)
     }
 
     fn acquire_lock(path: &Path) -> Result<LockGuard> {
@@ -183,6 +229,9 @@ impl SettingsStorage for FileSettingsStorage {
     fn read(&self, scope: SettingsScope) -> Result<Option<String>> {
         let path = self.path(scope);
         let _process_guard = process_lock(path);
+        if scope == SettingsScope::Project {
+            self.project_path_within_root(path)?;
+        }
         let now_identity = fs::metadata(path)
             .ok()
             .and_then(|metadata| stat_identity(&metadata));
@@ -202,7 +251,7 @@ impl SettingsStorage for FileSettingsStorage {
             }
         }
         let guard = Self::acquire_lock(path)?;
-        let content = fs::read_to_string(path)?;
+        let content = self.read_file(scope, path)?;
         drop(guard);
         read_cache()
             .lock()
@@ -224,13 +273,16 @@ impl SettingsStorage for FileSettingsStorage {
     ) -> Result<()> {
         let path = self.path(scope);
         let _process_guard = process_lock(path);
+        if scope == SettingsScope::Project {
+            self.project_path_within_root(path)?;
+        }
         let file_exists = path.exists();
         let mut held: Option<LockGuard> = None;
         if file_exists {
             held = Some(Self::acquire_lock(path)?);
         }
         let current = if file_exists {
-            Some(fs::read_to_string(path)?)
+            Some(self.read_file(scope, path)?)
         } else {
             None
         };
@@ -241,15 +293,26 @@ impl SettingsStorage for FileSettingsStorage {
                     fs::create_dir_all(dir)?;
                 }
             }
+            if scope == SettingsScope::Project {
+                self.project_path_within_root(path)?;
+            }
             if held.is_none() {
                 held = Some(Self::acquire_lock(path)?);
                 // A racing first writer may have landed since the unlocked read.
                 if path.exists() {
-                    next = update(Some(fs::read_to_string(path)?));
+                    next = update(Some(self.read_file(scope, path)?));
                 }
             }
             if let Some(content) = next {
-                atomic_write_with(path, &content, AtomicWriteOptions { fsync: true })?;
+                let write_path = match scope {
+                    SettingsScope::Global => path.to_path_buf(),
+                    SettingsScope::Project => {
+                        self.project_path_within_root(path)?;
+                        self.project_path_within_root(path.parent().unwrap())?
+                            .join(path.file_name().unwrap())
+                    }
+                };
+                atomic_write_with(&write_path, &content, AtomicWriteOptions { fsync: true })?;
             }
         }
         drop(held);
@@ -335,6 +398,30 @@ impl SettingsStorage for InMemorySettingsStorage {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[cfg(unix)]
+    fn project_settings_rejects_an_external_directory_link() {
+        use std::os::unix::fs::symlink;
+
+        let root = tempfile::tempdir().unwrap();
+        let project = root.path().join("project");
+        let external = root.path().join("external");
+        fs::create_dir_all(&project).unwrap();
+        fs::create_dir_all(external.join("agent")).unwrap();
+        fs::write(external.join("agent/settings.json"), r#"{"theme":"prime"}"#).unwrap();
+        symlink(&external, project.join(".prime")).unwrap();
+        let storage = FileSettingsStorage::new(&project, root.path().join("agent"));
+
+        assert!(storage.read(SettingsScope::Project).is_err());
+        assert!(storage
+            .with_lock(SettingsScope::Project, &mut |_| Some("{}".into()))
+            .is_err());
+        assert_eq!(
+            fs::read_to_string(external.join("agent/settings.json")).unwrap(),
+            r#"{"theme":"prime"}"#
+        );
+    }
 
     #[test]
     fn in_memory_round_trip() {
