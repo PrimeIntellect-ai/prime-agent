@@ -3854,6 +3854,54 @@ class FactoryExecutorTest(_ExecutorTestCase):
         self.assertNotIn("...", captured_event["answer"])
 
     @async_test
+    async def test_a_fenced_json_output_at_the_binding_cap_binds(self) -> None:
+        # The binding lane stores a settled child's answer capped at
+        # ANSWER_BINDING_CAP, which sits at parity with the host's collect
+        # bound: the daemon's ANSWER_TEXT_MAX_CHARS
+        # (crates/pa-daemon/src/rlm_child_model.rs), 65,536 characters —
+        # the hard-coded literal below, not the factory constant, so a cap
+        # below the host bound fails the test. The old 8192 cap sat below
+        # that bound, so a valid fenced JSON between the two (a design
+        # node's ~27 KiB output, observed three times) was cut mid-object
+        # BEFORE the parse and failed capture deterministically. A fenced
+        # JSON exactly the host bound long binds whole; any smaller cap
+        # cuts it and fails.
+        body = {"design": {"plan": "p"}}
+        long_json = f"```json\n{json.dumps(body)}\n```"
+        body["design"]["plan"] = "p" * (1 + 65_536 - len(long_json))
+        long_json = f"```json\n{json.dumps(body)}\n```"
+        assert len(long_json) == 65_536
+        self.host.outcomes["design"] = {"status": "done", "answer": long_json}
+        self.host.outcomes["build"] = {"status": "done", "answer": "DONE"}
+        self.store_machine(
+            {
+                "run": {"failure_policy": "escalate", "max_parallel": 4},
+                "states": [
+                    {
+                        "id": "design",
+                        "entry": True,
+                        "subagent": "worker",
+                        "outputs": [{"name": "design", "type": "json"}],
+                    },
+                    {
+                        "id": "build",
+                        "subagent": "worker",
+                        "inputs": [{"name": "design", "type": "json", "from": "design.design"}],
+                    },
+                ],
+                "transitions": [{"from": "design", "to": "build"}],
+            }
+        )
+        result = await self.start()
+        status = await self.settle(result)
+        self.assertEqual(status["state"], "done")
+        self.assertEqual(self.all_events_of(result, "output_capture_failed"), [])
+        # The port value bound whole: the dependent's prompt carries the
+        # entire cap-sized design, not a cut.
+        build_prompt = self.host.spawn_calls("build")[0]["prompt"]
+        self.assertIn(f"- design: {json.dumps(body['design'])}", build_prompt)
+
+    @async_test
     async def test_a_json_null_output_is_a_captured_value_not_a_failure(self) -> None:
         # Review finding (PR #3462): the capture-complete check conflated a
         # port that parsed as JSON null with a missing port — a legit null
