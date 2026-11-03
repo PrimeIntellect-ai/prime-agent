@@ -274,25 +274,15 @@ mod tests {
     }
 
     #[test]
-    fn custom_theme_cannot_break_out_of_export_style_element() {
-        let dir = tempfile::TempDir::new().expect("temp dir");
-        let themes = dir.path().join("themes");
-        std::fs::create_dir_all(&themes).expect("themes dir");
-        let theme = serde_json::json!({
-            "name": "hostile",
-            "colors": {
-                "accent": "#fff</style><script>window.themeValue=1</script>",
-                "key</style><script>window.themeKey=1</script>": "#123456"
-            },
-            "export": {
-                "pageBg": "#000</style><script>window.themeBackground=1</script>"
-            }
-        });
-        std::fs::write(
-            themes.join("hostile.json"),
-            serde_json::to_vec(&theme).expect("serialize theme"),
-        )
-        .expect("write theme");
+    fn generated_html_cannot_break_out_of_export_style_element() {
+        // Keep this boundary safe even if another caller supplies a theme
+        // without going through the file parser's color validation.
+        let theme = theme::ExportTheme {
+            theme_vars: "--accent: #fff</style><script>window.themeValue=1</script>;".to_string(),
+            body_bg: "#000</style><script>window.themeBackground=1</script>".to_string(),
+            container_bg: "#123456".to_string(),
+            info_bg: "#654321".to_string(),
+        };
         let data = SessionExportData {
             header: serde_json::json!({"type": "session", "id": "s"}),
             entries: vec![],
@@ -301,16 +291,7 @@ mod tests {
             tools: None,
             rendered_tools: None,
         };
-        let output = dir.path().join("out.html");
-        export_session_to_html(
-            &data,
-            Some("hostile"),
-            dir.path(),
-            &dir.path().join("session.jsonl"),
-            output.to_str(),
-        )
-        .expect("export");
-        let html = std::fs::read_to_string(output).expect("read export");
+        let html = generate_html(&data, &theme);
         assert_eq!(html.matches("</style>").count(), 1);
         assert!(!html.contains("<script>window.theme"));
     }
