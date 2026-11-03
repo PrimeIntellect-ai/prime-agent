@@ -1,6 +1,6 @@
 use super::{
-    auxiliary_model, compaction, compaction_exec, image_model_routing, ipython_state,
-    provider_adapter, refine, semantic_edges, telemetry, AgentSession, PromptBatchRow,
+    auxiliary_model, compaction, compaction_exec, image_model_routing, ipython_state, model_usage,
+    provider_adapter, refine, rlm_usage, semantic_edges, telemetry, AgentSession, PromptBatchRow,
 };
 
 impl AgentSession {
@@ -100,6 +100,36 @@ impl AgentSession {
     /// installs it once the session telemetry is assembled).
     pub fn set_skill_telemetry(&mut self, telemetry: std::sync::Arc<telemetry::SessionTelemetry>) {
         self.skill_telemetry = Some(telemetry);
+    }
+
+    /// Bind the durable store the session's `model_usage` rows append to.
+    pub fn set_usage_store(&mut self, store: std::sync::Arc<dyn rlm_usage::RlmChildUsageStore>) {
+        self.usage_store = store;
+    }
+
+    /// Record one billed model call made outside the agent loop. A failed
+    /// append is logged; the call's result stands either way. Once handed
+    /// off, the append survives cancellation of this caller, and it lands
+    /// only in this session.
+    pub async fn record_model_usage(&self, usage: Option<model_usage::ModelUsage>) {
+        let Some(usage) = usage else {
+            return;
+        };
+        let session = std::sync::Arc::clone(&self.session);
+        let store = std::sync::Arc::clone(&self.usage_store);
+        // The task owns the resolved bill before the first await. Dropping
+        // its JoinHandle detaches the append instead of dropping the bill.
+        // This session's manager never moves to another session, so the id
+        // read inside the task is still the one the bill was made in.
+        let recording = tokio::spawn(async move {
+            let session_id = session.lock().await.get_session_id().to_string();
+            if let Err(error) = store.append_model_usage(session_id, usage).await {
+                eprintln!("pa-core: model usage row not persisted: {error}");
+            }
+        });
+        if let Err(error) = recording.await {
+            eprintln!("pa-core: model usage recording task failed: {error}");
+        }
     }
 
     /// Bind the auto-refine surface for this session: whether the session may

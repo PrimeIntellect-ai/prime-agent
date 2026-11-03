@@ -393,6 +393,7 @@ fn the_focused_dock_expands_into_one_row_per_group() {
         heartbeats_paused: 1,
         shells: vec!["cargo test · 12.0s".to_string()],
         shells_persistent: 0,
+        factory_specs: 2,
         factory_runs: vec!["nightly paused".to_string()],
         factory_counts: crate::factory_view::FactoryRunCounts {
             running: 0,
@@ -412,8 +413,8 @@ fn the_focused_dock_expands_into_one_row_per_group() {
         vec![
             " ◆ subagents   3 running · 1 idle · 2 inactive",
             " ◷ heartbeats  5m lane canary",
-            " ▸ shells      cargo test · 12.0s",
-            " ⚙ factory     nightly paused",
+            " ▸ shells      1 running · 0 persistent  ·  cargo test · 12.0s",
+            " ⚙ factory     2 factories · 0 running · 1 paused  ·  nightly paused",
             " Pursuing goal (0s)",
         ]
     );
@@ -476,18 +477,48 @@ fn the_expanded_dock_bands_exactly_the_selected_row() {
     assert!(frame[1].iter().all(|span| span.style.bg.is_none()));
 }
 
-/// A row lists as many items as fit and counts the rest as `+N`.
+/// A row lists as many items as fit and counts the rest as `+N`; the shells row leads with its
+/// running and persistent counts, and the marker counts the commands it hides.
 #[test]
 fn an_overflowing_expanded_row_counts_the_rest() {
     let theme = Theme::builtin("prime", ColorMode::TrueColor);
     let dock = ActivityDock {
         shells: items(9),
+        shells_persistent: 2,
         selected: ActivityGroup::Subagents,
         focused: true,
         ..ActivityDock::default()
     };
-    let texts = line_texts(&render_activity_dock(&dock, &theme, 50));
-    assert_eq!(texts[3], " ▸ shells      item 1  ·  item 2  ·  item 3  +6");
+    let texts = line_texts(&render_activity_dock(&dock, &theme, 60));
+    assert_eq!(
+        texts[3],
+        " ▸ shells      9 running · 2 persistent  ·  item 1  +8"
+    );
+}
+
+/// Stored factory specs without a live run still fill the expanded factory row with its counts,
+/// while the collapsed segment keeps counting live runs only.
+#[test]
+fn the_expanded_factory_row_counts_stored_specs_without_runs() {
+    let theme = Theme::builtin("prime", ColorMode::TrueColor);
+    let dock = ActivityDock {
+        factory_specs: 2,
+        factory_group: true,
+        selected: ActivityGroup::Subagents,
+        focused: true,
+        ..ActivityDock::default()
+    };
+    let texts = line_texts(&render_activity_dock(&dock, &theme, 80));
+    assert_eq!(
+        texts[4].trim_end(),
+        " ⚙ factory     2 factories · 0 running"
+    );
+    let collapsed = ActivityDock {
+        focused: false,
+        ..dock
+    };
+    let texts = line_texts(&render_activity_dock(&collapsed, &theme, 80));
+    assert!(texts[1].ends_with("⚙ 0 factory"), "{texts:?}");
 }
 
 /// A large activity list fits by terminal cells, including a multi-digit omitted count.

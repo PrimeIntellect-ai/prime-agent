@@ -1429,3 +1429,100 @@ async fn run_boundaries_record_git_state() {
         ]
     );
 }
+
+/// Cancelling a caller once its bill is resolved must not cancel that bill,
+/// whether the session lock or the durable store is busy.
+#[tokio::test]
+async fn a_resolved_model_bill_survives_its_callers_cancellation() {
+    use std::future::Future;
+    use std::task::{Context, Waker};
+    use tokio::sync::Notify;
+
+    struct GatedStore {
+        inner: Arc<dyn rlm_usage::RlmChildUsageStore>,
+        entered: Notify,
+        release: Notify,
+        completed: Notify,
+    }
+    impl rlm_usage::RlmChildUsageStore for GatedStore {
+        fn last_assistant(
+            &self,
+        ) -> rlm_usage::RlmChildUsageFuture<'_, Option<(String, pa_types::ai::Usage)>> {
+            self.inner.last_assistant()
+        }
+        fn append_attribution(
+            &self,
+            row_id: &str,
+            target_id: &str,
+            child_usage: pa_types::ai::Usage,
+            origin: Option<pa_types::session::ChildUsageOrigin>,
+        ) -> rlm_usage::RlmChildUsageFuture<'_, std::io::Result<rlm_usage::ChildUsageAppendResult>>
+        {
+            self.inner
+                .append_attribution(row_id, target_id, child_usage, origin)
+        }
+        fn append_model_usage(
+            &self,
+            session_id: String,
+            usage: model_usage::ModelUsage,
+        ) -> rlm_usage::RlmChildUsageFuture<'_, std::io::Result<()>> {
+            Box::pin(async move {
+                self.entered.notify_one();
+                self.release.notified().await;
+                let result = self.inner.append_model_usage(session_id, usage).await;
+                self.completed.notify_one();
+                result
+            })
+        }
+    }
+
+    let mut session = scripted_session().await;
+    let store = Arc::new(GatedStore {
+        inner: Arc::clone(&session.usage_store),
+        entered: Notify::new(),
+        release: Notify::new(),
+        completed: Notify::new(),
+    });
+    session.set_usage_store(store.clone());
+    let bill = model_usage::ModelUsage::new(
+        "compaction_discarded",
+        "test",
+        "m",
+        pa_types::ai::Usage {
+            input: 11,
+            output: 7,
+            total_tokens: 18,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let busy_session = Arc::clone(session.session_handle()).lock_owned().await;
+    let mut recording = Box::pin(session.record_model_usage(Some(bill.clone())));
+    // One poll hands the bill to its recording task, which waits on the
+    // held session lock. Readiness is the store's signal, never a fixed sleep.
+    assert!(recording
+        .as_mut()
+        .poll(&mut Context::from_waker(Waker::noop()))
+        .is_pending());
+    drop(recording);
+    drop(busy_session);
+    tokio::time::timeout(std::time::Duration::from_secs(5), store.entered.notified())
+        .await
+        .expect("recording reached the store");
+    store.release.notify_one();
+    tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        store.completed.notified(),
+    )
+    .await
+    .expect("a resolved bill must persist after its caller is cancelled");
+    let rows: Vec<serde_json::Value> = session
+        .entries()
+        .await
+        .into_iter()
+        .map(|entry| serde_json::to_value(entry).unwrap())
+        .filter(|entry| entry["customType"] == model_usage::MODEL_USAGE_CUSTOM_TYPE)
+        .map(|entry| entry["data"].clone())
+        .collect();
+    assert_eq!(rows, vec![serde_json::to_value(bill).unwrap()]);
+}

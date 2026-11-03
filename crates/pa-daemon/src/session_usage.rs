@@ -11,6 +11,7 @@ use pa_types::JsNumber;
 use serde::{Deserialize, Serialize};
 
 use pa_core::session_engine::compaction_exec::{add_assistant_usage, subtract_assistant_usage};
+use pa_core::session_engine::model_usage::MODEL_USAGE_CUSTOM_TYPE;
 
 /// The token/cost summary the rows publish: `inputTokens` folds cache reads
 /// and writes into the input total; `cost` is the provider-billed total.
@@ -275,7 +276,7 @@ pub struct UsageScan {
     attributed_child_usage: Usage,
     attributed_child_ids: std::collections::HashSet<String>,
     #[serde(with = "usage_bits")]
-    summarization_usage: Usage,
+    billed_row_usage: Usage,
 }
 
 impl UsageScan {
@@ -319,10 +320,10 @@ impl UsageScan {
         }
     }
 
-    /// A `compaction` or `branch_summary` entry's own usage (the summarization's billed block).
-    pub(crate) fn fold_summarization(&mut self, usage: Option<Usage>) {
-        if let Some(usage) = usage {
-            add_assistant_usage(&mut self.summarization_usage, &usage);
+    /// A [`BilledRow`]'s usage: a model call made outside the agent loop.
+    pub(crate) fn fold_billed_row(&mut self, row: Option<BilledRow>) {
+        if let Some(row) = row {
+            add_assistant_usage(&mut self.billed_row_usage, &row.usage);
         }
     }
 
@@ -334,7 +335,7 @@ impl UsageScan {
         for (_, usage) in &self.assistant_usage_by_id.entries {
             add_assistant_usage(&mut total, usage);
         }
-        add_assistant_usage(&mut total, &self.summarization_usage);
+        add_assistant_usage(&mut total, &self.billed_row_usage);
         let mut own = total;
         subtract_assistant_usage(&mut own, &self.attributed_child_usage);
         SessionUsageTotals { own, total }
@@ -348,6 +349,90 @@ impl UsageScan {
     }
 }
 
+/// One model call a non-message row bills: compactions and branch summaries
+/// (the summarizer's usage on the row) and `model_usage` rows (refinement
+/// planning and review, side questions). `model` is the serving
+/// `(provider, modelId)` when the row records it.
+pub(crate) struct BilledRow {
+    pub(crate) usage: Usage,
+    pub(crate) model: Option<(String, String)>,
+}
+
+/// The fields a billed row keeps its call in.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct BilledRowFields {
+    #[serde(default)]
+    custom_type: Option<String>,
+    #[serde(default)]
+    usage: Option<ScanUsage>,
+    #[serde(default)]
+    provider: Option<String>,
+    #[serde(default)]
+    model_id: Option<String>,
+    /// Typed straight away: a custom row with other data fails the parse
+    /// and bills nothing, without building that data in memory.
+    #[serde(default)]
+    data: Option<ModelUsageData>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ModelUsageData {
+    usage: ScanUsage,
+    provider: String,
+    model_id: String,
+}
+
+/// The one place that knows which rows besides assistant messages bill a
+/// model call and where each keeps it. `fields` parses the row lazily: only
+/// a candidate row type pays for it.
+fn billed_row(type_: &str, fields: impl FnOnce() -> Option<BilledRowFields>) -> Option<BilledRow> {
+    match type_ {
+        "compaction" | "branch_summary" => {
+            let fields = fields()?;
+            Some(BilledRow::new(
+                fields.usage?,
+                fields.provider.zip(fields.model_id),
+            ))
+        }
+        "custom" => {
+            let fields = fields()?;
+            if fields.custom_type.as_deref() != Some(MODEL_USAGE_CUSTOM_TYPE) {
+                return None;
+            }
+            let data = fields.data?;
+            Some(BilledRow::new(
+                data.usage,
+                Some((data.provider, data.model_id)),
+            ))
+        }
+        _ => None,
+    }
+}
+
+impl BilledRow {
+    fn new(usage: ScanUsage, model: Option<(String, String)>) -> Self {
+        Self {
+            usage: usage.into(),
+            model: model
+                .filter(|(provider, model_id)| !provider.is_empty() && !model_id.is_empty()),
+        }
+    }
+}
+
+/// [`billed_row`] over an in-memory store entry.
+pub(crate) fn billed_store_row(entry: &crate::session_store::SessionEntry) -> Option<BilledRow> {
+    billed_row(&entry.type_, || {
+        BilledRowFields::deserialize(&entry.fields).ok()
+    })
+}
+
+/// [`billed_row`] over one raw JSONL line.
+pub(crate) fn billed_line(type_: &str, line: &str) -> Option<BilledRow> {
+    billed_row(type_, || serde_json::from_str(line).ok())
+}
+
 /// The standalone scanner's minimal entry parse: only the usage fold's fields.
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -358,8 +443,6 @@ struct ScanEntry {
     id: String,
     #[serde(default)]
     message: Option<ScanMessage>,
-    #[serde(default)]
-    usage: Option<ScanUsage>,
     #[serde(default)]
     target_id: Option<String>,
     #[serde(default)]
@@ -378,8 +461,9 @@ struct ScanMessage {
 }
 
 impl ScanEntry {
-    /// Fold this parsed entry into a scan (the same fold the listing scan drives).
-    fn fold_into(&self, scan: &mut UsageScan) {
+    /// Fold this parsed entry into a scan (the same fold the listing scan
+    /// drives); `billed` is the entry's [`BilledRow`], if any.
+    fn fold_into(&self, scan: &mut UsageScan, billed: Option<BilledRow>) {
         match self.type_.as_str() {
             "message" => {
                 let (role, usage) = self.message.as_ref().map_or((None, None), |message| {
@@ -393,10 +477,7 @@ impl ScanEntry {
                 self.child_usage.map(Usage::from),
                 self.aggregate_usage.map(Usage::from),
             ),
-            "compaction" | "branch_summary" => {
-                scan.fold_summarization(self.usage.map(Usage::from));
-            }
-            _ => {}
+            _ => scan.fold_billed_row(billed),
         }
     }
 }
@@ -419,7 +500,8 @@ fn scan_file(path: &Path) -> Option<UsageScan> {
         let Ok(entry) = serde_json::from_str::<ScanEntry>(trimmed) else {
             continue;
         };
-        entry.fold_into(&mut scan);
+        let billed = billed_line(&entry.type_, trimmed);
+        entry.fold_into(&mut scan, billed);
     }
     Some(scan)
 }
@@ -457,7 +539,7 @@ pub(crate) fn own_usage_summary_of(
         };
         parsed.type_.clone_from(&entry.type_);
         parsed.id.clone_from(&entry.id);
-        parsed.fold_into(&mut scan);
+        parsed.fold_into(&mut scan, billed_store_row(entry));
     }
     scan.summary()
 }
@@ -480,7 +562,8 @@ mod tests {
         let mut scan = UsageScan::default();
         for line in lines {
             let entry: ScanEntry = serde_json::from_value(line.clone()).unwrap();
-            entry.fold_into(&mut scan);
+            let billed = billed_line(&entry.type_, &line.to_string());
+            entry.fold_into(&mut scan, billed);
         }
         scan.summary()
     }
@@ -514,7 +597,7 @@ mod tests {
         for row in [&assistant, &first] {
             serde_json::from_value::<ScanEntry>(row.clone())
                 .unwrap()
-                .fold_into(&mut full);
+                .fold_into(&mut full, None);
         }
         let mut resumed: UsageScan =
             serde_json::from_slice(&serde_json::to_vec(&full).unwrap()).unwrap();
@@ -522,7 +605,7 @@ mod tests {
             for row in [&second, &repeated] {
                 serde_json::from_value::<ScanEntry>(row.clone())
                     .unwrap()
-                    .fold_into(scan);
+                    .fold_into(scan, None);
             }
             assert_eq!(
                 scan.totals(),
@@ -557,7 +640,7 @@ mod tests {
         ] {
             serde_json::from_value::<ScanEntry>(row)
                 .unwrap()
-                .fold_into(&mut scan);
+                .fold_into(&mut scan, None);
         }
         assert_eq!(
             scan.totals(),
@@ -638,7 +721,16 @@ mod tests {
     }
 
     #[test]
-    fn summarization_usage_is_added() {
+    fn billed_row_usage_is_added() {
+        let model_usage_row = |custom_type: &str, total_tokens: u64, cost: f64| {
+            json!({
+                "type": "custom", "id": "r", "customType": custom_type,
+                "data": { "source": "refine_review", "provider": "p", "modelId": "m",
+                          "usage": { "input": 30, "output": 3, "cacheRead": 0, "cacheWrite": 0,
+                                     "totalTokens": total_tokens,
+                                     "cost": { "input": 0.0, "output": 0.0, "cacheRead": 0.0, "cacheWrite": 0.0, "total": cost } } }
+            })
+        };
         let summary = scan_summary(&[
             message(
                 "a",
@@ -660,15 +752,18 @@ mod tests {
                            "totalTokens": 55,
                            "cost": { "input": 0.0, "output": 0.1, "cacheRead": 0.0, "cacheWrite": 0.0, "total": 0.1 } }
             }),
+            model_usage_row("model_usage", 33, 0.05),
+            // Another custom row's data bills nothing, whatever it holds.
+            model_usage_row("goal_state", 33, 9.0),
         ]);
-        // 100 + 200 + 5 + 50 input tokens; 10 + 20 + 5 output. The cost sums
-        // in the fold's order: the summarization blocks accumulate first.
+        // 100 + 200 + 5 + 50 + 30 input tokens; 10 + 20 + 5 + 3 output. The
+        // cost sums in the fold's order: the billed rows accumulate first.
         assert_eq!(
             summary,
             Some(SessionUsageSummary {
-                input_tokens: 355,
-                output_tokens: 35,
-                cost: 1.0 + (0.3 + 0.1)
+                input_tokens: 385,
+                output_tokens: 38,
+                cost: 1.0 + (0.3 + 0.1 + 0.05)
             })
         );
     }

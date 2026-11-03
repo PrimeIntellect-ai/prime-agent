@@ -12,7 +12,6 @@ use crate::agents_view_state::{
     UnifiedRecord,
 };
 use crate::bash_view::ShellCounts;
-use crate::factory_view::FactoryRunCounts;
 use crate::subagents::{is_subagent_summary, summary_identity_keys, summary_parent_keys};
 
 struct BaseRow {
@@ -29,7 +28,7 @@ struct BaseRow {
     descendant_cost: f64,
     descendant_count: usize,
     running_subagent_count: usize,
-    /// The session's own shells and factory runs (never subtree-aggregated).
+    /// The session's own shells and factory counts (never subtree-aggregated).
     activity: SessionActivity,
     record: usize,
     search_score: Option<f64>,
@@ -101,12 +100,20 @@ pub(crate) fn build_rows<S: std::hash::BuildHasher + Default>(
         );
         let rollup = rollups.get(&record.identity).copied().unwrap_or_default();
         let model = session_model(&summary);
-        let live = summary
-            .get("activeSessionId")
-            .and_then(Value::as_str)
-            .and_then(|active| activity.live.get(active))
-            .copied()
-            .unwrap_or_default();
+        let live = match summary.get("activeSessionId").and_then(Value::as_str) {
+            Some(active) => activity.live.get(active).copied().unwrap_or_default(),
+            // Without a live kernel, the catalog row's stored factory specs.
+            None => SessionActivity {
+                shells: ShellCounts::default(),
+                factory: crate::factory_view::FactoryCounts {
+                    specs: record
+                        .saved
+                        .as_ref()
+                        .map_or(0, crate::factory_view::stored_spec_count),
+                    runs: crate::factory_view::FactoryRunCounts::default(),
+                },
+            },
+        };
         // Persistent shells count from the daemon list only; the kernel adds its other shells.
         let persistent = summary
             .get("sessionId")
@@ -118,7 +125,7 @@ pub(crate) fn build_rows<S: std::hash::BuildHasher + Default>(
                 running: live.shells.running - live.shells.persistent + persistent,
                 persistent,
             },
-            factory_runs: live.factory_runs,
+            ..live
         };
         base.push(BaseRow {
             kind,
@@ -269,7 +276,7 @@ struct RowForest<'a, S: std::hash::BuildHasher + Default> {
 }
 
 impl<S: std::hash::BuildHasher + Default> RowForest<'_, S> {
-    /// Emit one row, then its subagents block, then its shells and factory-run lines (after the
+    /// Emit one row, then its subagents block, then its shells and factory lines (after the
     /// block, so an expanded summary line stays directly above its children).
     fn emit(
         &self,
@@ -394,8 +401,8 @@ fn merged_summary_row(parent: &BaseRow, depth: usize, expanded: bool) -> AgentsV
     }
 }
 
-/// The node's own `$ N shells[ · M persistent]` and `⚙ N factory runs` lines, each only when its
-/// count is nonzero; paused runs read apart from the running ones (`⚙ 0 factory runs · 1 paused`).
+/// The node's own `$ N shells[ · M persistent]` and `⚙ N factories · M running[ · K paused]` lines,
+/// each only when one of its counts is nonzero.
 /// Like the summary line they reuse the parent's summary, so the open action resolves the parent.
 fn activity_rows(parent: &BaseRow, depth: usize) -> Vec<AgentsViewRow> {
     let line = |kind: RowKind, prefix: &str, title: String| AgentsViewRow {
@@ -414,10 +421,7 @@ fn activity_rows(parent: &BaseRow, depth: usize) -> Vec<AgentsViewRow> {
         expanded: false,
         has_spawn_code: false,
     };
-    let SessionActivity {
-        shells,
-        factory_runs,
-    } = parent.activity;
+    let SessionActivity { shells, factory } = parent.activity;
     let mut rows = Vec::new();
     if shells.running > 0 {
         let persistent = if shells.persistent > 0 {
@@ -435,20 +439,11 @@ fn activity_rows(parent: &BaseRow, depth: usize) -> Vec<AgentsViewRow> {
             ),
         ));
     }
-    let FactoryRunCounts { running, paused } = factory_runs;
-    if running + paused > 0 {
-        let paused = if paused > 0 {
-            format!(" \u{b7} {paused} paused")
-        } else {
-            String::new()
-        };
+    if let Some(label) = factory.label() {
         rows.push(line(
             RowKind::FactoryRuns,
             super::FACTORY_ROW_PREFIX,
-            format!(
-                "\u{2699} {running} factory run{}{paused}",
-                if running == 1 { "" } else { "s" }
-            ),
+            format!("\u{2699} {label}"),
         ));
     }
     rows
