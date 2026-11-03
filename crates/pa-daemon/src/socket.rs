@@ -6,9 +6,9 @@
 use std::path::Path;
 use std::time::Duration;
 
-#[cfg(unix)]
-use anyhow::anyhow;
 use anyhow::Result;
+#[cfg(unix)]
+use anyhow::{anyhow, Context};
 
 #[cfg(unix)]
 pub use crate::platform::socket_dir;
@@ -71,7 +71,11 @@ async fn acquire_cleanup_lock(path: &Path) -> Result<pa_core::platform::LockDir>
 #[cfg(unix)]
 pub async fn prepare_socket_path(path: &Path) -> Result<()> {
     if let Some(parent) = path.parent() {
-        crate::paths::ensure_dir(parent)?;
+        if parent == socket_dir() {
+            ensure_private_socket_dir(parent, pa_core::platform::process::current_user_id())?;
+        } else {
+            crate::paths::ensure_dir(parent)?;
+        }
     }
     // lstat, not `Path::exists()`: a dangling symlink still blocks `bind`
     // while `exists()` (which follows links) denies it.
@@ -87,6 +91,27 @@ pub async fn prepare_socket_path(path: &Path) -> Result<()> {
     }
     let _lock = acquire_cleanup_lock(path).await?;
     prepare_locked_socket_path(path).await
+}
+
+/// The default directory is in a shared temporary area. Refuse a precreated
+/// symlink or a directory owned by another user before binding a control
+/// socket there; its owner could otherwise replace the socket pathname.
+#[cfg(unix)]
+fn ensure_private_socket_dir(path: &Path, uid: u32) -> Result<()> {
+    use std::os::unix::fs::MetadataExt;
+
+    pa_core::platform::perms::create_dir_all_private(path)
+        .with_context(|| format!("create daemon socket directory {}", path.display()))?;
+    let metadata = std::fs::symlink_metadata(path)
+        .with_context(|| format!("inspect daemon socket directory {}", path.display()))?;
+    if !metadata.file_type().is_dir() || metadata.uid() != uid {
+        return Err(anyhow!(
+            "Daemon socket directory is not an owned directory: {}",
+            path.display()
+        ));
+    }
+    pa_core::platform::perms::restrict_dir(path)
+        .with_context(|| format!("restrict daemon socket directory {}", path.display()))
 }
 
 /// Probe + grace wait + unlink for a probed-stale socket file; the caller owns the cleanup lock.
@@ -252,6 +277,55 @@ pub async fn bind_capture_gap() {
 mod tests {
     use super::*;
     use pa_types::platform::transport::bind_transport;
+
+    #[test]
+    fn default_socket_dir_rejects_a_precreated_symlink() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let target = dir.path().join("other-user-controlled");
+        std::fs::create_dir(&target).unwrap();
+        let socket_dir = dir.path().join("prime-agent-1000");
+        std::os::unix::fs::symlink(&target, &socket_dir).unwrap();
+
+        let error =
+            ensure_private_socket_dir(&socket_dir, pa_core::platform::process::current_user_id())
+                .unwrap_err();
+        assert!(error.to_string().contains("not an owned directory"));
+        assert!(std::fs::symlink_metadata(&socket_dir)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+    }
+
+    #[test]
+    fn default_socket_dir_rejects_a_precreated_foreign_owned_directory() {
+        use std::os::unix::fs::MetadataExt;
+
+        let dir = tempfile::TempDir::new().unwrap();
+        let socket_dir = dir.path().join("prime-agent-1000");
+        std::fs::create_dir(&socket_dir).unwrap();
+        let owner = std::fs::metadata(&socket_dir).unwrap().uid();
+        // Simulate a different process UID without requiring root in CI.
+        let other_uid = owner.wrapping_add(1);
+
+        let error = ensure_private_socket_dir(&socket_dir, other_uid).unwrap_err();
+        assert!(error.to_string().contains("not an owned directory"));
+        assert_eq!(std::fs::metadata(&socket_dir).unwrap().uid(), owner);
+    }
+
+    #[test]
+    fn default_socket_dir_tightens_an_existing_owned_directory() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::TempDir::new().unwrap();
+        let socket_dir = dir.path().join("prime-agent-1000");
+        std::fs::create_dir(&socket_dir).unwrap();
+        std::fs::set_permissions(&socket_dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        ensure_private_socket_dir(&socket_dir, pa_core::platform::process::current_user_id())
+            .unwrap();
+        let mode = std::fs::metadata(&socket_dir).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o700);
+    }
 
     /// Bind and drop the listener: the socket file outlives the fd with
     /// nobody listening - exactly a crashed worker's residue.

@@ -1,0 +1,1 @@
+- Prevented another user from impersonating Prime Agent through its default temporary daemon socket.
