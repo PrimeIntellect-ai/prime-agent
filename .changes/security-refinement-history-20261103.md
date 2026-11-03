@@ -1,0 +1,1 @@
+- Protected global refinement history from access by other local users.
