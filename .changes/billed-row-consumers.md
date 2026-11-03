@@ -1,0 +1,1 @@
+- Billed rows now count in goal budgets, session stats, and telemetry: get_session_stats reports whole-branch spend, including children, across compactions.

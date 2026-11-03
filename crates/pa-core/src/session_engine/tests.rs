@@ -1474,6 +1474,12 @@ async fn a_resolved_model_bill_survives_its_callers_cancellation() {
                 result
             })
         }
+        fn observe_billed_rows(
+            &self,
+            sink: crate::session::billed_row::BilledRowSink,
+        ) -> rlm_usage::RlmChildUsageFuture<'_, ()> {
+            self.inner.observe_billed_rows(sink)
+        }
     }
 
     let mut session = scripted_session().await;

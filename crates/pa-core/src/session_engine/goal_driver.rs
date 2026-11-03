@@ -62,6 +62,11 @@ pub struct GoalDriver {
     /// The last turn the streak counted (re-consult dedup): adopted from the
     /// durable `no_progress_turn_ms` so a restart never re-counts the same corpse.
     counted_no_progress_turn_ms: Option<i64>,
+    /// Goal tokens of the billed rows (compactions, branch summaries,
+    /// `model_usage` calls) the session's store appended since the last
+    /// accounting ([`Self::billed_row_recorder`]); the next accounted turn
+    /// charges them. In-memory only.
+    billed_tokens: std::sync::Arc<std::sync::atomic::AtomicU64>,
 }
 
 fn now_millis() -> u64 {
@@ -92,6 +97,7 @@ impl GoalDriver {
             no_progress_backoff_until_ms: 0,
             parked_refusal_until_ms: 0,
             counted_no_progress_turn_ms: None,
+            billed_tokens: std::sync::Arc::default(),
         }
     }
 
@@ -141,8 +147,11 @@ impl GoalDriver {
             }
             _ => {
                 // A different goal (or none) adopts: the previous goal's pending
-                // mint and deferral would block the adopted goal's continuations.
+                // mint and deferral would block the adopted goal's continuations,
+                // and its billed calls never charge the adopted goal.
                 self.continuation_consumed();
+                self.billed_tokens
+                    .store(0, std::sync::atomic::Ordering::SeqCst);
                 self.owed_continuation_for_rlm_work = false;
                 // The adopted goal's own durable streak applies; the backoff
                 // window does not survive the move.
@@ -274,6 +283,9 @@ impl GoalDriver {
             }
             return Err(error);
         }
+        // Calls billed before the goal started never charge it.
+        self.billed_tokens
+            .store(0, std::sync::atomic::Ordering::SeqCst);
         Ok(self.state_with_creation_elapsed())
     }
 
@@ -317,8 +329,22 @@ impl GoalDriver {
         Ok(())
     }
 
-    /// Account one assistant turn's usage. Double-counts are suppressed by
-    /// message id. Returns whether the budget was reached.
+    /// Count one billed row's call toward the goal: the session's store
+    /// reports each row it appends here, and the next accounted assistant
+    /// turn charges the sum (the store's append cannot take the driver lock).
+    pub fn billed_row_recorder(&self) -> impl Fn(&pa_types::ai::Usage) + Send + Sync + 'static {
+        let billed_tokens = std::sync::Arc::clone(&self.billed_tokens);
+        move |usage| {
+            billed_tokens.fetch_add(
+                goal_token_delta_for_usage(usage.input as i64, usage.output as i64),
+                std::sync::atomic::Ordering::SeqCst,
+            );
+        }
+    }
+
+    /// Account one assistant turn's usage plus the billed rows since the
+    /// last accounting. Double-counts are suppressed by message id. Returns
+    /// whether the budget was reached.
     ///
     /// # Errors
     ///
@@ -330,6 +356,9 @@ impl GoalDriver {
         usage: &pa_types::ai::Usage,
     ) -> anyhow::Result<UsageOutcome> {
         if self.state.status != GoalStatus::Active {
+            // Calls billed while no goal runs never charge a later one.
+            self.billed_tokens
+                .store(0, std::sync::atomic::Ordering::SeqCst);
             return Ok(UsageOutcome::Ignored);
         }
         // The double-counting guard stays open until the state is durable:
@@ -337,7 +366,11 @@ impl GoalDriver {
         if self.accounted_messages.contains(message_id) {
             return Ok(UsageOutcome::Ignored);
         }
-        let token_delta = goal_token_delta_for_usage(usage.input as i64, usage.output as i64);
+        let billed_tokens = self
+            .billed_tokens
+            .swap(0, std::sync::atomic::Ordering::SeqCst);
+        let token_delta =
+            goal_token_delta_for_usage(usage.input as i64, usage.output as i64) + billed_tokens;
         let next_goal = GoalState {
             tokens_used: self.state.tokens_used + token_delta,
             ..self.state.clone()
@@ -345,7 +378,7 @@ impl GoalDriver {
         let budget_reached = next_goal
             .token_budget
             .is_some_and(|budget| next_goal.tokens_used >= budget);
-        let outcome = if budget_reached {
+        let persisted = if budget_reached {
             let token_budget = next_goal.token_budget;
             let budget_reason = token_budget
                 .map(|budget| format!("Reached {budget} token goal budget"))
@@ -359,14 +392,22 @@ impl GoalDriver {
                     last_error: None,
                     ..next_goal
                 },
-            )?;
+            )
+        } else {
+            self.set_state(session, next_goal)
+        };
+        if let Err(error) = persisted {
+            // The retry charges the billed calls again with the message.
+            self.billed_tokens
+                .fetch_add(billed_tokens, std::sync::atomic::Ordering::SeqCst);
+            return Err(error);
+        }
+        self.accounted_messages.insert(message_id.to_string());
+        Ok(if budget_reached {
             UsageOutcome::BudgetReached
         } else {
-            self.set_state(session, next_goal)?;
             UsageOutcome::Accounted
-        };
-        self.accounted_messages.insert(message_id.to_string());
-        Ok(outcome)
+        })
     }
 
     /// Pause the goal (no-op when not active).
@@ -378,16 +419,27 @@ impl GoalDriver {
         if self.state.status != GoalStatus::Active {
             return Ok(());
         }
-        self.set_state(
+        // Calls billed since the last accounted turn ran under this goal: the
+        // pause charges them (resume drops what the pause itself billed).
+        let billed_tokens = self
+            .billed_tokens
+            .swap(0, std::sync::atomic::Ordering::SeqCst);
+        let paused = self.set_state(
             session,
             GoalState {
                 active: false,
                 status: GoalStatus::Paused,
+                tokens_used: self.state.tokens_used + billed_tokens,
                 last_reason: Some(reason.to_string()),
                 last_error: None,
                 ..self.state.clone()
             },
-        )?;
+        );
+        if let Err(error) = paused {
+            self.billed_tokens
+                .fetch_add(billed_tokens, std::sync::atomic::Ordering::SeqCst);
+            return Err(error);
+        }
         // The deferral drops after the durable write: a failed persist
         // keeps the previous goal's deferral as it was.
         self.owed_continuation_for_rlm_work = false;
@@ -436,6 +488,9 @@ impl GoalDriver {
             },
         )?;
         if next_status == GoalStatus::Active {
+            // Calls billed while the goal was paused never charge it.
+            self.billed_tokens
+                .store(0, std::sync::atomic::Ordering::SeqCst);
             return Ok(create_goal_context_message(
                 &self.state,
                 GoalContextKind::Continuation,
