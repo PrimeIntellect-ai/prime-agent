@@ -1,0 +1,1 @@
+- Kept daemon and worker diagnostic logs private when created, reopened, or rotated.

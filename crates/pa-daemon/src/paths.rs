@@ -114,6 +114,15 @@ pub struct RotatingLog {
     max_bytes: u64,
 }
 
+fn open_private_append(path: &Path) -> std::io::Result<std::fs::File> {
+    let mut options = std::fs::OpenOptions::new();
+    options.create(true).append(true);
+    pa_core::platform::perms::set_private_mode(&mut options);
+    let file = options.open(path)?;
+    pa_core::platform::perms::restrict_open_file(&file)?;
+    Ok(file)
+}
+
 impl RotatingLog {
     #[must_use]
     pub fn new(path: PathBuf) -> Self {
@@ -129,11 +138,7 @@ impl RotatingLog {
         if let Some(parent) = self.path.parent() {
             let _ = std::fs::create_dir_all(parent);
         }
-        let Ok(mut file) = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&self.path)
-        else {
+        let Ok(mut file) = open_private_append(&self.path) else {
             return;
         };
         let payload = format!("{line}\n");
@@ -142,11 +147,7 @@ impl RotatingLog {
                 drop(file);
                 let rotated = self.path.with_extension("log.1");
                 let _ = std::fs::rename(&self.path, &rotated);
-                match std::fs::OpenOptions::new()
-                    .create(true)
-                    .append(true)
-                    .open(&self.path)
-                {
+                match open_private_append(&self.path) {
                     Ok(reopened) => file = reopened,
                     Err(_) => return,
                 }
@@ -186,5 +187,43 @@ mod tests {
             Path::new("/ad"),
         );
         assert_ne!(path, other);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rotating_log_is_private_when_new_or_legacy() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("daemon.sock.abcdef01.log");
+        let log = RotatingLog::new(path.clone());
+        log.append("first");
+        assert_eq!(pa_core::platform::perms::file_mode(&path), Some(0o600));
+
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        log.append("second");
+        assert_eq!(pa_core::platform::perms::file_mode(&path), Some(0o600));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "first\nsecond\n");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rotated_and_reopened_daemon_logs_stay_private() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("daemon.sock.abcdef01.log");
+        let log = RotatingLog {
+            path: path.clone(),
+            max_bytes: 5,
+        };
+        log.append("one");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        log.append("two");
+        let rotated = path.with_extension("log.1");
+        assert_eq!(pa_core::platform::perms::file_mode(&rotated), Some(0o600));
+        assert_eq!(pa_core::platform::perms::file_mode(&path), Some(0o600));
+        assert_eq!(std::fs::read_to_string(rotated).unwrap(), "one\n");
+        assert_eq!(std::fs::read_to_string(path).unwrap(), "two\n");
     }
 }

@@ -37,12 +37,16 @@ pub(crate) fn open_for_spawn(log_path: &Path) -> Result<File> {
         .parent()
         .context("worker stderr log has no parent dir")?;
     crate::paths::ensure_dir(logs_dir)?;
-    let file = std::fs::OpenOptions::new()
-        .create(true)
-        .truncate(true)
-        .write(true)
+    let mut options = std::fs::OpenOptions::new();
+    options.create(true).write(true);
+    pa_core::platform::perms::set_private_mode(&mut options);
+    let file = options
         .open(log_path)
         .with_context(|| format!("open worker stderr log {}", log_path.display()))?;
+    pa_core::platform::perms::restrict_open_file(&file)
+        .with_context(|| format!("restrict worker stderr log {}", log_path.display()))?;
+    file.set_len(0)
+        .with_context(|| format!("truncate worker stderr log {}", log_path.display()))?;
     prune_retained(logs_dir, log_path, worker_stderr_log_name);
     Ok(file)
 }
@@ -250,6 +254,23 @@ mod tests {
             "",
             "a new launch starts with an empty log"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn spawn_log_is_private_when_new_or_reopened() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = log_path(dir.path(), "private");
+        drop(open_for_spawn(&path).expect("create worker log"));
+        assert_eq!(pa_core::platform::perms::file_mode(&path), Some(0o600));
+
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        std::fs::write(&path, "old diagnostic\n").unwrap();
+        drop(open_for_spawn(&path).expect("reopen worker log"));
+        assert_eq!(pa_core::platform::perms::file_mode(&path), Some(0o600));
+        assert_eq!(std::fs::read(&path).unwrap(), b"");
     }
 
     #[test]
