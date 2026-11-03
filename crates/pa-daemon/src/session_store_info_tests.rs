@@ -77,11 +77,6 @@ fn legacy_read_session_info(path: &Path) -> Option<SessionInfo> {
                     usage_field("aggregateUsage"),
                 );
             }
-            "compaction" | "branch_summary" => {
-                usage_scan.fold_summarization(entry.fields.get("usage").and_then(|usage| {
-                    serde_json::from_value::<pa_types::ai::Usage>(usage.clone()).ok()
-                }));
-            }
             "message" => {
                 message_count += 1;
                 if let Some(message) = entry.fields.get("message") {
@@ -114,7 +109,7 @@ fn legacy_read_session_info(path: &Path) -> Option<SessionInfo> {
                     }
                 }
             }
-            _ => {}
+            _ => usage_scan.fold_billed_row(crate::session_usage::billed_store_row(&entry)),
         }
     }
     let header = header?;
