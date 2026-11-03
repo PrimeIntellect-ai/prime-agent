@@ -717,7 +717,7 @@ mod tests {
         let source_task = tokio::spawn(async move {
             let (mut socket, _) = source.accept().await.unwrap();
             let mut buffer = [0u8; 2048];
-            socket.read(&mut buffer).await.unwrap();
+            assert!(socket.read(&mut buffer).await.unwrap() > 0);
             let response = format!(
                 "HTTP/1.1 307 Temporary Redirect\r\nLocation: http://127.0.0.1:{destination_port}/collect\r\nContent-Length: 0\r\n\r\n"
             );
@@ -757,7 +757,7 @@ mod tests {
         let server = tokio::spawn(async move {
             let (mut first, _) = listener.accept().await.unwrap();
             let mut buffer = [0u8; 2048];
-            first.read(&mut buffer).await.unwrap();
+            assert!(first.read(&mut buffer).await.unwrap() > 0);
             first
                 .write_all(b"HTTP/1.1 307 Temporary Redirect\r\nLocation: /next\r\nContent-Length: 0\r\n\r\n")
                 .await
