@@ -307,9 +307,12 @@ impl SettingsStorage for FileSettingsStorage {
                 let write_path = match scope {
                     SettingsScope::Global => path.to_path_buf(),
                     SettingsScope::Project => {
-                        self.project_path_within_root(path)?;
-                        self.project_path_within_root(path.parent().unwrap())?
-                            .join(path.file_name().unwrap())
+                        if path.exists() {
+                            self.project_path_within_root(path)?
+                        } else {
+                            self.project_path_within_root(path.parent().unwrap())?
+                                .join(path.file_name().unwrap())
+                        }
                     }
                 };
                 atomic_write_with(&write_path, &content, AtomicWriteOptions { fsync: true })?;

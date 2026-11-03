@@ -1073,9 +1073,13 @@ mod tests {
         assert_eq!(manager.get_theme(), Some("prime"));
         manager.set_project_packages(vec![serde_json::json!({"source": "example"})]);
         assert!(manager.errors().is_empty());
+        assert!(std::fs::symlink_metadata(&project_settings)
+            .unwrap()
+            .file_type()
+            .is_symlink());
         assert_eq!(
             serde_json::from_str::<serde_json::Value>(
-                &std::fs::read_to_string(&project_settings).unwrap()
+                &std::fs::read_to_string(&shared_settings).unwrap()
             )
             .unwrap()["packages"],
             serde_json::json!([{"source": "example"}])
