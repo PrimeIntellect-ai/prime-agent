@@ -1,0 +1,1 @@
+- Escaped custom theme values in session HTML exports to prevent injected scripts.
