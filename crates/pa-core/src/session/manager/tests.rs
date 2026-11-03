@@ -3,6 +3,32 @@
 use super::*;
 
 #[test]
+#[cfg(unix)]
+fn session_rewrite_does_not_follow_a_planted_temp_symlink() {
+    use std::os::unix::fs::symlink;
+
+    let dir = tempfile::tempdir().unwrap();
+    let session = dir.path().join("session.jsonl");
+    let victim = dir.path().join("unrelated.txt");
+    std::fs::write(&victim, "keep this content").unwrap();
+    let predictable_temp =
+        PathBuf::from(format!("{}.tmp{}", session.display(), std::process::id()));
+    symlink(&victim, &predictable_temp).unwrap();
+
+    persist::atomic_write(&session, "session content").unwrap();
+
+    assert_eq!(
+        std::fs::read_to_string(&victim).unwrap(),
+        "keep this content"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&session).unwrap(),
+        "session content"
+    );
+    assert_eq!(std::fs::read_link(&predictable_temp).unwrap(), victim);
+}
+
+#[test]
 fn generated_entry_ids_are_unique_and_link_to_previous_entry() {
     let mut manager = SessionManager::in_memory(Path::new("/tmp"));
     let mut previous = None;

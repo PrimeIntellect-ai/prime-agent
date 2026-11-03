@@ -487,7 +487,7 @@ mod tests {
     }
 
     #[test]
-    fn cache_write_is_private_and_survives_a_failed_write() {
+    fn cache_write_is_private_and_ignores_a_stale_temp_slot() {
         let dir = tempfile::tempdir().unwrap();
         let models_json = dir.path().join("models.json");
         let cache_path = private_prime_authorization_cache_path(&models_json);
@@ -502,8 +502,8 @@ mod tests {
                 .fingerprint,
             "fingerprint-a"
         );
-        // Block the temp slot with a directory: the next write fails and
-        // the fingerprint-a cache survives for the next reader.
+        // A pre-existing temp path must not block the next private cache
+        // write or be reused by it.
         let temp = dir.path().join(format!(
             "{}.tmp{}",
             cache_path.display(),
@@ -515,7 +515,7 @@ mod tests {
             read_private_prime_authorization_cache(&models_json)
                 .expect("cache readable")
                 .fingerprint,
-            "fingerprint-a"
+            "fingerprint-b"
         );
     }
 
