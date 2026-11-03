@@ -1,0 +1,1 @@
+- Kept daemon recovery journals private while preserving their contents and locations.
