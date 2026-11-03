@@ -1,7 +1,8 @@
 //! Prompt-cache keep-alive loop tests: the window decision (fires only
 //! when a tool batch outlasts the cache window, once per window, stopping
 //! at turn end), the replayed request shape (`max_tokens = 1`, identical
-//! messages, discarded response), and the opt-out resolution.
+//! messages, discarded response), and the off resolution (no policy, no
+//! warm calls).
 
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -310,10 +311,10 @@ async fn warm_request_replays_the_request_shape_with_one_token_cap() {
     )));
 }
 
-/// A resolver that answers `None` (the settings opt-out) keeps the loop
-/// on the plain batch path: no warm calls at all.
+/// A resolver that answers `None` (a session that did not opt in)
+/// keeps the loop on the plain batch path: no warm calls at all.
 #[tokio::test(start_paused = true)]
-async fn opt_out_resolves_no_policy_and_never_fires() {
+async fn unresolved_policy_never_fires() {
     let provider = Arc::new(RecordingProvider::new(test_model()));
     let agent = Agent::new(AgentOptions {
         initial_state: pa_agent::agent::AgentInitialState {
@@ -340,7 +341,7 @@ async fn opt_out_resolves_no_policy_and_never_fires() {
     assert_eq!(
         calls.len(),
         2,
-        "the opt-out never sends warm requests: {calls:?}"
+        "an unresolved policy never sends warm requests: {calls:?}"
     );
 }
 

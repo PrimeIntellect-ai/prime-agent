@@ -380,10 +380,10 @@ pub struct Settings {
     /// Prompt-cache keep-alive (the `cacheKeepAlive` setting; a
     /// Rust-era feature): while a tool batch outlasts the prompt-cache
     /// TTL window, re-send the same request shape with `max_tokens = 1`
-    /// to keep the cache warm. Unset means ON for models whose requests
-    /// carry cache blocks (the cheap side of the economics: the warm
-    /// read costs ~0.1x input for one window versus a full 1.25x-input
-    /// cache write after expiry).
+    /// to keep the cache warm. Opt-in per session: unset means OFF, and
+    /// only `true` arms the feature (an explicit `false` is the same off
+    /// state; even opted in, models whose requests carry no cache blocks
+    /// never fire).
     pub cache_keep_alive: Option<bool>,
     /// Unknown keys survive load/save round-trips (forward compatibility).
     #[serde(flatten, skip_serializing_if = "serde_json::Map::is_empty")]

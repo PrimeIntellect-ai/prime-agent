@@ -966,10 +966,11 @@ impl SettingsManager {
         self.merged.request_timing.unwrap_or(false)
     }
 
-    /// `cacheKeepAlive`: unset means ON — the prompt-cache keep-alive is
-    /// the cheap side of the cache economics, so only an explicit `false`
-    /// opts out (the policy still resolves per model: models whose
-    /// requests carry no cache blocks never fire).
+    /// `cacheKeepAlive`: opt-in per session — unset (and an explicit
+    /// `false`) means OFF; only `true` arms the keep-alive (the policy
+    /// still resolves per model: models whose requests carry no cache
+    /// blocks never fire, so an opted-in session on such a model stays
+    /// off).
     #[must_use]
     pub fn get_cache_keep_alive(&self) -> Option<bool> {
         self.merged.cache_keep_alive

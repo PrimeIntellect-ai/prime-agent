@@ -7,9 +7,9 @@
 //! that re-arms the TTL.
 //!
 //! The loop mechanics live in `pa-agent` (`agent_loop::keep_alive`); this
-//! module owns the policy: the settings gate, the TTL window per model,
-//! the durable usage attribution row, and the one structured line per
-//! fire.
+//! module owns the policy: the settings opt-in gate, the TTL window per
+//! model, the durable usage attribution row, and the one structured line
+//! per fire.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -25,19 +25,23 @@ use crate::session::manager::SessionManager;
 pub const CACHE_KEEP_ALIVE_MARGIN: Duration = Duration::from_secs(60);
 
 /// The per-run keep-alive policy for the loop (the resolver the engine
-/// installs on the agent): eligible only when the `cacheKeepAlive` setting
-/// has not opted out AND the model's requests carry prompt-cache blocks
-/// (the anthropic-messages family; the same retention resolution the
-/// provider stream applies). The warm fire is attributed through the
-/// session's durable `cache_keep_alive` row, never silent cost.
+/// installs on the agent): opt-in per session — only an explicit
+/// `cacheKeepAlive: true` arms, and even then only for models whose
+/// requests carry prompt-cache blocks (the anthropic-messages family; the
+/// same retention resolution the provider stream applies — a model without
+/// cache blocks has nothing to keep warm). The warm fire is attributed
+/// through the session's durable `cache_keep_alive` row, never silent
+/// cost.
 #[must_use]
 pub fn keep_alive_resolver(
     setting: Option<bool>,
     session: Arc<tokio::sync::Mutex<SessionManager>>,
 ) -> pa_agent::agent::CacheKeepAliveResolver {
     Arc::new(move |model: &AgentModel| {
-        // The explicit opt-out (`cacheKeepAlive: false`); unset stays on.
-        if setting == Some(false) {
+        // Opt-in only: the session's explicit `cacheKeepAlive: true`. An
+        // unset key and an explicit `false` both stay off — no model-based
+        // auto-enable.
+        if setting != Some(true) {
             return None;
         }
         let ttl = pa_ai::prompt_cache_ttl(&model.api, None, None)?;
@@ -135,8 +139,8 @@ mod tests {
     }
 
     #[test]
-    fn eligible_model_arms_at_ttl_minus_margin() {
-        let resolver = keep_alive_resolver(None, session_manager());
+    fn opted_in_eligible_model_arms_at_ttl_minus_margin() {
+        let resolver = keep_alive_resolver(Some(true), session_manager());
         let policy = resolver(&agent_model("anthropic-messages")).expect("policy");
         assert_eq!(
             policy.rearm_after,
@@ -146,20 +150,31 @@ mod tests {
         );
     }
 
+    /// The default-off pin: reverting the resolver to the old default-on
+    /// (arm unless `Some(false)`) makes the `None` case below arm, so this
+    /// test fails on that revert.
     #[test]
-    fn opt_out_and_non_cache_models_never_arm() {
-        // The explicit `cacheKeepAlive: false` opts out entirely.
+    fn default_and_explicit_off_never_arm() {
+        // Opt-in per session: the unset key never arms.
+        let resolver = keep_alive_resolver(None, session_manager());
+        assert!(resolver(&agent_model("anthropic-messages")).is_none());
+        // An explicit `cacheKeepAlive: false` is the same off state.
         let resolver = keep_alive_resolver(Some(false), session_manager());
         assert!(resolver(&agent_model("anthropic-messages")).is_none());
-        // Models whose requests carry no anthropic cache blocks never fire.
-        let resolver = keep_alive_resolver(None, session_manager());
+    }
+
+    #[test]
+    fn opted_in_non_cache_models_never_arm() {
+        // Models whose requests carry no anthropic cache blocks have
+        // nothing to keep warm, even for an opted-in session.
+        let resolver = keep_alive_resolver(Some(true), session_manager());
         assert!(resolver(&agent_model("openai-completions")).is_none());
     }
 
     #[test]
     fn resolved_fire_appends_the_usage_row() {
         let session = session_manager();
-        let resolver = keep_alive_resolver(None, Arc::clone(&session));
+        let resolver = keep_alive_resolver(Some(true), Arc::clone(&session));
         let policy = resolver(&agent_model("anthropic-messages")).expect("policy");
         let fire = pa_agent::agent_loop::CacheKeepAliveFire {
             model: agent_model("anthropic-messages"),

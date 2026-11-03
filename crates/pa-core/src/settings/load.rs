@@ -159,8 +159,8 @@ mod tests {
     }
 
     /// A wrong-typed `cacheKeepAlive` behaves as unset (the known-field
-    /// registry entry): the feature keeps its default (on for models with
-    /// cache blocks), never a surviving raw value.
+    /// registry entry): the feature stays off (opt-in per session), never
+    /// a surviving raw value.
     #[test]
     fn wrong_typed_cache_keep_alive_loads_as_none() {
         let value: Value = serde_json::json!({ "cacheKeepAlive": "off" });

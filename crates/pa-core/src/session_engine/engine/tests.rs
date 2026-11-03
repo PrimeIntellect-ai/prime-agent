@@ -377,13 +377,13 @@ async fn create_session_registers_goal_and_heartbeat_handlers() {
 }
 
 /// The prompt-cache keep-alive through a full engine build: an
-/// anthropic-messages model with the default settings arms the policy, a
-/// tool batch outlasting the (TTL - margin) window fires ONE warm request
-/// per window, and each settled warm request lands as a durable
-/// `cache_keep_alive` usage row — attributed, not silent cost. The
-/// settings opt-out (`cacheKeepAlive: false`) never fires.
+/// anthropic-messages model with the session opted in (`cacheKeepAlive:
+/// true`) arms the policy, a tool batch outlasting the (TTL - margin)
+/// window fires ONE warm request per window, and each settled warm
+/// request lands as a durable `cache_keep_alive` usage row — attributed,
+/// not silent cost.
 #[tokio::test(start_paused = true)]
-async fn engine_cache_keep_alive_fires_and_attributes_warm_usage() {
+async fn engine_cache_keep_alive_opt_in_fires_and_attributes_warm_usage() {
     let model = pa_agent::types::Model {
         id: "claude-test".into(),
         name: "Claude Test".into(),
@@ -416,6 +416,14 @@ async fn engine_cache_keep_alive_fires_and_attributes_warm_usage() {
     let cwd = tmp.path().join("project");
     std::fs::create_dir_all(&cwd).unwrap();
     let agent_dir = tmp.path().join("agent");
+    // The session opts in: `cacheKeepAlive: true` persists before the
+    // engine reads it.
+    std::fs::create_dir_all(&agent_dir).unwrap();
+    std::fs::write(
+        agent_dir.join("settings.json"),
+        serde_json::json!({ "cacheKeepAlive": true }).to_string(),
+    )
+    .unwrap();
     let engine = create_session(SessionEngineConfig {
         semantic_edges: None,
         cron_store: None,
@@ -502,10 +510,11 @@ async fn engine_cache_keep_alive_fires_and_attributes_warm_usage() {
     );
 }
 
-/// The `cacheKeepAlive: false` opt-out writes no settings row and fires
-/// nothing even when the tool batch outlasts the window.
+/// The `cacheKeepAlive: false` explicit off writes no settings row and
+/// fires nothing even when the tool batch outlasts the window (an unset
+/// key takes the same path; the no-setting pin is the next test).
 #[tokio::test(start_paused = true)]
-async fn engine_cache_keep_alive_opt_out_never_fires() {
+async fn engine_cache_keep_alive_explicit_off_never_fires() {
     let model = pa_agent::types::Model {
         id: "claude-test".into(),
         name: "Claude Test".into(),
@@ -581,7 +590,105 @@ async fn engine_cache_keep_alive_opt_out_never_fires() {
         entries
             .iter()
             .all(|entry| !matches!(entry, pa_types::session::FileEntry::CacheKeepAlive { .. })),
-        "the opt-out never fires: {entries:#?}"
+        "the explicit off never fires: {entries:#?}"
+    );
+}
+
+/// The opt-in default: a session with no `cacheKeepAlive` setting never
+/// fires, even when the tool batch outlasts the window. Reverting the
+/// resolver's gate to default-on fails this test: the warm request would
+/// become the second stream call, consume the final scripted reply, and
+/// leave the turn errored.
+#[tokio::test(start_paused = true)]
+async fn engine_cache_keep_alive_default_off_never_fires() {
+    let model = pa_agent::types::Model {
+        id: "claude-test".into(),
+        name: "Claude Test".into(),
+        api: "anthropic-messages".into(),
+        provider: "anthropic".into(),
+        base_url: "http://localhost".into(),
+        reasoning: false,
+        cost: pa_agent::types::UsageCost::default(),
+        context_window: 100_000,
+        max_tokens: 4_096,
+    };
+    let provider = Arc::new(ScriptedProvider::new(model.clone()));
+    provider.push_tool_call_turn(
+        None,
+        vec![("call-1", "slow", serde_json::json!({ "text": "hold on" }))],
+    );
+    provider.push_text_turn("all done");
+
+    let tmp = tempfile::tempdir().unwrap();
+    let cwd = tmp.path().join("project");
+    std::fs::create_dir_all(&cwd).unwrap();
+    let agent_dir = tmp.path().join("agent");
+    // No settings.json at all: the unset key is the opt-in default's
+    // ground state.
+    let engine = create_session(SessionEngineConfig {
+        semantic_edges: None,
+        cron_store: None,
+        queued_steering_probe: None,
+        image_model_router: None,
+        steering_mode: None,
+        follow_up_mode: None,
+        cwd: cwd.clone(),
+        agent_dir: agent_dir.clone(),
+        mcp_manager: None,
+        model: Some(model),
+        thinking_level: None,
+        stream_fn: Some(provider.stream_fn()),
+        tools: vec![bridge_tool(slow_definition())],
+        custom_system_prompt: None,
+        prompt_guidelines: vec![],
+        generic_mcp_servers: vec![],
+        allow_recursion: None,
+        session_manager: Some(SessionManager::persisted(&cwd, &agent_dir)),
+        extra_host_handlers: None,
+        conversation_log_path: None,
+        additional_skill_paths: vec![],
+        additional_prompt_paths: vec![],
+        extra_builtin_skill_overrides: vec![],
+        rlm_subagent_host: None,
+        rlm_depth: None,
+        telemetry: None,
+        model_info: None,
+        on_background_work_settled: None,
+        prewarm_ipython_kernel: None,
+        queued_goal_context_purge: None,
+    })
+    .await
+    .unwrap();
+
+    engine
+        .prompt("run the slow tool", PromptOptions::default())
+        .await
+        .unwrap();
+    engine.session.agent().wait_for_idle().await;
+
+    let calls = provider.calls();
+    assert_eq!(
+        calls.len(),
+        2,
+        "a session with no setting runs NO warm requests: only the tool-call request and the continuation"
+    );
+    let entries = engine.session.entries().await;
+    assert!(
+        entries
+            .iter()
+            .all(|entry| !matches!(entry, pa_types::session::FileEntry::CacheKeepAlive { .. })),
+        "the default never fires: {entries:#?}"
+    );
+    let state = engine.session.agent().state().await;
+    assert!(
+        state.messages.iter().any(|message| matches!(
+            message,
+            pa_agent::types::AgentMessage::Standard(pa_agent::types::Message::Assistant(assistant))
+                if assistant.content.iter().any(|block| matches!(block,
+                    pa_agent::types::AssistantContent::Text(text) if text.text == "all done"))
+        )),
+        "the turn completes on the plain batch path: {:?}",
+        state.messages
     );
 }
 
