@@ -10,6 +10,51 @@ fn temp_dir() -> PathBuf {
     dir
 }
 
+#[cfg(unix)]
+#[test]
+fn rewrite_keeps_new_and_legacy_session_files_private() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = temp_dir();
+    let mut session = SessionFile::create("/repo", None, 0);
+    session.append_message(&json!({"role": "user", "content": "private transcript"}));
+    let path = dir.join(session_file_name(session.session_id()));
+    session.set_path(path.clone());
+    session.rewrite().unwrap();
+    assert_eq!(
+        fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+
+    let bytes = fs::read(&path).unwrap();
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+    session.rewrite().unwrap();
+    assert_eq!(
+        fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+    assert_eq!(fs::read(&path).unwrap(), bytes);
+}
+
+#[cfg(unix)]
+#[test]
+fn rewrite_ignores_a_planted_pid_temp_symlink() {
+    let dir = temp_dir();
+    let mut session = SessionFile::create("/repo", None, 0);
+    session.append_message(&json!({"role": "user", "content": "private transcript"}));
+    let path = dir.join(session_file_name(session.session_id()));
+    session.set_path(path.clone());
+    let planted = path.with_extension(format!("jsonl.tmp-{}", std::process::id()));
+    let victim = dir.join("unrelated-file");
+    fs::write(&victim, b"keep this file").unwrap();
+    std::os::unix::fs::symlink(&victim, &planted).unwrap();
+
+    session.rewrite().unwrap();
+    assert_eq!(fs::read(&victim).unwrap(), b"keep this file");
+    assert_eq!(fs::read_link(&planted).unwrap(), victim);
+    assert!(is_valid_session_file(&path));
+}
+
 /// The captured-attribution fixture: real devbox session rows (content sanitized,
 /// cwd/repoUrl neutralized; ids, timestamps, and usage verbatim).
 fn captured_attribution_fixture() -> PathBuf {
