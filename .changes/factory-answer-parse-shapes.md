@@ -1,0 +1,1 @@
+- Factory json output ports now also bind from a bare JSON object that ends the settle answer (a plain-text tail after prose, a fence that lost its markers, a punctuation-dirty tail), instead of failing the settle with "no JSON object containing output" and burning a re-admission.
