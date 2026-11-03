@@ -74,6 +74,9 @@ impl FileSink {
         if size < self.max_bytes {
             return Ok(());
         }
+        // A mirror left with loose legacy permissions must not carry those
+        // permissions into the retained rotation.
+        drop(self.open_private().await?);
         let rotated = self.path.with_extension("jsonl.1");
         tokio::fs::rename(&self.path, &rotated)
             .await
@@ -84,38 +87,32 @@ impl FileSink {
 
     async fn append(&self, payload: &str) -> Result<()> {
         use tokio::io::AsyncWriteExt;
+        let mut file = self.open_private().await?;
+        file.write_all(payload.as_bytes()).await?;
+        file.flush().await?;
+        Ok(())
+    }
+
+    /// Tighten an existing mirror before appending and create a new one
+    /// privately from the start, even under a permissive umask.
+    async fn open_private(&self) -> Result<tokio::fs::File> {
         let mut options = tokio::fs::OpenOptions::new();
         options.create(true).append(true);
-        let mut file = options
+        #[cfg(unix)]
+        options.mode(0o600);
+        let file = options
             .open(&self.path)
             .await
             .with_context(|| format!("open {}", self.path.display()))?;
-        file.write_all(payload.as_bytes()).await?;
-        file.flush().await?;
-        self.set_private().await
-    }
-
-    /// 0600 on unix; on other platforms the agent dir ACLs apply. The
-    /// signature stays async for the shared call site; the non-unix arm
-    /// is legitimately await-free (the ACLs carry the restriction).
-    #[cfg_attr(
-        not(unix),
-        allow(clippy::unused_async, clippy::unused_async_trait_impl)
-    )]
-    async fn set_private(&self) -> Result<()> {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
             let perms = std::fs::Permissions::from_mode(0o600);
-            tokio::fs::set_permissions(&self.path, perms)
+            file.set_permissions(perms)
                 .await
                 .with_context(|| format!("chmod 600 {}", self.path.display()))?;
         }
-        #[cfg(not(unix))]
-        {
-            let _ = &self.path;
-        }
-        Ok(())
+        Ok(file)
     }
 }
 
@@ -178,6 +175,9 @@ mod tests {
 
     #[tokio::test]
     async fn rotates_at_cap() {
+        #[cfg(unix)]
+        use std::os::unix::fs::PermissionsExt;
+
         let dir = tempfile::tempdir().unwrap();
         let mut sink = FileSink::at(dir.path().join(FILE_NAME));
         sink.max_bytes = 200;
@@ -185,8 +185,19 @@ mod tests {
         let big = (0..10).map(|i| event(&format!("event {i}"))).collect();
         sink.send_batch("install-1", big).await;
         assert!(sink.path().exists());
+        #[cfg(unix)]
+        std::fs::set_permissions(sink.path(), std::fs::Permissions::from_mode(0o644)).unwrap();
         sink.send_batch("install-1", vec![event("after cap")]).await;
         assert!(dir.path().join("telemetry.jsonl.1").exists());
+        #[cfg(unix)]
+        {
+            let mode = std::fs::metadata(dir.path().join("telemetry.jsonl.1"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777;
+            assert_eq!(mode, 0o600, "rotated mirror remains private");
+        }
         let current = tokio::fs::read_to_string(sink.path()).await.unwrap();
         assert!(current.contains("after cap"));
         let rotated = tokio::fs::read_to_string(dir.path().join("telemetry.jsonl.1"))
@@ -198,10 +209,25 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
-    async fn mirror_is_private() {
+    async fn mirror_is_private_before_writing() {
         use std::os::unix::fs::PermissionsExt;
         let dir = tempfile::tempdir().unwrap();
         let sink = FileSink::new(dir.path());
+        let file = sink.open_private().await.unwrap();
+        let mode = file.metadata().await.unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600, "new mirror is private before writing");
+        drop(file);
+
+        std::fs::set_permissions(sink.path(), std::fs::Permissions::from_mode(0o644)).unwrap();
+        let file = sink.open_private().await.unwrap();
+        let mode = file.metadata().await.unwrap().permissions().mode();
+        assert_eq!(
+            mode & 0o777,
+            0o600,
+            "existing mirror is tightened before writing"
+        );
+        drop(file);
+
         sink.send_batch("install-1", vec![event("agent started")])
             .await;
         let mode = tokio::fs::metadata(sink.path())
