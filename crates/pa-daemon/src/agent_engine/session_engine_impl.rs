@@ -141,7 +141,7 @@ impl SessionEngine for AgentSessionEngine {
                     batch: Vec::new(),
                     message: message.content.text(),
                     images: Vec::new(),
-                    source: "user".to_string(),
+                    source: crate::engine::PromptSource::System,
                     agent_message_id: None,
                     custom_message: Some(crate::session_commands::custom_message_value(&message)),
                 },
@@ -1444,6 +1444,7 @@ impl SessionEngine for AgentSessionEngine {
                 text: request.message.clone(),
                 images: request.images.clone(),
                 batch: request.batch,
+                user_typed: request.source == crate::engine::PromptSource::User,
             },
         };
         // A batch with image blocks routes to `settings.imageModel` when the

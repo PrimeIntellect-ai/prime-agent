@@ -13,7 +13,7 @@ fn scripted_engine_replays_then_echoes() {
         batch: Vec::new(),
         images: Vec::new(),
         message: message.to_string(),
-        source: "test".to_string(),
+        source: PromptSource::User,
         agent_message_id: None,
         custom_message: None,
     };
@@ -46,7 +46,7 @@ fn cancellation_stops_the_prompt() {
             batch: Vec::new(),
             images: Vec::new(),
             message: "x".into(),
-            source: "test".into(),
+            source: PromptSource::User,
             agent_message_id: None,
             custom_message: None,
         },

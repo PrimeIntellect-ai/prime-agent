@@ -1002,7 +1002,7 @@ fn agent_engine_reports_model_resolution_failures() {
             batch: Vec::new(),
             images: Vec::new(),
             message: "hi".to_string(),
-            source: "user".to_string(),
+            source: PromptSource::User,
             agent_message_id: None,
             custom_message: None,
         },

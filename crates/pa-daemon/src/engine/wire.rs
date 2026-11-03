@@ -10,7 +10,11 @@ pub struct PromptRequest {
     /// Images attached to the prompt (base64 payload plus mime type),
     /// admitted as multimodal content after the text block.
     pub images: Vec<pa_agent::types::ImageContent>,
-    pub source: String,
+    /// Where the prompt came from. The empty-reply retry answers
+    /// user-typed prompts only: an empty reply is a correct answer for the
+    /// session's own machinery (usage.md: "none for harness notices that
+    /// require no action").
+    pub source: PromptSource,
     pub agent_message_id: Option<String>,
     /// An injected custom row (wire `role: "custom"`) that replaces the
     /// accepted user message for this turn: the row persists and renders,
@@ -27,6 +31,19 @@ pub struct PromptRequest {
 pub struct PromptBatchRow {
     pub text: String,
     pub images: Vec<pa_agent::types::ImageContent>,
+}
+
+/// The prompt's origin: who typed it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PromptSource {
+    /// A message the user typed (the wire `session/prompt` command and
+    /// its queued/steered deliveries).
+    #[default]
+    User,
+    /// The session's own machinery: agent messages, kernel/child notices,
+    /// injected custom rows, scheduler fires (cron, heartbeat, autonomous
+    /// and goal continuations), and the quota-resume marker.
+    System,
 }
 
 /// The saved session context read off a session's already-loaded entries:

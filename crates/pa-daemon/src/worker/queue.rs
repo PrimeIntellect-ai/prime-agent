@@ -131,6 +131,25 @@ pub(crate) fn enqueue_priority(lane: &mut VecDeque<QueuedItem>, item: QueuedItem
     lane.insert(index, item);
 }
 
+impl QueuedItem {
+    /// The item's prompt origin (the empty-reply retry answers user-typed
+    /// prompts only): agent messages, injected custom rows, kernel
+    /// notices, scheduler fires (`queue_key`), and the injected
+    /// continuation classes are the session's own machinery — an empty
+    /// reply is a correct answer for those turns.
+    pub(crate) fn prompt_source(&self) -> crate::engine::PromptSource {
+        if self.custom_message.is_some()
+            || self.agent_message.is_some()
+            || self.queue_key.is_some()
+            || self.policy == TurnPolicy::Injected
+        {
+            crate::engine::PromptSource::System
+        } else {
+            crate::engine::PromptSource::User
+        }
+    }
+}
+
 #[derive(Debug)]
 pub(crate) struct QueuedItem {
     pub(crate) message: String,
@@ -641,4 +660,86 @@ fn is_bash_completion_notice_for(
     let details = row.get("details").unwrap_or(&Value::Null);
     details.get("pid").and_then(Value::as_u64) == Some(u64::from(notice.pid))
         && details.get("command").and_then(Value::as_str) == Some(notice.command.as_str())
+}
+
+#[cfg(test)]
+mod prompt_source_tests {
+    use super::*;
+    use crate::engine::PromptSource;
+
+    fn item(
+        custom_message: Option<Value>,
+        agent_message: Option<String>,
+        queue_key: Option<String>,
+        policy: TurnPolicy,
+    ) -> QueuedItem {
+        QueuedItem {
+            message: "m".to_string(),
+            priority: QueuePriority::Human,
+            preview: None,
+            custom_message,
+            agent_message,
+            queue_key,
+            admission_id: None,
+            images: Vec::new(),
+            done: None,
+            queue_visible: true,
+            policy,
+            forced_batch: false,
+        }
+    }
+
+    /// The origin classes the empty-reply retry answers: only a user-typed
+    /// row (no custom row, no agent-message marker, no scheduler key, a
+    /// queued or direct class) is `User`; every machinery delivery is
+    /// `System`.
+    #[test]
+    fn user_typed_and_machinery_origins_classify() {
+        // A user prompt: idle (direct) and busy (queued).
+        assert_eq!(
+            item(None, None, None, TurnPolicy::Direct).prompt_source(),
+            PromptSource::User
+        );
+        assert_eq!(
+            item(None, None, None, TurnPolicy::Queued).prompt_source(),
+            PromptSource::User
+        );
+        // An agent-message delivery.
+        assert_eq!(
+            item(
+                Some(json!({"role": "custom"})),
+                Some("from a sibling".into()),
+                None,
+                TurnPolicy::Injected
+            )
+            .prompt_source(),
+            PromptSource::System
+        );
+        // A kernel notice while busy rides the queued class with its custom row.
+        assert_eq!(
+            item(
+                Some(json!({"role": "custom"})),
+                None,
+                None,
+                TurnPolicy::Queued
+            )
+            .prompt_source(),
+            PromptSource::System
+        );
+        // A scheduler fire (cron, autonomous continuation) carries its queue key.
+        assert_eq!(
+            item(None, None, Some("cron:1".into()), TurnPolicy::Injected).prompt_source(),
+            PromptSource::System
+        );
+        // The injected continuation classes (goal follow-ups, the quota-resume marker).
+        assert_eq!(
+            item(None, None, None, TurnPolicy::Injected).prompt_source(),
+            PromptSource::System
+        );
+        // A restored scheduler fire that lost its injected class still keeps the key.
+        assert_eq!(
+            item(None, None, Some("cron:1".into()), TurnPolicy::Queued).prompt_source(),
+            PromptSource::System
+        );
+    }
 }

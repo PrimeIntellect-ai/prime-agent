@@ -410,7 +410,7 @@ impl AgentSessionEngine {
                         message: pa_core::session_engine::provider_park::QUOTA_RESUME_MARKER_TEXT
                             .to_string(),
                         images: Vec::new(),
-                        source: "user".to_string(),
+                        source: crate::engine::PromptSource::System,
                         agent_message_id: None,
                         custom_message: None,
                         batch: Vec::new(),

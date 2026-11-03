@@ -18,7 +18,7 @@ use pa_core::session_engine::agent_messaging::{
 };
 use pa_core::session_engine::engine::{SessionEngine as CoreSessionEngine, SessionEngineConfig};
 use pa_core::session_engine::provider_adapter::{
-    json_round_trip, map_thinking_level, model_thinking_level, switchable_stream_fn, ProviderTarget,
+    json_round_trip, map_thinking_level, switchable_stream_fn, ProviderTarget,
 };
 use pa_core::session_engine::session_commands::{
     execute_session_command, SessionCommandExecution, SessionCommandParams,
@@ -51,10 +51,17 @@ mod lifecycle;
 mod turn_types;
 
 use turn_types::{
-    aborted_message, drop_trailing_assistant, retry_event_to_engine_event, BoundaryRun,
-    TurnAdmission, TurnOnce, TurnPrompt, TurnResult, EMPTY_REPLY_RETRY_INSTRUCTION,
+    aborted_message, drop_trailing_assistant, empty_reply_retry_message,
+    retry_event_to_engine_event, BoundaryRun, TurnAdmission, TurnOnce, TurnPrompt, TurnResult,
     EMPTY_REPLY_TURN_ERROR,
 };
+// The retry contract's user-facing strings, and the prompt-origin enum the
+// engine's tests construct: the lib itself references them through the
+// builder and the full `crate::engine::` paths.
+#[cfg(test)]
+use crate::engine::PromptSource;
+#[cfg(test)]
+use turn_types::{EMPTY_REPLY_RETRY_CUSTOM_TYPE, EMPTY_REPLY_RETRY_INSTRUCTION};
 
 mod model;
 

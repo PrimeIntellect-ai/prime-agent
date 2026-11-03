@@ -9,8 +9,8 @@
 //! child-originated mail, so those rows render in the `agent_message`
 //! class now, superseding the 2026-09-23 diamond-row divergence): the
 //! kinds here are the engine-injected turn prompts only — the heartbeat
-//! prompt, the goal context, the kernel-state restore, and the
-//! skills-unavailable report.
+//! prompt, the goal context, the kernel-state restore, the
+//! skills-unavailable report, and the empty-reply retry's re-ask.
 //!
 //! Second divergence (operator directive 2026-09-23): the heartbeat prompt
 //! row renders the `◷` clock glyph — the unified activity dock's
@@ -20,8 +20,9 @@
 
 use super::render::{spacer, text_rows, truncate_text};
 use super::{
-    custom_content_text, GOAL_CONTEXT_CUSTOM_TYPE, HEARTBEAT_PROMPT_CUSTOM_TYPE,
-    IPYTHON_STATE_RESTORED_CUSTOM_TYPE, PYTHON_SKILLS_UNAVAILABLE_CUSTOM_TYPE,
+    custom_content_text, EMPTY_REPLY_RETRY_CUSTOM_TYPE, GOAL_CONTEXT_CUSTOM_TYPE,
+    HEARTBEAT_PROMPT_CUSTOM_TYPE, IPYTHON_STATE_RESTORED_CUSTOM_TYPE,
+    PYTHON_SKILLS_UNAVAILABLE_CUSTOM_TYPE,
 };
 use crate::chat::Detail;
 use crate::theme::{Theme, ThemeColor};
@@ -53,6 +54,9 @@ pub enum InjectedPromptKind {
     /// `Python skills unavailable · <skill names>` (muted label, dim
     /// names, no marker glyph), expandable to the full report.
     PythonSkillsUnavailable { skills: Vec<String> },
+    /// `↻ Retry prompt` (the empty-reply retry's re-ask for the answer as
+    /// text), expandable to the full instruction.
+    AnswerRetry,
 }
 
 /// One injected-prompt row (TS `isInjectedPromptMessage` kinds).
@@ -95,11 +99,12 @@ pub(crate) fn injected_prompt_row(
                 })
                 .unwrap_or_default(),
         },
-        // The dispatch routes only this module's four kinds here; every
+        EMPTY_REPLY_RETRY_CUSTOM_TYPE => InjectedPromptKind::AnswerRetry,
+        // The dispatch routes only this module's five kinds here; every
         // other custom type (the RLM child status notices included — they
         // render in the `agent_message` class now) owns its own dispatch
         // arm, and an unknown type never reaches this function.
-        _ => unreachable!("injected_prompt_row sees only its four kinds"),
+        _ => unreachable!("injected_prompt_row sees only its five kinds"),
     };
     let body = match &kind {
         // The kernel-state row stays header-only (TS keeps
@@ -181,6 +186,11 @@ fn prompt_header(row: &InjectedPromptRow, theme: &Theme) -> Line {
             }
             spans
         }
+        InjectedPromptKind::AnswerRetry => vec![
+            Span::styled("\u{21bb}".to_string(), theme.fg_style(ThemeColor::Error)),
+            Span::raw(" "),
+            Span::styled("Retry prompt".to_string(), muted),
+        ],
     };
     header
 }
@@ -291,6 +301,39 @@ mod tests {
             rows[1][1],
             Span::styled("\u{25f7}".to_string(), theme().fg_style(ThemeColor::Error))
         );
+    }
+
+    #[test]
+    fn answer_retry_header_and_body() {
+        // The decode: the retry's custom row reads as the AnswerRetry kind
+        // (the engine's own re-ask, never the generic `[customType]` panel).
+        let row = injected_prompt_row(
+            EMPTY_REPLY_RETRY_CUSTOM_TYPE,
+            &serde_json::json!({
+                "customType": EMPTY_REPLY_RETRY_CUSTOM_TYPE,
+                "content": "Reply again now with your complete answer as ordinary text.",
+                "display": true,
+            }),
+            &serde_json::Value::Null,
+        );
+        assert_eq!(row.kind, InjectedPromptKind::AnswerRetry);
+        assert_eq!(
+            row.body.as_deref(),
+            Some("Reply again now with your complete answer as ordinary text.")
+        );
+        // The header: `↻ Retry prompt` with the body riding when expanded.
+        let rows = render_injected_prompt(
+            &InjectedPromptRow {
+                kind: InjectedPromptKind::AnswerRetry,
+                body: Some("the instruction".to_string()),
+            },
+            Detail::Overview,
+            &theme(),
+            60,
+        );
+        assert_eq!(rows.len(), 2, "{rows:?}");
+        assert!(rows[0].is_empty());
+        assert_eq!(flat(&rows[1]).trim_end(), " \u{21bb} Retry prompt");
     }
 
     #[test]

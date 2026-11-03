@@ -52,6 +52,8 @@ pub const AGENT_MESSAGE_CUSTOM_TYPE: &str = "agent_message";
 pub const HEARTBEAT_PROMPT_CUSTOM_TYPE: &str = "heartbeat_prompt";
 pub const GOAL_CONTEXT_CUSTOM_TYPE: &str = "goal_context";
 pub const IPYTHON_STATE_RESTORED_CUSTOM_TYPE: &str = "ipython_state_restored";
+/// Wire twin of `pa_core::session_engine::messages::EMPTY_REPLY_RETRY_CUSTOM_TYPE`.
+pub const EMPTY_REPLY_RETRY_CUSTOM_TYPE: &str = "empty_reply_retry";
 pub const PYTHON_SKILLS_UNAVAILABLE_CUSTOM_TYPE: &str = "python_skills_unavailable";
 pub const RLM_CHILD_FAILURE_CUSTOM_TYPE: &str = "rlm_child_failure";
 pub const RLM_CHILD_TERMINAL_NOTICE_CUSTOM_TYPE: &str = "rlm_child_terminal_notice";
@@ -209,7 +211,8 @@ pub fn custom_message_entries(message: &Value) -> Vec<ChatEntry> {
         HEARTBEAT_PROMPT_CUSTOM_TYPE
         | GOAL_CONTEXT_CUSTOM_TYPE
         | IPYTHON_STATE_RESTORED_CUSTOM_TYPE
-        | PYTHON_SKILLS_UNAVAILABLE_CUSTOM_TYPE => {
+        | PYTHON_SKILLS_UNAVAILABLE_CUSTOM_TYPE
+        | EMPTY_REPLY_RETRY_CUSTOM_TYPE => {
             vec![ChatEntry::InjectedPrompt(Box::new(injected_prompt_row(
                 custom_type,
                 message,

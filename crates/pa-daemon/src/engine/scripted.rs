@@ -244,7 +244,7 @@ impl SessionEngine for ScriptedEngine {
                 batch: Vec::new(),
                 message: goal.message.clone(),
                 images: Vec::new(),
-                source: "user".to_string(),
+                source: crate::engine::PromptSource::System,
                 agent_message_id: None,
                 custom_message: Some(json!({
                     "role": "custom",

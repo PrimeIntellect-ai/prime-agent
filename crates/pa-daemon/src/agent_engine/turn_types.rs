@@ -3,16 +3,35 @@
 use super::{EngineEvent, Model, StopReason};
 
 /// The empty-of-substance retry's admitted instruction (the silent-stop bug
-/// class: a reasoning model that burns its output budget on thinking ends
-/// its reply clean with no visible text). The row is user-visible in the
-/// transcript and persists like any admitted prompt; the retried turn
-/// re-issues over it.
+/// class: a clean-stopped reply whose visible content is missing or an
+/// observed actionless stub). The row is user-visible in the transcript and
+/// persists like any admitted row; the retried turn re-issues over it.
 pub(crate) const EMPTY_REPLY_RETRY_INSTRUCTION: &str = "Your previous reply ended with no visible answer — it stopped after reasoning without any text. Reply again now with your complete answer as ordinary text so the user can read it.";
+
+/// The retry's injected custom row's type (shared with the TUI's
+/// transcript dispatch): the retry instruction is the engine's own row
+/// (the user never typed it), admitted as one representation.
+pub(crate) use pa_core::session_engine::messages::EMPTY_REPLY_RETRY_CUSTOM_TYPE;
+
+/// The retry's admitted row: an injected custom row, the same shape goal
+/// continuations and child notices ride. The caller emits it first so the
+/// transcript persists and renders it; the episode's injected admission
+/// keeps the loop context to the same one row.
+pub(crate) fn empty_reply_retry_message(timestamp: u64) -> pa_types::session::CustomMessage {
+    pa_types::session::CustomMessage {
+        custom_type: EMPTY_REPLY_RETRY_CUSTOM_TYPE.to_string(),
+        content: pa_types::ai::UserContent::Text(EMPTY_REPLY_RETRY_INSTRUCTION.to_string()),
+        display: true,
+        details: None,
+        timestamp,
+        rest: serde_json::Map::default(),
+    }
+}
 
 /// The visible error when both the reply and its one retry ended with no
 /// visible answer — never silence (the retry instruction row and the empty
 /// replies are already in the transcript).
-pub(crate) const EMPTY_REPLY_TURN_ERROR: &str = "The model ended its reply with no visible answer twice: both replies stopped after reasoning without any text, and a retry instructing it to answer as text produced none. Try sending the message again, lower the thinking level, or switch to a different model.";
+pub(crate) const EMPTY_REPLY_TURN_ERROR: &str = "The model ended its reply with no visible answer twice: both replies stopped after reasoning without any text, and a retry instructing it to answer as text produced none. Try sending the message again, or switch to a different model.";
 
 /// The outcome of one admitted turn.
 pub(crate) enum TurnResult {
@@ -45,11 +64,15 @@ pub(crate) enum TurnAdmission {
 #[derive(Debug, Clone)]
 pub(crate) enum TurnPrompt {
     /// A user prompt: text plus images, with the batched co-delivery
-    /// rows riding the same run after the primary.
+    /// rows riding the same run after the primary. `user_typed` marks the
+    /// origin: scheduler fires (cron, autonomous continuations) admit
+    /// plain text rows the user never typed, and the empty-reply retry
+    /// answers user-typed prompts only.
     User {
         text: String,
         images: Vec<pa_agent::types::ImageContent>,
         batch: Vec<crate::engine::PromptBatchRow>,
+        user_typed: bool,
     },
     /// An injected custom row (goal continuations, RLM child terminal
     /// notices): the admission carries the row itself, so the transcript

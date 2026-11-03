@@ -362,6 +362,7 @@ impl AgentSessionEngine {
                         text,
                         images,
                         batch,
+                        user_typed: _,
                     } => {
                         // The batched co-delivery rows ride the same admission: one run over
                         // the primary plus every batched row.

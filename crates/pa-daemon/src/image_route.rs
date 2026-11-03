@@ -286,7 +286,7 @@ mod tests {
     use super::*;
     use crate::agent_engine::{tests::FAUX_TEST_LOCK, AgentEngineConfig};
     use crate::engine::SessionEngine as _;
-    use crate::engine::{EngineEvent, EngineModelSelection, PromptRequest};
+    use crate::engine::{EngineEvent, EngineModelSelection, PromptRequest, PromptSource};
 
     fn write_image_pair_models_json(agent_dir: &std::path::Path) {
         std::fs::create_dir_all(agent_dir).unwrap();
@@ -489,7 +489,7 @@ mod tests {
                 batch: Vec::new(),
                 images: one_image(),
                 message: "describe this".to_string(),
-                source: "user".to_string(),
+                source: PromptSource::User,
                 agent_message_id: None,
                 custom_message: None,
             },
@@ -557,7 +557,7 @@ mod tests {
                 batch: Vec::new(),
                 images: one_image(),
                 message: "describe this".to_string(),
-                source: "user".to_string(),
+                source: PromptSource::User,
                 agent_message_id: None,
                 custom_message: None,
             },

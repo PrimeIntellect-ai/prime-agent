@@ -415,7 +415,7 @@ fn run_skill_prompt_body(
                 .collect(),
             images: Vec::new(),
             message: prompt.to_string(),
-            source: "user".to_string(),
+            source: PromptSource::User,
             agent_message_id: None,
             custom_message: None,
         },

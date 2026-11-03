@@ -460,7 +460,7 @@ fn goal_prompt_request(message: &pa_types::session::CustomMessage) -> PromptRequ
     PromptRequest {
         message: message.content.text(),
         images: Vec::new(),
-        source: "user".to_string(),
+        source: crate::engine::PromptSource::System,
         agent_message_id: None,
         custom_message: Some(crate::session_commands::custom_message_value(message)),
         batch: Vec::new(),

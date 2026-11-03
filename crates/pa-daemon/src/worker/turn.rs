@@ -339,7 +339,7 @@ impl TurnRunner {
                 .collect(),
             message: first.message.clone(),
             images: first.images.clone(),
-            source: "user".to_string(),
+            source: first.prompt_source(),
             agent_message_id: None,
             custom_message: first.custom_message.clone(),
         };

@@ -31,6 +31,10 @@ pub const PROVIDER_RETRY_OUTCOME_CUSTOM_TYPE: &str = "provider_retry_outcome";
 /// daemon; the row is bookkeeping, never model context).
 pub const MCP_CONNECTION_OUTCOME_CUSTOM_TYPE: &str = "mcp_connection_outcome";
 pub const HEARTBEAT_PROMPT_CUSTOM_TYPE: &str = "heartbeat_prompt";
+
+/// The empty-of-substance retry's injected instruction row: the engine's own
+/// re-ask for the answer as text (the user never typed it).
+pub const EMPTY_REPLY_RETRY_CUSTOM_TYPE: &str = "empty_reply_retry";
 /// The durable row a detached kernel bash completion admits as the
 /// woken turn's injected prompt.
 pub const ASYNC_BASH_COMPLETION_CUSTOM_TYPE: &str = "async_bash_completion";

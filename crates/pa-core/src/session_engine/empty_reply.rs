@@ -1,35 +1,24 @@
 //! The empty-of-substance reply contract: a clean-stopped assistant reply
-//! whose entire visible content is missing or a degenerate stub is a silent
-//! turn end — the user sees nothing, nothing retries, nothing errors. The
-//! shape (the silent-stop bug class): a reasoning model burns part of the
-//! output budget on thinking before the answer starts, the provider then
-//! concludes normally (`stop`, not `length`) with thinking-only content, and
-//! the turn-completion accept path takes it as a valid turn end. The
-//! classification here feeds the turn runner's one bounded retry.
+//! whose entire visible content is missing or an observed actionless stub is
+//! a silent turn end — the user sees nothing, nothing retries, nothing
+//! errors. The observed shape (the silent-stop bug class): a reasoning model
+//! replies with thinking blocks and no usable text, and the provider
+//! concludes normally (`stop`, not `length`) — so the turn-completion accept
+//! path takes it as a valid turn end. The classification here feeds the
+//! turn runner's one bounded retry.
 
 use pa_agent::types::{AssistantContent, AssistantMessage, StopReason};
-use pa_types::ai::thinking_levels::{
-    get_supported_thinking_levels, thinking_level_index, EXTENDED_THINKING_LEVELS,
-};
-use pa_types::ai::{Model, ModelThinkingLevel};
 
-/// The parenthesized self-reports of an actionless turn — the observed
-/// `print(no action)` class of stub replies. Never matched without thinking
-/// blocks present (see [`is_empty_of_substance`]), so a terse legitimate
-/// answer from a non-reasoning reply never trips the retry.
-const STUB_SENTINELS: [&str; 5] = [
-    "(no action)",
-    "no action",
-    "(none)",
-    "(no output)",
-    "(nothing)",
-];
+/// The observed actionless stub (`print(no action)` in the report trace).
+/// Never matched without thinking blocks present (see
+/// [`is_empty_of_substance`]), so a terse legitimate answer from a
+/// non-reasoning reply never trips the retry.
+const STUB_SENTINEL: &str = "(no action)";
 
 /// Whether the reply is empty of substance: a clean-stopped (`stop`) reply
-/// whose visible text is missing entirely, or degenerate stub text —
-/// whitespace, a single character, or an actionless sentinel — when
-/// thinking blocks were present. A reply with tool calls is never empty of
-/// substance (tool work is a live turn), and neither is any other stop
+/// whose visible text is missing entirely, or the observed actionless stub
+/// when thinking blocks were present. A reply with tool calls is never empty
+/// of substance (tool work is a live turn), and neither is any other stop
 /// reason: the provider's own `length`/`error`/`toolUse` classes keep their
 /// existing machinery.
 #[must_use]
@@ -64,32 +53,13 @@ pub fn is_empty_of_substance(message: &AssistantMessage) -> bool {
     has_thinking && is_degenerate_stub(&text)
 }
 
-/// The degenerate stub classes: whitespace, a single character, or an
-/// actionless sentinel.
+/// The degenerate stub classes: blank text (the observed blank prints), or
+/// the observed actionless sentinel. A short answer is a real answer — a
+/// reasoning model asked "2+2?" that thinks and replies "4" must never trip
+/// the retry.
 fn is_degenerate_stub(text: &str) -> bool {
     let trimmed = text.trim();
-    trimmed.is_empty()
-        || trimmed.chars().count() == 1
-        || STUB_SENTINELS.contains(&trimmed.to_ascii_lowercase().as_str())
-}
-
-/// One rung down the thinking ladder where the model supports the step: the
-/// empty-reply retry's reasoning relief — a lower effort level burns less of
-/// the output budget on thinking, leaving the answer text room in the same
-/// budget. The ladder's floor, or an unsupported rung (a model that maps the
-/// next-lower level to null), keeps the current level.
-#[must_use]
-pub fn thinking_step_lower(model: &Model, level: ModelThinkingLevel) -> ModelThinkingLevel {
-    let index = thinking_level_index(level);
-    if index == 0 {
-        return level;
-    }
-    let lower = EXTENDED_THINKING_LEVELS[index - 1];
-    if get_supported_thinking_levels(model).contains(&lower) {
-        lower
-    } else {
-        level
-    }
+    trimmed.is_empty() || trimmed.to_ascii_lowercase() == STUB_SENTINEL
 }
 
 #[cfg(test)]
@@ -130,16 +100,6 @@ mod tests {
         })
     }
 
-    fn model(reasoning: bool) -> Model {
-        serde_json::from_value(json!({
-            "id": "m", "name": "m", "api": "openai-completions", "provider": "p",
-            "baseUrl": "http://localhost", "reasoning": reasoning, "input": ["text"],
-            "cost": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0},
-            "contextWindow": 128_000, "maxTokens": 8_192,
-        }))
-        .unwrap()
-    }
-
     #[test]
     fn a_thinking_only_clean_stop_is_empty_of_substance() {
         // Oscar's silent-stop trace: the reply plans the whole answer in
@@ -161,28 +121,38 @@ mod tests {
                 vec![thinking("planned the answer"), text(content)],
             )
         };
-        // The observed progression: blank, ".", "(no action)".
-        for stub in [
-            "",
-            " ",
-            "\n\t",
-            ".",
-            "…",
-            "(no action)",
-            "NO ACTION",
-            "(none)",
-        ] {
+        // The observed classes: the blank reply, and the actionless stub
+        // (the parenthesized self-report, matched case-insensitively).
+        for stub in ["", " ", "\n\t", "(no action)", "(NO ACTION)"] {
             assert!(
                 is_empty_of_substance(&with_thinking(stub)),
                 "stub {stub:?} with thinking is empty of substance"
             );
         }
-        // A terse legitimate answer from a reply with no thinking blocks
-        // never trips the retry.
-        for plain in [".", "no", "(none)", "42"] {
+        // A short answer is a real answer, with or without thinking: "4",
+        // "Y", "." never trip the retry.
+        for plain in [".", "…", "4", "Y", "✓", "no", "42"] {
             assert!(
                 !is_empty_of_substance(&reply(StopReason::Stop, vec![text(plain)])),
                 "plain {plain:?} without thinking is the reply's answer"
+            );
+            assert!(
+                !is_empty_of_substance(&with_thinking(plain)),
+                "short answer {plain:?} with thinking is the reply's answer"
+            );
+        }
+        // The never-observed sentinel spellings stay real answers — matching
+        // invented model wording drifts.
+        for plain in [
+            "(none)",
+            "(no output)",
+            "(nothing)",
+            "no action",
+            "NO ACTION",
+        ] {
+            assert!(
+                !is_empty_of_substance(&with_thinking(plain)),
+                "unobserved sentinel {plain:?} is a real answer"
             );
         }
     }
@@ -213,70 +183,5 @@ mod tests {
             StopReason::Length,
             vec![thinking("cut off"), text(".")]
         )));
-    }
-
-    #[test]
-    fn the_step_lowers_one_rung_where_supported() {
-        let reasoning_model = model(true);
-        // A bare reasoning model serves off..high (xhigh/max need explicit
-        // mappings), so the ladder steps inside that span.
-        assert_eq!(
-            thinking_step_lower(&reasoning_model, ModelThinkingLevel::High),
-            ModelThinkingLevel::Medium
-        );
-        assert_eq!(
-            thinking_step_lower(&reasoning_model, ModelThinkingLevel::Medium),
-            ModelThinkingLevel::Low
-        );
-        // A model with every rung mapped steps down from the top.
-        let fully_mapped = Model {
-            thinking_level_map: Some(pa_types::ai::thinking_level_map(&[
-                (ModelThinkingLevel::Off, Some("off")),
-                (ModelThinkingLevel::Minimal, Some("minimal")),
-                (ModelThinkingLevel::Low, Some("low")),
-                (ModelThinkingLevel::Medium, Some("medium")),
-                (ModelThinkingLevel::High, Some("high")),
-                (ModelThinkingLevel::Xhigh, Some("xhigh")),
-                (ModelThinkingLevel::Max, Some("max")),
-            ])),
-            ..model(true)
-        };
-        assert_eq!(
-            thinking_step_lower(&fully_mapped, ModelThinkingLevel::Max),
-            ModelThinkingLevel::Xhigh
-        );
-        // The ladder's floor stays put.
-        assert_eq!(
-            thinking_step_lower(&reasoning_model, ModelThinkingLevel::Off),
-            ModelThinkingLevel::Off
-        );
-        // A model that maps the next-lower rung to null keeps the level.
-        let gated = Model {
-            reasoning: true,
-            thinking_level_map: Some(pa_types::ai::thinking_level_map(&[
-                (ModelThinkingLevel::Off, Some("off")),
-                (ModelThinkingLevel::Minimal, None),
-                (ModelThinkingLevel::Low, Some("low")),
-                (ModelThinkingLevel::Medium, None),
-                (ModelThinkingLevel::High, Some("high")),
-            ])),
-            ..model(true)
-        };
-        assert_eq!(
-            thinking_step_lower(&gated, ModelThinkingLevel::Low),
-            ModelThinkingLevel::Low,
-            "minimal is mapped to null: the low rung stays"
-        );
-        assert_eq!(
-            thinking_step_lower(&gated, ModelThinkingLevel::High),
-            ModelThinkingLevel::High,
-            "medium is mapped to null: the unsupported step keeps the high rung"
-        );
-        // A model with no thinking surface has no step to take.
-        let plain = model(false);
-        assert_eq!(
-            thinking_step_lower(&plain, ModelThinkingLevel::Off),
-            ModelThinkingLevel::Off
-        );
     }
 }

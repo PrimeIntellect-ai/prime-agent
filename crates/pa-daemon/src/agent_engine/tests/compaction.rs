@@ -968,7 +968,7 @@ fn threshold_below_the_headroom_stays_silent() {
             batch: Vec::new(),
             images: Vec::new(),
             message: "a small turn".to_string(),
-            source: "user".to_string(),
+            source: PromptSource::User,
             agent_message_id: None,
             custom_message: None,
         },
