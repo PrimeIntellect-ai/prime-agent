@@ -102,6 +102,12 @@ impl RequestTimingLog {
         use std::io::Write;
         let append = || -> std::io::Result<()> {
             std::fs::create_dir_all(self.path.parent().unwrap_or_else(|| Path::new(".")))?;
+            // Older versions may have left a readable retained copy. Repair
+            // it on the next write without making diagnostics depend on it.
+            let rotated = self.path.with_extension("jsonl.old");
+            if let Ok(file) = std::fs::OpenOptions::new().append(true).open(&rotated) {
+                let _ = crate::platform::perms::restrict_open_file(&file);
+            }
             // Best-effort rotation: keep appending when the rotate fails.
             let _ = self.rotate_if_needed();
             let mut options = std::fs::OpenOptions::new();

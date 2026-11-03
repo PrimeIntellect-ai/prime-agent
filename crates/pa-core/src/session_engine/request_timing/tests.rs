@@ -24,8 +24,13 @@ fn request_timing_log_and_rotation_are_private() {
     let mut log = RequestTimingLog::at(&path);
     let mode = |path: &Path| std::fs::metadata(path).unwrap().permissions().mode() & 0o777;
 
+    let rotated = path.with_extension("jsonl.old");
+    std::fs::write(&rotated, "previous private detail").unwrap();
+    std::fs::set_permissions(&rotated, std::fs::Permissions::from_mode(0o644)).unwrap();
+
     log.info("private error detail", Map::new());
     assert_eq!(mode(&path), 0o600, "new log must be private");
+    assert_eq!(mode(&rotated), 0o600, "legacy rotated log is tightened");
 
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
     log.info("another private detail", Map::new());
