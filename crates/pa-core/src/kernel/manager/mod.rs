@@ -99,6 +99,8 @@ struct ExecBuffers {
     status: ExecuteStatus,
     done_fields: Option<Value>,
     settled: bool,
+    /// The time limit the cell outlived and was interrupted for.
+    timed_out_after_ms: Option<u64>,
 }
 
 pub(crate) struct ActiveExecution {
@@ -113,9 +115,6 @@ pub(crate) struct ActiveExecution {
     restores_namespace: bool,
     buffers: Mutex<ExecBuffers>,
     result_tx: Mutex<Option<oneshot::Sender<anyhow::Result<InternalExecuteResult>>>>,
-    /// When the request frame went on the wire: the cell's own wall-clock start,
-    /// excluding queue wait and kernel boot. `None` until the write begins.
-    cell_started: Mutex<Option<Instant>>,
 }
 
 /// `ExecuteResult` plus the raw fields of the request's `done` event (state ops).
@@ -139,6 +138,7 @@ impl InternalExecuteResult {
                 status: ExecuteStatus::Aborted,
                 error: None,
                 duration_ms: started.elapsed().as_millis() as u64,
+                timed_out_after_ms: None,
             },
             done_fields: None,
         }
@@ -603,9 +603,8 @@ impl ReplKernelManager {
         let result = self
             .enqueue_execute(code, opts, execution_timeout_ms)
             .await?;
-        // A watchdog-noted cell stayed ok in the kernel and committed its
-        // namespace changes: the auto-snapshot applies exactly as for any ok
-        // cell, or a crash would revive a namespace missing the cell.
+        // An ok cell committed its namespace changes: refresh the snapshot,
+        // or a crash would revive a namespace missing the cell.
         if result.result.status == ExecuteStatus::Ok {
             self.schedule_snapshot();
         }

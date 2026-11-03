@@ -104,10 +104,11 @@ pub type KernelBootstrapResultHandler = Arc<dyn Fn(KernelBootstrapStats) + Send 
 pub struct IpythonKernelProvisionerOptions {
     /// Python override. Must have prime-agent-runtime installed.
     pub python: Option<PathBuf>,
-    /// Per-cell watchdog budget for user `python_repl` cells, in milliseconds
-    /// (`None`: the watchdog never arms). The daemon engine resolves it from
-    /// settings and disarms it for daemonless sessions; the runtime bootstrap
-    /// and internal state ops never arm it.
+    /// Default time limit for user `python_repl` cells, in milliseconds
+    /// (`None`: never armed; `0`: disabled). The daemon engine resolves it
+    /// from settings and disarms it for daemonless sessions; a cell's own
+    /// `timeout` argument replaces it. The runtime bootstrap and internal
+    /// state ops never arm it.
     pub cell_timeout_ms: Option<u64>,
     pub env: HashMap<String, String>,
     /// Command prefix prepended to every kernel `bash()` invocation.
@@ -283,8 +284,8 @@ impl IpythonKernelProvisioner {
         self.lock_state().manager.clone()
     }
 
-    /// The per-cell watchdog budget the kernel executor arms for user cells
-    /// (`None`: the watchdog never arms).
+    /// The default time limit the kernel executor arms for user cells
+    /// (`None`: never armed).
     #[must_use]
     pub fn cell_timeout_ms(&self) -> Option<u64> {
         self.inner.options.cell_timeout_ms

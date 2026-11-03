@@ -147,6 +147,9 @@ pub struct ActivityDock {
     pub shells: Vec<String>,
     /// How many of the running shells are persistent.
     pub shells_persistent: usize,
+    /// The current session's stored factory specs (the expanded factory
+    /// row's breakdown; the collapsed segment counts live runs only).
+    pub factory_specs: usize,
     /// The live factory runs, paused first, each `<name> <state>` (a live
     /// state — running, stopping, or paused — or a terminal run whose
     /// children are still in flight; the current session's kernel registry
@@ -914,20 +917,37 @@ fn render_expanded_dock_row(
             dock.heartbeats_active.len(),
             &dock.heartbeats_active,
         ),
-        ActivityGroup::Bash => expanded_group_row(
-            theme,
-            width,
-            ("▸", "shells"),
-            dock.shells.len(),
-            &dock.shells,
-        ),
-        ActivityGroup::Factory => expanded_group_row(
-            theme,
-            width,
-            ("⚙", "factory"),
-            dock.factory_counts.running,
-            &dock.factory_runs,
-        ),
+        // The breakdown leads, then each running command.
+        ActivityGroup::Bash => {
+            let breakdown = (!dock.shells.is_empty()).then(|| {
+                format!(
+                    "{} running · {} persistent",
+                    dock.shells.len(),
+                    dock.shells_persistent
+                )
+            });
+            let items: Vec<String> = breakdown.into_iter().chain(dock.shells.clone()).collect();
+            expanded_group_row(theme, width, ("▸", "shells"), dock.shells.len(), &items)
+        }
+        // The stored specs and live runs lead, then each live run.
+        ActivityGroup::Factory => {
+            let counts = crate::factory_view::FactoryCounts {
+                specs: dock.factory_specs,
+                runs: dock.factory_counts,
+            };
+            let items: Vec<String> = counts
+                .label()
+                .into_iter()
+                .chain(dock.factory_runs.clone())
+                .collect();
+            expanded_group_row(
+                theme,
+                width,
+                ("⚙", "factory"),
+                dock.factory_counts.running,
+                &items,
+            )
+        }
         ActivityGroup::Goal => vec![Span::raw(" "), goal_span(dock, theme)],
     };
     let mut row = truncate_spans_to_width(&row, width);
