@@ -92,6 +92,7 @@ impl FileSink {
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
             Err(err) => return Err(err).with_context(|| format!("open {}", self.path.display())),
         };
+        #[cfg(unix)]
         self.make_private(&file).await?;
         drop(file);
         let rotated = self.path.with_extension("jsonl.1");
@@ -127,21 +128,18 @@ impl FileSink {
             .open(&self.path)
             .await
             .with_context(|| format!("open {}", self.path.display()))?;
+        #[cfg(unix)]
         self.make_private(&file).await?;
         Ok(file)
     }
 
+    #[cfg(unix)]
     async fn make_private(&self, file: &tokio::fs::File) -> Result<()> {
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let perms = std::fs::Permissions::from_mode(0o600);
-            file.set_permissions(perms)
-                .await
-                .with_context(|| format!("chmod 600 {}", self.path.display()))?;
-        }
-        #[cfg(not(unix))]
-        let _ = file;
+        use std::os::unix::fs::PermissionsExt;
+        let perms = std::fs::Permissions::from_mode(0o600);
+        file.set_permissions(perms)
+            .await
+            .with_context(|| format!("chmod 600 {}", self.path.display()))?;
         Ok(())
     }
 }
