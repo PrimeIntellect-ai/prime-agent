@@ -266,7 +266,7 @@ fn lazy_build_restores_only_the_pre_admission_prompt_context() {
                             .persist_entry("message", json!({ "message": message }))
                             .expect("worker persists settled message");
                     }
-                    EngineEvent::AgentEnd { messages } => {
+                    EngineEvent::AgentEnd { messages, .. } => {
                         model_user_content = Some(
                             messages
                                 .into_iter()

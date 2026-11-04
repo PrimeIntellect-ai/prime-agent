@@ -5,7 +5,7 @@
 pub use self::unix::supports_keyboard_enhancement;
 #[cfg(unix)]
 #[cfg(feature = "events")]
-pub(crate) use self::unix::read_supports_keyboard_enhancement_raw;
+pub(crate) use self::unix::probe_terminal_raw;
 #[cfg(unix)]
 pub(crate) use self::unix::{
     disable_raw_mode, enable_raw_mode, is_raw_mode_enabled, size, window_size,

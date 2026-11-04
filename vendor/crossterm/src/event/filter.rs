@@ -17,20 +17,21 @@ impl Filter for CursorPositionFilter {
     }
 }
 
+/// Prime Agent patch: the combined terminal probe's replies — the OSC 7501
+/// detection reply, the keyboard enhancement flags, and the primary device
+/// attributes that conclude the probe.
 #[cfg(unix)]
 #[derive(Debug, Clone)]
-pub(crate) struct KeyboardEnhancementFlagsFilter;
+pub(crate) struct TerminalProbeFilter;
 
 #[cfg(unix)]
-impl Filter for KeyboardEnhancementFlagsFilter {
+impl Filter for TerminalProbeFilter {
     fn eval(&self, event: &InternalEvent) -> bool {
-        // This filter checks for either a KeyboardEnhancementFlags response or
-        // a PrimaryDeviceAttributes response. If we receive the PrimaryDeviceAttributes
-        // response but not KeyboardEnhancementFlags, the terminal does not support
-        // progressive keyboard enhancement.
         matches!(
             *event,
-            InternalEvent::KeyboardEnhancementFlags(_) | InternalEvent::PrimaryDeviceAttributes
+            InternalEvent::ProgramStatusSupport(_)
+                | InternalEvent::KeyboardEnhancementFlags(_)
+                | InternalEvent::PrimaryDeviceAttributes
         )
     }
 }
@@ -75,24 +76,13 @@ impl Filter for InternalEventFilter {
 mod tests {
     use super::{
         super::Event, CursorPositionFilter, EventFilter, Filter, InternalEvent,
-        InternalEventFilter, KeyboardEnhancementFlagsFilter, PrimaryDeviceAttributesFilter,
+        InternalEventFilter, PrimaryDeviceAttributesFilter,
     };
 
     #[test]
     fn test_cursor_position_filter_filters_cursor_position() {
         assert!(!CursorPositionFilter.eval(&InternalEvent::Event(Event::Resize(10, 10))));
         assert!(CursorPositionFilter.eval(&InternalEvent::CursorPosition(0, 0)));
-    }
-
-    #[test]
-    fn test_keyboard_enhancement_status_filter_filters_keyboard_enhancement_status() {
-        assert!(!KeyboardEnhancementFlagsFilter.eval(&InternalEvent::Event(Event::Resize(10, 10))));
-        assert!(
-            KeyboardEnhancementFlagsFilter.eval(&InternalEvent::KeyboardEnhancementFlags(
-                crate::event::KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
-            ))
-        );
-        assert!(KeyboardEnhancementFlagsFilter.eval(&InternalEvent::PrimaryDeviceAttributes));
     }
 
     #[test]

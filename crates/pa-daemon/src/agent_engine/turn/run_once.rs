@@ -255,13 +255,16 @@ impl AgentSessionEngine {
                                     let _ = tx.send(EngineEvent::AgentStart);
                                 }
                             }
-                            AgentEvent::AgentEnd { messages } => {
+                            AgentEvent::AgentEnd { messages, aborted } => {
                                 let messages = messages
                                     .iter()
                                     .filter_map(session_wire_value)
                                     .collect::<Vec<Value>>();
                                 boundary_passed.store(true, std::sync::atomic::Ordering::SeqCst);
-                                let _ = tx.send(EngineEvent::AgentEnd { messages });
+                                let _ = tx.send(EngineEvent::AgentEnd {
+                                    messages,
+                                    aborted: *aborted,
+                                });
                             }
                             AgentEvent::TurnEnd {
                                 message,

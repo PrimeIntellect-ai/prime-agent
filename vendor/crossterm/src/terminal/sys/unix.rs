@@ -200,9 +200,20 @@ fn read_supports_keyboard_enhancement_flags() -> io::Result<bool> {
 }
 
 #[cfg(feature = "events")]
-pub(crate) fn read_supports_keyboard_enhancement_raw() -> io::Result<bool> {
+fn read_supports_keyboard_enhancement_raw() -> io::Result<bool> {
+    probe_terminal_raw(true, false).map(|probe| probe.keyboard_enhancement)
+}
+
+/// Prime Agent patch: the bounded terminal probe behind both the stock
+/// keyboard check (`keyboard` only, upstream's bytes) and the app's combined
+/// probe (`program_status` adds the OSC 7501 detection query in front).
+#[cfg(feature = "events")]
+pub(crate) fn probe_terminal_raw(
+    keyboard: bool,
+    program_status: bool,
+) -> io::Result<crate::terminal::TerminalProbe> {
     use crate::event::{
-        filter::{KeyboardEnhancementFlagsFilter, PrimaryDeviceAttributesFilter},
+        filter::{PrimaryDeviceAttributesFilter, TerminalProbeFilter},
         poll_internal, read_internal, InternalEvent,
     };
     use std::io::Write;
@@ -214,18 +225,32 @@ pub(crate) fn read_supports_keyboard_enhancement_raw() -> io::Result<bool> {
     // flags, none of the flags are supported.
     //
     // See <https://sw.kovidgoyal.net/kitty/keyboard-protocol/#detection-of-support-for-this-protocol>
+    //
+    // The OSC 7501 query rides the same write, ahead of both: terminals answer in order, so its
+    // reply arrives before the device attributes exactly when the protocol is supported, and the
+    // ONE device-attributes reply concludes both queries.
+    //
+    // See <https://www.superlogical.com/rex/docs/build/program-status> (Feature detection)
 
-    // ESC [ ? u        Query progressive keyboard enhancement flags (kitty protocol).
-    // ESC [ c          Query primary device attributes.
-    const QUERY: &[u8] = b"\x1B[?u\x1B[c";
+    // ESC ] 7501 ; ? ESC \   Query OSC 7501 (Program Status Protocol) support.
+    // ESC [ ? u            Query progressive keyboard enhancement flags (kitty protocol).
+    // ESC [ c              Query primary device attributes.
+    let mut query = Vec::new();
+    if program_status {
+        query.extend_from_slice(b"\x1B]7501;?\x1B\\");
+    }
+    if keyboard {
+        query.extend_from_slice(b"\x1B[?u");
+    }
+    query.extend_from_slice(b"\x1B[c");
 
     let result = File::open("/dev/tty").and_then(|mut file| {
-        file.write_all(QUERY)?;
+        file.write_all(&query)?;
         file.flush()
     });
     if result.is_err() {
         let mut stdout = io::stdout();
-        stdout.write_all(QUERY)?;
+        stdout.write_all(&query)?;
         stdout.flush()?;
     }
 
@@ -241,6 +266,7 @@ pub(crate) fn read_supports_keyboard_enhancement_raw() -> io::Result<bool> {
     // contract is unchanged (diagnostic 1c5af0f for the window's origin).
     let deadline = Instant::now() + Duration::from_millis(250);
     let slice = Duration::from_millis(10);
+    let mut program_status_reply = None;
     loop {
         let leftover = deadline.saturating_duration_since(Instant::now());
         if leftover.is_zero() {
@@ -249,17 +275,26 @@ pub(crate) fn read_supports_keyboard_enhancement_raw() -> io::Result<bool> {
                 "The keyboard enhancement status could not be read within a normal duration",
             ));
         }
-        match poll_internal(Some(leftover.min(slice)), &KeyboardEnhancementFlagsFilter) {
-            Ok(true) => {
-                match read_internal(&KeyboardEnhancementFlagsFilter) {
-                    Ok(InternalEvent::KeyboardEnhancementFlags(_current_flags)) => {
-                        // Flush the PrimaryDeviceAttributes out of the event queue.
-                        read_internal(&PrimaryDeviceAttributesFilter).ok();
-                        return Ok(true);
-                    }
-                    _ => return Ok(false),
+        match poll_internal(Some(leftover.min(slice)), &TerminalProbeFilter) {
+            Ok(true) => match read_internal(&TerminalProbeFilter) {
+                Ok(InternalEvent::ProgramStatusSupport(reply)) => {
+                    program_status_reply = Some(reply);
                 }
-            }
+                Ok(InternalEvent::KeyboardEnhancementFlags(_current_flags)) => {
+                    // Flush the PrimaryDeviceAttributes out of the event queue.
+                    read_internal(&PrimaryDeviceAttributesFilter).ok();
+                    return Ok(crate::terminal::TerminalProbe {
+                        keyboard_enhancement: true,
+                        program_status: program_status_reply,
+                    });
+                }
+                _ => {
+                    return Ok(crate::terminal::TerminalProbe {
+                        keyboard_enhancement: false,
+                        program_status: program_status_reply,
+                    })
+                }
+            },
             Ok(false) => {
                 if Instant::now() >= deadline {
                     return Err(io::Error::new(
