@@ -67,8 +67,11 @@ impl LogDir {
     pub(crate) fn restrict(&self) -> io::Result<()> {
         #[cfg(unix)]
         {
-            use std::os::unix::fs::PermissionsExt;
-            self.fd.set_permissions(fs::Permissions::from_mode(0o700))?;
+            use rustix::fs::{chmodat, AtFlags, Mode};
+
+            // `fd` can be search-only. Resolve `.` from that held directory,
+            // so repairing permissions cannot follow a swapped pathname.
+            chmodat(&self.fd, ".", Mode::from_raw_mode(0o700), AtFlags::empty())?;
         }
         #[cfg(not(any(unix, windows)))]
         pa_core::platform::perms::restrict_dir(&self.path)?;
@@ -145,7 +148,7 @@ impl LogDir {
         let fd = openat(
             &root_fd,
             name,
-            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            root_access | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
             Mode::empty(),
         )?;
         Ok(Self { fd: File::from(fd) })
@@ -234,9 +237,18 @@ impl LogDir {
     pub(crate) fn names(&self) -> io::Result<Vec<OsString>> {
         #[cfg(unix)]
         {
+            use rustix::fs::{openat, Mode, OFlags};
             use std::os::unix::ffi::OsStringExt;
 
-            let entries = rustix::fs::Dir::read_from(&self.fd)?;
+            // Listing needs read permission. Open `.` relative to the pinned
+            // directory only when requested; named opens need search alone.
+            let listing_fd = openat(
+                &self.fd,
+                ".",
+                OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC,
+                Mode::empty(),
+            )?;
+            let entries = rustix::fs::Dir::read_from(&listing_fd)?;
             Ok(entries
                 .filter_map(Result::ok)
                 .map(|entry| OsString::from_vec(entry.file_name().to_bytes().to_vec()))
@@ -259,21 +271,34 @@ impl LogDir {
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
+    use std::io::Read as _;
     use std::io::Write as _;
 
     #[test]
     fn directory_handle_keeps_log_operations_in_the_original_directory() {
+        use std::os::unix::fs::PermissionsExt;
+
         let temp = tempfile::tempdir().unwrap();
         let logs = temp.path().join("logs");
         let dir = LogDir::for_write(&logs).unwrap();
         let original = temp.path().join("original-logs");
         let outside = temp.path().join("outside");
         std::fs::create_dir(&outside).unwrap();
+        std::fs::set_permissions(&outside, fs::Permissions::from_mode(0o755)).unwrap();
         std::fs::write(outside.join("worker-a.stderr.log"), b"outside\n").unwrap();
         std::fs::write(outside.join("foreign-only.log"), b"outside\n").unwrap();
 
         std::fs::rename(&logs, &original).unwrap();
         std::os::unix::fs::symlink(&outside, &logs).unwrap();
+        dir.restrict().unwrap();
+        assert_eq!(
+            fs::metadata(&original).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+        assert_eq!(
+            fs::metadata(&outside).unwrap().permissions().mode() & 0o777,
+            0o755
+        );
         let mut file = dir
             .open_file(OsStr::new("worker-a.stderr.log"), OpenMode::Write)
             .unwrap();
@@ -334,6 +359,56 @@ mod tests {
         fs::set_permissions(&agent, fs::Permissions::from_mode(0o700)).unwrap();
         assert!(opened.is_ok(), "agent root needs search, not read");
         assert!(agent.join("logs").is_dir());
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "android", target_os = "macos"))]
+    #[test]
+    fn existing_search_write_only_logs_allow_named_access_and_repair() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir().unwrap();
+        let logs = temp.path().join("agent/logs");
+        fs::create_dir_all(&logs).unwrap();
+        let name = OsStr::new("worker-a.stderr.log");
+        fs::write(logs.join(name), b"initial").unwrap();
+        fs::set_permissions(&logs, fs::Permissions::from_mode(0o300)).unwrap();
+
+        let read = LogDir::for_read(&logs);
+        let write = LogDir::for_write(&logs);
+        fs::set_permissions(&logs, fs::Permissions::from_mode(0o700)).unwrap();
+        let read = read.expect("named reads need search, not directory listing");
+        let write = write.expect("named writes need search, not directory listing");
+
+        fs::set_permissions(&logs, fs::Permissions::from_mode(0o300)).unwrap();
+        let named_read = read.open_file(name, OpenMode::Read).and_then(|mut file| {
+            let mut contents = String::new();
+            file.read_to_string(&mut contents)?;
+            Ok(contents)
+        });
+        let named_append = write
+            .open_file(name, OpenMode::Append)
+            .and_then(|mut file| file.write_all(b" appended"));
+        let daemon_log = logs.join("daemon.sock.abcdef01.log");
+        crate::paths::RotatingLog::new(daemon_log.clone()).append("ready");
+        let denied_listing = write.names();
+        let repaired = write.restrict();
+        let repaired_listing = write.names();
+        fs::set_permissions(&logs, fs::Permissions::from_mode(0o700)).unwrap();
+
+        assert_eq!(named_read.unwrap(), "initial");
+        named_append.unwrap();
+        assert!(denied_listing.is_err());
+        repaired.unwrap();
+        assert!(repaired_listing.unwrap().contains(&name.to_os_string()));
+        assert_eq!(fs::read(logs.join(name)).unwrap(), b"initial appended");
+        assert_eq!(fs::read_to_string(daemon_log).unwrap(), "ready\n");
+
+        fs::set_permissions(&logs, fs::Permissions::from_mode(0o300)).unwrap();
+        let worker_path = crate::worker_stderr::log_path(&temp.path().join("agent"), "b");
+        let spawned_log = crate::worker_stderr::open_for_spawn(&worker_path);
+        fs::set_permissions(&logs, fs::Permissions::from_mode(0o700)).unwrap();
+        drop(spawned_log.unwrap());
+        assert!(worker_path.exists());
     }
 }
 
