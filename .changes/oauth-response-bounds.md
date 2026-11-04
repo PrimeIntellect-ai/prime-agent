@@ -1,0 +1,1 @@
+- OAuth token and provider HTTP responses now stop after 1 MiB, preventing oversized remote bodies from exhausting memory during login and refresh.

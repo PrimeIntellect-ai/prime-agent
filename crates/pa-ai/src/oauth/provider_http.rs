@@ -104,7 +104,7 @@ impl ProviderHttp for ReqwestProviderHttp {
                 }
             })?;
             let status = response.status().as_u16();
-            let body = response.text().await.map_err(|error| error.to_string())?;
+            let body = super::read_oauth_body(response).await?;
             Ok(ProviderHttpResponse { status, body })
         })
     }
