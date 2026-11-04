@@ -1,0 +1,1 @@
+- Kept harness state reads and saves in the original agent directory when a path changes during an update.
