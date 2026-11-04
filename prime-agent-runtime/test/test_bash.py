@@ -1679,6 +1679,16 @@ class PersistentBashTest(unittest.IsolatedAsyncioTestCase):
         with open(record_path, "rb") as f:
             self.assertEqual(f.read(), before)
 
+    def test_rehydration_still_reads_records_if_chmod_is_denied(self):
+        shell_id = "5" * 32
+        self.write_record(self.record(shell_id, 1234, "old", session_id="other"))
+        os.chmod(self.home, 0o755)
+        read_records = bash_module._session_records
+        with mock.patch.object(bash_module.os, "fchmod", side_effect=PermissionError("denied")):
+            with mock.patch.object(bash_module, "_session_records", wraps=read_records) as records:
+                bash_module._rehydrate_persistent_shells()
+        records.assert_called_once_with(self.home, "own-session")
+
     async def test_a_watched_leader_exit_kills_the_members_it_leaves_behind(self):
         handle = bash("( sleep 30 & ); exit 0", persistent=True)
         self.pgids.append(handle.pid)

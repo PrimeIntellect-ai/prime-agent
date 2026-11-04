@@ -6,6 +6,7 @@ import asyncio
 import atexit
 import functools
 import json
+import logging
 import os
 import secrets
 import selectors
@@ -1472,13 +1473,20 @@ def _tighten_persistent_home(home: str) -> None:
         return
     try:
         home_fd = os.open(home, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        try:
+            if os.fstat(home_fd).st_uid == os.geteuid():
+                os.fchmod(home_fd, 0o700)
+        finally:
+            os.close(home_fd)
     except FileNotFoundError:
         return
-    try:
-        if os.fstat(home_fd).st_uid == os.geteuid():
-            os.fchmod(home_fd, 0o700)
-    finally:
-        os.close(home_fd)
+    except OSError as error:
+        # A read-only or ACL-managed custom home can still reattach its
+        # existing shells; report the failed privacy upgrade without dropping
+        # every session's persistent handles during kernel boot.
+        logging.getLogger(__name__).warning(
+            "could not restrict persistent shell directory %s: %s", home, error
+        )
 
 
 def _persistent_file(home: str, shell_id: str, kind: str) -> str:
