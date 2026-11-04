@@ -291,13 +291,14 @@ pub fn atomic_write_with(path: &Path, content: &str, options: AtomicWriteOptions
     // A predictable temp name can be planted as a symlink in a project-local
     // config directory. Exclusive creation also protects against a collision
     // even if a random name is guessed.
-    let mut temp_name = path.as_os_str().to_os_string();
-    temp_name.push(format!(
-        ".tmp{}-{}",
+    // Keep the staging component independent of the destination basename:
+    // a valid long credentials filename must still be writable on filesystems
+    // with a 255-byte per-component limit.
+    let temp = path.with_file_name(format!(
+        ".prime-agent-tmp-{}-{}",
         std::process::id(),
         uuid::Uuid::new_v4().simple()
     ));
-    let temp = PathBuf::from(temp_name);
     let result = (|| -> Result<()> {
         let mut open = fs::OpenOptions::new();
         open.create_new(true).write(true);
@@ -413,6 +414,20 @@ mod tests {
             .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
             .collect();
         assert_eq!(names, ["state.json".to_string()]);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn atomic_write_accepts_a_valid_long_destination_basename() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("c".repeat(220));
+        fs::write(&path, "old credentials").unwrap();
+
+        atomic_write(&path, "new credentials").unwrap();
+
+        assert_eq!(fs::read_to_string(&path).unwrap(), "new credentials");
+        assert_eq!(crate::platform::perms::file_mode(&path), Some(0o600));
+        assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 1);
     }
 
     #[test]
