@@ -162,7 +162,6 @@ pub(crate) fn sanitize_uv_path(env: &mut HashMap<OsString, OsString>, project: O
             }
         });
     }
-    let Some(project) = project else { return };
     let keys: Vec<_> = env
         .keys()
         .filter(|key| {
@@ -181,7 +180,7 @@ pub(crate) fn sanitize_uv_path(env: &mut HashMap<OsString, OsString>, project: O
         .iter()
         .filter_map(|key| env.get(key))
         .flat_map(|value| std::env::split_paths(value))
-        .filter(|path| safe_path(path, Some(project)))
+        .filter(|path| safe_path(path, project))
         .collect();
     for key in keys {
         env.remove(&key);
@@ -373,10 +372,13 @@ mod tests {
         #[cfg(windows)]
         env.insert(
             OsString::from("Uv_Python_Search_Path"),
-            sibling.clone().into_os_string(),
+            sibling.into_os_string(),
         );
         sanitize_uv_path(&mut env, Some(&project));
-        assert_eq!(env.get(OsStr::new("PATH")), Some(&trusted.into_os_string()));
+        assert_eq!(
+            env.get(OsStr::new("PATH")),
+            Some(&trusted.as_os_str().to_os_string())
+        );
         for name in [
             "UV_PYTHON_SEARCH_PATH",
             "UV_PYTHON_INSTALL_DIR",
@@ -392,6 +394,13 @@ mod tests {
         }
         #[cfg(windows)]
         assert!(!env.contains_key(OsStr::new("Uv_Python_Search_Path")));
+
+        let mut unresolved = HashMap::from([(
+            OsString::from("PATH"),
+            std::env::join_paths([&trusted]).unwrap(),
+        )]);
+        sanitize_uv_path(&mut unresolved, None);
+        assert!(!unresolved.contains_key(OsStr::new("PATH")));
     }
 
     #[test]
