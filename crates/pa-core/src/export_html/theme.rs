@@ -68,13 +68,36 @@ enum ResolvedColor {
     Css(String),
 }
 
+/// The theme schema uses hex colors; keep all CSS-supported hex widths so
+/// valid existing custom themes retain their exported appearance.
+fn is_hex_color(value: &str) -> bool {
+    let Some(digits) = value.strip_prefix('#') else {
+        return false;
+    };
+    matches!(digits.len(), 3 | 4 | 6 | 8) && digits.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+/// Color names become CSS custom property names. Exclude CSS punctuation that
+/// could escape a declaration and introduce an unrelated rule.
+fn is_css_color_name(name: &str) -> bool {
+    !name.is_empty()
+        && name
+            .chars()
+            .all(|ch| ch.is_alphanumeric() || ch == '-' || ch == '_')
+}
+
 /// Resolve one color value against the theme variables: numbers and hex colors pass through;
 /// anything else is a variable reference, resolved transitively with cycle detection.
 fn resolve_var_refs(value: &Value, vars: &Map<String, Value>) -> Result<ResolvedColor> {
     match value {
         Value::Number(index) => Ok(ResolvedColor::Ansi256(as_index(index)?)),
         Value::String(color) => {
-            if color.is_empty() || color.starts_with('#') {
+            if color.is_empty() {
+                Ok(ResolvedColor::Css(color.clone()))
+            } else if color.starts_with('#') {
+                if !is_hex_color(color) {
+                    return Err(anyhow!("Invalid hex color in export theme"));
+                }
                 Ok(ResolvedColor::Css(color.clone()))
             } else {
                 let referenced = vars
@@ -96,7 +119,13 @@ fn resolve_var_ref_chain<'a>(
     match value {
         Value::Number(index) => Ok(ResolvedColor::Ansi256(as_index(index)?)),
         Value::String(color) => {
-            if color.is_empty() || color.starts_with('#') {
+            if color.is_empty() {
+                return Ok(ResolvedColor::Css(color.clone()));
+            }
+            if color.starts_with('#') {
+                if !is_hex_color(color) {
+                    return Err(anyhow!("Invalid hex color in export theme"));
+                }
                 return Ok(ResolvedColor::Css(color.clone()));
             }
             if visited.contains(color.as_str()) {
@@ -321,6 +350,9 @@ pub(crate) fn resolve_export_theme(
         .map(|(key, value)| (key.to_string(), value.to_string()))
         .collect();
     for (key, value) in &theme.colors {
+        if !is_css_color_name(key) {
+            return Err(anyhow!("Invalid color name in export theme"));
+        }
         css_colors.insert(
             key.clone(),
             css_color(resolve_var_refs(value, &theme.vars)?, light),
@@ -366,6 +398,38 @@ pub(crate) fn resolve_export_theme(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn custom_theme_rejects_css_rules_in_colors_and_names() {
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let themes = dir.path().join("themes");
+        std::fs::create_dir_all(&themes).expect("themes dir");
+        for (name, colors) in [
+            (
+                "value",
+                serde_json::json!({
+                    "accent": "#fff; } body { background: url(https://attacker.example/opened) } :root { --x: #000"
+                }),
+            ),
+            (
+                "name",
+                serde_json::json!({
+                    "accent; } body { background: url(https://attacker.example/opened) } :root { --x": "#fff"
+                }),
+            ),
+        ] {
+            let theme = serde_json::json!({ "name": name, "colors": colors });
+            std::fs::write(
+                themes.join(format!("{name}.json")),
+                serde_json::to_vec(&theme).expect("serialize theme"),
+            )
+            .expect("write theme");
+            assert!(
+                resolve_export_theme(Some(name), dir.path()).is_err(),
+                "CSS rule injection from {name} must be refused"
+            );
+        }
+    }
 
     /// The bundled prime theme resolves like the TS exporter.
     #[test]

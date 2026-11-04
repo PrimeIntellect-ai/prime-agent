@@ -1,0 +1,1 @@
+- Prevented custom themes from injecting scripts or CSS rules into session HTML exports.

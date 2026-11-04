@@ -83,16 +83,30 @@ fn generate_html(data: &SessionExportData, theme: &theme::ExportTheme) -> String
     let session_data = serde_json::to_string(data).unwrap_or_default();
     let session_data = base64::engine::general_purpose::STANDARD.encode(session_data);
     let css = TEMPLATE_CSS
-        .replacen("{{THEME_VARS}}", &theme.theme_vars, 1)
-        .replacen("{{BODY_BG}}", &theme.body_bg, 1)
-        .replacen("{{CONTAINER_BG}}", &theme.container_bg, 1)
-        .replacen("{{INFO_BG}}", &theme.info_bg, 1);
+        .replacen(
+            "{{THEME_VARS}}",
+            &escape_style_raw_text(&theme.theme_vars),
+            1,
+        )
+        .replacen("{{BODY_BG}}", &escape_style_raw_text(&theme.body_bg), 1)
+        .replacen(
+            "{{CONTAINER_BG}}",
+            &escape_style_raw_text(&theme.container_bg),
+            1,
+        )
+        .replacen("{{INFO_BG}}", &escape_style_raw_text(&theme.info_bg), 1);
     TEMPLATE_HTML
         .replacen("{{CSS}}", &css, 1)
         .replacen("{{JS}}", TEMPLATE_JS, 1)
         .replacen("{{SESSION_DATA}}", &session_data, 1)
         .replacen("{{MARKED_JS}}", MARKED_JS, 1)
         .replacen("{{HIGHLIGHT_JS}}", HIGHLIGHT_JS, 1)
+}
+
+/// A literal `<` can close the export's HTML style element before CSS parsing.
+/// CSS hex escaping keeps valid custom color values intact inside that element.
+fn escape_style_raw_text(value: &str) -> String {
+    value.replace('<', "\\3C ")
 }
 
 /// Write the export file and return the output path as the caller will
@@ -307,6 +321,29 @@ assert(!html.includes('<img'), html);
             data.get("systemPrompt").is_none(),
             "absent sections are omitted: {data}"
         );
+    }
+
+    #[test]
+    fn generated_html_cannot_break_out_of_export_style_element() {
+        // Keep this boundary safe even if another caller supplies a theme
+        // without going through the file parser's color validation.
+        let theme = theme::ExportTheme {
+            theme_vars: "--accent: #fff</style><script>window.themeValue=1</script>;".to_string(),
+            body_bg: "#000</style><script>window.themeBackground=1</script>".to_string(),
+            container_bg: "#123456".to_string(),
+            info_bg: "#654321".to_string(),
+        };
+        let data = SessionExportData {
+            header: serde_json::json!({"type": "session", "id": "s"}),
+            entries: vec![],
+            leaf_id: None,
+            system_prompt: None,
+            tools: None,
+            rendered_tools: None,
+        };
+        let html = generate_html(&data, &theme);
+        assert_eq!(html.matches("</style>").count(), 1);
+        assert!(!html.contains("<script>window.theme"));
     }
 
     #[test]
