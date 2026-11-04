@@ -343,7 +343,13 @@ pub fn save_harness_state(
             &canonical,
             crate::platform::fs::DirectoryCreation::CreateMissing,
         )?;
-        crate::platform::fs::open_readable_directory_at(&search)?
+        match crate::platform::fs::open_readable_directory_at(&search) {
+            Ok(parent) => parent,
+            // Preserve the previous write-then-sync-error behavior for a
+            // writable/searchable directory without read permission.
+            Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => search,
+            Err(error) => return Err(error.into()),
+        }
     };
     #[cfg(all(test, unix))]
     BEFORE_STANDALONE_HARNESS_SAVE.with(|hook| {
@@ -367,11 +373,19 @@ pub fn save_harness_state(
 #[cfg(unix)]
 fn save_harness_state_at(parent: &std::fs::File, state: &HarnessState) -> anyhow::Result<()> {
     let content = format!("{}\n", serde_json::to_string_pretty(state)?);
-    crate::platform::fs::atomic_write_private_at(
+    if let Err(error) = crate::platform::fs::atomic_write_private_at(
         parent,
         std::ffi::OsStr::new("harness_state.json"),
         &content,
-    )?;
+    ) {
+        if error.raw_os_error() == Some(libc::EBADF) {
+            // A search-only parent permits the rename, but cannot fsync. The
+            // earlier path-based writer also returned the EACCES from opening
+            // the parent for its post-rename sync.
+            drop(crate::platform::fs::open_readable_directory_at(parent)?);
+        }
+        return Err(error.into());
+    }
     #[cfg(test)]
     HARNESS_DURABLE_WRITES.with(|count| count.set(count.get() + 1));
     Ok(())
@@ -883,6 +897,49 @@ mod tests {
             load_harness_state(&harness, HarnessScope::Global).schema,
             12
         );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn search_only_harness_directory_keeps_the_previous_flush_result() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = tempfile::tempdir().unwrap();
+        let harness = root.path().join("harness");
+        std::fs::create_dir_all(&harness).unwrap();
+        std::fs::set_permissions(&harness, std::fs::Permissions::from_mode(0o300)).unwrap();
+
+        let mut state = empty_harness_state();
+        state.schema = 13;
+        let save_error = save_harness_state(&harness, &state).unwrap_err();
+        assert_eq!(
+            save_error
+                .downcast_ref::<std::io::Error>()
+                .and_then(std::io::Error::raw_os_error),
+            Some(libc::EACCES)
+        );
+        assert_eq!(
+            load_harness_state(&harness, HarnessScope::Global).schema,
+            13,
+            "the old writer stored state before the directory sync error"
+        );
+
+        let update_error = try_update_harness_state(&harness, HarnessScope::Global, |state| {
+            state.schema = 14;
+            Ok(())
+        })
+        .unwrap_err();
+        assert_eq!(
+            update_error
+                .downcast_ref::<std::io::Error>()
+                .and_then(std::io::Error::raw_os_error),
+            Some(libc::EACCES)
+        );
+        assert_eq!(
+            load_harness_state(&harness, HarnessScope::Global).schema,
+            14
+        );
+        std::fs::set_permissions(&harness, std::fs::Permissions::from_mode(0o700)).unwrap();
     }
 
     #[test]

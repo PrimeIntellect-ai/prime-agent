@@ -556,7 +556,15 @@ impl LockDir {
     /// read or write while this guard is held.
     #[cfg(unix)]
     pub(crate) fn original_parent_for_io(&self) -> io::Result<fs::File> {
-        super::fs::open_readable_directory_at(&self.parent)
+        match super::fs::open_readable_directory_at(&self.parent) {
+            Ok(parent) => Ok(parent),
+            // A writable, searchable directory need not be readable. The
+            // search handle still permits relative file I/O in that layout.
+            Err(error) if error.kind() == io::ErrorKind::PermissionDenied => {
+                self.parent.try_clone()
+            }
+            Err(error) => Err(error),
+        }
     }
 
     #[cfg(not(unix))]
