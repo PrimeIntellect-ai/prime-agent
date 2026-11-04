@@ -42,7 +42,7 @@ const FILE_SYNCHRONOUS_IO_NONALERT: u32 = 0x0000_0020;
 const FILE_CREATE: u32 = 2;
 const FILE_OPEN: u32 = 1;
 const OBJ_CASE_INSENSITIVE: u32 = 0x0000_0040;
-const FILE_RENAME_INFO_CLASS: u32 = 3;
+const FILE_RENAME_INFORMATION_CLASS: i32 = 10;
 const FILE_DISPOSITION_INFO_CLASS: u32 = 4;
 const FILE_ID_INFO_CLASS: i32 = 18;
 
@@ -118,6 +118,15 @@ unsafe extern "system" {
         create_options: u32,
         ea_buffer: *mut c_void,
         ea_length: u32,
+    ) -> i32;
+
+    #[link_name = "NtSetInformationFile"]
+    fn nt_set_information_file(
+        file_handle: *mut c_void,
+        io_status_block: *mut IoStatusBlock,
+        file_information: *mut c_void,
+        length: u32,
+        file_information_class: i32,
     ) -> i32;
 
     #[link_name = "RtlNtStatusToDosError"]
@@ -458,8 +467,9 @@ fn rename_in_same_directory(file: &File, name: &OsStr) -> io::Result<()> {
     let information = storage.as_mut_ptr().cast::<RenameInfo>();
     unsafe {
         (*information).replace_if_exists = 1;
-        // A NULL root with a simple name renames this opened temp within its
-        // own directory. This also works for SMB, which requires a NULL root.
+        // Native FileRenameInformation treats a NULL root and simple name as
+        // a rename within this temp's held directory. SMB also requires a
+        // NULL root; Win32 FileRenameInfo interprets the name differently.
         (*information).root_directory = ptr::null_mut();
         (*information).file_name_length = u32::try_from(name_bytes).expect("bounded above");
         ptr::copy_nonoverlapping(
@@ -469,18 +479,23 @@ fn rename_in_same_directory(file: &File, name: &OsStr) -> io::Result<()> {
         );
     }
     for attempt in 1..=5 {
-        if unsafe {
-            set_file_information_by_handle(
+        let mut io_status = IoStatusBlock {
+            status: 0,
+            information: 0,
+        };
+        let status = unsafe {
+            nt_set_information_file(
                 file.as_raw_handle(),
-                FILE_RENAME_INFO_CLASS,
+                &mut io_status,
                 storage.as_mut_ptr().cast::<c_void>(),
                 used_bytes_u32,
+                FILE_RENAME_INFORMATION_CLASS,
             )
-        } != 0
-        {
+        };
+        if status == 0 {
             return Ok(());
         }
-        let error = io::Error::last_os_error();
+        let error = nt_error(status);
         let busy = matches!(error.raw_os_error(), Some(32 | 33))
             || error.kind() == io::ErrorKind::PermissionDenied;
         if !busy || attempt == 5 {
