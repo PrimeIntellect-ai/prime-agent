@@ -264,18 +264,24 @@ fn write_file_atomic_at(path: &Path, content: &str, sync: TempSync) -> Result<()
         std::process::id(),
         uuid::Uuid::new_v4().simple()
     ));
-    {
-        let file = create_staging_file(&temp)?;
+    let file = create_staging_file(&temp)?;
+    let persist = (|| -> Result<()> {
         let mut writer = std::io::BufWriter::new(file);
         writer.write_all(content.as_bytes())?;
         writer.flush()?;
         if matches!(sync, TempSync::Synced) {
             writer.get_ref().sync_all()?;
         }
+        drop(writer);
+        let _ = pa_core::platform::perms::restrict_file(&temp);
+        pa_core::platform::rename_onto(&temp, path)
+            .with_context(|| format!("persist {}", path.display()))?;
+        Ok(())
+    })();
+    if persist.is_err() {
+        let _ = std::fs::remove_file(&temp);
     }
-    let _ = pa_core::platform::perms::restrict_file(&temp);
-    pa_core::platform::rename_onto(&temp, path)
-        .with_context(|| format!("persist {}", path.display()))?;
+    persist?;
     #[cfg(test)]
     atomic_write_probe::record(path, sync);
     Ok(())
@@ -498,6 +504,20 @@ mod tests {
             std::fs::read_dir(dir.path()).unwrap().count() == 1,
             "the temp file must not survive the rename"
         );
+    }
+
+    #[test]
+    fn failed_descriptor_rename_removes_secret_bearing_staging_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("descriptor.json");
+        std::fs::create_dir(&path).unwrap();
+
+        assert!(write_file_atomic(&path, "authentication token").is_err());
+        let entries: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        assert_eq!(entries, vec![std::ffi::OsString::from("descriptor.json")]);
     }
 
     #[test]
