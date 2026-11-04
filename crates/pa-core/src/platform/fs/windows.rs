@@ -617,7 +617,7 @@ mod tests {
     }
 
     #[test]
-    fn temp_cannot_move_before_same_directory_rename() {
+    fn temp_cannot_move_or_change_before_same_directory_rename() {
         let root = tempfile::tempdir().unwrap();
         let project = root.path().join("project");
         let outside = root.path().join("outside");
@@ -628,16 +628,21 @@ mod tests {
             open_search_absolute_directory(&project, DirectoryCreation::ExistingOnly).unwrap();
         let move_succeeded = Rc::new(Cell::new(false));
         let moved_for_hook = Rc::clone(&move_succeeded);
+        let write_succeeded = Rc::new(Cell::new(false));
+        let wrote_for_hook = Rc::clone(&write_succeeded);
         let project_for_hook = project.clone();
         let outside_for_hook = outside.clone();
         BEFORE_TEMP_RENAME.with(|hook| {
             *hook.borrow_mut() = Some(Box::new(move |temp_name| {
-                moved_for_hook.set(
-                    std::fs::rename(
-                        project_for_hook.join(temp_name),
-                        outside_for_hook.join(temp_name),
-                    )
-                    .is_ok(),
+                let temp_path = project_for_hook.join(temp_name);
+                moved_for_hook
+                    .set(std::fs::rename(&temp_path, outside_for_hook.join(temp_name)).is_ok());
+                wrote_for_hook.set(
+                    OpenOptions::new()
+                        .write(true)
+                        .open(&temp_path)
+                        .and_then(|mut file| file.write_all(b"bad"))
+                        .is_ok(),
                 );
             }));
         });
@@ -647,6 +652,7 @@ mod tests {
 
         result.unwrap();
         assert!(!move_succeeded.get());
+        assert!(!write_succeeded.get());
         assert_eq!(
             std::fs::read_to_string(project.join("settings.json")).unwrap(),
             "new"
