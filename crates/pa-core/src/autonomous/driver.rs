@@ -109,6 +109,7 @@ impl<R: GateCommandRunner> AutonomousDriver for ShellAutonomousDriver<R> {
             {
                 return AutonomousFollowUp::Inactive;
             }
+            let now = now_millis();
             let decision =
                 should_autonomously_continue(state, Some(message.stop_reason), &self.gates).await;
             if decision.should_continue {
@@ -126,6 +127,9 @@ impl<R: GateCommandRunner> AutonomousDriver for ShellAutonomousDriver<R> {
                             },
                         )
                     }
+                    _ if super::autonomous_budget_thin(state, now) => {
+                        super::build_autonomous_last_call_text(state, now)
+                    }
                     _ => super::autonomous_continuation_text(state),
                 };
                 return AutonomousFollowUp::Continue { text };
@@ -140,13 +144,34 @@ impl<R: GateCommandRunner> AutonomousDriver for ShellAutonomousDriver<R> {
                     }
                 }
                 AutonomousDecisionReason::LimitReached => {
-                    let reason = autonomous_limit_reason(state, now_millis()).map_or(
-                        AutonomousStopReason::GateRetryExhausted,
-                        AutonomousStopReason::Limit,
-                    );
-                    AutonomousFollowUp::Stop {
-                        reason,
-                        status: Box::new(autonomous_status(state)),
+                    // The exhausted budget mints one finalize wake before the
+                    // stop: the model gets a final turn to write its
+                    // deliverable and run the task's submission step. The
+                    // limit re-derivation and the wake text read a fresh
+                    // clock: the gate run just above can take minutes, and a
+                    // wall-clock timeout that crossed during it must surface
+                    // as Limit(TimeoutMs) with its wake, not as a bare
+                    // GateRetryExhausted.
+                    let now = now_millis();
+                    if let Some(reason) = autonomous_limit_reason(state, now) {
+                        if !state.finalize_wake_used {
+                            state.finalize_wake_used = true;
+                            let status = autonomous_status(state);
+                            return AutonomousFollowUp::Continue {
+                                text: super::build_autonomous_finalize_wake_text(
+                                    &status, reason, now,
+                                ),
+                            };
+                        }
+                        AutonomousFollowUp::Stop {
+                            reason: AutonomousStopReason::Limit(reason),
+                            status: Box::new(autonomous_status(state)),
+                        }
+                    } else {
+                        AutonomousFollowUp::Stop {
+                            reason: AutonomousStopReason::GateRetryExhausted,
+                            status: Box::new(autonomous_status(state)),
+                        }
                     }
                 }
                 reason => {
@@ -270,7 +295,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn limit_hit_stops_with_reason_and_status() {
+    async fn limit_hit_mints_last_call_wake_then_stops_with_reason_and_status() {
         let config = AgentAutonomousConfig {
             enabled: Some(true),
             max_continuations: Some(1),
@@ -278,15 +303,37 @@ mod tests {
         };
         let mut state = create_autonomous_runtime_state(Some(&config), None);
         let driver = driver_with(vec![]);
-        // First turn: no limit yet -> continue (consumes the only
-        // continuation slot).
+        // First turn: no limit yet -> the only continuation carries the
+        // last-call text (the turn it drives may be the model's last).
         match after_turn(&driver, &mut state).await {
             AutonomousFollowUp::Continue { text } => {
-                assert!(text.starts_with("[autonomous-continuation]\n\n"));
+                assert!(
+                    text.starts_with("[autonomous-continuation: last-call]"),
+                    "{text}"
+                );
+                assert!(text.contains("continuations 1/1"), "{text}");
             }
-            other => panic!("expected continuation, got {other:?}"),
+            other => panic!("expected last-call continuation, got {other:?}"),
         }
         assert_eq!(state.continuations_used, 1);
+        // Second turn: the spent budget mints its one finalize wake before the stop.
+        match after_turn(&driver, &mut state).await {
+            AutonomousFollowUp::Continue { text } => {
+                assert!(
+                    text.starts_with("[autonomous-continuation: finalize-wake]"),
+                    "{text}"
+                );
+                assert!(text.contains("maxContinuations reached (1/1)"), "{text}");
+                assert!(text.contains("This is your FINAL turn"), "{text}");
+            }
+            other => panic!("expected the finalize wake, got {other:?}"),
+        }
+        assert_eq!(
+            state.continuations_used, 1,
+            "the wake spends no continuation"
+        );
+        assert!(state.finalize_wake_used);
+        // The wake's turn settles: the same limit stops the run.
         match after_turn(&driver, &mut state).await {
             AutonomousFollowUp::Stop { reason, status } => {
                 assert_eq!(
@@ -298,6 +345,49 @@ mod tests {
             }
             other => panic!("expected stop, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn a_timeout_crossing_during_the_gate_run_still_limits_with_its_wake() {
+        // The gate run can outlive the wall-clock budget (gate commands
+        // await snapshots; the per-gate timeout is minutes), so the limit
+        // re-derivation must read a fresh clock: with the pre-gate clock a
+        // timeout that crossed mid-gate surfaces as GateRetryExhausted and
+        // the finalize wake is skipped.
+        struct SlowGateRunner;
+        impl GateCommandRunner for SlowGateRunner {
+            fn run_gate(&self, _command: &str, _timeout_ms: u64) -> GateRunFuture<'_> {
+                Box::pin(async move {
+                    // Longer than the run's whole wall-clock budget below.
+                    tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+                    Ok(fail())
+                })
+            }
+            fn capture_snapshot(&self) -> SnapshotFuture<'_> {
+                Box::pin(async { None })
+            }
+        }
+        let config = enabled_config(Some(AgentAutonomousGateConfig {
+            commands: Some(vec!["make check".to_string()]),
+            ..Default::default()
+        }));
+        let mut state = create_autonomous_runtime_state(Some(&config), None);
+        // 50 ms of the 250 ms budget are spent at the driver's entry; the
+        // gate command crosses the line while it runs.
+        state.started_at = Some(now_millis() - 50);
+        state.limits.timeout_ms = 250;
+        let driver = ShellAutonomousDriver::with_gate_runner(SlowGateRunner);
+        match after_turn(&driver, &mut state).await {
+            AutonomousFollowUp::Continue { text } => {
+                assert!(
+                    text.starts_with("[autonomous-continuation: finalize-wake]"),
+                    "{text}"
+                );
+                assert!(text.contains("timeoutMs reached"), "{text}");
+            }
+            other => panic!("expected the finalize wake, got {other:?}"),
+        }
+        assert!(state.finalize_wake_used);
     }
 
     #[tokio::test]

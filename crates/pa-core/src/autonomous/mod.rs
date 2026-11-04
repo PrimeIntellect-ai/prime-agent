@@ -25,6 +25,17 @@ pub const DEFAULT_MAX_TOKENS: u64 = 80_000;
 pub const DEFAULT_TIMEOUT_MS: u64 = 30 * 60 * 1000;
 pub const DEFAULT_GATE_MAX_RETRIES: u64 = 3;
 pub const DEFAULT_GATE_TIMEOUT_MS: u64 = 5 * 60 * 1000;
+/// The finalize wake's continuation prefix: a run admitted as this text
+/// keeps its spent wake flag, so the wake cannot chain into itself.
+pub const AUTONOMOUS_FINALIZE_WAKE_PREFIX: &str = "[autonomous-continuation: finalize-wake]";
+
+/// The thin-budget last-call continuation prefix.
+pub const AUTONOMOUS_LAST_CALL_PREFIX: &str = "[autonomous-continuation: last-call]";
+
+/// The last-call headroom on the wall-clock budget: with less than a
+/// minute left, the minted continuation may be the model's last turn.
+pub const LAST_CALL_TIMEOUT_HEADROOM_MS: u64 = 60 * 1000;
+
 /// One keep-alive continuation per 25 minutes of continuous subagent
 /// activity, strictly below the default wall-clock budget.
 pub const DEFAULT_SUBAGENT_KEEP_ALIVE_MS: u64 = 25 * 60 * 1000;
@@ -120,6 +131,9 @@ pub struct AutonomousRuntimeState {
     pub last_gate_failure: Option<AgentAutonomousGateFailure>,
     pub last_gate_failure_snapshot: Option<GitWorktreeSnapshot>,
     pub subagent_keep_alive_ms: u64,
+    /// Whether this run already minted its finalize wake (the one grace turn
+    /// the exhausted budget allows before the stop).
+    pub finalize_wake_used: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -207,6 +221,7 @@ pub fn create_autonomous_runtime_state(
             last_gate_failure: None,
             last_gate_failure_snapshot: None,
             subagent_keep_alive_ms: normalize_subagent_keep_alive_ms(None),
+            finalize_wake_used: false,
         };
     };
     AutonomousRuntimeState {
@@ -259,6 +274,7 @@ pub fn create_autonomous_runtime_state(
         last_gate_failure: None,
         last_gate_failure_snapshot: None,
         subagent_keep_alive_ms: normalize_subagent_keep_alive_ms(config.subagent_keep_alive_ms),
+        finalize_wake_used: false,
     }
 }
 
@@ -272,6 +288,7 @@ pub fn set_autonomous_enabled(state: &mut AutonomousRuntimeState, enabled: bool)
         state.continuations_used = 0;
         state.turns_used = 0;
         state.tokens_used = 0;
+        state.finalize_wake_used = false;
         state.started_at = Some(now_millis());
     } else {
         state.started_at = None;
@@ -427,6 +444,68 @@ pub fn build_autonomous_gate_failure_continuation(
 #[must_use]
 pub fn autonomous_continuation_text(state: &AutonomousRuntimeState) -> String {
     format!("[autonomous-continuation]\n\n{}", state.continuation_prompt)
+}
+
+/// Whether the budget allows at most one more settled turn before the
+/// driver's limit check stops the run: a continuation minted now may be
+/// the model's last turn, so it must carry the last-call text.
+#[must_use]
+pub fn autonomous_budget_thin(state: &AutonomousRuntimeState, now: u64) -> bool {
+    if !state.enabled {
+        return false;
+    }
+    // The continuation minted now is the last one the continuation cap allows.
+    if state.continuations_used >= state.limits.max_continuations {
+        return true;
+    }
+    // The turn the continuation drives reaches the turn cap when it settles.
+    if state.turns_used + 1 >= state.limits.max_turns {
+        return true;
+    }
+    // The next turn's usage is unknown; reserve a tenth of the token cap for it.
+    if state.tokens_used + state.limits.max_tokens / 10 >= state.limits.max_tokens {
+        return true;
+    }
+    // A turn started now can outrun the wall-clock budget.
+    if let Some(started_at) = state.started_at {
+        if now.saturating_sub(started_at) + LAST_CALL_TIMEOUT_HEADROOM_MS >= state.limits.timeout_ms
+        {
+            return true;
+        }
+    }
+    false
+}
+
+/// The thin-budget last-call continuation: the minted continuation may be
+/// the model's last turn, so the text orders deliverable-first work.
+#[must_use]
+pub fn build_autonomous_last_call_text(state: &AutonomousRuntimeState, now: u64) -> String {
+    format!(
+        "{AUTONOMOUS_LAST_CALL_PREFIX}\n\nBudget is nearly exhausted: turns {}/{}, continuations {}/{}, tokens {}/{}. The turn after this one may be your last.\n\nPrioritize completion over exploration: write the deliverable files the task asks for to disk as soon as their content is ready, keep them current as you work, and run the task's submission or finish step as soon as the work is done. Do not leave writing the deliverable for later. Timestamp: {}.",
+        state.turns_used,
+        state.limits.max_turns,
+        state.continuations_used,
+        state.limits.max_continuations,
+        state.tokens_used,
+        state.limits.max_tokens,
+        crate::session::manager::format_iso(now as i64),
+    )
+}
+
+/// The finalize wake at budget exhaustion: the one grace continuation the
+/// driver mints instead of stopping mid-work without a word. The model gets
+/// exactly one final turn to write its deliverable and submit.
+#[must_use]
+pub fn build_autonomous_finalize_wake_text(
+    status: &AgentAutonomousStatus,
+    reason: AutonomousLimitReason,
+    now: u64,
+) -> String {
+    format!(
+        "{AUTONOMOUS_FINALIZE_WAKE_PREFIX}\n\nThe autonomous budget is exhausted: {}. This is your FINAL turn — the run stops after it and no further turns will run.\n\nStop starting new work. Finalize NOW: write every deliverable file the task asks for to disk (a partial deliverable on disk is strictly better than none), run the task's submission or finish step exactly as the task instructions define it, and reply with the final result. Timestamp: {}.",
+        describe_autonomous_limit(status, reason, now),
+        crate::session::manager::format_iso(now as i64),
+    )
 }
 
 /// The continuation row an in-run continuation hook returns to the agent loop; the loop emits and
@@ -650,6 +729,56 @@ mod tests {
             .contains("at least 1 minute without"));
         assert!(create_autonomous_subagent_keep_alive_text(&state)
             .contains("at least 25 minutes without"));
+    }
+
+    #[test]
+    fn budget_thin_and_finalize_texts() {
+        let mut state = create_autonomous_runtime_state(Some(&config(true)), None);
+        let started = state.started_at.unwrap_or(0);
+        assert!(!autonomous_budget_thin(&state, started));
+        // The minted continuation is the last one the continuation cap allows.
+        state.continuations_used = state.limits.max_continuations;
+        assert!(autonomous_budget_thin(&state, started));
+        // The turn the continuation drives reaches the turn cap when it settles.
+        state.continuations_used = 0;
+        state.turns_used = state.limits.max_turns - 1;
+        assert!(autonomous_budget_thin(&state, started));
+        // The next turn's usage outruns the token cap.
+        state.turns_used = 0;
+        state.tokens_used = state.limits.max_tokens - state.limits.max_tokens / 10;
+        assert!(autonomous_budget_thin(&state, started));
+        // A turn started now can outrun the wall-clock budget.
+        state.tokens_used = 0;
+        state.started_at = Some(1_000);
+        assert!(autonomous_budget_thin(
+            &state,
+            1_000 + state.limits.timeout_ms - LAST_CALL_TIMEOUT_HEADROOM_MS
+        ));
+        assert!(!autonomous_budget_thin(
+            &state,
+            1_000 + state.limits.timeout_ms - LAST_CALL_TIMEOUT_HEADROOM_MS - 1
+        ));
+        // The exhausted-budget finalize wake: the limit headline plus the
+        // finalize directive.
+        state.continuations_used = state.limits.max_continuations;
+        let status = autonomous_status(&state);
+        let wake = build_autonomous_finalize_wake_text(
+            &status,
+            AutonomousLimitReason::MaxContinuations,
+            0,
+        );
+        assert!(wake.starts_with(
+            "[autonomous-continuation: finalize-wake]\n\nThe autonomous budget is exhausted: maxContinuations reached (3/3)."
+        ));
+        assert!(wake.contains("This is your FINAL turn"));
+        assert!(wake.contains("a partial deliverable on disk is strictly better than none"));
+        // The thin-budget last call carries the budget numbers.
+        state.continuations_used = 1;
+        let last_call = build_autonomous_last_call_text(&state, 0);
+        assert!(last_call.starts_with("[autonomous-continuation: last-call]"));
+        assert!(last_call.contains("turns 0/12, continuations 1/3, tokens 0/80000"));
+        assert!(last_call
+            .contains("run the task's submission or finish step as soon as the work is done"));
     }
 
     #[test]
