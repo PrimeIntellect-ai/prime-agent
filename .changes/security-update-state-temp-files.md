@@ -1,0 +1,1 @@
+- Prevented update status and intent writes from following planted temporary-file links.

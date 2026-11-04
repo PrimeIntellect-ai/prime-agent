@@ -189,30 +189,8 @@ impl StatusWriter {
             std::fs::create_dir_all(parent)
                 .with_context(|| format!("create {}", parent.display()))?;
         }
-        let temporary = self
-            .path
-            .with_extension(format!("{}.tmp", std::process::id()));
         let content = serde_json::to_string_pretty(&json!(self.status))? + "\n";
-        #[cfg(unix)]
-        {
-            use std::io::Write;
-            use std::os::unix::fs::OpenOptionsExt;
-            let mut file = std::fs::OpenOptions::new()
-                .write(true)
-                .create(true)
-                .truncate(true)
-                .mode(0o600)
-                .open(&temporary)
-                .with_context(|| format!("create {}", temporary.display()))?;
-            file.write_all(content.as_bytes())?;
-            file.sync_all()?;
-        }
-        #[cfg(not(unix))]
-        std::fs::write(&temporary, content)
-            .with_context(|| format!("write {}", temporary.display()))?;
-        std::fs::rename(&temporary, &self.path)
-            .with_context(|| format!("finalize {}", self.path.display()))?;
-        Ok(())
+        super::atomic_state::replace(&self.path, content.as_bytes())
     }
 }
 
@@ -274,6 +252,30 @@ mod tests {
 
     fn update_id() -> UpdateId {
         UpdateId::from("u1".to_string())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn status_write_does_not_follow_a_planted_temp_symlink() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("status.json");
+        let temporary = path.with_extension(format!("{}.tmp", std::process::id()));
+        let victim = dir.path().join("unrelated-file");
+        std::fs::write(&victim, b"keep this file").unwrap();
+        std::os::unix::fs::symlink(&victim, &temporary).unwrap();
+
+        let writer = StatusWriter::new(&path, &update_id(), "/tmp/s.sock").unwrap();
+        assert_eq!(std::fs::read(&victim).unwrap(), b"keep this file");
+        assert_eq!(read_status(&path).unwrap(), *writer.current());
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            serde_json::to_string_pretty(&json!(writer.current())).unwrap() + "\n"
+        );
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            std::fs::metadata(path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
     }
 
     #[tokio::test]

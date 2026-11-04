@@ -18,13 +18,13 @@ tokio = { workspace = true }
 anyhow = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+tempfile = "3"
 
 [[bin]]
 name = "prime-agent"
 path = "src/main.rs"
 
 [dev-dependencies]
-tempfile = "3"
 base64 = "0.22"
 # The release-workflow test parses the CI workflow YAML and builds fixture
 # tarballs/manifests for the promote-job layout gates (the same versions the
