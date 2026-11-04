@@ -118,6 +118,11 @@ fn open_private_append(path: &Path) -> std::io::Result<std::fs::File> {
     let mut options = std::fs::OpenOptions::new();
     options.create(true).append(true);
     pa_core::platform::perms::set_private_mode(&mut options);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW);
+    }
     let file = options.open(path)?;
     pa_core::platform::perms::restrict_open_file(&file)?;
     Ok(file)
@@ -225,5 +230,26 @@ mod tests {
         assert_eq!(pa_core::platform::perms::file_mode(&path), Some(0o600));
         assert_eq!(std::fs::read_to_string(rotated).unwrap(), "one\n");
         assert_eq!(std::fs::read_to_string(path).unwrap(), "two\n");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rotating_log_does_not_follow_a_planted_symlink() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("daemon.sock.abcdef01.log");
+        let victim = dir.path().join("unrelated-file");
+        std::fs::write(&victim, b"keep this file").unwrap();
+        std::os::unix::fs::symlink(&victim, &path).unwrap();
+
+        RotatingLog::new(path.clone()).append("sensitive diagnostics");
+        assert_eq!(std::fs::read(&victim).unwrap(), b"keep this file");
+        assert_eq!(std::fs::read_link(&path).unwrap(), victim);
+
+        std::fs::remove_file(&path).unwrap();
+        RotatingLog::new(path.clone()).append("ordinary diagnostics");
+        assert_eq!(
+            std::fs::read_to_string(path).unwrap(),
+            "ordinary diagnostics\n"
+        );
     }
 }

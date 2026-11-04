@@ -40,6 +40,11 @@ pub(crate) fn open_for_spawn(log_path: &Path) -> Result<File> {
     let mut options = std::fs::OpenOptions::new();
     options.create(true).write(true);
     pa_core::platform::perms::set_private_mode(&mut options);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW);
+    }
     let file = options
         .open(log_path)
         .with_context(|| format!("open worker stderr log {}", log_path.display()))?;
@@ -124,7 +129,14 @@ pub(crate) fn prune_socket_logs(agent_dir: &Path, socket_path: &Path) -> usize {
 ///
 /// Returns an error when the log cannot be opened, inspected, or read and it exists.
 fn read_tail(path: &Path) -> Result<Option<String>> {
-    let mut file = match File::open(path) {
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW);
+    }
+    let mut file = match options.open(path) {
         Ok(file) => file,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(error) => {
@@ -271,6 +283,35 @@ mod tests {
         drop(open_for_spawn(&path).expect("reopen worker log"));
         assert_eq!(pa_core::platform::perms::file_mode(&path), Some(0o600));
         assert_eq!(std::fs::read(&path).unwrap(), b"");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn spawn_open_does_not_follow_a_planted_log_symlink() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = log_path(dir.path(), "a");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let victim = dir.path().join("unrelated-file");
+        std::fs::write(&victim, b"keep this file").unwrap();
+        std::os::unix::fs::symlink(&victim, &path).unwrap();
+
+        assert!(open_for_spawn(&path).is_err());
+        assert_eq!(std::fs::read(&victim).unwrap(), b"keep this file");
+        assert_eq!(std::fs::read_link(&path).unwrap(), victim);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn tail_does_not_read_a_planted_log_symlink() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = log_path(dir.path(), "a");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let victim = dir.path().join("unrelated-file");
+        std::fs::write(&victim, b"private content\n").unwrap();
+        std::os::unix::fs::symlink(&victim, &path).unwrap();
+
+        assert!(read_tail(&path).is_err());
+        assert_eq!(std::fs::read(&victim).unwrap(), b"private content\n");
     }
 
     #[test]

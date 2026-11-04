@@ -22,6 +22,9 @@ tokio-util = "0.7"
 sha2 = "0.10"
 uuid = { version = "1", features = ["v4", "v7"] }
 
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [dev-dependencies]
 filetime = "0.2"
 tempfile = "3"
