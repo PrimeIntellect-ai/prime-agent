@@ -1675,6 +1675,37 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
+    fn windows_lock_create_does_not_follow_a_raced_dangling_link() {
+        use std::os::windows::fs::symlink_dir;
+
+        let root = tempfile::tempdir().unwrap();
+        let project = root.path().join("project");
+        let outside = root.path().join("outside");
+        fs::create_dir(&project).unwrap();
+        let file = project.join("settings.json");
+        let lock_path = LockDir::path_for(&file);
+        let planted = lock_path.clone();
+        let target = outside.clone();
+        BEFORE_LOCK_CREATE.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(move || {
+                symlink_dir(&target, &planted).unwrap();
+            }));
+        });
+
+        let result = LockDir::acquire(&file, MIN_STALE);
+        let accepted = result.is_ok();
+        let outside_created = outside.exists();
+        drop(result);
+        assert!(!accepted, "a planted link must not become a lock");
+        assert!(!outside_created, "a planted link must not create outside");
+        assert!(fs::symlink_metadata(&lock_path)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+    }
+
+    #[cfg(windows)]
+    #[test]
     fn windows_stale_reclaim_does_not_remove_a_foreign_lock() {
         let root = tempfile::tempdir().unwrap();
         let project = root.path().join("project");
