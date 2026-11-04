@@ -552,13 +552,6 @@ impl SettingsStorage for FileSettingsStorage {
                         }
                     }
                 }
-                #[cfg(unix)]
-                if scope == SettingsScope::Project {
-                    let parent = project_parent
-                        .as_ref()
-                        .ok_or_else(|| anyhow!("Project settings directory is missing"))?;
-                    project_parent = Some(open_readable_directory_at(parent)?);
-                }
                 #[cfg(all(test, any(unix, windows)))]
                 if scope == SettingsScope::Project {
                     BEFORE_PROJECT_WRITE.with(|hook| {
@@ -575,13 +568,17 @@ impl SettingsStorage for FileSettingsStorage {
                     let name = locked_path
                         .file_name()
                         .ok_or_else(|| anyhow!("Project settings path has no file name"))?;
-                    // Reads need only search permission. Reopen for fsync
-                    // before writing, so missing read permission fails
-                    // before replacing the document.
+                    // Unix reads need only search permission. Reopen for fsync
+                    // before writing so missing read permission fails before
+                    // replacing the document.
+                    #[cfg(unix)]
                     let readable_parent = open_readable_directory_at(parent)?;
                     #[cfg(test)]
                     OPT_IN_FSYNC.with(|count| count.set(count.get() + 1));
+                    #[cfg(unix)]
                     platform_fs::atomic_write_private_at(&readable_parent, name, &content)?;
+                    #[cfg(windows)]
+                    platform_fs::atomic_write_private_at(parent, name, &content)?;
                 } else {
                     atomic_write_with(&locked_path, &content, AtomicWriteOptions { fsync: true })?;
                 }
