@@ -16,6 +16,7 @@ fn run_quiet(command: &str, args: &[&str], project: Option<&Path>) -> bool {
         // Never let the repository cwd shadow the installed runtime during a
         // readiness probe.
         .arg("-P")
+        .arg("-s")
         .args(args)
         .stdin(Stdio::null())
         .stdout(Stdio::null())

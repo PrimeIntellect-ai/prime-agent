@@ -1159,7 +1159,7 @@ async fn unwritable_venv_disables_uncovered_skills_instead_of_failing() {
     std::fs::create_dir_all(python.parent().unwrap()).unwrap();
     std::fs::write(
         &python,
-        "#!/bin/sh\nif [ \"$3\" = \"import edit\" ]; then exit 1; fi\nexit 0\n",
+        "#!/bin/sh\nif [ \"$4\" = \"import edit\" ]; then exit 1; fi\nexit 0\n",
     )
     .unwrap();
     set_mode(&python, 0o755);

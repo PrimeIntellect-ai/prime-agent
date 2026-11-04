@@ -163,6 +163,9 @@ pub(crate) async fn bootstrap_venv(
             venv_str,
             "--python".to_string(),
             PYTHON_VERSION.to_string(),
+            // The preceding `uv python install` provisions this runtime.
+            // Avoid querying Python executables found on the caller's PATH.
+            "--managed-python".to_string(),
             "--seed".to_string(),
         ],
         uv_command.project,

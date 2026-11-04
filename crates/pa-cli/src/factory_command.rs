@@ -271,7 +271,7 @@ fn dispatch_via_kernel(python: &std::path::Path, payload: &Value) -> Result<Valu
         .map_err(|error| format!("cannot resolve project directory: {error}"))?;
     let mut child = Command::new(python);
     child
-        .args(["-P", "-c", CLI_DISPATCH_RUNNER])
+        .args(["-P", "-s", "-c", CLI_DISPATCH_RUNNER])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

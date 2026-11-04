@@ -97,11 +97,15 @@ fn safe_path_with_home_mode(
     trusted_home_tool || !overlaps
 }
 
-/// Drop ambient Python import roots after caller overrides are applied. A path
-/// outside the cwd can still be inside the opened repository, and interpreter
-/// startup imports sitecustomize before the kernel can check it.
+/// Drop ambient Python import roots after caller overrides are applied.
+/// Python imports sitecustomize before the kernel can check it.
 pub(crate) fn sanitize_python_env(env: &mut HashMap<OsString, OsString>) {
-    for name in ["PYTHONPATH", "PYTHONHOME", "PYTHONUSERBASE"] {
+    for name in [
+        "PYTHONPATH",
+        "PYTHONHOME",
+        "PYTHONUSERBASE",
+        "PYTHONNOUSERSITE",
+    ] {
         // Windows environment names are case-insensitive. On Unix, a
         // lowercase name is a separate variable that Python ignores.
         let keys: Vec<_> = env
@@ -122,6 +126,7 @@ pub(crate) fn sanitize_python_env(env: &mut HashMap<OsString, OsString>) {
             env.remove(&key);
         }
     }
+    env.insert(OsString::from("PYTHONNOUSERSITE"), OsString::from("1"));
 }
 
 pub(crate) fn inherited_python_env(_project: Option<&Path>) -> HashMap<OsString, OsString> {
@@ -133,6 +138,30 @@ pub(crate) fn inherited_python_env(_project: Option<&Path>) -> HashMap<OsString,
 /// `uv` probes Python executables on PATH while creating a venv. Exclude
 /// relative and repository entries before it can execute a checked-in binary.
 pub(crate) fn sanitize_uv_path(env: &mut HashMap<OsString, OsString>, project: Option<&Path>) {
+    // These overrides can redirect managed-Python discovery into a checkout
+    // even after PATH has been filtered.
+    for name in [
+        "UV_PYTHON_SEARCH_PATH",
+        "UV_PYTHON_INSTALL_DIR",
+        "UV_PYTHON",
+        "UV_PYTHON_PREFERENCE",
+        "UV_MANAGED_PYTHON",
+        "UV_NO_MANAGED_PYTHON",
+        "UV_SYSTEM_PYTHON",
+        "VIRTUAL_ENV",
+        "CONDA_PREFIX",
+    ] {
+        env.retain(|key, _| {
+            #[cfg(windows)]
+            {
+                !key.to_string_lossy().eq_ignore_ascii_case(name)
+            }
+            #[cfg(not(windows))]
+            {
+                key.as_os_str() != OsStr::new(name)
+            }
+        });
+    }
     let Some(project) = project else { return };
     let keys: Vec<_> = env
         .keys()
@@ -180,6 +209,8 @@ mod tests {
         env.insert(OsString::from("pythonpath"), OsString::from("untouched"));
         #[cfg(windows)]
         env.insert(OsString::from("pythonpath"), OsString::from("/other"));
+        #[cfg(windows)]
+        env.insert(OsString::from("pythonnousersite"), OsString::from("0"));
 
         sanitize_python_env(&mut env);
         for name in ["PYTHONPATH", "PYTHONHOME", "PYTHONUSERBASE"] {
@@ -190,6 +221,10 @@ mod tests {
         }
         assert_eq!(
             env.get(OsStr::new("PYTHONUTF8")),
+            Some(&OsString::from("1"))
+        );
+        assert_eq!(
+            env.get(OsStr::new("PYTHONNOUSERSITE")),
             Some(&OsString::from("1"))
         );
         #[cfg(not(windows))]
@@ -245,6 +280,59 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn default_user_site_cannot_run_usercustomize_before_prompt() {
+        let Some(python) = ["python3.11", "python3"].into_iter().find(|python| {
+            std::process::Command::new(python)
+                .args(["-P", "-c", "pass"])
+                .status()
+                .is_ok_and(|status| status.success())
+        }) else {
+            return;
+        };
+        let root = tempfile::tempdir().unwrap();
+        let project = root.path().join("project");
+        std::fs::create_dir(&project).unwrap();
+        let site = std::process::Command::new(python)
+            .args(["-P", "-c", "import site; print(site.getusersitepackages())"])
+            .env_clear()
+            .env("HOME", &project)
+            .output()
+            .unwrap();
+        assert!(site.status.success());
+        let user_site = String::from_utf8(site.stdout).unwrap();
+        let user_site = Path::new(user_site.trim());
+        std::fs::create_dir_all(user_site).unwrap();
+        let marker = root.path().join("user-site-ran");
+        std::fs::write(
+            user_site.join("usercustomize.py"),
+            format!("from pathlib import Path\nPath({marker:?}).touch()\n"),
+        )
+        .unwrap();
+        let mut env = HashMap::from([(OsString::from("HOME"), project.into_os_string())]);
+        let run = |env: &HashMap<OsString, OsString>| {
+            std::process::Command::new(python)
+                .args(["-P", "-c", "pass"])
+                .env_clear()
+                .envs(env)
+                .status()
+                .unwrap()
+        };
+        assert!(run(&env).success());
+        assert!(
+            marker.exists(),
+            "default user site did not reproduce the bug"
+        );
+        std::fs::remove_file(&marker).unwrap();
+        sanitize_python_env(&mut env);
+        assert!(run(&env).success());
+        assert!(
+            !marker.exists(),
+            "user site ran after sanitizing Python env"
+        );
+    }
+
     #[test]
     fn executable_search_rejects_repository_sibling_paths() {
         let root = tempfile::tempdir().unwrap();
@@ -269,8 +357,41 @@ mod tests {
             OsString::from("PATH"),
             std::env::join_paths([Path::new("."), &sibling, &trusted]).unwrap(),
         )]);
+        for name in [
+            "UV_PYTHON_SEARCH_PATH",
+            "UV_PYTHON_INSTALL_DIR",
+            "UV_PYTHON",
+            "UV_PYTHON_PREFERENCE",
+            "UV_MANAGED_PYTHON",
+            "UV_NO_MANAGED_PYTHON",
+            "UV_SYSTEM_PYTHON",
+            "VIRTUAL_ENV",
+            "CONDA_PREFIX",
+        ] {
+            env.insert(OsString::from(name), sibling.clone().into_os_string());
+        }
+        #[cfg(windows)]
+        env.insert(
+            OsString::from("Uv_Python_Search_Path"),
+            sibling.clone().into_os_string(),
+        );
         sanitize_uv_path(&mut env, Some(&project));
         assert_eq!(env.get(OsStr::new("PATH")), Some(&trusted.into_os_string()));
+        for name in [
+            "UV_PYTHON_SEARCH_PATH",
+            "UV_PYTHON_INSTALL_DIR",
+            "UV_PYTHON",
+            "UV_PYTHON_PREFERENCE",
+            "UV_MANAGED_PYTHON",
+            "UV_NO_MANAGED_PYTHON",
+            "UV_SYSTEM_PYTHON",
+            "VIRTUAL_ENV",
+            "CONDA_PREFIX",
+        ] {
+            assert!(!env.contains_key(OsStr::new(name)), "{name} survived");
+        }
+        #[cfg(windows)]
+        assert!(!env.contains_key(OsStr::new("Uv_Python_Search_Path")));
     }
 
     #[test]

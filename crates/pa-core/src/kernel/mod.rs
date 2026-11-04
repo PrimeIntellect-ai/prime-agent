@@ -38,7 +38,8 @@ pub use shared::{
 pub use state_snapshot::{manifest_path_in, snapshot_path_in, RestoreResult, SnapshotResult};
 
 /// Environment for a Python process launched from `project`: ambient Python
-/// import roots are removed before interpreter initialization.
+/// import roots and the default user site are disabled before interpreter
+/// initialization.
 #[must_use]
 pub fn python_process_environment(
     project: &std::path::Path,

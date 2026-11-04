@@ -18,6 +18,8 @@ fn factory_dispatch_and_probes_drop_project_python_paths() {
         &python,
         r#"#!/bin/sh
 [ "$1" = "-P" ] || exit 41
+[ "$2" = "-s" ] || exit 45
+[ "$PYTHONNOUSERSITE" = "1" ] || exit 46
 [ -z "${PYTHONPATH+x}" ] || exit 42
 [ -z "${PYTHONHOME+x}" ] || exit 43
 [ -z "${PYTHONUSERBASE+x}" ] || exit 44
