@@ -29,6 +29,20 @@ fn session_rewrite_does_not_follow_a_planted_temp_symlink() {
 }
 
 #[test]
+#[cfg(unix)]
+fn session_rewrite_accepts_a_long_valid_filename() {
+    let dir = tempfile::tempdir().unwrap();
+    let session = dir.path().join("s".repeat(220));
+
+    persist::atomic_write(&session, "session content").unwrap();
+
+    assert_eq!(
+        std::fs::read_to_string(&session).unwrap(),
+        "session content"
+    );
+}
+
+#[test]
 fn generated_entry_ids_are_unique_and_link_to_previous_entry() {
     let mut manager = SessionManager::in_memory(Path::new("/tmp"));
     let mut previous = None;

@@ -3,8 +3,7 @@
 //! (TS `writeFileAtomicSync`).
 
 use super::{
-    serialize_entry, AgentMessage, FileEntry, Path, PathBuf, SessionManager,
-    SessionPersistListener, Write,
+    serialize_entry, AgentMessage, FileEntry, Path, SessionManager, SessionPersistListener, Write,
 };
 
 impl SessionManager {
@@ -156,13 +155,14 @@ impl SessionManager {
 /// non-synced rename can zero the file on a hard crash); other sites are
 /// TS-default.
 pub(super) fn atomic_write(path: &Path, content: &str) -> std::io::Result<()> {
-    let mut temp_name = path.as_os_str().to_os_string();
-    temp_name.push(format!(
-        ".tmp{}-{}",
+    // Keep the sibling basename independent of the destination's length: a
+    // valid long session filename must not overflow the filesystem's component
+    // limit when we add the random suffix.
+    let temp = path.with_file_name(format!(
+        ".prime-agent-session-{}-{}.tmp",
         std::process::id(),
         uuid::Uuid::new_v4().simple()
     ));
-    let temp = PathBuf::from(temp_name);
     let result = (|| -> std::io::Result<()> {
         let mut options = std::fs::OpenOptions::new();
         options.create_new(true).write(true);
