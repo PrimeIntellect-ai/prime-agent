@@ -552,6 +552,13 @@ impl LockDir {
         Ok(())
     }
 
+    /// A readable handle to the lock's original parent for a handle-relative
+    /// read or write while this guard is held.
+    #[cfg(unix)]
+    pub(crate) fn original_parent_for_io(&self) -> io::Result<fs::File> {
+        super::fs::open_readable_directory_at(&self.parent)
+    }
+
     #[cfg(not(unix))]
     fn owner_matches(path: &Path, owner: &str) -> bool {
         fs::File::open(path.join("owner"))

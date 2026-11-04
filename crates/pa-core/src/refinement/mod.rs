@@ -6,6 +6,14 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+#[cfg(all(test, unix))]
+thread_local! {
+    static BEFORE_HARNESS_LOAD: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
+    static BEFORE_LOCKED_HARNESS_SAVE: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
+    static BEFORE_STANDALONE_HARNESS_SAVE: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
+    static HARNESS_DURABLE_WRITES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 /// Refinement entry kinds (the continual harness component set).
 pub const REFINEMENT_KINDS: [&str; 5] = ["prompt", "memory", "skill", "subagent", "factory"];
 
@@ -172,12 +180,58 @@ pub fn factory_enabled(agent_dir: &Path) -> bool {
 /// # Panics
 ///
 /// The `get_mut(kind).unwrap()` cannot panic: the empty state pre-populates every kind map.
+// Keep this existing public function's attributes unchanged for downstream callers.
+#[allow(clippy::must_use_candidate)]
 pub fn load_harness_state(harness_state_dir: &Path, scope: HarnessScope) -> HarnessState {
     let state_path = get_harness_state_path(harness_state_dir);
     let Ok(raw) = std::fs::read_to_string(&state_path) else {
         return empty_harness_state();
     };
-    let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&raw) else {
+    parse_harness_state(&raw, scope)
+}
+
+/// Read the locked transaction from its original directory, even if its
+/// caller-facing path is replaced after lock acquisition.
+#[cfg(unix)]
+fn load_harness_state_at(parent: &std::fs::File, scope: HarnessScope) -> HarnessState {
+    use std::io::Read;
+    use std::os::fd::{AsRawFd, FromRawFd};
+
+    let mut file = match crate::platform::fs::open_regular_file_at(
+        parent,
+        std::ffi::OsStr::new("harness_state.json"),
+    ) {
+        Ok(file) => file,
+        // Existing harness-state leaf symlinks remain readable. Only their
+        // parent is pinned by the owned lock; this preserves linked layouts.
+        Err(error) if error.raw_os_error() == Some(libc::ELOOP) => {
+            let fd = unsafe {
+                libc::openat(
+                    parent.as_raw_fd(),
+                    c"harness_state.json".as_ptr(),
+                    libc::O_RDONLY | libc::O_NONBLOCK | libc::O_CLOEXEC,
+                )
+            };
+            if fd < 0 {
+                return empty_harness_state();
+            }
+            let file = unsafe { std::fs::File::from_raw_fd(fd) };
+            if !file.metadata().is_ok_and(|metadata| metadata.is_file()) {
+                return empty_harness_state();
+            }
+            file
+        }
+        Err(_) => return empty_harness_state(),
+    };
+    let mut raw = String::new();
+    if file.read_to_string(&mut raw).is_err() {
+        return empty_harness_state();
+    }
+    parse_harness_state(&raw, scope)
+}
+
+fn parse_harness_state(raw: &str, scope: HarnessScope) -> HarnessState {
+    let Ok(parsed) = serde_json::from_str::<serde_json::Value>(raw) else {
         return empty_harness_state();
     };
     let Some(parsed_obj) = parsed.as_object() else {
@@ -282,13 +336,45 @@ pub fn save_harness_state(
 ) -> anyhow::Result<PathBuf> {
     std::fs::create_dir_all(harness_state_dir)?;
     let state_path = get_harness_state_path(harness_state_dir);
+    #[cfg(unix)]
+    let parent = {
+        let canonical = std::fs::canonicalize(harness_state_dir)?;
+        let search = crate::platform::fs::open_search_absolute_directory(
+            &canonical,
+            crate::platform::fs::DirectoryCreation::CreateMissing,
+        )?;
+        crate::platform::fs::open_readable_directory_at(&search)?
+    };
+    #[cfg(all(test, unix))]
+    BEFORE_STANDALONE_HARNESS_SAVE.with(|hook| {
+        if let Some(callback) = hook.borrow_mut().take() {
+            callback();
+        }
+    });
+    #[cfg(unix)]
+    save_harness_state_at(&parent, state)?;
+    #[cfg(not(unix))]
     let content = format!("{}\n", serde_json::to_string_pretty(state)?);
+    #[cfg(not(unix))]
     crate::settings::storage::atomic_write_with(
         &state_path,
         &content,
         crate::settings::storage::AtomicWriteOptions { fsync: true },
     )?;
     Ok(state_path)
+}
+
+#[cfg(unix)]
+fn save_harness_state_at(parent: &std::fs::File, state: &HarnessState) -> anyhow::Result<()> {
+    let content = format!("{}\n", serde_json::to_string_pretty(state)?);
+    crate::platform::fs::atomic_write_private_at(
+        parent,
+        std::ffi::OsStr::new("harness_state.json"),
+        &content,
+    )?;
+    #[cfg(test)]
+    HARNESS_DURABLE_WRITES.with(|count| count.set(count.get() + 1));
+    Ok(())
 }
 
 /// Locked read-modify-write of the harness state file: both writer sides
@@ -319,9 +405,32 @@ pub(crate) fn try_update_harness_state<R>(
         50,
         std::time::Duration::from_millis(20),
     )?;
+    #[cfg(unix)]
+    let parent = lock.original_parent_for_io()?;
+    #[cfg(all(test, unix))]
+    BEFORE_HARNESS_LOAD.with(|hook| {
+        if let Some(callback) = hook.borrow_mut().take() {
+            callback();
+        }
+    });
+    #[cfg(unix)]
+    let mut state = load_harness_state_at(&parent, scope);
+    #[cfg(not(unix))]
     let mut state = load_harness_state(harness_state_dir, scope);
     let result = update(&mut state)?;
     lock.ensure_owned()?;
+    #[cfg(all(test, unix))]
+    BEFORE_LOCKED_HARNESS_SAVE.with(|hook| {
+        if let Some(callback) = hook.borrow_mut().take() {
+            callback();
+        }
+    });
+    #[cfg(unix)]
+    let written = {
+        save_harness_state_at(&parent, &state)?;
+        state_path
+    };
+    #[cfg(not(unix))]
     let written = save_harness_state(harness_state_dir, &state)?;
     Ok((result, written))
 }
@@ -615,6 +724,167 @@ mod tests {
         assert_eq!(std::fs::read(path).unwrap(), before);
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn locked_harness_load_reads_the_original_directory_after_a_path_swap() {
+        use std::os::unix::fs::symlink;
+
+        let root = tempfile::tempdir().unwrap();
+        let harness = root.path().join("harness");
+        let moved = root.path().join("harness-moved");
+        let outside = root.path().join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        let mut original = empty_harness_state();
+        original.schema = 7;
+        save_harness_state(&harness, &original).unwrap();
+        std::fs::write(outside.join("harness_state.json"), r#"{"schema":99}"#).unwrap();
+
+        let harness_for_swap = harness.clone();
+        BEFORE_HARNESS_LOAD.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(move || {
+                std::fs::rename(&harness_for_swap, &moved).unwrap();
+                symlink(&outside, &harness_for_swap).unwrap();
+            }));
+        });
+        let mut observed_schema = None;
+        let _ = try_update_harness_state(&harness, HarnessScope::Global, |state| {
+            observed_schema = Some(state.schema);
+            Ok(())
+        });
+
+        assert_eq!(observed_schema, Some(7));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn locked_harness_save_stays_in_the_original_directory_after_a_path_swap() {
+        use std::os::unix::fs::symlink;
+
+        let root = tempfile::tempdir().unwrap();
+        let harness = root.path().join("harness");
+        let moved = root.path().join("harness-moved");
+        let outside = root.path().join("outside");
+        std::fs::create_dir_all(&harness).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("harness_state.json"), "outside sentinel").unwrap();
+
+        let harness_for_swap = harness.clone();
+        let moved_for_check = moved.clone();
+        let outside_for_check = outside.clone();
+        BEFORE_LOCKED_HARNESS_SAVE.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(move || {
+                std::fs::rename(&harness_for_swap, &moved).unwrap();
+                symlink(&outside, &harness_for_swap).unwrap();
+            }));
+        });
+        try_update_harness_state(&harness, HarnessScope::Global, |state| {
+            state.schema = 8;
+            Ok(())
+        })
+        .unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(outside_for_check.join("harness_state.json")).unwrap(),
+            "outside sentinel"
+        );
+        assert_eq!(
+            load_harness_state(&moved_for_check, HarnessScope::Global).schema,
+            8
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn standalone_harness_save_stays_in_its_open_directory_after_a_path_swap() {
+        use std::os::unix::fs::symlink;
+
+        let root = tempfile::tempdir().unwrap();
+        let harness = root.path().join("harness");
+        let moved = root.path().join("harness-moved");
+        let outside = root.path().join("outside");
+        std::fs::create_dir_all(&harness).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("harness_state.json"), "outside sentinel").unwrap();
+
+        let harness_for_swap = harness.clone();
+        let moved_for_check = moved.clone();
+        let outside_for_check = outside.clone();
+        BEFORE_STANDALONE_HARNESS_SAVE.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(move || {
+                std::fs::rename(&harness_for_swap, &moved).unwrap();
+                symlink(&outside, &harness_for_swap).unwrap();
+            }));
+        });
+        let mut state = empty_harness_state();
+        state.schema = 9;
+        save_harness_state(&harness, &state).unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(outside_for_check.join("harness_state.json")).unwrap(),
+            "outside sentinel"
+        );
+        assert_eq!(
+            load_harness_state(&moved_for_check, HarnessScope::Global).schema,
+            9
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn linked_agent_root_keeps_its_path_and_harness_layout() {
+        use std::os::unix::fs::symlink;
+
+        let root = tempfile::tempdir().unwrap();
+        let real = root.path().join("real-agent");
+        let linked = root.path().join("linked-agent");
+        std::fs::create_dir_all(&real).unwrap();
+        symlink(&real, &linked).unwrap();
+        let harness = get_global_harness_state_dir(&linked);
+        let real_harness = get_global_harness_state_dir(&real);
+        std::fs::create_dir_all(&real_harness).unwrap();
+        let shared = real_harness.join("shared-state.json");
+        std::fs::write(&shared, r#"{"schema":10}"#).unwrap();
+        symlink("shared-state.json", real_harness.join("harness_state.json")).unwrap();
+
+        try_update_harness_state(&harness, HarnessScope::Global, |state| {
+            assert_eq!(state.schema, 10);
+            state.schema = 11;
+            Ok(())
+        })
+        .unwrap();
+
+        assert_eq!(
+            load_harness_state(&real_harness, HarnessScope::Global).schema,
+            11
+        );
+        assert_eq!(std::fs::read_to_string(shared).unwrap(), r#"{"schema":10}"#);
+        assert!(std::fs::symlink_metadata(&linked)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn relative_agent_root_keeps_its_harness_path() {
+        let cwd = std::env::current_dir().unwrap();
+        let root = tempfile::tempdir_in(&cwd).unwrap();
+        let relative = root.path().strip_prefix(&cwd).unwrap().join("agent");
+        let harness = get_global_harness_state_dir(&relative);
+
+        let ((), written) = try_update_harness_state(&harness, HarnessScope::Global, |state| {
+            state.schema = 12;
+            Ok(())
+        })
+        .unwrap();
+
+        assert_eq!(written, get_harness_state_path(&harness));
+        assert_eq!(
+            load_harness_state(&harness, HarnessScope::Global).schema,
+            12
+        );
+    }
+
     #[test]
     fn factory_opt_in_reads_leniently_and_fails_closed() {
         let tmp = tempfile::tempdir().unwrap();
@@ -704,10 +974,17 @@ mod tests {
                 entry("m1", RefinementKind::Memory, HarnessScope::Global, "a fact"),
             );
         let expected = format!("{}\n", serde_json::to_string_pretty(&state).unwrap());
+        #[cfg(unix)]
+        let before = HARNESS_DURABLE_WRITES.with(std::cell::Cell::get);
+        #[cfg(not(unix))]
         let before = crate::settings::storage::opt_in_fsync_calls();
         let written = save_harness_state(&dir, &state).unwrap();
+        #[cfg(unix)]
+        let after = HARNESS_DURABLE_WRITES.with(std::cell::Cell::get);
+        #[cfg(not(unix))]
+        let after = crate::settings::storage::opt_in_fsync_calls();
         assert_eq!(
-            crate::settings::storage::opt_in_fsync_calls(),
+            after,
             before + 1,
             "the harness save must flush the temp file before the rename"
         );
