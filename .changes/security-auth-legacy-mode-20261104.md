@@ -1,0 +1,1 @@
+- Existing credential files are restricted to owner access when read, while deliberately linked shared files keep their permissions.

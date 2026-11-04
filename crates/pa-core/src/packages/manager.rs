@@ -200,8 +200,9 @@ impl PackageManager {
         if ambient_api_key.is_some_and(|value| !value.trim().is_empty()) {
             return true;
         }
-        let stored = std::fs::read_to_string(agent_dir.join("auth.json"))
+        let stored = crate::auth::storage::read_existing_auth_file(&agent_dir.join("auth.json"))
             .ok()
+            .flatten()
             .and_then(|content| {
                 crate::auth::parse_storage_data(Some(&content))
                     .ok()
@@ -714,9 +715,23 @@ mod tests {
             r#"{ "serper": { "type": "api_key", "key": "stored" } }"#,
         )
         .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(
+                agent_dir.join("auth.json"),
+                std::fs::Permissions::from_mode(0o644),
+            )
+            .unwrap();
+        }
         assert!(PackageManager::websearch_enabled_by_credential(
             &agent_dir, None
         ));
+        #[cfg(unix)]
+        assert_eq!(
+            crate::platform::perms::file_mode(&agent_dir.join("auth.json")),
+            Some(0o600)
+        );
         std::fs::write(
             agent_dir.join("auth.json"),
             r#"{ "other": { "type": "api_key", "key": "x" } }"#,
