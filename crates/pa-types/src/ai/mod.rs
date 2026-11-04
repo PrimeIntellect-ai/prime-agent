@@ -250,6 +250,17 @@ pub struct ImageContent {
     pub rest: JsonMap,
 }
 
+/// Video content block (`type: "video"`); data is base64. Only the `OpenAI` Completions provider
+/// sends it to the model (as a `video_url` part); the others replace it with a text placeholder.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct VideoContent {
+    pub data: String,
+    #[serde(rename = "mimeType")]
+    pub mime_type: String,
+    #[serde(flatten)]
+    pub rest: JsonMap,
+}
+
 pub const PYTHON_TOOL_NAME: &str = "python_repl";
 
 #[must_use]
@@ -280,6 +291,7 @@ pub struct ToolCall {
 pub enum UserContentBlock {
     Text(TextContent),
     Image(ImageContent),
+    Video(VideoContent),
     /// Un-modeled block (missing/unknown `type` tag or other JSON shape); serialized verbatim.
     Raw(Value),
 }
@@ -289,6 +301,7 @@ impl Serialize for UserContentBlock {
         match self {
             Self::Text(text) => serialize_tagged_block("text", text, serializer),
             Self::Image(image) => serialize_tagged_block("image", image, serializer),
+            Self::Video(video) => serialize_tagged_block("video", video, serializer),
             Self::Raw(value) => value.serialize(serializer),
         }
     }
@@ -326,6 +339,9 @@ impl<'de> Deserialize<'de> for UserContentBlock {
             "image" => serde_json::from_value::<ImageContent>(payload)
                 .map(Self::Image)
                 .map_err(|e| <D::Error as serde::de::Error>::custom(e.to_string())),
+            // A `video` block of another shape stays un-modeled rather than failing the load.
+            "video" => Ok(serde_json::from_value::<VideoContent>(payload)
+                .map_or(Self::Raw(value), Self::Video)),
             _ => Ok(Self::Raw(value)),
         }
     }
@@ -349,7 +365,7 @@ impl UserContentBlock {
     pub fn text(&self) -> Option<&str> {
         match self {
             Self::Text(content) => Some(content.text.as_str()),
-            Self::Image(_) => None,
+            Self::Image(_) | Self::Video(_) => None,
             Self::Raw(raw) => raw.get("text").and_then(Value::as_str),
         }
     }
@@ -359,7 +375,7 @@ impl UserContentBlock {
     pub fn image(&self) -> Option<(&str, &str)> {
         match self {
             Self::Image(content) => Some((content.data.as_str(), content.mime_type.as_str())),
-            Self::Text(_) => None,
+            Self::Text(_) | Self::Video(_) => None,
             Self::Raw(raw) => {
                 let data = raw.get("data").and_then(Value::as_str)?;
                 let mime_type = raw.get("mimeType").and_then(Value::as_str)?;
@@ -398,7 +414,9 @@ impl UserContent {
                 .iter()
                 .filter_map(|b| match b {
                     UserContentBlock::Text(t) => Some(t.text.clone()),
-                    UserContentBlock::Image(_) | UserContentBlock::Raw(_) => None,
+                    UserContentBlock::Image(_)
+                    | UserContentBlock::Video(_)
+                    | UserContentBlock::Raw(_) => None,
                 })
                 .collect::<Vec<_>>()
                 .join(" "),
@@ -668,6 +686,7 @@ pub struct ModelCost {
 pub enum ModelInput {
     Text,
     Image,
+    Video,
 }
 mod compat;
 pub use compat::{

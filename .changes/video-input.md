@@ -1,0 +1,1 @@
+- New `attach_video(*paths)` skill: loads short MP4/WebM clips (up to 7.5 MB each, prime-agent's attachment limit) into context. OpenAI-compatible chat-completions providers receive them as `video_url` parts when the model declares `"video"` input in `models.json`; other providers and models see a placeholder.

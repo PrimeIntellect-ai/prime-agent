@@ -70,6 +70,8 @@ fn user_content_block_chars(blocks: &[crate::types::UserOrToolContent]) -> u64 {
         .map(|block| match block {
             crate::types::UserOrToolContent::Text(text) => text.text.chars().count() as u64,
             crate::types::UserOrToolContent::Image(_) => 4_800,
+            // Four images' worth (~4,800 tokens): a short clip at the attach-video size cap.
+            crate::types::UserOrToolContent::Video(_) => 19_200,
             crate::types::UserOrToolContent::Raw(value) => {
                 serde_json::to_string(value).map_or(0, |json| json.chars().count() as u64)
             }

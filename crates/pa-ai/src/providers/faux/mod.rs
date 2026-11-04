@@ -296,6 +296,9 @@ fn content_to_text(content: &UserMessageContent) -> String {
                 crate::types::UserBlockPayload::Image { data, mime_type } => {
                     format!("[image:{}:{}]", mime_type, data.len())
                 }
+                crate::types::UserBlockPayload::Video { data, mime_type } => {
+                    format!("[video:{mime_type}:{}]", data.len())
+                }
                 crate::types::UserBlockPayload::Opaque(json) => json,
             })
             .collect::<Vec<_>>()
@@ -328,6 +331,9 @@ fn tool_result_to_text(message: &ToolResultMessage) -> String {
             crate::types::UserBlockPayload::Text(text) => text.to_string(),
             crate::types::UserBlockPayload::Image { data, mime_type } => {
                 format!("[image:{}:{}]", mime_type, data.len())
+            }
+            crate::types::UserBlockPayload::Video { data, mime_type } => {
+                format!("[video:{mime_type}:{}]", data.len())
             }
             crate::types::UserBlockPayload::Opaque(json) => json,
         }

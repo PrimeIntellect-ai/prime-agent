@@ -70,6 +70,10 @@ pub fn convert_messages(model: &Model, context: &Context, compat: &ResolvedCompa
                                 "type": "image_url",
                                 "image_url": { "url": format!("data:{mime_type};base64,{data}") },
                             }),
+                            crate::types::UserBlockPayload::Video { data, mime_type } => json!({
+                                "type": "video_url",
+                                "video_url": { "url": format!("data:{mime_type};base64,{data}") },
+                            }),
                             crate::types::UserBlockPayload::Opaque(json) => json!({
                                 "type": "text",
                                 "text": sanitize_surrogates(&json),
@@ -270,6 +274,7 @@ pub fn convert_messages(model: &Model, context: &Context, compat: &ResolvedCompa
             }
             Message::ToolResult(_) => {
                 let mut image_blocks: Vec<Value> = Vec::new();
+                let mut video_blocks: Vec<Value> = Vec::new();
                 let mut j = index;
                 while j < transformed.len() {
                     let Message::ToolResult(tool_msg) = &transformed[j] else {
@@ -289,6 +294,10 @@ pub fn convert_messages(model: &Model, context: &Context, compat: &ResolvedCompa
                         .content
                         .iter()
                         .any(|block| matches!(block, UserOrToolContent::Image(_)));
+                    let has_videos = tool_msg
+                        .content
+                        .iter()
+                        .any(|block| matches!(block, UserOrToolContent::Video(_)));
 
                     let has_text = !text_result.is_empty();
                     let mut tool_result_msg = Map::new();
@@ -299,6 +308,8 @@ pub fn convert_messages(model: &Model, context: &Context, compat: &ResolvedCompa
                             text_result.as_str()
                         } else if has_images {
                             "(see attached image)"
+                        } else if has_videos {
+                            "(see attached video)"
                         } else {
                             ""
                         })),
@@ -324,11 +335,26 @@ pub fn convert_messages(model: &Model, context: &Context, compat: &ResolvedCompa
                             }
                         }
                     }
+                    if has_videos
+                        && model
+                            .input
+                            .iter()
+                            .any(|mode| matches!(mode, ModelInput::Video))
+                    {
+                        for block in &tool_msg.content {
+                            if let UserOrToolContent::Video(video) = block {
+                                video_blocks.push(json!({
+                                    "type": "video_url",
+                                    "video_url": { "url": format!("data:{};base64,{}", video.mime_type, video.data) },
+                                }));
+                            }
+                        }
+                    }
                     j += 1;
                 }
 
                 index = j;
-                if image_blocks.is_empty() {
+                if image_blocks.is_empty() && video_blocks.is_empty() {
                     last_role = Some("toolResult");
                 } else {
                     if compat.requires_assistant_after_tool_result {
@@ -339,9 +365,14 @@ pub fn convert_messages(model: &Model, context: &Context, compat: &ResolvedCompa
                     }
                     let mut content_items = vec![json!({
                         "type": "text",
-                        "text": "Attached image(s) from tool result:",
+                        "text": if video_blocks.is_empty() {
+                            "Attached image(s) from tool result:"
+                        } else {
+                            "Attached media from tool result:"
+                        },
                     })];
                     content_items.extend(image_blocks);
+                    content_items.extend(video_blocks);
                     params.push(json!({
                         "role": "user",
                         "content": content_items,
@@ -632,5 +663,135 @@ mod tests {
         assert!((usage.cost.input.as_f64() - 0.035).abs() < 1e-9);
         assert!((usage.cost.output.as_f64() - 0.035).abs() < 1e-9);
         assert!((usage.cost.total.as_f64() - 0.07).abs() < 1e-9);
+    }
+
+    fn video_model() -> Model {
+        let mut model = model("intercept", 0.0, 0.0);
+        model.input = vec![ModelInput::Text, ModelInput::Image, ModelInput::Video];
+        model
+    }
+
+    fn context(messages: &Value) -> Context {
+        serde_json::from_value(json!({ "messages": messages })).expect("context parses")
+    }
+
+    fn user_video_context() -> Context {
+        context(&json!([{
+            "role": "user",
+            "content": [
+                { "type": "text", "text": "What happens?" },
+                { "type": "video", "data": "AAAA", "mimeType": "video/mp4" },
+            ],
+            "timestamp": 1,
+        }]))
+    }
+
+    fn tool_result_video_context() -> Context {
+        context(&json!([
+            { "role": "user", "content": "Watch clip.mp4", "timestamp": 1 },
+            {
+                "role": "assistant",
+                "content": [{
+                    "type": "toolCall",
+                    "id": "call_1",
+                    "name": "python_repl",
+                    "arguments": { "code": "await attach_video('clip.mp4')" },
+                }],
+                "api": "openai-completions",
+                "provider": "intercept",
+                "model": "m",
+                "usage": {
+                    "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0, "totalTokens": 0,
+                    "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0, "total": 0 },
+                },
+                "stopReason": "toolUse",
+                "timestamp": 2,
+            },
+            {
+                "role": "toolResult",
+                "toolCallId": "call_1",
+                "toolName": "python_repl",
+                "content": [
+                    { "type": "text", "text": "Loaded 1 video(s) into context: clip.mp4" },
+                    { "type": "video", "data": "AAAA", "mimeType": "video/mp4" },
+                ],
+                "isError": false,
+                "timestamp": 3,
+            },
+        ]))
+    }
+
+    fn convert(model: &Model, context: &Context) -> Vec<Value> {
+        convert_messages(
+            model,
+            context,
+            &crate::providers::openai_completions::get_compat(model),
+        )
+    }
+
+    #[test]
+    fn user_video_block_serializes_as_a_video_url_part() {
+        assert_eq!(
+            convert(&video_model(), &user_video_context()),
+            vec![json!({
+                "role": "user",
+                "content": [
+                    { "type": "text", "text": "What happens?" },
+                    { "type": "video_url", "video_url": { "url": "data:video/mp4;base64,AAAA" } },
+                ],
+            })]
+        );
+    }
+
+    /// Tool messages carry text only, so a tool-result video rides in the follow-up user message,
+    /// the same bridge tool-result images take.
+    #[test]
+    fn tool_result_video_is_attached_in_a_follow_up_user_message() {
+        let params = convert(&video_model(), &tool_result_video_context());
+        assert_eq!(
+            params[params.len() - 2..],
+            [
+                json!({
+                    "role": "tool",
+                    "content": "Loaded 1 video(s) into context: clip.mp4",
+                    "tool_call_id": "call_1",
+                }),
+                json!({
+                    "role": "user",
+                    "content": [
+                        { "type": "text", "text": "Attached media from tool result:" },
+                        { "type": "video_url", "video_url": { "url": "data:video/mp4;base64,AAAA" } },
+                    ],
+                }),
+            ]
+        );
+    }
+
+    /// A vision model that does not declare `"video"` input never receives a video part: user and
+    /// tool-result videos become placeholders, like images on a non-vision model.
+    #[test]
+    fn videos_become_placeholders_without_declared_video_input() {
+        let mut model = video_model();
+        model.input = vec![ModelInput::Text, ModelInput::Image];
+        assert_eq!(
+            convert(&model, &user_video_context()),
+            vec![json!({
+                "role": "user",
+                "content": [
+                    { "type": "text", "text": "What happens?" },
+                    { "type": "text", "text": "(video omitted: model does not support video)" },
+                ],
+            })]
+        );
+        let params = convert(&model, &tool_result_video_context());
+        assert_eq!(
+            params.last(),
+            Some(&json!({
+                "role": "tool",
+                "content": "Loaded 1 video(s) into context: clip.mp4\n(tool video omitted: model does not support video)",
+                "tool_call_id": "call_1",
+            }))
+        );
+        assert!(!Value::Array(params).to_string().contains("video_url"));
     }
 }

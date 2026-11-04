@@ -18,7 +18,7 @@ pub use pa_types::ai::{
     TextSignaturePhase, TextSignatureV1, ThinkingBudgets, ThinkingContent, ThinkingFormat,
     ThinkingLevel, ThinkingLevelMap, Tool, ToolCall, ToolResultMessage, Transport, Usage,
     UsageCost, UserContent as UserMessageContent, UserContentBlock as UserOrToolContent,
-    UserMessage,
+    UserMessage, VideoContent,
 };
 
 /// JSON tool parameter schema. In the TS reference this is a `TypeBox` schema;
@@ -27,7 +27,9 @@ pub type JsonSchema = serde_json::Value;
 
 /// Provider payload view of one user/tool-result content block.
 ///
-/// Most provider conversions map a block to either a text part or an image part. Un-modeled blocks
+/// Most provider conversions map a block to either a text part or an image part; only the `OpenAI`
+/// Completions conversion sends [`UserBlockPayload::Video`] as a video part, every other provider
+/// replaces it with [`UNSUPPORTED_VIDEO_PLACEHOLDER`]. Un-modeled blocks
 /// ([`UserOrToolContent::Raw`]: a missing `type` tag or an unknown kind) never reach the prompt as
 /// structured parts - a bare text block maps to [`UserBlockPayload::Text`], a bare image block to
 /// [`UserBlockPayload::Image`], and anything else to [`UserBlockPayload::Opaque`] (its JSON, as
@@ -36,8 +38,13 @@ pub type JsonSchema = serde_json::Value;
 pub enum UserBlockPayload<'a> {
     Text(&'a str),
     Image { data: &'a str, mime_type: &'a str },
+    Video { data: &'a str, mime_type: &'a str },
     Opaque(String),
 }
+
+/// Model-facing text standing in for a video block on providers without video input.
+pub const UNSUPPORTED_VIDEO_PLACEHOLDER: &str =
+    "(video omitted: this provider does not support video input)";
 
 #[must_use]
 pub fn user_block_payload(block: &UserOrToolContent) -> UserBlockPayload<'_> {
@@ -46,6 +53,12 @@ pub fn user_block_payload(block: &UserOrToolContent) -> UserBlockPayload<'_> {
     }
     if let Some((data, mime_type)) = block.image() {
         return UserBlockPayload::Image { data, mime_type };
+    }
+    if let UserOrToolContent::Video(video) = block {
+        return UserBlockPayload::Video {
+            data: &video.data,
+            mime_type: &video.mime_type,
+        };
     }
     // Un-modeled without recognized text/image fields: pass the block JSON through as text so a
     // resumed conversation never silently loses content.
@@ -132,6 +145,8 @@ pub trait ModelExt {
     fn thinking_level_map_value(&self, level: ModelThinkingLevel) -> Option<Option<&String>>;
     /// Whether the model accepts image input blocks.
     fn supports_image_input(&self) -> bool;
+    /// Whether the model accepts video input blocks (declared as `"video"` input).
+    fn supports_video_input(&self) -> bool;
 }
 
 impl ModelExt for Model {
@@ -149,6 +164,12 @@ impl ModelExt for Model {
         self.input
             .iter()
             .any(|mode| matches!(mode, ModelInput::Image))
+    }
+
+    fn supports_video_input(&self) -> bool {
+        self.input
+            .iter()
+            .any(|mode| matches!(mode, ModelInput::Video))
     }
 }
 

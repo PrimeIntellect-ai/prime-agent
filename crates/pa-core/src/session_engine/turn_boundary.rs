@@ -202,6 +202,7 @@ impl TurnBoundaryRequests {
                         "input": model_info.input.iter().map(|input| match input {
                             pa_types::ai::ModelInput::Text => "text",
                             pa_types::ai::ModelInput::Image => "image",
+                            pa_types::ai::ModelInput::Video => "video",
                         }).collect::<Vec<&str>>(),
                     }))
                 })

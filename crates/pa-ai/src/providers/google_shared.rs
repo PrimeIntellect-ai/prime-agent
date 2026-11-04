@@ -210,6 +210,9 @@ pub fn convert_messages(model: &Model, context: &Context) -> Vec<Value> {
                                     "data": data,
                                 },
                             }),
+                            crate::types::UserBlockPayload::Video { .. } => {
+                                json!({ "text": crate::types::UNSUPPORTED_VIDEO_PLACEHOLDER })
+                            }
                             crate::types::UserBlockPayload::Opaque(json) => {
                                 json!({ "text": sanitize_surrogates(&json) })
                             }
