@@ -1,0 +1,1 @@
+- Bounded MCP OAuth server responses so oversized or stalled metadata cannot exhaust the agent.
