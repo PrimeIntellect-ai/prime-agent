@@ -149,7 +149,68 @@ try {
         if (-not (Test-Path (Join-Path $prefix 'share\prime-agent\prime-agent.exe') -PathType Leaf)) { throw "missing payload in $prefix" }
     }
 
-    Write-Host "WIN_CHANNEL_SELECTION default=$stableVersion explicit-beta=$betaVersion; missing stable artifacts refused"
+    # An archive cannot supply the installer's ownership marker. Test a
+    # regular entry on every Windows runner, then a linked entry when this
+    # runner can extract symlinks (Developer Mode or elevated extraction).
+    function Publish-MarkerCandidate([string]$candidate) {
+        Copy-Item -LiteralPath $candidate -Destination (Join-Path $stableDir $stableFile) -Force
+        $sha = (Get-FileHash -LiteralPath (Join-Path $stableDir $stableFile) -Algorithm SHA256).Hash.ToLower()
+        Set-Content -LiteralPath (Join-Path $stableDir 'SHA256SUMS') -Value "$sha  $stableFile"
+        $row = '{"platform": "' + $platform + '", "file": "' + $stableFile + '", "sha256": "' + $sha + '"}'
+        Set-Content -LiteralPath (Join-Path $channel 'latest.json') -Value ('{"version": "v' + $stableVersion + '", "binaries": [' + $row + '], "binaries_v2": [' + $row + ']}')
+    }
+    function Assert-MarkerCandidateRejected([string]$label, [string]$candidate) {
+        Publish-MarkerCandidate $candidate
+        $prefix = Join-Path $scratch "prefix-marker-$label"
+        $share = Join-Path $prefix 'share'
+        New-Item -ItemType Directory -Path $share -Force | Out-Null
+        $victim = Join-Path $share 'victim.txt'
+        Set-Content -LiteralPath $victim -Value 'keep this' -NoNewline
+        $run = Invoke-Installer -ChannelKnob $null -Prefix $prefix
+        $transcript = $run.Lines -join [Environment]::NewLine
+        if ($run.Exit -eq 0 -or $transcript -notmatch [regex]::Escape('the tarball contains an installer-owned .prime-agent-install marker')) {
+            $run.Lines | Write-Host
+            throw "$label archive marker was not rejected before publication"
+        }
+        if ((Get-Content -LiteralPath $victim -Raw) -ne 'keep this') { throw "$label archive changed the outside witness" }
+        if (Test-Path -LiteralPath (Join-Path $share 'prime-agent')) { throw "$label archive published a payload" }
+    }
+
+    $regularMarker = Join-Path $payload '.prime-agent-install'
+    Set-Content -LiteralPath $regularMarker -Value 'archive-supplied marker' -NoNewline
+    $regularArchive = Join-Path $scratch 'regular-marker.tar.gz'
+    & tar -czf $regularArchive -C $payload prime-agent.exe .prime-agent-install
+    if ($LASTEXITCODE -ne 0) { throw 'the regular-marker archive build failed' }
+    Assert-MarkerCandidateRejected 'regular' $regularArchive
+
+    $symlinkArchive = Join-Path $scratch 'linked-marker.tar.gz'
+    $makeSymlinkArchive = Join-Path $scratch 'make-linked-marker-archive.py'
+    $pythonScript = @(
+        'import sys, tarfile',
+        "with tarfile.open(sys.argv[1], 'r:gz') as source, tarfile.open(sys.argv[2], 'w:gz') as target:",
+        '    for member in source:',
+        '        target.addfile(member, source.extractfile(member) if member.isfile() else None)',
+        "    marker = tarfile.TarInfo('.prime-agent-install')",
+        '    marker.type = tarfile.SYMTYPE',
+        "    marker.linkname = '../victim.txt'",
+        '    target.addfile(marker)'
+    ) -join "`n"
+    Set-Content -LiteralPath $makeSymlinkArchive -Value $pythonScript
+    & $py $makeSymlinkArchive (Join-Path $releaseDir $artifactFile) $symlinkArchive
+    if ($LASTEXITCODE -ne 0) { throw 'the linked-marker archive build failed' }
+    $probe = Join-Path $scratch 'linked-marker-probe'
+    New-Item -ItemType Directory -Path $probe | Out-Null
+    Set-Content -LiteralPath (Join-Path $scratch 'victim.txt') -Value 'keep this' -NoNewline
+    & tar -xzf $symlinkArchive -C $probe 2>$null
+    $linkExtractionSucceeded = $LASTEXITCODE -eq 0
+    $probeMarker = @(Get-ChildItem -LiteralPath $probe -Force | Where-Object { $_.Name -eq '.prime-agent-install' })
+    if ($linkExtractionSucceeded -and $probeMarker.Count -eq 1 -and $probeMarker[0].LinkType -eq 'SymbolicLink') {
+        Assert-MarkerCandidateRejected 'linked' $symlinkArchive
+    } else {
+        Write-Host 'linked-marker runtime case skipped: this runner cannot extract symbolic links'
+    }
+
+    Write-Host "WIN_CHANNEL_SELECTION default=$stableVersion explicit-beta=$betaVersion; missing stable artifacts and archive-owned markers refused"
 } finally {
     Stop-Process -Id $server.Id -Force -ErrorAction SilentlyContinue
     # The User PATH: strip ONLY the entries this test added - the ones
