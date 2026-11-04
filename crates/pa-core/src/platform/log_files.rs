@@ -8,13 +8,16 @@ use std::io;
 #[cfg(unix)]
 use std::path::Component;
 use std::path::Path;
-#[cfg(not(unix))]
+#[cfg(not(any(unix, windows)))]
 use std::path::PathBuf;
 
+#[cfg(windows)]
+mod windows;
+
 pub(crate) struct LogDir {
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     dir: File,
-    #[cfg(not(unix))]
+    #[cfg(not(any(unix, windows)))]
     path: PathBuf,
 }
 
@@ -42,7 +45,7 @@ impl DirectoryMode {
 }
 
 impl LogDir {
-    /// On Unix, the configured root may itself be a symlink. Every managed
+    /// The configured root may itself be a symlink. Every managed
     /// component below it is created and opened relative to its held handle,
     /// without following links or re-resolving an ancestor pathname.
     pub(crate) fn for_write(
@@ -107,7 +110,13 @@ impl LogDir {
             }
             Ok(Self { dir })
         }
-        #[cfg(not(unix))]
+        #[cfg(windows)]
+        {
+            Ok(Self {
+                dir: windows::open_managed_directory(path, trusted_root, mode)?,
+            })
+        }
+        #[cfg(not(any(unix, windows)))]
         {
             let _ = trusted_root;
             mode.create(path)?;
@@ -115,7 +124,7 @@ impl LogDir {
         }
     }
 
-    #[cfg(not(unix))]
+    #[cfg(not(any(unix, windows)))]
     fn for_read(path: &Path) -> io::Result<Self> {
         if fs::symlink_metadata(path)?.file_type().is_symlink() {
             return Err(io::Error::new(
@@ -161,7 +170,9 @@ impl LogDir {
             // SAFETY: openat returned a new owned descriptor, transferred to File once.
             unsafe { File::from_raw_fd(fd) }
         };
-        #[cfg(not(unix))]
+        #[cfg(windows)]
+        let file = windows::open_file(&self.dir, name, append)?;
+        #[cfg(not(any(unix, windows)))]
         let file = {
             let path = self.path.join(name);
             if fs::symlink_metadata(&path).is_ok_and(|meta| meta.file_type().is_symlink()) {
@@ -176,11 +187,6 @@ impl LogDir {
                 super::perms::set_private_mode(&mut options);
             } else {
                 options.read(true);
-            }
-            #[cfg(windows)]
-            {
-                use std::os::windows::fs::OpenOptionsExt;
-                options.custom_flags(0x0020_0000); // FILE_FLAG_OPEN_REPARSE_POINT
             }
             let file = options.open(&path)?;
             if fs::symlink_metadata(&path).is_ok_and(|meta| meta.file_type().is_symlink()) {
@@ -226,7 +232,11 @@ impl LogDir {
             )
             .map_err(errno_to_io)
         }
-        #[cfg(not(unix))]
+        #[cfg(windows)]
+        {
+            windows::rename(&self.dir, from, to)
+        }
+        #[cfg(not(any(unix, windows)))]
         {
             fs::rename(self.path.join(from), self.path.join(to))
         }
@@ -243,7 +253,11 @@ impl LogDir {
             )
             .map_err(errno_to_io)
         }
-        #[cfg(not(unix))]
+        #[cfg(windows)]
+        {
+            windows::remove(&self.dir, name)
+        }
+        #[cfg(not(any(unix, windows)))]
         {
             fs::remove_file(self.path.join(name))
         }
@@ -324,5 +338,83 @@ mod tests {
         fs::set_permissions(&agent, fs::Permissions::from_mode(0o700)).unwrap();
         assert!(opened.is_ok(), "agent root needs search, not read");
         assert!(agent.join("logs").is_dir());
+    }
+}
+
+#[cfg(all(test, windows))]
+mod windows_tests {
+    use super::*;
+    use std::io::Write as _;
+    use std::os::windows::fs::symlink_dir;
+
+    #[test]
+    fn directory_swap_keeps_managed_log_operations_on_original_dir() {
+        let root = tempfile::tempdir().unwrap();
+        let agent = root.path().join("agent");
+        fs::create_dir(&agent).unwrap();
+        let logs = agent.join("logs");
+        let dir = LogDir::for_write(&logs, &agent, DirectoryMode::Inherited).unwrap();
+        let original = agent.join("original-logs");
+        let outside = root.path().join("outside");
+        fs::create_dir(&outside).unwrap();
+        let victim = outside.join("agent.log");
+        fs::write(&victim, b"outside\n").unwrap();
+
+        fs::rename(&logs, &original).unwrap();
+        symlink_dir(&outside, &logs).unwrap();
+        dir.open_append(OsStr::new("agent.log"))
+            .unwrap()
+            .write_all(b"inside\n")
+            .unwrap();
+        dir.rename(OsStr::new("agent.log"), OsStr::new("agent.log.old"))
+            .unwrap();
+        dir.remove(OsStr::new("agent.log.old")).unwrap();
+
+        assert_eq!(fs::read(&victim).unwrap(), b"outside\n");
+        assert!(!original.join("agent.log.old").exists());
+    }
+
+    #[test]
+    fn linked_agent_root_can_still_contain_managed_logs() {
+        let root = tempfile::tempdir().unwrap();
+        let real_agent = root.path().join("real-agent");
+        fs::create_dir(&real_agent).unwrap();
+        let linked_agent = root.path().join("agent");
+        symlink_dir(&real_agent, &linked_agent).unwrap();
+
+        let dir = LogDir::for_write(
+            &linked_agent.join("logs"),
+            &linked_agent,
+            DirectoryMode::Inherited,
+        )
+        .unwrap();
+        dir.open_append(OsStr::new("agent.log"))
+            .unwrap()
+            .write_all(b"inside\n")
+            .unwrap();
+
+        assert_eq!(
+            fs::read(real_agent.join("logs/agent.log")).unwrap(),
+            b"inside\n"
+        );
+    }
+
+    #[test]
+    fn hardlinked_managed_log_cannot_append_to_another_file() {
+        let root = tempfile::tempdir().unwrap();
+        let agent = root.path().join("agent");
+        fs::create_dir(&agent).unwrap();
+        let logs = agent.join("logs");
+        let dir = LogDir::for_write(&logs, &agent, DirectoryMode::Inherited).unwrap();
+        let victim = root.path().join("outside.txt");
+        fs::write(&victim, b"outside\n").unwrap();
+        fs::hard_link(&victim, logs.join("agent.log")).unwrap();
+
+        assert!(dir.open_append(OsStr::new("agent.log")).is_err());
+        assert!(dir.repair_existing(OsStr::new("agent.log")).is_err());
+        assert!(dir
+            .rename(OsStr::new("agent.log"), OsStr::new("agent.log.old"))
+            .is_err());
+        assert_eq!(fs::read(&victim).unwrap(), b"outside\n");
     }
 }
