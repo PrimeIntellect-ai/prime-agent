@@ -200,19 +200,52 @@ mod tests {
 
     #[test]
     fn read_tool_range_escapes_untrusted_session_offset() {
-        // A session's tool-call arguments are JSON values. A string offset such as
-        // `<img src=x onerror=alert(1)>` must not become HTML when an exported
-        // session is opened in the viewer.
-        let read_renderer = TEMPLATE_JS
-            .split("function renderToolCall(call) {")
-            .nth(1)
-            .expect("tool call renderer")
-            .split("case 'read': {")
-            .nth(1)
-            .and_then(|tail| tail.split("case 'write': {").next())
-            .expect("read tool renderer");
-        assert!(read_renderer.contains("${escapeHtml(String(startLine))}"));
-        assert!(!read_renderer.contains("${startLine}"));
+        // Execute the embedded viewer's actual tool-call renderer with a
+        // hostile session argument. Node is present in CI; Rust-only local
+        // setups can still run the rest of the crate's tests without it.
+        let script = r#"
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const vm = require('node:vm');
+const source = fs.readFileSync(process.argv[1], 'utf8');
+const start = source.indexOf('function renderToolCall(call) {');
+const end = source.indexOf('\n      /**\n       * Download the session data', start);
+assert(start >= 0 && end > start, 'exported viewer tool renderer');
+const context = {
+  findToolResult: () => null,
+  str: value => typeof value === 'string' ? value : value == null ? '' : null,
+  shortenPath: value => value,
+  escapeHtml: value => String(value).replace(/[&<>"']/g, char => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+  })[char]),
+};
+const renderToolCall = vm.runInNewContext(source.slice(start, end) + '\nrenderToolCall', context);
+const hostileOffset = '<img src=x onerror=alert(1)>';
+const html = renderToolCall({ id: 'read-1', name: 'read', arguments: {
+  path: 'notes.txt', offset: hostileOffset
+} });
+assert(html.includes('&lt;img src=x onerror=alert(1)&gt;'), html);
+assert(!html.includes('<img'), html);
+"#;
+        let template = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/assets/export-html/template.js"
+        );
+        let output = match std::process::Command::new("node")
+            .arg("-e")
+            .arg(script)
+            .arg(template)
+            .output()
+        {
+            Ok(output) => output,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return,
+            Err(error) => panic!("run exported viewer renderer: {error}"),
+        };
+        assert!(
+            output.status.success(),
+            "renderer test failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
 
     fn fixture_session(dir: &Path) -> std::path::PathBuf {
