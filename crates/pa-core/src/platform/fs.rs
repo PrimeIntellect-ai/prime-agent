@@ -289,15 +289,13 @@ pub(crate) fn has_multiple_hard_links(file: &File) -> io::Result<bool> {
     #[link(name = "kernel32")]
     unsafe extern "system" {
         #[link_name = "GetFileInformationByHandle"]
-        fn get_file_information_by_handle(
-            file: *mut c_void,
-            information: *mut ByHandleFileInformation,
-        ) -> i32;
+        fn get_file_information_by_handle(file: *mut c_void, information: *mut c_void) -> i32;
     }
 
     let mut information = MaybeUninit::<ByHandleFileInformation>::uninit();
-    if unsafe { get_file_information_by_handle(file.as_raw_handle(), information.as_mut_ptr()) }
-        == 0
+    if unsafe {
+        get_file_information_by_handle(file.as_raw_handle(), information.as_mut_ptr().cast())
+    } == 0
     {
         return Err(io::Error::last_os_error());
     }

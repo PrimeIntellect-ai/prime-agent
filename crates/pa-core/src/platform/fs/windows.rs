@@ -27,7 +27,7 @@ pub(crate) enum DirectoryCreation {
 }
 
 const FILE_SHARE_ALL: u32 = 0x0000_0007;
-const FILE_SHARE_READ_WRITE: u32 = 0x0000_0003;
+const FILE_SHARE_READ: u32 = 0x0000_0001;
 const FILE_READ_ATTRIBUTES: u32 = 0x0000_0080;
 const FILE_TRAVERSE: u32 = 0x0000_0020;
 const FILE_READ_DATA: u32 = 0x0000_0001;
@@ -122,14 +122,14 @@ unsafe extern "system" {
     fn nt_create_file(
         file_handle: *mut *mut c_void,
         desired_access: u32,
-        object_attributes: *mut ObjectAttributes,
-        io_status_block: *mut IoStatusBlock,
-        allocation_size: *mut i64,
+        object_attributes: *const c_void,
+        io_status_block: *mut c_void,
+        allocation_size: *const i64,
         file_attributes: u32,
         share_access: u32,
         create_disposition: u32,
         create_options: u32,
-        ea_buffer: *mut c_void,
+        ea_buffer: *const c_void,
         ea_length: u32,
     ) -> i32;
 
@@ -200,8 +200,9 @@ fn directory_identity(file: &File) -> io::Result<DirectoryId> {
         ));
     }
     let mut information = MaybeUninit::<ByHandleFileInformation>::uninit();
-    if unsafe { get_file_information_by_handle(file.as_raw_handle(), information.as_mut_ptr()) }
-        == 0
+    if unsafe {
+        get_file_information_by_handle(file.as_raw_handle(), information.as_mut_ptr().cast())
+    } == 0
     {
         return Err(io::Error::last_os_error());
     }
@@ -241,10 +242,7 @@ unsafe extern "system" {
     ) -> i32;
 
     #[link_name = "GetFileInformationByHandle"]
-    fn get_file_information_by_handle(
-        file: *mut c_void,
-        information: *mut ByHandleFileInformation,
-    ) -> i32;
+    fn get_file_information_by_handle(file: *mut c_void, information: *mut c_void) -> i32;
 
     #[link_name = "GetVolumeInformationByHandleW"]
     fn get_volume_information_by_handle(
@@ -312,7 +310,7 @@ fn open_relative(
         maximum_length: length,
         buffer: wide.as_mut_ptr(),
     };
-    let mut attributes = ObjectAttributes {
+    let attributes = ObjectAttributes {
         length: u32::try_from(size_of::<ObjectAttributes>()).expect("fixed Win32 structure"),
         root_directory: parent.as_raw_handle(),
         object_name: &raw mut unicode,
@@ -329,14 +327,14 @@ fn open_relative(
         nt_create_file(
             &raw mut handle,
             desired_access,
-            &raw mut attributes,
-            &raw mut io_status,
-            ptr::null_mut(),
+            (&raw const attributes).cast(),
+            (&raw mut io_status).cast(),
+            ptr::null(),
             FILE_ATTRIBUTE_NORMAL,
             share_mode,
             disposition,
             options | FILE_SYNCHRONOUS_IO_NONALERT,
-            ptr::null_mut(),
+            ptr::null(),
             0,
         )
     };
@@ -560,9 +558,9 @@ pub(crate) fn atomic_write_private_at(
         GENERIC_WRITE | FILE_READ_ATTRIBUTES | DELETE | SYNCHRONIZE,
         FILE_CREATE,
         FILE_NON_DIRECTORY_FILE,
-        // Keep the temp in its held parent until this handle renames it.
-        // Other processes may still read/write, but cannot move or delete it.
-        FILE_SHARE_READ_WRITE,
+        // Keep the temp in its held parent and unmodified until this handle
+        // renames it. Readers can inspect it, but cannot write, move, or delete.
+        FILE_SHARE_READ,
     )?;
     let result = (|| {
         temp.write_all(content.as_bytes())?;
@@ -597,7 +595,7 @@ mod tests {
         std::fs::create_dir(&project).unwrap();
         let parent =
             open_search_absolute_directory(&project, DirectoryCreation::ExistingOnly).unwrap();
-        let child_for_hook = child.clone();
+        let child_for_hook = child;
         let outside_for_hook = outside.clone();
         BEFORE_MISSING_DIRECTORY_CREATE.with(|hook| {
             *hook.borrow_mut() = Some(Box::new(move |_| {
@@ -617,7 +615,7 @@ mod tests {
     }
 
     #[test]
-    fn temp_cannot_move_before_same_directory_rename() {
+    fn temp_cannot_move_or_change_before_same_directory_rename() {
         let root = tempfile::tempdir().unwrap();
         let project = root.path().join("project");
         let outside = root.path().join("outside");
@@ -628,16 +626,21 @@ mod tests {
             open_search_absolute_directory(&project, DirectoryCreation::ExistingOnly).unwrap();
         let move_succeeded = Rc::new(Cell::new(false));
         let moved_for_hook = Rc::clone(&move_succeeded);
+        let write_succeeded = Rc::new(Cell::new(false));
+        let wrote_for_hook = Rc::clone(&write_succeeded);
         let project_for_hook = project.clone();
         let outside_for_hook = outside.clone();
         BEFORE_TEMP_RENAME.with(|hook| {
             *hook.borrow_mut() = Some(Box::new(move |temp_name| {
-                moved_for_hook.set(
-                    std::fs::rename(
-                        project_for_hook.join(temp_name),
-                        outside_for_hook.join(temp_name),
-                    )
-                    .is_ok(),
+                let temp_path = project_for_hook.join(temp_name);
+                moved_for_hook
+                    .set(std::fs::rename(&temp_path, outside_for_hook.join(temp_name)).is_ok());
+                wrote_for_hook.set(
+                    OpenOptions::new()
+                        .write(true)
+                        .open(&temp_path)
+                        .and_then(|mut file| file.write_all(b"bad"))
+                        .is_ok(),
                 );
             }));
         });
@@ -647,6 +650,7 @@ mod tests {
 
         result.unwrap();
         assert!(!move_succeeded.get());
+        assert!(!write_succeeded.get());
         assert_eq!(
             std::fs::read_to_string(project.join("settings.json")).unwrap(),
             "new"
