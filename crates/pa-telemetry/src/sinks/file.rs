@@ -25,7 +25,7 @@ pub struct FileSink {
     path: PathBuf,
     max_bytes: u64,
     #[cfg(unix)]
-    follow_symlinks: bool,
+    allow_linked_files: bool,
 }
 
 impl FileSink {
@@ -36,7 +36,7 @@ impl FileSink {
             path: agent_dir.join(FILE_NAME),
             max_bytes: DEFAULT_MAX_BYTES,
             #[cfg(unix)]
-            follow_symlinks: false,
+            allow_linked_files: false,
         }
     }
 
@@ -47,7 +47,7 @@ impl FileSink {
             path: path.into(),
             max_bytes: DEFAULT_MAX_BYTES,
             #[cfg(unix)]
-            follow_symlinks: true,
+            allow_linked_files: true,
         }
     }
 
@@ -145,7 +145,7 @@ impl FileSink {
 
     #[cfg(unix)]
     fn set_link_policy(&self, options: &mut tokio::fs::OpenOptions) {
-        if !self.follow_symlinks {
+        if !self.allow_linked_files {
             let nofollow =
                 i32::try_from(rustix::fs::OFlags::NOFOLLOW.bits()).expect("O_NOFOLLOW fits in i32");
             options.custom_flags(nofollow);
@@ -154,7 +154,21 @@ impl FileSink {
 
     #[cfg(unix)]
     async fn make_private(&self, file: &tokio::fs::File) -> Result<()> {
-        use std::os::unix::fs::PermissionsExt;
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+        if !self.allow_linked_files {
+            let links = file
+                .metadata()
+                .await
+                .with_context(|| format!("inspect {}", self.path.display()))?
+                .nlink();
+            if links > 1 {
+                anyhow::bail!(
+                    "default telemetry mirror {} has {links} hard links",
+                    self.path.display()
+                );
+            }
+        }
         let perms = std::fs::Permissions::from_mode(0o600);
         file.set_permissions(perms)
             .await
@@ -388,5 +402,46 @@ mod tests {
         assert!(content.starts_with("existing line\n"));
         assert!(content.contains("\"name\":\"new event\""));
         assert_eq!(std::fs::read_link(&link).unwrap(), victim);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn default_mirror_rejects_hard_link_before_chmod_or_write() {
+        use std::os::unix::fs::PermissionsExt;
+
+        for max_bytes in [DEFAULT_MAX_BYTES, 1] {
+            let dir = tempfile::tempdir().unwrap();
+            let mut sink = FileSink::new(dir.path());
+            sink.max_bytes = max_bytes;
+            let victim = dir.path().join("other-file");
+            std::fs::write(&victim, "keep this file\n").unwrap();
+            std::fs::set_permissions(&victim, std::fs::Permissions::from_mode(0o644)).unwrap();
+            std::fs::hard_link(&victim, sink.path()).unwrap();
+
+            assert_eq!(
+                sink.send_batch("install-1", vec![event("new event")]).await,
+                SinkOutcome::Dropped
+            );
+            assert_eq!(
+                std::fs::read_to_string(&victim).unwrap(),
+                "keep this file\n"
+            );
+            assert_eq!(
+                std::fs::metadata(&victim).unwrap().permissions().mode() & 0o777,
+                0o644
+            );
+            assert!(!sink.path().with_extension("jsonl.1").exists());
+
+            let explicit = FileSink::at(sink.path());
+            assert_eq!(
+                explicit
+                    .send_batch("install-1", vec![event("custom path")])
+                    .await,
+                SinkOutcome::Sent
+            );
+            assert!(std::fs::read_to_string(&victim)
+                .unwrap()
+                .contains("\"name\":\"custom path\""));
+        }
     }
 }
