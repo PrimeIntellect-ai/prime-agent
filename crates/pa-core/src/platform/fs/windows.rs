@@ -27,6 +27,7 @@ pub(crate) enum DirectoryCreation {
 }
 
 const FILE_SHARE_ALL: u32 = 0x0000_0007;
+const FILE_SHARE_READ_WRITE: u32 = 0x0000_0003;
 const FILE_READ_ATTRIBUTES: u32 = 0x0000_0080;
 const FILE_TRAVERSE: u32 = 0x0000_0020;
 const FILE_READ_DATA: u32 = 0x0000_0001;
@@ -300,6 +301,7 @@ fn open_relative(
     desired_access: u32,
     disposition: u32,
     options: u32,
+    share_mode: u32,
 ) -> io::Result<File> {
     let mut wide = single_component(name)?;
     let length = u16::try_from(wide.len().saturating_mul(size_of::<u16>())).map_err(|_| {
@@ -331,7 +333,7 @@ fn open_relative(
             &raw mut io_status,
             ptr::null_mut(),
             FILE_ATTRIBUTE_NORMAL,
-            FILE_SHARE_ALL,
+            share_mode,
             disposition,
             options | FILE_SYNCHRONOUS_IO_NONALERT,
             ptr::null_mut(),
@@ -360,6 +362,7 @@ pub(crate) fn open_regular_file_at(parent: &File, name: &OsStr) -> io::Result<Fi
         FILE_READ_DATA | FILE_READ_ATTRIBUTES | SYNCHRONIZE,
         FILE_OPEN,
         FILE_NON_DIRECTORY_FILE | FILE_OPEN_REPARSE_POINT,
+        FILE_SHARE_ALL,
     )?;
     let metadata = file.metadata()?;
     if !metadata.is_file() || metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
@@ -395,6 +398,7 @@ pub(crate) fn open_search_directory_at(
         FILE_READ_ATTRIBUTES | FILE_TRAVERSE | SYNCHRONIZE,
         FILE_OPEN,
         FILE_OPEN_FOR_BACKUP_INTENT | FILE_OPEN_REPARSE_POINT,
+        FILE_SHARE_ALL,
     );
     match opened {
         Ok(file) => checked_directory(file),
@@ -413,7 +417,8 @@ pub(crate) fn open_search_directory_at(
                 name,
                 FILE_READ_ATTRIBUTES | FILE_TRAVERSE | SYNCHRONIZE,
                 FILE_CREATE,
-                FILE_DIRECTORY_FILE,
+                FILE_DIRECTORY_FILE | FILE_OPEN_REPARSE_POINT,
+                FILE_SHARE_ALL,
             ) {
                 Ok(file) => checked_directory(file),
                 // Another creator may win; reopen without following its result.
@@ -424,6 +429,7 @@ pub(crate) fn open_search_directory_at(
                         FILE_READ_ATTRIBUTES | FILE_TRAVERSE | SYNCHRONIZE,
                         FILE_OPEN,
                         FILE_OPEN_FOR_BACKUP_INTENT | FILE_OPEN_REPARSE_POINT,
+                        FILE_SHARE_ALL,
                     )?;
                     checked_directory(file)
                 }
@@ -554,6 +560,9 @@ pub(crate) fn atomic_write_private_at(
         GENERIC_WRITE | FILE_READ_ATTRIBUTES | DELETE | SYNCHRONIZE,
         FILE_CREATE,
         FILE_NON_DIRECTORY_FILE,
+        // Keep the temp in its held parent until this handle renames it.
+        // Other processes may still read/write, but cannot move or delete it.
+        FILE_SHARE_READ_WRITE,
     )?;
     let result = (|| {
         temp.write_all(content.as_bytes())?;

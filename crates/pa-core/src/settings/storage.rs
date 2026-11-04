@@ -262,7 +262,13 @@ impl FileSettingsStorage {
         Ok(Some(dir))
     }
 
-    fn read_file(&self, scope: SettingsScope, path: &Path, locked_path: &Path) -> Result<String> {
+    fn read_file(
+        &self,
+        scope: SettingsScope,
+        path: &Path,
+        locked_path: &Path,
+        #[cfg(windows)] held_parent: Option<&fs::File>,
+    ) -> Result<String> {
         if scope == SettingsScope::Global {
             return Ok(fs::read_to_string(path)?);
         }
@@ -271,6 +277,17 @@ impl FileSettingsStorage {
             // The locked path is the resolved in-project target, including for
             // an intentional in-project settings symlink. Hold its parent and
             // open only its final regular basename from that directory.
+            #[cfg(windows)]
+            let opened_parent = if held_parent.is_none() {
+                self.project_parent_anchor(locked_path, DirectoryCreation::ExistingOnly)?
+            } else {
+                None
+            };
+            #[cfg(windows)]
+            let parent = held_parent
+                .or(opened_parent.as_ref())
+                .ok_or_else(|| anyhow!("Project settings directory is missing"))?;
+            #[cfg(unix)]
             let parent = self
                 .project_parent_anchor(locked_path, DirectoryCreation::ExistingOnly)?
                 .ok_or_else(|| anyhow!("Project settings directory is missing"))?;
@@ -336,6 +353,26 @@ impl FileSettingsStorage {
             "Failed to acquire settings lock: {}",
             last_error.map_or_else(|| "busy".into(), |e| e.to_string())
         ))
+    }
+
+    #[cfg(windows)]
+    fn project_file_exists(parent: &fs::File, locked_path: &Path) -> Result<bool> {
+        let name = locked_path
+            .file_name()
+            .ok_or_else(|| anyhow!("Project settings path has no file name"))?;
+        match open_regular_file_at(parent, name) {
+            Ok(_) => Ok(true),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+            Err(error) => Err(error.into()),
+        }
+    }
+
+    #[cfg(windows)]
+    fn check_project_lock_parent(guard: &LockGuard, parent: &fs::File) -> Result<()> {
+        if !guard.holds_parent(parent)? {
+            bail!("Project settings lock directory changed while acquiring");
+        }
+        Ok(())
     }
 }
 
@@ -458,8 +495,27 @@ impl SettingsStorage for FileSettingsStorage {
                 }
             }
         }
+        #[cfg(windows)]
+        let project_parent = if scope == SettingsScope::Project {
+            Some(
+                self.project_parent_anchor(&locked_path, DirectoryCreation::ExistingOnly)?
+                    .ok_or_else(|| anyhow!("Project settings directory is missing"))?,
+            )
+        } else {
+            None
+        };
         let guard = Self::acquire_lock(&locked_path)?;
-        let content = self.read_file(scope, path, &locked_path)?;
+        #[cfg(windows)]
+        if let Some(parent) = project_parent.as_ref() {
+            Self::check_project_lock_parent(&guard, parent)?;
+        }
+        let content = self.read_file(
+            scope,
+            path,
+            &locked_path,
+            #[cfg(windows)]
+            project_parent.as_ref(),
+        )?;
         drop(guard);
         read_cache()
             .lock()
@@ -499,13 +555,37 @@ impl SettingsStorage for FileSettingsStorage {
                 }
             });
         }
+        #[cfg(windows)]
+        let file_exists = if scope == SettingsScope::Project {
+            if let Some(parent) = project_parent.as_ref() {
+                Self::project_file_exists(parent, &locked_path)?
+            } else {
+                false
+            }
+        } else {
+            path.exists()
+        };
+        #[cfg(not(windows))]
         let file_exists = path.exists();
         let mut held: Option<LockGuard> = None;
         if file_exists {
             held = Some(Self::acquire_lock(&locked_path)?);
+            #[cfg(windows)]
+            if scope == SettingsScope::Project {
+                Self::check_project_lock_parent(
+                    held.as_ref().expect("lock was just acquired"),
+                    project_parent.as_ref().expect("existing file has a parent"),
+                )?;
+            }
         }
         let current = if file_exists {
-            Some(self.read_file(scope, path, &locked_path)?)
+            Some(self.read_file(
+                scope,
+                path,
+                &locked_path,
+                #[cfg(windows)]
+                project_parent.as_ref(),
+            )?)
         } else {
             None
         };
@@ -539,9 +619,33 @@ impl SettingsStorage for FileSettingsStorage {
             }
             if held.is_none() {
                 held = Some(Self::acquire_lock(&locked_path)?);
+                #[cfg(windows)]
+                if scope == SettingsScope::Project {
+                    Self::check_project_lock_parent(
+                        held.as_ref().expect("lock was just acquired"),
+                        project_parent.as_ref().expect("write has a parent"),
+                    )?;
+                }
                 // A racing first writer may have landed since the unlocked read.
-                if path.exists() {
-                    next = update(Some(self.read_file(scope, path, &locked_path)?));
+                #[cfg(windows)]
+                let raced_exists = if scope == SettingsScope::Project {
+                    Self::project_file_exists(
+                        project_parent.as_ref().expect("write has a parent"),
+                        &locked_path,
+                    )?
+                } else {
+                    path.exists()
+                };
+                #[cfg(not(windows))]
+                let raced_exists = path.exists();
+                if raced_exists {
+                    next = update(Some(self.read_file(
+                        scope,
+                        path,
+                        &locked_path,
+                        #[cfg(windows)]
+                        project_parent.as_ref(),
+                    )?));
                 }
             }
             if let Some(content) = next {

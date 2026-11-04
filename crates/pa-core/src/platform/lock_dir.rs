@@ -870,6 +870,13 @@ impl LockDir {
         Ok(())
     }
 
+    /// Check two held handles, so a pathname swap cannot make a settings
+    /// writer lock one directory and update another.
+    #[cfg(windows)]
+    pub(crate) fn holds_parent(&self, parent: &fs::File) -> io::Result<bool> {
+        Ok(win32::file_id(&self.parent)? == win32::file_id(parent)?)
+    }
+
     #[cfg(unix)]
     fn check_parent(parent: &fs::File, path: &Path) -> io::Result<()> {
         use std::os::unix::fs::MetadataExt;
