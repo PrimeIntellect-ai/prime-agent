@@ -1,0 +1,1 @@
+- Updated the Python runtime's MCP, token, and tracing dependency minimums to patched releases.
