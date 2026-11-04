@@ -825,13 +825,8 @@ impl OutputSpill {
         ));
         let mut options = std::fs::OpenOptions::new();
         options.write(true).create_new(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            // Set the mode atomically at creation: chmod after replaying output would expose any
-            // secrets to other local users while the spill was being written.
-            options.mode(0o600);
-        }
+        // Set the mode atomically at creation before replaying secret-bearing output.
+        pa_core::platform::perms::set_private_mode(&mut options);
         let Ok(mut file) = options.open(&path) else {
             self.failed = true;
             return;
