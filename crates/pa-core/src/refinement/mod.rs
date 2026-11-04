@@ -475,6 +475,8 @@ pub fn append_global_refinement(
             let mut linked_options = std::fs::OpenOptions::new();
             linked_options.create(true).append(true);
             crate::platform::perms::set_private_mode(&mut linked_options);
+            use std::os::unix::fs::OpenOptionsExt;
+            linked_options.custom_flags(libc::O_NOFOLLOW);
             (linked_options.open(target)?, true)
         }
         Err(error) => return Err(error.into()),
@@ -502,7 +504,13 @@ fn read_refinement_history(path: &Path) -> Option<String> {
     let opened = match opened {
         Err(error) if error.raw_os_error() == Some(libc::ELOOP) => {
             // User-linked shared history keeps its existing permission policy.
-            return std::fs::read_to_string(linked_history_target(path).ok()?).ok();
+            let mut linked_file = options.open(linked_history_target(path).ok()?).ok()?;
+            if !linked_file.metadata().ok()?.is_file() {
+                return None;
+            }
+            let mut content = String::new();
+            linked_file.read_to_string(&mut content).ok()?;
+            return Some(content);
         }
         other => other,
     };
@@ -1038,6 +1046,39 @@ mod tests {
         append_global_refinement(&dir, &result).unwrap();
         assert_eq!(load_global_refinement_history(&dir).len(), 2);
         assert_eq!(crate::platform::perms::file_mode(&shared), Some(0o664));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn history_link_fallback_rejects_a_second_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = get_global_harness_state_dir(tmp.path());
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = get_refinement_history_path(&dir);
+        let intermediate = tmp.path().join("shared-history.jsonl");
+        let victim = tmp.path().join("auth.json");
+        std::fs::write(&victim, "saved credentials\n").unwrap();
+        symlink(&victim, &intermediate).unwrap();
+        symlink(&intermediate, &path).unwrap();
+        let result = RefinementResult {
+            id: "linked".into(),
+            summary: "private history".into(),
+            rationale: String::new(),
+            expected_outcome: String::new(),
+            applied_edits: Vec::new(),
+            harness_state_path: get_harness_state_path(&dir).display().to_string(),
+            rollback_of: None,
+            scope: None,
+        };
+
+        assert!(append_global_refinement(&dir, &result).is_err());
+        assert!(read_refinement_history(&path).is_none());
+        assert_eq!(
+            std::fs::read_to_string(&victim).unwrap(),
+            "saved credentials\n"
+        );
     }
 
     #[test]
