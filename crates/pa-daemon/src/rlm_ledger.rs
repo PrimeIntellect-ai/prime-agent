@@ -313,6 +313,45 @@ fn fold_records(records: Vec<LedgerRecord>, keep: impl Fn(&str) -> bool) -> Repl
     state
 }
 
+fn write_seed_staging(path: &Path, payload: &str) -> Result<()> {
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    pa_core::platform::perms::set_private_mode(&mut options);
+    let mut file = options.open(path)?;
+    file.write_all(payload.as_bytes())?;
+    file.sync_all()?;
+    Ok(())
+}
+
+/// Tighten a legacy ledger through the opened handle before reading or
+/// appending private records. A non-file path is not a ledger.
+fn tighten_ledger_file(file: &File) -> Result<bool> {
+    let metadata = file.metadata()?;
+    if !metadata.is_file() {
+        return Ok(false);
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if metadata.permissions().mode() & 0o077 != 0 {
+            pa_core::platform::perms::restrict_open_file(file)?;
+        }
+    }
+    Ok(true)
+}
+
+/// Capture the target after `O_NOFOLLOW` rejected a shared ledger link. If
+/// the link was replaced by a regular file, `read_link` fails closed.
+#[cfg(unix)]
+fn linked_ledger_target(path: &Path) -> std::io::Result<PathBuf> {
+    let target = fs::read_link(path)?;
+    Ok(if target.is_absolute() {
+        target
+    } else {
+        path.parent().unwrap_or_else(|| Path::new(".")).join(target)
+    })
+}
+
 impl RlmSpawnLedger {
     /// Ledger over one sessions dir, with a caller-supplied log sink for
     /// degraded reads and seed skips.
@@ -994,11 +1033,21 @@ impl RlmSpawnLedger {
             }
         }
         let state = Arc::new(self.replay()?);
-        if let Some(identity) = identity {
-            *cache = Some(ReplaySnapshot {
-                identity,
-                state: Arc::clone(&state),
-            });
+        // A legacy-mode repair changes the file identity during replay. Do
+        // not cache bytes under the pre-repair identity, or a later chmod
+        // back to broad permissions could hit that stale entry.
+        let identity_after = file_identity(&self.path)?;
+        if let (Some(before), Some(after)) = (identity, identity_after) {
+            if before == after {
+                *cache = Some(ReplaySnapshot {
+                    identity: before,
+                    state: Arc::clone(&state),
+                });
+            } else {
+                cache.take();
+            }
+        } else {
+            cache.take();
         }
         Ok(state)
     }
@@ -1034,9 +1083,35 @@ impl RlmSpawnLedger {
     /// ledger reads empty, and one torn or unknown line skips that
     /// record only.
     fn read_records(&self) -> Result<Vec<LedgerRecord>> {
-        let Ok(bytes) = fs::read(&self.path) else {
+        let mut options = OpenOptions::new();
+        options.read(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.custom_flags(libc::O_NOFOLLOW);
+        }
+        let opened = options.open(&self.path);
+        #[cfg(unix)]
+        let opened = match opened {
+            Err(error) if error.raw_os_error() == Some(libc::ELOOP) => {
+                // Deliberately linked ledgers retain their shared mode.
+                let Ok(target) = linked_ledger_target(&self.path) else {
+                    return Ok(Vec::new());
+                };
+                File::open(target).map(|file| (file, true))
+            }
+            other => other.map(|file| (file, false)),
+        };
+        #[cfg(not(unix))]
+        let opened = opened.map(|file| (file, false));
+        let Ok((mut file, linked)) = opened else {
             return Ok(Vec::new());
         };
+        if !file.metadata()?.is_file() || (!linked && !tighten_ledger_file(&file)?) {
+            return Ok(Vec::new());
+        }
+        let mut bytes = Vec::new();
+        file.read_to_end(&mut bytes)?;
         if bytes.len() as u64 > RLM_LEDGER_MAX_BYTES {
             bail!(
                 "RLM ledger {} exceeds {RLM_LEDGER_MAX_BYTES} bytes; refusing to read",
@@ -1087,12 +1162,34 @@ impl RlmSpawnLedger {
         }
         let mut line = serde_json::to_string(&record)?;
         line.push('\n');
-        let mut file = OpenOptions::new()
-            .create(true)
-            .read(true)
-            .append(true)
-            .open(&self.path)
-            .with_context(|| format!("open RLM ledger {}", self.path.display()))?;
+        let mut options = OpenOptions::new();
+        options.create(true).read(true).append(true);
+        pa_core::platform::perms::set_private_mode(&mut options);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.custom_flags(libc::O_NOFOLLOW);
+        }
+        let opened = options.open(&self.path);
+        #[cfg(unix)]
+        let opened = match opened {
+            Err(error) if error.raw_os_error() == Some(libc::ELOOP) => {
+                // Preserve a deliberately shared ledger's permission policy.
+                let target = linked_ledger_target(&self.path)?;
+                let mut linked_options = OpenOptions::new();
+                linked_options.create(true).read(true).append(true);
+                pa_core::platform::perms::set_private_mode(&mut linked_options);
+                linked_options.open(target).map(|file| (file, true))
+            }
+            other => other.map(|file| (file, false)),
+        };
+        #[cfg(not(unix))]
+        let opened = opened.map(|file| (file, false));
+        let (mut file, linked) =
+            opened.with_context(|| format!("open RLM ledger {}", self.path.display()))?;
+        if !file.metadata()?.is_file() || (!linked && !tighten_ledger_file(&file)?) {
+            bail!("RLM ledger {} is not a file", self.path.display());
+        }
         if file.metadata()?.len() == 0 {
             let meta = json!({
                 "v": 1,
@@ -1204,13 +1301,9 @@ impl RlmSpawnLedger {
         let temp_path = self.path.with_extension(format!(
             "seed-{}-{}",
             std::process::id(),
-            crate::util::now_ms()
+            uuid::Uuid::new_v4().simple()
         ));
-        {
-            let mut file = File::create(&temp_path)?;
-            file.write_all(payload.as_bytes())?;
-            file.sync_all()?;
-        }
+        write_seed_staging(&temp_path, &payload)?;
         // Atomic no-clobber publish via a hard link: EEXIST means a live
         // append created the real file meanwhile and wins.
         match fs::hard_link(&temp_path, &self.path) {

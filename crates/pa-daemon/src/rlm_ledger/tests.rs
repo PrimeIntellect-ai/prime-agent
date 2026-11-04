@@ -76,6 +76,148 @@ fn ledger_path_hashes_the_canonical_sessions_dir() {
 }
 
 #[test]
+#[cfg(unix)]
+fn appended_ledger_is_owner_only() {
+    let dir = temp_dir("append-mode");
+    let ledger = ledger_for(&dir);
+
+    ledger
+        .append_record(&json!({"v": 1, "op": "rename", "at": "t", "childId": "c", "child": "p", "name": "private name"}))
+        .unwrap();
+
+    assert_eq!(
+        pa_core::platform::perms::file_mode(ledger.ledger_path()),
+        Some(0o600)
+    );
+}
+
+#[test]
+#[cfg(unix)]
+fn appending_to_legacy_ledger_tightens_its_mode() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = temp_dir("append-legacy-mode");
+    let ledger = ledger_for(&dir);
+    let path = ledger.ledger_path();
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    fs::write(
+        path,
+        "{\"v\":1,\"op\":\"meta\",\"at\":\"t\",\"sessionsDir\":\"x\"}\n",
+    )
+    .unwrap();
+    fs::set_permissions(path, fs::Permissions::from_mode(0o664)).unwrap();
+
+    ledger
+        .append_record(&json!({"v": 1, "op": "rename", "at": "t", "childId": "c", "child": "p", "name": "private name"}))
+        .unwrap();
+
+    assert_eq!(pa_core::platform::perms::file_mode(path), Some(0o600));
+}
+
+#[test]
+#[cfg(unix)]
+fn reading_a_legacy_ledger_tightens_its_mode() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = temp_dir("read-legacy-mode");
+    let ledger = ledger_for(&dir);
+    let path = ledger.ledger_path();
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    fs::write(
+        path,
+        "{\"v\":1,\"op\":\"meta\",\"at\":\"t\",\"sessionsDir\":\"x\"}\n",
+    )
+    .unwrap();
+    fs::set_permissions(path, fs::Permissions::from_mode(0o664)).unwrap();
+
+    assert!(ledger.edges(false).unwrap().is_empty());
+    assert_eq!(pa_core::platform::perms::file_mode(path), Some(0o600));
+
+    // The replay cache must not hide a later permission regression.
+    fs::set_permissions(path, fs::Permissions::from_mode(0o664)).unwrap();
+    assert!(ledger.edges(false).unwrap().is_empty());
+    assert_eq!(pa_core::platform::perms::file_mode(path), Some(0o600));
+}
+
+#[test]
+#[cfg(unix)]
+fn a_directory_at_the_ledger_path_keeps_its_mode() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = temp_dir("read-directory-mode");
+    let ledger = ledger_for(&dir);
+    let path = ledger.ledger_path();
+    fs::create_dir_all(path).unwrap();
+    fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+
+    assert!(ledger.edges(false).unwrap().is_empty());
+    assert_eq!(pa_core::platform::perms::file_mode(path), Some(0o755));
+}
+
+#[test]
+#[cfg(unix)]
+fn seed_staging_is_owner_only() {
+    let dir = temp_dir("seed-mode");
+    let staging = dir.join("staging");
+    write_seed_staging(&staging, "private name").unwrap();
+    assert_eq!(pa_core::platform::perms::file_mode(&staging), Some(0o600));
+}
+
+#[test]
+#[cfg(unix)]
+fn seed_staging_rejects_a_planted_symlink() {
+    use std::os::unix::fs::symlink;
+
+    let dir = temp_dir("seed-link");
+    let staging = dir.join("predictable-stage");
+    let victim = dir.join("victim");
+    fs::write(&victim, "keep this file").unwrap();
+    symlink(&victim, &staging).unwrap();
+
+    assert!(write_seed_staging(&staging, "seed content").is_err());
+    assert_eq!(fs::read_to_string(&victim).unwrap(), "keep this file");
+}
+
+#[test]
+#[cfg(unix)]
+fn linked_ledger_preserves_shared_target_permissions() {
+    use std::os::unix::fs::{symlink, PermissionsExt};
+
+    let dir = temp_dir("shared-link");
+    let ledger = ledger_for(&dir);
+    let path = ledger.ledger_path();
+    let shared = dir.join("shared-ledger.jsonl");
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    fs::write(
+        &shared,
+        "{\"v\":1,\"op\":\"meta\",\"at\":\"t\",\"sessionsDir\":\"x\"}\n",
+    )
+    .unwrap();
+    fs::set_permissions(&shared, fs::Permissions::from_mode(0o664)).unwrap();
+    symlink("../shared-ledger.jsonl", path).unwrap();
+
+    assert!(ledger.edges(false).unwrap().is_empty());
+    assert_eq!(pa_core::platform::perms::file_mode(&shared), Some(0o664));
+    ledger
+        .append_record(&json!({"v": 1, "op": "rename", "at": "t", "childId": "c", "child": "p", "name": "shared name"}))
+        .unwrap();
+    assert!(fs::read_to_string(&shared).unwrap().contains("shared name"));
+    assert_eq!(pa_core::platform::perms::file_mode(&shared), Some(0o664));
+    assert!(fs::symlink_metadata(path).unwrap().file_type().is_symlink());
+}
+
+#[test]
+#[cfg(unix)]
+fn linked_ledger_fallback_rejects_a_swapped_regular_file() {
+    let dir = temp_dir("link-swap");
+    let path = dir.join("ledger.jsonl");
+    fs::write(&path, "keep this file").unwrap();
+
+    assert!(linked_ledger_target(&path).is_err());
+    assert_eq!(fs::read_to_string(path).unwrap(), "keep this file");
+}
+
+#[test]
 fn spawn_rename_delete_replay_in_order() {
     let dir = temp_dir("replay");
     let ledger = ledger_for(&dir);
@@ -735,6 +877,11 @@ fn seeds_from_legacy_registries_once_and_atomically() {
     let content = fs::read_to_string(ledger.ledger_path()).unwrap();
     let first = content.lines().next().unwrap();
     assert!(first.contains("\"op\":\"meta\""));
+    #[cfg(unix)]
+    assert_eq!(
+        pa_core::platform::perms::file_mode(ledger.ledger_path()),
+        Some(0o600)
+    );
 }
 
 #[test]
