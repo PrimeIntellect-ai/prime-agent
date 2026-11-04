@@ -46,6 +46,10 @@ _COMPLETION_SUFFIX = b"\x1f"
 _CANCEL_TERM_GRACE = 0.5
 _CANCEL_KILL_WAIT = 2.0
 _COMPLETION_NOTICE_COMMAND_CAP = 1000
+# The completion notice's output tail: the last lines are the result the
+# wake should deliver — a pointer-only notice costs the model a retrieval
+# turn (await handle -> stale-snapshot confusion) after every completion.
+_COMPLETION_NOTICE_OUTPUT_CAP = 2000
 # Display MIME the host aggregates into a per-cell summary of the bash()
 # commands the cell ran (first capped command, count, line total).
 _BASH_COMMAND_MIME = "application/vnd.prime-agent.bash-command+json"
@@ -75,6 +79,12 @@ def _set_completion_notices_wired(wired: bool) -> None:
     """
     global _completion_notices_wired
     _completion_notices_wired = wired
+
+
+def _completion_notices_are_wired() -> bool:
+    """Read the wiring flag (module-attribute imports of `rlm.bash` bind the
+    `bash()` function, not the module, so the flag needs an importable seam)."""
+    return _completion_notices_wired
 
 
 # One stderr hint per degrade, budgeted per kernel (nano-rlm's
@@ -138,6 +148,83 @@ _live_lock = threading.Lock()
 _hook_installed = False
 _hook_lock = threading.Lock()
 
+# ── the waiting keepalive: paced notices for parked sessions ───────────────
+#
+# A parked session with live background work races every idle clock: the
+# eval's idle close can end the session mid-wait (the work never lands), and
+# the product's own idle passivation gate sees user bash, not kernel handles.
+# While any handle is live and no request is in flight, pace one [waiting]
+# notice per window so the session's activity clock stays fresh and the
+# parked-turn contract stays taught — the model stops inventing watcher
+# loops to keep its own session alive. `0` (or unparsable) disables.
+try:
+    _WAITING_KEEPALIVE_SECONDS = max(
+        0.0, float(os.environ.get("PRIME_AGENT_BASH_WAITING_KEEPALIVE_SECONDS", "240"))
+    )
+except ValueError:
+    _WAITING_KEEPALIVE_SECONDS = 240.0
+_WAITING_TICK_SECONDS = 15.0
+_waiting_keepalive_task: "asyncio.Task[None] | None" = None
+
+
+def _start_waiting_keepalive() -> None:
+    """Arm the keepalive loop once, on the first detached background launch."""
+    global _waiting_keepalive_task
+    if _waiting_keepalive_task is not None or _WAITING_KEEPALIVE_SECONDS <= 0:
+        return
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return
+    _waiting_keepalive_task = loop.create_task(_waiting_keepalive_loop())
+
+
+async def _waiting_keepalive_loop() -> None:
+    """Pace one [waiting] notice per window while background commands run.
+
+    Skips ticks while a request is in flight (the session's own turn keeps
+    the clocks warm) and stops firing once the last handle settles — its own
+    [bash-done] wake takes over. A host without the handler (an older
+    daemon) answers with an error: disable instead of re-asking every
+    window.
+    """
+    from . import repl
+
+    tick = min(_WAITING_TICK_SECONDS, _WAITING_KEEPALIVE_SECONDS / 4.0)
+    last_sent = 0.0
+    while True:
+        await asyncio.sleep(tick)
+        live = []
+        with _live_lock:
+            live = [handle for handle in _live_handles if handle.running]
+        if not live:
+            continue
+        if repl.request_in_flight():
+            continue
+        now = time.monotonic()
+        if now - last_sent < _WAITING_KEEPALIVE_SECONDS:
+            continue
+        last_sent = now
+        shown = live[:_COMPLETION_NOTICE_COMMAND_CAP]
+        pids = [handle.pid for handle in shown]
+        commands = [_capped(handle.command) for handle in shown]
+        try:
+            reply = await repl.host_request(
+                {
+                    "type": "bash.waiting",
+                    "pids": pids,
+                    "commands": commands,
+                    "count": len(live),
+                }
+            )
+        except (OSError, RuntimeError):
+            return
+        # A host without the handler answers with an error reply (an older
+        # daemon, or the TS daemon): disable instead of re-asking every
+        # window.
+        if not isinstance(reply, dict) or reply.get("status") != "ok":
+            return
+
 # bash(persistent=True): every session's persistent shells live in one home
 # under the agent dir (the cross-language contract pa-daemon reads): per shell
 # a <id>.json record assigned to its session (RLM_SESSION_ID, the durable
@@ -177,6 +264,14 @@ def _capped(command: str) -> str:
     if len(command) > _COMPLETION_NOTICE_COMMAND_CAP:
         return command[:_COMPLETION_NOTICE_COMMAND_CAP] + "\n... [command truncated]"
     return command
+
+
+def _notice_output_tail(output: str) -> str:
+    """The completion notice's output payload: the tail, capped — the final
+    lines are what a wake needs to deliver the result in the wake turn."""
+    if len(output) > _COMPLETION_NOTICE_OUTPUT_CAP:
+        return "... [output truncated at the head]\n" + output[-_COMPLETION_NOTICE_OUTPUT_CAP:]
+    return output
 
 
 def _completion_reaches(
@@ -820,6 +915,10 @@ class BashHandle:
             return
         from . import repl
 
+        # The first detached launch arms the waiting keepalive: parked
+        # sessions with live background work stay awake on paced notices.
+        _start_waiting_keepalive()
+
         activity = {"id": self._activity_id, "pid": self._pid, "active": True}
         # Publish synchronously before bash() returns and the creating cell can end.
         repl.emit({"application/vnd.prime-agent.bash-activity+json": activity})
@@ -853,6 +952,9 @@ class BashHandle:
                     "pid": self._pid,
                     "command": command,
                     "exitCode": result.exit_code,
+                    # The result rides the wake: a completion notice that
+                    # only points makes every wake cost a retrieval turn.
+                    "output": _notice_output_tail(result.output),
                 }
             )
             if isinstance(reply, dict) and reply.get("status") == "ok":
@@ -1295,7 +1397,11 @@ class PersistentBashHandle(BashHandle):
         return f"<BashHandle persistent pid={self._pid} {state} command={self.command!r}>"
 
 
-def bash(command: str, persistent: bool = False) -> BashHandle:
+def bash(
+    command: str,
+    persistent: bool = False,
+    **unknown: Any,
+) -> BashHandle:
     """Start a shell command immediately; await the handle for the result.
 
     `await bash(cmd)` is a one-shot: cancelling the await (e.g. an interrupt)
@@ -1329,6 +1435,19 @@ def bash(command: str, persistent: bool = False) -> BashHandle:
     polled, so its result and completion notice lag by up to a second; its
     exit_code is -1 when it was killed before recording a status.
     """
+    if unknown:
+        # Invented wait parameters (`timeout=`) are the recurring failure the
+        # eval traces show: the model reaches for a common API shape, loses the
+        # cell to a bare TypeError, and flails. Decline with the real
+        # signature and the parked-turn alternative instead.
+        raise TypeError(
+            "bash() takes command, persistent — not "
+            + ", ".join(f"{name!r}" for name in sorted(unknown))
+            + ". There is no wait or timeout parameter: launch the command "
+            "(bash() returns immediately and auto-backgrounds it) and end "
+            "the turn; a [bash-done] notification resumes you. An await "
+            "always yields after 1 second."
+        )
     if not isinstance(command, str) or not command:
         raise TypeError("command must be a non-empty str")
     if persistent:

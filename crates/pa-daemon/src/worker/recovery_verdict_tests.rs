@@ -88,7 +88,7 @@ async fn a_bash_completion_notice_admits_the_steering_lane_with_busy_evidence() 
         &worker.recovery,
         &worker.core,
         &notify,
-        crate::engine::KernelNotice::bash_completion(4321, "sleep 12; echo RW_WAKE_DONE", 0),
+        crate::engine::KernelNotice::bash_completion(4321, "sleep 12; echo RW_WAKE_DONE", 0, None),
         || false,
     );
     let core = worker.core.lock().unwrap();
@@ -149,7 +149,7 @@ async fn a_bash_completion_notice_on_a_busy_session_queues_a_visible_steer_row()
         &worker.recovery,
         &worker.core,
         &notify,
-        crate::engine::KernelNotice::bash_completion(99, "make gates", 2),
+        crate::engine::KernelNotice::bash_completion(99, "make gates", 2, None),
         || false,
     );
     let core = worker.core.lock().unwrap();
@@ -157,6 +157,106 @@ async fn a_bash_completion_notice_on_a_busy_session_queues_a_visible_steer_row()
     assert!(item.queue_visible, "the busy session keeps a visible row");
     assert_eq!(item.policy, TurnPolicy::Queued);
     drop(core);
+    let _ = std::fs::remove_dir_all(worker.config.socket_path.parent().unwrap());
+}
+
+/// A turn-held pacing notice queues like a completion on a busy session — a
+/// visible steer row that cuts the turn at its next boundary — and the
+/// held gate keeps it quiet once the delivery settled.
+#[tokio::test]
+async fn a_turn_held_notice_queues_on_a_busy_session_and_stays_quiet_when_idle() {
+    let worker = created_worker_with_journal().await;
+    worker.core.lock().unwrap().busy = true;
+    let notify = Arc::new(Notify::new());
+    admit_turn_held_notice(
+        &worker.recovery,
+        &worker.core,
+        &notify,
+        crate::engine::KernelNotice::turn_held(60_000),
+    );
+    let core = worker.core.lock().unwrap();
+    let item = core
+        .steering
+        .front()
+        .expect("the turn-held notice queues on the steering lane");
+    let row = item.custom_message.as_ref().expect("the injected row");
+    assert_eq!(
+        row.get("customType").and_then(Value::as_str),
+        Some("turn_held_notice"),
+        "the row is the turn-held notice: {row}"
+    );
+    assert!(
+        item.message
+            .starts_with("[turn-held] This turn has been open for 60s."),
+        "the turn runs on the notice content: {item:?}"
+    );
+    assert!(item.queue_visible, "the busy session keeps a visible row");
+    assert_eq!(item.policy, TurnPolicy::Queued);
+    drop(core);
+    assert!(
+        WorkerRecoveryJournal::read_interrupted(&worker.config.recovery_journal_path),
+        "the pacing notice admission is live work"
+    );
+    // The held gate: a settled delivery must not be woken by the pacing
+    // notice.
+    worker.core.lock().unwrap().busy = false;
+    admit_turn_held_notice(
+        &worker.recovery,
+        &worker.core,
+        &notify,
+        crate::engine::KernelNotice::turn_held(60_000),
+    );
+    let core = worker.core.lock().unwrap();
+    assert_eq!(
+        core.steering.len(),
+        1,
+        "the idle session refuses the pacing notice"
+    );
+    drop(core);
+    let _ = std::fs::remove_dir_all(worker.config.socket_path.parent().unwrap());
+}
+
+/// A waiting keepalive notice queues on the steering lane like a completion,
+/// with its [waiting] content and the capped-pid row.
+#[tokio::test]
+async fn a_bash_waiting_notice_queues_on_the_steering_lane() {
+    let worker = created_worker_with_journal().await;
+    worker.dispatch("clear_queue", &json!({})).await;
+    let notify = Arc::new(Notify::new());
+    admit_kernel_notice(
+        &worker.recovery,
+        &worker.core,
+        &notify,
+        crate::engine::KernelNotice::bash_waiting(
+            &[7227, 7228],
+            &["heavy.py alpha".to_string(), "heavy.py beta".to_string()],
+            2,
+        ),
+        || false,
+    );
+    let core = worker.core.lock().unwrap();
+    let item = core
+        .steering
+        .front()
+        .expect("the waiting notice queues on the steering lane");
+    let row = item.custom_message.as_ref().expect("the injected row");
+    assert_eq!(
+        row.get("customType").and_then(Value::as_str),
+        Some("bash_waiting_notice"),
+        "the row is the waiting keepalive notice: {row}"
+    );
+    assert!(
+        item.message
+            .starts_with("[waiting] Background work still running: 2 command(s)"),
+        "the turn runs on the notice content: {item:?}"
+    );
+    // An idle session's wake is an invisible injected turn.
+    assert!(!item.queue_visible, "the idle wake stays invisible");
+    drop(core);
+    assert!(
+        WorkerRecoveryJournal::read_interrupted(&worker.config.recovery_journal_path),
+        "the keepalive admission is live work"
+    );
     let _ = std::fs::remove_dir_all(worker.config.socket_path.parent().unwrap());
 }
 
@@ -170,7 +270,7 @@ async fn bash_consumed_withdraws_the_undelivered_notice_and_settles() {
         &worker.recovery,
         &worker.core,
         &notify,
-        crate::engine::KernelNotice::bash_completion(4321, "sleep 12; echo RW_WAKE_DONE", 0),
+        crate::engine::KernelNotice::bash_completion(4321, "sleep 12; echo RW_WAKE_DONE", 0, None),
         || false,
     );
     assert!(

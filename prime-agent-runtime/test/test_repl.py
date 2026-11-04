@@ -122,6 +122,14 @@ def reply_ok(repl: ReplProcess, request: dict) -> None:
     repl.send({"type": "host_reply", "id": request["id"], "data": {"status": "ok", "result": {}}})
 
 
+def wait_for_host_request_of_type(repl: ReplProcess, kind: str) -> dict:
+    """Read protocol events until the next host_request whose data.type is `kind`."""
+    while True:
+        event = repl.read_event()
+        if event.get("event") == "host_request" and event.get("data", {}).get("type") == kind:
+            return event
+
+
 class ReplTest(unittest.TestCase):
     def setUp(self) -> None:
         self.repl = ReplProcess()
@@ -144,7 +152,7 @@ class ReplTest(unittest.TestCase):
         return repl
 
     def test_bash_activity_is_available_while_cell_is_running(self):
-        self.repl.send({"type": "execute", "id": "cell", "code": "from rlm import bash\nimport asyncio\nh = bash('echo ready; sleep 20'); await asyncio.sleep(20)"})
+        self.repl.send({"type": "execute", "id": "cell", "code": "from rlm import bash\nimport asyncio\nh = bash('echo ready; sleep 20')\nawait asyncio.get_running_loop().create_future()"})
         # Wait for the activity start display before requesting list.
         while True:
             event = self.repl.read_event()
@@ -184,7 +192,7 @@ class ReplTest(unittest.TestCase):
 
     def test_factory_activity_is_available_while_cell_is_running(self):
         repl = self.enabled_factory_repl()
-        repl.send({"type": "execute", "id": "cell", "code": "import asyncio\nawait asyncio.sleep(20)"})
+        repl.send({"type": "execute", "id": "cell", "code": "import asyncio\nawait asyncio.get_running_loop().create_future()"})
         # The factory graph answers out of band while the cell runs: no
         # live runs exist yet, so the graph action lists the empty registry.
         repl.send({"type": "factory_activity", "id": "g", "action": "graph"})
@@ -455,7 +463,7 @@ class ReplTest(unittest.TestCase):
                 "if hasattr(signal, 'pthread_kill'):",
                 "    del signal.pthread_kill",
                 "import asyncio",
-                "await asyncio.sleep(30)",
+                "await asyncio.get_running_loop().create_future()",
             ]
         )
         self.repl.send({"type": "execute", "id": "nokill", "code": code})
@@ -572,11 +580,13 @@ class ReplTest(unittest.TestCase):
 
     def test_interrupt_await_suspended(self):
         events = self._interrupt_after_running(
-            "await", "import asyncio\nawait asyncio.sleep(1e9)"
+            "await", "import asyncio\nawait asyncio.get_running_loop().create_future()"
         )
         error = one(events, "error")
         self.assertEqual(error["ename"], "KeyboardInterrupt")
-        self.assertIn("await asyncio.sleep(1e9)", "".join(error["traceback"]))
+        self.assertIn(
+            "await asyncio.get_running_loop().create_future()", "".join(error["traceback"])
+        )
         self.assertEqual(one(events, "done")["status"], "error")
         follow = self.repl.execute("after-await", "2+2")
         self.assertEqual(one(follow, "result")["text"], "4")
@@ -602,7 +612,7 @@ class ReplTest(unittest.TestCase):
                 "    while True:",
                 "        time.sleep(0.05)",
                 "hog_task = asyncio.create_task(hog())",
-                "await asyncio.sleep(1e9)",
+                "await asyncio.get_running_loop().create_future()",
             ]
         )
         events = self._interrupt_after_running("fg", code)
@@ -615,7 +625,7 @@ class ReplTest(unittest.TestCase):
         self.assertEqual(one(follow, "result")["text"], "14")
 
     def test_interrupt_written_back_to_back_with_execute(self):
-        execute = json.dumps({"type": "execute", "id": "race", "code": "import asyncio\nawait asyncio.sleep(1e9)"})
+        execute = json.dumps({"type": "execute", "id": "race", "code": "import asyncio\nawait asyncio.get_running_loop().create_future()"})
         interrupt = json.dumps({"type": "interrupt"})
         assert self.repl.proc.stdin is not None
         self.repl.proc.stdin.write(execute + "\n" + interrupt + "\n")
@@ -649,7 +659,8 @@ class ReplTest(unittest.TestCase):
                 "import time",
                 "class SlowRepr:",
                 "    def __repr__(self):",
-                "        time.sleep(600)",
+                "        while True:",
+                "            time.sleep(0.05)",
                 "        return 'late'",
                 "SlowRepr()",
             ]
@@ -682,6 +693,80 @@ class ReplTest(unittest.TestCase):
         self.assertNotIn("repl.py", text)
         self.assertNotIn("ast.py", text)
         self.assertEqual(one(events, "done")["status"], "error")
+
+    def test_discipline_screen_declines_long_sleep(self):
+        events = self.repl.execute(
+            "sleep-30", "import time\ntime.sleep(30)\nprint('slept')"
+        )
+        error = one(events, "error")
+        self.assertEqual(error["ename"], "CellDeclinedError")
+        self.assertIn("[bash-done]", error["evalue"])
+        self.assertIn("time.sleep(30)", error["evalue"])
+        text = "".join(error["traceback"])
+        self.assertIn("Traceback (most recent call last):", text)
+        self.assertEqual(one(events, "done")["status"], "error")
+        # Refused before it ran: nothing from the cell body reached stdout.
+        self.assertIsNone(one(events, "result"))
+        self.assertNotIn("slept", stream_text(events, "stdout"))
+
+    def test_discipline_screen_allows_short_and_unresolved_waits(self):
+        events = self.repl.execute("sleep-short", "import time\ntime.sleep(0.05)\nprint('ok')")
+        self.assertIsNone(one(events, "error"))
+        self.assertEqual(one(events, "done")["status"], "ok")
+        self.assertIn("ok", stream_text(events, "stdout"))
+        events = self.repl.execute("sleep-var", "import time\nn = 0.05\ntime.sleep(n)")
+        self.assertIsNone(one(events, "error"))
+        events = self.repl.execute("aio-short", "import asyncio\nawait asyncio.sleep(0.05)")
+        self.assertIsNone(one(events, "error"))
+
+    def test_discipline_screen_declines_sleep_aliases(self):
+        for rid, code in (
+            ("alias", "from time import sleep as wait\nwait(45)"),
+            ("module-alias", "import time as t\nt.sleep(60)"),
+            ("aio", "import asyncio\nawait asyncio.sleep(15)"),
+            ("bare", "time.sleep(30)"),
+        ):
+            events = self.repl.execute(rid, code)
+            self.assertEqual(one(events, "error")["ename"], "CellDeclinedError", rid)
+            self.assertEqual(one(events, "done")["status"], "error", rid)
+
+    def test_discipline_screen_declines_subprocess_family(self):
+        for rid, code in (
+            ("imp", "import subprocess"),
+            ("run", "import subprocess\nsubprocess.run(['ls'])"),
+            ("from-import", "from subprocess import run\nrun(['ls'])"),
+            ("os-system", "import os\nos.system('ls')"),
+            ("os-popen", "os.popen('ls')"),
+            ("os-getoutput", "import os\nos.getoutput('ls')"),
+            ("os-getstatusoutput", "os.getstatusoutput('ls')"),
+            ("from-os", "from os import system\nsystem('ls')"),
+            ("from-os-getoutput", "from os import getoutput\ngetoutput('ls')"),
+            ("pty", "import pty\npty.spawn('/bin/sh')"),
+        ):
+            events = self.repl.execute(rid, code)
+            error = one(events, "error")
+            self.assertEqual(error["ename"], "CellDeclinedError", rid)
+            self.assertIn("bash('...')", error["evalue"], rid)
+            self.assertEqual(one(events, "done")["status"], "error", rid)
+
+    def test_discipline_screen_spares_mentions_bash_and_libraries(self):
+        code = (
+            "import os\n"
+            "doc = 'never run time.sleep(30) or os.system(rm -rf /) in a cell'\n"
+            "print(doc, os.pathsep)"
+        )
+        events = self.repl.execute("mention", code)
+        self.assertIsNone(one(events, "error"))
+        self.assertEqual(one(events, "done")["status"], "ok")
+        # Backgrounded shell work is the sanctioned shape, never declined.
+        events = self.repl.execute("bg", "from rlm import bash\nbash('sleep 30 & echo started')\nprint('launched')")
+        self.assertIsNone(one(events, "error"))
+        self.assertIn("launched", stream_text(events, "stdout"))
+
+    def test_declined_cell_keeps_kernel_usable(self):
+        self.repl.execute("d1", "import time\ntime.sleep(10)")
+        events = self.repl.execute("d2", "2+2")
+        self.assertEqual(one(events, "result")["text"], "4")
 
     def test_snapshot_restore_roundtrip(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1210,6 +1295,7 @@ class ReplTest(unittest.TestCase):
                 "pid": pid,
                 "command": "sleep 0.05; printf detached",
                 "exitCode": 0,
+                "output": "detached",
             },
         )
         reply_ok(self.repl, request)
@@ -1240,6 +1326,7 @@ class ReplTest(unittest.TestCase):
                 "pid": pid,
                 "command": "sleep 1.5; printf degraded",
                 "exitCode": 0,
+                "output": "degraded",
             },
         )
         reply_ok(self.repl, request)
@@ -3300,6 +3387,205 @@ class OwnerExitWaitTest(unittest.TestCase):
         ):
             self.repl_module._wait_owner_posix(self.owner.pid, os.getppid())
         sleep.assert_called_once()
+
+
+class CellSpanGuardTest(unittest.TestCase):
+    """The in-cell span guard: a cell still running at the budget is
+    interrupted through the SIGINT path and settles as a teaching error
+    (CellSpanGuard); short cells run untouched, the kernel stays usable,
+    and `PRIME_AGENT_CELL_SPAN_GUARD_SECONDS=0` disables the guard."""
+
+    def guarded_repl(self, seconds: str) -> ReplProcess:
+        repl = ReplProcess(env={"PRIME_AGENT_CELL_SPAN_GUARD_SECONDS": seconds})
+        self.addCleanup(repl.close)
+        repl.ready()
+        # The guard arms only in sessions whose host wires completion
+        # notices (the bootstrap flips the flag from the host-handler
+        # registry); the test host simulates the daemon's registration.
+        repl.execute(
+            "wire",
+            "from rlm.bash import _set_completion_notices_wired\n"
+            "_set_completion_notices_wired(True)",
+        )
+        return repl
+
+    def test_an_unwired_host_keeps_long_cells_untouched(self):
+        # A host without completion notices has no [bash-done] wake, so the
+        # guard's teaching promise cannot hold there: it stays disarmed and
+        # a long cell runs unbounded as on main (the wired twin interrupts
+        # the same shape at the budget).
+        repl = ReplProcess(env={"PRIME_AGENT_CELL_SPAN_GUARD_SECONDS": "0.5"})
+        self.addCleanup(repl.close)
+        repl.ready()
+        events = repl.execute("slow", "import time\ntime.sleep(2)\ndone = True")
+        self.assertIsNone(one(events, "error"), f"events: {events}")
+        self.assertEqual(one(events, "done")["status"], "ok")
+        events = repl.execute("check", "done")
+        self.assertEqual(one(events, "result")["text"], "True")
+
+    def test_long_compute_cell_is_interrupted_with_the_teaching_error(self):
+        # Pure compute: no banned shape, invisible to the discipline screen,
+        # and blocking — exactly the single-giant-cell shape the boundary
+        # notices cannot reach.
+        repl = self.guarded_repl("0.5")
+        repl.send({"type": "execute", "id": "long", "code": "n = 0\nwhile True:\n    n += 1"})
+        events = repl.until_done("long")
+        error = one(events, "error")
+        self.assertIsNotNone(error)
+        self.assertEqual(error["ename"], "CellSpanGuard")
+        self.assertIn("0.5s inline budget", error["evalue"])
+        self.assertIn("[cell-span]", "\n".join(error["traceback"]))
+        self.assertIn("bash()", "\n".join(error["traceback"]))
+        self.assertEqual(one(events, "done")["status"], "error")
+        # The kernel stays usable and the interrupted cell's prior state
+        # persists in the namespace.
+        events = repl.execute("after", "n > 0")
+        self.assertEqual(one(events, "result")["text"], "True")
+        self.assertEqual(one(events, "done")["status"], "ok")
+
+    def test_await_suspended_cell_is_interrupted_at_the_budget(self):
+        repl = self.guarded_repl("0.5")
+        repl.send({"type": "execute", "id": "parked", "code": "import asyncio\nawait asyncio.get_running_loop().create_future()"})
+        events = repl.until_done("parked")
+        error = one(events, "error")
+        self.assertIsNotNone(error)
+        self.assertEqual(error["ename"], "CellSpanGuard")
+        self.assertEqual(one(events, "done")["status"], "error")
+
+    def test_short_cells_run_untouched(self):
+        repl = self.guarded_repl("1")
+        events = repl.execute("quick", "40 + 2")
+        self.assertEqual(one(events, "result")["text"], "42")
+        self.assertEqual(one(events, "done")["status"], "ok")
+
+    def test_guard_fires_even_when_the_host_blocked_sigint(self):
+        # A host that blocks SIGINT on the spawning thread (tokio-style signal
+        # handling) leaks that mask through fork+exec; the kernel must own its
+        # mask and unblock SIGINT at startup, or no interrupt — user abort or
+        # the span guard — can ever land in a stuck cell.
+        if not hasattr(signal, "pthread_sigmask"):
+            self.skipTest("POSIX signal masks required")
+        signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGINT})
+        try:
+            repl = self.guarded_repl("0.5")
+        finally:
+            signal.pthread_sigmask(signal.SIG_UNBLOCK, {signal.SIGINT})
+        repl.send({"type": "execute", "id": "stuck", "code": "n = 0\nwhile True:\n    n += 1"})
+        events = repl.until_done("stuck")
+        error = one(events, "error")
+        self.assertIsNotNone(error)
+        self.assertEqual(error["ename"], "CellSpanGuard")
+        self.assertEqual(one(events, "done")["status"], "error")
+
+    def test_zero_disables_the_guard(self):
+        repl = self.guarded_repl("0")
+        # 1.5s of sleep would clear the decline screen (literal sleeps under
+        # 5s) and outlive a 1s budget: only a disabled guard lets it finish.
+        events = repl.execute("slow", "import time\ntime.sleep(1.5)\nseen = True")
+        self.assertIsNone(one(events, "error"))
+        self.assertEqual(one(events, "done")["status"], "ok")
+        events = repl.execute("check", "seen")
+        self.assertEqual(one(events, "result")["text"], "True")
+
+
+class WaitingKeepaliveTest(unittest.TestCase):
+    """The waiting keepalive: a parked session with live background commands
+    paces [waiting] host requests so idle clocks never close it mid-wait;
+    a session with no live work stays quiet, and the env knob disables."""
+
+    def kept_repl(self, seconds: str) -> ReplProcess:
+        repl = ReplProcess(env={"PRIME_AGENT_BASH_WAITING_KEEPALIVE_SECONDS": seconds})
+        self.addCleanup(repl.close)
+        repl.ready()
+        return repl
+
+    def test_parked_session_paces_waiting_notices_while_background_work_runs(self):
+        repl = self.kept_repl("0.5")
+        repl.execute(
+            "launch",
+            "from rlm import bash\nh = bash('sleep 3; echo done')\nprint('launched', h.pid)",
+        )
+        waiting = wait_for_host_request_of_type(repl, "bash.waiting")
+        data = waiting["data"]
+        self.assertEqual(len(data["pids"]), 1)
+        self.assertGreaterEqual(data["count"], 1)
+        self.assertIn("sleep 3", data["commands"][0])
+        reply_ok(repl, waiting)
+        # The keepalive paces: another one arrives while the command still runs.
+        second = wait_for_host_request_of_type(repl, "bash.waiting")
+        reply_ok(repl, second)
+        # The completion notice still fires for the finished command.
+        done = wait_for_host_request_of_type(repl, "bash.completed")
+        reply_ok(repl, done)
+
+    def test_an_error_reply_disables_the_keepalive(self):
+        # A host without the handler (an older daemon, the TS daemon) answers
+        # with an error reply instead: the keepalive disables itself rather
+        # than re-asking every window.
+        repl = self.kept_repl("0.5")
+        repl.execute(
+            "launch",
+            "from rlm import bash\nh = bash('sleep 10; echo done')\nprint('launched', h.pid)",
+        )
+        first = wait_for_host_request_of_type(repl, "bash.waiting")
+        repl.send(
+            {
+                "type": "host_reply",
+                "id": first["id"],
+                "data": {"status": "error", "error": "not available in this session"},
+            }
+        )
+        # The window is 0.5s with 0.125s ticks: a re-asking loop would fire
+        # within a second; the disabled one stays quiet through 2s.
+        deadline = time.monotonic() + 2.0
+        while time.monotonic() < deadline:
+            try:
+                event = repl.read_event(timeout=max(0.1, deadline - time.monotonic()))
+            except TimeoutError:
+                break
+            self.assertNotEqual(
+                (event.get("data") or {}).get("type"),
+                "bash.waiting",
+                f"the keepalive re-asked a refusing host: {event}",
+            )
+
+    def test_no_waiting_notice_without_live_background_work(self):
+        repl = self.kept_repl("0.5")
+        repl.execute("quick", "print('idle session')")
+        try:
+            event = repl.read_event(timeout=2.0)
+        except TimeoutError:
+            return
+        self.assertNotEqual(event.get("event"), "host_request", "nothing should request the host")
+
+    def test_zero_disables_the_keepalive(self):
+        repl = self.kept_repl("0")
+        repl.execute(
+            "launch",
+            "from rlm import bash\nh = bash('sleep 2; echo done')\nprint('launched', h.pid)",
+        )
+        # Only the completion notice may request the host — never a waiting row.
+        done = wait_for_host_request_of_type(repl, "bash.completed")
+        reply_ok(repl, done)
+
+class CompletionNoticeOutputTest(unittest.TestCase):
+    """The bash.completed host request carries the command's output tail: a
+    wake that delivers the result instead of a pointer the model must
+    retrieve."""
+
+    def test_completion_notice_carries_the_output_tail(self):
+        repl = ReplProcess()
+        self.addCleanup(repl.close)
+        repl.ready()
+        repl.execute(
+            "launch",
+            "from rlm import bash\nh = bash('sleep 0.2; echo RESULT-LINE')\nprint('launched', h.pid)",
+        )
+        done = wait_for_host_request_of_type(repl, "bash.completed")
+        data = done["data"]
+        self.assertIn("RESULT-LINE", data["output"], f"payload: {data}")
+        self.assertEqual(data["exitCode"], 0)
+        reply_ok(repl, done)
 
 
 if __name__ == "__main__":

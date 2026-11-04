@@ -1835,6 +1835,55 @@ class PersistentBashTest(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(self.handle_for(gone.pid))
         self.assertEqual(self.files(), [])
 
+class BashInventedKwargsTest(unittest.TestCase):
+    """The invented-kwarg teaching surface: `timeout=` (the eval trace's
+    recurring invention) is declined with the real signature and the
+    parked-turn alternative, never a bare TypeError."""
+
+    def test_invented_kwargs_teach_the_real_signature(self):
+        with self.assertRaises(TypeError) as ctx:
+            bash("echo hi", timeout=600)
+        message = str(ctx.exception)
+        self.assertIn("command, persistent", message)
+        self.assertIn("'timeout'", message)
+        self.assertIn("[bash-done]", message)
+        self.assertIn("end the turn", message)
+
+    def test_the_contract_docstring_survives_the_decline(self):
+        # The decline block sits after the docstring: help(bash) must keep
+        # serving the await-degrade contract models read.
+        self.assertIsNotNone(bash.__doc__)
+        self.assertIn("DEGRADES", bash.__doc__)
+
+    def test_positional_call_is_untouched(self):
+        handle = bash("echo okay")
+        try:
+            # Wait for the observable (the echo landing in the buffer), not a
+            # fixed sleep: bash() returns before the shell has run anything.
+            deadline = time.monotonic() + 5.0
+            while "okay" not in handle.output() and time.monotonic() < deadline:
+                time.sleep(0.02)
+            self.assertIn("okay", handle.output())
+        finally:
+            handle.kill()
+
+class NoticeOutputTailTest(unittest.TestCase):
+    """The completion notice's output tail: the last lines ride the wake, so
+    a completion delivers the result instead of a pointer a wake must
+    retrieve."""
+
+    def test_short_output_rides_untouched(self):
+        self.assertEqual(bash_module._notice_output_tail("all done\n"), "all done\n")
+        self.assertEqual(bash_module._notice_output_tail(""), "")
+
+    def test_long_output_caps_at_the_head_keeping_the_tail(self):
+        long_output = "y" * 10_000
+        tail = bash_module._notice_output_tail(long_output)
+        marker = "... [output truncated at the head]\n"
+        self.assertTrue(tail.startswith(marker))
+        self.assertEqual(len(tail), len(marker) + bash_module._COMPLETION_NOTICE_OUTPUT_CAP)
+        self.assertTrue(tail.endswith("y" * 10))
+
 
 if __name__ == "__main__":
     unittest.main()
