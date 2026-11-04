@@ -137,9 +137,13 @@ fn read_owner_at(dir: &fs::File) -> io::Result<String> {
     read_owner_file(unsafe { fs::File::from_raw_fd(fd) })
 }
 
-#[cfg(all(test, unix))]
+#[cfg(all(test, any(unix, windows)))]
 thread_local! {
     static BEFORE_LOCK_CREATE: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(all(test, unix))]
+thread_local! {
     static AFTER_LOCK_MKDIR: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
     static BEFORE_STALE_DIR_OPEN: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
 }
@@ -360,7 +364,7 @@ impl LockDir {
             // open returned an owned descriptor.
             unsafe { fs::File::from_raw_fd(fd) }
         };
-        #[cfg(all(test, unix))]
+        #[cfg(all(test, any(unix, windows)))]
         BEFORE_LOCK_CREATE.with(|hook| {
             if let Some(callback) = hook.borrow_mut().take() {
                 callback();
@@ -1104,6 +1108,90 @@ mod tests {
             assert!(std::fs::read_dir(&path).unwrap().next().is_none());
         }
         assert!(!lock_of(&file).exists(), "release removes the directory");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_acquisition_does_not_create_in_a_swapped_parent() {
+        let root = tempfile::tempdir().unwrap();
+        let project = root.path().join("project");
+        let moved = root.path().join("project-moved");
+        let outside = root.path().join("outside");
+        fs::create_dir(&project).unwrap();
+        fs::create_dir(&outside).unwrap();
+        let file = project.join("settings.json");
+        let outside_lock = outside.join("settings.json.lock");
+        BEFORE_LOCK_CREATE.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(move || {
+                fs::rename(&project, &moved).unwrap();
+                fs::rename(&outside, &project).unwrap();
+            }));
+        });
+
+        let result = LockDir::acquire(&file, MIN_STALE);
+        assert!(result.is_err(), "a changed parent must stop acquisition");
+        assert!(!outside_lock.exists(), "no foreign lock may be created");
+        assert!(!root
+            .path()
+            .join("project-moved/settings.json.lock")
+            .exists());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_stale_reclaim_does_not_remove_a_foreign_lock() {
+        let root = tempfile::tempdir().unwrap();
+        let project = root.path().join("project");
+        let moved = root.path().join("project-moved");
+        let outside = root.path().join("outside");
+        fs::create_dir(&project).unwrap();
+        fs::create_dir(&outside).unwrap();
+        let file = project.join("settings.json");
+        let project_lock = LockDir::path_for(&file);
+        let outside_lock = outside.join("settings.json.lock");
+        fs::create_dir(&project_lock).unwrap();
+        fs::create_dir(&outside_lock).unwrap();
+        let marker = "2147483648 foreign-owner\n";
+        fs::write(outside_lock.join("owner"), marker).unwrap();
+        set_mtime(&project_lock, 1, 0).unwrap();
+        set_mtime(&outside_lock, 1, 0).unwrap();
+        BEFORE_LOCK_CREATE.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(move || {
+                fs::rename(&project, &moved).unwrap();
+                fs::rename(&outside, &project).unwrap();
+            }));
+        });
+
+        let _ = LockDir::acquire(&file, MIN_STALE);
+        assert_eq!(
+            fs::read_to_string(project_lock.join("owner")).unwrap(),
+            marker
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_release_removes_only_the_original_lock_after_parent_swap() {
+        let root = tempfile::tempdir().unwrap();
+        let project = root.path().join("project");
+        let moved = root.path().join("project-moved");
+        let outside = root.path().join("outside");
+        fs::create_dir(&project).unwrap();
+        fs::create_dir(&outside).unwrap();
+        let guard = LockDir::acquire(&project.join("settings.json"), MIN_STALE).unwrap();
+        let outside_lock = outside.join("settings.json.lock");
+        let swapped_lock = project.join("settings.json.lock");
+        fs::create_dir(&outside_lock).unwrap();
+
+        fs::rename(&project, &moved).unwrap();
+        fs::rename(&outside, &project).unwrap();
+        drop(guard);
+
+        assert!(swapped_lock.is_dir(), "foreign lock must be retained");
+        assert!(
+            !moved.join("settings.json.lock").exists(),
+            "own lock must be removed"
+        );
     }
 
     #[cfg(unix)]
