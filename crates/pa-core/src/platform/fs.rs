@@ -16,7 +16,7 @@ use std::os::unix::ffi::OsStrExt;
 use std::path::Component;
 
 /// Whether a directory walk may create a missing component under its held parent.
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum DirectoryCreation {
     ExistingOnly,
@@ -307,3 +307,11 @@ pub(crate) fn has_multiple_hard_links(file: &File) -> io::Result<bool> {
     }
     Ok(count > 1)
 }
+
+#[cfg(windows)]
+mod windows;
+#[cfg(windows)]
+pub(crate) use windows::{
+    atomic_write_private_at, open_regular_file_at, open_search_absolute_directory,
+    open_search_directory_at, same_directory_at_path,
+};
