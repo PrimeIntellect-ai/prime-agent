@@ -264,6 +264,25 @@ mod tests {
         );
     }
 
+    #[tokio::test(flavor = "current_thread")]
+    async fn alternate_local_spelling_keeps_the_built_in_peer_check() {
+        let name = test_worker_pipe("000000000003");
+        let alias = name.replacen(r"\\.\pipe\", r"\\?\pipe\", 1);
+        let _server = ServerOptions::new()
+            .first_pipe_instance(true)
+            .create(&name)
+            .expect("fake worker server");
+        super::TEST_FOREIGN_PEER.with(|flag| flag.set(true));
+        let result = super::connect(&alias).await;
+        super::TEST_FOREIGN_PEER.with(|flag| flag.set(false));
+        assert_eq!(
+            result
+                .expect_err("alias must enforce built-in policy")
+                .kind(),
+            io::ErrorKind::PermissionDenied
+        );
+    }
+
     #[tokio::test]
     async fn built_in_worker_and_daemon_pipes_accept_same_user_roundtrips() {
         for name in [
