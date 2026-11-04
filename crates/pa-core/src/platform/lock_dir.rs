@@ -511,6 +511,17 @@ impl LockDir {
         }
     }
 
+    /// Whether this guard's pinned lock parent is the same directory as another
+    /// held handle. A path check can be fooled by a rename and replacement.
+    #[cfg(unix)]
+    pub(crate) fn holds_parent(&self, parent: &fs::File) -> io::Result<bool> {
+        use std::os::unix::fs::MetadataExt;
+
+        let locked = self.parent.metadata()?;
+        let target = parent.metadata()?;
+        Ok(locked.dev() == target.dev() && locked.ino() == target.ino())
+    }
+
     /// Acquire a harness-state lock with a PID and per-process token.
     /// Only a provably dead owner can be reclaimed after `stale_after`.
     ///
