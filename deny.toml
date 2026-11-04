@@ -15,11 +15,11 @@ unsound = "all"
 # a landed fix upstream means the entry is removed instead of silenced.
 ignore = [
   # Marvin Attack timing sidechannel in rsa; no patch exists upstream
-  # (RustCrypto/RSA#626 tracks it). `rsa` is currently a dead dependency in
-  # pa-ai (declared, never referenced); no signing path executes it, so no
-  # timing oracle exists. Reviewed 2026-09-17; drop rsa (pa-ai lane) or
-  # re-triage when rsa publishes a fix.
-  { id = "RUSTSEC-2023-0071", reason = "unpatched upstream; rsa is an unused pa-ai dep, no signing path executes it (reviewed 2026-09-17)" },
+  # (RustCrypto/RSA#626 tracks it). pa-core uses RSA-OAEP to decrypt one
+  # local browser-login result under a fresh key per login; this path does
+  # not expose repeated decryptions of one key to a network observer.
+  # Re-triage when rsa publishes a fix. Reviewed 2026-11-03.
+  { id = "RUSTSEC-2023-0071", reason = "unpatched upstream; pa-core decrypts one local browser-login OAEP result per ephemeral key, without a network-observable repeated-decryption oracle (reviewed 2026-11-03)" },
   # `paste` proc-macro is unmaintained; pulled by ratatui (build-time only,
   # no vulnerable code path). Reviewed 2026-09-17; revisit when ratatui
   # drops the dep.
