@@ -22,6 +22,8 @@
     clippy::struct_field_names
 )]
 #![cfg(unix)]
+// The SIGKILL tests are Linux-only, so their helpers are unused elsewhere.
+#![cfg_attr(not(target_os = "linux"), allow(dead_code))]
 
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
@@ -389,6 +391,8 @@ fn sigkill(pid: u32) {
 /// as a settled row from the surviving spawn edge, and the child stays
 /// visible as a passive ledger row (the close is a plain stop - the
 /// spawn edge survives, no delete record).
+// The parent pid check reads /proc/<pid>/environ: Linux only.
+#[cfg(target_os = "linux")]
 #[test]
 fn sigkill_closes_the_spawned_child_and_passivates_the_row() {
     let Some(kernel_python) = kernel_python() else {
@@ -529,6 +533,8 @@ fn sigkill_closes_the_spawned_child_and_passivates_the_row() {
 /// `rlm.create_session` depth-0 roots are NOT parent-linked (TS `createRlmRootSession`
 /// carries no `parentActiveSessionId`, so `getChildActiveSessionStates` never matches
 /// them): a created root survives the parent's hard death.
+// The parent pid check reads /proc/<pid>/environ: Linux only.
+#[cfg(target_os = "linux")]
 #[test]
 fn sigkill_keeps_a_created_root_session_running() {
     let Some(kernel_python) = kernel_python() else {

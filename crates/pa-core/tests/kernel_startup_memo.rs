@@ -81,10 +81,11 @@ fn counting_gated_kernel(
     gates: &std::path::Path,
 ) -> PathBuf {
     let wrapper = dir.join("counting-gated-python");
+    // `$((...))` strips the leading spaces BSD `wc` pads its count with.
     std::fs::write(
         &wrapper,
         format!(
-            "#!/bin/sh\nn=$(wc -c < '{}')\nprintf x >> '{}'\nwhile [ ! -f '{}'/gate$n ] && [ -d '{}' ]; do sleep 0.05; done\nexec '{}' \"$@\"\n",
+            "#!/bin/sh\nn=$(($(wc -c < '{}')))\nprintf x >> '{}'\nwhile [ ! -f '{}'/gate$n ] && [ -d '{}' ]; do sleep 0.05; done\nexec '{}' \"$@\"\n",
             count.display(),
             count.display(),
             gates.display(),

@@ -541,6 +541,10 @@ fn assert_reader_artifacts_are_truthful(release: &LatestRelease, out: &Path) {
 }
 
 #[test]
+#[cfg_attr(
+    not(target_os = "linux"),
+    ignore = "compiles and splits a Linux ELF fixture (gcc -Wl,--build-id)"
+)]
 fn assembled_archives_carry_the_platform_alias_the_reader_demands() {
     let (_, workflow) = load_workflow();
     let emit_run = channel_step_run(&workflow);

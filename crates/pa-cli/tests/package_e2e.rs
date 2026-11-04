@@ -20,7 +20,8 @@
 use std::fmt::Write as _;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
+use std::time::Duration;
 
 const NPM_SHIM: &str = r#"#!/usr/bin/env bash
 echo "npm $*" >> {LOG}
@@ -285,17 +286,28 @@ struct Output {
     stderr: String,
 }
 
+/// The child runs under a hang guard in-process: GNU `timeout` is not on macOS.
 fn run(binary: &Path, args: &[&str], sandbox: &Sandbox) -> Output {
-    let output = Command::new("timeout")
-        .arg("60")
-        .arg(binary)
+    let child = Command::new(binary)
         .args(args)
         .env("HOME", &sandbox.home)
         .env("PRIME_AGENT_CODING_AGENT_DIR", &sandbox.agent_dir)
         .env("GIT_SSH_COMMAND", &sandbox.ssh_shim)
         .current_dir(&sandbox.cwd)
-        .output()
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
         .expect("failed to spawn binary under test");
+    let pid = child.id() as i32;
+    let (done_tx, done_rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || done_tx.send(child.wait_with_output()));
+    let output = done_rx
+        .recv_timeout(Duration::from_secs(60))
+        .unwrap_or_else(|_| {
+            unsafe { libc::kill(pid, libc::SIGKILL) };
+            done_rx.recv().expect("the waiter reports the killed child")
+        })
+        .expect("wait for binary under test");
     Output {
         exit_code: output.status.code(),
         stdout: String::from_utf8_lossy(&output.stdout).into_owned(),

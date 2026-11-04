@@ -101,8 +101,10 @@ fn print_mode_reports_provider_errors_as_exit_one() {
 
 // Session persistence (headless print sessions must land on disk).
 
+/// Under the canonical temp root: sessions record the canonical cwd, and
+/// macOS temp dirs sit behind the /var -> /private/var symlink.
 fn isolated_home() -> tempfile::TempDir {
-    tempfile::TempDir::new().unwrap()
+    tempfile::TempDir::new_in(std::env::temp_dir().canonicalize().unwrap()).unwrap()
 }
 
 fn run_in_home(

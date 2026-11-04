@@ -148,6 +148,10 @@ pub struct Worker {
     /// Tokens whose attach guard already released: a late registration
     /// racing the close is rejected, not recreated as unowned.
     pub(crate) released_attach_tokens: std::sync::Mutex<std::collections::HashSet<String>>,
+    /// Every live connection's outbound sink (dead entries pruned at each
+    /// registration): the shutdown drains them before its reply unlocks
+    /// the process exit.
+    pub(crate) connection_sinks: std::sync::Mutex<Vec<std::sync::Weak<ConnectionSink>>>,
     pub(crate) events: Arc<EventPump>,
     /// The `/model` catalog background-refresh coalescing gate: at most
     /// one refresh plus one queued re-arm per burst.
@@ -767,6 +771,7 @@ impl Worker {
             idle_notify,
             session_attachments: std::sync::Mutex::new(std::collections::HashMap::new()),
             released_attach_tokens: std::sync::Mutex::new(std::collections::HashSet::new()),
+            connection_sinks: std::sync::Mutex::new(Vec::new()),
             events,
             model_catalog_refresh_gate: std::sync::Arc::new(
                 crate::model_catalog::RefreshGate::default(),

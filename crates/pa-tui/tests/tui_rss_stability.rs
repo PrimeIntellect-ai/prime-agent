@@ -2,7 +2,7 @@
 //! interactive loop must not grow memory monotonically; a sampler reads
 //! `/proc/self/statm` and asserts a plateau in the last quarter. Linux-only
 //! by construction (compiles to nothing elsewhere).
-#![cfg(unix)]
+#![cfg(target_os = "linux")]
 #![warn(clippy::allow_attributes_without_reason)]
 
 use std::io::{BufRead, BufReader, Write};
