@@ -20,6 +20,18 @@ use std::os::unix::ffi::OsStrExt;
 const MIN_STALE: Duration = Duration::from_secs(2);
 const MAX_OWNER_RECORD_BYTES: u64 = 256;
 
+#[cfg(any(test, windows))]
+fn usable_file_id_128(id: [u8; 16]) -> bool {
+    // MS-FSCC reserves zero for unsupported IDs and all-ones for IDs that
+    // cannot be made unique; neither can establish directory identity.
+    id != [0; 16] && id != [u8::MAX; 16]
+}
+
+#[cfg(any(test, windows))]
+fn usable_file_id_64(id: u64) -> bool {
+    id != 0 && id != u64::MAX
+}
+
 fn read_owner_file(file: fs::File) -> io::Result<String> {
     use std::io::Read;
 
@@ -534,7 +546,7 @@ mod win32 {
         };
         if ok != 0 {
             let info = unsafe { info.assume_init() };
-            if info.FileId != [0; 16] {
+            if super::usable_file_id_128(info.FileId) {
                 return Ok(FileId::Extended {
                     volume: info.VolumeSerialNumber,
                     id: info.FileId,
@@ -585,7 +597,7 @@ mod win32 {
         }
         let info = unsafe { info.assume_init() };
         let index = u64::from(info.FileIndexHigh) << 32 | u64::from(info.FileIndexLow);
-        if index == 0 {
+        if !super::usable_file_id_64(index) {
             return Err(io::Error::new(
                 io::ErrorKind::Unsupported,
                 "filesystem returned no stable lock file index",
@@ -1582,6 +1594,16 @@ pub fn unlock_file(file: &std::fs::File) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unusable_file_id_sentinels_never_identify_a_lock() {
+        assert!(!usable_file_id_128([0; 16]));
+        assert!(!usable_file_id_128([u8::MAX; 16]));
+        assert!(usable_file_id_128([1; 16]));
+        assert!(!usable_file_id_64(0));
+        assert!(!usable_file_id_64(u64::MAX));
+        assert!(usable_file_id_64(1));
+    }
 
     #[cfg(unix)]
     fn in_restrictive_umask_subprocess(test_filter: &str, check: impl FnOnce()) {
