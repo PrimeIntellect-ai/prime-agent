@@ -188,7 +188,7 @@ fn set_mtime(path: &Path, tv_sec: i64, tv_nsec: i64) -> io::Result<()> {
 // The `libc::timespec` field names are the syscall's own vocabulary; the struct-literal shorthand
 // below is the point.
 #[allow(clippy::similar_names)]
-#[cfg(windows)]
+#[cfg(all(windows, test))]
 fn set_mtime(path: &Path, tv_sec: i64, tv_nsec: i64) -> io::Result<()> {
     win32::set_last_write_time(path, tv_sec, tv_nsec)
 }
@@ -206,20 +206,45 @@ fn set_mtime(_path: &Path, _tv_sec: i64, _tv_nsec: i64) -> io::Result<()> {
 mod win32 {
     #![allow(non_snake_case)]
 
-    use std::ffi::c_void;
+    use std::ffi::{c_void, OsStr};
+    use std::fs::File;
     use std::io;
     use std::os::windows::ffi::OsStrExt;
+    use std::os::windows::io::{AsRawHandle, FromRawHandle};
     use std::path::Path;
 
     /// `winbase.h`: required to open a directory handle.
     const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+    const FILE_ATTRIBUTE_NORMAL: u32 = 0x80;
+    const FILE_ATTRIBUTE_DIRECTORY: u32 = 0x10;
+    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+    const FILE_ADD_FILE: u32 = 0x0002;
+    const FILE_ADD_SUBDIRECTORY: u32 = 0x0004;
+    const FILE_TRAVERSE: u32 = 0x0020;
+    const FILE_READ_ATTRIBUTES: u32 = 0x0080;
     /// `winbase.h`: write access to the file's times.
     const FILE_WRITE_ATTRIBUTES: u32 = 0x0100;
+    const FILE_READ_DATA: u32 = 0x0001;
+    const FILE_WRITE_DATA: u32 = 0x0002;
+    const DELETE: u32 = 0x0001_0000;
+    const SYNCHRONIZE: u32 = 0x0010_0000;
+    pub(super) const LOCK_DELETE_ACCESS: u32 = FILE_TRAVERSE | FILE_READ_ATTRIBUTES | DELETE;
     /// `winnt.h` `FILE_SHARE_READ | WRITE | DELETE`: a concurrent stat of the lock dir must not be
     /// blocked.
     const FILE_SHARE_ALL: u32 = 0x0000_0007;
     /// `winbase.h` `OPEN_EXISTING`.
     const OPEN_EXISTING: u32 = 3;
+    const FILE_CREATE: u32 = 2;
+    const FILE_OPEN: u32 = 1;
+    const FILE_DIRECTORY_FILE: u32 = 0x0000_0001;
+    const FILE_SYNCHRONOUS_IO_NONALERT: u32 = 0x0000_0020;
+    const FILE_NON_DIRECTORY_FILE: u32 = 0x0000_0040;
+    const FILE_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+    const OBJ_CASE_INSENSITIVE: u32 = 0x40;
+    const FILE_BASIC_INFO_CLASS: i32 = 0;
+    const FILE_DISPOSITION_INFO_CLASS: i32 = 4;
+    const FILE_ID_INFO_CLASS: i32 = 18;
+    const STATUS_OBJECT_NAME_COLLISION: i32 = 0xC000_0035_u32 as i32;
     /// `winbase.h`: `CreateFileW` returns this (not null) on failure.
     const INVALID_HANDLE_VALUE: isize = -1;
 
@@ -233,6 +258,57 @@ mod win32 {
 
     type Handle = *mut c_void;
 
+    #[repr(C)]
+    struct UnicodeString {
+        Length: u16,
+        MaximumLength: u16,
+        Buffer: *mut u16,
+    }
+
+    #[repr(C)]
+    struct ObjectAttributes {
+        Length: u32,
+        RootDirectory: Handle,
+        ObjectName: *const UnicodeString,
+        Attributes: u32,
+        SecurityDescriptor: *mut c_void,
+        SecurityQualityOfService: *mut c_void,
+    }
+
+    #[repr(C)]
+    struct IoStatusBlock {
+        Status: usize,
+        Information: usize,
+    }
+
+    #[repr(C)]
+    struct FileBasicInfo {
+        CreationTime: i64,
+        LastAccessTime: i64,
+        LastWriteTime: i64,
+        ChangeTime: i64,
+        FileAttributes: u32,
+    }
+
+    #[repr(C)]
+    struct FileIdInfo {
+        VolumeSerialNumber: u64,
+        FileId: [u8; 16],
+    }
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub(super) struct FileId {
+        volume: u64,
+        id: [u8; 16],
+    }
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub(super) enum EntryType {
+        Directory,
+        File,
+        Reparse,
+    }
+
     extern "system" {
         fn CreateFileW(
             filename: *const u16,
@@ -243,13 +319,273 @@ mod win32 {
             flags_and_attributes: u32,
             template_file: Handle,
         ) -> Handle;
-        fn CloseHandle(handle: Handle) -> i32;
         fn SetFileTime(
             handle: Handle,
             creation_time: *const FileTime,
             last_access_time: *const FileTime,
             last_write_time: *const FileTime,
         ) -> i32;
+        fn GetFileInformationByHandleEx(
+            handle: Handle,
+            information_class: i32,
+            information: *mut c_void,
+            size: u32,
+        ) -> i32;
+        fn SetFileInformationByHandle(
+            handle: Handle,
+            information_class: i32,
+            information: *const c_void,
+            size: u32,
+        ) -> i32;
+    }
+
+    #[link(name = "ntdll")]
+    extern "system" {
+        fn NtCreateFile(
+            file_handle: *mut Handle,
+            desired_access: u32,
+            object_attributes: *const ObjectAttributes,
+            io_status: *mut IoStatusBlock,
+            allocation_size: *const i64,
+            file_attributes: u32,
+            share_access: u32,
+            create_disposition: u32,
+            create_options: u32,
+            ea_buffer: *const c_void,
+            ea_length: u32,
+        ) -> i32;
+        fn RtlNtStatusToDosError(status: i32) -> u32;
+    }
+
+    fn nt_error(status: i32) -> io::Error {
+        if status == STATUS_OBJECT_NAME_COLLISION {
+            return io::Error::from(io::ErrorKind::AlreadyExists);
+        }
+        io::Error::from_raw_os_error(unsafe { RtlNtStatusToDosError(status) } as i32)
+    }
+
+    fn open_path(path: &Path, desired_access: u32) -> io::Result<File> {
+        let mut wide: Vec<u16> = path.as_os_str().encode_wide().collect();
+        if wide.contains(&0) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "NUL in lock path",
+            ));
+        }
+        wide.push(0);
+        let handle = unsafe {
+            CreateFileW(
+                wide.as_ptr(),
+                desired_access,
+                FILE_SHARE_ALL,
+                std::ptr::null_mut(),
+                OPEN_EXISTING,
+                FILE_FLAG_BACKUP_SEMANTICS,
+                std::ptr::null_mut(),
+            )
+        };
+        if handle as isize == INVALID_HANDLE_VALUE {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(unsafe { File::from_raw_handle(handle) })
+    }
+
+    pub(super) fn open_parent(path: &Path) -> io::Result<File> {
+        open_path(
+            path,
+            FILE_ADD_SUBDIRECTORY | FILE_TRAVERSE | FILE_READ_ATTRIBUTES,
+        )
+    }
+
+    pub(super) fn parent_matches(parent: &File, path: &Path) -> io::Result<bool> {
+        let current = open_path(path, FILE_READ_ATTRIBUTES)?;
+        Ok(file_id(parent)? == file_id(&current)?)
+    }
+
+    fn open_relative(
+        parent: &File,
+        name: &OsStr,
+        desired_access: u32,
+        disposition: u32,
+        options: u32,
+    ) -> io::Result<File> {
+        let mut wide: Vec<u16> = name.encode_wide().collect();
+        if wide.contains(&0) || wide.is_empty() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "invalid lock name",
+            ));
+        }
+        let bytes = u16::try_from(wide.len().saturating_mul(2))
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "lock name is too long"))?;
+        let name = UnicodeString {
+            Length: bytes,
+            MaximumLength: bytes,
+            Buffer: wide.as_mut_ptr(),
+        };
+        let attributes = ObjectAttributes {
+            Length: std::mem::size_of::<ObjectAttributes>() as u32,
+            RootDirectory: parent.as_raw_handle(),
+            ObjectName: &name,
+            Attributes: OBJ_CASE_INSENSITIVE,
+            SecurityDescriptor: std::ptr::null_mut(),
+            SecurityQualityOfService: std::ptr::null_mut(),
+        };
+        let mut io_status = IoStatusBlock {
+            Status: 0,
+            Information: 0,
+        };
+        let mut handle: Handle = std::ptr::null_mut();
+        let status = unsafe {
+            NtCreateFile(
+                &mut handle,
+                desired_access | SYNCHRONIZE,
+                &attributes,
+                &mut io_status,
+                std::ptr::null(),
+                FILE_ATTRIBUTE_NORMAL,
+                FILE_SHARE_ALL,
+                disposition,
+                options | FILE_SYNCHRONOUS_IO_NONALERT,
+                std::ptr::null(),
+                0,
+            )
+        };
+        if status < 0 {
+            return Err(nt_error(status));
+        }
+        if handle.is_null() {
+            return Err(io::Error::other("NtCreateFile returned no handle"));
+        }
+        Ok(unsafe { File::from_raw_handle(handle) })
+    }
+
+    pub(super) fn create_dir_at(parent: &File, name: &OsStr, owned: bool) -> io::Result<File> {
+        let access = FILE_TRAVERSE
+            | FILE_READ_ATTRIBUTES
+            | FILE_WRITE_ATTRIBUTES
+            | DELETE
+            | if owned { FILE_ADD_FILE } else { 0 };
+        open_relative(parent, name, access, FILE_CREATE, FILE_DIRECTORY_FILE)
+    }
+
+    pub(super) fn open_entry_at(
+        parent: &File,
+        name: &OsStr,
+        desired_access: u32,
+    ) -> io::Result<Option<File>> {
+        match open_relative(
+            parent,
+            name,
+            desired_access,
+            FILE_OPEN,
+            FILE_OPEN_REPARSE_POINT,
+        ) {
+            Ok(file) => Ok(Some(file)),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(error),
+        }
+    }
+
+    pub(super) fn create_owner_at(dir: &File, owner: &str) -> io::Result<()> {
+        use std::io::Write;
+
+        let mut file = open_relative(
+            dir,
+            OsStr::new("owner"),
+            FILE_WRITE_DATA | DELETE,
+            FILE_CREATE,
+            FILE_NON_DIRECTORY_FILE,
+        )?;
+        if let Err(error) = file.write_all(format!("{owner}\n").as_bytes()) {
+            let _ = delete_handle(&file);
+            return Err(error);
+        }
+        Ok(())
+    }
+
+    pub(super) fn read_owner_at(dir: &File) -> io::Result<String> {
+        let file = open_relative(
+            dir,
+            OsStr::new("owner"),
+            FILE_READ_DATA | FILE_READ_ATTRIBUTES,
+            FILE_OPEN,
+            FILE_OPEN_REPARSE_POINT,
+        )?;
+        if entry_type(&file)? != EntryType::File {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "invalid lock owner",
+            ));
+        }
+        super::read_owner_file(file)
+    }
+
+    pub(super) fn file_id(file: &File) -> io::Result<FileId> {
+        let mut info = std::mem::MaybeUninit::<FileIdInfo>::uninit();
+        let ok = unsafe {
+            GetFileInformationByHandleEx(
+                file.as_raw_handle(),
+                FILE_ID_INFO_CLASS,
+                info.as_mut_ptr().cast(),
+                std::mem::size_of::<FileIdInfo>() as u32,
+            )
+        };
+        if ok == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        let info = unsafe { info.assume_init() };
+        Ok(FileId {
+            volume: info.VolumeSerialNumber,
+            id: info.FileId,
+        })
+    }
+
+    pub(super) fn entry_type(file: &File) -> io::Result<EntryType> {
+        let mut info = std::mem::MaybeUninit::<FileBasicInfo>::uninit();
+        let ok = unsafe {
+            GetFileInformationByHandleEx(
+                file.as_raw_handle(),
+                FILE_BASIC_INFO_CLASS,
+                info.as_mut_ptr().cast(),
+                std::mem::size_of::<FileBasicInfo>() as u32,
+            )
+        };
+        if ok == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        let attributes = unsafe { info.assume_init() }.FileAttributes;
+        if attributes & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+            Ok(EntryType::Reparse)
+        } else if attributes & FILE_ATTRIBUTE_DIRECTORY != 0 {
+            Ok(EntryType::Directory)
+        } else {
+            Ok(EntryType::File)
+        }
+    }
+
+    pub(super) fn delete_handle(file: &File) -> io::Result<()> {
+        let info: u8 = 1;
+        let ok = unsafe {
+            SetFileInformationByHandle(
+                file.as_raw_handle(),
+                FILE_DISPOSITION_INFO_CLASS,
+                std::ptr::from_ref(&info).cast(),
+                1,
+            )
+        };
+        if ok == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(())
+    }
+
+    pub(super) fn delete_owner_at(dir: &File) -> io::Result<()> {
+        if let Some(file) = open_entry_at(dir, OsStr::new("owner"), FILE_READ_ATTRIBUTES | DELETE)?
+        {
+            delete_handle(&file)?;
+        }
+        Ok(())
     }
 
     /// `(tv_sec, tv_nsec)` -> FILETIME. The Windows epoch trails the Unix
@@ -270,32 +606,27 @@ mod win32 {
     /// Set the directory's last-write time. The `tv_sec`/`tv_nsec` pair
     /// is the POSIX timespec vocabulary, same as `unix_to_filetime`.
     #[allow(clippy::similar_names)]
+    #[cfg(test)]
     pub(crate) fn set_last_write_time(path: &Path, tv_sec: i64, tv_nsec: i64) -> io::Result<()> {
-        let wide: Vec<u16> = path.as_os_str().encode_wide().chain([0]).collect();
-        let handle = unsafe {
-            CreateFileW(
-                wide.as_ptr(),
-                FILE_WRITE_ATTRIBUTES,
-                FILE_SHARE_ALL,
-                std::ptr::null_mut(),
-                OPEN_EXISTING,
-                FILE_FLAG_BACKUP_SEMANTICS,
-                std::ptr::null_mut(),
-            )
-        };
-        if handle as isize == INVALID_HANDLE_VALUE {
-            return Err(io::Error::last_os_error());
-        }
+        let file = open_path(path, FILE_WRITE_ATTRIBUTES)?;
+        set_last_write_time_handle(&file, tv_sec, tv_nsec)
+    }
+
+    #[allow(clippy::similar_names)]
+    pub(super) fn set_last_write_time_handle(
+        file: &File,
+        tv_sec: i64,
+        tv_nsec: i64,
+    ) -> io::Result<()> {
         let last_write = unix_to_filetime(tv_sec, tv_nsec);
         let ok = unsafe {
             SetFileTime(
-                handle,
+                file.as_raw_handle(),
                 std::ptr::null(),
                 std::ptr::null(),
                 std::ptr::from_ref(&last_write),
             )
         };
-        unsafe { CloseHandle(handle) };
         if ok == 0 {
             return Err(io::Error::last_os_error());
         }
@@ -309,10 +640,12 @@ mod win32 {
 pub struct LockDir {
     path: PathBuf,
     owner: Option<String>,
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     parent: fs::File,
     #[cfg(unix)]
     identity: LockIdentity,
+    #[cfg(windows)]
+    identity: win32::FileId,
 }
 
 impl LockDir {
@@ -364,6 +697,8 @@ impl LockDir {
             // open returned an owned descriptor.
             unsafe { fs::File::from_raw_fd(fd) }
         };
+        #[cfg(windows)]
+        let parent = win32::open_parent(Self::parent_path(&path))?;
         #[cfg(all(test, any(unix, windows)))]
         BEFORE_LOCK_CREATE.with(|hook| {
             if let Some(callback) = hook.borrow_mut().take() {
@@ -372,21 +707,25 @@ impl LockDir {
         });
         #[cfg(unix)]
         let first_create = Self::create_at(&path, owner.as_deref(), &parent);
-        #[cfg(not(unix))]
+        #[cfg(windows)]
+        let first_create = Self::create_at(&path, owner.as_deref(), &parent);
+        #[cfg(not(any(unix, windows)))]
         let first_create = Self::create(&path, owner.as_deref());
         match first_create {
             Ok(created) => {
-                #[cfg(not(unix))]
+                #[cfg(not(any(unix, windows)))]
                 let () = created;
                 let guard = LockDir {
                     path,
                     owner,
-                    #[cfg(unix)]
+                    #[cfg(any(unix, windows))]
                     parent,
                     #[cfg(unix)]
                     identity: created,
+                    #[cfg(windows)]
+                    identity: created,
                 };
-                #[cfg(unix)]
+                #[cfg(any(unix, windows))]
                 Self::check_parent(&guard.parent, &guard.path)?;
                 Ok(guard)
             }
@@ -395,27 +734,33 @@ impl LockDir {
             Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
                 #[cfg(unix)]
                 Self::judge_and_reclaim_at(&path, stale_after, &parent)?;
-                #[cfg(not(unix))]
+                #[cfg(windows)]
+                Self::judge_and_reclaim_at(&path, stale_after, &parent)?;
+                #[cfg(not(any(unix, windows)))]
                 Self::judge_and_reclaim(&path, stale_after)?;
                 // The judge path removed (or raced away) the incumbent: one
                 // fresh attempt; a reappearing rival is contention.
                 #[cfg(unix)]
                 let next_create = Self::create_at(&path, owner.as_deref(), &parent);
-                #[cfg(not(unix))]
+                #[cfg(windows)]
+                let next_create = Self::create_at(&path, owner.as_deref(), &parent);
+                #[cfg(not(any(unix, windows)))]
                 let next_create = Self::create(&path, owner.as_deref());
                 match next_create {
                     Ok(created) => {
-                        #[cfg(not(unix))]
+                        #[cfg(not(any(unix, windows)))]
                         let () = created;
                         let guard = LockDir {
                             path,
                             owner,
-                            #[cfg(unix)]
+                            #[cfg(any(unix, windows))]
                             parent,
                             #[cfg(unix)]
                             identity: created,
+                            #[cfg(windows)]
+                            identity: created,
                         };
-                        #[cfg(unix)]
+                        #[cfg(any(unix, windows))]
                         Self::check_parent(&guard.parent, &guard.path)?;
                         Ok(guard)
                     }
@@ -432,11 +777,21 @@ impl LockDir {
         }
     }
 
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     fn parent_path(path: &Path) -> &Path {
         path.parent()
             .filter(|parent| !parent.as_os_str().is_empty())
             .unwrap_or_else(|| Path::new("."))
+    }
+
+    #[cfg(windows)]
+    fn check_parent(parent: &fs::File, path: &Path) -> io::Result<()> {
+        if !win32::parent_matches(parent, Self::parent_path(path))? {
+            return Err(io::Error::other(
+                "Lock directory parent changed while acquiring",
+            ));
+        }
+        Ok(())
     }
 
     #[cfg(unix)]
@@ -457,6 +812,23 @@ impl LockDir {
         Ok(stat_at(&self.parent, name)?.is_some_and(|stat| {
             stat.st_mode & libc::S_IFMT == libc::S_IFDIR && lock_identity(&stat) == self.identity
         }))
+    }
+
+    #[cfg(windows)]
+    fn open_current_lock(&self) -> io::Result<Option<fs::File>> {
+        let name = self
+            .path
+            .file_name()
+            .ok_or_else(|| io::Error::other("Lock path has no name"))?;
+        let Some(dir) = win32::open_entry_at(&self.parent, name, win32::LOCK_DELETE_ACCESS)? else {
+            return Ok(None);
+        };
+        if win32::entry_type(&dir)? != win32::EntryType::Directory
+            || win32::file_id(&dir)? != self.identity
+        {
+            return Ok(None);
+        }
+        Ok(Some(dir))
     }
 
     /// [`Self::acquire`] with a bounded retry: only a fresh foreign lock
@@ -544,7 +916,16 @@ impl LockDir {
                     && read_owner_at(&dir).is_ok_and(|recorded| recorded.trim() == owner))
             })()
             .unwrap_or(false);
-            #[cfg(not(unix))]
+            #[cfg(windows)]
+            let matches = (|| -> io::Result<bool> {
+                Self::check_parent(&self.parent, &self.path)?;
+                let Some(dir) = self.open_current_lock()? else {
+                    return Ok(false);
+                };
+                Ok(win32::read_owner_at(&dir).is_ok_and(|recorded| recorded.trim() == owner))
+            })()
+            .unwrap_or(false);
+            #[cfg(not(any(unix, windows)))]
             let matches = Self::owner_matches(&self.path, owner);
             if !matches {
                 return Err(io::Error::other(format!(
@@ -556,7 +937,7 @@ impl LockDir {
         Ok(())
     }
 
-    #[cfg(not(unix))]
+    #[cfg(not(any(unix, windows)))]
     fn owner_matches(path: &Path, owner: &str) -> bool {
         fs::File::open(path.join("owner"))
             .and_then(read_owner_file)
@@ -708,20 +1089,30 @@ impl LockDir {
         result
     }
 
-    /// Windows retains the TS-compatible path-based create and time probe.
+    /// Create the fixed lock name below the parent handle captured before
+    /// acquisition, so a renamed project ancestor cannot redirect it.
     #[cfg(windows)]
-    fn create(path: &Path, owner: Option<&str>) -> io::Result<()> {
-        fs::create_dir(path)?;
+    fn create_at(path: &Path, owner: Option<&str>, parent: &fs::File) -> io::Result<win32::FileId> {
+        let name = path
+            .file_name()
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "Lock path has no name"))?;
+        let dir = win32::create_dir_at(parent, name, owner.is_some())?;
+        let mut owner_created = false;
         let result = (|| {
+            let identity = win32::file_id(&dir)?;
             if let Some(owner) = owner {
-                fs::write(path.join("owner"), format!("{owner}\n"))?;
+                win32::create_owner_at(&dir, owner)?;
+                owner_created = true;
             }
             let (sec, nanos) = probe_mtime();
-            set_mtime(path, sec, nanos)
+            win32::set_last_write_time_handle(&dir, sec, nanos)?;
+            Ok(identity)
         })();
         if result.is_err() {
-            let _ = fs::remove_file(path.join("owner"));
-            let _ = fs::remove_dir(path);
+            if owner_created {
+                let _ = win32::delete_owner_at(&dir);
+            }
+            let _ = win32::delete_handle(&dir);
         }
         result
     }
@@ -860,7 +1251,49 @@ impl LockDir {
         ))
     }
 
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    fn judge_and_reclaim_at(
+        path: &Path,
+        stale_after: Duration,
+        parent: &fs::File,
+    ) -> io::Result<()> {
+        let name = path
+            .file_name()
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "Lock path has no name"))?;
+        let Some(entry) = win32::open_entry_at(parent, name, win32::LOCK_DELETE_ACCESS)? else {
+            return Ok(());
+        };
+        match win32::entry_type(&entry)? {
+            win32::EntryType::File => return win32::delete_handle(&entry),
+            win32::EntryType::Directory => {
+                let modified = entry.metadata()?.modified()?;
+                let age = std::time::SystemTime::now()
+                    .duration_since(modified)
+                    .unwrap_or_default();
+                if age > stale_after {
+                    if win32::read_owner_at(&entry)
+                        .ok()
+                        .as_deref()
+                        .is_some_and(|owner| !Self::owner_dead(owner))
+                    {
+                        return Err(io::Error::new(
+                            io::ErrorKind::WouldBlock,
+                            format!("Lock file is already being held: {}", path.display()),
+                        ));
+                    }
+                    win32::delete_owner_at(&entry)?;
+                    return win32::delete_handle(&entry);
+                }
+            }
+            win32::EntryType::Reparse => {}
+        }
+        Err(io::Error::new(
+            io::ErrorKind::WouldBlock,
+            format!("Lock file is already being held: {}", path.display()),
+        ))
+    }
+
+    #[cfg(not(any(unix, windows)))]
     fn judge_and_reclaim(path: &Path, stale_after: Duration) -> io::Result<()> {
         let metadata = match fs::symlink_metadata(path) {
             Ok(metadata) => metadata,
@@ -1004,7 +1437,32 @@ impl LockDir {
                 }
             }
         }
-        #[cfg(not(unix))]
+        #[cfg(windows)]
+        {
+            let dir = match self.open_current_lock() {
+                Ok(Some(dir)) => dir,
+                Ok(None) => return,
+                Err(error) => {
+                    tracing::warn!("failed to release lock {}: {error}", self.path.display());
+                    return;
+                }
+            };
+            if let Some(owner) = &self.owner {
+                if !win32::read_owner_at(&dir).is_ok_and(|recorded| recorded.trim() == owner) {
+                    return;
+                }
+                if let Err(error) = win32::delete_owner_at(&dir) {
+                    tracing::warn!("failed to release lock {}: {error}", self.path.display());
+                    return;
+                }
+            }
+            if let Err(error) = win32::delete_handle(&dir) {
+                if error.kind() != io::ErrorKind::NotFound {
+                    tracing::warn!("failed to release lock {}: {error}", self.path.display());
+                }
+            }
+        }
+        #[cfg(not(any(unix, windows)))]
         {
             if let Some(owner) = &self.owner {
                 if !Self::owner_matches(&self.path, owner) {
@@ -1192,6 +1650,47 @@ mod tests {
             !moved.join("settings.json.lock").exists(),
             "own lock must be removed"
         );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_owned_lock_keeps_owner_and_live_contention() {
+        let root = tempfile::tempdir().unwrap();
+        let file = root.path().join("harness_state.json");
+        let guard =
+            LockDir::acquire_owned_retrying(&file, Duration::from_secs(10), 1, MIN_STALE).unwrap();
+        let lock = LockDir::path_for(&file);
+        let owner = fs::read_to_string(lock.join("owner")).unwrap();
+        assert!(owner.starts_with(&format!("{} ", std::process::id())));
+        guard.ensure_owned().unwrap();
+        set_mtime(&lock, 1, 0).unwrap();
+        let error = LockDir::acquire_owned_retrying(&file, Duration::from_secs(10), 1, MIN_STALE)
+            .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::WouldBlock);
+        drop(guard);
+        assert!(!lock.exists());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_linked_project_root_keeps_its_lock_layout() {
+        use std::os::windows::fs::symlink_dir;
+
+        let root = tempfile::tempdir().unwrap();
+        let real = root.path().join("real-project");
+        let linked = root.path().join("linked-project");
+        fs::create_dir(&real).unwrap();
+        symlink_dir(&real, &linked).unwrap();
+        let file = linked.join("settings.json");
+        let guard = LockDir::acquire(&file, MIN_STALE).unwrap();
+        let real_lock = real.join("settings.json.lock");
+        assert!(real_lock.is_dir());
+        drop(guard);
+        assert!(!real_lock.exists());
+        assert!(fs::symlink_metadata(&linked)
+            .unwrap()
+            .file_type()
+            .is_symlink());
     }
 
     #[cfg(unix)]
