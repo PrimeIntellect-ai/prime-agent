@@ -196,6 +196,27 @@ pub(crate) fn sanitize_uv_path(env: &mut HashMap<OsString, OsString>, project: O
 mod tests {
     use super::*;
 
+    #[cfg(unix)]
+    fn python_for_test() -> Option<std::path::PathBuf> {
+        let path = std::env::var_os("PATH")?;
+        for dir in std::env::split_paths(&path) {
+            for name in ["python3.11", "python3"] {
+                let Ok(python) = dir.join(name).canonicalize() else {
+                    continue;
+                };
+                if python.is_file()
+                    && std::process::Command::new(&python)
+                        .args(["-P", "-c", "pass"])
+                        .status()
+                        .is_ok_and(|status| status.success())
+                {
+                    return Some(python);
+                }
+            }
+        }
+        None
+    }
+
     #[test]
     fn python_import_roots_are_removed_after_options_overlay() {
         let mut env = HashMap::from([
@@ -236,12 +257,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn sibling_python_path_cannot_run_sitecustomize_before_prompt() {
-        let python = ["python3.11", "python3"].into_iter().find(|python| {
-            std::process::Command::new(python)
-                .args(["-P", "-c", "pass"])
-                .status()
-                .is_ok_and(|status| status.success())
-        });
+        let python = python_for_test();
         let Some(python) = python else { return };
         let root = tempfile::tempdir().unwrap();
         let repo = root.path().join("repo");
@@ -257,7 +273,7 @@ mod tests {
         .unwrap();
         let mut env = HashMap::from([(OsString::from("PYTHONPATH"), sibling.into_os_string())]);
         let run = |env: &HashMap<OsString, OsString>| {
-            std::process::Command::new(python)
+            std::process::Command::new(&python)
                 .args(["-P", "-c", "pass"])
                 .current_dir(&project)
                 .env_clear()
@@ -282,18 +298,13 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn default_user_site_cannot_run_usercustomize_before_prompt() {
-        let Some(python) = ["python3.11", "python3"].into_iter().find(|python| {
-            std::process::Command::new(python)
-                .args(["-P", "-c", "pass"])
-                .status()
-                .is_ok_and(|status| status.success())
-        }) else {
+        let Some(python) = python_for_test() else {
             return;
         };
         let root = tempfile::tempdir().unwrap();
         let project = root.path().join("project");
         std::fs::create_dir(&project).unwrap();
-        let site = std::process::Command::new(python)
+        let site = std::process::Command::new(&python)
             .args(["-P", "-c", "import site; print(site.getusersitepackages())"])
             .env_clear()
             .env("HOME", &project)
@@ -311,7 +322,7 @@ mod tests {
         .unwrap();
         let mut env = HashMap::from([(OsString::from("HOME"), project.into_os_string())]);
         let run = |env: &HashMap<OsString, OsString>| {
-            std::process::Command::new(python)
+            std::process::Command::new(&python)
                 .args(["-P", "-c", "pass"])
                 .env_clear()
                 .envs(env)
