@@ -1,0 +1,1 @@
+- Fixed release archive installation changing files outside the staging directory through symlinks.

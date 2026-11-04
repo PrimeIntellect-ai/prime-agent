@@ -422,8 +422,8 @@ fn finish_staging(
     }
     let binary = staging.join("prime-agent");
     make_executable(&binary)?;
-    std::fs::write(staging.join(".archive-sha256"), archive_sha256)?;
-    std::fs::write(staging.join(".install-source"), install_source)?;
+    write_new_metadata(staging, ".archive-sha256", archive_sha256)?;
+    write_new_metadata(staging, ".install-source", install_source)?;
     sync_release_tree(staging)?;
     std::fs::rename(staging, release_dir)
         .with_context(|| format!("stage the release into {}", release_dir.display()))?;
@@ -431,6 +431,19 @@ fn finish_staging(
         super::install::sync_directory(releases)?;
     }
     Ok(())
+}
+
+/// Installer-owned metadata must be created exclusively: a payload may carry
+/// a symlink with this name, and writing through it would escape staging.
+fn write_new_metadata(staging: &Path, name: &str, contents: &str) -> Result<()> {
+    let path = staging.join(name);
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&path)
+        .with_context(|| format!("create installer metadata at {}", path.display()))?;
+    std::io::Write::write_all(&mut file, contents.as_bytes())
+        .with_context(|| format!("write installer metadata at {}", path.display()))
 }
 
 /// The canonical digest of a staged payload tree — identical bytes under different
@@ -536,22 +549,24 @@ fn copy_payload_tree(from: &Path, to: &Path) -> Result<()> {
     Ok(())
 }
 
-#[cfg(unix)]
 fn make_executable(path: &Path) -> Result<()> {
-    use std::os::unix::fs::PermissionsExt;
-    let permissions = std::fs::metadata(path)?.permissions();
-    std::fs::set_permissions(
-        path,
-        std::fs::Permissions::from_mode(permissions.mode() | 0o755),
-    )?;
-    Ok(())
-}
-
-// The signature stays Result for the shared unix callers; the non-unix
-// arm has nothing to chmod (the ACLs carry the executable bit).
-#[cfg(not(unix))]
-#[allow(clippy::unnecessary_wraps)]
-fn make_executable(_path: &Path) -> Result<()> {
+    // `metadata` follows links. Check the archive entry itself before chmod,
+    // or a linked binary can change permissions outside the staged release.
+    let metadata = std::fs::symlink_metadata(path)?;
+    if !metadata.file_type().is_file() {
+        anyhow::bail!(
+            "the release binary {} is not a regular file",
+            path.display()
+        );
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(
+            path,
+            std::fs::Permissions::from_mode(metadata.permissions().mode() | 0o755),
+        )?;
+    }
     Ok(())
 }
 
@@ -624,6 +639,80 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
+    fn fixture_archive_with_symlink(dir: &Path, name: &str, victim: &Path) -> (PathBuf, String) {
+        let payload = dir.join("payload");
+        std::fs::create_dir_all(payload.join("prime-agent-runtime")).unwrap();
+        std::fs::create_dir_all(payload.join("skills")).unwrap();
+        for asset in ["prime-agent", "LICENSE", "README.md"] {
+            if asset != name {
+                std::fs::write(payload.join(asset), "payload").unwrap();
+            }
+        }
+        let archive = dir.join("candidate.tar.gz");
+        let file = std::fs::File::create(&archive).unwrap();
+        let encoder = flate2::write::GzEncoder::new(file, flate2::Compression::default());
+        let mut tar = tar::Builder::new(encoder);
+        for asset in ["prime-agent", "LICENSE", "README.md"] {
+            if asset != name {
+                tar.append_path_with_name(payload.join(asset), asset)
+                    .unwrap();
+            }
+        }
+        for asset in ["prime-agent-runtime", "skills"] {
+            tar.append_dir_all(asset, payload.join(asset)).unwrap();
+        }
+        let mut link = tar::Header::new_gnu();
+        link.set_entry_type(tar::EntryType::Symlink);
+        link.set_path(name).unwrap();
+        link.set_link_name(victim).unwrap();
+        link.set_size(0);
+        link.set_mode(0o777);
+        link.set_cksum();
+        tar.append(&link, std::io::empty()).unwrap();
+        tar.into_inner().unwrap().finish().unwrap();
+
+        let sha = sha256_hex(&std::fs::read(&archive).unwrap());
+        (archive, sha)
+    }
+
+    /// An archive may contain a symlink for installer-owned metadata. Writing that metadata must
+    /// never follow the link into a file outside the staging directory.
+    #[cfg(unix)]
+    #[test]
+    fn archive_metadata_symlink_cannot_clobber_a_file_outside_staging() {
+        let dir = tempfile::tempdir().unwrap();
+        let victim = dir.path().join("outside.txt");
+        std::fs::write(&victim, "keep this").unwrap();
+        let (archive, sha) = fixture_archive_with_symlink(dir.path(), ".archive-sha256", &victim);
+        let root = dir.path().join("install-root");
+        std::fs::create_dir_all(&root).unwrap();
+        let staged = stage_archive(&archive, &sha, &root, "0.2.0", "https://example.com");
+        assert_eq!(std::fs::read_to_string(victim).unwrap(), "keep this");
+        assert!(staged.is_err());
+    }
+
+    /// A payload-supplied binary link must not chmod its target outside staging.
+    #[cfg(unix)]
+    #[test]
+    fn archive_binary_symlink_cannot_change_permissions_outside_staging() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let victim = dir.path().join("outside.txt");
+        std::fs::write(&victim, "keep this").unwrap();
+        std::fs::set_permissions(&victim, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let (archive, sha) = fixture_archive_with_symlink(dir.path(), "prime-agent", &victim);
+        let root = dir.path().join("install-root");
+        std::fs::create_dir_all(&root).unwrap();
+        let staged = stage_archive(&archive, &sha, &root, "0.2.0", "https://example.com");
+        assert_eq!(
+            std::fs::metadata(&victim).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        assert!(staged.is_err());
+    }
+
     #[test]
     fn never_reuses_a_damaged_release() {
         let dir = tempfile::tempdir().unwrap();
@@ -638,6 +727,23 @@ mod tests {
         std::fs::write(release_dir.join("README.md"), "payload").unwrap();
         std::fs::write(release_dir.join(".archive-sha256"), format!("{sha}0")).unwrap();
         assert!(stage_archive(&archive, &sha, &root, "0.2.0", "https://example.com").is_err());
+        #[cfg(unix)]
+        {
+            std::fs::write(release_dir.join(".archive-sha256"), &sha).unwrap();
+            let source = release_dir.join(".install-source");
+            std::fs::remove_file(&source).unwrap();
+            let victim = dir.path().join("outside-install-source.txt");
+            std::fs::write(&victim, "https://example.com").unwrap();
+            std::os::unix::fs::symlink(&victim, source).unwrap();
+            assert!(
+                stage_archive(&archive, &sha, &root, "0.2.0", "https://mirror.example.com")
+                    .is_err()
+            );
+            assert_eq!(
+                std::fs::read_to_string(victim).unwrap(),
+                "https://example.com"
+            );
+        }
     }
 
     /// A payload directory whose `prime-agent` is a script binary reporting

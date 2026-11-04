@@ -2295,6 +2295,12 @@ if ! tar -xzf "$asset" -C "$stage"; then
   rm -rf "$stage"
   die "could not extract ${asset}"
 fi
+# The ownership marker is installer-owned. An archive-provided symlink here
+# could make the marker redirection overwrite an unrelated file outside stage.
+if [ -e "${stage}/.prime-agent-install" ] || [ -L "${stage}/.prime-agent-install" ]; then
+  rm -rf "$stage"
+  die "the tarball contains an installer-owned .prime-agent-install marker"
+fi
 if [ ! -x "${stage}/${BINARY_NAME}" ]; then
   rm -rf "$stage"
   die "the tarball did not contain an executable ${BINARY_NAME} payload"
