@@ -3,6 +3,7 @@
 //! signatures; session-engine call sites never branch on `cfg` themselves.
 
 pub mod browser;
+pub(crate) mod cache_content;
 pub mod fs;
 pub mod lock_dir;
 pub mod perms;

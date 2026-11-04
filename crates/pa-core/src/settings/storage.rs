@@ -117,9 +117,8 @@ fn process_lock(path: &Path) -> MutexGuard<'static, ()> {
         .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
-/// The stat identity a cached read is validated against: device, inode, mtime
-/// (nanoseconds), and length — every known writer changes one, so a match means
-/// the cached content is byte-identical to a locked read right now.
+/// The stat identity is a cheap reject for cached reads. A matching identity
+/// still needs an exact byte check because timestamps can be preserved or coarse.
 #[derive(Clone, Copy, PartialEq, Eq)]
 struct FileIdentity {
     dev: u64,
@@ -177,7 +176,7 @@ fn read_cache() -> &'static Mutex<HashMap<PathBuf, CachedRead>> {
 }
 
 impl SettingsStorage for FileSettingsStorage {
-    /// The consolidated read arm: on a cache hit, one `stat` and the cached content;
+    /// The consolidated read arm: on a cache hit, `stat` plus a bounded byte check;
     /// on a miss, the full locked cycle, byte-identical to `with_lock`'s read arm, which
     /// also populates the cache. The same-process mutex still orders in-process writers.
     fn read(&self, scope: SettingsScope) -> Result<Option<String>> {
@@ -191,15 +190,16 @@ impl SettingsStorage for FileSettingsStorage {
         let Some(identity) = now_identity else {
             return Ok(None);
         };
+        let cached = read_cache()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(path)
+            .filter(|entry| entry.identity == identity)
+            .map(|entry| entry.content.clone());
+        if let Some(content) = cached
+            .filter(|content| crate::platform::cache_content::matches(path, content.as_bytes()))
         {
-            let cache = read_cache()
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            if let Some(entry) = cache.get(path) {
-                if entry.identity == identity {
-                    return Ok(Some(entry.content.clone()));
-                }
-            }
+            return Ok(Some(content));
         }
         let guard = Self::acquire_lock(path)?;
         let content = fs::read_to_string(path)?;
@@ -453,6 +453,50 @@ mod tests {
             storage.read(SettingsScope::Global).unwrap().as_deref(),
             Some(r#"{ "theme": "ink" }"#)
         );
+    }
+
+    #[test]
+    fn read_arm_sees_equal_size_equal_time_replacement_in_both_scopes() {
+        for scope in [SettingsScope::Global, SettingsScope::Project] {
+            let dir = tempfile::tempdir().unwrap();
+            let cwd = dir.path().join("cwd");
+            let agent = dir.path().join("agent");
+            let storage = FileSettingsStorage::new(&cwd, &agent);
+            let path = storage.path(scope);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            let original = r#"{ "theme": "blue" }"#;
+            let replacement = r#"{ "theme": "dark" }"#;
+            fs::write(path, original).unwrap();
+            assert_eq!(storage.read(scope).unwrap().as_deref(), Some(original));
+
+            let before = fs::metadata(path).unwrap();
+            let temp = path.with_extension("json.external");
+            fs::write(&temp, replacement).unwrap();
+            fs::OpenOptions::new()
+                .write(true)
+                .open(&temp)
+                .unwrap()
+                .set_times(fs::FileTimes::new().set_modified(before.modified().unwrap()))
+                .unwrap();
+            fs::rename(&temp, path).unwrap();
+            let after = fs::metadata(path).unwrap();
+            assert_eq!(before.len(), after.len());
+            assert_eq!(before.modified().unwrap(), after.modified().unwrap());
+            assert_eq!(storage.read(scope).unwrap().as_deref(), Some(replacement));
+
+            let rewritten = r#"{ "theme": "mint" }"#;
+            fs::write(path, rewritten).unwrap();
+            fs::OpenOptions::new()
+                .write(true)
+                .open(path)
+                .unwrap()
+                .set_times(fs::FileTimes::new().set_modified(after.modified().unwrap()))
+                .unwrap();
+            let current = fs::metadata(path).unwrap();
+            assert_eq!(after.len(), current.len());
+            assert_eq!(after.modified().unwrap(), current.modified().unwrap());
+            assert_eq!(storage.read(scope).unwrap().as_deref(), Some(rewritten));
+        }
     }
 
     #[test]

@@ -3,6 +3,7 @@
 
 use std::collections::HashMap;
 use std::fs;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard, OnceLock};
 
@@ -106,6 +107,66 @@ impl FileAuthStorageBackend {
     }
 }
 
+/// Capture a deliberate shared-auth link's target after `O_NOFOLLOW` rejects
+/// the link. A symlink-to-regular swap fails `read_link` before any open.
+#[cfg(unix)]
+fn linked_auth_target(path: &Path) -> std::io::Result<PathBuf> {
+    let target = fs::read_link(path)?;
+    Ok(if target.is_absolute() {
+        target
+    } else {
+        path.parent().unwrap_or_else(|| Path::new(".")).join(target)
+    })
+}
+
+/// Read an existing credential file without creating it. Regular legacy
+/// files are tightened through the opened handle before their bytes are used;
+/// deliberate file links keep their chosen shared permission policy.
+pub(crate) fn read_existing_auth_file(path: &Path) -> Result<Option<String>> {
+    let mut options = fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW);
+    }
+    let opened = options.open(path);
+    #[cfg(unix)]
+    let opened = match opened {
+        Err(error) if error.raw_os_error() == Some(libc::ELOOP) => {
+            let Ok(target) = linked_auth_target(path) else {
+                return Ok(None);
+            };
+            fs::File::open(target).map(|file| (file, true))
+        }
+        other => other.map(|file| (file, false)),
+    };
+    #[cfg(not(unix))]
+    let opened = opened.map(|file| (file, false));
+    let Ok((mut file, linked)) = opened else {
+        return Ok(None);
+    };
+    let Ok(metadata) = file.metadata() else {
+        return Ok(None);
+    };
+    if !metadata.is_file() {
+        return Ok(None);
+    }
+    if !linked {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            if metadata.permissions().mode() & 0o077 != 0 {
+                crate::platform::perms::restrict_open_file(&file)?;
+            }
+        }
+        #[cfg(not(unix))]
+        crate::platform::perms::restrict_open_file(&file)?;
+    }
+    let mut content = String::new();
+    Ok(file.read_to_string(&mut content).ok().map(|_| content))
+}
+
 /// Same-process serialization for one auth document.
 ///
 /// TS's synchronous auth lock runs on one thread, so same-process calls never
@@ -124,8 +185,8 @@ fn process_lock(path: &Path) -> MutexGuard<'static, ()> {
         .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
-/// The stat identity a cached read is validated against: every writer renames the document in
-/// place, so a matching identity means the cached content is byte-identical to a locked read now.
+/// The stat identity is a cheap reject for cached reads. A matching identity
+/// still needs an exact byte check because timestamps can be preserved or coarse.
 #[derive(Clone, Copy, PartialEq, Eq)]
 struct FileIdentity {
     dev: u64,
@@ -133,13 +194,17 @@ struct FileIdentity {
     mtime_sec: i64,
     mtime_nsec: i64,
     len: u64,
+    #[cfg(unix)]
+    mode: u32,
+    #[cfg(unix)]
+    linked: bool,
 }
 
 // The fallible non-Unix twin pins the Option shape across
 // platforms - unwrapping only this arm would split the contract.
 #[allow(clippy::unnecessary_wraps)]
 #[cfg(unix)]
-fn stat_identity(metadata: &fs::Metadata) -> Option<FileIdentity> {
+fn stat_identity(path: &Path, metadata: &fs::Metadata) -> Option<FileIdentity> {
     use std::os::unix::fs::MetadataExt;
     Some(FileIdentity {
         dev: metadata.dev(),
@@ -147,11 +212,13 @@ fn stat_identity(metadata: &fs::Metadata) -> Option<FileIdentity> {
         mtime_sec: metadata.mtime(),
         mtime_nsec: metadata.mtime_nsec(),
         len: metadata.len(),
+        mode: metadata.mode() & 0o777,
+        linked: fs::symlink_metadata(path).ok()?.file_type().is_symlink(),
     })
 }
 
 #[cfg(windows)]
-fn stat_identity(metadata: &fs::Metadata) -> Option<FileIdentity> {
+fn stat_identity(_path: &Path, metadata: &fs::Metadata) -> Option<FileIdentity> {
     let modified = metadata.modified().ok()?;
     let since = modified.duration_since(std::time::UNIX_EPOCH).ok()?;
     Some(FileIdentity {
@@ -164,7 +231,7 @@ fn stat_identity(metadata: &fs::Metadata) -> Option<FileIdentity> {
 }
 
 #[cfg(not(any(unix, windows)))]
-fn stat_identity(_metadata: &fs::Metadata) -> Option<FileIdentity> {
+fn stat_identity(_path: &Path, _metadata: &fs::Metadata) -> Option<FileIdentity> {
     None
 }
 
@@ -183,21 +250,24 @@ fn read_cache() -> &'static Mutex<HashMap<PathBuf, CachedRead>> {
 }
 
 impl AuthStorageBackend for FileAuthStorageBackend {
-    /// On a hit, one `stat` and the cached content; on a miss, the full
+    /// On a hit, `stat` plus a bounded byte check; on a miss, the full
     /// locked protocol cycle, which also populates the cache.
     fn read(&self) -> Result<Option<String>> {
         let _process_guard = process_lock(&self.auth_path);
         let now_identity = fs::metadata(&self.auth_path)
             .ok()
-            .and_then(|metadata| stat_identity(&metadata));
+            .and_then(|metadata| stat_identity(&self.auth_path, &metadata));
         if let Some(identity) = now_identity {
-            let cache = read_cache()
+            let cached = read_cache()
                 .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            if let Some(entry) = cache.get(&self.auth_path) {
-                if entry.identity == identity {
-                    return Ok(Some(entry.content.clone()));
-                }
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .get(&self.auth_path)
+                .filter(|entry| entry.identity == identity)
+                .map(|entry| entry.content.clone());
+            if let Some(content) = cached.filter(|content| {
+                crate::platform::cache_content::matches(&self.auth_path, content.as_bytes())
+            }) {
+                return Ok(Some(content));
             }
         }
         self.ensure_parent_dir()?;
@@ -206,11 +276,15 @@ impl AuthStorageBackend for FileAuthStorageBackend {
         // so re-stat for the identity that pairs with this read.
         let now_identity = fs::metadata(&self.auth_path)
             .ok()
-            .and_then(|metadata| stat_identity(&metadata));
+            .and_then(|metadata| stat_identity(&self.auth_path, &metadata));
         let guard = self.acquire_lock()?;
-        let content = fs::read_to_string(&self.auth_path).ok();
+        let content = read_existing_auth_file(&self.auth_path)?;
+        let after_identity = fs::metadata(&self.auth_path)
+            .ok()
+            .and_then(|metadata| stat_identity(&self.auth_path, &metadata));
         drop(guard);
-        if let (Some(identity), Some(content)) = (now_identity, content.as_deref()) {
+        let unchanged_identity = now_identity.filter(|before| Some(*before) == after_identity);
+        if let (Some(identity), Some(content)) = (unchanged_identity, content.as_deref()) {
             read_cache()
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -233,7 +307,7 @@ impl AuthStorageBackend for FileAuthStorageBackend {
         self.ensure_parent_dir()?;
         self.ensure_file_exists()?;
         let guard = self.acquire_lock()?;
-        let current = fs::read_to_string(&self.auth_path).ok();
+        let current = read_existing_auth_file(&self.auth_path)?;
         let ((), next) = update(current)?;
         if let Some(next) = next {
             super::super::settings::storage::atomic_write_with(
@@ -287,6 +361,92 @@ pub fn parse_storage_data(content: Option<&str>) -> Result<AuthStorageData> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[cfg(unix)]
+    fn legacy_auth_is_restricted_before_read_without_rewriting_credentials() {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("auth.json");
+        let credential = r#"{ "prime-inference": { "type": "api_key", "key": "private-key" } }"#;
+        fs::write(&path, credential).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+        let inode = fs::metadata(&path).unwrap().ino();
+        let backend = FileAuthStorageBackend::new(&path);
+
+        assert_eq!(backend.read().unwrap().as_deref(), Some(credential));
+        assert_eq!(crate::platform::perms::file_mode(&path), Some(0o600));
+        assert_eq!(fs::metadata(&path).unwrap().ino(), inode);
+        assert_eq!(fs::read_to_string(&path).unwrap(), credential);
+
+        // An externally loosened file must not hide behind the read cache.
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+        assert_eq!(backend.read().unwrap().as_deref(), Some(credential));
+        assert_eq!(crate::platform::perms::file_mode(&path), Some(0o600));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn deliberately_linked_auth_preserves_shared_target_permissions() {
+        use std::os::unix::fs::{symlink, PermissionsExt};
+
+        let dir = tempfile::tempdir().unwrap();
+        let agent_dir = dir.path().join("agent");
+        fs::create_dir(&agent_dir).unwrap();
+        let path = agent_dir.join("auth.json");
+        let shared = dir.path().join("shared-auth.json");
+        let credential = r#"{"prime-inference":{"type":"api_key","key":"shared"}}"#;
+        fs::write(&shared, credential).unwrap();
+        fs::set_permissions(&shared, fs::Permissions::from_mode(0o644)).unwrap();
+        symlink("../shared-auth.json", &path).unwrap();
+        let backend = FileAuthStorageBackend::new(&path);
+
+        assert_eq!(backend.read().unwrap().as_deref(), Some(credential));
+        backend
+            .with_lock(&mut |current| {
+                assert_eq!(current.as_deref(), Some(credential));
+                Ok(((), None))
+            })
+            .unwrap();
+        assert_eq!(crate::platform::perms::file_mode(&shared), Some(0o644));
+        assert!(fs::symlink_metadata(&path)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+
+        // A regular hard link to the same inode must not reuse the exception
+        // cached for the former symlink.
+        fs::remove_file(&path).unwrap();
+        fs::hard_link(&shared, &path).unwrap();
+        assert_eq!(backend.read().unwrap().as_deref(), Some(credential));
+        assert_eq!(crate::platform::perms::file_mode(&shared), Some(0o600));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn auth_directory_is_not_chmoded_as_a_file() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("auth.json");
+        fs::create_dir(&path).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+
+        assert!(read_existing_auth_file(&path).unwrap().is_none());
+        assert_eq!(crate::platform::perms::file_mode(&path), Some(0o755));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn linked_auth_fallback_rejects_a_swapped_regular_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("auth.json");
+        fs::write(&path, "keep this file").unwrap();
+
+        assert!(linked_auth_target(&path).is_err());
+        assert_eq!(fs::read_to_string(path).unwrap(), "keep this file");
+    }
 
     #[test]
     fn file_backend_round_trip_and_modes() {
@@ -380,6 +540,45 @@ mod tests {
             backend.read().unwrap().as_deref(),
             Some(r#"{ "written": "externally" }"#)
         );
+    }
+
+    #[test]
+    fn read_sees_equal_size_equal_time_replacement() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("auth.json");
+        let backend = FileAuthStorageBackend::new(&path);
+        let original = r#"{ "key": "AAAA" }"#;
+        let replacement = r#"{ "key": "BBBB" }"#;
+        fs::write(&path, original).unwrap();
+        assert_eq!(backend.read().unwrap().as_deref(), Some(original));
+
+        let before = fs::metadata(&path).unwrap();
+        let temp = dir.path().join("external.tmp");
+        fs::write(&temp, replacement).unwrap();
+        fs::OpenOptions::new()
+            .write(true)
+            .open(&temp)
+            .unwrap()
+            .set_times(fs::FileTimes::new().set_modified(before.modified().unwrap()))
+            .unwrap();
+        fs::rename(&temp, &path).unwrap();
+        let after = fs::metadata(&path).unwrap();
+        assert_eq!(before.len(), after.len());
+        assert_eq!(before.modified().unwrap(), after.modified().unwrap());
+        assert_eq!(backend.read().unwrap().as_deref(), Some(replacement));
+
+        let rewritten = r#"{ "key": "CCCC" }"#;
+        fs::write(&path, rewritten).unwrap();
+        fs::OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_times(fs::FileTimes::new().set_modified(after.modified().unwrap()))
+            .unwrap();
+        let current = fs::metadata(&path).unwrap();
+        assert_eq!(after.len(), current.len());
+        assert_eq!(after.modified().unwrap(), current.modified().unwrap());
+        assert_eq!(backend.read().unwrap().as_deref(), Some(rewritten));
     }
 
     #[test]
