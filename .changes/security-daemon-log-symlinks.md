@@ -1,0 +1,1 @@
+- Prevented daemon diagnostic logs from reading or changing unrelated files through linked paths on Unix.

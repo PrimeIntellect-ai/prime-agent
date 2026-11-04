@@ -8,3 +8,6 @@ mod paths;
 pub use paths::{
     default_daemon_socket_path, socket_dir, socket_identity, worker_socket_path, SocketIdentity,
 };
+
+// Managed diagnostics use the same platform wall as endpoint paths.
+pub(crate) mod log_files;

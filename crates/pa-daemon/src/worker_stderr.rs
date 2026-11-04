@@ -9,6 +9,8 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, Context, Result};
 
+use crate::platform::log_files::{LogDir, OpenMode};
+
 /// The stderr tail attached to not-ready launch failures (Codex
 /// `STDERR_LOG_TAIL_BYTES`).
 const TAIL_BYTES: u64 = 4096;
@@ -36,14 +38,19 @@ pub(crate) fn open_for_spawn(log_path: &Path) -> Result<File> {
     let logs_dir = log_path
         .parent()
         .context("worker stderr log has no parent dir")?;
-    crate::paths::ensure_dir(logs_dir)?;
-    let file = std::fs::OpenOptions::new()
-        .create(true)
-        .truncate(true)
-        .write(true)
-        .open(log_path)
+    let dir = LogDir::for_write(logs_dir)
+        .with_context(|| format!("open worker logs dir {}", logs_dir.display()))?;
+    dir.restrict()
+        .with_context(|| format!("restrict worker logs dir {}", logs_dir.display()))?;
+    let name = log_path
+        .file_name()
+        .context("worker stderr log has no filename")?;
+    let file = dir
+        .open_file(name, OpenMode::Write)
         .with_context(|| format!("open worker stderr log {}", log_path.display()))?;
-    prune_retained(logs_dir, log_path, worker_stderr_log_name);
+    file.set_len(0)
+        .with_context(|| format!("truncate worker stderr log {}", log_path.display()))?;
+    prune_retained(&dir, log_path, worker_stderr_log_name);
     Ok(file)
 }
 
@@ -51,20 +58,19 @@ pub(crate) fn open_for_spawn(log_path: &Path) -> Result<File> {
 /// minted per launch and socket paths accumulate, so without the prune
 /// every session ever hosted leaves a log. The `keep` path is spared;
 /// deletion is best-effort.
-fn prune_retained(logs_dir: &Path, keep: &Path, matches: impl Fn(&str) -> bool) -> usize {
-    let Ok(entries) = std::fs::read_dir(logs_dir) else {
+fn prune_retained(dir: &LogDir, keep: &Path, matches: impl Fn(&str) -> bool) -> usize {
+    let Ok(entries) = dir.names() else {
         return 0;
     };
-    let mut logs: Vec<(std::time::SystemTime, PathBuf)> = entries
-        .filter_map(std::result::Result::ok)
-        .map(|entry| entry.path())
-        .filter(|path| {
-            path.file_name()
-                .and_then(|name| name.to_str())
-                .is_some_and(&matches)
-        })
-        .filter_map(|path| {
-            let modified = std::fs::metadata(&path).and_then(|m| m.modified()).ok()?;
+    let mut logs: Vec<(std::time::SystemTime, std::ffi::OsString)> = entries
+        .into_iter()
+        .filter(|name| name.to_str().is_some_and(&matches))
+        .filter_map(|name| {
+            let file = dir.open_file(&name, OpenMode::Read).ok()?;
+            let modified = file
+                .metadata()
+                .and_then(|metadata| metadata.modified())
+                .ok()?;
             // A future mtime (clock skew) reads as protected: a skewed clock must not
             // turn a fresh log into a prune target.
             let fresh = modified.elapsed().map_or(true, |age| {
@@ -73,7 +79,7 @@ fn prune_retained(logs_dir: &Path, keep: &Path, matches: impl Fn(&str) -> bool) 
             if fresh {
                 return None;
             }
-            Some((modified, path))
+            Some((modified, name))
         })
         .collect();
     if logs.len() <= RETAINED_FILES {
@@ -82,14 +88,14 @@ fn prune_retained(logs_dir: &Path, keep: &Path, matches: impl Fn(&str) -> bool) 
     logs.sort_by_key(|(modified, _)| *modified);
     let excess = logs.len() - RETAINED_FILES;
     let mut deleted = 0;
-    for (_, path) in &logs {
+    for (_, name) in &logs {
         if deleted == excess {
             break;
         }
-        if path == keep {
+        if keep.file_name() == Some(name.as_os_str()) {
             continue;
         }
-        let _ = std::fs::remove_file(path);
+        let _ = dir.remove(name);
         deleted += 1;
     }
     deleted
@@ -110,7 +116,10 @@ fn socket_log_name(name: &str) -> bool {
 
 pub(crate) fn prune_socket_logs(agent_dir: &Path, socket_path: &Path) -> usize {
     let keep = crate::paths::daemon_log_path(socket_path, agent_dir);
-    prune_retained(&crate::paths::logs_dir(agent_dir), &keep, socket_log_name)
+    let Ok(dir) = LogDir::for_read(&crate::paths::logs_dir(agent_dir)) else {
+        return 0;
+    };
+    prune_retained(&dir, &keep, socket_log_name)
 }
 
 /// Read the last [`TAIL_BYTES`] of a worker stderr log, dropping the leading partial
@@ -120,7 +129,21 @@ pub(crate) fn prune_socket_logs(agent_dir: &Path, socket_path: &Path) -> usize {
 ///
 /// Returns an error when the log cannot be opened, inspected, or read and it exists.
 fn read_tail(path: &Path) -> Result<Option<String>> {
-    let mut file = match File::open(path) {
+    let parent = path
+        .parent()
+        .context("worker stderr log has no parent dir")?;
+    let dir = match LogDir::for_read(parent) {
+        Ok(dir) => dir,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(error)
+                .with_context(|| format!("open worker logs dir {}", parent.display()));
+        }
+    };
+    let name = path
+        .file_name()
+        .context("worker stderr log has no filename")?;
+    let mut file = match dir.open_file(name, OpenMode::Read) {
         Ok(file) => file,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(error) => {
@@ -252,6 +275,194 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn spawn_log_is_private_when_new_or_reopened() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = log_path(dir.path(), "private");
+        drop(open_for_spawn(&path).expect("create worker log"));
+        assert_eq!(pa_core::platform::perms::file_mode(&path), Some(0o600));
+
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        std::fs::write(&path, "old diagnostic\n").unwrap();
+        drop(open_for_spawn(&path).expect("reopen worker log"));
+        assert_eq!(pa_core::platform::perms::file_mode(&path), Some(0o600));
+        assert_eq!(std::fs::read(&path).unwrap(), b"");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn spawn_open_does_not_follow_a_planted_log_symlink() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = log_path(dir.path(), "a");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let victim = dir.path().join("unrelated-file");
+        std::fs::write(&victim, b"keep this file").unwrap();
+        std::os::unix::fs::symlink(&victim, &path).unwrap();
+
+        assert!(open_for_spawn(&path).is_err());
+        assert_eq!(std::fs::read(&victim).unwrap(), b"keep this file");
+        assert_eq!(std::fs::read_link(&path).unwrap(), victim);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_spawn_open_rejects_a_planted_log_symlink() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = log_path(dir.path(), "a");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let victim = dir.path().join("unrelated-file");
+        std::fs::write(&victim, b"keep this file").unwrap();
+        std::os::windows::fs::symlink_file(&victim, &path).unwrap();
+
+        assert!(open_for_spawn(&path).is_err());
+        assert_eq!(std::fs::read(&victim).unwrap(), b"keep this file");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_spawn_open_rejects_a_hard_linked_log() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = log_path(dir.path(), "a");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let victim = dir.path().join("unrelated-file");
+        std::fs::write(&victim, b"keep this file").unwrap();
+        std::fs::hard_link(&victim, &path).unwrap();
+
+        assert!(open_for_spawn(&path).is_err());
+        assert_eq!(std::fs::read(&victim).unwrap(), b"keep this file");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn tail_does_not_read_a_planted_log_symlink() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = log_path(dir.path(), "a");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let victim = dir.path().join("unrelated-file");
+        std::fs::write(&victim, b"private content\n").unwrap();
+        std::os::unix::fs::symlink(&victim, &path).unwrap();
+
+        assert!(read_tail(&path).is_err());
+        assert_eq!(std::fs::read(&victim).unwrap(), b"private content\n");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn spawn_open_rejects_a_linked_logs_directory() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let agent_dir = dir.path().join("agent");
+        std::fs::create_dir(&agent_dir).unwrap();
+        let outside = dir.path().join("outside");
+        std::fs::create_dir(&outside).unwrap();
+        std::fs::set_permissions(&outside, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let victim = outside.join("worker-a.stderr.log");
+        std::fs::write(&victim, b"keep this log\n").unwrap();
+        let logs = agent_dir.join("logs");
+        std::os::unix::fs::symlink(&outside, &logs).unwrap();
+
+        assert!(open_for_spawn(&log_path(&agent_dir, "a")).is_err());
+        assert_eq!(std::fs::read(&victim).unwrap(), b"keep this log\n");
+        assert_eq!(
+            std::fs::metadata(&outside).unwrap().permissions().mode() & 0o777,
+            0o755
+        );
+        assert_eq!(std::fs::read_link(&logs).unwrap(), outside);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn tail_rejects_a_linked_logs_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let agent_dir = dir.path().join("agent");
+        std::fs::create_dir(&agent_dir).unwrap();
+        let outside = dir.path().join("outside");
+        std::fs::create_dir(&outside).unwrap();
+        std::fs::write(outside.join("worker-a.stderr.log"), b"private content\n").unwrap();
+        std::os::unix::fs::symlink(&outside, agent_dir.join("logs")).unwrap();
+
+        assert!(read_tail(&log_path(&agent_dir, "a")).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn linked_agent_root_keeps_generated_logs_working() {
+        let dir = tempfile::tempdir().unwrap();
+        let real_agent = dir.path().join("real-agent");
+        std::fs::create_dir(&real_agent).unwrap();
+        let linked_agent = dir.path().join("linked-agent");
+        std::os::unix::fs::symlink(&real_agent, &linked_agent).unwrap();
+
+        let stderr = log_path(&linked_agent, "a");
+        drop(open_for_spawn(&stderr).unwrap());
+        assert!(real_agent.join("logs/worker-a.stderr.log").exists());
+
+        let socket = dir.path().join("daemon.sock");
+        let daemon_log = crate::paths::daemon_log_path(&socket, &linked_agent);
+        crate::paths::RotatingLog::new(daemon_log.clone()).append("ready");
+        assert_eq!(std::fs::read_to_string(daemon_log).unwrap(), "ready\n");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_linked_agent_root_keeps_generated_logs_working() {
+        let dir = tempfile::tempdir().unwrap();
+        let real_agent = dir.path().join("real-agent");
+        std::fs::create_dir(&real_agent).unwrap();
+        let linked_agent = dir.path().join("linked-agent");
+        let output = std::process::Command::new("cmd")
+            .args(["/C", "mklink", "/J"])
+            .arg(&linked_agent)
+            .arg(&real_agent)
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
+
+        let stderr = log_path(&linked_agent, "a");
+        drop(open_for_spawn(&stderr).unwrap());
+        assert!(real_agent.join("logs/worker-a.stderr.log").exists());
+
+        let socket = dir.path().join("daemon.sock");
+        let daemon_log = crate::paths::daemon_log_path(&socket, &linked_agent);
+        crate::paths::RotatingLog::new(daemon_log.clone()).append("ready");
+        assert_eq!(std::fs::read_to_string(daemon_log).unwrap(), "ready\n");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn spawn_open_rejects_a_hard_linked_log() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = log_path(dir.path(), "a");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let victim = dir.path().join("other-file");
+        std::fs::write(&victim, b"keep this file\n").unwrap();
+        std::fs::set_permissions(&victim, std::fs::Permissions::from_mode(0o644)).unwrap();
+        std::fs::hard_link(&victim, &path).unwrap();
+
+        assert!(open_for_spawn(&path).is_err());
+        assert_eq!(std::fs::read(&victim).unwrap(), b"keep this file\n");
+        assert_eq!(pa_core::platform::perms::file_mode(&victim), Some(0o644));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn tail_rejects_a_hard_linked_log() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = log_path(dir.path(), "a");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let victim = dir.path().join("other-file");
+        std::fs::write(&victim, b"private content\n").unwrap();
+        std::fs::hard_link(&victim, &path).unwrap();
+
+        assert!(read_tail(&path).is_err());
+    }
+
     #[test]
     fn not_ready_error_carries_the_tail() {
         let dir = tempfile::tempdir().expect("temp dir");
@@ -307,7 +518,8 @@ mod tests {
         // The just-opened log sorts OLDEST (a coarse-mtime tie would
         // do this): the prune must spare it from the deletion window.
         let keep = logs_dir.join("worker-000.stderr.log");
-        prune_retained(&logs_dir, &keep, worker_stderr_log_name);
+        let dir_handle = LogDir::for_read(&logs_dir).expect("open logs dir");
+        prune_retained(&dir_handle, &keep, worker_stderr_log_name);
         let mut remaining: Vec<String> = std::fs::read_dir(&logs_dir)
             .expect("read logs dir")
             .filter_map(std::result::Result::ok)
@@ -399,7 +611,12 @@ mod tests {
                 "worker died\n",
             );
         }
-        prune_retained(&logs_dir, Path::new("absent-keep"), worker_stderr_log_name);
+        let dir_handle = LogDir::for_read(&logs_dir).expect("open logs dir");
+        prune_retained(
+            &dir_handle,
+            Path::new("absent-keep"),
+            worker_stderr_log_name,
+        );
         let fresh = std::fs::read_dir(&logs_dir).expect("read logs dir").count();
         assert_eq!(fresh, RETAINED_FILES + 6, "a fresh burst is not pruned");
         // The burst ages past the window: the same prune collapses it to
@@ -407,7 +624,11 @@ mod tests {
         for index in 0..(RETAINED_FILES + 6) {
             backdate(&logs_dir.join(format!("worker-{index:03}.stderr.log")), 0);
         }
-        prune_retained(&logs_dir, Path::new("absent-keep"), worker_stderr_log_name);
+        prune_retained(
+            &dir_handle,
+            Path::new("absent-keep"),
+            worker_stderr_log_name,
+        );
         let aged = std::fs::read_dir(&logs_dir).expect("read logs dir").count();
         assert_eq!(aged, RETAINED_FILES, "an aged burst collapses to the cap");
     }

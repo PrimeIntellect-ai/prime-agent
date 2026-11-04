@@ -5,6 +5,7 @@
 pub mod browser;
 pub mod fs;
 pub mod lock_dir;
+pub(crate) mod log_files;
 pub mod perms;
 pub mod process;
 pub mod shell;

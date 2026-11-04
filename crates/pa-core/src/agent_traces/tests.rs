@@ -9,6 +9,83 @@ use std::io::Write as _;
 use std::pin::Pin;
 use std::sync::Mutex;
 
+#[cfg(unix)]
+#[test]
+fn trace_upload_log_and_rotation_are_private() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempfile::tempdir().unwrap();
+    let log = agent_traces_log_path(dir.path());
+    let old = log.with_extension("log.old");
+    let mode = |path: &Path| std::fs::metadata(path).unwrap().permissions().mode() & 0o777;
+
+    append_rotating_log(&log, "session secret");
+    assert_eq!(mode(&log), 0o600, "new trace log must be private");
+
+    std::fs::set_permissions(&log, std::fs::Permissions::from_mode(0o644)).unwrap();
+    append_rotating_log(&log, "another detail");
+    assert_eq!(mode(&log), 0o600, "existing trace log must be tightened");
+
+    std::fs::write(&old, "previous session secret").unwrap();
+    std::fs::set_permissions(&old, std::fs::Permissions::from_mode(0o644)).unwrap();
+    append_rotating_log(&log, "new detail");
+    assert_eq!(mode(&old), 0o600, "retained legacy log must be tightened");
+
+    std::fs::write(&log, vec![b'x'; MAX_LOG_BYTES as usize + 1]).unwrap();
+    std::fs::set_permissions(&log, std::fs::Permissions::from_mode(0o644)).unwrap();
+    append_rotating_log(&log, "after rotation");
+    assert_eq!(mode(&old), 0o600, "rotated trace log must be private");
+    assert_eq!(mode(&log), 0o600, "replacement trace log must be private");
+}
+
+#[cfg(unix)]
+#[test]
+fn trace_log_does_not_touch_linked_files_or_log_directory() {
+    use std::os::unix::fs::{symlink, PermissionsExt};
+
+    let root = tempfile::tempdir().unwrap();
+    let agent = root.path().join("agent");
+    std::fs::create_dir(&agent).unwrap();
+    let logs = agent.join("logs");
+    let outside = root.path().join("outside");
+    std::fs::create_dir(&outside).unwrap();
+    let victim = outside.join("shared.log");
+    std::fs::write(&victim, b"shared collector\n").unwrap();
+    std::fs::set_permissions(&victim, std::fs::Permissions::from_mode(0o644)).unwrap();
+    symlink(&outside, &logs).unwrap();
+    append_rotating_log(&agent_traces_log_path(&agent), "private trace");
+    assert!(!outside.join("agent-traces.log").exists());
+    std::fs::remove_file(&logs).unwrap();
+    std::fs::create_dir(&logs).unwrap();
+
+    let log = agent_traces_log_path(&agent);
+    symlink(&victim, &log).unwrap();
+    append_rotating_log(&log, "private trace");
+    std::fs::remove_file(&log).unwrap();
+    std::fs::hard_link(&victim, &log).unwrap();
+    append_rotating_log(&log, "private trace");
+    std::fs::remove_file(&log).unwrap();
+
+    let retained = log.with_extension("log.old");
+    symlink(&victim, &retained).unwrap();
+    append_rotating_log(&log, "safe trace");
+    assert_eq!(std::fs::read(&victim).unwrap(), b"shared collector\n");
+    assert_eq!(
+        std::fs::metadata(&victim).unwrap().permissions().mode() & 0o777,
+        0o644
+    );
+    assert_eq!(std::fs::read_to_string(&log).unwrap(), "safe trace\n");
+
+    std::fs::remove_file(&retained).unwrap();
+    std::fs::hard_link(&victim, &retained).unwrap();
+    append_rotating_log(&log, "another safe trace");
+    assert_eq!(std::fs::read(&victim).unwrap(), b"shared collector\n");
+    assert_eq!(
+        std::fs::metadata(&victim).unwrap().permissions().mode() & 0o777,
+        0o644
+    );
+}
+
 /// One captured request (url, headers, body).
 type CapturedRequest = (String, Vec<(String, String)>, String);
 

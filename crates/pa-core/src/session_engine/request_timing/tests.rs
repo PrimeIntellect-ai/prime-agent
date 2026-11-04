@@ -14,6 +14,85 @@ use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
 /// the process env is global across parallel test threads.
 static REQUEST_TIMING_ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
+#[cfg(unix)]
+#[test]
+fn request_timing_log_and_rotation_are_private() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("agent.jsonl");
+    let mut log = RequestTimingLog::at(&path);
+    let mode = |path: &Path| std::fs::metadata(path).unwrap().permissions().mode() & 0o777;
+
+    let rotated = path.with_extension("jsonl.old");
+    std::fs::write(&rotated, "previous private detail").unwrap();
+    std::fs::set_permissions(&rotated, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+    log.info("private error detail", Map::new());
+    assert_eq!(mode(&path), 0o600, "new log must be private");
+    assert_eq!(mode(&rotated), 0o600, "legacy rotated log is tightened");
+
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+    log.info("another private detail", Map::new());
+    assert_eq!(mode(&path), 0o600, "existing log must be tightened");
+
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+    log.max_bytes = 1;
+    log.info("after rotation", Map::new());
+    assert_eq!(mode(&path.with_extension("jsonl.old")), 0o600);
+    assert_eq!(mode(&path), 0o600);
+}
+
+#[cfg(unix)]
+#[test]
+fn request_timing_log_does_not_touch_linked_files_or_log_directory() {
+    use std::os::unix::fs::{symlink, PermissionsExt};
+
+    let root = tempfile::tempdir().unwrap();
+    let agent = root.path().join("agent");
+    std::fs::create_dir(&agent).unwrap();
+    let logs = agent.join("logs");
+    let outside = root.path().join("outside");
+    std::fs::create_dir(&outside).unwrap();
+    let victim = outside.join("shared.jsonl");
+    std::fs::write(&victim, b"shared collector\n").unwrap();
+    std::fs::set_permissions(&victim, std::fs::Permissions::from_mode(0o644)).unwrap();
+    symlink(&outside, &logs).unwrap();
+    RequestTimingLog::new(&agent).info("private timing", Map::new());
+    assert!(!outside.join("agent.jsonl").exists());
+    std::fs::remove_file(&logs).unwrap();
+    std::fs::create_dir(&logs).unwrap();
+
+    let log = logs.join("agent.jsonl");
+    symlink(&victim, &log).unwrap();
+    RequestTimingLog::new(&agent).info("private timing", Map::new());
+    std::fs::remove_file(&log).unwrap();
+    std::fs::hard_link(&victim, &log).unwrap();
+    RequestTimingLog::new(&agent).info("private timing", Map::new());
+    std::fs::remove_file(&log).unwrap();
+
+    let retained = log.with_extension("jsonl.old");
+    symlink(&victim, &retained).unwrap();
+    RequestTimingLog::new(&agent).info("safe timing", Map::new());
+    assert_eq!(std::fs::read(&victim).unwrap(), b"shared collector\n");
+    assert_eq!(
+        std::fs::metadata(&victim).unwrap().permissions().mode() & 0o777,
+        0o644
+    );
+    assert!(std::fs::read_to_string(&log)
+        .unwrap()
+        .contains("safe timing"));
+
+    std::fs::remove_file(&retained).unwrap();
+    std::fs::hard_link(&victim, &retained).unwrap();
+    RequestTimingLog::new(&agent).info("another safe timing", Map::new());
+    assert_eq!(std::fs::read(&victim).unwrap(), b"shared collector\n");
+    assert_eq!(
+        std::fs::metadata(&victim).unwrap().permissions().mode() & 0o777,
+        0o644
+    );
+}
+
 fn test_model() -> pa_agent::types::Model {
     pa_agent::types::Model {
         id: "bench/bench-model".to_string(),

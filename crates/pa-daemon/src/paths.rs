@@ -6,6 +6,8 @@ use std::time::{Duration, SystemTime};
 use anyhow::{anyhow, Result};
 use sha2::{Digest, Sha256};
 
+use crate::platform::log_files::{LogDir, OpenMode};
+
 pub const AGENT_DIR_ENV: &str = "PRIME_AGENT_CODING_AGENT_DIR";
 pub const SESSION_DIR_ENV: &str = "PRIME_AGENT_SESSION_DIR";
 pub const CONFIG_DIR_NAME: &str = ".prime/agent";
@@ -114,6 +116,10 @@ pub struct RotatingLog {
     max_bytes: u64,
 }
 
+fn open_private_append(dir: &LogDir, name: &std::ffi::OsStr) -> std::io::Result<std::fs::File> {
+    dir.open_file(name, OpenMode::Append)
+}
+
 impl RotatingLog {
     #[must_use]
     pub fn new(path: PathBuf) -> Self {
@@ -126,14 +132,16 @@ impl RotatingLog {
     pub fn append(&self, line: &str) {
         // The log lives in `<agent-dir>/logs`; create it if this is the first
         // write (a fresh agent dir has no logs directory yet).
-        if let Some(parent) = self.path.parent() {
-            let _ = std::fs::create_dir_all(parent);
-        }
-        let Ok(mut file) = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&self.path)
-        else {
+        let Some(parent) = self.path.parent() else {
+            return;
+        };
+        let Ok(dir) = LogDir::for_write(parent) else {
+            return;
+        };
+        let Some(name) = self.path.file_name() else {
+            return;
+        };
+        let Ok(mut file) = open_private_append(&dir, name) else {
             return;
         };
         let payload = format!("{line}\n");
@@ -141,12 +149,11 @@ impl RotatingLog {
             if metadata.len() + payload.len() as u64 > self.max_bytes {
                 drop(file);
                 let rotated = self.path.with_extension("log.1");
-                let _ = std::fs::rename(&self.path, &rotated);
-                match std::fs::OpenOptions::new()
-                    .create(true)
-                    .append(true)
-                    .open(&self.path)
-                {
+                let Some(rotated_name) = rotated.file_name() else {
+                    return;
+                };
+                let _ = dir.rename(name, rotated_name);
+                match open_private_append(&dir, name) {
                     Ok(reopened) => file = reopened,
                     Err(_) => return,
                 }
@@ -186,5 +193,149 @@ mod tests {
             Path::new("/ad"),
         );
         assert_ne!(path, other);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rotating_log_is_private_when_new_or_legacy() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("daemon.sock.abcdef01.log");
+        let log = RotatingLog::new(path.clone());
+        log.append("first");
+        assert_eq!(pa_core::platform::perms::file_mode(&path), Some(0o600));
+
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        log.append("second");
+        assert_eq!(pa_core::platform::perms::file_mode(&path), Some(0o600));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "first\nsecond\n");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rotated_and_reopened_daemon_logs_stay_private() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("daemon.sock.abcdef01.log");
+        let log = RotatingLog {
+            path: path.clone(),
+            max_bytes: 5,
+        };
+        log.append("one");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        log.append("two");
+        let rotated = path.with_extension("log.1");
+        assert_eq!(pa_core::platform::perms::file_mode(&rotated), Some(0o600));
+        assert_eq!(pa_core::platform::perms::file_mode(&path), Some(0o600));
+        assert_eq!(std::fs::read_to_string(rotated).unwrap(), "one\n");
+        assert_eq!(std::fs::read_to_string(path).unwrap(), "two\n");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rotating_log_does_not_follow_a_planted_symlink() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("daemon.sock.abcdef01.log");
+        let victim = dir.path().join("unrelated-file");
+        std::fs::write(&victim, b"keep this file").unwrap();
+        std::os::unix::fs::symlink(&victim, &path).unwrap();
+
+        RotatingLog::new(path.clone()).append("sensitive diagnostics");
+        assert_eq!(std::fs::read(&victim).unwrap(), b"keep this file");
+        assert_eq!(std::fs::read_link(&path).unwrap(), victim);
+
+        std::fs::remove_file(&path).unwrap();
+        RotatingLog::new(path.clone()).append("ordinary diagnostics");
+        assert_eq!(
+            std::fs::read_to_string(path).unwrap(),
+            "ordinary diagnostics\n"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rotating_log_rejects_a_linked_logs_directory() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let agent_dir = dir.path().join("agent");
+        std::fs::create_dir(&agent_dir).unwrap();
+        let outside = dir.path().join("outside");
+        std::fs::create_dir(&outside).unwrap();
+        std::fs::set_permissions(&outside, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let victim = outside.join("daemon.sock.abcdef01.log");
+        std::fs::write(&victim, b"keep this log\n").unwrap();
+        let logs = agent_dir.join("logs");
+        std::os::unix::fs::symlink(&outside, &logs).unwrap();
+
+        RotatingLog::new(logs.join("daemon.sock.abcdef01.log")).append("sensitive diagnostics");
+        assert_eq!(std::fs::read(&victim).unwrap(), b"keep this log\n");
+        assert_eq!(
+            std::fs::metadata(&outside).unwrap().permissions().mode() & 0o777,
+            0o755
+        );
+        assert_eq!(std::fs::read_link(&logs).unwrap(), outside);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_rotating_log_rejects_a_logs_junction() {
+        let dir = tempfile::tempdir().unwrap();
+        let agent_dir = dir.path().join("agent");
+        std::fs::create_dir(&agent_dir).unwrap();
+        let outside = dir.path().join("outside");
+        std::fs::create_dir(&outside).unwrap();
+        let victim = outside.join("daemon.sock.abcdef01.log");
+        std::fs::write(&victim, b"keep this log\n").unwrap();
+        let logs = agent_dir.join("logs");
+        let output = std::process::Command::new("cmd")
+            .args(["/C", "mklink", "/J"])
+            .arg(&logs)
+            .arg(&outside)
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
+
+        RotatingLog::new(logs.join("daemon.sock.abcdef01.log")).append("sensitive diagnostics");
+        assert_eq!(std::fs::read(&victim).unwrap(), b"keep this log\n");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_regular_rotating_log_keeps_append_and_rotation() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir
+            .path()
+            .join(".prime/agent/logs/daemon.sock.abcdef01.log");
+        let log = RotatingLog {
+            path: path.clone(),
+            max_bytes: 5,
+        };
+        log.append("one");
+        log.append("two");
+        assert_eq!(
+            std::fs::read_to_string(path.with_extension("log.1")).unwrap(),
+            "one\n"
+        );
+        assert_eq!(std::fs::read_to_string(path).unwrap(), "two\n");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rotating_log_rejects_a_hard_linked_file() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("daemon.sock.abcdef01.log");
+        let victim = dir.path().join("other-file");
+        std::fs::write(&victim, b"keep this file\n").unwrap();
+        std::fs::set_permissions(&victim, std::fs::Permissions::from_mode(0o644)).unwrap();
+        std::fs::hard_link(&victim, &path).unwrap();
+
+        RotatingLog::new(path).append("sensitive diagnostics");
+        assert_eq!(std::fs::read(&victim).unwrap(), b"keep this file\n");
+        assert_eq!(pa_core::platform::perms::file_mode(&victim), Some(0o644));
     }
 }

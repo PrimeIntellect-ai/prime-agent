@@ -1,0 +1,1 @@
+- Kept trace-upload diagnostic logs private before writing or rotating them.

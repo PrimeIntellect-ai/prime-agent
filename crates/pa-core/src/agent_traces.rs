@@ -685,15 +685,33 @@ pub fn agent_traces_log_path(agent_dir: &Path) -> PathBuf {
 fn append_rotating_log(log_path: &Path, message: &str) {
     let write = || -> std::io::Result<()> {
         use std::io::Write;
-        std::fs::create_dir_all(log_path.parent().unwrap_or(Path::new("")))?;
-        if std::fs::metadata(log_path).map_or(0, |meta| meta.len()) > MAX_LOG_BYTES {
-            let _ = std::fs::remove_file(log_path.with_extension("log.old"));
-            let _ = std::fs::rename(log_path, log_path.with_extension("log.old"));
+        let parent = log_path.parent().unwrap_or(Path::new(""));
+        let trusted_root = parent
+            .parent()
+            .filter(|root| !root.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        let dir = crate::platform::log_files::LogDir::for_write(
+            parent,
+            trusted_root,
+            crate::platform::log_files::DirectoryMode::Inherited,
+        )?;
+        let name = log_path.file_name().ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "trace log has no filename",
+            )
+        })?;
+        let old_path = log_path.with_extension("log.old");
+        let old_name = old_path.file_name().expect("rotated log has a filename");
+        // Repair a retained log from older versions on the next write.
+        let _ = dir.repair_existing(old_name);
+        let mut file = dir.open_append(name)?;
+        if file.metadata()?.len() > MAX_LOG_BYTES {
+            drop(file);
+            let _ = dir.remove(old_name);
+            let _ = dir.rename(name, old_name);
+            file = dir.open_append(name)?;
         }
-        let mut file = std::fs::OpenOptions::new()
-            .append(true)
-            .create(true)
-            .open(log_path)?;
         writeln!(file, "{message}")?;
         Ok(())
     };
