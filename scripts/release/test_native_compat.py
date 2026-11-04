@@ -2,20 +2,88 @@
 """Packaging regressions; real old-installer execution lives in test_legacy_upgrade."""
 
 import argparse
-import http.server
 import json
-import os
 import shutil
 import subprocess
 import tarfile
 import tempfile
-import threading
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
 from assemble_artifacts import BUNDLED_CATALOG_FILES, pack_tarball, stage_tree
 from native_compat import validate_compatibility_archive
+
+
+class InstallerMetadataBoundsTests(unittest.TestCase):
+    def test_shell_fetch_bounds_channel_metadata_with_and_without_content_length(self):
+        import http.server
+        import os
+        import threading
+
+        repo = Path(__file__).resolve().parents[2]
+        installer = (repo / "install-rust.sh").read_text()
+        fetch = "fetch() {\n" + installer.split("fetch() {\n", 1)[1].split(
+            "\n# --- platform detection", 1
+        )[0]
+        oversized = b"x" * (1024 * 1024 + 1)
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                body = (
+                    b"1.2.3\n" if self.path == "/valid" else
+                    b"x" * 1024 if self.path == "/boundary" else oversized
+                )
+                if self.path != "/chunked":
+                    self.send_response(200)
+                    self.send_header("Content-Length", str(len(body)))
+                    self.end_headers()
+                    self.wfile.write(body)
+                else:
+                    self.send_response(200)
+                    self.send_header("Transfer-Encoding", "chunked")
+                    self.end_headers()
+                    for offset in range(0, len(body), 16384):
+                        chunk = body[offset:offset + 16384]
+                        self.wfile.write(f"{len(chunk):x}\r\n".encode() + chunk + b"\r\n")
+                    self.wfile.write(b"0\r\n\r\n")
+
+            def log_message(self, *_args):
+                pass
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            self.addCleanup(thread.join, 5)
+            self.addCleanup(server.server_close)
+            self.addCleanup(server.shutdown)
+            env = {name: os.environ[name] for name in ("PATH", "LANG") if name in os.environ}
+            env.update(HOME=str(root), TMPDIR=str(root))
+            for shell in ("sh", "bash"):
+                for name, max_bytes, success in (
+                    ("valid", 1024, True),
+                    ("boundary", 1024, True),
+                    ("length", 1024 * 1024, False),
+                    ("chunked", 1024 * 1024, False),
+                ):
+                    output = root / f"{shell}-{name}"
+                    script = (
+                        "set -eu\nui_pid=\nstep_detail() { :; }\n"
+                        + fetch
+                        + f'\nfetch "http://127.0.0.1:{server.server_port}/{name}" '
+                        + f'"{output}" 3 "" {max_bytes}\n'
+                    )
+                    result = subprocess.run(
+                        [shell, "-c", script], cwd=root, env=env,
+                        capture_output=True, text=True, timeout=10,
+                    )
+                    self.assertEqual(result.returncode == 0, success, result.stderr)
+                    if success:
+                        self.assertEqual(output.read_bytes(), b"1.2.3\n" if name == "valid" else b"x" * 1024)
+                    elif output.exists():
+                        self.assertLessEqual(output.stat().st_size, max_bytes * 2)
 
 
 class NativeCompatibilityTests(unittest.TestCase):
@@ -114,73 +182,6 @@ class NativeCompatibilityTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("Native compatibility verified:", result.stdout)
         self.assertNotIn("src.tar.gz", result.stdout)
-
-
-class InstallerMetadataBoundsTests(unittest.TestCase):
-    def test_shell_fetch_bounds_channel_metadata_with_and_without_content_length(self):
-        repo = Path(__file__).resolve().parents[2]
-        installer = (repo / "install-rust.sh").read_text()
-        fetch = "fetch() {\n" + installer.split("fetch() {\n", 1)[1].split(
-            "\n# --- platform detection", 1
-        )[0]
-        oversized = b"x" * (1024 * 1024 + 1)
-
-        class Handler(http.server.BaseHTTPRequestHandler):
-            def do_GET(self):
-                body = (
-                    b"1.2.3\n" if self.path == "/valid" else
-                    b"x" * 1024 if self.path == "/boundary" else oversized
-                )
-                if self.path != "/chunked":
-                    self.send_response(200)
-                    self.send_header("Content-Length", str(len(body)))
-                    self.end_headers()
-                    self.wfile.write(body)
-                else:
-                    self.send_response(200)
-                    self.send_header("Transfer-Encoding", "chunked")
-                    self.end_headers()
-                    for offset in range(0, len(body), 16384):
-                        chunk = body[offset:offset + 16384]
-                        self.wfile.write(f"{len(chunk):x}\r\n".encode() + chunk + b"\r\n")
-                    self.wfile.write(b"0\r\n\r\n")
-
-            def log_message(self, *_args):
-                pass
-
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
-            thread = threading.Thread(target=server.serve_forever, daemon=True)
-            thread.start()
-            self.addCleanup(thread.join, 5)
-            self.addCleanup(server.server_close)
-            self.addCleanup(server.shutdown)
-            env = {name: os.environ[name] for name in ("PATH", "LANG") if name in os.environ}
-            env.update(HOME=str(root), TMPDIR=str(root))
-            for shell in ("sh", "bash"):
-                for name, max_bytes, success in (
-                    ("valid", 1024, True),
-                    ("boundary", 1024, True),
-                    ("length", 1024 * 1024, False),
-                    ("chunked", 1024 * 1024, False),
-                ):
-                    output = root / f"{shell}-{name}"
-                    script = (
-                        "set -eu\nui_pid=\nstep_detail() { :; }\n"
-                        + fetch
-                        + f'\nfetch "http://127.0.0.1:{server.server_port}/{name}" '
-                        + f'"{output}" 3 "" {max_bytes}\n'
-                    )
-                    result = subprocess.run(
-                        [shell, "-c", script], cwd=root, env=env,
-                        capture_output=True, text=True, timeout=10,
-                    )
-                    self.assertEqual(result.returncode == 0, success, result.stderr)
-                    if success:
-                        self.assertEqual(output.read_bytes(), b"1.2.3\n" if name == "valid" else b"x" * 1024)
-                    elif output.exists():
-                        self.assertLessEqual(output.stat().st_size, max_bytes * 2)
 
 
 if __name__ == "__main__":

@@ -284,7 +284,11 @@ function Read-ChannelBytes {
         $response = $request.Result
         if (-not $response.IsSuccessStatusCode) { Fail "HTTP $([int]$response.StatusCode) for $Uri" }
         if ($response.Content.Headers.ContentLength -gt $MaxBytes) { Fail "$Name exceeds $MaxBytes bytes" }
-        $stream = $response.Content.ReadAsStreamAsync().GetAwaiter().GetResult()
+        $remaining = $deadline - $clock.Elapsed
+        if ($remaining -le [TimeSpan]::Zero) { Fail "$Name timed out after 30 seconds" }
+        $streamTask = $response.Content.ReadAsStreamAsync()
+        if (-not $streamTask.Wait($remaining)) { Fail "$Name timed out after 30 seconds" }
+        $stream = $streamTask.Result
         $body = [System.IO.MemoryStream]::new()
         $buffer = New-Object byte[] (16 * 1024)
         while ($true) {
