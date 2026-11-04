@@ -469,13 +469,14 @@ pub fn append_global_refinement(
         Ok(file) => (file, false),
         #[cfg(unix)]
         Err(error) if error.raw_os_error() == Some(libc::ELOOP) => {
+            use std::os::unix::fs::OpenOptionsExt;
+
             // Keep user-created links to shared history working, but do not
             // change the target's deliberately chosen permissions.
             let target = linked_history_target(&history_path)?;
             let mut linked_options = std::fs::OpenOptions::new();
             linked_options.create(true).append(true);
             crate::platform::perms::set_private_mode(&mut linked_options);
-            use std::os::unix::fs::OpenOptionsExt;
             linked_options.custom_flags(libc::O_NOFOLLOW);
             (linked_options.open(target)?, true)
         }
