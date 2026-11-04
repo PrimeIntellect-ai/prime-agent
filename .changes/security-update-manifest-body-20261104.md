@@ -1,0 +1,1 @@
+- Fixed update checks using unbounded memory on oversized release channel manifests.

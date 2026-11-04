@@ -59,6 +59,7 @@ const PAYLOAD_BINARY: &str = if cfg!(windows) {
 /// The small-file budget for the script download (the script is a few KB;
 /// a hung fetch must not hang the update).
 const SCRIPT_FETCH_TIMEOUT: Duration = Duration::from_secs(30);
+const SCRIPT_FETCH_MAX_BYTES: usize = 2 * 1024 * 1024;
 /// The launcher `--version` probe budget (the same bound the release
 /// probe uses; a hung launcher must not hang the report).
 const LAUNCHER_PROBE_TIMEOUT: Duration = Duration::from_secs(10);
@@ -510,6 +511,8 @@ pub fn installed_channel(prefix: &Path) -> Option<&'static str> {
 /// Returns an error when the request fails, answers a non-success status,
 /// or the body cannot be read or written.
 async fn fetch_script(url: &str) -> Result<(PathBuf, std::fs::File)> {
+    use futures::StreamExt as _;
+
     let response = pa_ai::utils::tls::http_client_builder()
         .build()
         .expect("installer client")
@@ -520,12 +523,23 @@ async fn fetch_script(url: &str) -> Result<(PathBuf, std::fs::File)> {
         .await
         .with_context(|| format!("request {url}"))?;
     let status = response.status();
-    let bytes = response
-        .bytes()
-        .await
-        .with_context(|| "read the installer script")?;
     if !status.is_success() {
         anyhow::bail!("download {url} returned {status}");
+    }
+    if response
+        .content_length()
+        .is_some_and(|length| length > SCRIPT_FETCH_MAX_BYTES as u64)
+    {
+        anyhow::bail!("the installer script at {url} exceeds {SCRIPT_FETCH_MAX_BYTES} bytes");
+    }
+    let mut bytes = Vec::new();
+    let mut stream = response.bytes_stream();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.context("read the installer script")?;
+        if chunk.len() > SCRIPT_FETCH_MAX_BYTES - bytes.len() {
+            anyhow::bail!("the installer script at {url} exceeds {SCRIPT_FETCH_MAX_BYTES} bytes");
+        }
+        bytes.extend_from_slice(&chunk);
     }
     if bytes.is_empty() {
         anyhow::bail!("the installer script at {url} was empty");
@@ -782,6 +796,57 @@ async fn launcher_version(prefix: &Path) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn serve_script_body(body: Vec<u8>, declared_length: Option<usize>) -> String {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind loopback");
+        let address = listener.local_addr().expect("local address");
+        std::thread::spawn(move || {
+            use std::io::{Read as _, Write as _};
+            if let Ok((mut stream, _)) = listener.accept() {
+                let mut head = Vec::new();
+                let mut byte = [0_u8; 1];
+                while !head.ends_with(b"\r\n\r\n") {
+                    match stream.read(&mut byte) {
+                        Ok(0) | Err(_) => return,
+                        Ok(_) => head.push(byte[0]),
+                    }
+                }
+                let length = declared_length
+                    .map(|length| format!("Content-Length: {length}\r\n"))
+                    .unwrap_or_default();
+                let header = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n{length}Connection: close\r\n\r\n"
+                );
+                let _ = stream.write_all(header.as_bytes());
+                let _ = stream.write_all(&body);
+            }
+        });
+        format!("http://{address}/install.sh")
+    }
+
+    #[tokio::test]
+    async fn installer_fetch_rejects_an_oversized_declared_length() {
+        let url = serve_script_body(
+            b"small".to_vec(),
+            /*declared_length*/ Some(SCRIPT_FETCH_MAX_BYTES + 1),
+        );
+        let error = fetch_script(&url)
+            .await
+            .expect_err("oversized script refused");
+        assert!(error.to_string().contains("exceeds"), "{error:#}");
+    }
+
+    #[tokio::test]
+    async fn installer_fetch_rejects_an_oversized_stream_without_length() {
+        let url = serve_script_body(
+            vec![b'x'; SCRIPT_FETCH_MAX_BYTES + 1],
+            /*declared_length*/ None,
+        );
+        let error = fetch_script(&url)
+            .await
+            .expect_err("oversized script refused");
+        assert!(error.to_string().contains("exceeds"), "{error:#}");
+    }
 
     /// The platform map `prime-agent update --check` names on every
     /// supported platform pair (the same set install-rust.sh's uname case

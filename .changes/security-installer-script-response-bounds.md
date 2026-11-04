@@ -1,0 +1,1 @@
+- Installer updates now reject oversized installer scripts before reading them into memory.
