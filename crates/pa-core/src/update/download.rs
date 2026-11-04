@@ -92,9 +92,8 @@ async fn download_once(
     if observed != expected_sha256 {
         anyhow::bail!("archive digest mismatch: expected {expected_sha256}, observed {observed}");
     }
-    temporary
-        .persist(destination)
-        .map_err(|error| error.error)
+    let temporary_path = temporary.into_temp_path();
+    crate::platform::rename_onto(temporary_path.as_ref(), destination)
         .with_context(|| format!("finalize {}", destination.display()))?;
     Ok(())
 }
@@ -936,5 +935,6 @@ mod tests {
             .unwrap()
             .file_type()
             .is_symlink());
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 3);
     }
 }
