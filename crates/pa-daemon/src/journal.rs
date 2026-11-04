@@ -25,11 +25,7 @@ pub(crate) fn append_record(path: &Path, record: &Value) -> Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
     }
-    let mut file = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(path)
-        .with_context(|| format!("open journal {}", path.display()))?;
+    let mut file = open_private_journal_for_append(path)?;
     let mut line = serde_json::to_string(record)?;
     line.push('\n');
     file.write_all(line.as_bytes())?;
@@ -48,11 +44,7 @@ pub(crate) fn append_records(path: &Path, records: &[Value]) -> Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
     }
-    let mut file = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(path)
-        .with_context(|| format!("open journal {}", path.display()))?;
+    let mut file = open_private_journal_for_append(path)?;
     let mut lines = Vec::new();
     for record in records {
         serde_json::to_writer(&mut lines, record)?;
@@ -61,6 +53,20 @@ pub(crate) fn append_records(path: &Path, records: &[Value]) -> Result<()> {
     file.write_all(&lines)?;
     pa_core::platform::fsync(&file)?;
     Ok(())
+}
+
+fn open_private_journal_for_append(path: &Path) -> Result<File> {
+    let mut options = OpenOptions::new();
+    options.create(true).append(true);
+    pa_core::platform::perms::set_private_mode(&mut options);
+    let file = options
+        .open(path)
+        .with_context(|| format!("open journal {}", path.display()))?;
+    // Existing journals may predate private creation. Tighten the opened inode
+    // before appending content, without changing the path or JSONL format.
+    pa_core::platform::perms::restrict_open_file(&file)
+        .with_context(|| format!("restrict journal {}", path.display()))?;
+    Ok(file)
 }
 
 /// Whether the temp journal's data rides a full sync before the swap.
@@ -75,9 +81,18 @@ pub(crate) enum Finalize {
 }
 
 pub(crate) fn rewrite_records(path: &Path, records: &[Value], finalize: Finalize) -> Result<()> {
-    let temp = path.with_extension(format!("jsonl.tmp-{}", std::process::id()));
-    {
-        let file = File::create(&temp).with_context(|| format!("create {}", temp.display()))?;
+    let temp = path.with_extension(format!(
+        "jsonl.tmp-{}-{}",
+        std::process::id(),
+        uuid::Uuid::new_v4().simple()
+    ));
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    pa_core::platform::perms::set_private_mode(&mut options);
+    let file = options
+        .open(&temp)
+        .with_context(|| format!("create {}", temp.display()))?;
+    let result = (|| -> Result<()> {
         let mut writer = BufWriter::new(file);
         for record in records {
             let mut line = serde_json::to_string(record)?;
@@ -88,10 +103,13 @@ pub(crate) fn rewrite_records(path: &Path, records: &[Value], finalize: Finalize
         if !matches!(finalize, Finalize::Bare) {
             writer.get_ref().sync_all()?;
         }
+        drop(writer);
+        fs::rename(&temp, path).with_context(|| format!("persist {}", path.display()))
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&temp);
     }
-    let rename = fs::rename(&temp, path);
-    rename.with_context(|| format!("persist {}", path.display()))?;
-    Ok(())
+    result
 }
 
 // Complete records must decode exactly before recovery can replace their history.
@@ -638,6 +656,72 @@ fn parse_snapshot_lane(value: Option<&Value>) -> Vec<WorkerQueueItemRecord> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn journal_writes_are_private_and_tighten_legacy_files() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let path = temp_path("private.recovery.jsonl");
+        let record = serde_json::json!({"message": "private prompt"});
+        append_record(&path, &record).unwrap();
+        assert_eq!(
+            fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+        append_records(&path, std::slice::from_ref(&record)).unwrap();
+        assert_eq!(
+            fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+
+        rewrite_records(&path, &[record], Finalize::Bare).unwrap();
+        assert_eq!(
+            fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        let _ = fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn journal_rewrite_does_not_follow_the_predictable_legacy_temp_path() {
+        use std::os::unix::fs::symlink;
+
+        let path = temp_path("symlink.recovery.jsonl");
+        let legacy_temp = path.with_extension(format!("jsonl.tmp-{}", std::process::id()));
+        let sentinel = path.parent().unwrap().join("sentinel");
+        fs::write(&sentinel, "keep this content").unwrap();
+        symlink(&sentinel, &legacy_temp).unwrap();
+
+        rewrite_records(
+            &path,
+            &[serde_json::json!({"message": "private prompt"})],
+            Finalize::Bare,
+        )
+        .unwrap();
+        assert_eq!(fs::read_to_string(&sentinel).unwrap(), "keep this content");
+        assert!(fs::read_to_string(&path)
+            .unwrap()
+            .contains("private prompt"));
+        let _ = fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn journal_rewrite_removes_private_temp_after_failed_rename() {
+        let path = temp_path("blocked.recovery.jsonl");
+        fs::create_dir(&path).unwrap();
+        let result = rewrite_records(
+            &path,
+            &[serde_json::json!({"message": "private prompt"})],
+            Finalize::Bare,
+        );
+        assert!(result.is_err());
+        assert_eq!(fs::read_dir(path.parent().unwrap()).unwrap().count(), 1);
+        let _ = fs::remove_dir_all(path.parent().unwrap());
+    }
 
     fn temp_path(name: &str) -> std::path::PathBuf {
         let dir = std::env::temp_dir().join(format!("pa-daemon-journal-{}", uuid::Uuid::new_v4()));
