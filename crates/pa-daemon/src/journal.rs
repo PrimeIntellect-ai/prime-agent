@@ -59,13 +59,39 @@ fn open_private_journal_for_append(path: &Path) -> Result<File> {
     let mut options = OpenOptions::new();
     options.create(true).append(true);
     pa_core::platform::perms::set_private_mode(&mut options);
-    let file = options
-        .open(path)
-        .with_context(|| format!("open journal {}", path.display()))?;
+    #[cfg(unix)]
+    crate::platform::reject_final_symlink(&mut options);
+    let opened = options.open(path);
+    #[cfg(unix)]
+    let opened = match opened {
+        Err(error) if crate::platform::is_no_follow_link_error(&error) => {
+            // A user-linked shared journal keeps its chosen target mode.
+            // Resolve only the rejected link; a replaced regular file fails
+            // read_link, and a second link cannot redirect the target open.
+            let link = fs::read_link(path)
+                .with_context(|| format!("read journal link {}", path.display()))?;
+            let target = if link.is_absolute() {
+                link
+            } else {
+                path.parent().unwrap_or_else(|| Path::new(".")).join(link)
+            };
+            let mut linked_options = OpenOptions::new();
+            linked_options.create(true).append(true);
+            pa_core::platform::perms::set_private_mode(&mut linked_options);
+            crate::platform::reject_final_symlink(&mut linked_options);
+            linked_options.open(target).map(|file| (file, true))
+        }
+        other => other.map(|file| (file, false)),
+    };
+    #[cfg(not(unix))]
+    let opened = opened.map(|file| (file, false));
+    let (file, linked) = opened.with_context(|| format!("open journal {}", path.display()))?;
     // Existing journals may predate private creation. Tighten the opened inode
     // before appending content, without changing the path or JSONL format.
-    pa_core::platform::perms::restrict_open_file(&file)
-        .with_context(|| format!("restrict journal {}", path.display()))?;
+    if !linked {
+        pa_core::platform::perms::restrict_open_file(&file)
+            .with_context(|| format!("restrict journal {}", path.display()))?;
+    }
     Ok(file)
 }
 
@@ -683,6 +709,36 @@ mod tests {
             0o600
         );
         let _ = fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn linked_journal_append_preserves_shared_target_permissions() {
+        use std::os::unix::fs::{symlink, PermissionsExt};
+
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("shared.jsonl");
+        let path = dir.path().join("worker.recovery.jsonl");
+        fs::write(&target, "").unwrap();
+        fs::set_permissions(&target, fs::Permissions::from_mode(0o640)).unwrap();
+        symlink(&target, &path).unwrap();
+        let record = serde_json::json!({"message": "private prompt"});
+
+        append_record(&path, &record).unwrap();
+        append_records(&path, std::slice::from_ref(&record)).unwrap();
+
+        assert!(fs::symlink_metadata(&path)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert_eq!(
+            fs::metadata(&target).unwrap().permissions().mode() & 0o777,
+            0o640
+        );
+        assert_eq!(
+            fs::read_to_string(&target).unwrap(),
+            format!("{record}\n{record}\n")
+        );
     }
 
     #[cfg(unix)]

@@ -1086,14 +1086,11 @@ impl RlmSpawnLedger {
         let mut options = OpenOptions::new();
         options.read(true);
         #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            options.custom_flags(libc::O_NOFOLLOW);
-        }
+        crate::platform::reject_final_symlink(&mut options);
         let opened = options.open(&self.path);
         #[cfg(unix)]
         let opened = match opened {
-            Err(error) if error.raw_os_error() == Some(libc::ELOOP) => {
+            Err(error) if crate::platform::is_no_follow_link_error(&error) => {
                 // Deliberately linked ledgers retain their shared mode.
                 let Ok(target) = linked_ledger_target(&self.path) else {
                     return Ok(Vec::new());
@@ -1166,14 +1163,11 @@ impl RlmSpawnLedger {
         options.create(true).read(true).append(true);
         pa_core::platform::perms::set_private_mode(&mut options);
         #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            options.custom_flags(libc::O_NOFOLLOW);
-        }
+        crate::platform::reject_final_symlink(&mut options);
         let opened = options.open(&self.path);
         #[cfg(unix)]
         let opened = match opened {
-            Err(error) if error.raw_os_error() == Some(libc::ELOOP) => {
+            Err(error) if crate::platform::is_no_follow_link_error(&error) => {
                 // Preserve a deliberately shared ledger's permission policy.
                 let target = linked_ledger_target(&self.path)?;
                 let mut linked_options = OpenOptions::new();
