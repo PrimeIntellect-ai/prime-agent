@@ -1,0 +1,1 @@
+- Secured built-in Windows daemon and worker pipe connections against another local account impersonating their server.

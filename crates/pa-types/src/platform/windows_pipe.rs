@@ -15,6 +15,7 @@ use tokio::runtime::Runtime;
 use tokio::sync::Mutex as AsyncMutex;
 
 use super::transport::BlockingTransportStream;
+use super::windows_pipe_security;
 
 /// `winerror.h` `ERROR_PIPE_BUSY`: the pipe name exists but no instance is
 /// listening (pinned constant, no windows-sys dependency).
@@ -46,9 +47,9 @@ impl NamedPipeListener {
     /// fails when another process owns the name (a live Unix socket blocking
     /// `bind`); a stale pipe cannot exist - instances die with their process.
     pub(crate) fn bind(name: &str) -> io::Result<Self> {
-        let first = ServerOptions::new()
-            .first_pipe_instance(true)
-            .create(name)?;
+        let mut options = ServerOptions::new();
+        options.first_pipe_instance(true);
+        let first = create_server(name, &options)?;
         Ok(Self {
             name: name.to_string(),
             pending: AsyncMutex::new(Some(first)),
@@ -60,12 +61,20 @@ impl NamedPipeListener {
     /// keeping clients off the busy path.
     pub(crate) async fn accept(&self) -> io::Result<NamedPipeServer> {
         let mut pending = self.pending.lock().await;
-        let next = ServerOptions::new().create(&self.name)?;
+        let next = create_server(&self.name, &ServerOptions::new())?;
         let server = pending
             .replace(next)
             .expect("a listening instance is always kept ready");
         server.connect().await?;
         Ok(server)
+    }
+}
+
+fn create_server(name: &str, options: &ServerOptions) -> io::Result<NamedPipeServer> {
+    if windows_pipe_security::is_built_in_name(name) {
+        windows_pipe_security::create_private_server(options, name)
+    } else {
+        options.create(name)
     }
 }
 
@@ -75,7 +84,16 @@ pub(crate) async fn connect(name: &str) -> io::Result<NamedPipeClient> {
     let deadline = tokio::time::Instant::now() + BUSY_RETRY_DEADLINE;
     loop {
         match ClientOptions::new().open(name) {
-            Ok(client) => return Ok(client),
+            Ok(client) => {
+                if windows_pipe_security::is_built_in_name(name) {
+                    #[cfg(test)]
+                    if TEST_FOREIGN_PEER.with(std::cell::Cell::get) {
+                        return Err(io::ErrorKind::PermissionDenied.into());
+                    }
+                    windows_pipe_security::verify_server_user(&client)?;
+                }
+                return Ok(client);
+            }
             Err(error) if error.raw_os_error() == Some(ERROR_PIPE_BUSY) => {}
             Err(error) => return Err(error),
         }
@@ -244,6 +262,48 @@ mod tests {
             result.expect_err("foreign server must be refused").kind(),
             io::ErrorKind::PermissionDenied
         );
+    }
+
+    #[tokio::test]
+    async fn built_in_worker_and_daemon_pipes_accept_same_user_roundtrips() {
+        for name in [
+            test_worker_pipe("000000000002"),
+            r"\\.\pipe\prime-agent-daemon".to_string(),
+        ] {
+            let path = PathBuf::from(&name);
+            let listener = bind_transport(&path).await.expect("private built-in bind");
+            let client_path = path.clone();
+            let client = tokio::spawn(async move {
+                connect_transport(&client_path)
+                    .await
+                    .expect("same-user built-in connect")
+            });
+            let server = listener.accept().await.expect("built-in accept");
+            let client = client.await.expect("client task");
+            let (mut client_read, mut client_write) = client.split();
+            let (mut server_read, mut server_write) = server.split();
+            server_write.write_all(b"ping").await.expect("server write");
+            let mut buf = [0u8; 4];
+            client_read.read_exact(&mut buf).await.expect("client read");
+            assert_eq!(&buf, b"ping");
+            client_write.write_all(b"pong").await.expect("client write");
+            server_read.read_exact(&mut buf).await.expect("server read");
+            assert_eq!(&buf, b"pong");
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn custom_pipe_does_not_apply_built_in_peer_policy() {
+        let name = test_pipe("custom-peer-policy");
+        let name = name.to_str().expect("pipe path");
+        let _server = ServerOptions::new()
+            .first_pipe_instance(true)
+            .create(name)
+            .expect("custom server");
+        super::TEST_FOREIGN_PEER.with(|flag| flag.set(true));
+        let result = super::connect(name).await;
+        super::TEST_FOREIGN_PEER.with(|flag| flag.set(false));
+        result.expect("custom pipe policy remains caller-controlled");
     }
 
     #[tokio::test]

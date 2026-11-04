@@ -17,6 +17,9 @@ socket2 = "0.6"
 # (src/cli/incident.ts); the `regex` crate keeps their semantics 1:1.
 regex = "1"
 
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_System_Pipes", "Win32_System_Threading"] }
+
 [dev-dependencies]
 tempfile = "3"
 
