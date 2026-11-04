@@ -265,7 +265,11 @@ impl FileSettingsStorage {
             open_regular_file_at(&parent, name)?
         };
         #[cfg(not(unix))]
-        let mut file = fs::File::open(path)?;
+        let mut file = {
+            #[cfg(all(test, windows))]
+            project_read_step(ProjectReadStep::Open);
+            fs::File::open(path)?
+        };
         let opened = file.metadata()?;
         #[cfg(unix)]
         if is_multiply_linked(&opened) {
@@ -275,12 +279,12 @@ impl FileSettingsStorage {
         if crate::platform::fs::has_multiple_hard_links(&file)? {
             bail!("Project settings file has multiple hard links");
         }
-        #[cfg(all(test, unix))]
+        #[cfg(all(test, any(unix, windows)))]
         // Preserve the pre-fix path-check interleavings in the race test.
         project_read_step(ProjectReadStep::Restore);
         #[cfg(not(unix))]
         self.check_locked_project_path(path, locked_path)?;
-        #[cfg(all(test, unix))]
+        #[cfg(all(test, any(unix, windows)))]
         project_read_step(ProjectReadStep::Repoint);
         #[cfg(not(unix))]
         {
@@ -576,14 +580,14 @@ thread_local! {
     static OPT_IN_FSYNC: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     #[cfg(any(unix, windows))]
     static BEFORE_PROJECT_WRITE: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     static PROJECT_READ_STEP: std::cell::RefCell<Option<ProjectReadHook>> = const { std::cell::RefCell::new(None) };
 }
 
-#[cfg(all(test, unix))]
+#[cfg(all(test, any(unix, windows)))]
 type ProjectReadHook = Box<dyn FnMut(ProjectReadStep)>;
 
-#[cfg(all(test, unix))]
+#[cfg(all(test, any(unix, windows)))]
 #[derive(Clone, Copy)]
 enum ProjectReadStep {
     Open,
@@ -591,7 +595,7 @@ enum ProjectReadStep {
     Repoint,
 }
 
-#[cfg(all(test, unix))]
+#[cfg(all(test, any(unix, windows)))]
 fn project_read_step(step: ProjectReadStep) {
     PROJECT_READ_STEP.with(|hook| {
         if let Some(callback) = hook.borrow_mut().as_mut() {
@@ -920,10 +924,11 @@ mod tests {
         fs::write(external.join("settings.json"), "outside untouched").unwrap();
         let storage = FileSettingsStorage::new(&project, root.path().join("agent"));
         let external_for_swap = external.clone();
+        let moved_for_swap = moved.clone();
 
         BEFORE_PROJECT_WRITE.with(|hook| {
             *hook.borrow_mut() = Some(Box::new(move || {
-                fs::rename(&settings_dir, &moved).unwrap();
+                fs::rename(&settings_dir, &moved_for_swap).unwrap();
                 fs::rename(&external_for_swap, &settings_dir).unwrap();
             }));
         });
@@ -943,6 +948,60 @@ mod tests {
             fs::read_to_string(moved.join("settings.json")).unwrap(),
             "project new"
         );
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn project_settings_read_ignores_a_swapped_link_with_matching_metadata() {
+        use std::os::windows::fs::symlink_file;
+
+        let root = tempfile::tempdir().unwrap();
+        let project = root.path().join("project");
+        let settings = project.join(".prime/agent/settings.json");
+        let shared = project.join("shared/settings.json");
+        let outside = root.path().join("outside.json");
+        fs::create_dir_all(settings.parent().unwrap()).unwrap();
+        fs::create_dir_all(shared.parent().unwrap()).unwrap();
+        fs::write(&shared, "inside secret").unwrap();
+        fs::write(&outside, "outside data!").unwrap();
+        let modified = fs::metadata(&shared).unwrap().modified().unwrap();
+        fs::File::options()
+            .write(true)
+            .open(&outside)
+            .unwrap()
+            .set_times(fs::FileTimes::new().set_modified(modified))
+            .unwrap();
+        assert_eq!(
+            fs::metadata(&shared).unwrap().len(),
+            fs::metadata(&outside).unwrap().len()
+        );
+        symlink_file(&shared, &settings).unwrap();
+        let storage = FileSettingsStorage::new(&project, root.path().join("agent"));
+        let settings_for_swap = settings.clone();
+        let shared_for_swap = shared.clone();
+
+        PROJECT_READ_STEP.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(move |step| match step {
+                ProjectReadStep::Open => {
+                    fs::remove_file(&settings_for_swap).unwrap();
+                    symlink_file(&outside, &settings_for_swap).unwrap();
+                }
+                ProjectReadStep::Restore => {
+                    fs::remove_file(&settings_for_swap).unwrap();
+                    symlink_file(&shared_for_swap, &settings_for_swap).unwrap();
+                }
+                ProjectReadStep::Repoint => {}
+            }));
+        });
+        let read = storage.read(SettingsScope::Project);
+        PROJECT_READ_STEP.with(|hook| *hook.borrow_mut() = None);
+
+        assert_eq!(read.unwrap().as_deref(), Some("inside secret"));
+        assert_eq!(fs::read_to_string(&shared).unwrap(), "inside secret");
+        assert!(fs::symlink_metadata(&settings)
+            .unwrap()
+            .file_type()
+            .is_symlink());
     }
 
     #[test]
