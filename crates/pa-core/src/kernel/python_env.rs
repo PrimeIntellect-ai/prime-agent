@@ -63,8 +63,7 @@ fn safe_path_with_home_mode(
     };
     let repository_root = project
         .ancestors()
-        .filter(|ancestor| ancestor.join(".git").exists())
-        .last();
+        .find(|ancestor| ancestor.join(".git").exists());
     // Opening the user's home itself does not make its normal tool installs
     // repository-controlled. A Git checkout at home still remains untrusted.
     let unmarked_home = repository_root.is_none()
@@ -294,5 +293,15 @@ mod tests {
         }
         std::fs::create_dir(home.join(".git")).unwrap();
         assert!(!safe_path_with_home(&tool_dir, Some(&home), Some(&home)));
+        let nested = home.join("project");
+        let nested_tools = nested.join("tools");
+        std::fs::create_dir_all(&nested_tools).unwrap();
+        std::fs::create_dir(nested.join(".git")).unwrap();
+        assert!(safe_path_with_home(&tool_dir, Some(&nested), Some(&home)));
+        assert!(!safe_path_with_home(
+            &nested_tools,
+            Some(&nested),
+            Some(&home)
+        ));
     }
 }
