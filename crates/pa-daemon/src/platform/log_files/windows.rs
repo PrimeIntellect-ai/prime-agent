@@ -42,6 +42,7 @@ const FILE_OPEN_IF: u32 = 3;
 const FILE_ATTRIBUTE_TAG_INFO_CLASS: i32 = 9;
 const FILE_STANDARD_INFO_CLASS: i32 = 1;
 const FILE_ID_BOTH_DIR_INFO_CLASS: i32 = 10;
+const FILE_ID_BOTH_DIR_RESTART_INFO_CLASS: i32 = 11;
 const FILE_RENAME_INFORMATION_CLASS: i32 = 10;
 const FILE_DISPOSITION_INFO_CLASS: i32 = 4;
 const ERROR_NO_MORE_FILES: i32 = 18;
@@ -359,17 +360,21 @@ impl AnchoredDir {
         // The buffer is 8-byte aligned as required by FILE_ID_BOTH_DIR_INFO.
         let mut buffer = vec![0u64; 8192];
         let size = buffer.len() * size_of::<u64>();
+        // The enumeration cursor belongs to the held handle. Restart each
+        // public call, then resume within this call as buffers fill.
+        let mut info_class = FILE_ID_BOTH_DIR_RESTART_INFO_CLASS;
         loop {
             // SAFETY: buffer is aligned, writable, and remains live while the
             // OS fills it; self.fd stays open for the whole enumeration.
             let ok = unsafe {
                 GetFileInformationByHandleEx(
                     self.fd.as_raw_handle(),
-                    FILE_ID_BOTH_DIR_INFO_CLASS,
+                    info_class,
                     buffer.as_mut_ptr().cast(),
                     u32::try_from(size).expect("fixed Windows directory buffer"),
                 )
             };
+            info_class = FILE_ID_BOTH_DIR_INFO_CLASS;
             if ok == 0 {
                 let error = io::Error::last_os_error();
                 return if error.raw_os_error() == Some(ERROR_NO_MORE_FILES) {
@@ -400,10 +405,11 @@ impl AnchoredDir {
                         .cast::<FileIdBothDirInfo>()
                 };
                 let name_bytes = entry.file_name_length as usize;
+                let entry_bytes = header.checked_add(name_bytes).ok_or_else(|| {
+                    io::Error::new(io::ErrorKind::InvalidData, "invalid directory name")
+                })?;
                 if !name_bytes.is_multiple_of(2)
-                    || offset
-                        .checked_add(header + name_bytes)
-                        .is_none_or(|end| end > size)
+                    || offset.checked_add(entry_bytes).is_none_or(|end| end > size)
                 {
                     return Err(io::Error::new(
                         io::ErrorKind::InvalidData,
@@ -411,9 +417,14 @@ impl AnchoredDir {
                     ));
                 }
                 // SAFETY: the UTF-16 name's byte length was checked against
-                // the allocated buffer; Windows supplies the data in place.
-                let wide =
-                    unsafe { std::slice::from_raw_parts(entry.file_name.as_ptr(), name_bytes / 2) };
+                // the allocated buffer. Derive the slice from that allocation,
+                // since the ABI's FileName[1] is a flexible trailing array.
+                let wide = unsafe {
+                    std::slice::from_raw_parts(
+                        buffer.as_ptr().cast::<u8>().add(offset + header).cast(),
+                        name_bytes / 2,
+                    )
+                };
                 let name = OsString::from_wide(wide);
                 if name != "." && name != ".." {
                     names.push(name);
@@ -422,9 +433,7 @@ impl AnchoredDir {
                     break;
                 }
                 let next = entry.next_entry_offset as usize;
-                if !next.is_multiple_of(align_of::<FileIdBothDirInfo>())
-                    || next < header + name_bytes
-                {
+                if !next.is_multiple_of(align_of::<FileIdBothDirInfo>()) || next < entry_bytes {
                     return Err(io::Error::new(
                         io::ErrorKind::InvalidData,
                         "invalid directory offset",
