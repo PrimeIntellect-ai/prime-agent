@@ -2,7 +2,7 @@
 //! in-memory (tests, embedded hosts).
 
 use std::collections::HashMap;
-use std::fs::{self, File};
+use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard, OnceLock};
@@ -137,7 +137,7 @@ pub(crate) fn read_existing_auth_file(path: &Path) -> Result<Option<String>> {
             let Ok(target) = linked_auth_target(path) else {
                 return Ok(None);
             };
-            File::open(target).map(|file| (file, true))
+            fs::File::open(target).map(|file| (file, true))
         }
         other => other.map(|file| (file, false)),
     };
