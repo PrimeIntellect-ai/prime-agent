@@ -545,18 +545,21 @@ async fn a_dropped_refresh_resolves_the_gate_and_the_next_refresh_starts_fresh()
     let cache = Arc::new(models_cache(dir.path(), server.url("/catalog")));
 
     // A coalesced waiter joins the dropped driver: it must wake with a
-    // failed refresh (None), never hang on the abandoned gate. Both waits
-    // are bounded — the 2s bound fails the test instead of wedging it.
-    let dropped = tokio::time::timeout(
-        std::time::Duration::from_millis(100),
-        cache.refresh(
-            PUBLIC_SCOPE,
-            RefreshOptions {
-                force: true,
-                ..Default::default()
-            },
-        ),
-    );
+    // failed refresh (None), never hang on the abandoned gate. The driver
+    // drops once the server holds its fetch; the 2s bound fails the test
+    // instead of wedging it.
+    let dropped = async {
+        tokio::select! {
+            _ = cache.refresh(
+                PUBLIC_SCOPE,
+                RefreshOptions {
+                    force: true,
+                    ..Default::default()
+                },
+            ) => panic!("the held fetch settled before the drop"),
+            () = server.wait_for_requests(1) => {}
+        }
+    };
     let joined = tokio::time::timeout(
         std::time::Duration::from_secs(2),
         cache.refresh(
@@ -567,11 +570,7 @@ async fn a_dropped_refresh_resolves_the_gate_and_the_next_refresh_starts_fresh()
             },
         ),
     );
-    let (dropped, joined) = tokio::join!(dropped, joined);
-    assert!(
-        dropped.is_err(),
-        "the bounded wait must return while the fetch is held"
-    );
+    let ((), joined) = tokio::join!(dropped, joined);
     let joined = joined.expect("the coalesced waiter wakes on the abandoned gate");
     assert!(
         joined.is_none(),
