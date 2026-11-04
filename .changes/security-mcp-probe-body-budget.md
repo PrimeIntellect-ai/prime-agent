@@ -1,0 +1,1 @@
+- Bounded MCP connection verification responses to prevent oversized server bodies from exhausting memory.
