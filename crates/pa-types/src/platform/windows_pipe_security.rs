@@ -6,7 +6,7 @@ use std::io;
 use std::mem::size_of;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
-use std::ptr;
+use std::ptr::{self, NonNull};
 
 use tokio::net::windows::named_pipe::{NamedPipeClient, NamedPipeServer, ServerOptions};
 use windows_sys::Win32::Foundation::{LocalFree, HANDLE};
@@ -79,14 +79,12 @@ fn local_computer_name_matches(host: &str) -> bool {
     })
 }
 
-struct UnicastTable(*mut MIB_UNICASTIPADDRESS_TABLE);
+struct UnicastTable(NonNull<MIB_UNICASTIPADDRESS_TABLE>);
 
 impl Drop for UnicastTable {
     fn drop(&mut self) {
-        if !self.0.is_null() {
-            // SAFETY: GetUnicastIpAddressTable allocated this table.
-            unsafe { FreeMibTable(self.0.cast()) };
-        }
+        // SAFETY: GetUnicastIpAddressTable allocated this non-null table.
+        unsafe { FreeMibTable(self.0.as_ptr().cast()) };
     }
 }
 
@@ -110,22 +108,25 @@ fn local_unicast_ips() -> io::Result<Vec<IpAddr>> {
     let mut raw_table = ptr::null_mut();
     // SAFETY: The output pointer is writable; Windows owns the returned table.
     let status = unsafe { GetUnicastIpAddressTable(AF_UNSPEC, &raw mut raw_table) };
-    let table = UnicastTable(raw_table);
+    let table = NonNull::new(raw_table).map(UnicastTable);
     if status != 0 {
         return Err(io::Error::from_raw_os_error(status.cast_signed()));
     }
-    if table.0.is_null() {
-        return Err(io::Error::other("Windows unicast address table is missing"));
-    }
-    // SAFETY: Windows returned a table with NumEntries valid trailing rows.
-    let count = unsafe { (*table.0).NumEntries } as usize;
+    let table =
+        table.ok_or_else(|| io::Error::other("Windows unicast address table is missing"))?;
+    // SAFETY: A successful GetUnicastIpAddressTable call returns a live
+    // MIB_UNICASTIPADDRESS_TABLE with NumEntries valid trailing rows; this
+    // NonNull owner keeps it allocated until all rows have been copied.
+    // See https://learn.microsoft.com/windows/win32/api/netioapi/nf-netioapi-getunicastipaddresstable.
+    let table_ref = unsafe { table.0.as_ref() };
+    let count = table_ref.NumEntries as usize;
     if count > 65_536 {
         return Err(io::Error::other(
             "Windows unicast address table is too large",
         ));
     }
     // SAFETY: GetUnicastIpAddressTable allocated `count` contiguous rows.
-    let rows = unsafe { std::slice::from_raw_parts((*table.0).Table.as_ptr(), count) };
+    let rows = unsafe { std::slice::from_raw_parts(table_ref.Table.as_ptr(), count) };
     Ok(rows.iter().filter_map(unicast_row_ip).collect())
 }
 
@@ -162,6 +163,9 @@ fn is_local_host(host: &str) -> bool {
         .and_then(|rest| rest.strip_suffix(']'))
         .unwrap_or(host);
     if let Ok(ip) = numeric.parse::<IpAddr>() {
+        if ip.is_loopback() {
+            return true;
+        }
         return local_unicast_ip_matches(ip);
     }
     local_computer_name_matches(host)
@@ -460,6 +464,10 @@ mod tests {
         assert!(
             !super::is_built_in_name(r"\\other-host\pipe\prime-agent-daemon"),
             "a genuinely remote custom pipe retains its former policy"
+        );
+        assert!(
+            super::is_built_in_name(r"\\127.0.0.2\pipe\prime-agent-daemon"),
+            "the full IPv4 loopback range is local"
         );
     }
 
