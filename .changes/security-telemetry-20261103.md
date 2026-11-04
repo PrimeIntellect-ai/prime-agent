@@ -1,0 +1,1 @@
+- Kept the local telemetry mirror private before writing events or rotating old data.

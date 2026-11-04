@@ -1,0 +1,1 @@
+- Prevented the default telemetry mirror from writing through linked files on Unix.
