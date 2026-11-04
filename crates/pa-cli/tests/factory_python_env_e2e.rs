@@ -18,7 +18,7 @@ fn factory_dispatch_and_probes_drop_project_python_paths() {
         &python,
         r#"#!/bin/sh
 [ "$1" = "-P" ] || exit 41
-[ "$PYTHONPATH" = "$EXPECTED_TRUSTED" ] || exit 42
+[ -z "${PYTHONPATH+x}" ] || exit 42
 [ -z "${PYTHONHOME+x}" ] || exit 43
 [ -z "${PYTHONUSERBASE+x}" ] || exit 44
 case "$*" in
@@ -41,7 +41,6 @@ esac
         .env("PYTHONPATH", path)
         .env("PYTHONHOME", &project)
         .env("PYTHONUSERBASE", &project)
-        .env("EXPECTED_TRUSTED", &trusted)
         .env("DISPATCH_MARKER", &marker)
         .output()
         .unwrap();

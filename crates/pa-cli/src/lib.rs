@@ -104,6 +104,7 @@ fn main_impl(args: &[String], runtime: &dyn mode::Runtime) -> Result<i32, String
     // Install-time kernel preparation: the installer invokes `--prime-agent-bootstrap`
     // after extracting a release, so the venv is ready before the first session.
     if args.len() == 1 && args[0] == "--prime-agent-bootstrap" {
+        crate::config::require_agent_dir()?;
         return run_runtime_bootstrap();
     }
 
