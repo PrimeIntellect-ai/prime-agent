@@ -278,7 +278,7 @@ mod win32 {
     const FILE_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
     const OBJ_CASE_INSENSITIVE: u32 = 0x40;
     const FILE_BASIC_INFO_CLASS: i32 = 0;
-    const FILE_DISPOSITION_INFO_CLASS: i32 = 4;
+    const FILE_DISPOSITION_INFO_CLASS: u32 = 4;
     const FILE_ID_INFO_CLASS: i32 = 18;
     const STATUS_OBJECT_NAME_COLLISION: i32 = 0xC000_0035_u32 as i32;
 
@@ -370,10 +370,7 @@ mod win32 {
             information: *mut c_void,
             size: u32,
         ) -> i32;
-        fn GetFileInformationByHandle(
-            handle: Handle,
-            information: *mut ByHandleFileInformation,
-        ) -> i32;
+        fn GetFileInformationByHandle(handle: Handle, information: *mut c_void) -> i32;
         fn GetVolumeInformationByHandleW(
             handle: Handle,
             volume_name: *mut u16,
@@ -386,8 +383,8 @@ mod win32 {
         ) -> i32;
         fn SetFileInformationByHandle(
             handle: Handle,
-            information_class: i32,
-            information: *const c_void,
+            information_class: u32,
+            information: *mut c_void,
             size: u32,
         ) -> i32;
     }
@@ -397,8 +394,8 @@ mod win32 {
         fn NtCreateFile(
             file_handle: *mut Handle,
             desired_access: u32,
-            object_attributes: *const ObjectAttributes,
-            io_status: *mut IoStatusBlock,
+            object_attributes: *const c_void,
+            io_status: *mut c_void,
             allocation_size: *const i64,
             file_attributes: u32,
             share_access: u32,
@@ -478,8 +475,8 @@ mod win32 {
             NtCreateFile(
                 &raw mut handle,
                 desired_access | SYNCHRONIZE,
-                &raw const attributes,
-                &raw mut io_status,
+                (&raw const attributes).cast(),
+                (&raw mut io_status).cast(),
                 std::ptr::null(),
                 FILE_ATTRIBUTE_NORMAL,
                 FILE_SHARE_ALL,
@@ -625,7 +622,9 @@ mod win32 {
             ));
         }
         let mut info = std::mem::MaybeUninit::<ByHandleFileInformation>::uninit();
-        if unsafe { GetFileInformationByHandle(file.as_raw_handle(), info.as_mut_ptr()) } == 0 {
+        if unsafe { GetFileInformationByHandle(file.as_raw_handle(), info.as_mut_ptr().cast()) }
+            == 0
+        {
             return Err(io::Error::last_os_error());
         }
         let info = unsafe { info.assume_init() };
@@ -666,12 +665,12 @@ mod win32 {
     }
 
     pub(super) fn delete_handle(file: &File) -> io::Result<()> {
-        let info: u8 = 1;
+        let mut info: u8 = 1;
         let ok = unsafe {
             SetFileInformationByHandle(
                 file.as_raw_handle(),
                 FILE_DISPOSITION_INFO_CLASS,
-                std::ptr::from_ref(&info).cast(),
+                (&raw mut info).cast(),
                 1,
             )
         };
@@ -908,6 +907,24 @@ impl LockDir {
             ));
         }
         Ok(())
+    }
+
+    /// Check two held handles, so a pathname swap cannot make a settings
+    /// writer lock one directory and update another.
+    #[cfg(windows)]
+    pub(crate) fn holds_parent(&self, parent: &fs::File) -> io::Result<bool> {
+        Ok(win32::file_id(&self.parent)? == win32::file_id(parent)?)
+    }
+
+    /// Whether this guard's pinned lock parent is the same directory as another
+    /// held handle. A path check can be fooled by a rename and replacement.
+    #[cfg(unix)]
+    pub(crate) fn holds_parent(&self, parent: &fs::File) -> io::Result<bool> {
+        use std::os::unix::fs::MetadataExt;
+
+        let locked = self.parent.metadata()?;
+        let target = parent.metadata()?;
+        Ok(locked.dev() == target.dev() && locked.ino() == target.ino())
     }
 
     #[cfg(unix)]

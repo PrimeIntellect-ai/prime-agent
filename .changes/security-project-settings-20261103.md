@@ -1,0 +1,1 @@
+- Prevented project settings links from reading or copying files outside the project directory.
