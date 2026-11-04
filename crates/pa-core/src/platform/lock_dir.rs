@@ -439,7 +439,7 @@ mod win32 {
         let attributes = ObjectAttributes {
             Length: std::mem::size_of::<ObjectAttributes>() as u32,
             RootDirectory: parent.as_raw_handle(),
-            ObjectName: &name,
+            ObjectName: &raw const name,
             Attributes: OBJ_CASE_INSENSITIVE,
             SecurityDescriptor: std::ptr::null_mut(),
             SecurityQualityOfService: std::ptr::null_mut(),
@@ -451,10 +451,10 @@ mod win32 {
         let mut handle: Handle = std::ptr::null_mut();
         let status = unsafe {
             NtCreateFile(
-                &mut handle,
+                &raw mut handle,
                 desired_access | SYNCHRONIZE,
-                &attributes,
-                &mut io_status,
+                &raw const attributes,
+                &raw mut io_status,
                 std::ptr::null(),
                 FILE_ATTRIBUTE_NORMAL,
                 FILE_SHARE_ALL,
