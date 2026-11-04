@@ -118,6 +118,17 @@ unnecessary_literal_bound = "warn"
 unnecessary_semicolon = "warn"
 used_underscore_binding = "warn"
 
+# Dev and test builds (the test profile inherits dev) keep file:line in
+# backtraces for workspace code and skip debuginfo for dependencies. Full
+# debuginfo made incremental test rebuilds mostly link time and target/
+# several times larger. For a debugger session with locals and types in
+# workspace code, build with CARGO_PROFILE_DEV_DEBUG=2.
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+debug = false
+
 # Shipping posture, pinned (Kevin, Option C): thin LTO plus 4 codegen
 # units for cross-crate inlining in the hot render path. Builds emit line
 # tables and do NOT strip at link: the release pipeline's split_debug step
