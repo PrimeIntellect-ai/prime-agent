@@ -242,7 +242,7 @@ impl FileSettingsStorage {
         if !same_inode(&dir.metadata()?, &fs::metadata(parent_path)?) {
             bail!("Project settings directory changed while opening");
         }
-        Ok(Some(open_readable_directory_at(&dir)?))
+        Ok(Some(dir))
     }
 
     fn read_file(&self, scope: SettingsScope, path: &Path, locked_path: &Path) -> Result<String> {
@@ -547,9 +547,13 @@ impl SettingsStorage for FileSettingsStorage {
                     let name = locked_path
                         .file_name()
                         .ok_or_else(|| anyhow!("Project settings path has no file name"))?;
+                    // Reads need only search permission. Reopen for fsync
+                    // before writing, so missing read permission fails
+                    // before replacing the document.
+                    let readable_parent = open_readable_directory_at(parent)?;
                     #[cfg(test)]
                     OPT_IN_FSYNC.with(|count| count.set(count.get() + 1));
-                    platform_fs::atomic_write_private_at(parent, name, &content)?;
+                    platform_fs::atomic_write_private_at(&readable_parent, name, &content)?;
                 } else {
                     atomic_write_with(&locked_path, &content, AtomicWriteOptions { fsync: true })?;
                 }
@@ -750,6 +754,37 @@ mod tests {
             fs::read_to_string(settings_dir.join("settings.json")).unwrap(),
             "{}"
         );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn searchable_settings_directory_allows_read_before_a_failed_write() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = tempfile::tempdir().unwrap();
+        let project = root.path().join("project");
+        let settings_dir = project.join(".prime/agent");
+        fs::create_dir_all(&settings_dir).unwrap();
+        let settings = settings_dir.join("settings.json");
+        fs::write(&settings, "original").unwrap();
+        let storage = FileSettingsStorage::new(&project, root.path().join("agent"));
+        // Search and create are allowed, but opening this directory for fsync
+        // must fail before a write can replace the existing document.
+        fs::set_permissions(&settings_dir, fs::Permissions::from_mode(0o311)).unwrap();
+
+        let read = storage.read(SettingsScope::Project);
+        let mut update_called = false;
+        let write = storage.with_lock(SettingsScope::Project, &mut |current| {
+            update_called = true;
+            assert_eq!(current.as_deref(), Some("original"));
+            Some("replacement".into())
+        });
+        fs::set_permissions(&settings_dir, fs::Permissions::from_mode(0o700)).unwrap();
+
+        assert_eq!(read.unwrap(), Some("original".into()));
+        assert!(update_called);
+        assert!(write.is_err());
+        assert_eq!(fs::read_to_string(settings).unwrap(), "original");
     }
 
     #[test]
