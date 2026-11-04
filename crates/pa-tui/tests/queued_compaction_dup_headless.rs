@@ -3,15 +3,17 @@
 //! answers `get_messages`, so a refetch would be recorded.
 #![cfg(unix)]
 
-use std::io::{BufRead, BufReader, Write};
-use std::os::unix::net::{UnixListener, UnixStream};
+mod support;
+
+use std::os::unix::net::UnixListener;
 use std::path::PathBuf;
 
 use pa_tui::interactive::{
-    run_interactive, HeadlessPlan, HeadlessStep, InteractiveOptions, ModelSelection,
-    SessionSelection, UiMode,
+    run_interactive, HeadlessPlan, HeadlessStep, InteractiveOptions, UiMode,
 };
 use serde_json::{json, Value};
+
+use support::{serve_connection, write_json, Request};
 
 const QUEUED_TEXT: &str = "queued while compacting";
 const SUMMARY_TEXT: &str = "the compacted summary";
@@ -110,50 +112,24 @@ impl MockSupervisor {
     /// `attach_frames` rides the wire right after the attach response.
     fn serve(self, attach_frames: &[Value]) -> Vec<String> {
         let (stream, _) = self.listener.accept().expect("accept mock client");
-        let mut writer = stream.try_clone().expect("clone mock socket");
-        let mut reader = BufReader::new(stream);
-
-        let hello = json!({
-            "type": "daemon_hello",
-            "protocol": { "name": "prime-agent.daemon", "version": 7 },
-            "serverCapabilities": [],
-            "clientId": "mock",
-        });
-        write_json(&mut writer, &hello);
-
         let mut commands = Vec::new();
-        let mut line = String::new();
-        loop {
-            line.clear();
-            match reader.read_line(&mut line) {
-                Ok(0) | Err(_) => break,
-                Ok(_) => {}
-            }
-            let Ok(envelope) = serde_json::from_str::<Value>(line.trim()) else {
-                continue;
-            };
-            let id = envelope.get("id").and_then(Value::as_str).unwrap_or("");
-            let command = envelope.get("command").cloned().unwrap_or(Value::Null);
-            let command_type = command
-                .get("type")
-                .and_then(Value::as_str)
-                .unwrap_or_default()
-                .to_string();
-            commands.push(command_type.clone());
-            match command_type.as_str() {
-                "create" => write_json(&mut writer, &create_response(id)),
+        serve_connection(stream, &[], |writer, Request { id, kind, .. }| {
+            commands.push(kind.to_string());
+            match kind {
+                "create" => write_json(writer, &create_response(id)),
                 "attach" => {
-                    write_json(&mut writer, &attach_response(id));
+                    write_json(writer, &attach_response(id));
                     for frame in attach_frames {
-                        write_json(&mut writer, frame);
+                        write_json(writer, frame);
                     }
                 }
                 // The PRE-FIX tree's rebuild fetch: the queued row is already
                 // persisted, so the fetched transcript contains it too.
-                "get_messages" => write_json(&mut writer, &raced_fetch_response(id)),
-                command => write_json(&mut writer, &generic_response(id, command)),
+                "get_messages" => write_json(writer, &raced_fetch_response(id)),
+                _ => return false,
             }
-        }
+            true
+        });
         commands
     }
 }
@@ -219,56 +195,10 @@ fn raced_fetch_response(id: &str) -> Value {
     })
 }
 
-/// The catch-all success envelope every other command answers with.
-fn generic_response(id: &str, command: &str) -> Value {
-    json!({
-        "type": "response", "id": id, "command": command,
-        "success": true, "data": {},
-    })
-}
-
-fn write_json(writer: &mut UnixStream, value: &Value) {
-    let mut line = serde_json::to_string(value).expect("serialize mock frame");
-    line.push('\n');
-    writer.write_all(line.as_bytes()).expect("write mock frame");
-    writer.flush().expect("flush mock frame");
-}
-
 fn options(socket: PathBuf) -> InteractiveOptions {
     InteractiveOptions {
-        models: None,
-        socket_path: socket,
-        cwd: PathBuf::from("/tmp"),
-        session_dir: None,
-        script_path: None,
-        model_selection: ModelSelection::default(),
-        model_catalog: Vec::new(),
-        model_configured_providers: std::collections::HashSet::default(),
-        model_recent_models: Vec::new(),
-        default_thinking_level: None,
-        no_session: false,
-        session: SessionSelection::New,
-        initial_message: None,
-        show_images: true,
         fullscreen_mouse: false,
-        theme: "prime".to_string(),
-        code_block_indent: "  ".to_string(),
-        tree_filter_mode: String::new(),
-        branch_summary_skip_prompt: false,
-        version: "0.0.0".to_string(),
-        onboarding: None,
-        telemetry_disabled: None,
-        client_auth: None,
-        traces: None,
-        provider_auth: None,
-        update_commands: None,
-        telemetry: None,
-        keybindings: pa_tui::keybindings::KeybindingsManager::new(),
-        session_rlm_depth: None,
-        prompt_stash: std::sync::Arc::default(),
-        session_has_children: false,
-        restore_dock_focus: false,
-        client_settings: None,
+        ..support::options(socket)
     }
 }
 
