@@ -667,6 +667,8 @@ const AGENT_SESSION_ENDED: EventRule = EventRule {
         ("failed_run_count", optional(count())),
         ("aborted_run_count", optional(count())),
         ("tool_call_count", optional(count())),
+        // Videos `attach_video` loaded into tool results (the count only).
+        ("video_attachment_count", optional(count())),
         ("compaction_count", optional(count())),
         ("model_call_count", optional(count())),
         ("input_tokens", optional(tokens())),

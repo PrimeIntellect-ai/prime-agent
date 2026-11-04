@@ -24,7 +24,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use pa_agent::agent::Subscription;
-use pa_agent::types::{AgentEvent, AssistantMessage, StopReason, Usage};
+use pa_agent::types::{AgentEvent, AssistantMessage, StopReason, ToolResultContent, Usage};
 use pa_telemetry::{
     base_properties, Properties, RunTrigger, TelemetryClient, TelemetryClientConfig, ToolCategory,
 };
@@ -183,6 +183,7 @@ struct SessionTotals {
     aborted_run_count: u64,
     prompt_count: u64,
     tool_call_count: u64,
+    video_attachment_count: u64,
     compaction_count: u64,
     retry_count: u64,
     failover_count: u64,
@@ -240,6 +241,8 @@ struct ActiveRun {
     turn_count: u64,
     tool_call_count: u64,
     tool_error_count: u64,
+    /// Video blocks the tool results carried (the `attach_video` adoption count).
+    video_attachment_count: u64,
     compaction_count: u64,
     retry_count: u64,
     failover_count: u64,
@@ -635,6 +638,10 @@ impl SessionTelemetry {
             properties.set("failed_run_count", Value::from(totals.failed_run_count));
             properties.set("aborted_run_count", Value::from(totals.aborted_run_count));
             properties.set("tool_call_count", Value::from(totals.tool_call_count));
+            properties.set(
+                "video_attachment_count",
+                Value::from(totals.video_attachment_count),
+            );
             properties.set("compaction_count", Value::from(totals.compaction_count));
             properties.set(
                 "model_call_count",
@@ -770,6 +777,7 @@ fn handle_event(
                 turn_count: 0,
                 tool_call_count: 0,
                 tool_error_count: 0,
+                video_attachment_count: 0,
                 compaction_count: 0,
                 retry_count: 0,
                 failover_count: 0,
@@ -916,8 +924,8 @@ fn handle_event(
         AgentEvent::ToolExecutionEnd {
             tool_call_id,
             tool_name,
+            result,
             is_error,
-            ..
         } => {
             let started_at = state.tool_starts.remove(&tool_call_id);
             let duration_ms = started_at.map_or(0, |start| now.saturating_sub(start));
@@ -927,6 +935,12 @@ fn handle_event(
                 if is_error {
                     run.tool_error_count += 1;
                 }
+                // The kernel turns only accepted video attachments into video blocks.
+                run.video_attachment_count += result
+                    .content
+                    .iter()
+                    .filter(|block| matches!(block, ToolResultContent::Video(_)))
+                    .count() as u64;
                 run.tool_duration_ms += duration_ms;
                 let tool_stats = run.tool_summary.entry(category).or_default();
                 tool_stats.calls += 1;
@@ -974,6 +988,7 @@ fn finalize_run_locked(client: &TelemetryClient, execution_mode: &str, state: &m
     let outcome = run_outcome(run.last_assistant.as_ref());
     state.totals.run_count += 1;
     state.totals.tool_call_count += run.tool_call_count;
+    state.totals.video_attachment_count += run.video_attachment_count;
     state.totals.compaction_count += run.compaction_count;
     match outcome {
         "success" => state.totals.successful_run_count += 1,

@@ -183,6 +183,12 @@ fn to_chat_messages(messages: &[Message], supports_images: bool) -> Vec<Value> {
                                 }));
                             }
                             crate::types::UserBlockPayload::Image { .. } => {}
+                            crate::types::UserBlockPayload::Video { .. } => {
+                                content.push(json!({
+                                    "type": "text",
+                                    "text": crate::types::UNSUPPORTED_VIDEO_PLACEHOLDER,
+                                }));
+                            }
                             crate::types::UserBlockPayload::Opaque(json) => {
                                 content.push(json!({
                                     "type": "text",
