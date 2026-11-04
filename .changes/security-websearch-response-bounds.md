@@ -1,0 +1,1 @@
+- Web search now stops reading oversized provider responses before they can exhaust memory.
