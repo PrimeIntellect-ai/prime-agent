@@ -31,70 +31,89 @@ fn paths_overlap(path: &Path, project: &Path) -> bool {
 }
 
 pub(crate) fn safe_path(path: &Path, project: Option<&Path>) -> bool {
-    safe_path_with_home(path, project, pa_types::platform::home_dir().as_deref())
+    safe_path_with_mode(path, project, false)
 }
 
 /// An ancestor PATH entry is safe for direct executable lookup only when the
 /// selected executable itself resolves outside the project.
 pub(crate) fn safe_executable_path(path: &Path, project: Option<&Path>) -> bool {
-    safe_path_with_home_mode(
-        path,
-        project,
-        pa_types::platform::home_dir().as_deref(),
-        true,
-    )
+    safe_path_with_mode(path, project, true)
 }
 
-fn safe_path_with_home(path: &Path, project: Option<&Path>, home: Option<&Path>) -> bool {
-    safe_path_with_home_mode(path, project, home, false)
+fn paths_equal(left: &Path, right: &Path) -> bool {
+    path_starts_with(left, right) && path_starts_with(right, left)
 }
 
-fn safe_path_with_home_mode(
-    path: &Path,
-    project: Option<&Path>,
-    home: Option<&Path>,
-    allow_ancestor: bool,
-) -> bool {
+fn safe_path_with_mode(path: &Path, project: Option<&Path>, allow_ancestor: bool) -> bool {
     let Some(project) = project else {
         return false;
     };
     let Ok(project) = project.canonicalize() else {
         return false;
     };
-    let repository_root = project
+    let repository_roots: Vec<_> = project
         .ancestors()
-        .find(|ancestor| ancestor.join(".git").exists());
-    // Opening the user's home itself does not make its normal tool installs
-    // repository-controlled. A Git checkout at home still remains untrusted.
-    let unmarked_home = repository_root.is_none()
-        && home.and_then(|home| home.canonicalize().ok()).as_deref() == Some(project.as_path());
-    let boundary = repository_root.unwrap_or(&project);
+        .filter(|ancestor| ancestor.join(".git").exists())
+        .collect();
     if !path.is_absolute() {
         return false;
     }
     let Ok(canonical_path) = path.canonicalize() else {
         return false;
     };
-    let trusted_home_tool = unmarked_home
-        && home
-            .and_then(|home| {
-                let tools = home.join(".local/bin");
-                tools
-                    .canonicalize()
-                    .ok()
-                    .map(|canonical| (tools, canonical))
-            })
-            .is_some_and(|(tools, canonical)| {
-                (path_starts_with(path, &tools) || path_starts_with(path, &canonical))
-                    && canonical == project.join(".local/bin")
-                    && path_starts_with(&canonical_path, &canonical)
-            });
-    let overlaps = if allow_ancestor {
-        path_starts_with(path, boundary) || path_starts_with(&canonical_path, boundary)
+    // An unmarked filesystem root is not a repository. Requiring a candidate
+    // outside it would reject every installed executable on that volume.
+    if repository_roots.is_empty() && project.parent().is_none() {
+        return true;
+    }
+    let boundaries = if repository_roots.is_empty() {
+        vec![project.as_path()]
     } else {
-        paths_overlap(path, boundary) || paths_overlap(&canonical_path, boundary)
+        repository_roots
     };
-    trusted_home_tool || !overlaps
+    !boundaries.into_iter().any(|boundary| {
+        if allow_ancestor {
+            path_starts_with(path, boundary) || path_starts_with(&canonical_path, boundary)
+        } else {
+            paths_overlap(path, boundary) || paths_overlap(&canonical_path, boundary)
+        }
+    })
+}
+
+/// The single global uv install is a trusted executable even when HOME is an
+/// enclosing Git checkout. No other HOME path receives this exception.
+pub(crate) fn safe_home_uv(path: &Path, project: Option<&Path>) -> bool {
+    safe_home_uv_with_home(path, project, pa_types::platform::home_dir().as_deref())
+}
+
+fn safe_home_uv_with_home(path: &Path, project: Option<&Path>, home: Option<&Path>) -> bool {
+    let (Some(project), Some(home)) = (project, home) else {
+        return false;
+    };
+    let (Ok(project), Ok(canonical_home)) = (project.canonicalize(), home.canonicalize()) else {
+        return false;
+    };
+    let tools = home.join(".local/bin");
+    let Ok(canonical_tools) = tools.canonicalize() else {
+        return false;
+    };
+    let uv_name = if cfg!(windows) { "uv.exe" } else { "uv" };
+    let Ok(canonical_uv) = path.canonicalize() else {
+        return false;
+    };
+    if !path.is_absolute()
+        || !paths_equal(path, &tools.join(uv_name))
+        || !paths_equal(&canonical_tools, &canonical_home.join(".local/bin"))
+        || !paths_equal(&canonical_uv, &canonical_tools.join(uv_name))
+    {
+        return false;
+    }
+    let nearest_checkout = project
+        .ancestors()
+        .find(|ancestor| ancestor.join(".git").exists());
+    let unmarked_home = nearest_checkout.is_none() && paths_equal(&project, &canonical_home);
+    let active_boundary = nearest_checkout.unwrap_or(&project);
+    unmarked_home || !path_starts_with(&canonical_uv, active_boundary)
 }
 
 /// Drop ambient Python import roots after caller overrides are applied.
@@ -415,34 +434,68 @@ mod tests {
     }
 
     #[test]
-    fn unmarked_home_keeps_user_tool_install_but_home_repo_blocks_it() {
+    fn only_the_direct_home_uv_is_trusted_outside_the_active_checkout() {
         let root = tempfile::tempdir().unwrap();
         let home = root.path().join("home");
         let tool_dir = home.join(".local/bin");
-        let untrusted = home.join("untrusted-repo/tools");
+        let uv_name = if cfg!(windows) { "uv.exe" } else { "uv" };
+        let uv = tool_dir.join(uv_name);
+        let untrusted = home.join("tools");
+        let untrusted_uv = untrusted.join(uv_name);
         std::fs::create_dir_all(&tool_dir).unwrap();
         std::fs::create_dir_all(&untrusted).unwrap();
-        assert!(safe_path_with_home(&tool_dir, Some(&home), Some(&home)));
-        assert!(!safe_path_with_home(&untrusted, Some(&home), Some(&home)));
+        std::fs::write(&uv, "uv").unwrap();
+        std::fs::write(&untrusted_uv, "uv").unwrap();
+        assert!(safe_home_uv_with_home(&uv, Some(&home), Some(&home)));
+        assert!(!safe_home_uv_with_home(
+            &untrusted_uv,
+            Some(&home),
+            Some(&home)
+        ));
         #[cfg(unix)]
         {
+            std::fs::remove_file(&uv).unwrap();
             std::fs::remove_dir(&tool_dir).unwrap();
             std::os::unix::fs::symlink(&untrusted, &tool_dir).unwrap();
-            assert!(!safe_path_with_home(&tool_dir, Some(&home), Some(&home)));
+            assert!(!safe_home_uv_with_home(&uv, Some(&home), Some(&home)));
             std::fs::remove_file(&tool_dir).unwrap();
             std::fs::create_dir(&tool_dir).unwrap();
+            std::fs::write(&uv, "uv").unwrap();
         }
         std::fs::create_dir(home.join(".git")).unwrap();
-        assert!(!safe_path_with_home(&tool_dir, Some(&home), Some(&home)));
+        assert!(!safe_home_uv_with_home(&uv, Some(&home), Some(&home)));
         let nested = home.join("project");
         let nested_tools = nested.join("tools");
         std::fs::create_dir_all(&nested_tools).unwrap();
         std::fs::create_dir(nested.join(".git")).unwrap();
-        assert!(safe_path_with_home(&tool_dir, Some(&nested), Some(&home)));
-        assert!(!safe_path_with_home(
-            &nested_tools,
+        assert!(safe_home_uv_with_home(&uv, Some(&nested), Some(&home)));
+        assert!(!safe_executable_path(&untrusted_uv, Some(&nested)));
+        assert!(!safe_home_uv_with_home(
+            &untrusted_uv,
             Some(&nested),
             Some(&home)
+        ));
+        assert!(!safe_home_uv_with_home(
+            &nested_tools.join(uv_name),
+            Some(&nested),
+            Some(&home)
+        ));
+    }
+
+    #[test]
+    fn filesystem_root_without_git_allows_absolute_uv_paths() {
+        let root = tempfile::tempdir().unwrap();
+        let filesystem_root = root.path().ancestors().last().unwrap();
+        if filesystem_root.join(".git").exists() {
+            return;
+        }
+        let tool = root.path().join("uv");
+        std::fs::write(&tool, "uv").unwrap();
+        assert!(safe_executable_path(&tool, Some(filesystem_root)));
+        assert!(safe_path(root.path(), Some(filesystem_root)));
+        assert!(!safe_executable_path(
+            Path::new("uv"),
+            Some(filesystem_root)
         ));
     }
 }

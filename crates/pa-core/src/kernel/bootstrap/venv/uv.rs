@@ -93,7 +93,8 @@ pub(crate) fn ensure_uv(project: Option<&Path>) -> anyhow::Result<String> {
     }
     let uv_name = if cfg!(windows) { "uv.exe" } else { "uv" };
     let local_uv = home_dir().join(".local").join("bin").join(uv_name);
-    if crate::kernel::python_env::safe_executable_path(&local_uv, project)
+    if (crate::kernel::python_env::safe_executable_path(&local_uv, project)
+        || crate::kernel::python_env::safe_home_uv(&local_uv, project))
         && is_executable(&local_uv)
     {
         return Ok(local_uv.to_string_lossy().to_string());
@@ -160,6 +161,49 @@ mod safe_uv_tests {
         assert_eq!(
             find_executable("uv", &path, Some(&project)),
             Some(trusted.join("uv"))
+        );
+    }
+
+    #[test]
+    fn uv_search_skips_enclosing_checkout_but_keeps_external_tool() {
+        let root = tempfile::tempdir().unwrap();
+        let outer = root.path().join("outer");
+        let inner = outer.join("inner");
+        let outer_tools = outer.join("tools");
+        let trusted = root.path().join("trusted");
+        for dir in [&inner, &outer_tools, &trusted] {
+            std::fs::create_dir_all(dir).unwrap();
+        }
+        for checkout in [&outer, &inner] {
+            std::fs::create_dir(checkout.join(".git")).unwrap();
+        }
+        for path in [outer_tools.join("uv"), trusted.join("uv")] {
+            std::fs::write(&path, "#!/bin/sh\nexit 0\n").unwrap();
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let path = std::env::join_paths([&outer_tools, &trusted]).unwrap();
+        assert_eq!(
+            find_executable("uv", &path, Some(&inner)),
+            Some(trusted.join("uv"))
+        );
+    }
+
+    #[test]
+    fn uv_search_accepts_installed_tool_from_unmarked_filesystem_root() {
+        let root = tempfile::tempdir().unwrap();
+        let filesystem_root = root.path().ancestors().last().unwrap();
+        if filesystem_root.join(".git").exists() {
+            return;
+        }
+        let trusted = root.path().join("trusted");
+        std::fs::create_dir(&trusted).unwrap();
+        let uv = trusted.join("uv");
+        std::fs::write(&uv, "#!/bin/sh\nexit 0\n").unwrap();
+        std::fs::set_permissions(&uv, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let path = std::env::join_paths([Path::new("."), &trusted]).unwrap();
+        assert_eq!(
+            find_executable("uv", &path, Some(filesystem_root)),
+            Some(uv)
         );
     }
 }
