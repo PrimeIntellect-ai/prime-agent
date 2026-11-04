@@ -169,6 +169,10 @@ pub struct AgentSessionEngine {
     /// (unwired) answers `false`.
     pub(crate) background_bash_probe:
         std::sync::Mutex<Option<std::sync::Arc<dyn Fn() -> bool + Send + Sync>>>,
+    /// `true` while the kernel holds work that dies with it (background `bash()` handles or live
+    /// user asyncio tasks), so the passivation gates keep it resident. `None` answers `false`.
+    pub(crate) background_work_probe:
+        std::sync::Mutex<Option<std::sync::Arc<dyn Fn() -> bool + Send + Sync>>>,
     /// The current session's stop-with-snapshot handle, adopted as a weak
     /// provisioner reference (the park arm never takes the session mutex).
     /// `None` when no session is built.

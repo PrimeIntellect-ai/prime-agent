@@ -116,6 +116,10 @@ impl Inner {
                     .unwrap_or("error");
                 let execution = lock(&self.guarded).active_execution.clone();
                 if let Some(execution) = execution.filter(|e| e.request_id == id) {
+                    // Only execute frames carry the count; state requests run no user code.
+                    if let Some(tasks) = fields.get("user_tasks").and_then(Value::as_u64) {
+                        lock(&self.guarded).live_user_tasks = tasks;
+                    }
                     {
                         let mut buffers = lock(&execution.buffers);
                         buffers.done_fields = Some(fields.clone());

@@ -448,6 +448,34 @@ async fn kernel_teardown_with_live_handles_settles_the_callback_once() {
     assert_eq!(settled.load(std::sync::atomic::Ordering::SeqCst), 1);
 }
 
+/// An asyncio task a cell leaves running dies with the kernel, so it holds residency like a
+/// `bash()` handle, but never the bash-only continuation hold: it has no completion notice
+/// that could wake one.
+#[tokio::test]
+async fn live_user_asyncio_task_holds_residency_until_it_ends() {
+    let Some(options) = test_options(None) else {
+        return;
+    };
+    let manager = started_manager(options).await;
+
+    execute(
+        &manager,
+        "import asyncio\ntick = asyncio.create_task(asyncio.sleep(600))",
+    )
+    .await;
+    assert!(
+        manager.has_background_work(),
+        "a live user task must keep the kernel resident"
+    );
+    assert!(!manager.has_background_bash());
+
+    execute(&manager, "tick.cancel()\nawait asyncio.sleep(0)").await;
+    assert!(
+        !manager.has_background_work(),
+        "the runtime's own tasks must not hold residency"
+    );
+}
+
 /// Each `bash()` call a cell starts reports its command text and line
 /// count through the bash-command display MIME, aggregated into the cell's
 /// execute result — including calls routed through a helper function,

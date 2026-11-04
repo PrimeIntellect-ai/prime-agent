@@ -237,13 +237,19 @@ impl AgentSessionEngine {
     }
 
     /// The settled passivation gates (the kernel release and the whole-worker idle
-    /// passivation share them): no unsettled RLM work, no live background `bash()`
-    /// handle (a snapshot cannot resurrect a live process), no active-or-paused
-    /// scheduled job (crons AND armed heartbeats). Deliberate divergence: no
-    /// relaunch-on-fire, so the port BLOCKS while any job is armed. An unwired jobs
-    /// probe passes.
+    /// passivation share them): no unsettled RLM work, no kernel background work (a
+    /// snapshot cannot resurrect a live `bash()` process or asyncio task), no
+    /// active-or-paused scheduled job (crons AND armed heartbeats). Deliberate
+    /// divergence: no relaunch-on-fire, so the port BLOCKS while any job is armed. An
+    /// unwired jobs probe passes.
     pub(crate) async fn settled_passivation_gates_pass(&self) -> bool {
-        if self.has_unsettled_rlm_work().await || self.has_live_background_bash_handles() {
+        let background_work = self
+            .background_work_probe
+            .lock()
+            .expect("background work probe lock")
+            .clone()
+            .is_some_and(|probe| probe());
+        if background_work || self.has_unsettled_rlm_work().await {
             return false;
         }
         let probe = self
