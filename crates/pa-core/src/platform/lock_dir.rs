@@ -207,9 +207,10 @@ mod win32 {
     #![allow(non_snake_case)]
 
     use std::ffi::{c_void, OsStr};
-    use std::fs::File;
+    use std::fs::{File, OpenOptions};
     use std::io;
     use std::os::windows::ffi::OsStrExt;
+    use std::os::windows::fs::OpenOptionsExt;
     use std::os::windows::io::{AsRawHandle, FromRawHandle};
     use std::path::Path;
 
@@ -232,8 +233,6 @@ mod win32 {
     /// `winnt.h` `FILE_SHARE_READ | WRITE | DELETE`: a concurrent stat of the lock dir must not be
     /// blocked.
     const FILE_SHARE_ALL: u32 = 0x0000_0007;
-    /// `winbase.h` `OPEN_EXISTING`.
-    const OPEN_EXISTING: u32 = 3;
     const FILE_CREATE: u32 = 2;
     const FILE_OPEN: u32 = 1;
     const FILE_DIRECTORY_FILE: u32 = 0x0000_0001;
@@ -245,8 +244,6 @@ mod win32 {
     const FILE_DISPOSITION_INFO_CLASS: i32 = 4;
     const FILE_ID_INFO_CLASS: i32 = 18;
     const STATUS_OBJECT_NAME_COLLISION: i32 = 0xC000_0035_u32 as i32;
-    /// `winbase.h`: `CreateFileW` returns this (not null) on failure.
-    const INVALID_HANDLE_VALUE: isize = -1;
 
     /// A Win32 `FILETIME`: 100ns ticks since 1601-01-01 UTC, split 32/32.
     #[repr(C)]
@@ -310,15 +307,6 @@ mod win32 {
     }
 
     extern "system" {
-        fn CreateFileW(
-            filename: *const u16,
-            desired_access: u32,
-            share_mode: u32,
-            security_attributes: *mut c_void,
-            creation_disposition: u32,
-            flags_and_attributes: u32,
-            template_file: Handle,
-        ) -> Handle;
         fn SetFileTime(
             handle: Handle,
             creation_time: *const FileTime,
@@ -365,29 +353,14 @@ mod win32 {
     }
 
     fn open_path(path: &Path, desired_access: u32) -> io::Result<File> {
-        let mut wide: Vec<u16> = path.as_os_str().encode_wide().collect();
-        if wide.contains(&0) {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "NUL in lock path",
-            ));
-        }
-        wide.push(0);
-        let handle = unsafe {
-            CreateFileW(
-                wide.as_ptr(),
-                desired_access,
-                FILE_SHARE_ALL,
-                std::ptr::null_mut(),
-                OPEN_EXISTING,
-                FILE_FLAG_BACKUP_SEMANTICS,
-                std::ptr::null_mut(),
-            )
-        };
-        if handle as isize == INVALID_HANDLE_VALUE {
-            return Err(io::Error::last_os_error());
-        }
-        Ok(unsafe { File::from_raw_handle(handle) })
+        // Rust's path conversion adds the extended-length prefix when it is
+        // needed, including for long UNC paths; preserve that behavior while
+        // requesting the directory rights needed by the relative NT opens.
+        OpenOptions::new()
+            .access_mode(desired_access)
+            .share_mode(FILE_SHARE_ALL)
+            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+            .open(path)
     }
 
     pub(super) fn open_parent(path: &Path) -> io::Result<File> {
@@ -1578,7 +1551,7 @@ mod tests {
         fs::create_dir(&project).unwrap();
         fs::create_dir(&outside).unwrap();
         let file = project.join("settings.json");
-        let outside_lock = outside.join("settings.json.lock");
+        let swapped_lock = project.join("settings.json.lock");
         BEFORE_LOCK_CREATE.with(|hook| {
             *hook.borrow_mut() = Some(Box::new(move || {
                 fs::rename(&project, &moved).unwrap();
@@ -1588,7 +1561,7 @@ mod tests {
 
         let result = LockDir::acquire(&file, MIN_STALE);
         assert!(result.is_err(), "a changed parent must stop acquisition");
-        assert!(!outside_lock.exists(), "no foreign lock may be created");
+        assert!(!swapped_lock.exists(), "no foreign lock may be created");
         assert!(!root
             .path()
             .join("project-moved/settings.json.lock")
@@ -1691,6 +1664,23 @@ mod tests {
             .unwrap()
             .file_type()
             .is_symlink());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_long_project_path_still_accepts_directory_locks() {
+        let root = tempfile::tempdir().unwrap();
+        let mut parent = root.path().to_path_buf();
+        for _ in 0..5 {
+            parent.push("deep-project-directory-segment-0123456789abcdef0123456789");
+        }
+        assert!(parent.to_string_lossy().len() > 260);
+        fs::create_dir_all(&parent).unwrap();
+        let file = parent.join("settings.json");
+        let guard = LockDir::acquire(&file, MIN_STALE).unwrap();
+        assert!(LockDir::path_for(&file).is_dir());
+        drop(guard);
+        assert!(!LockDir::path_for(&file).exists());
     }
 
     #[cfg(unix)]
