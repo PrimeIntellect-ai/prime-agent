@@ -64,6 +64,70 @@ impl Inner {
             // artifacts the kernel manager creates.
             crate::platform::perms::create_dir_all_private(parent)?;
         }
+        // The provisioner owns this fixed session-artifact path. Custom
+        // stderr destinations may deliberately be links to a shared log, but
+        // the managed path must never append to a planted link's target.
+        let managed_session_log = self.options.stderr_log_path.as_deref() == Some(path)
+            && self.options.snapshot.as_ref().is_some_and(|snapshot| {
+                snapshot
+                    .path
+                    .parent()
+                    .is_some_and(|dir| dir.join("kernel-stderr.log") == path)
+            });
+        if managed_session_log {
+            let mut options = std::fs::OpenOptions::new();
+            options.create(true).append(true);
+            crate::platform::perms::set_private_mode(&mut options);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                options.custom_flags(libc::O_NOFOLLOW);
+            }
+            #[cfg(windows)]
+            {
+                use std::os::windows::fs::OpenOptionsExt;
+                // Win32 FILE_FLAG_OPEN_REPARSE_POINT: open the link itself,
+                // never its target, if it appears between checks.
+                options.custom_flags(0x0020_0000);
+            }
+            let open_managed = || -> anyhow::Result<std::fs::File> {
+                // Reject a visible link before opening, including for
+                // platforms where the no-follow flag differs from Unix.
+                if std::fs::symlink_metadata(path).is_ok_and(|meta| meta.file_type().is_symlink()) {
+                    anyhow::bail!("managed kernel stderr log is a symbolic link");
+                }
+                let file = options.open(path)?;
+                #[cfg(windows)]
+                if std::fs::symlink_metadata(path).is_ok_and(|meta| meta.file_type().is_symlink()) {
+                    anyhow::bail!("managed kernel stderr log is a symbolic link");
+                }
+                Ok(file)
+            };
+            let file = open_managed()?;
+            let mut size = file.metadata()?.len();
+            let file = if size > MAX_KERNEL_STDERR_LOG_BYTES {
+                crate::platform::perms::restrict_open_file(&file)?;
+                drop(file);
+                let old = path.with_extension("log.old");
+                let _ = std::fs::remove_file(&old);
+                match std::fs::rename(path, &old) {
+                    Ok(()) => size = 0,
+                    Err(error) => {
+                        self.append_diagnostic(&format!(
+                            "cannot rotate kernel stderr log: {error}"
+                        ));
+                    }
+                }
+                open_managed()?
+            } else {
+                file
+            };
+            crate::platform::perms::restrict_open_file(&file)?;
+            return Ok(Arc::new(Mutex::new(StderrLog {
+                file,
+                budget: MAX_KERNEL_STDERR_LOG_BYTES.saturating_sub(size),
+            })));
+        }
         let mut size = path.metadata().map_or(0, |m| m.len());
         if size > MAX_KERNEL_STDERR_LOG_BYTES {
             let old = path.with_extension("log.old");
@@ -553,10 +617,21 @@ fn unix_signal_of(status: std::process::ExitStatus) -> Option<i32> {
 mod tests {
     use super::*;
     use crate::kernel::manager::ReplKernelManager;
-    use crate::kernel::shared::KernelManagerOptions;
+    use crate::kernel::shared::{KernelManagerOptions, KernelSnapshotConfig};
 
-    fn manager() -> ReplKernelManager {
-        ReplKernelManager::new(KernelManagerOptions::default())
+    fn session_manager(path: &std::path::Path) -> ReplKernelManager {
+        let dir = path.parent().unwrap();
+        ReplKernelManager::new(KernelManagerOptions {
+            snapshot: Some(KernelSnapshotConfig {
+                path: dir.join("snapshot.pkl"),
+                manifest_path: dir.join("manifest.json"),
+                max_bytes: None,
+                max_variable_bytes: None,
+                debounce_ms: None,
+            }),
+            stderr_log_path: Some(path.to_path_buf()),
+            ..KernelManagerOptions::default()
+        })
     }
 
     fn temp_root(tag: &str) -> std::path::PathBuf {
@@ -583,7 +658,7 @@ mod tests {
     fn kernel_stderr_log_is_owner_only() {
         let root = temp_root("create");
         let path = root.join("artifacts").join("kernel-stderr.log");
-        let log = manager()
+        let log = session_manager(&path)
             .inner
             .open_stderr_log_at(&path)
             .expect("stderr log opens");
@@ -626,7 +701,7 @@ mod tests {
             .write_all(&vec![0u8; (MAX_KERNEL_STDERR_LOG_BYTES + 1) as usize])
             .expect("fill");
         drop(loose);
-        let log = manager()
+        let log = session_manager(&path)
             .inner
             .open_stderr_log_at(&path)
             .expect("stderr log opens");
@@ -648,5 +723,67 @@ mod tests {
         #[cfg(not(unix))]
         assert!(path.with_extension("log.old").is_file());
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn default_session_stderr_log_does_not_follow_a_planted_link() {
+        use std::os::unix::fs::{symlink, PermissionsExt};
+
+        let root = tempfile::tempdir().unwrap();
+        let artifacts = root.path().join("artifacts");
+        std::fs::create_dir(&artifacts).unwrap();
+        let path = artifacts.join("kernel-stderr.log");
+        let victim = root.path().join("auth.json");
+        std::fs::write(&victim, "saved credentials").unwrap();
+        std::fs::set_permissions(&victim, std::fs::Permissions::from_mode(0o644)).unwrap();
+        symlink(&victim, &path).unwrap();
+        let manager = session_manager(&path);
+
+        let opened = manager.inner.open_stderr_log_at(&path);
+        if let Ok(log) = &opened {
+            log.lock()
+                .unwrap()
+                .file
+                .write_all(b"kernel stderr")
+                .unwrap();
+        }
+        assert_eq!(
+            std::fs::read_to_string(&victim).unwrap(),
+            "saved credentials"
+        );
+        assert_eq!(crate::platform::perms::file_mode(&victim), Some(0o644));
+        assert!(opened.is_err());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn explicit_stderr_log_link_keeps_its_existing_append_behavior() {
+        use std::os::unix::fs::symlink;
+
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("custom-stderr.log");
+        let shared = root.path().join("shared-stderr.log");
+        std::fs::write(&shared, "prefix").unwrap();
+        symlink(&shared, &path).unwrap();
+
+        let log = ReplKernelManager::new(KernelManagerOptions::default())
+            .inner
+            .open_stderr_log_at(&path)
+            .unwrap();
+        log.lock()
+            .unwrap()
+            .file
+            .write_all(b"kernel stderr")
+            .unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(&shared).unwrap(),
+            "prefixkernel stderr"
+        );
+        assert!(std::fs::symlink_metadata(&path)
+            .unwrap()
+            .file_type()
+            .is_symlink());
     }
 }

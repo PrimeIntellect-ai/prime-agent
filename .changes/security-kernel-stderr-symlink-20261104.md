@@ -1,0 +1,1 @@
+- Managed kernel stderr logs no longer follow planted links to other files when a session resumes.
