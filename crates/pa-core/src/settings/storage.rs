@@ -258,7 +258,7 @@ impl FileSettingsStorage {
             return Ok(fs::read_to_string(path)?);
         }
         #[cfg(unix)]
-        let file = {
+        let mut file = {
             // The locked path is the resolved in-project target, including for
             // an intentional in-project settings symlink. Hold its parent and
             // open only its final regular basename from that directory.
@@ -273,7 +273,7 @@ impl FileSettingsStorage {
             open_regular_file_at(&parent, name)?
         };
         #[cfg(not(unix))]
-        let file = fs::File::open(path)?;
+        let mut file = fs::File::open(path)?;
         let opened = file.metadata()?;
         if is_multiply_linked(&opened) {
             bail!("Project settings file has multiple hard links");
@@ -299,7 +299,8 @@ impl FileSettingsStorage {
         let mut content = String::new();
         // A writer can grow the file after metadata inspection, so the read
         // itself also stops one byte past the accepted limit.
-        file.take(MAX_PROJECT_SETTINGS_BYTES as u64 + 1)
+        Read::by_ref(&mut file)
+            .take(MAX_PROJECT_SETTINGS_BYTES as u64 + 1)
             .read_to_string(&mut content)?;
         if content.len() > MAX_PROJECT_SETTINGS_BYTES {
             bail!("Project settings file exceeds {MAX_PROJECT_SETTINGS_BYTES} bytes");
