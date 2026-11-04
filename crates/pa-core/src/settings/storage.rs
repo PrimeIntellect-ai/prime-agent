@@ -288,15 +288,18 @@ impl FileSettingsStorage {
                 .or(opened_parent.as_ref())
                 .ok_or_else(|| anyhow!("Project settings directory is missing"))?;
             #[cfg(unix)]
-            let parent = self
-                .project_parent_anchor(locked_path, DirectoryCreation::ExistingOnly)?
+            let opened_parent =
+                self.project_parent_anchor(locked_path, DirectoryCreation::ExistingOnly)?;
+            #[cfg(unix)]
+            let parent = opened_parent
+                .as_ref()
                 .ok_or_else(|| anyhow!("Project settings directory is missing"))?;
             let name = locked_path
                 .file_name()
                 .ok_or_else(|| anyhow!("Project settings path has no file name"))?;
             #[cfg(test)]
             project_read_step(ProjectReadStep::Open);
-            open_regular_file_at(&parent, name)?
+            open_regular_file_at(parent, name)?
         };
         #[cfg(not(any(unix, windows)))]
         let mut file = fs::File::open(path)?;
