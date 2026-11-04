@@ -257,6 +257,8 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn status_write_does_not_follow_a_planted_temp_symlink() {
+        use std::os::unix::fs::PermissionsExt;
+
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("status.json");
         let temporary = path.with_extension(format!("{}.tmp", std::process::id()));
@@ -271,7 +273,6 @@ mod tests {
             std::fs::read_to_string(&path).unwrap(),
             serde_json::to_string_pretty(&json!(writer.current())).unwrap() + "\n"
         );
-        use std::os::unix::fs::PermissionsExt;
         assert_eq!(
             std::fs::metadata(path).unwrap().permissions().mode() & 0o777,
             0o600
