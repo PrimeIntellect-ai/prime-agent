@@ -1039,18 +1039,27 @@ event and the status node's ``answer_preview`` stay compact (the host's
 own roster previews cap at 160 characters, ``compactRlmText``).
 """
 
-ANSWER_BINDING_CAP = 8192
-"""Local cap for the settle-capture binding lane.
+ANSWER_BINDING_CAP = 65_536
+"""Local cap for the settle-capture binding lane, at parity with the
+host's collect bound (the daemon's ANSWER_TEXT_MAX_CHARS: 65,536
+characters).
 
 ``rlm.collect`` carries the child's full final answer (``answer_text``,
-host-bounded at 64 KiB): input binding and output capture work on that
-text, not the roster preview — a fenced JSON output longer than the old
-200-character preview cap was truncated before the executor ever saw it,
-and the downstream bind failed with "no JSON object containing output"
-although the child settled with exactly the fenced JSON (the M2 class).
-The factory caps its own storage here so a run of many long answers
-cannot balloon kernel memory; a bind failure names this cap when the
-capture was cut at it. Full child transcripts stay in the child's own
+host-bounded at that size): input binding and output capture work on
+that text, not the roster preview — a fenced JSON output longer than the
+old 200-character preview cap was truncated before the executor ever saw
+it, and the downstream bind failed with "no JSON object containing
+output" although the child settled with exactly the fenced JSON (the M2
+class). The old 8192-character cap failed the same class one lane later:
+a valid fenced JSON longer than it (a design node's 26–29 KiB output,
+observed three times) was cut mid-object before the parse, so the capture
+failed deterministically although the envelope still carried the whole
+answer. At parity the slice is a no-op on what the host delivers (it
+bounds answer_text at this same size), so a fenced JSON the child kept
+within this size binds whole; the cap still bounds each captured answer
+the factory stores, and a bind failure names the stored answer's length
+when it reaches this cap (a joined multi-instance answer can cross it
+with nothing cut). Full child transcripts stay in the child's own
 session regardless.
 """
 
@@ -5655,7 +5664,8 @@ watched = await rlm.factory.watch(result["run_id"], 30)
   admissions); the default `escalate` policy pauses
   instead of failing, so read `status` (or the notice) before resuming.
 - Outputs bind from the child's full final answer (the collect envelope
-  carries it; the executor caps its own capture at 8,192 characters): a
+  carries it; the executor caps its own capture at 65,536 characters,
+  the same bound the daemon puts on the envelope's answer text): a
   fenced json output block binds whole as long as it fits that cap, so
   keep declared outputs compact — the rosters and ledger previews stay
   ~160 characters — and let the full answer live in the child's session.
