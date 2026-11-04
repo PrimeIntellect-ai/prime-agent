@@ -279,6 +279,49 @@ mod tests {
         assert_eq!(std::fs::read_link(&logs).unwrap(), outside);
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn windows_rotating_log_rejects_a_logs_junction() {
+        let dir = tempfile::tempdir().unwrap();
+        let agent_dir = dir.path().join("agent");
+        std::fs::create_dir(&agent_dir).unwrap();
+        let outside = dir.path().join("outside");
+        std::fs::create_dir(&outside).unwrap();
+        let victim = outside.join("daemon.sock.abcdef01.log");
+        std::fs::write(&victim, b"keep this log\n").unwrap();
+        let logs = agent_dir.join("logs");
+        let output = std::process::Command::new("cmd")
+            .args(["/C", "mklink", "/J"])
+            .arg(&logs)
+            .arg(&outside)
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
+
+        RotatingLog::new(logs.join("daemon.sock.abcdef01.log")).append("sensitive diagnostics");
+        assert_eq!(std::fs::read(&victim).unwrap(), b"keep this log\n");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_regular_rotating_log_keeps_append_and_rotation() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir
+            .path()
+            .join(".prime/agent/logs/daemon.sock.abcdef01.log");
+        let log = RotatingLog {
+            path: path.clone(),
+            max_bytes: 5,
+        };
+        log.append("one");
+        log.append("two");
+        assert_eq!(
+            std::fs::read_to_string(path.with_extension("log.1")).unwrap(),
+            "one\n"
+        );
+        assert_eq!(std::fs::read_to_string(path).unwrap(), "two\n");
+    }
+
     #[cfg(unix)]
     #[test]
     fn rotating_log_rejects_a_hard_linked_file() {

@@ -307,6 +307,34 @@ mod tests {
         assert_eq!(std::fs::read_link(&path).unwrap(), victim);
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn windows_spawn_open_rejects_a_planted_log_symlink() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = log_path(dir.path(), "a");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let victim = dir.path().join("unrelated-file");
+        std::fs::write(&victim, b"keep this file").unwrap();
+        std::os::windows::fs::symlink_file(&victim, &path).unwrap();
+
+        assert!(open_for_spawn(&path).is_err());
+        assert_eq!(std::fs::read(&victim).unwrap(), b"keep this file");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_spawn_open_rejects_a_hard_linked_log() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = log_path(dir.path(), "a");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let victim = dir.path().join("unrelated-file");
+        std::fs::write(&victim, b"keep this file").unwrap();
+        std::fs::hard_link(&victim, &path).unwrap();
+
+        assert!(open_for_spawn(&path).is_err());
+        assert_eq!(std::fs::read(&victim).unwrap(), b"keep this file");
+    }
+
     #[cfg(unix)]
     #[test]
     fn tail_does_not_read_a_planted_log_symlink() {
@@ -368,6 +396,31 @@ mod tests {
         std::fs::create_dir(&real_agent).unwrap();
         let linked_agent = dir.path().join("linked-agent");
         std::os::unix::fs::symlink(&real_agent, &linked_agent).unwrap();
+
+        let stderr = log_path(&linked_agent, "a");
+        drop(open_for_spawn(&stderr).unwrap());
+        assert!(real_agent.join("logs/worker-a.stderr.log").exists());
+
+        let socket = dir.path().join("daemon.sock");
+        let daemon_log = crate::paths::daemon_log_path(&socket, &linked_agent);
+        crate::paths::RotatingLog::new(daemon_log.clone()).append("ready");
+        assert_eq!(std::fs::read_to_string(daemon_log).unwrap(), "ready\n");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_linked_agent_root_keeps_generated_logs_working() {
+        let dir = tempfile::tempdir().unwrap();
+        let real_agent = dir.path().join("real-agent");
+        std::fs::create_dir(&real_agent).unwrap();
+        let linked_agent = dir.path().join("linked-agent");
+        let output = std::process::Command::new("cmd")
+            .args(["/C", "mklink", "/J"])
+            .arg(&linked_agent)
+            .arg(&real_agent)
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
 
         let stderr = log_path(&linked_agent, "a");
         drop(open_for_spawn(&stderr).unwrap());
