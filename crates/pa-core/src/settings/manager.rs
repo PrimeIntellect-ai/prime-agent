@@ -472,8 +472,8 @@ impl SettingsManager {
     }
 
     pub fn set_project_packages(&mut self, packages: Vec<serde_json::Value>) {
-        // Retain edits to existing project documents for migration/removal, but
-        // project packages never become active, including in this manager.
+        // Preserve project package entries for explicit removal. They never
+        // become active, including in this manager.
         let value = serde_json::Value::Array(packages);
         self.persist_scope_field(SettingsScope::Project, "packages", &value);
         if let serde_json::Value::Object(project_raw) = self

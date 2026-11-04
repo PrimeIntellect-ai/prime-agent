@@ -111,11 +111,15 @@ impl Inner {
         }
         let progress = options.on_bootstrap_progress.clone();
         let skills = self.options.python_skills.clone();
-        let python = crate::kernel::bootstrap::ensure_kernel_python(
+        let python = crate::kernel::bootstrap::ensure_kernel_python_for_project(
             crate::kernel::bootstrap::EnsureKernelPythonOptions {
                 python_skills: skills,
                 on_progress: progress,
             },
+            self.options
+                .cwd
+                .clone()
+                .or_else(|| std::env::current_dir().ok()),
         )
         .await?;
         *lock(&self.resolved_python) = Some(python.clone());
@@ -163,8 +167,9 @@ impl Inner {
             return Err(anyhow!("Kernel was disposed during startup"));
         }
 
-        let env = kernel_spawn_env(&self.options.env);
         let cwd = self.options.cwd.clone();
+        let project = cwd.clone().or_else(|| std::env::current_dir().ok());
+        let env = kernel_spawn_env(&self.options.env, project.as_deref());
         let mut command = tokio::process::Command::new(&python);
         command
             // `-m` otherwise prepends the project cwd to sys.path, allowing
@@ -531,18 +536,26 @@ impl Inner {
 /// read UTF-8 regardless of the active legacy code page, overriding any
 /// provisioner-provided `PYTHONUTF8`) and the owner pid the runtime journals
 /// its process groups under.
-fn kernel_spawn_env(options_env: &HashMap<String, String>) -> HashMap<String, String> {
-    let mut env: HashMap<String, String> = std::env::vars().collect();
+fn kernel_spawn_env(
+    options_env: &HashMap<String, String>,
+    project: Option<&std::path::Path>,
+) -> HashMap<std::ffi::OsString, std::ffi::OsString> {
+    let mut env: HashMap<std::ffi::OsString, std::ffi::OsString> = std::env::vars_os().collect();
     for (key, value) in options_env {
-        env.insert(key.clone(), value.clone());
+        #[cfg(windows)]
+        env.retain(|name, _| !name.to_string_lossy().eq_ignore_ascii_case(key));
+        env.insert(key.into(), value.into());
     }
-    if cfg!(windows) {
-        env.insert("PYTHONUTF8".to_string(), "1".to_string());
+    #[cfg(windows)]
+    {
+        env.retain(|name, _| !name.to_string_lossy().eq_ignore_ascii_case("PYTHONUTF8"));
+        env.insert("PYTHONUTF8".into(), "1".into());
     }
     env.insert(
-        "PRIME_AGENT_KERNEL_OWNER_PID".to_string(),
-        std::process::id().to_string(),
+        "PRIME_AGENT_KERNEL_OWNER_PID".into(),
+        std::process::id().to_string().into(),
     );
+    crate::kernel::python_env::sanitize_python_env(&mut env, project);
     env
 }
 
@@ -561,6 +574,40 @@ mod tests {
         ReplKernelManager::new(KernelManagerOptions::default())
     }
 
+    #[test]
+    fn kernel_spawn_filters_project_python_overrides_after_applying_options() {
+        let root = tempfile::tempdir().unwrap();
+        let project = root.path().join("project");
+        let trusted = root.path().join("trusted");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::create_dir_all(&trusted).unwrap();
+        let options = HashMap::from([
+            (
+                "PYTHONPATH".to_string(),
+                std::env::join_paths([std::path::Path::new("."), &project, &trusted])
+                    .unwrap()
+                    .into_string()
+                    .unwrap(),
+            ),
+            (
+                "PYTHONHOME".to_string(),
+                project.to_string_lossy().into_owned(),
+            ),
+            (
+                "PYTHONUSERBASE".to_string(),
+                project.to_string_lossy().into_owned(),
+            ),
+        ]);
+
+        let env = kernel_spawn_env(&options, Some(&project));
+        assert_eq!(
+            env.get(std::ffi::OsStr::new("PYTHONPATH")),
+            Some(&trusted.into_os_string())
+        );
+        assert!(!env.contains_key(std::ffi::OsStr::new("PYTHONHOME")));
+        assert!(!env.contains_key(std::ffi::OsStr::new("PYTHONUSERBASE")));
+    }
+
     fn temp_root(tag: &str) -> std::path::PathBuf {
         let dir =
             std::env::temp_dir().join(format!("pa-stderr-perms-{}-{tag}", std::process::id()));
@@ -572,11 +619,16 @@ mod tests {
     #[test]
     fn kernel_spawn_env_forces_utf8_mode() {
         let mut options_env = HashMap::new();
-        options_env.insert("PYTHONUTF8".to_string(), "0".to_string());
-        let env = kernel_spawn_env(&options_env);
-        assert_eq!(env.get("PYTHONUTF8").map(String::as_str), Some("1"));
+        options_env.insert("pythonutf8".to_string(), "0".to_string());
+        let env = kernel_spawn_env(&options_env, None);
         assert_eq!(
-            env.get("PRIME_AGENT_KERNEL_OWNER_PID").map(String::as_str),
+            env.get(std::ffi::OsStr::new("PYTHONUTF8"))
+                .and_then(|value| value.to_str()),
+            Some("1")
+        );
+        assert_eq!(
+            env.get(std::ffi::OsStr::new("PRIME_AGENT_KERNEL_OWNER_PID"))
+                .and_then(|value| value.to_str()),
             Some(std::process::id().to_string().as_str())
         );
     }

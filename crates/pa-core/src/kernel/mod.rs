@@ -11,6 +11,7 @@ pub mod manager;
 pub mod orphan_journal;
 pub mod protocol;
 pub mod provisioner;
+pub(crate) mod python_env;
 pub mod rlm_runtime;
 pub mod shared;
 pub mod state_snapshot;
@@ -35,3 +36,13 @@ pub use shared::{
     EXECUTE_STATUS_OK,
 };
 pub use state_snapshot::{manifest_path_in, snapshot_path_in, RestoreResult, SnapshotResult};
+
+/// Environment for a Python process launched from `project`: caller-owned
+/// absolute paths remain available, while repository paths cannot run code
+/// during interpreter initialization.
+#[must_use]
+pub fn python_process_environment(
+    project: &std::path::Path,
+) -> std::collections::HashMap<std::ffi::OsString, std::ffi::OsString> {
+    python_env::inherited_python_env(Some(project))
+}

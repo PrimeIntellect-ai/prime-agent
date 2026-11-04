@@ -811,7 +811,7 @@ mod tests {
     }
 
     #[test]
-    fn legacy_project_scope_persists_but_stays_inert_until_removal() {
+    fn project_packages_stay_inert_until_explicit_removal() {
         let (dir, mut manager) = setup();
         make_pkg(&dir, "project-pkg");
         manager
