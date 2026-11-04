@@ -320,6 +320,21 @@ impl LockDir {
         PathBuf::from(path)
     }
 
+    /// A readable handle to the lock's original parent for a handle-relative
+    /// read or write while this guard is held.
+    #[cfg(unix)]
+    pub(crate) fn original_parent_for_io(&self) -> io::Result<fs::File> {
+        match super::fs::open_readable_directory_at(&self.parent) {
+            Ok(parent) => Ok(parent),
+            // A writable, searchable directory need not be readable. The
+            // search handle still permits relative file I/O in that layout.
+            Err(error) if error.kind() == io::ErrorKind::PermissionDenied => {
+                self.parent.try_clone()
+            }
+            Err(error) => Err(error),
+        }
+    }
+
     /// Acquire exclusively: create `{file}.lock` as an empty directory and
     /// bump its mtime. A fresh foreign lock surfaces as
     /// [`io::ErrorKind::WouldBlock`] (the TS protocol's ELOCKED); a lock
@@ -550,21 +565,6 @@ impl LockDir {
             }
         }
         Ok(())
-    }
-
-    /// A readable handle to the lock's original parent for a handle-relative
-    /// read or write while this guard is held.
-    #[cfg(unix)]
-    pub(crate) fn original_parent_for_io(&self) -> io::Result<fs::File> {
-        match super::fs::open_readable_directory_at(&self.parent) {
-            Ok(parent) => Ok(parent),
-            // A writable, searchable directory need not be readable. The
-            // search handle still permits relative file I/O in that layout.
-            Err(error) if error.kind() == io::ErrorKind::PermissionDenied => {
-                self.parent.try_clone()
-            }
-            Err(error) => Err(error),
-        }
     }
 
     #[cfg(not(unix))]
