@@ -24,6 +24,8 @@ const FILE_NAME: &str = "telemetry.jsonl";
 pub struct FileSink {
     path: PathBuf,
     max_bytes: u64,
+    #[cfg(unix)]
+    follow_symlinks: bool,
 }
 
 impl FileSink {
@@ -33,14 +35,19 @@ impl FileSink {
         Self {
             path: agent_dir.join(FILE_NAME),
             max_bytes: DEFAULT_MAX_BYTES,
+            #[cfg(unix)]
+            follow_symlinks: false,
         }
     }
 
-    /// Mirror at an explicit path (tests) with the default cap.
+    /// Mirror at an explicit path (tests) with the default cap. An explicit
+    /// path may intentionally be a link, so it retains link-following behavior.
     pub fn at(path: impl Into<PathBuf>) -> Self {
         Self {
             path: path.into(),
             max_bytes: DEFAULT_MAX_BYTES,
+            #[cfg(unix)]
+            follow_symlinks: true,
         }
     }
 
@@ -83,11 +90,11 @@ impl FileSink {
         // The current mirror may have been rotated by another sink since the
         // size check. Do not create an empty replacement that could overwrite
         // the retained rotation.
-        let file = match tokio::fs::OpenOptions::new()
-            .append(true)
-            .open(&self.path)
-            .await
-        {
+        let mut options = tokio::fs::OpenOptions::new();
+        options.append(true);
+        #[cfg(unix)]
+        self.set_link_policy(&mut options);
+        let file = match options.open(&self.path).await {
             Ok(file) => file,
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
             Err(err) => return Err(err).with_context(|| format!("open {}", self.path.display())),
@@ -123,7 +130,10 @@ impl FileSink {
         let mut options = tokio::fs::OpenOptions::new();
         options.create(true).append(true);
         #[cfg(unix)]
-        options.mode(0o600);
+        {
+            options.mode(0o600);
+            self.set_link_policy(&mut options);
+        }
         let file = options
             .open(&self.path)
             .await
@@ -131,6 +141,15 @@ impl FileSink {
         #[cfg(unix)]
         self.make_private(&file).await?;
         Ok(file)
+    }
+
+    #[cfg(unix)]
+    fn set_link_policy(&self, options: &mut tokio::fs::OpenOptions) {
+        if !self.follow_symlinks {
+            let nofollow =
+                i32::try_from(rustix::fs::OFlags::NOFOLLOW.bits()).expect("O_NOFOLLOW fits in i32");
+            options.custom_flags(nofollow);
+        }
     }
 
     #[cfg(unix)]
@@ -291,5 +310,83 @@ mod tests {
             tokio::fs::read_to_string(&rotated).await.unwrap(),
             "retained history\n"
         );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn default_mirror_does_not_follow_a_link_when_appending() {
+        use std::os::unix::fs::{symlink, PermissionsExt};
+
+        let dir = tempfile::tempdir().unwrap();
+        let sink = FileSink::new(dir.path());
+        let victim = dir.path().join("other-file");
+        std::fs::write(&victim, "keep this file\n").unwrap();
+        std::fs::set_permissions(&victim, std::fs::Permissions::from_mode(0o644)).unwrap();
+        symlink(&victim, sink.path()).unwrap();
+
+        assert_eq!(
+            sink.send_batch("install-1", vec![event("new event")]).await,
+            SinkOutcome::Dropped
+        );
+        assert_eq!(
+            std::fs::read_to_string(&victim).unwrap(),
+            "keep this file\n"
+        );
+        assert_eq!(
+            std::fs::metadata(&victim).unwrap().permissions().mode() & 0o777,
+            0o644
+        );
+        assert_eq!(std::fs::read_link(sink.path()).unwrap(), victim);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn default_mirror_does_not_follow_a_link_when_rotating() {
+        use std::os::unix::fs::{symlink, PermissionsExt};
+
+        let dir = tempfile::tempdir().unwrap();
+        let mut sink = FileSink::new(dir.path());
+        sink.max_bytes = 1;
+        let victim = dir.path().join("other-file");
+        std::fs::write(&victim, "keep this file\n").unwrap();
+        std::fs::set_permissions(&victim, std::fs::Permissions::from_mode(0o644)).unwrap();
+        symlink(&victim, sink.path()).unwrap();
+
+        assert_eq!(
+            sink.send_batch("install-1", vec![event("new event")]).await,
+            SinkOutcome::Dropped
+        );
+        assert_eq!(
+            std::fs::read_to_string(&victim).unwrap(),
+            "keep this file\n"
+        );
+        assert_eq!(
+            std::fs::metadata(&victim).unwrap().permissions().mode() & 0o777,
+            0o644
+        );
+        assert_eq!(std::fs::read_link(sink.path()).unwrap(), victim);
+        assert!(!sink.path().with_extension("jsonl.1").exists());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn explicit_mirror_path_still_follows_a_link() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().unwrap();
+        let victim = dir.path().join("chosen-file");
+        let link = dir.path().join("chosen-mirror");
+        std::fs::write(&victim, "existing line\n").unwrap();
+        symlink(&victim, &link).unwrap();
+        let sink = FileSink::at(&link);
+
+        assert_eq!(
+            sink.send_batch("install-1", vec![event("new event")]).await,
+            SinkOutcome::Sent
+        );
+        let content = std::fs::read_to_string(&victim).unwrap();
+        assert!(content.starts_with("existing line\n"));
+        assert!(content.contains("\"name\":\"new event\""));
+        assert_eq!(std::fs::read_link(&link).unwrap(), victim);
     }
 }
