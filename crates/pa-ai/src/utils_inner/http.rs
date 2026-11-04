@@ -35,6 +35,29 @@ pub(crate) fn append_bounded_error_text(out: &mut String, chunk: &str) -> bool {
     chunk.len() >= remaining
 }
 
+/// Decode one body chunk without replacing a UTF-8 character split across chunks.
+fn decode_text_chunk(utf8_tail: &mut Vec<u8>, bytes: &[u8]) -> String {
+    utf8_tail.extend_from_slice(bytes);
+    match std::str::from_utf8(utf8_tail) {
+        Ok(text) => {
+            let text = text.to_string();
+            utf8_tail.clear();
+            text
+        }
+        Err(error) if error.error_len().is_none() => {
+            let valid_up_to = error.valid_up_to();
+            let text = String::from_utf8_lossy(&utf8_tail[..valid_up_to]).to_string();
+            utf8_tail.drain(..valid_up_to);
+            text
+        }
+        Err(_) => {
+            let text = String::from_utf8_lossy(utf8_tail).to_string();
+            utf8_tail.clear();
+            text
+        }
+    }
+}
+
 /// The HTTP/1.1 client every provider shares, pinned with `http1_only()` so that enabling the
 /// reqwest `http2` feature (bedrock) cannot change the transport of any other provider.
 fn client() -> &'static reqwest::Client {
@@ -105,28 +128,7 @@ impl HttpResponse {
                 None => self.body.chunk().await,
             };
             let text = match chunk {
-                Ok(Some(bytes)) => {
-                    self.utf8_tail.extend_from_slice(&bytes);
-                    match std::str::from_utf8(&self.utf8_tail) {
-                        Ok(text) => {
-                            let text = text.to_string();
-                            self.utf8_tail.clear();
-                            text
-                        }
-                        Err(error) if error.error_len().is_none() => {
-                            let valid_up_to = error.valid_up_to();
-                            let text =
-                                String::from_utf8_lossy(&self.utf8_tail[..valid_up_to]).to_string();
-                            self.utf8_tail.drain(..valid_up_to);
-                            text
-                        }
-                        Err(_) => {
-                            let text = String::from_utf8_lossy(&self.utf8_tail).to_string();
-                            self.utf8_tail.clear();
-                            text
-                        }
-                    }
-                }
+                Ok(Some(bytes)) => decode_text_chunk(&mut self.utf8_tail, &bytes),
                 Ok(None) if self.utf8_tail.is_empty() => return Ok(None),
                 Ok(None) => {
                     let text = String::from_utf8_lossy(&self.utf8_tail).to_string();
@@ -205,16 +207,25 @@ impl HttpResponse {
     /// already received when the peer stalls.
     pub async fn read_error_text(&mut self) -> Result<String, ProviderError> {
         let mut out = String::new();
+        let mut raw_bytes = self.utf8_tail.len();
         let deadline = tokio::time::Instant::now() + ERROR_BODY_READ_TIMEOUT;
-        while out.len() < MAX_ERROR_BODY_BYTES {
-            let next = match tokio::time::timeout_at(deadline, self.next_text()).await {
+        while raw_bytes < MAX_ERROR_BODY_BYTES && out.len() < MAX_ERROR_BODY_BYTES {
+            let next = match tokio::time::timeout_at(deadline, self.next_bytes()).await {
                 Ok(result) => result?,
                 Err(_) => break,
             };
-            let Some(chunk) = next else {
+            let Some(bytes) = next else {
+                if !self.utf8_tail.is_empty() {
+                    let text = String::from_utf8_lossy(&self.utf8_tail).to_string();
+                    self.utf8_tail.clear();
+                    append_bounded_error_text(&mut out, &text);
+                }
                 break;
             };
-            if append_bounded_error_text(&mut out, &chunk) {
+            let take = (MAX_ERROR_BODY_BYTES - raw_bytes).min(bytes.len());
+            raw_bytes += take;
+            let text = decode_text_chunk(&mut self.utf8_tail, &bytes[..take]);
+            if !text.is_empty() && append_bounded_error_text(&mut out, &text) {
                 break;
             }
         }
@@ -459,6 +470,60 @@ mod tests {
             close_tx.send(()).unwrap();
             server.await.unwrap();
         }
+    }
+
+    /// A trailing UTF-8 lead byte is held by text decoding, but it still uses
+    /// the last byte of the raw error-body budget.
+    #[tokio::test]
+    async fn error_text_stops_at_raw_limit_with_incomplete_utf8() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (close_tx, close_rx) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = [0u8; 4096];
+            let mut head = String::new();
+            loop {
+                let read = socket.read(&mut request).await.unwrap();
+                if read == 0 {
+                    return;
+                }
+                head.push_str(&String::from_utf8_lossy(&request[..read]));
+                if head.contains("\r\n\r\n") {
+                    break;
+                }
+            }
+            let header = format!(
+                "HTTP/1.1 500 Internal Server Error\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                MAX_ERROR_BODY_BYTES + 1
+            );
+            socket.write_all(header.as_bytes()).await.unwrap();
+            socket
+                .write_all(&vec![b'x'; MAX_ERROR_BODY_BYTES - 1])
+                .await
+                .unwrap();
+            socket.write_all(&[0xE4]).await.unwrap();
+            close_rx.await.unwrap();
+        });
+
+        let mut response = send(RequestOptions::new(
+            reqwest::Method::GET,
+            format!("http://{addr}/"),
+        ))
+        .await
+        .unwrap();
+        let body = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            response.read_error_text(),
+        )
+        .await
+        .expect("raw byte limit must end the diagnostic before the deadline")
+        .unwrap();
+        assert_eq!(body, "x".repeat(MAX_ERROR_BODY_BYTES - 1));
+        close_tx.send(()).unwrap();
+        server.await.unwrap();
     }
 
     /// A peer that stalls below the byte cap must not hold an error diagnostic indefinitely.
