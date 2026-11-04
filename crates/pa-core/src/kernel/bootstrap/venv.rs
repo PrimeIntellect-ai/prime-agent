@@ -88,11 +88,9 @@ async fn run_async(command: &str, args: &[String], project: Option<&Path>) -> an
         // uv otherwise discovers uv.toml/pyproject.toml from the process cwd,
         // which may be the repository opened before the first prompt.
         child.arg("--no-config").args(&args).stdin(Stdio::null());
-        child
-            .env_clear()
-            .envs(crate::kernel::python_env::inherited_python_env(
-                project.as_deref(),
-            ));
+        let mut env = crate::kernel::python_env::inherited_python_env(project.as_deref());
+        crate::kernel::python_env::sanitize_uv_path(&mut env, project.as_deref());
+        child.env_clear().envs(env);
         // Hidden window on Windows (TS `spawnHidden`).
         crate::platform::process::set_no_window(&mut child);
         // CPython must read UTF-8 .pth files even under a Windows legacy

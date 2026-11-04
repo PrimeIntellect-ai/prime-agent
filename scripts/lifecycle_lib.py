@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 import pty
 import re
+import shlex
 import select
 import signal
 import socket
@@ -67,11 +68,21 @@ def env_for(root):
 
 
 def skill_pythonpath():
-    """The repo's bundled skill sources for kernel cells that import skills. With a
-    PRIME_AGENT_KERNEL_PYTHON override the product installs no bundled skills into
-    that venv (it disables them), so these checks put the sources on PYTHONPATH."""
+    """The bundled skill sources used by a test-selected kernel interpreter."""
     skills = Path(__file__).resolve().parent.parent / "skills"
     return os.pathsep.join(sorted(str(path) for path in skills.glob("*/src")))
+
+
+def use_skill_python(root, env):
+    """Give a selected test interpreter the bundled skills without changing product startup."""
+    python = env.get("PRIME_AGENT_KERNEL_PYTHON")
+    if python:
+        wrapper = root / "kernel-python-with-skills"
+        wrapper.write_text("#!/bin/sh\nexport PYTHONPATH=" + shlex.quote(skill_pythonpath())
+                           + "\nexec " + shlex.quote(python) + " \"$@\"\n")
+        wrapper.chmod(0o700)
+        env["PRIME_AGENT_KERNEL_PYTHON"] = str(wrapper)
+    return env
 
 
 def actual_hello(binary, root, env):

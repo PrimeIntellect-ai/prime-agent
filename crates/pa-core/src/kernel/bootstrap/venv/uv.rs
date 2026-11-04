@@ -127,4 +127,26 @@ mod safe_uv_tests {
             Some(trusted.join("uv"))
         );
     }
+
+    #[test]
+    fn uv_search_skips_sibling_directory_in_repository() {
+        let root = tempfile::tempdir().unwrap();
+        let repo = root.path().join("repo");
+        let project = repo.join("app");
+        let sibling = repo.join("tools");
+        let trusted = root.path().join("trusted");
+        for dir in [&project, &sibling, &trusted] {
+            std::fs::create_dir_all(dir).unwrap();
+        }
+        std::fs::create_dir(repo.join(".git")).unwrap();
+        for path in [sibling.join("uv"), trusted.join("uv")] {
+            std::fs::write(&path, "#!/bin/sh\nexit 0\n").unwrap();
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let path = std::env::join_paths([&sibling, &trusted]).unwrap();
+        assert_eq!(
+            find_executable("uv", &path, Some(&project)),
+            Some(trusted.join("uv"))
+        );
+    }
 }
