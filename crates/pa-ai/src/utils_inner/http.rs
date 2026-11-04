@@ -22,6 +22,7 @@ fn client() -> &'static reqwest::Client {
         crate::utils_inner::tls::http_client_builder()
             .http1_only()
             .pool_idle_timeout(std::time::Duration::from_secs(90))
+            .redirect(crate::utils_inner::tls::same_origin_redirect_policy())
             .build()
             .expect("reqwest client")
     })
@@ -33,6 +34,7 @@ fn h2_alpn_client() -> &'static reqwest::Client {
     H2_ALPN_CLIENT.get_or_init(|| {
         crate::utils_inner::tls::http_client_builder()
             .pool_idle_timeout(std::time::Duration::from_secs(90))
+            .redirect(crate::utils_inner::tls::same_origin_redirect_policy())
             .build()
             .expect("reqwest h2 client")
     })
@@ -431,5 +433,105 @@ mod tests {
             text.push_str(&chunk);
         }
         assert_eq!(text, "cut \u{FFFD}");
+    }
+
+    #[tokio::test]
+    async fn provider_api_key_does_not_cross_a_redirect_origin() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let target = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let target_addr = target.local_addr().unwrap();
+        let (captured_tx, mut captured_rx) = tokio::sync::oneshot::channel();
+        let target_task = tokio::spawn(async move {
+            let (mut stream, _) = target.accept().await.unwrap();
+            let mut head = Vec::new();
+            let mut buffer = [0u8; 4096];
+            while !head.windows(4).any(|bytes| bytes == b"\r\n\r\n") {
+                let read = stream.read(&mut buffer).await.unwrap();
+                assert_ne!(read, 0);
+                head.extend_from_slice(&buffer[..read]);
+            }
+            let _ = captured_tx.send(String::from_utf8_lossy(&head).to_string());
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                .await
+                .unwrap();
+        });
+
+        let source = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let source_addr = source.local_addr().unwrap();
+        let source_task = tokio::spawn(async move {
+            let (mut stream, _) = source.accept().await.unwrap();
+            let mut head = vec![0u8; 4096];
+            let _ = stream.read(&mut head).await.unwrap();
+            stream
+                .write_all(
+                    format!(
+                        "HTTP/1.1 302 Found\r\nLocation: http://{target_addr}/\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                    )
+                    .as_bytes(),
+                )
+                .await
+                .unwrap();
+        });
+
+        let mut request =
+            RequestOptions::new(reqwest::Method::GET, format!("http://{source_addr}/"));
+        request
+            .headers
+            .push(("x-api-key".into(), "test-secret".into()));
+        let response = send(request).await;
+        source_task.await.unwrap();
+        let captured = captured_rx.try_recv().ok();
+        target_task.abort();
+        assert!(
+            !captured
+                .as_deref()
+                .is_some_and(|head| head.to_ascii_lowercase().contains("x-api-key: test-secret")),
+            "provider API key crossed the redirect origin"
+        );
+        assert!(response.is_err(), "cross-origin redirect was followed");
+    }
+
+    #[tokio::test]
+    async fn same_origin_provider_redirect_preserves_the_request() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let mut captured = Vec::new();
+            for path in ["/next", ""] {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut head = Vec::new();
+                let mut buffer = [0u8; 4096];
+                while !head.windows(4).any(|bytes| bytes == b"\r\n\r\n") {
+                    let read = stream.read(&mut buffer).await.unwrap();
+                    assert_ne!(read, 0);
+                    head.extend_from_slice(&buffer[..read]);
+                }
+                captured.push(String::from_utf8_lossy(&head).to_string());
+                let response = if path.is_empty() {
+                    "HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_string()
+                } else {
+                    format!("HTTP/1.1 302 Found\r\nLocation: {path}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                };
+                stream.write_all(response.as_bytes()).await.unwrap();
+            }
+            captured
+        });
+
+        let mut request = RequestOptions::new(reqwest::Method::GET, format!("http://{addr}/"));
+        request
+            .headers
+            .push(("x-api-key".into(), "test-secret".into()));
+        let response = send(request).await.unwrap();
+        assert_eq!(response.status, 200);
+        let captured = server.await.unwrap();
+        assert!(captured[0].starts_with("GET / HTTP/1.1"));
+        assert!(captured[1].starts_with("GET /next HTTP/1.1"));
+        assert!(captured
+            .iter()
+            .all(|head| head.to_ascii_lowercase().contains("x-api-key: test-secret")));
     }
 }

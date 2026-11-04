@@ -90,6 +90,7 @@ impl CodexHttp for ReqwestCodexHttp {
         Box::pin(async move {
             let client = crate::utils_inner::tls::http_client_builder()
                 .timeout(Duration::from_millis(timeout_ms))
+                .redirect(crate::utils_inner::tls::same_origin_redirect_policy())
                 .build()
                 .map_err(|error| error.to_string())?;
             let response = client
@@ -165,5 +166,64 @@ mod tests {
             .post_form("https://other.example/token", "", 1)
             .await
             .is_err());
+    }
+
+    #[tokio::test]
+    async fn codex_refresh_token_does_not_cross_a_redirect_origin() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let target = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let target_addr = target.local_addr().unwrap();
+        let (captured_tx, mut captured_rx) = tokio::sync::oneshot::channel();
+        let target_task = tokio::spawn(async move {
+            let (mut stream, _) = target.accept().await.unwrap();
+            let mut request = Vec::new();
+            let mut buffer = [0u8; 4096];
+            while !String::from_utf8_lossy(&request).contains("refresh_token=test-secret") {
+                let read = stream.read(&mut buffer).await.unwrap();
+                assert_ne!(read, 0);
+                request.extend_from_slice(&buffer[..read]);
+            }
+            let _ = captured_tx.send(String::from_utf8_lossy(&request).to_string());
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}")
+                .await
+                .unwrap();
+        });
+
+        let source = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let source_addr = source.local_addr().unwrap();
+        let source_task = tokio::spawn(async move {
+            let (mut stream, _) = source.accept().await.unwrap();
+            let mut request = vec![0u8; 4096];
+            let _ = stream.read(&mut request).await.unwrap();
+            stream
+                .write_all(
+                    format!(
+                        "HTTP/1.1 307 Temporary Redirect\r\nLocation: http://{target_addr}/\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                    )
+                    .as_bytes(),
+                )
+                .await
+                .unwrap();
+        });
+
+        let response = ReqwestCodexHttp::new()
+            .post_form(
+                &format!("http://{source_addr}/"),
+                "refresh_token=test-secret",
+                3_000,
+            )
+            .await;
+        source_task.await.unwrap();
+        let captured = captured_rx.try_recv().ok();
+        target_task.abort();
+        assert!(
+            !captured
+                .as_deref()
+                .is_some_and(|request| request.contains("refresh_token=test-secret")),
+            "OAuth refresh token crossed the redirect origin"
+        );
+        assert!(response.is_err(), "cross-origin redirect was followed");
     }
 }

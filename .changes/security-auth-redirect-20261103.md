@@ -1,0 +1,1 @@
+- Prevented Prime login and trace uploads from sending private data across site redirects.
