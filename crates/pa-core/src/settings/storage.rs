@@ -266,7 +266,7 @@ impl FileSettingsStorage {
                 .file_name()
                 .ok_or_else(|| anyhow!("Project settings path has no file name"))?;
             #[cfg(test)]
-            project_read_step(ProjectReadStep::BeforeOpen);
+            project_read_step(ProjectReadStep::Open);
             open_regular_file_at(&parent, name)?
         };
         #[cfg(not(unix))]
@@ -277,11 +277,11 @@ impl FileSettingsStorage {
         }
         #[cfg(all(test, unix))]
         // Preserve the pre-fix path-check interleavings in the race test.
-        project_read_step(ProjectReadStep::BeforeContainmentCheck);
+        project_read_step(ProjectReadStep::Restore);
         #[cfg(not(unix))]
         self.check_locked_project_path(path, locked_path)?;
         #[cfg(all(test, unix))]
-        project_read_step(ProjectReadStep::BeforeMetadataCheck);
+        project_read_step(ProjectReadStep::Repoint);
         #[cfg(not(unix))]
         {
             let checked = fs::metadata(locked_path)?;
@@ -566,15 +566,18 @@ thread_local! {
     #[cfg(unix)]
     static BEFORE_PROJECT_WRITE: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
     #[cfg(unix)]
-    static PROJECT_READ_STEP: std::cell::RefCell<Option<Box<dyn FnMut(ProjectReadStep)>>> = const { std::cell::RefCell::new(None) };
+    static PROJECT_READ_STEP: std::cell::RefCell<Option<ProjectReadHook>> = const { std::cell::RefCell::new(None) };
 }
+
+#[cfg(all(test, unix))]
+type ProjectReadHook = Box<dyn FnMut(ProjectReadStep)>;
 
 #[cfg(all(test, unix))]
 #[derive(Clone, Copy)]
 enum ProjectReadStep {
-    BeforeOpen,
-    BeforeContainmentCheck,
-    BeforeMetadataCheck,
+    Open,
+    Restore,
+    Repoint,
 }
 
 #[cfg(all(test, unix))]
@@ -783,11 +786,11 @@ mod tests {
         let outside = external.clone();
         PROJECT_READ_STEP.with(|hook| {
             *hook.borrow_mut() = Some(Box::new(move |step| match step {
-                ProjectReadStep::BeforeOpen | ProjectReadStep::BeforeMetadataCheck => {
+                ProjectReadStep::Open | ProjectReadStep::Repoint => {
                     fs::rename(&target, &moved_for_swap).unwrap();
                     symlink(&outside, &target).unwrap();
                 }
-                ProjectReadStep::BeforeContainmentCheck => {
+                ProjectReadStep::Restore => {
                     fs::remove_file(&target).unwrap();
                     fs::rename(&moved_for_swap, &target).unwrap();
                 }
