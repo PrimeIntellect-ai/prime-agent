@@ -11,6 +11,8 @@ pub mod transport;
 pub mod windows_console;
 #[cfg(windows)]
 pub(crate) mod windows_pipe;
+#[cfg(windows)]
+mod windows_pipe_security;
 
 pub use dirs::{agent_dir, home_dir};
 pub use identity::socket_identity;
