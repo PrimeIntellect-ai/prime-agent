@@ -558,7 +558,7 @@ mod tests {
 
     #[tokio::test]
     async fn prime_auth_get_rejects_oversized_body_before_peer_finishes() {
-        let (url, server) = oversized_stalled_auth_response(false).await;
+        let (url, server) = oversized_stalled_auth_response(/*chunked*/ false).await;
         let result = tokio::time::timeout(
             Duration::from_secs(2),
             ReqwestPrimeHttp.get(&url, "sk-test", DEFAULT_REQUEST_TIMEOUT_MS),
@@ -571,10 +571,15 @@ mod tests {
 
     #[tokio::test]
     async fn prime_auth_post_rejects_oversized_chunked_body_before_peer_finishes() {
-        let (url, server) = oversized_stalled_auth_response(true).await;
+        let (url, server) = oversized_stalled_auth_response(/*chunked*/ true).await;
         let result = tokio::time::timeout(
             Duration::from_secs(2),
-            ReqwestPrimeHttp.post_json(&url, "{}", None, DEFAULT_REQUEST_TIMEOUT_MS),
+            ReqwestPrimeHttp.post_json(
+                &url,
+                "{}",
+                /*bearer*/ None,
+                DEFAULT_REQUEST_TIMEOUT_MS,
+            ),
         )
         .await
         .expect("oversized Prime auth response should fail before the peer closes");
