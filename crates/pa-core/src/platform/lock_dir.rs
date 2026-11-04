@@ -114,6 +114,31 @@ fn open_lock_dir_at(parent: &fs::File, name: &CStr) -> io::Result<fs::File> {
 }
 
 #[cfg(unix)]
+fn chmod_readable_lock_dir_at(
+    parent: &fs::File,
+    name: &CStr,
+    created: LockIdentity,
+) -> io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let fd = unsafe {
+        libc::openat(
+            parent.as_raw_fd(),
+            name.as_ptr(),
+            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+        )
+    };
+    if fd < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let dir = unsafe { fs::File::from_raw_fd(fd) };
+    if lock_identity(&stat_file(&dir)?) != created {
+        return Err(io::Error::other("Created lock directory changed"));
+    }
+    dir.set_permissions(fs::Permissions::from_mode(0o700))
+}
+
+#[cfg(unix)]
 fn lock_identity(stat: &libc::stat) -> LockIdentity {
     LockIdentity {
         dev: stat.st_dev,
@@ -623,7 +648,18 @@ impl LockDir {
                 .ok_or_else(|| io::Error::other("Created lock directory changed"))?;
             created_identity = Some(created);
             if let Some(owner) = owner {
-                owned_dir = Some(open_lock_dir_at(parent, &name)?);
+                owned_dir = Some(match open_lock_dir_at(parent, &name) {
+                    Ok(dir) => dir,
+                    Err(error) if error.kind() == io::ErrorKind::PermissionDenied => {
+                        // O_SEARCH needs search permission on macOS. A 0600
+                        // directory under umask 0177 can instead be opened
+                        // for reading, chmodded through that verified handle,
+                        // then opened for search again.
+                        chmod_readable_lock_dir_at(parent, &name, created)?;
+                        open_lock_dir_at(parent, &name)?
+                    }
+                    Err(error) => return Err(error),
+                });
                 let dir = owned_dir.as_ref().expect("opened lock directory");
                 if lock_identity(&stat_file(dir)?) != created {
                     return Err(io::Error::other("Created lock directory changed"));
@@ -637,25 +673,36 @@ impl LockDir {
                     if error.kind() != io::ErrorKind::PermissionDenied {
                         return Err(error);
                     }
-                    // With umask 0177 the new directory is 0600: it can be
-                    // opened for reading but "." cannot be resolved without
-                    // search permission. Open only the same inode, then set
-                    // its mode through that handle. Never chmod the lock name.
-                    let chmod_fd = unsafe {
-                        libc::openat(
-                            parent.as_raw_fd(),
-                            name.as_ptr(),
-                            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
-                        )
-                    };
-                    if chmod_fd < 0 {
-                        return Err(io::Error::last_os_error());
+                    // With umask 0177, an O_PATH handle cannot resolve "."
+                    // through the new 0600 directory. Use a verified readable
+                    // handle if one can be opened without following a link.
+                    if let Err(read_error) = chmod_readable_lock_dir_at(parent, &name, created) {
+                        #[cfg(target_os = "linux")]
+                        {
+                            use std::os::unix::fs::MetadataExt;
+
+                            if read_error.kind() != io::ErrorKind::PermissionDenied {
+                                return Err(read_error);
+                            }
+                            // Under umask 0777 even owner read is gone. Linux
+                            // procfs exposes this held O_PATH handle at a
+                            // stable fd link; failure to access procfs fails
+                            // closed, without chmodding the mutable lock name.
+                            let proc_path = format!("/proc/self/fd/{}", dir.as_raw_fd());
+                            let proc_stat = fs::metadata(&proc_path)?;
+                            if (proc_stat.dev(), proc_stat.ino()) != (created.dev, created.ino) {
+                                return Err(io::Error::other("Created lock directory changed"));
+                            }
+                            let proc_path = CString::new(proc_path)?;
+                            if unsafe { libc::chmod(proc_path.as_ptr(), 0o700) } != 0 {
+                                return Err(io::Error::last_os_error());
+                            }
+                        }
+                        #[cfg(not(target_os = "linux"))]
+                        {
+                            return Err(read_error);
+                        }
                     }
-                    let chmod_dir = unsafe { fs::File::from_raw_fd(chmod_fd) };
-                    if lock_identity(&stat_file(&chmod_dir)?) != created {
-                        return Err(io::Error::other("Created lock directory changed"));
-                    }
-                    chmod_dir.set_permissions(fs::Permissions::from_mode(0o700))?;
                 }
                 let owner_fd = unsafe {
                     libc::openat(
@@ -1422,6 +1469,31 @@ mod tests {
                 let root = tempfile::tempdir().unwrap();
                 // The parent must remain searchable so this test reaches the
                 // newly created lock directory under the restrictive umask.
+                fs::set_permissions(root.path(), fs::Permissions::from_mode(0o700)).unwrap();
+                let file = root.path().join("harness_state.json");
+                let guard =
+                    LockDir::acquire_owned_retrying(&file, MIN_STALE, 1, MIN_STALE).unwrap();
+                assert_eq!(
+                    fs::metadata(&guard.path).unwrap().permissions().mode() & 0o777,
+                    0o700
+                );
+                guard.ensure_owned().unwrap();
+                drop(guard);
+                assert!(!LockDir::path_for(&file).exists());
+            },
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn owned_lock_acquires_when_umask_removes_all_permissions() {
+        in_umask_subprocess(
+            "owned_lock_acquires_when_umask_removes_all_permissions",
+            0o777,
+            || {
+                use std::os::unix::fs::PermissionsExt;
+
+                let root = tempfile::tempdir().unwrap();
                 fs::set_permissions(root.path(), fs::Permissions::from_mode(0o700)).unwrap();
                 let file = root.path().join("harness_state.json");
                 let guard =
