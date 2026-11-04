@@ -77,11 +77,6 @@ fn is_multiply_linked(metadata: &fs::Metadata) -> bool {
     metadata.nlink() > 1
 }
 
-#[cfg(not(unix))]
-fn is_multiply_linked(_metadata: &fs::Metadata) -> bool {
-    false
-}
-
 #[cfg(unix)]
 fn same_inode(left: &fs::Metadata, right: &fs::Metadata) -> bool {
     use std::os::unix::fs::MetadataExt;
@@ -272,7 +267,12 @@ impl FileSettingsStorage {
         #[cfg(not(unix))]
         let mut file = fs::File::open(path)?;
         let opened = file.metadata()?;
+        #[cfg(unix)]
         if is_multiply_linked(&opened) {
+            bail!("Project settings file has multiple hard links");
+        }
+        #[cfg(windows)]
+        if crate::platform::fs::has_multiple_hard_links(&file)? {
             bail!("Project settings file has multiple hard links");
         }
         #[cfg(all(test, unix))]
@@ -406,6 +406,17 @@ impl SettingsStorage for FileSettingsStorage {
             self.check_locked_project_path(path, &locked_path)?;
         }
         let now_metadata = fs::metadata(path).ok();
+        #[cfg(windows)]
+        let now_metadata = if scope == SettingsScope::Project && now_metadata.is_some() {
+            let file = fs::File::open(path)?;
+            if crate::platform::fs::has_multiple_hard_links(&file)? {
+                bail!("Project settings file has multiple hard links");
+            }
+            Some(file.metadata()?)
+        } else {
+            now_metadata
+        };
+        #[cfg(unix)]
         if scope == SettingsScope::Project && now_metadata.as_ref().is_some_and(is_multiply_linked)
         {
             bail!("Project settings file has multiple hard links");

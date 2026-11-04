@@ -213,6 +213,52 @@ pub(crate) fn atomic_write_private_at(
     write_result
 }
 
+/// Ask Windows for the link count of the file handle that settings will read.
+/// The stable `MetadataExt` API does not expose `nNumberOfLinks`.
+#[cfg(windows)]
+pub(crate) fn has_multiple_hard_links(file: &File) -> io::Result<bool> {
+    use std::ffi::c_void;
+    use std::mem::MaybeUninit;
+    use std::os::windows::io::AsRawHandle;
+
+    // All fields are required for the Win32 BY_HANDLE_FILE_INFORMATION layout.
+    #[allow(dead_code)]
+    #[repr(C)]
+    struct ByHandleFileInformation {
+        attributes: u32,
+        creation_time: [u32; 2],
+        last_access_time: [u32; 2],
+        last_write_time: [u32; 2],
+        volume_serial_number: u32,
+        file_size_high: u32,
+        file_size_low: u32,
+        number_of_links: u32,
+        file_index_high: u32,
+        file_index_low: u32,
+    }
+
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        #[link_name = "GetFileInformationByHandle"]
+        fn get_file_information_by_handle(
+            file: *mut c_void,
+            information: *mut ByHandleFileInformation,
+        ) -> i32;
+    }
+
+    let mut information = MaybeUninit::<ByHandleFileInformation>::uninit();
+    if unsafe { get_file_information_by_handle(file.as_raw_handle(), information.as_mut_ptr()) }
+        == 0
+    {
+        return Err(io::Error::last_os_error());
+    }
+    let count = unsafe { information.assume_init() }.number_of_links;
+    if count == 0 {
+        return Err(io::Error::other("Windows file link count is unavailable"));
+    }
+    Ok(count > 1)
+}
+
 /// Sync an existing regular file; Windows requires a writable flush handle.
 pub(crate) fn sync_file(path: &Path) -> io::Result<()> {
     let mut options = File::options();

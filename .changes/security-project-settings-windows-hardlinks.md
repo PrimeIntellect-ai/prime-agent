@@ -1,0 +1,1 @@
+- Rejected Windows project settings files with multiple hard links to prevent linked private data from being read or copied.
