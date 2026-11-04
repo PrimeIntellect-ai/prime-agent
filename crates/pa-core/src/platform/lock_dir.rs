@@ -1094,7 +1094,29 @@ impl LockDir {
                 // pinned directory handle changes this directory, not a
                 // replacement at the fixed lock name.
                 if unsafe { libc::fchmodat(dir.as_raw_fd(), c".".as_ptr(), 0o700, 0) } != 0 {
-                    return Err(io::Error::last_os_error());
+                    let error = io::Error::last_os_error();
+                    if error.kind() != io::ErrorKind::PermissionDenied {
+                        return Err(error);
+                    }
+                    // With umask 0177 the new directory is 0600: it can be
+                    // opened for reading but "." cannot be resolved without
+                    // search permission. Open only the same inode, then set
+                    // its mode through that handle. Never chmod the lock name.
+                    let chmod_fd = unsafe {
+                        libc::openat(
+                            parent.as_raw_fd(),
+                            name.as_ptr(),
+                            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+                        )
+                    };
+                    if chmod_fd < 0 {
+                        return Err(io::Error::last_os_error());
+                    }
+                    let chmod_dir = unsafe { fs::File::from_raw_fd(chmod_fd) };
+                    if lock_identity(&stat_file(&chmod_dir)?) != created {
+                        return Err(io::Error::other("Created lock directory changed"));
+                    }
+                    chmod_dir.set_permissions(fs::Permissions::from_mode(0o700))?;
                 }
                 let owner_fd = unsafe {
                     libc::openat(
@@ -1615,8 +1637,20 @@ mod tests {
 
     #[cfg(unix)]
     fn in_restrictive_umask_subprocess(test_filter: &str, check: impl FnOnce()) {
+        in_umask_subprocess(test_filter, 0o477, check);
+    }
+
+    #[cfg(unix)]
+    fn in_umask_subprocess(test_filter: &str, mask: libc::mode_t, check: impl FnOnce()) {
         if std::env::var_os("PRIME_LOCK_DIR_UMASK_CHILD").is_some() {
-            unsafe { libc::umask(0o477) };
+            struct RestoreUmask(libc::mode_t);
+            impl Drop for RestoreUmask {
+                fn drop(&mut self) {
+                    unsafe { libc::umask(self.0) };
+                }
+            }
+            let original = unsafe { libc::umask(mask) };
+            let _restore = RestoreUmask(original);
             check();
             return;
         }
@@ -2116,6 +2150,33 @@ mod tests {
             drop(guard);
             assert!(!LockDir::path_for(&file).exists());
         });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn owned_lock_acquires_when_umask_removes_owner_search() {
+        in_umask_subprocess(
+            "owned_lock_acquires_when_umask_removes_owner_search",
+            0o177,
+            || {
+                use std::os::unix::fs::PermissionsExt;
+
+                let root = tempfile::tempdir().unwrap();
+                // The parent must remain searchable so this test reaches the
+                // newly created lock directory under the restrictive umask.
+                fs::set_permissions(root.path(), fs::Permissions::from_mode(0o700)).unwrap();
+                let file = root.path().join("harness_state.json");
+                let guard =
+                    LockDir::acquire_owned_retrying(&file, MIN_STALE, 1, MIN_STALE).unwrap();
+                assert_eq!(
+                    fs::metadata(&guard.path).unwrap().permissions().mode() & 0o777,
+                    0o700
+                );
+                guard.ensure_owned().unwrap();
+                drop(guard);
+                assert!(!LockDir::path_for(&file).exists());
+            },
+        );
     }
 
     #[cfg(unix)]
