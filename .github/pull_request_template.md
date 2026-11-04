@@ -25,6 +25,7 @@ https://github.com/PrimeIntellect-ai/prime-agent/discussions
 - [ ] cargo fmt --all --check
 - [ ] cargo clippy --workspace --all-targets -- -D warnings
 - [ ] cargo test --workspace
+- [ ] `.changes/<branch-slug>.md` fragment added (or the `no-changelog` label for no user-visible change)
 <!-- Windows-touching PRs: make windows-cross (zero warnings) -->
 
 ## Test/e2e evidence

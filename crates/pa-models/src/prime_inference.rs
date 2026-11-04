@@ -265,10 +265,16 @@ pub fn parse_prime_inference_model_catalog(
     };
     let mut entries = Vec::with_capacity(items.len());
     let mut seen: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    let mut null_specs: Vec<&str> = Vec::new();
     for item in items {
-        let wire: WireItem = match serde_json::from_value(item.clone()) {
-            Ok(wire) => wire,
-            Err(_) => continue,
+        let Ok(wire) = serde_json::from_value::<WireItem>(item.clone()) else {
+            if let (Some(serde_json::Value::Null), Some(id)) = (
+                item.get("specs"),
+                item.get("id").and_then(serde_json::Value::as_str),
+            ) {
+                null_specs.push(id);
+            }
+            continue;
         };
         if wire.id.is_empty() || wire.id.chars().count() > 1_024 {
             continue;
@@ -362,6 +368,12 @@ pub fn parse_prime_inference_model_catalog(
             entry.reasoning = wire.specs.supports_reasoning;
         }
         entries.push(entry);
+    }
+    if !null_specs.is_empty() {
+        tracing::warn!(
+            models = ?null_specs,
+            "dropped Prime Inference models whose /models entry has null specs"
+        );
     }
     if entries.is_empty() && !allow_empty {
         return Err("Prime Inference model catalog is empty".into());
@@ -740,6 +752,16 @@ mod tests {
         assert!(parse_prime_inference_model_catalog(&json!({"data": []}), false).is_err());
         assert!(parse_prime_inference_model_catalog(&json!({"data": []}), true).is_ok());
         assert!(parse_prime_inference_model_catalog(&json!({}), false).is_err());
+    }
+
+    #[test]
+    fn parse_drops_entries_with_null_specs() {
+        let mut null_specs = wire_entry("openai/gpt-5.6", 1.0, 2.0);
+        null_specs["specs"] = Value::Null;
+        let value = json!({"data": [wire_entry("z-ai/glm-5.3", 1.0, 2.0), null_specs]});
+        let entries = parse_prime_inference_model_catalog(&value, false).expect("entries");
+        let ids: Vec<&str> = entries.iter().map(|entry| entry.id.as_str()).collect();
+        assert_eq!(ids, vec!["z-ai/glm-5.3"]);
     }
 
     #[test]

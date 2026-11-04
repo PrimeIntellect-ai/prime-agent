@@ -6,6 +6,45 @@ use crate::session_engine::tool_bridge::{bridge_tool, ToolDefinitionBridge};
 use crate::tools::tool_definition::{ExecutionMode, ToolDefinition, ToolExecutionResult};
 use pa_agent::scripted::ScriptedProvider;
 
+/// Exercise the startup gate without starting a session or a configured process.
+#[tokio::test]
+async fn mcp_startup_gating_ignores_project_settings() {
+    let dir = tempfile::tempdir().unwrap();
+    let agent_dir = dir.path().join("agent");
+    let cwd = dir.path().join("project");
+    std::fs::create_dir_all(&agent_dir).unwrap();
+    std::fs::create_dir_all(cwd.join(".prime/agent")).unwrap();
+    let global: serde_json::Value = serde_json::from_str(include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/mcp/global-settings.json"
+    )))
+    .unwrap();
+    std::fs::write(agent_dir.join("settings.json"), global.to_string()).unwrap();
+    std::fs::write(
+        cwd.join(".prime/agent/settings.json"),
+        include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/mcp/project-settings.json"
+        )),
+    )
+    .unwrap();
+    let mut settings = crate::settings::SettingsManager::create(&cwd, &agent_dir);
+    // Reload and reopen must preserve the same execution scope as the first read.
+    for _ in 0..2 {
+        let (_, servers, manager) = mcp_gating(&settings, agent_dir.clone()).await.unwrap();
+        assert_eq!(servers, vec!["user-server"]);
+        for (name, expected) in global["mcpServers"].as_object().unwrap() {
+            assert_eq!(
+                serde_json::to_value(&manager.integrations()[name].config).unwrap(),
+                *expected
+            );
+        }
+        assert!(!manager.integrations().contains_key("project-server"));
+        settings.reload().unwrap();
+        settings = settings.reopen();
+    }
+}
+
 fn echo_definition() -> ToolDefinition {
     ToolDefinition {
         name: "echo".to_string(),
@@ -93,6 +132,7 @@ async fn engine_runs_tool_loop_and_persists() {
         rlm_usage_store: None,
         progress_note_emit: None,
         rlm_depth: None,
+        factory_child: false,
         daemonless: true,
         telemetry: None,
         model_info: None,
@@ -202,6 +242,7 @@ async fn spawned_child_prompt_stamps_its_depth() {
         rlm_usage_store: None,
         progress_note_emit: None,
         rlm_depth: Some(2),
+        factory_child: false,
         daemonless: true,
         telemetry: None,
         model_info: None,
@@ -274,6 +315,7 @@ async fn oauth_creds_unlock_generic_mcp_gating_in_new_sessions() {
             rlm_usage_store: None,
             progress_note_emit: None,
             rlm_depth: None,
+            factory_child: false,
             daemonless: true,
             telemetry: None,
             model_info: None,
@@ -463,6 +505,7 @@ async fn create_session_appends_missing_resume_settings_rows() {
         rlm_usage_store: None,
         progress_note_emit: None,
         rlm_depth: None,
+        factory_child: false,
         daemonless: true,
         telemetry: None,
         model_info: None,
@@ -845,6 +888,7 @@ async fn late_receipts_recorded_before_the_row_lands_apply_on_landing() {
         rlm_usage_store: None,
         progress_note_emit: None,
         rlm_depth: None,
+        factory_child: false,
         daemonless: true,
         telemetry: None,
         model_info: None,

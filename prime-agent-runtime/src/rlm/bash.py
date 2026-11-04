@@ -57,14 +57,13 @@ _ASYNCIO_WRAPPER_CALLBACKS = {
     ("asyncio.tasks", "_release_waiter"),
 }
 
-# Bounded awaits (yield_after): in sessions whose host registers the
-# bash.completed handler, an await past its bound degrades to returning the
+# Bounded awaits: in sessions whose host registers the bash.completed handler,
+# an await still running after _YIELD_AFTER_SECONDS degrades to returning the
 # live handle instead of blocking (the [bash-done] notice collects it). The
 # kernel bootstrap flips the flag from the host-handler registry — one source
-# of truth; the numbers stay here, never on the Rust side.
+# of truth; the window stays here, never on the Rust side.
 _completion_notices_wired = False
-_DEFAULT_YIELD_AFTER_SECONDS = 10.0
-_MAX_YIELD_AFTER_SECONDS = 300.0
+_YIELD_AFTER_SECONDS = 1.0
 
 
 def _set_completion_notices_wired(wired: bool) -> None:
@@ -76,15 +75,6 @@ def _set_completion_notices_wired(wired: bool) -> None:
     """
     global _completion_notices_wired
     _completion_notices_wired = wired
-
-
-def _effective_yield_after(yield_after: float | None) -> float | None:
-    """The bound every await of a handle uses; None means unbounded."""
-    if not _completion_notices_wired:
-        return None
-    if yield_after is None:
-        return _DEFAULT_YIELD_AFTER_SECONDS
-    return min(yield_after, _MAX_YIELD_AFTER_SECONDS)
 
 
 # One stderr hint per degrade, budgeted per kernel (nano-rlm's
@@ -109,19 +99,19 @@ def _note_degrade(handle: "BashHandle", bound: float) -> None:
 
 
 async def _bounded_wait(
-    wait: Awaitable[BashResult], yield_after: float | None
+    wait: Awaitable[BashResult], bound: float | None
 ) -> BashResult | None:
-    """Await a command wait, abandoning it after `yield_after` seconds.
+    """Await a command wait, abandoning it after `bound` seconds.
 
     Returns None only on the degrade: the wait task keeps running (cancelling
     an owned wait would kill the command — the degrade must not), and its
     late result is consumed silently by the done callback.
     """
-    if yield_after is None:
+    if bound is None:
         return await wait
     wait_task = asyncio.ensure_future(wait)
     try:
-        done, _pending = await asyncio.wait({wait_task}, timeout=yield_after)
+        done, _pending = await asyncio.wait({wait_task}, timeout=bound)
     except asyncio.CancelledError:
         # An interrupt inside the window: the wait must observe the cancel
         # (an owned await runs its kill dance in _wait_owned) before the
@@ -379,11 +369,8 @@ class BashHandle:
     handle; later awaits only wait and cancelling them leaves it running.
     """
 
-    def __init__(self, command: str, yield_after: float | None = None) -> None:
+    def __init__(self, command: str) -> None:
         self.command = command
-        # The requested bound (None = the session default); every await
-        # resolves it through _effective_yield_after.
-        self._yield_after = yield_after
         self._activity_id = secrets.token_hex(16)
         completion_context = _current_cell_completion_context()
         self._creating_cell_finished = completion_context[0] if completion_context else None
@@ -1064,13 +1051,13 @@ class BashHandle:
         # A handle awaited before any other API use is a one-shot command tied
         # to the await (kill-on-cancel); touching the handle API first marks it
         # as a deliberate background handle whose awaits only wait. Both paths
-        # wait at most the handle's bound, then degrade to this live handle.
+        # wait at most the yield window, then degrade to this live handle.
         try:
             current_task = asyncio.current_task()
         except RuntimeError:
             current_task = None
         creating_cell_waited = _creating_cell_waits_for(self._creating_cell_task, current_task)
-        bound = _effective_yield_after(self._yield_after)
+        bound = _YIELD_AFTER_SECONDS if _completion_notices_wired else None
         owned = not self._released
         wait = self._wait_owned() if owned else self._wait()
         self._released = True
@@ -1177,10 +1164,8 @@ class PersistentBashHandle(BashHandle):
         home: str,
         proc: subprocess.Popen[bytes] | None,
         running: bool = True,
-        yield_after: float | None = None,
     ) -> None:
         self.command = command
-        self._yield_after = yield_after
         self._activity_id = shell_id
         completion_context = _current_cell_completion_context()
         self._creating_cell_finished = completion_context[0] if completion_context else None
@@ -1310,21 +1295,19 @@ class PersistentBashHandle(BashHandle):
         return f"<BashHandle persistent pid={self._pid} {state} command={self.command!r}>"
 
 
-def bash(command: str, yield_after: float | None = None, persistent: bool = False) -> BashHandle:
+def bash(command: str, persistent: bool = False) -> BashHandle:
     """Start a shell command immediately; await the handle for the result.
 
     `await bash(cmd)` is a one-shot: cancelling the await (e.g. an interrupt)
     kills the command's process group. In sessions whose host wires completion
-    notices (the kernel bootstrap turns the bounded default on), an await that
-    is still running after `yield_after` seconds instead DEGRADES: it returns a
-    BashSnapshot (r.running True, r.output the output so far, r.handle the live
-    handle) while the command keeps running, and its [bash-done] notification
-    arrives on completion. `yield_after=None` uses the session
-    default (10 seconds); explicit values must be positive and are clamped to
-    300. In sessions without completion notices every await stays unbounded and
-    `yield_after` has no effect. `h = bash(cmd)` used as a background
-    handle (any .pid/.running/.output()/.tail()/.poll()/.kill() access before
-    the first await) survives cancellation; awaiting it only waits. Leak
+    notices (the kernel bootstrap turns the bound on), an await that is still
+    running after 1 second instead DEGRADES: it returns a BashSnapshot
+    (r.running True, r.output the output so far, r.handle the live handle)
+    while the command keeps running, and its [bash-done] notification arrives
+    on completion. In sessions without completion notices every await stays
+    unbounded. `h = bash(cmd)` used as a background handle (any
+    .pid/.running/.output()/.tail()/.poll()/.kill() access before the first
+    await) survives cancellation; awaiting it only waits. Leak
     containment is per-platform: process groups plus the orphan journal on
     POSIX; a kill-on-close job object on Windows entered while the child is
     still suspended, so no descendant can escape it and kill()/crash cleanup
@@ -1338,23 +1321,21 @@ def bash(command: str, yield_after: float | None = None, persistent: bool = Fals
     shell survives kernel, worker, and daemon restarts and its session's
     delete or archive (a deleted session's shells keep running as orphans);
     only its own exit or an explicit kill() ends it. Its output and exit
-    status live in files under the agent dir, and awaits never own it: an
-    await bounded by yield_after degrades as for any handle and the shell runs
-    on. After a restart, get the handles back with `from rlm import
-    persistent_shells; persistent_shells()`; a shell that finished while no
+    status live in files under the agent dir, and awaits never own it: a
+    bounded await degrades as for any handle and the shell runs on. After a
+    restart, get the handles back with `from rlm import persistent_shells;
+    persistent_shells()`; a shell that finished while no
     kernel ran is listed once, finished. Completion of a re-attached shell is
     polled, so its result and completion notice lag by up to a second; its
     exit_code is -1 when it was killed before recording a status.
     """
     if not isinstance(command, str) or not command:
         raise TypeError("command must be a non-empty str")
-    if yield_after is not None and yield_after <= 0:
-        raise ValueError("yield_after must be a positive number of seconds")
     if persistent:
-        handle: BashHandle = _spawn_persistent(command, yield_after)
+        handle: BashHandle = _spawn_persistent(command)
     else:
         _install_shutdown_hook()
-        handle = BashHandle(command, yield_after)
+        handle = BashHandle(command)
     from . import repl
 
     repl.emit(
@@ -1550,7 +1531,7 @@ def _shell_identity(pid: int, start_id: str) -> bool | None:
     return None if current is None else current == start_id
 
 
-def _spawn_persistent(command: str, yield_after: float | None) -> PersistentBashHandle:
+def _spawn_persistent(command: str) -> PersistentBashHandle:
     if not _IS_POSIX:
         raise RuntimeError("bash(persistent=True) is only supported on POSIX")
     session_id = os.environ.get("RLM_SESSION_ID")
@@ -1594,9 +1575,7 @@ def _spawn_persistent(command: str, yield_after: float | None) -> PersistentBash
         gate.write(b"\n")
     finally:
         gate.close()
-    return PersistentBashHandle(
-        command, shell_id, proc.pid, start_id, started_at, home, proc, yield_after=yield_after
-    )
+    return PersistentBashHandle(command, shell_id, proc.pid, start_id, started_at, home, proc)
 
 
 def persistent_shells() -> list[BashHandle]:

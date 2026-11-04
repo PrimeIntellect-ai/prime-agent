@@ -35,6 +35,8 @@ pub struct McpOAuthConfig {
     pub client_id: Option<String>,
     /// Fixed loopback port registered for a public client; otherwise use the DCR port range.
     pub callback_port: Option<u16>,
+    /// Secret of a pre-registered confidential client, sent as `client_secret_post`.
+    pub client_secret: Option<String>,
     /// Requested scopes; defaults to the server's advertised scopes.
     pub scopes: Option<String>,
 }
@@ -201,6 +203,11 @@ pub async fn mcp_login(
     if let Some(resource) = &discovery.resource {
         auth_params.push(("resource".to_string(), resource.clone()));
     }
+    // Google issues a refresh token only for offline access, and re-issues one only on consent.
+    if discovery.metadata.issuer == "https://accounts.google.com" {
+        auth_params.push(("access_type".to_string(), "offline".to_string()));
+        auth_params.push(("prompt".to_string(), "consent".to_string()));
+    }
     let auth_url = authorization_url(&discovery.metadata.authorization_endpoint, &auth_params)?;
     ui.on_auth(
         &auth_url,
@@ -291,6 +298,9 @@ pub async fn mcp_login(
         ("client_id".to_string(), client_id.clone()),
         ("code_verifier".to_string(), verifier),
     ];
+    if let Some(client_secret) = &config.client_secret {
+        token_params.push(("client_secret".to_string(), client_secret.clone()));
+    }
     if let Some(resource) = &discovery.resource {
         token_params.push(("resource".to_string(), resource.clone()));
     }
@@ -487,6 +497,9 @@ pub async fn mcp_refresh_token(
     if !client_id.is_empty() {
         refresh_params.push(("client_id".to_string(), client_id.clone()));
     }
+    if let Some(client_secret) = &config.client_secret {
+        refresh_params.push(("client_secret".to_string(), client_secret.clone()));
+    }
     if let Some(resource) = resource {
         refresh_params.push(("resource".to_string(), resource.clone()));
     }
@@ -677,6 +690,7 @@ mod tests {
             url: url.to_string(),
             client_id: None,
             callback_port: None,
+            client_secret: None,
             scopes: None,
         }
     }

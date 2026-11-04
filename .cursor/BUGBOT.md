@@ -40,11 +40,18 @@ either changes.
 - If a change forces edits across many crate internals, the crate boundary is what needs fixing: flag that instead of the edits.
 - Risky raw APIs route through the in-house wrappers, not new raw call sites: process control (signals/process groups), file locking, permissions, and shell selection go through `pa-core`'s `platform` wall; durable renames go through `rename_onto`; TS-parity hashing (tool-call id normalization) uses `pa-ai`'s in-house `short_hash`; environment-variable resolution goes through its owning module (telemetry overrides in `pa-telemetry`, provider API keys in `pa-ai`), not duplicated ad-hoc parsing. Flag a raw call site that bypasses these walls.
 
+## Repo hygiene
+
+- Flag scripts and tools that no CI workflow, Makefile target, or other code runs, such as one-off review, parity, evidence, or reproduction scripts (for example a 520-line TS-vs-Rust shutdown comparison script added in a feature PR). Nothing keeps them working; their results belong in the PR body, not in the repo.
+- Flag test files that nothing runs. Before flagging, check the globs, loops, and paths built at run time in `.github/workflows/` and the Makefile (for example, ci.yml runs `scripts/test_check_<scenario>.py` through a path built inside its loop over `scripts/check_*.py`). A file name that appears nowhere can still run. Flag only when no runner, glob, or loop reaches the file; such a test only looks like coverage.
+- Flag committed artifacts that no code or test reads: evidence logs, reports, generated outputs, and local venvs or caches.
+- Flag a PR body that presents a script or run that CI does not run as lasting proof (for example "covered by `scripts/foo.py`"). One-off evidence such as parity-diff evidence belongs in the body, but it must read as a one-off run with its command and result, not as coverage.
+
 ## Tests
 
-- Add a regression test only when it captures meaningful behavior that fails before the fix; do not require one for trivial or documentation-only changes.
-- Reject incidental or duplicate coverage and copy/string snapshot assertions that merely restate labels or descriptions; assert text only when the text is the behavior.
-- A bug fix that captures meaningful behavior lands with a regression test that fails without the fix (no test required for trivial or documentation-only fixes).
+- A bug fix that changes meaningful behavior lands with a regression test that fails without the fix; flag tests that pass without it. Trivial or documentation-only changes need no test.
+- Reject incidental or duplicate coverage, tests that re-check behavior the PR does not change, and copy/string snapshot assertions that merely restate labels or descriptions; assert text only when the text is the behavior.
+- Flag test code far out of proportion to the product change (for example 2,300 test lines for ~400 product lines). Ask for one discriminating test per behavior change, not several tests that pin the same behavior.
 - Tests must wait for observable readiness: flag fixed sleeps, polling loops, and retry-to-green wrappers used as readiness signals. A timeout may bound failure; it must not make the test pass.
 - Flag skipped or disabled tests without a reason stated at the test; flag tests that should use isolated ports and temporary paths but do not, and tests that leave shared state unrestored.
 

@@ -14,7 +14,7 @@ use super::{
 /// Output cap for gate results surfaced in continuation text.
 const MAX_GATE_OUTPUT_CHARS: usize = 6000;
 /// Output cap for gate child processes (both streams combined per stream).
-const MAX_CHILD_PROCESS_OUTPUT_CHARS: usize = 1024 * 1024;
+const MAX_CHILD_PROCESS_OUTPUT_BYTES: usize = 1024 * 1024;
 /// Timeout for the git commands that capture a worktree snapshot.
 const SNAPSHOT_TIMEOUT_MS: u64 = 10_000;
 
@@ -457,12 +457,13 @@ pub async fn run_gate_command(
     run_child_process(&shell.shell, &args, cwd, timeout_ms).await
 }
 
-/// Read one output pipe to EOF, keeping at most `cap` characters; the
-/// remainder is drained so a full pipe never blocks the child.
+/// Read one output pipe to EOF, keeping at most `cap` bytes of text; the
+/// remainder is drained so a full pipe never blocks the child. The bytes are
+/// decoded once at the end, so a character split across two reads survives.
 async fn read_pipe_capped<R: tokio::io::AsyncRead + Unpin>(mut pipe: Option<R>) -> (String, bool) {
     use tokio::io::AsyncReadExt;
-    let cap = MAX_CHILD_PROCESS_OUTPUT_CHARS;
-    let mut kept = String::new();
+    let cap = MAX_CHILD_PROCESS_OUTPUT_BYTES;
+    let mut kept: Vec<u8> = Vec::new();
     let mut truncated = false;
     let mut buffer = [0u8; 8192];
     if let Some(pipe) = pipe.as_mut() {
@@ -470,23 +471,23 @@ async fn read_pipe_capped<R: tokio::io::AsyncRead + Unpin>(mut pipe: Option<R>) 
             match pipe.read(&mut buffer).await {
                 Ok(0) | Err(_) => break,
                 Ok(read) => {
-                    let chunk = String::from_utf8_lossy(&buffer[..read]);
-                    if kept.len() < cap {
-                        let remaining = cap - kept.len();
-                        if chunk.len() <= remaining {
-                            kept.push_str(&chunk);
-                        } else {
-                            kept.push_str(&chunk[..remaining]);
-                            truncated = true;
-                        }
-                    } else {
+                    let room = cap.saturating_sub(kept.len());
+                    if read > room {
                         truncated = true;
                     }
+                    kept.extend_from_slice(&buffer[..read.min(room)]);
                 }
             }
         }
     }
-    (kept, truncated)
+    if truncated {
+        // The cap may have cut the last character short; drop its partial bytes.
+        if let Some(last) = kept.utf8_chunks().last() {
+            let partial = last.invalid().len();
+            kept.truncate(kept.len() - partial);
+        }
+    }
+    (String::from_utf8_lossy(&kept).into_owned(), truncated)
 }
 
 #[cfg(test)]
@@ -710,5 +711,24 @@ mod tests {
         );
         let digest = hash_untracked_path(&dir.path().join("untracked.txt"));
         assert!(digest.starts_with("file:"));
+    }
+
+    #[tokio::test]
+    async fn a_character_split_across_pipe_reads_is_kept_whole() {
+        let output = format!("{}\u{e9} done", "a".repeat(8191));
+        let captured =
+            read_pipe_capped(Some(std::io::Cursor::new(output.clone().into_bytes()))).await;
+        assert_eq!(captured, (output, false));
+    }
+
+    #[tokio::test]
+    async fn the_cap_never_cuts_inside_a_character() {
+        let mut output = "a".repeat(MAX_CHILD_PROCESS_OUTPUT_BYTES - 1);
+        output.push_str("\u{e9}\u{e9}");
+        let captured = read_pipe_capped(Some(std::io::Cursor::new(output.into_bytes()))).await;
+        assert_eq!(
+            captured,
+            ("a".repeat(MAX_CHILD_PROCESS_OUTPUT_BYTES - 1), true)
+        );
     }
 }

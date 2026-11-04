@@ -30,7 +30,7 @@ prime-agent is a recursive harness. Each session builds a tree of agents, starti
 
 The following programmatic tools are available in the REPL for subagent management:
 
-- `rlm.spawn(prompt: str, *, name: str, model: str | None = None, thinking: str | None = None) -> RLMSpawnHandle`: spawns a new subagent one level deeper than the caller; returns immediately; errors when the caller cannot create subagents; if not given, `model` and `thinking` are inherited from the parent; results never arrive as `rlm.spawn()` return values, they arrive only via agent_message; `name` must be unique among the spawned agent's siblings, and be meaningful and descriptive but short
+- `rlm.spawn(prompt: str, *, name: str, model: str | None = None, thinking: str | None = None, cwd: str | None = None) -> RLMSpawnHandle`: spawns a new subagent one level deeper than the caller; returns immediately; errors when the caller cannot create subagents; if not given, `model` and `thinking` are inherited from the parent; `cwd` starts the child in that directory (relative paths resolve against the session cwd; it must exist) and loads its project context; results never arrive as `rlm.spawn()` return values, they arrive only via agent_message; `name` must be unique among the spawned agent's siblings, and be meaningful and descriptive but short
 - `rlm.create_session(prompt: str, name: str | None = None, model: str | None = None, thinking: str | None = None, cwd: str | None = None) -> RLMCreateSessionHandle`: creates another depth-0 session; only available to agents at depth 0 backed by a daemon; returns after the session is successfully created and the first prompt sent
 - `rlm.find_models(query: str = '', limit: int = 8) -> list[RLMModel]`
 - `rlm.list_subagents() -> list[RLMSubagent]`: direct child handles
@@ -140,6 +140,14 @@ prime-agent compacts automatically when there is only a given number of tokens l
 
 - `compact.run(instructions: str | None = None) -> dict`: schedule a compaction at the next assistant turn boundary
 - `compact.status() -> dict`: context usage & threshold before auto-compaction
+- `rlm.session.messages(start: int = -10, limit: int = 10, *, role: str | tuple[str, ...] = "*", agent=None) -> list[RLMMessage]` / `rlm.session.count(role="*", *, agent=None) -> int`: this session's own transcript on the active branch, or with `agent` a nuclear-family member's (parent, sibling, or child: a name, child id, session id, spawn handle, or `list_subagents()` row), oldest first, including the messages compaction summarized away (each compaction in place as a `compactionSummary` message); `messages` returns `rows[start:][:limit]` (Python slice semantics) of the rows whose role matches `role`, fnmatch globs over `user`, `assistant`, `toolResult`, `custom`, `compactionSummary`, `branchSummary`, `bashExecution`; `count` returns `len(rows)`
+- `RLMMessage`
+  - `index: int`: the position in `rows` for the same `role`; the page before `msgs` is `messages(max(0, i - k), min(k, i), role=role)` with `i = msgs[0].index`
+  - `id: str`: the entry id
+  - `role: str`
+  - `text: str`: the message's plain text
+  - `timestamp: int | None`: milliseconds since the epoch
+  - `raw: dict`: the stored message, including tool calls and thinking
 
 ## Goal
 

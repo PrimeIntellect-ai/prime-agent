@@ -445,6 +445,52 @@ async fn refine_with_an_empty_plan_pushes_only_the_outcome_row() {
     );
 }
 
+/// The planning call bills the session: its usage lands on a durable row
+/// whether or not the plan edits anything.
+#[tokio::test]
+async fn refine_records_the_planning_call_usage() {
+    let (session, tmp) = refine_test_session().await;
+    let usage = pa_types::ai::Usage {
+        input: 1_200,
+        output: 80,
+        total_tokens: 1_280,
+        cost: pa_types::ai::UsageCost {
+            total: pa_types::JsNumber(0.004),
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let billed_plan: crate::refinement::executor::RefinerFn =
+        Box::new(move |model, system, prompt| {
+            let reply = refine_plan_call(EMPTY_PLAN)(model, system, prompt);
+            Box::pin(async move {
+                let mut reply = reply.await?;
+                reply.usage = usage;
+                Ok(reply)
+            })
+        });
+    session
+        .refine_with_refiner(
+            &refine::RefineOptions::default(),
+            refine::RefinementSource::User,
+            &session_ai_model(),
+            billed_plan,
+            tmp.path().join("harness"),
+        )
+        .await
+        .unwrap();
+    let rows = session.shared_persistence().lock().await.get_entries();
+    let billed: Vec<serde_json::Value> = rows
+        .iter()
+        .filter_map(|entry| match entry {
+            pa_types::session::FileEntry::Custom { payload, .. } => payload.data.clone(),
+            _ => None,
+        })
+        .filter_map(|data| data.get("usage").cloned())
+        .collect();
+    assert_eq!(billed, vec![serde_json::to_value(usage).unwrap()]);
+}
+
 #[tokio::test]
 async fn sequential_refines_push_exactly_their_own_rows() {
     // The second run must select exactly its own rows (by id), never
@@ -606,11 +652,32 @@ async fn refine_keeps_the_retry_drop_instead_of_resurrecting_the_error_row() {
 }
 
 #[tokio::test]
-async fn refinement_and_auto_review_preserve_conversation_identity() {
-    let (session, tmp) = refine_test_session().await;
+async fn refinement_and_auto_review_send_the_session_request_identity() {
+    let (mut session, tmp) = refine_test_session().await;
+    std::fs::write(
+        tmp.path().join("auth.json"),
+        serde_json::json!({
+            "prime-inference": {
+                "type": "api_key",
+                "key": "test-key",
+                "primeTeam": { "teamId": "team-1", "name": "Test Team" }
+            }
+        })
+        .to_string(),
+    )
+    .unwrap();
+    session.set_auxiliary_model_context(
+        crate::session_engine::auxiliary_model::AuxiliaryModelContext {
+            cwd: tmp.path().to_path_buf(),
+            agent_dir: tmp.path().to_path_buf(),
+        },
+    );
     let expected = session.session_id().await;
     let registration =
-        pa_ai::faux::register_faux_provider(pa_ai::faux::RegisterFauxProviderOptions::default());
+        pa_ai::faux::register_faux_provider(pa_ai::faux::RegisterFauxProviderOptions {
+            provider: Some("prime-inference".to_string()),
+            ..Default::default()
+        });
     let observed = Arc::new(std::sync::Mutex::new(Vec::new()));
     let step = |text: &'static str| {
         let observed = Arc::clone(&observed);
@@ -618,6 +685,9 @@ async fn refinement_and_auto_review_preserve_conversation_identity() {
             observed.lock().unwrap().push((
                 options.and_then(|o| o.session_id.clone()),
                 options.and_then(|o| o.transport),
+                options
+                    .and_then(|o| o.headers.as_ref())
+                    .and_then(|headers| headers.get("X-Prime-Team-ID").cloned()),
             ));
             Ok(pa_ai::faux::faux_assistant_text_message(
                 text,
@@ -647,6 +717,13 @@ async fn refinement_and_auto_review_preserve_conversation_identity() {
         .unwrap();
     assert_eq!(
         *observed.lock().unwrap(),
-        vec![(Some(expected), Some(pa_ai::types::Transport::Sse)); 2]
+        vec![
+            (
+                Some(expected),
+                Some(pa_ai::types::Transport::Sse),
+                Some("team-1".to_string())
+            );
+            2
+        ]
     );
 }

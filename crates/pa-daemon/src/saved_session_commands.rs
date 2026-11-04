@@ -170,6 +170,8 @@ pub(crate) enum SavedDeleteCapture {
     TopLevel,
     Child {
         usage: Option<crate::session_usage::SessionUsageSummary>,
+        /// `usage` split by model (`None` when it does not reconcile).
+        by_model: Option<Vec<crate::session_usage::ModelUsageSummary>>,
         /// The canonical session key captured while the file still existed:
         /// a symlink delete unlinks the LINK, so the tombstone uses the pre-unlink key.
         canonical_path: String,
@@ -206,8 +208,12 @@ pub(crate) fn capture_saved_session_delete(
     } else {
         None
     };
+    let by_model = usage.as_ref().and_then(|usage| {
+        crate::state_getters::own_usage_by_model_of(Path::new(session_path), usage)
+    });
     SavedDeleteCapture::Child {
         usage,
+        by_model,
         canonical_path,
     }
 }
@@ -221,6 +227,7 @@ pub(crate) fn tombstone_saved_session_delete_captured(
 ) -> usize {
     let SavedDeleteCapture::Child {
         usage,
+        by_model,
         canonical_path,
     } = capture
     else {
@@ -231,6 +238,7 @@ pub(crate) fn tombstone_saved_session_delete_captured(
         canonical_path,
         crate::rlm_ledger::RlmLedgerDeleteReason::User,
         usage.as_ref(),
+        by_model.as_deref(),
     ) {
         // The returned edges are the pre-append replay state: every
         // matching edge received the snapshot when one was captured.
@@ -1015,6 +1023,7 @@ mod tombstone_usage_tests {
                 child: child.to_string_lossy().to_string(),
                 depth: 1,
                 name: "lane".to_string(),
+                factory: None,
             })
             .unwrap();
         let captured = tombstone_saved_session_delete(
@@ -1086,6 +1095,7 @@ mod tombstone_usage_tests {
                 child: child.to_string_lossy().into(),
                 depth: 1,
                 name: "w".into(),
+                factory: None,
             })
             .unwrap();
         // The delete goes through a final-component symlink: the capture
@@ -1132,6 +1142,7 @@ mod tombstone_usage_tests {
                 child: fifo.to_string_lossy().into(),
                 depth: 1,
                 name: "w".into(),
+                factory: None,
             })
             .unwrap();
         let capture = capture_saved_session_delete(&fifo.to_string_lossy(), None);
@@ -1139,6 +1150,7 @@ mod tombstone_usage_tests {
             SavedDeleteCapture::Child {
                 usage,
                 canonical_path,
+                ..
             } => {
                 assert!(
                     usage.is_none(),

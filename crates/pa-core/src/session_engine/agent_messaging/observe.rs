@@ -86,6 +86,8 @@ pub struct AgentObserveSummary {
     /// The session's first user message, preview-capped (an inactive
     /// child's identity signal; TS `firstMessage`).
     pub first_message: Option<String>,
+    /// The session's file: a transcript read of a member no worker holds opens it.
+    pub session_file: Option<String>,
 }
 
 impl AgentObserveSummary {
@@ -177,6 +179,15 @@ pub trait AgentObserveController: Send + Sync {
         limit: usize,
         max_chars: usize,
     ) -> impl Future<Output = anyhow::Result<AgentObserveRecentMessagesResult>> + Send;
+    /// One slice of a family member's transcript (`rlm.session.messages(agent=...)`):
+    /// the `rlm.session.messages` reply plus `agent`, the member's display name.
+    fn session_messages(
+        &self,
+        target: &str,
+        start: i64,
+        limit: u64,
+        roles: Vec<String>,
+    ) -> impl Future<Output = anyhow::Result<Value>> + Send;
 }
 
 /// Clamp an observe limit (default 8, range 1..=50).
@@ -373,6 +384,36 @@ pub fn register_agent_observe_host_handlers<C: AgentObserveController + 'static>
                         anyhow::bail!("agent {target} is not reachable");
                     };
                     Ok(json!({ "agent": agent.to_value() }))
+                })
+            }
+        }),
+    );
+    handlers.register(
+        "agent_observe.session_messages",
+        host_handler({
+            let controller = controller.clone();
+            move |payload| {
+                #[derive(serde::Deserialize)]
+                struct Request {
+                    target: String,
+                    start: i64,
+                    limit: u64,
+                    roles: Vec<String>,
+                }
+                let controller = controller.clone();
+                Box::pin(async move {
+                    let request: Request =
+                        serde_json::from_value(payload.data.clone()).map_err(|error| {
+                            anyhow::anyhow!("agent_observe.session_messages is invalid: {error}")
+                        })?;
+                    controller
+                        .session_messages(
+                            &request.target,
+                            request.start,
+                            request.limit,
+                            request.roles,
+                        )
+                        .await
                 })
             }
         }),

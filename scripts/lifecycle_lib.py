@@ -737,6 +737,10 @@ class DockScreen:
                     elif command == "n" and nums[0] == 6:
                         replies.append(f"\x1b[{self.row + 1};{self.col + 1}R".encode())
                     elif command == "c": replies.append(b"\x1b[?1;2c")
+                    elif command == 't' and nums == [16]:
+                        # Fixed fixture cell geometry: TS asks for this in
+                        # image-capable terminals (CSI 16 t -> CSI 6;h;w t).
+                        replies.append(b'\x1b[6;16;8t')
                     elif command in 'hl' and params.startswith('?'):
                         for mode in nums:
                             if mode == 7:
@@ -797,7 +801,13 @@ class DockScreen:
                         self.col = self.width - 1
                 self.cells[self.row][self.col] = char
                 self.styles[self.row][self.col] = dict(self.sgr)
-                self.col += 2 if unicodedata.east_asian_width(char) in "WF" else 1
+                width = 2 if unicodedata.east_asian_width(char) in "WF" else 1
+                if width == 2 and self.col + 1 < self.width:
+                    # A terminal paints both cells of a wide glyph, replacing
+                    # any old text and background in its continuation cell.
+                    self.cells[self.row][self.col + 1] = ' '
+                    self.styles[self.row][self.col + 1] = dict(self.sgr)
+                self.col += width
             elif char not in ('\x00', '\x07') and not unicodedata.combining(char):
                 self.unsupported_terminal.append(char)
         return replies

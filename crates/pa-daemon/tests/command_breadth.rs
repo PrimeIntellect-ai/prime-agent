@@ -532,6 +532,10 @@ const WIRE_FIXTURES: &[(&str, &str)] = &[
         "kill_persistent_shell",
         r#"{"type": "kill_persistent_shell", "shellId": "s"}"#,
     ),
+    (
+        "get_session_messages",
+        r#"{"type": "get_session_messages", "activeSessionId": "sess", "start": -10, "limit": 10, "roles": ["*"]}"#,
+    ),
 ];
 
 /// The accept list is the TS list, in TS order, then the Rust-native supervisor/worker frames.
@@ -563,6 +567,7 @@ fn known_command_types_match_the_ts_list() {
                     | "list_persistent_shells"
                     | "tail_persistent_shell"
                     | "kill_persistent_shell"
+                    | "get_session_messages"
             ),
             "unexpected non-TS command type: {extra}"
         );

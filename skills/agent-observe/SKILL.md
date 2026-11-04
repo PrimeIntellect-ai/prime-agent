@@ -8,9 +8,10 @@ description: Read-only roster and observation of an agent's parent, siblings, an
 Observe the current agent's nuclear family through the local daemon: parent,
 siblings, direct children, and self. `list_agents` is the one family roster and
 covers every member `agent_message.send` can reach. `get_agent` also returns an
-inactive child's roster row. `recent_messages` reads live sessions only; it
-does not rehydrate an inactive member. They cannot read a root sibling that has
-no live session in this worker.
+inactive child's roster row. `recent_messages` also reads a member no worker
+holds (a passivated or finished child) from its session file, read-only,
+without waking it. They cannot read a root sibling that has no live session in
+this worker.
 This skill is read-only: it can list family sessions, inspect one session, and fetch
 bounded recent message previews. It cannot prompt, steer, clear, kill, rename, or
 otherwise mutate another session.
@@ -52,8 +53,8 @@ if child is not None:
   returns `agent` (the target's summary), `messages` (up to `limit` recent
   bounded previews), the clamped `limit` and `maxChars`, and `truncated`
   (true when older messages exist beyond the returned window). `limit` must be
-  1-50, and `max_chars` must be 80-2000. The target must be a live family
-  member: a member with no live session errors instead of hydrating.
+  1-50, and `max_chars` must be 80-2000. Each preview's `index` is the
+  message's position in the full transcript.
 
 ## Safety
 

@@ -3,21 +3,7 @@
 //! `showError` row and keep running — a daemon refusal never exits the
 //! client; only transport failures stay fatal (TS `handleFollowUp`).
 #![cfg(unix)]
-// Casts: structurally bounded terminal-layout arithmetic; guarded conversions add panic paths.
-#![allow(
-    clippy::cast_possible_truncation,
-    clippy::cast_possible_wrap,
-    clippy::cast_sign_loss,
-    clippy::cast_precision_loss
-)]
-// Render routes are flat tables (one arm per route); splitting adds indirection.
-#![allow(clippy::too_many_lines)]
-// Widget state structs carry independent flag bits.
-#![allow(clippy::struct_excessive_bools, clippy::fn_params_excessive_bools)]
-// Futures are bounded by the surface's lifetime; boxing adds a steady-state allocation.
-#![allow(clippy::large_futures)]
-// The wrappers preserve a uniform Result-returning API surface.
-#![allow(clippy::unnecessary_wraps)]
+#![warn(clippy::allow_attributes_without_reason)]
 
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
@@ -137,6 +123,10 @@ impl MockSupervisor {
 
 /// One client connection's read loop, over the shared answers.
 impl SharedAnswers {
+    #[expect(
+        clippy::too_many_lines,
+        reason = "mock daemon request loop: one match arm per scripted request method"
+    )]
     fn serve_connection(self: std::sync::Arc<Self>, stream: UnixStream) {
         let mut writer = stream.try_clone().expect("clone mock socket");
         let mut reader = BufReader::new(stream);
@@ -569,14 +559,14 @@ fn run_plan(
     let options = options_with_session(socket, selection);
     let outcome = runtime.block_on(async {
         if agents_view_open {
-            pa_tui::interactive::run_interactive_agents_view_open(
+            Box::pin(pa_tui::interactive::run_interactive_agents_view_open(
                 options,
                 UiMode::Headless(plan),
                 None,
-            )
+            ))
             .await
         } else {
-            run_interactive(options, UiMode::Headless(plan)).await
+            Box::pin(run_interactive(options, UiMode::Headless(plan))).await
         }
     })?;
     let _ = handle.join();

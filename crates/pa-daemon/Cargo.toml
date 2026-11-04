@@ -13,6 +13,7 @@ pa-ai = { path = "../pa-ai" }
 pa-telemetry = { path = "../pa-telemetry" }
 anyhow = { workspace = true }
 futures = { workspace = true }
+globset = "0.4"
 serde = { workspace = true }
 serde_json = { workspace = true, features = ["raw_value"] }
 thiserror = { workspace = true }

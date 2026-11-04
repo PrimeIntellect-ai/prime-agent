@@ -1,0 +1,21 @@
+{
+  "mcpServers": {
+    "user-server": {
+      "type": "stdio",
+      "command": "fixture-user-server",
+      "args": ["user-argument"],
+      "cwd": "/user/workspace",
+      "env": { "FIXTURE_TOKEN": { "env": "FIXTURE_USER_TOKEN" } },
+      "enabled": true,
+      "enabledTools": ["user-tool"],
+      "disabledTools": ["other-tool"],
+      "startupTimeoutMs": 12000,
+      "callTimeoutMs": 34000
+    },
+    "disabled-server": {
+      "type": "stdio",
+      "command": "fixture-disabled-server",
+      "enabled": false
+    }
+  }
+}

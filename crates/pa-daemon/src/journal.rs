@@ -229,6 +229,12 @@ pub struct WorkerQueueItemRecord {
     /// restores as "queued" — the only class a fresh snapshot can batch.
     #[serde(default = "queue_policy_default")]
     pub policy: String,
+    /// The forced-steering batch flag: a restored forced item keeps its
+    /// one-turn batch semantics.
+    #[serde(default)]
+    pub forced_batch: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub images: Vec<pa_agent::types::ImageContent>,
 }
 
 fn queue_visible_default() -> bool {
@@ -261,8 +267,17 @@ pub struct WorkerQueueSnapshotRecord {
     pub active_session_id: String,
     pub steering: Vec<WorkerQueueItemRecord>,
     pub follow_up: Vec<WorkerQueueItemRecord>,
+    /// The queued-input suspension at snapshot time: a restored parked
+    /// queue stays parked until an explicit resume site clears it.
+    #[serde(default)]
+    pub suspended: bool,
     pub recorded_at: String,
 }
+
+/// One session's latest queue snapshot as read back for a restore: the
+/// steering and follow-up lanes, and whether queued input was suspended
+/// when they were recorded (a parked queue revives still parked).
+pub type QueueSnapshotLanes = (Vec<WorkerQueueItemRecord>, Vec<WorkerQueueItemRecord>, bool);
 
 /// Latest busy/operation per active session, plus the latest queue
 /// snapshot per session.
@@ -416,6 +431,7 @@ impl WorkerRecoveryJournal {
         active_session_id: &str,
         steering: &[WorkerQueueItemRecord],
         follow_up: &[WorkerQueueItemRecord],
+        suspended: bool,
     ) -> Result<()> {
         let record = WorkerQueueSnapshotRecord {
             version: QUEUE_SNAPSHOT_VERSION,
@@ -423,6 +439,7 @@ impl WorkerRecoveryJournal {
             active_session_id: active_session_id.to_string(),
             steering: steering.to_vec(),
             follow_up: follow_up.to_vec(),
+            suspended,
             recorded_at: crate::util::now_iso(),
         };
         append_record(&self.path, &serde_json::to_value(&record)?)?;
@@ -449,6 +466,7 @@ impl WorkerRecoveryJournal {
         operation: &str,
         steering: &[WorkerQueueItemRecord],
         follow_up: &[WorkerQueueItemRecord],
+        suspended: bool,
     ) -> Result<()> {
         let snapshot = WorkerQueueSnapshotRecord {
             version: QUEUE_SNAPSHOT_VERSION,
@@ -456,6 +474,7 @@ impl WorkerRecoveryJournal {
             active_session_id: active_session_id.to_string(),
             steering: steering.to_vec(),
             follow_up: follow_up.to_vec(),
+            suspended,
             recorded_at: crate::util::now_iso(),
         };
         let verdict_unchanged = self.latest.get(active_session_id).is_some_and(|previous| {
@@ -496,13 +515,14 @@ impl WorkerRecoveryJournal {
 
     /// The latest persisted queue rows for `active_session_id`.
     #[must_use]
-    pub fn latest_queue_snapshot(
-        &self,
-        active_session_id: &str,
-    ) -> Option<(Vec<WorkerQueueItemRecord>, Vec<WorkerQueueItemRecord>)> {
-        self.queue_snapshots
-            .get(active_session_id)
-            .map(|record| (record.steering.clone(), record.follow_up.clone()))
+    pub fn latest_queue_snapshot(&self, active_session_id: &str) -> Option<QueueSnapshotLanes> {
+        self.queue_snapshots.get(active_session_id).map(|record| {
+            (
+                record.steering.clone(),
+                record.follow_up.clone(),
+                record.suspended,
+            )
+        })
     }
 
     /// Read the latest queue snapshot for a session straight from a journal
@@ -515,10 +535,10 @@ impl WorkerRecoveryJournal {
     pub fn read_queue_snapshot(
         path: &Path,
         active_session_id: &str,
-    ) -> Result<Option<(Vec<WorkerQueueItemRecord>, Vec<WorkerQueueItemRecord>)>> {
+    ) -> Result<Option<QueueSnapshotLanes>> {
         Ok(parse_queue_snapshot_records(path)?
             .remove(active_session_id)
-            .map(|record| (record.steering, record.follow_up)))
+            .map(|record| (record.steering, record.follow_up, record.suspended)))
     }
 
     fn compact(&self, finalize: Finalize) -> Result<()> {
@@ -572,6 +592,10 @@ fn parse_queue_snapshot_records(path: &Path) -> Result<HashMap<String, WorkerQue
             active_session_id: active_session_id.to_string(),
             steering: parse_snapshot_lane(record.get("steering")),
             follow_up: parse_snapshot_lane(record.get("follow_up")),
+            suspended: record
+                .get("suspended")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
             recorded_at: record
                 .get("recorded_at")
                 .and_then(Value::as_str)
@@ -600,6 +624,8 @@ fn parse_snapshot_lane(value: Option<&Value>) -> Vec<WorkerQueueItemRecord> {
                         queue_key: None,
                         queue_visible: true,
                         policy: queue_policy_default(),
+                        forced_batch: false,
+                        images: Vec::new(),
                     }),
                     Value::Object(_) => serde_json::from_value(entry.clone()).ok(),
                     _ => None,
@@ -685,18 +711,24 @@ mod tests {
             queue_key: None,
             queue_visible: true,
             policy: queue_policy_default(),
+            forced_batch: false,
+            images: Vec::new(),
         };
         sequential
-            .record_queue_snapshot("s1", std::slice::from_ref(&item), &[])
+            .record_queue_snapshot("s1", std::slice::from_ref(&item), &[], false)
             .unwrap();
         sequential
             .record("s1", "sess1", Some("/a.jsonl"), true, "prompt_accepted")
             .unwrap();
-        sequential.record_queue_snapshot("s1", &[], &[]).unwrap();
+        sequential
+            .record_queue_snapshot("s1", &[], &[], false)
+            .unwrap();
         sequential
             .record("s1", "sess1", Some("/a.jsonl"), false, "turn_end")
             .unwrap();
-        sequential.record_queue_snapshot("s1", &[], &[]).unwrap();
+        sequential
+            .record_queue_snapshot("s1", &[], &[], false)
+            .unwrap();
         sequential
             .record("s1", "sess1", Some("/a.jsonl"), false, "turn_end")
             .unwrap();
@@ -709,13 +741,32 @@ mod tests {
                 "prompt_accepted",
                 std::slice::from_ref(&item),
                 &[],
+                false,
             )
             .unwrap();
         batched
-            .record_queue_checkpoint("s1", "sess1", Some("/a.jsonl"), false, "turn_end", &[], &[])
+            .record_queue_checkpoint(
+                "s1",
+                "sess1",
+                Some("/a.jsonl"),
+                false,
+                "turn_end",
+                &[],
+                &[],
+                false,
+            )
             .unwrap();
         batched
-            .record_queue_checkpoint("s1", "sess1", Some("/a.jsonl"), false, "turn_end", &[], &[])
+            .record_queue_checkpoint(
+                "s1",
+                "sess1",
+                Some("/a.jsonl"),
+                false,
+                "turn_end",
+                &[],
+                &[],
+                false,
+            )
             .unwrap();
 
         let strip_stamps = |path: &std::path::Path| -> Vec<Value> {
@@ -744,7 +795,7 @@ mod tests {
         assert_eq!(latest_a[0].busy, latest_b[0].busy);
         assert_eq!(latest_a[0].operation, latest_b[0].operation);
         let restored = WorkerRecoveryJournal::read_queue_snapshot(&batched_path, "s1").unwrap();
-        assert_eq!(restored, Some((Vec::new(), Vec::new())));
+        assert_eq!(restored, Some((Vec::new(), Vec::new(), false)));
         let _ = fs::remove_dir_all(sequential_path.parent().unwrap());
         let _ = fs::remove_dir_all(batched_path.parent().unwrap());
     }
@@ -758,8 +809,16 @@ mod tests {
         // Replace the journal with a directory: every append open now fails.
         fs::remove_file(&path).unwrap();
         fs::create_dir(&path).unwrap();
-        let result =
-            journal.record_queue_checkpoint("s1", "sess1", None, true, "prompt_accepted", &[], &[]);
+        let result = journal.record_queue_checkpoint(
+            "s1",
+            "sess1",
+            None,
+            true,
+            "prompt_accepted",
+            &[],
+            &[],
+            false,
+        );
         assert!(result.is_err());
         assert!(journal.latest.get("s1").is_some_and(|record| !record.busy));
         let _ = fs::remove_dir_all(path.parent().unwrap());
@@ -819,6 +878,8 @@ mod tests {
             queue_key: None,
             queue_visible: true,
             policy: queue_policy_default(),
+            forced_batch: false,
+            images: Vec::new(),
         };
         let mut journal = WorkerRecoveryJournal::open(&path).unwrap();
         journal
@@ -830,10 +891,20 @@ mod tests {
                 "prompt_accepted",
                 std::slice::from_ref(&item),
                 &[],
+                false,
             )
             .unwrap();
         journal
-            .record_queue_checkpoint("s1", "sess1", Some("/a.jsonl"), false, "turn_end", &[], &[])
+            .record_queue_checkpoint(
+                "s1",
+                "sess1",
+                Some("/a.jsonl"),
+                false,
+                "turn_end",
+                &[],
+                &[],
+                false,
+            )
             .unwrap();
         let after_first_settle = fs::read_to_string(&path).unwrap().lines().count();
         journal
@@ -845,11 +916,21 @@ mod tests {
                 "prompt_accepted",
                 std::slice::from_ref(&item),
                 &[],
+                false,
             )
             .unwrap();
         let after_second_admission = fs::read_to_string(&path).unwrap().lines().count();
         journal
-            .record_queue_checkpoint("s1", "sess1", Some("/a.jsonl"), false, "turn_end", &[], &[])
+            .record_queue_checkpoint(
+                "s1",
+                "sess1",
+                Some("/a.jsonl"),
+                false,
+                "turn_end",
+                &[],
+                &[],
+                false,
+            )
             .unwrap();
         let content = fs::read_to_string(&path).unwrap();
         let lines: Vec<&str> = content.lines().filter(|l| !l.trim().is_empty()).collect();
@@ -882,14 +963,23 @@ mod tests {
         let path = temp_path("unchanged-nocompact.recovery.jsonl");
         let mut journal = WorkerRecoveryJournal::open(&path).unwrap();
         journal
-            .record_queue_checkpoint("s1", "sess1", None, true, "prompt_accepted", &[], &[])
+            .record_queue_checkpoint(
+                "s1",
+                "sess1",
+                None,
+                true,
+                "prompt_accepted",
+                &[],
+                &[],
+                false,
+            )
             .unwrap();
         journal
-            .record_queue_checkpoint("s1", "sess1", None, false, "turn_end", &[], &[])
+            .record_queue_checkpoint("s1", "sess1", None, false, "turn_end", &[], &[], false)
             .unwrap();
         let lines_after_settle = fs::read_to_string(&path).unwrap().lines().count();
         journal
-            .record_queue_checkpoint("s1", "sess1", None, false, "turn_end", &[], &[])
+            .record_queue_checkpoint("s1", "sess1", None, false, "turn_end", &[], &[], false)
             .unwrap();
         let lines_after_unchanged = fs::read_to_string(&path).unwrap().lines().count();
         assert_eq!(lines_after_unchanged, lines_after_settle + 1);
@@ -916,6 +1006,8 @@ mod tests {
             queue_key: None,
             queue_visible: true,
             policy: queue_policy_default(),
+            forced_batch: false,
+            images: Vec::new(),
         };
         let mut journal = WorkerRecoveryJournal::open(&path).unwrap();
         journal
@@ -927,6 +1019,7 @@ mod tests {
                 "prompt_accepted",
                 std::slice::from_ref(&item),
                 &[],
+                /*suspended*/ false,
             )
             .unwrap();
         let whole = serde_json::to_string(&WorkerRecoveryRecord {
@@ -1007,8 +1100,12 @@ mod tests {
                 queue_key: None,
                 queue_visible: true,
                 policy: queue_policy_default(),
+                forced_batch: false,
+                images: Vec::new(),
             };
-            journal.record_queue_snapshot("s1", &[item], &[]).unwrap();
+            journal
+                .record_queue_snapshot("s1", &[item], &[], /*suspended*/ false)
+                .unwrap();
             drop(journal);
             let mut bytes = fs::read(&path).unwrap();
             let marker = b"safeXinstruction";

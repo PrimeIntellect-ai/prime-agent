@@ -12,7 +12,7 @@ use super::{
 /// full session summaries from the supervisor. The roster this controller
 /// reports is the caller's NUCLEAR FAMILY, derived from the same durable
 /// parent edges `agent_message.send` resolves through — never the whole daemon.
-pub(crate) struct LinkAgentObserveController {
+pub struct LinkAgentObserveController {
     link: Arc<SupervisorLink>,
     /// This worker's live active session id (the family-scope anchor).
     active_session_id: String,
@@ -24,7 +24,7 @@ pub(crate) struct LinkAgentObserveController {
 }
 
 impl LinkAgentObserveController {
-    pub(crate) fn new(
+    pub fn new(
         link: Arc<SupervisorLink>,
         active_session_id: String,
         own_summary: Arc<std::sync::Mutex<Option<Value>>>,
@@ -86,6 +86,39 @@ impl LinkAgentObserveController {
         Ok(summaries_from_roster(sessions, &identity, &child_ids))
     }
 
+    /// The family member `target` names: the one resolution and permission check
+    /// every read of another session goes through.
+    async fn family_target(&self, target: &str) -> anyhow::Result<AgentObserveSummary> {
+        find_target(self.family_summaries().await?, target)?
+            .ok_or_else(|| anyhow::anyhow!("agent {target} is not reachable"))
+    }
+
+    /// One `get_session_messages` read of `agent`'s transcript: its worker answers when one
+    /// holds the session, otherwise the supervisor reads the session file.
+    async fn request_session_messages(
+        &self,
+        agent: &AgentObserveSummary,
+        start: i64,
+        limit: u64,
+        roles: Vec<String>,
+    ) -> anyhow::Result<Value> {
+        let command = pa_types::daemon::DaemonCommand::GetSessionMessages {
+            id: None,
+            active_session_id: agent.active_session_id.clone().unwrap_or_default(),
+            start,
+            limit,
+            roles,
+            session_file: agent.session_file.clone(),
+            rest: serde_json::Map::default(),
+        };
+        self.link
+            .request_success(
+                serde_json::to_value(command)?,
+                std::time::Duration::from_secs(30),
+            )
+            .await
+    }
+
     /// The caller's own summary from its pushed state alone, no roster
     /// read: the row `list_agents` serves when the walk missed this
     /// session's live row.
@@ -103,7 +136,8 @@ impl LinkAgentObserveController {
 }
 
 /// Resolve within the nuclear family using the registry's normalized id-suffix
-/// and exact-name contract. Exact active ids retain direct-lookup precedence.
+/// and exact-name contract, or the exact RLM child id. Exact active ids retain
+/// direct-lookup precedence.
 fn find_target(
     mut summaries: Vec<AgentObserveSummary>,
     target: &str,
@@ -123,6 +157,7 @@ fn find_target(
                 .is_some_and(|id| crate::registry::selector_matches(id, target))
                 || crate::registry::selector_matches(&summary.session_id, target)
                 || summary.session_name.as_deref() == Some(target)
+                || summary.rlm_child_id.as_deref() == Some(target)
         })
         .collect();
     if matches.len() > 1 {
@@ -185,67 +220,85 @@ impl AgentObserveController for LinkAgentObserveController {
         limit: usize,
         max_chars: usize,
     ) -> anyhow::Result<AgentObserveRecentMessagesResult> {
-        let agent = find_target(self.family_summaries().await?, target)?
-            .ok_or_else(|| anyhow::anyhow!("agent {target} is not reachable"))?;
-        // A family member with no live session (a passivated child) has no
-        // worker to read; TS hydrates it first, the roster walk errors. A
-        // live member whose `get_state` degraded shows the offline stub
-        // (empty sessionId, no activeSessionId — classified Inactive): its
-        // row still carries the session id, so read the transcript through
-        // it instead of refusing a session that is live, just slow.
-        let degraded_stub = agent.session_id.is_empty();
-        let Some(live_session_id) = agent
-            .active_session_id
-            .as_deref()
-            .filter(|_| degraded_stub || agent.status != AgentFamilyStatus::Inactive)
-        else {
-            anyhow::bail!("agent {target} has no live session");
-        };
+        let agent = self.family_target(target).await?;
         let data = self
-            .link
-            .request_success(
-                json!({
-                    "type": "get_messages",
-                    "activeSessionId": live_session_id,
-                }),
-                std::time::Duration::from_secs(30),
+            .request_session_messages(
+                &agent,
+                -i64::try_from(limit)?,
+                u64::try_from(limit)?,
+                vec!["*".to_string()],
             )
             .await?;
-        let messages = data
-            .get("messages")
-            .and_then(Value::as_array)
-            .cloned()
-            .unwrap_or_default();
-        let total = messages.len();
-        let start = total.saturating_sub(limit);
-        let mut previews = Vec::new();
-        for (index, message) in messages.iter().enumerate().skip(start) {
-            let full_text = message_preview_text(message);
-            previews.push(AgentObserveMessagePreview {
-                index,
-                role: message
-                    .get("role")
-                    .and_then(Value::as_str)
-                    .unwrap_or_default()
-                    .to_string(),
-                timestamp: message.get("timestamp").and_then(Value::as_u64),
-                text: truncate_chars(&full_text, max_chars),
-                truncated: full_text.chars().count() > max_chars,
-                tool_calls: Vec::new(),
-                custom_type: message
-                    .get("customType")
-                    .and_then(Value::as_str)
-                    .map(str::to_string),
-            });
-        }
+        let reply: SessionMessagesReply = serde_json::from_value(data)?;
+        let truncated = reply.total > reply.messages.len();
+        let previews = reply
+            .messages
+            .into_iter()
+            .map(|SessionMessageRow { index, message }| {
+                let full_text = message_preview_text(&message);
+                AgentObserveMessagePreview {
+                    index,
+                    role: message
+                        .get("role")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_string(),
+                    timestamp: message.get("timestamp").and_then(|value| {
+                        value
+                            .as_u64()
+                            .or_else(|| value.as_str().and_then(crate::util::iso_to_unix_ms))
+                    }),
+                    text: truncate_chars(&full_text, max_chars),
+                    truncated: full_text.chars().count() > max_chars,
+                    tool_calls: Vec::new(),
+                    custom_type: message
+                        .get("customType")
+                        .and_then(Value::as_str)
+                        .map(str::to_string),
+                }
+            })
+            .collect();
         Ok(AgentObserveRecentMessagesResult {
             agent,
             messages: previews,
             limit,
             max_chars,
-            truncated: start > 0,
+            truncated,
         })
     }
+
+    /// The member's own worker answers with its store and running calls; the supervisor
+    /// reads the file of a member no worker holds.
+    async fn session_messages(
+        &self,
+        target: &str,
+        start: i64,
+        limit: u64,
+        roles: Vec<String>,
+    ) -> anyhow::Result<Value> {
+        let agent = self.family_target(target).await?;
+        let mut data = self
+            .request_session_messages(&agent, start, limit, roles)
+            .await?;
+        data["agent"] = json!(agent
+            .session_name
+            .or(agent.active_session_id)
+            .unwrap_or_default());
+        Ok(data)
+    }
+}
+
+/// The `get_session_messages` reply fields a preview reads.
+#[derive(serde::Deserialize)]
+struct SessionMessagesReply {
+    messages: Vec<SessionMessageRow>,
+    total: usize,
+}
+
+#[derive(serde::Deserialize)]
+struct SessionMessageRow {
+    index: usize,
+    message: Value,
 }
 
 /// Flatten the supervisor's roster rows into observation summaries of the caller's NUCLEAR
@@ -379,6 +432,7 @@ pub(super) fn summaries_from_roster(
                 rlm_child_id: row_str(&session, "rlmChildId").map(str::to_string),
                 first_message: row_str(&session, "firstMessage")
                     .map(|text| truncate_chars(text, AGENT_OBSERVE_PREVIEW_MAX_CHARS)),
+                session_file: row_str(&session, "sessionFile").map(str::to_string),
             })
         })
         .collect()
@@ -393,7 +447,12 @@ fn message_preview_text(message: &Value) -> String {
             .filter_map(|block| block.get("text").and_then(Value::as_str))
             .collect::<Vec<_>>()
             .join(""),
-        _ => String::new(),
+        // A `compactionSummary` row keeps its text in `summary`.
+        _ => message
+            .get("summary")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string(),
     }
 }
 

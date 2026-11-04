@@ -7,6 +7,7 @@ use pa_types::ai::{UserContent, UserMessage};
 use pa_types::session::{AgentMessage, CustomMessage, FileEntry};
 use serde_json::json;
 
+use super::model_usage::ModelUsage;
 use super::AgentSession;
 use crate::refinement::executor::{
     apply_refinement_plan, plan_refinement, review_auto_refine, AutoRefineReview,
@@ -488,6 +489,31 @@ pub(crate) enum AutoRefineRound {
 }
 
 impl AgentSession {
+    /// The refiner model call on the session model, with the merged request
+    /// headers (the Prime team header) the session's own requests send.
+    pub(super) async fn refiner_call(
+        &self,
+        model: &pa_types::ai::Model,
+        api_key: Option<String>,
+    ) -> anyhow::Result<crate::refinement::executor::RefinerFn> {
+        let (api_key, headers) = match self.auxiliary_model.clone() {
+            Some(context) => {
+                let model = model.clone();
+                let routed = tokio::task::spawn_blocking(move || {
+                    super::auxiliary_model::session_fallback_with_headers(&context, &model, api_key)
+                })
+                .await?;
+                (routed.api_key, routed.headers)
+            }
+            None => (api_key, None),
+        };
+        Ok(default_refiner_call(
+            api_key,
+            headers,
+            self.session_id().await,
+        ))
+    }
+
     /// The compact-trigger review: an LLM call over the conversation, the
     /// merged harness state, and the refinement history. `Ok(None)` is the
     /// decline; `Ok(Some(review))` a fresh approval.
@@ -496,6 +522,10 @@ impl AgentSession {
     ///
     /// Returns an error when the conversation history cannot be read or
     /// when the review request fails; a decline is `Ok(None)`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the billed-call slot's mutex is poisoned.
     pub async fn review_compact_auto_refine(
         &self,
         model: &pa_types::ai::Model,
@@ -527,6 +557,8 @@ impl AgentSession {
             refinement_history: session_history,
         } = parts.await?;
         let history = crate::refinement::merge_refinement_history(&history, &session_history);
+        let (review_call, billed) =
+            billed_refiner_call(self.refiner_call(model, api_key).await?, "refine_review");
         let review = review_auto_refine(
             &messages,
             &merged_state,
@@ -536,9 +568,12 @@ impl AgentSession {
                 reason: AUTO_REFINE_COMPACT_REASON.to_string(),
                 turns_since_last_review,
             },
-            default_refiner_call(api_key.clone(), self.session_id().await),
+            review_call,
         )
-        .await?;
+        .await;
+        let billed = billed.lock().expect("billed refiner call lock").take();
+        self.record_model_usage(billed).await;
+        let review = review?;
         if !review.should_refine {
             return Ok(None);
         }
@@ -610,14 +645,37 @@ impl AgentSession {
     }
 }
 
+/// The refiner seam plus the slot its reply's billed call lands in. The
+/// caller records the call once the refinement released the session lock:
+/// the session-file usage store appends through that same lock.
+pub(crate) fn billed_refiner_call(
+    call: crate::refinement::executor::RefinerFn,
+    source: &'static str,
+) -> (
+    crate::refinement::executor::RefinerFn,
+    std::sync::Arc<std::sync::Mutex<Option<ModelUsage>>>,
+) {
+    let billed = std::sync::Arc::new(std::sync::Mutex::new(None));
+    let slot = std::sync::Arc::clone(&billed);
+    let seam: crate::refinement::executor::RefinerFn = Box::new(move |model, system, prompt| {
+        let reply = call(model, system, prompt);
+        Box::pin(async move {
+            let reply = reply.await?;
+            *slot.lock().expect("billed refiner call lock") = ModelUsage::of_reply(source, &reply);
+            Ok(reply)
+        })
+    });
+    (seam, billed)
+}
+
 /// The default model seam over pa-ai completion.
 #[must_use]
 pub fn default_refiner_call(
     api_key: Option<String>,
+    headers: Option<std::collections::BTreeMap<String, String>>,
     session_id: String,
 ) -> crate::refinement::executor::RefinerFn {
     Box::new(move |model, system_prompt, prompt| {
-        let api_key = api_key;
         Box::pin(async move {
             let context = pa_types::ai::Context {
                 system_prompt: Some(system_prompt.to_string()),
@@ -631,6 +689,7 @@ pub fn default_refiner_call(
             let mut stream_options =
                 pa_ai::types::SimpleStreamOptions::from_base(pa_ai::types::StreamOptions {
                     api_key,
+                    headers: headers.map(|headers| headers.into_iter().collect()),
                     session_id: Some(session_id),
                     // One-off prompts ride SSE: they keep the conversation id (cache key,
                     // opencode routing) but never take or replace the session's Codex

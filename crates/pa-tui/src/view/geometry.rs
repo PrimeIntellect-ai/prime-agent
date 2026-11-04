@@ -69,6 +69,7 @@ impl AgentView {
                         card,
                         self.pulse_frame,
                         detail,
+                        self.detail,
                         &self.theme,
                         width,
                         self.show_images,
@@ -243,9 +244,9 @@ mod tests {
             Just(serde_json::json!({"error": {"ename": "E", "evalue": "boom", "traceback": []}})),
             Just(serde_json::json!({"error": {"ename": "E", "evalue": "boom",
                 "traceback": ["Traceback", "E: boom"]}, "status": "error"})),
-            Just(
-                serde_json::json!({"diffs": [{"path": "x", "diff": "-x\n+y"}], "stdout": "Edited x"})
-            ),
+            Just(serde_json::json!({"diffs": [
+                {"path": "x.py", "diff": "-3 a\tb\n+3 a\n 4 c\n   ...\n+9 d 界"},
+                {"path": "x.py", "diff": "-1 e\n+1 f"}], "stdout": "Edited x.py"})),
             markdown_text().prop_map(|message| serde_json::json!({"sentAgentMessages": [
                 {"message": message, "deliveryStatus": "delivered", "receiverRole": "parent"},
                 {"id": "invalid"}]})),

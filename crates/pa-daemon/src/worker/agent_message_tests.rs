@@ -503,7 +503,7 @@ async fn assert_clear_queue_bounces(restore_queue: bool) {
         // above have already completed their synchronous checkpoint writes.
         drop(worker.recovery.lock().unwrap().take());
         let journal = WorkerRecoveryJournal::open(&worker.config.recovery_journal_path).unwrap();
-        let (steering, follow_up) = restore_queue_snapshot(&journal, "target-session");
+        let (steering, follow_up, _) = restore_queue_snapshot(&journal, "target-session");
         assert_eq!(steering.len(), 1, "agent row checkpoint must be durable");
         assert_eq!(follow_up.len(), 1, "prompt checkpoint must be durable");
         // The replacement worker owns the reopened sink for clear's checkpoint.

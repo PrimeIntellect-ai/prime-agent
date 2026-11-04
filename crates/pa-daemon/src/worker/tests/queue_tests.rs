@@ -291,11 +291,11 @@ fn legacy_queue_record_priority_defaults_by_row_and_keeps_order() {
     }))
     .unwrap();
     journal
-        .record_queue_snapshot("legacy", &[machine, human, future], &[])
+        .record_queue_snapshot("legacy", &[machine, human, future], &[], false)
         .unwrap();
     drop(journal);
     let reopened = WorkerRecoveryJournal::open(&path).unwrap();
-    let (lane, _) = restore_queue_snapshot(&reopened, "legacy");
+    let (lane, _, _) = restore_queue_snapshot(&reopened, "legacy");
     assert_eq!(
         lane.iter()
             .map(|item| item.message.as_str())
@@ -335,6 +335,8 @@ fn queue_snapshot_round_trips_through_the_recovery_journal() {
         queue_key: Some("heartbeat:hb-1".to_string()),
         queue_visible: true,
         policy: "injected".to_string(),
+        forced_batch: false,
+        images: Vec::new(),
     };
     let plain = crate::journal::WorkerQueueItemRecord {
         message: "follow-me".to_string(),
@@ -344,18 +346,21 @@ fn queue_snapshot_round_trips_through_the_recovery_journal() {
         queue_key: None,
         queue_visible: true,
         policy: "queued".to_string(),
+        forced_batch: false,
+        images: Vec::new(),
     };
     journal
         .record_queue_snapshot(
             "session-a",
             std::slice::from_ref(&heartbeat),
             std::slice::from_ref(&plain),
+            false,
         )
         .unwrap();
     // A reopen (respawned worker) reads the latest snapshot per session.
     drop(journal);
     let reloaded = WorkerRecoveryJournal::open(&journal_path).unwrap();
-    let (steering, follow_up) = restore_queue_snapshot(&reloaded, "session-a");
+    let (steering, follow_up, _) = restore_queue_snapshot(&reloaded, "session-a");
     assert_eq!(steering.len(), 1);
     assert_eq!(steering[0].message, heartbeat.message);
     assert_eq!(steering[0].priority, QueuePriority::Background);
@@ -375,7 +380,7 @@ fn queue_snapshot_round_trips_through_the_recovery_journal() {
         .unwrap();
     drop(compacting);
     let compacted = WorkerRecoveryJournal::open(&journal_path).unwrap();
-    let (steering, _) = restore_queue_snapshot(&compacted, "session-a");
+    let (steering, _, _) = restore_queue_snapshot(&compacted, "session-a");
     assert_eq!(steering.len(), 1);
     assert_eq!(steering[0].custom_message, heartbeat.custom_message);
     let _ = std::fs::remove_dir_all(&dir);
@@ -393,7 +398,7 @@ fn a_version_one_queue_snapshot_restores_as_plain_rows() {
     )
     .unwrap();
     let journal = WorkerRecoveryJournal::open(&journal_path).unwrap();
-    let (steering, follow_up) = restore_queue_snapshot(&journal, "session-b");
+    let (steering, follow_up, _) = restore_queue_snapshot(&journal, "session-b");
     assert_eq!(steering.len(), 1);
     assert_eq!(steering[0].message, "steer-me");
     assert_eq!(steering[0].preview, None);

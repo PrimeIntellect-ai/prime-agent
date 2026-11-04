@@ -142,12 +142,22 @@ impl Worker {
     /// Persist the queue lanes to the recovery journal. Call after
     /// releasing the core lock: `record_recovery` takes the locks in
     /// the opposite order.
-    pub(crate) fn persist_queue_snapshot(&self, active_session_id: &str, lanes: &QueueLanes) {
+    pub(crate) fn persist_queue_snapshot(
+        &self,
+        active_session_id: &str,
+        suspended: bool,
+        lanes: &QueueLanes,
+    ) {
         let mut guard = self.recovery.lock().unwrap();
         let Some(journal) = guard.as_mut() else {
             return;
         };
-        let _ = journal.record_queue_snapshot(active_session_id, &lanes.steering, &lanes.follow_up);
+        let _ = journal.record_queue_snapshot(
+            active_session_id,
+            &lanes.steering,
+            &lanes.follow_up,
+            suspended,
+        );
     }
 
     /// One queue-lane recovery checkpoint: the lane snapshot and the

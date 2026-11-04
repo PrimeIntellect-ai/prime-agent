@@ -191,7 +191,7 @@ mod message;
 mod observe;
 
 pub use message::LinkAgentMessageController;
-pub(crate) use observe::LinkAgentObserveController;
+pub use observe::LinkAgentObserveController;
 
 #[cfg(test)]
 mod controller_tests;

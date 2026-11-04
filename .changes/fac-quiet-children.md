@@ -1,0 +1,1 @@
+- Factory runs no longer wake the parent session once per state: factory children are told their final message is the state's output instead of replying with `agent_message.send`, and their exit and failure notices are no longer posted into the parent conversation (the factory still reads every settle and failure through `rlm.collect`).

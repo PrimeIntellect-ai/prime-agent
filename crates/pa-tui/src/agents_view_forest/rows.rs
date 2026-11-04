@@ -4,14 +4,14 @@ use serde_json::Value;
 
 use super::lineage::{depth_consistent_parent, is_subagent_descendant};
 use super::{
-    session_model, session_title, AgentsViewRow, AgentsViewScope, Rollup, RowKind, SessionActivity,
-    SUMMARY_ROW_PREFIX,
+    session_model, session_title, ActivityCounts, AgentsViewRow, AgentsViewScope, Rollup, RowKind,
+    SessionActivity, SUMMARY_ROW_PREFIX,
 };
 use crate::agents_view_state::{
     is_unnamed_empty, now_ms, relative_age, section_rank, summary_for_record, Section,
     UnifiedRecord,
 };
-use crate::factory_view::FactoryRunCounts;
+use crate::bash_view::ShellCounts;
 use crate::subagents::{is_subagent_summary, summary_identity_keys, summary_parent_keys};
 
 struct BaseRow {
@@ -28,7 +28,7 @@ struct BaseRow {
     descendant_cost: f64,
     descendant_count: usize,
     running_subagent_count: usize,
-    /// The session's own shells and factory runs (never subtree-aggregated).
+    /// The session's own shells and factory counts (never subtree-aggregated).
     activity: SessionActivity,
     record: usize,
     search_score: Option<f64>,
@@ -43,7 +43,7 @@ pub(crate) fn build_rows<S: std::hash::BuildHasher + Default>(
     expanded: &HashSet<String, S>,
     program_shown: &HashSet<String, S>,
     rollups: &HashMap<String, Rollup, S>,
-    activity: &HashMap<String, SessionActivity, S>,
+    activity: &ActivityCounts,
     anchor: Option<&str>,
 ) -> Vec<AgentsViewRow> {
     let now = now_ms();
@@ -100,12 +100,33 @@ pub(crate) fn build_rows<S: std::hash::BuildHasher + Default>(
         );
         let rollup = rollups.get(&record.identity).copied().unwrap_or_default();
         let model = session_model(&summary);
-        let activity = summary
-            .get("activeSessionId")
+        let live = match summary.get("activeSessionId").and_then(Value::as_str) {
+            Some(active) => activity.live.get(active).copied().unwrap_or_default(),
+            // Without a live kernel, the catalog row's stored factory specs.
+            None => SessionActivity {
+                shells: ShellCounts::default(),
+                factory: crate::factory_view::FactoryCounts {
+                    specs: record
+                        .saved
+                        .as_ref()
+                        .map_or(0, crate::factory_view::stored_spec_count),
+                    runs: crate::factory_view::FactoryRunCounts::default(),
+                },
+            },
+        };
+        // Persistent shells count from the daemon list only; the kernel adds its other shells.
+        let persistent = summary
+            .get("sessionId")
             .and_then(Value::as_str)
-            .and_then(|active| activity.get(active))
-            .copied()
-            .unwrap_or_default();
+            .and_then(|session_id| activity.persistent_shells.get(session_id))
+            .map_or(0, |shells| shells.persistent);
+        let activity = SessionActivity {
+            shells: ShellCounts {
+                running: live.shells.running - live.shells.persistent + persistent,
+                persistent,
+            },
+            ..live
+        };
         base.push(BaseRow {
             kind,
             section: record.section,
@@ -255,7 +276,7 @@ struct RowForest<'a, S: std::hash::BuildHasher + Default> {
 }
 
 impl<S: std::hash::BuildHasher + Default> RowForest<'_, S> {
-    /// Emit one row, then its subagents block, then its shells and factory-run lines (after the
+    /// Emit one row, then its subagents block, then its shells and factory lines (after the
     /// block, so an expanded summary line stays directly above its children).
     fn emit(
         &self,
@@ -380,8 +401,8 @@ fn merged_summary_row(parent: &BaseRow, depth: usize, expanded: bool) -> AgentsV
     }
 }
 
-/// The node's own `$ N shells` and `⚙ N factory runs` lines, each only when its count is nonzero;
-/// paused runs read apart from the running ones (`⚙ 0 factory runs · 1 paused`).
+/// The node's own `$ N shells[ · M persistent]` and `⚙ N factories · M running[ · K paused]` lines,
+/// each only when one of its counts is nonzero.
 /// Like the summary line they reuse the parent's summary, so the open action resolves the parent.
 fn activity_rows(parent: &BaseRow, depth: usize) -> Vec<AgentsViewRow> {
     let line = |kind: RowKind, prefix: &str, title: String| AgentsViewRow {
@@ -400,32 +421,29 @@ fn activity_rows(parent: &BaseRow, depth: usize) -> Vec<AgentsViewRow> {
         expanded: false,
         has_spawn_code: false,
     };
-    let SessionActivity {
-        shells,
-        factory_runs,
-    } = parent.activity;
+    let SessionActivity { shells, factory } = parent.activity;
     let mut rows = Vec::new();
-    if shells > 0 {
-        rows.push(line(
-            RowKind::Shells,
-            super::SHELLS_ROW_PREFIX,
-            format!("$ {shells} shell{}", if shells == 1 { "" } else { "s" }),
-        ));
-    }
-    let FactoryRunCounts { running, paused } = factory_runs;
-    if running + paused > 0 {
-        let paused = if paused > 0 {
-            format!(" \u{b7} {paused} paused")
+    if shells.running > 0 {
+        let persistent = if shells.persistent > 0 {
+            format!(" · {} persistent", shells.persistent)
         } else {
             String::new()
         };
         rows.push(line(
+            RowKind::Shells,
+            super::SHELLS_ROW_PREFIX,
+            format!(
+                "$ {} shell{}{persistent}",
+                shells.running,
+                if shells.running == 1 { "" } else { "s" }
+            ),
+        ));
+    }
+    if let Some(label) = factory.label() {
+        rows.push(line(
             RowKind::FactoryRuns,
             super::FACTORY_ROW_PREFIX,
-            format!(
-                "\u{2699} {running} factory run{}{paused}",
-                if running == 1 { "" } else { "s" }
-            ),
+            format!("\u{2699} {label}"),
         ));
     }
     rows

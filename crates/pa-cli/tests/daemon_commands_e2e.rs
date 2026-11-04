@@ -770,6 +770,34 @@ fn ts_daemon_differential_cli_output() {
     let work = dir.path().join("work");
     std::fs::create_dir_all(&sessions).expect("sessions dir");
     std::fs::create_dir_all(&work).expect("work dir");
+    // Sends test admission, not provider completion. Give the real TS worker
+    // synthetic credentials and an owned loopback listener that never replies:
+    // the command must still return its receipt, and no live provider is used.
+    let provider_listener =
+        std::net::TcpListener::bind(("127.0.0.1", 0)).expect("fixture provider listener");
+    let provider_address = provider_listener
+        .local_addr()
+        .expect("fixture provider address");
+    std::fs::write(
+        agent_dir.join("models.json"),
+        json!({"providers": {"parity-cli": {
+            "api": "openai-completions",
+            "apiKey": "fixture-only",
+            "baseUrl": format!("http://{provider_address}/v1"),
+            "models": [{"id": "parity-1", "name": "CLI parity fixture",
+                "reasoning": false, "input": ["text"],
+                "contextWindow": 128_000, "maxTokens": 4096}]
+        }}})
+        .to_string(),
+    )
+    .expect("fixture model registry");
+    std::fs::write(
+        agent_dir.join("settings.json"),
+        json!({"defaultProvider": "parity-cli", "defaultModel": "parity-1",
+            "prewarmPythonKernel": false, "autoRefine": {"enabled": false}})
+        .to_string(),
+    )
+    .expect("fixture model settings");
     // `schedule` cannot take --daemon-socket (TS parity); the daemon uses the default path.
     std::env::set_var("TMPDIR", dir.path());
     let socket = pa_daemon::socket::default_daemon_socket_path();

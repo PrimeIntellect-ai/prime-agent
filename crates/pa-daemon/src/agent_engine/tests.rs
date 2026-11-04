@@ -13,6 +13,7 @@ mod compaction;
 mod empty_reply;
 mod failover_facts;
 mod goal;
+mod mcp_settings;
 mod model_resolution;
 mod quota_park;
 mod reload;

@@ -1,0 +1,1 @@
+- `await bash(cmd)`, `await handle` and `await r.handle` now always return after at most 1 second in sessions with `[bash-done]` notifications: a command still running by then returns the usual snapshot (`r.running` True, `r.handle` the live handle) and its `[bash-done]` notification arrives on completion. The `yield_after` parameter is gone; passing it raises a `TypeError`.

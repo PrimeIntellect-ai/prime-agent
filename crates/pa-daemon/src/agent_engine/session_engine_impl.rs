@@ -866,6 +866,8 @@ impl SessionEngine for AgentSessionEngine {
         // This session's own depth gates the kernel `refine.*` host requests (depth-0 only).
         self.rlm_depth
             .store(identity.rlm_depth, std::sync::atomic::Ordering::Relaxed);
+        self.factory_child
+            .store(identity.factory_child, std::sync::atomic::Ordering::Relaxed);
         if let Some(thinking) = &identity.thinking {
             pa_ai::models::thinking_level_from_str(thinking)
                 .ok_or_else(|| anyhow::anyhow!("unknown thinking level \"{thinking}\""))?;
@@ -947,6 +949,12 @@ impl SessionEngine for AgentSessionEngine {
         }
     }
 
+    fn on_turn_start(&self) {
+        if let Some(children) = &self.children {
+            children.notify_turn_started();
+        }
+    }
+
     /// The worker's turn completed: release child prompt tasks waiting on the boundary.
     fn on_turn_done(&self) {
         *self
@@ -1001,13 +1009,13 @@ impl SessionEngine for AgentSessionEngine {
         // and the ledger records nothing. The engine build always wires
         // it; no fallback to the agent's own fn, which would leak the
         // id-carrying wrapper into the side call.
-        let side_stream_fn = {
-            let guard = self.session.blocking_lock();
-            guard
-                .as_deref()
-                .and_then(|engine| engine.session.side_question_stream_fn())
-        };
-        let Some(side_stream_fn) = side_stream_fn else {
+        // The run bills the engine it started on: a replace during the run must
+        // not move the bill to the replacement.
+        let built = self.session.blocking_lock().clone();
+        let side_stream_fn = built
+            .as_deref()
+            .and_then(|engine| engine.session.side_question_stream_fn());
+        let (Some(built), Some(side_stream_fn)) = (built, side_stream_fn) else {
             return SideQuestionOutcome::Failed {
                 answer: String::new(),
                 error: "Select a model before asking a side question".to_string(),
@@ -1024,6 +1032,9 @@ impl SessionEngine for AgentSessionEngine {
                     signal,
                     sink,
                 ));
+        // The answer never enters the history, but the run's model calls bill the session.
+        self.runtime
+            .block_on(built.session.record_model_usage(result.usage.clone()));
         match result.status {
             pa_core::session_engine::side_question::SideQuestionStatus::Complete => {
                 SideQuestionOutcome::Complete {

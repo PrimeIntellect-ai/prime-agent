@@ -659,6 +659,57 @@ fn the_token_fetch_holds_no_document_lock_and_a_peer_write_keeps_its_fresher_cre
     );
 }
 
+/// Probe the persistence boundary itself: main releases the flight before this write.
+#[test]
+fn the_refresh_flight_stays_held_through_credential_commit() {
+    struct CommitProbe {
+        provider: &'static str,
+        storage: crate::auth::storage::InMemoryAuthStorageBackend,
+        flight_held: std::sync::Mutex<Vec<bool>>,
+    }
+
+    impl AuthStorageBackend for CommitProbe {
+        fn read(&self) -> anyhow::Result<Option<String>> {
+            self.storage.read()
+        }
+
+        fn with_lock(
+            &self,
+            update: &mut dyn FnMut(Option<String>) -> anyhow::Result<((), Option<String>)>,
+        ) -> anyhow::Result<()> {
+            self.flight_held
+                .lock()
+                .unwrap()
+                .push(refresh_flight_lock(self.provider).try_lock().is_err());
+            self.storage.with_lock(update)
+        }
+    }
+
+    let provider = "x-flight-commit-probe";
+    let backend = Arc::new(CommitProbe {
+        provider,
+        storage: crate::auth::storage::InMemoryAuthStorageBackend::default(),
+        flight_held: std::sync::Mutex::new(Vec::new()),
+    });
+    let mut data = AuthStorageData::default();
+    data.insert(provider, &expired_oauth("old-access"));
+    let seed = serde_json::to_string(&data.0).unwrap();
+    backend
+        .storage
+        .with_lock(&mut |_| Ok(((), Some(seed.clone()))))
+        .unwrap();
+    let oauth = Arc::new(CountingOAuth {
+        calls: std::sync::atomic::AtomicUsize::new(0),
+        delay_ms: 0,
+    });
+    let mut auth = AuthStorage::from_storage(backend.clone(), oauth);
+    assert_eq!(
+        auth.get_api_key(provider).as_deref(),
+        Some("fetched-access")
+    );
+    assert_eq!(*backend.flight_held.lock().unwrap(), vec![true]);
+}
+
 #[test]
 fn a_second_refresh_joins_the_first_flight_instead_of_fetching_again() {
     // Two resolutions race: the flight gate serializes them, and the

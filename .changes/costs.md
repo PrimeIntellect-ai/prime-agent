@@ -1,0 +1,1 @@
+- `/context` groups each factory run's agents under one `factory <spec> <run>` row with the run's summed tokens and cost, and deleted subagents now stay in the totals as `deleted` rows, so the `/context` total cost matches the agents view's session total.

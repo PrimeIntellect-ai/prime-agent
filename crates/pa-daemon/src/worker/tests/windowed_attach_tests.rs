@@ -386,6 +386,107 @@ async fn pages_continue_into_pre_compaction_history_with_one_summary() {
     );
 }
 
+/// `get_session_messages` reads a slice inside the window without hydrating, its indexes
+/// counting the unloaded prefix; a slice reaching into the prefix hydrates the store.
+#[tokio::test]
+async fn session_messages_hydrate_only_for_the_unloaded_prefix() {
+    let dir = session_dir();
+    let path = dir.join("session-messages.jsonl");
+    let mut fixture = Fixture {
+        content: header_line("session-messages"),
+        prev: None,
+        id: 0,
+    };
+    let user = |text: &str| json!({ "role": "user", "content": text, "timestamp": 1000u64 });
+    // The window's walk reads the model from the newest assistant row.
+    let assistant = |text: &str| {
+        let mut message = assistant_message(text);
+        message["provider"] = json!("p");
+        message["model"] = json!("m");
+        message
+    };
+    let conversation = |fixture: &mut Fixture, prefix: &str| {
+        fixture.row(|prev, id| message_row(prev, id, &user(&format!("{prefix}0"))));
+        fixture.row(|prev, id| message_row(prev, id, &assistant(&format!("{prefix}1"))));
+    };
+    conversation(&mut fixture, "p");
+    fixture.row(custom_row);
+    conversation(&mut fixture, "p");
+    fixture.row(custom_row);
+    fixture.row(|prev, id| message_row(prev, id, &user("r0")));
+    let first_kept = fixture.prev.clone().expect("retained start");
+    fixture.row(|prev, id| message_row(prev, id, &assistant("r1")));
+    fixture.row(|prev, id| {
+        format!(
+            "{{\"type\":\"compaction\",\"summary\":\"the story\",\"firstKeptEntryId\":\"{first_kept}\",\"tokensBefore\":4000,\"id\":\"{id}\",\"parentId\":{},\"timestamp\":\"2026-01-01T00:00:00.000Z\"}}\n",
+            parent_json(prev),
+        )
+    });
+    conversation(&mut fixture, "q");
+    std::fs::write(&path, fixture.content).unwrap();
+
+    let worker = worker_over(&dir, &path).await;
+    let windowed = || {
+        worker
+            .core
+            .lock()
+            .unwrap()
+            .store
+            .as_ref()
+            .is_some_and(|store| store.window.is_some())
+    };
+    let read = |start: i64, limit: u64, roles: Value| {
+        let worker = std::sync::Arc::clone(&worker);
+        async move {
+            let response = worker
+                .dispatch(
+                    "get_session_messages",
+                    &json!({ "start": start, "limit": limit, "roles": roles }),
+                )
+                .await;
+            assert!(response.success, "the read failed: {response:?}");
+            let data = response.data.expect("slice data");
+            let rows: Vec<(u64, String)> = data["messages"]
+                .as_array()
+                .expect("rows")
+                .iter()
+                .map(|row| {
+                    let message = &row["message"];
+                    let text = message["content"]
+                        .as_str()
+                        .or_else(|| message["content"][0]["text"].as_str())
+                        .unwrap_or_default();
+                    (row["index"].as_u64().unwrap(), text.to_string())
+                })
+                .collect();
+            (rows, data["total"].as_u64().unwrap())
+        }
+    };
+    assert!(windowed(), "the session opens windowed");
+
+    let tail = read(-3, 3, json!(["user", "assist*"])).await;
+    assert_eq!(
+        tail,
+        (
+            vec![
+                (5, "r1".to_string()),
+                (6, "q0".to_string()),
+                (7, "q1".to_string())
+            ],
+            8
+        )
+    );
+    assert_eq!(read(0, 0, json!(["c*"])).await, (Vec::new(), 3));
+    assert!(windowed(), "reads inside the window leave it in place");
+
+    let head = read(0, 2, json!(["*"])).await;
+    assert_eq!(
+        head,
+        (vec![(0, "p0".to_string()), (1, "p1".to_string())], 11)
+    );
+    assert!(!windowed(), "a read into the prefix hydrated the store");
+}
+
 #[tokio::test]
 async fn a_windowed_attach_preserves_iso_and_fractional_prompt_times() {
     for timestamp in [

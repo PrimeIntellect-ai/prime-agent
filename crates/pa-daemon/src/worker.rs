@@ -296,6 +296,8 @@ impl Worker {
             created: false,
             attached_client_ids: Vec::new(),
             abort_requested: false,
+            turn_cancelled: false,
+            turn_completed: false,
             suppress_aborted_row: false,
             shutdown_requested: false,
             last_activity_ms: 0,
@@ -847,8 +849,8 @@ impl Worker {
     /// no destructors, so the caller must have settled the close first).
     async fn exit_after_close(&self) -> ! {
         // Shutdown keeps the resume entry and exits the process (TS
-        // `closeKeepsResumeEntry("shutdown")`).
-        let _ = self.record_recovery(false, "shutdown");
+        // `closeKeepsResumeEntry("shutdown")`); `handle_shutdown` already
+        // recorded the recovery verdict.
         self.close_listener_then_cleanup_socket().await;
         std::process::exit(0)
     }
@@ -860,7 +862,7 @@ impl Worker {
             "pa-daemon worker {}: registration refused (the supervisor no longer owns this identity); retiring",
             std::process::id()
         );
-        let _ = self.handle_shutdown().await;
+        let _ = self.handle_shutdown(&json!({})).await;
         self.exit_after_close().await;
     }
 }
@@ -1011,6 +1013,56 @@ impl pa_core::session_engine::rlm_usage::RlmChildUsageStore for CoreUsageStore {
             store
                 .append_child_usage_once(&row_id, &target_id, child_usage, origin)
                 .map_err(|error| std::io::Error::other(format!("{error:#}")))
+        })
+    }
+
+    /// The worker swaps `core.store` on a session replace, so a bill made
+    /// before the swap lands only if its session is still the open one
+    /// (the fence `emit_refinement_event_for_session` applies to events).
+    fn append_model_usage(
+        &self,
+        session_id: String,
+        usage: pa_core::session_engine::model_usage::ModelUsage,
+    ) -> pa_core::session_engine::rlm_usage::RlmChildUsageFuture<'_, std::io::Result<()>> {
+        let core = Arc::clone(&self.0);
+        Box::pin(async move {
+            let data = serde_json::to_value(&usage)?;
+            let mut core = core.lock().unwrap();
+            let Some(store) = core.store.as_mut() else {
+                return Err(std::io::Error::other("session store not created"));
+            };
+            // A pathless store's id is not the engine's (lifecycle.rs keeps the in-memory
+            // manager's own id), so only path-backed sessions are fenced.
+            if !store.path.as_os_str().is_empty() && store.session_id() != session_id {
+                return Err(std::io::Error::other(format!(
+                    "bill for session {session_id} dropped: the worker moved to session {}",
+                    store.session_id()
+                )));
+            }
+            store
+                .persist_entry(
+                    "custom",
+                    json!({
+                        "customType": pa_core::session_engine::model_usage::MODEL_USAGE_CUSTOM_TYPE,
+                        "data": data,
+                    }),
+                )
+                .map(|_| ())
+                .map_err(|error| std::io::Error::other(format!("{error:#}")))
+        })
+    }
+
+    /// The engine builds on the store a create or a replacement installed;
+    /// a replacement retires the engine, so the rebuild re-observes.
+    fn observe_billed_rows(
+        &self,
+        sink: pa_core::session::billed_row::BilledRowSink,
+    ) -> pa_core::session_engine::rlm_usage::RlmChildUsageFuture<'_, ()> {
+        let core = Arc::clone(&self.0);
+        Box::pin(async move {
+            if let Some(store) = core.lock().unwrap().store.as_mut() {
+                store.billed_row_sink = crate::session_store::BilledRowSinkSlot(Some(sink));
+            }
         })
     }
 }

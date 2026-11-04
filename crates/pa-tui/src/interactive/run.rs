@@ -5,7 +5,7 @@ use super::{
     apply_startup_chrome, arm_shutdown_recovery, check_tmux_keyboard_setup, mpsc,
     run_onboarding_phase, spawn_session_reader, AgentView, DaemonClient, Duration, ExitGuard,
     HeadlessSettle, Instant, InteractiveOptions, InteractiveOutcome, PaneDrive, ReconnectConnect,
-    ReconnectLoop, RecoveryKind, Renderer, Result, SessionPanel, SessionReconnect,
+    ReconnectLoop, RecoveryKind, Renderer, Result, SelectionOrigin, SessionPanel, SessionReconnect,
     SessionSelection, SessionUi, TerminalHandoff, UiInput, UiMode, VecDeque,
     ACTIVITY_POLL_INTERVAL, SESSION_RECONNECT_ATTEMPT_TIMEOUT_S, TELEMETRY_EXIT_TIMEOUT_MS,
 };
@@ -58,6 +58,9 @@ pub(crate) enum SessionOpenRoute {
     /// The agents view's open: waits through the update-restart window and retries; `panel`
     /// mounts on open and its close returns to the agents view.
     AgentsView { panel: Option<SessionPanel> },
+    /// The return from a session the run requested: the requesting session reopens with its
+    /// origin panel mounted; waits through the update restart like the agents view's open.
+    Origin(SelectionOrigin),
 }
 
 /// Run one interactive session (the CLI open route).
@@ -86,6 +89,20 @@ pub async fn run_interactive_agents_view_open(
     panel: Option<SessionPanel>,
 ) -> Result<InteractiveOutcome> {
     run_interactive_route(options, ui, SessionOpenRoute::AgentsView { panel }).await
+}
+
+/// Reopen the session that requested the session just left (see [`SessionOpenRoute::Origin`]).
+///
+/// # Errors
+///
+/// Returns `Err` when the interactive surface fails or the open waits out the update-restart
+/// window; the restore runs first whenever this run owned or adopted the terminal.
+pub async fn run_interactive_origin_open(
+    options: InteractiveOptions,
+    ui: UiMode,
+    origin: SelectionOrigin,
+) -> Result<InteractiveOutcome> {
+    run_interactive_route(options, ui, SessionOpenRoute::Origin(origin)).await
 }
 
 async fn run_interactive_route(
@@ -313,7 +330,7 @@ async fn run_interactive_surface(
         let factory_tx = factory_tx.clone();
         let commands_tx = commands_tx.clone();
         let page_tx = page_tx.clone();
-        let waits_through_update_restart = matches!(route, SessionOpenRoute::AgentsView { .. });
+        let waits_through_update_restart = !matches!(route, SessionOpenRoute::Cli);
         tokio::spawn(async move {
             crate::update_restart_wait::wait_through_update_restart(
                 waits_through_update_restart,
@@ -714,8 +731,14 @@ async fn run_interactive_surface(
     // previous chat view of this session left via the agents view or a
     // switch) returns to the editor when its chat reopens.
     session.restore_prompt_stash_on_open(&mut view);
-    if let SessionOpenRoute::AgentsView { panel: Some(panel) } = route {
-        session.open_agents_view_panel(panel, &mut view);
+    match route {
+        SessionOpenRoute::AgentsView { panel: Some(panel) } => {
+            session.open_agents_view_panel(panel, true, &mut view);
+        }
+        SessionOpenRoute::Origin(origin) => {
+            session.open_agents_view_panel(origin.panel, origin.closes_to_agents_view, &mut view);
+        }
+        SessionOpenRoute::AgentsView { panel: None } | SessionOpenRoute::Cli => {}
     }
     // Declared above the onboarding phase: the pane's drive marks it.
     let mut headless_done = false;
@@ -753,6 +776,8 @@ async fn run_interactive_surface(
                 agents_view_scope: None,
                 return_to_agents_view: false,
                 selection_request: None,
+                selection_rlm_depth: None,
+                selection_origin: None,
                 copies: Vec::new(),
                 opened_urls: Vec::new(),
                 agents_view_notice: None,
@@ -2118,6 +2143,8 @@ async fn run_interactive_surface(
         return_to_agents_view: preserve_alt_screen,
         agents_view_scope: session.scoped_agents_view.take(),
         selection_request: session.pending_selection,
+        selection_rlm_depth: session.pending_selection_rlm_depth,
+        selection_origin: session.pending_selection_origin,
         copies: std::mem::take(&mut session.copies),
         opened_urls: std::mem::take(&mut session.opened_urls),
         // The view's status line keeps the wait notice when the chat hands back.

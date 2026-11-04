@@ -234,8 +234,20 @@ async fn a_branch_move_mid_summarize_conflicts_and_commits_against_the_new_tree(
         .rev()
         .find(|entry| matches!(entry, FileEntry::Compaction { .. }))
         .expect("the compaction row");
+    // The conflicted attempt's discarded call lands before the retry, which
+    // commits on top of it.
+    let discarded = entries
+        .iter()
+        .find(|entry| entry.id() == compaction.parent_id())
+        .expect("the compaction's parent row");
+    assert!(
+        matches!(discarded, FileEntry::Custom { payload, .. }
+            if payload.data.as_ref().and_then(|data| data["source"].as_str())
+                == Some("compaction_discarded")),
+        "the compaction's parent is the discarded summary's usage row: {discarded:?}"
+    );
     assert_eq!(
-        compaction.parent_id(),
+        discarded.parent_id(),
         Some(moved_to_leaf.as_str()),
         "the compaction committed against the moved-to tree"
     );

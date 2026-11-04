@@ -29,7 +29,7 @@ async def recent_messages(
     limit: int = 8,
     max_chars: int = 800,
 ) -> dict[str, Any]:
-    """Read bounded recent message previews from an active session.
+    """Read bounded recent message previews from a family member's session.
 
     Args:
         target: Active session id, session id/name, or unambiguous id suffix.

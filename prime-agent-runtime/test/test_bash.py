@@ -1380,8 +1380,8 @@ class BashTest(unittest.IsolatedAsyncioTestCase):
 
 
 class BoundedAwaitTest(unittest.IsolatedAsyncioTestCase):
-    """The yield_after contract: with completion notices wired (the kernel
-    bootstrap call) an await degrades to the live handle past its bound;
+    """The yield-window contract: with completion notices wired (the kernel
+    bootstrap call) an await degrades to the live handle past the window;
     without them every await stays unbounded (nothing wakes a collector)."""
 
     def _wire_notices(self) -> None:
@@ -1390,18 +1390,10 @@ class BoundedAwaitTest(unittest.IsolatedAsyncioTestCase):
         bash_module._degrade_hints_written = 0
         self.addCleanup(setattr, bash_module, "_degrade_hints_written", 0)
 
-    async def test_wired_default_and_maximum_bounds(self):
-        self._wire_notices()
-        self.assertEqual(bash_module._effective_yield_after(None), 10.0)
-        self.assertEqual(bash_module._effective_yield_after(500), 300.0)
-        self.assertEqual(bash_module._effective_yield_after(0.25), 0.25)
-        bash_module._set_completion_notices_wired(False)
-        self.assertIsNone(bash_module._effective_yield_after(None))
-        self.assertIsNone(bash_module._effective_yield_after(0.25))
-
+    @mock.patch.object(bash_module, "_YIELD_AFTER_SECONDS", 0.3)
     async def test_bounded_await_degrades_to_a_snapshot(self):
         self._wire_notices()
-        handle = bash("sleep 0.5", yield_after=0.3)
+        handle = bash("sleep 0.5")
         returned = await handle
         self.assertIsInstance(returned, bash_module.BashSnapshot)
         self.assertIs(returned.handle, handle)
@@ -1415,25 +1407,22 @@ class BoundedAwaitTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_bounded_await_returns_the_result_within_the_window(self):
         self._wire_notices()
-        result = await bash("printf quick", yield_after=5)
+        result = await bash("printf quick")
         self.assertEqual(result.exit_code, 0)
         self.assertIn("quick", result.output)
         self.assertIs(result.running, False)
-        with self.assertRaises(ValueError):
-            bash("echo no", yield_after=0)
-        with self.assertRaises(ValueError):
-            bash("echo no", yield_after=-1)
 
+    @mock.patch.object(bash_module, "_YIELD_AFTER_SECONDS", 0.2)
     async def test_daemonless_await_ignores_the_bound(self):
         # No completion notices wired: no wake-up exists to collect a
-        # degraded command, so the await stays unbounded and yield_after
-        # has no effect.
-        result = await bash("sleep 1", yield_after=0.2)
+        # degraded command, so the await stays unbounded.
+        result = await bash("sleep 0.5")
         self.assertEqual(result.exit_code, 0)
 
+    @mock.patch.object(bash_module, "_YIELD_AFTER_SECONDS", 0.3)
     async def test_cancelling_a_later_await_of_a_degraded_handle_only_waits(self):
         self._wire_notices()
-        handle = bash("sleep 1.5", yield_after=0.3)
+        handle = bash("sleep 1.5")
         snapshot = await handle
         self.assertIsInstance(snapshot, bash_module.BashSnapshot)
 
@@ -1451,13 +1440,14 @@ class BoundedAwaitTest(unittest.IsolatedAsyncioTestCase):
         result = await asyncio.wait_for(handle._wait(), 10)
         self.assertEqual(result.exit_code, 0)
 
+    @mock.patch.object(bash_module, "_YIELD_AFTER_SECONDS", 0.2)
     async def test_degrade_hints_are_budgeted_to_the_first_three(self):
         self._wire_notices()
         handles = []
         hints = io.StringIO()
         with mock.patch.object(sys, "stderr", hints):
             for _ in range(5):
-                handle = bash("sleep 3", yield_after=0.2)
+                handle = bash("sleep 3")
                 handles.append(handle)
                 self.assertIsInstance(await handle, bash_module.BashSnapshot)
         for handle in handles:
@@ -1594,7 +1584,7 @@ class PersistentBashTest(unittest.IsolatedAsyncioTestCase):
         # the bound resolves at await time.
         bash_module._set_completion_notices_wired(True)
         self.addCleanup(bash_module._set_completion_notices_wired, False)
-        with mock.patch.object(bash_module, "_DEFAULT_YIELD_AFTER_SECONDS", 0.2):
+        with mock.patch.object(bash_module, "_YIELD_AFTER_SECONDS", 0.2):
             self.assertIsInstance(await held, bash_module.BashSnapshot)
 
         held.kill()
