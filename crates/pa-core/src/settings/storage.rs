@@ -19,6 +19,9 @@ use crate::platform::fs::{
 };
 
 pub const CONFIG_DIR_NAME: &str = ".prime/agent";
+// Project files can come from an untrusted checkout. This is well above the
+// size of ordinary settings documents while bounding startup allocations.
+const MAX_PROJECT_SETTINGS_BYTES: usize = 4 * 1024 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SettingsScope {
@@ -255,7 +258,7 @@ impl FileSettingsStorage {
             return Ok(fs::read_to_string(path)?);
         }
         #[cfg(unix)]
-        let mut file = {
+        let file = {
             // The locked path is the resolved in-project target, including for
             // an intentional in-project settings symlink. Hold its parent and
             // open only its final regular basename from that directory.
@@ -270,10 +273,13 @@ impl FileSettingsStorage {
             open_regular_file_at(&parent, name)?
         };
         #[cfg(not(unix))]
-        let mut file = fs::File::open(path)?;
+        let file = fs::File::open(path)?;
         let opened = file.metadata()?;
         if is_multiply_linked(&opened) {
             bail!("Project settings file has multiple hard links");
+        }
+        if opened.len() > MAX_PROJECT_SETTINGS_BYTES as u64 {
+            bail!("Project settings file exceeds {MAX_PROJECT_SETTINGS_BYTES} bytes");
         }
         #[cfg(all(test, unix))]
         // Preserve the pre-fix path-check interleavings in the race test.
@@ -291,7 +297,13 @@ impl FileSettingsStorage {
             }
         }
         let mut content = String::new();
-        file.read_to_string(&mut content)?;
+        // A writer can grow the file after metadata inspection, so the read
+        // itself also stops one byte past the accepted limit.
+        file.take(MAX_PROJECT_SETTINGS_BYTES as u64 + 1)
+            .read_to_string(&mut content)?;
+        if content.len() > MAX_PROJECT_SETTINGS_BYTES {
+            bail!("Project settings file exceeds {MAX_PROJECT_SETTINGS_BYTES} bytes");
+        }
         Ok(content)
     }
 
@@ -506,6 +518,9 @@ impl SettingsStorage for FileSettingsStorage {
             }
             if let Some(content) = next {
                 if scope == SettingsScope::Project {
+                    if content.len() > MAX_PROJECT_SETTINGS_BYTES {
+                        bail!("Project settings file exceeds {MAX_PROJECT_SETTINGS_BYTES} bytes");
+                    }
                     self.check_locked_project_path(path, &locked_path)?;
                     #[cfg(unix)]
                     {
@@ -653,6 +668,38 @@ impl SettingsStorage for InMemorySettingsStorage {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn oversized_project_settings_are_rejected_before_loading() {
+        let root = tempfile::tempdir().unwrap();
+        let project = root.path().join("project");
+        let settings = project.join(CONFIG_DIR_NAME).join("settings.json");
+        fs::create_dir_all(settings.parent().unwrap()).unwrap();
+        fs::write(&settings, vec![b' '; MAX_PROJECT_SETTINGS_BYTES + 1]).unwrap();
+        let storage = FileSettingsStorage::new(&project, root.path().join("agent"));
+
+        assert!(storage.read(SettingsScope::Project).is_err());
+        assert_eq!(
+            fs::metadata(settings).unwrap().len(),
+            (MAX_PROJECT_SETTINGS_BYTES + 1) as u64
+        );
+    }
+
+    #[test]
+    fn oversized_project_update_does_not_replace_readable_settings() {
+        let root = tempfile::tempdir().unwrap();
+        let project = root.path().join("project");
+        let settings = project.join(CONFIG_DIR_NAME).join("settings.json");
+        fs::create_dir_all(settings.parent().unwrap()).unwrap();
+        fs::write(&settings, "{}").unwrap();
+        let storage = FileSettingsStorage::new(&project, root.path().join("agent"));
+        let oversized = " ".repeat(MAX_PROJECT_SETTINGS_BYTES + 1);
+
+        assert!(storage
+            .with_lock(SettingsScope::Project, &mut |_| Some(oversized.clone()))
+            .is_err());
+        assert_eq!(fs::read_to_string(settings).unwrap(), "{}");
+    }
 
     #[test]
     fn missing_project_root_has_no_project_settings() {
