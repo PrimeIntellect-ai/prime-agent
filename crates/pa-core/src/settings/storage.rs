@@ -9,6 +9,15 @@ use std::sync::{Mutex, MutexGuard, OnceLock};
 
 use anyhow::{anyhow, bail, Result};
 
+#[cfg(unix)]
+use std::ffi::{CString, OsStr};
+#[cfg(unix)]
+use std::os::fd::{AsRawFd, FromRawFd};
+#[cfg(unix)]
+use std::os::unix::ffi::OsStrExt;
+#[cfg(unix)]
+use std::path::Component;
+
 pub const CONFIG_DIR_NAME: &str = ".prime/agent";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -71,6 +80,55 @@ fn is_multiply_linked(metadata: &fs::Metadata) -> bool {
 #[cfg(not(unix))]
 fn is_multiply_linked(_metadata: &fs::Metadata) -> bool {
     false
+}
+
+#[cfg(unix)]
+fn same_inode(left: &fs::Metadata, right: &fs::Metadata) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    left.dev() == right.dev() && left.ino() == right.ino()
+}
+
+#[cfg(unix)]
+fn open_directory_at(parent: &fs::File, name: &OsStr) -> std::io::Result<fs::File> {
+    let name = CString::new(name.as_bytes())?;
+    // Each directory component is opened relative to an already-held directory,
+    // so a swapped symlink cannot redirect the walk outside the validated root.
+    let fd = unsafe {
+        libc::openat(
+            parent.as_raw_fd(),
+            name.as_ptr(),
+            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+        )
+    };
+    if fd < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    // openat returned an owned descriptor; File closes it on every path.
+    Ok(unsafe { fs::File::from_raw_fd(fd) })
+}
+
+#[cfg(unix)]
+fn open_absolute_directory(path: &Path) -> std::io::Result<fs::File> {
+    if !path.is_absolute() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "Project settings directory is not absolute",
+        ));
+    }
+    let mut dir = fs::File::open("/")?;
+    for component in path.components() {
+        match component {
+            Component::RootDir | Component::CurDir => {}
+            Component::Normal(name) => dir = open_directory_at(&dir, name)?,
+            Component::ParentDir | Component::Prefix(_) => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "Project settings directory is not canonical",
+                ));
+            }
+        }
+    }
+    Ok(dir)
 }
 
 impl FileSettingsStorage {
@@ -173,6 +231,54 @@ impl FileSettingsStorage {
             bail!("Project settings path changed while locked");
         }
         Ok(())
+    }
+
+    /// Hold the resolved target directory under the same project root that
+    /// passed containment validation. A missing directory is created later,
+    /// only if the update actually writes a document.
+    #[cfg(unix)]
+    fn project_parent_anchor(&self, locked_path: &Path) -> Result<Option<fs::File>> {
+        let root_path = Self::resolve_with_missing(&self.project_root)?;
+        let parent_path = locked_path
+            .parent()
+            .ok_or_else(|| anyhow!("Project settings path has no parent"))?;
+        let relative = parent_path
+            .strip_prefix(&root_path)
+            .map_err(|_| anyhow!("Project settings path escapes the project root"))?;
+        let root = match open_absolute_directory(&root_path) {
+            Ok(root) => root,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error.into()),
+        };
+        self.check_locked_project_path(&self.project_path, locked_path)?;
+        if Self::resolve_with_missing(&self.project_root)? != root_path
+            || !same_inode(&root.metadata()?, &fs::metadata(&self.project_root)?)
+        {
+            bail!("Project root changed while opening settings directory");
+        }
+        let mut dir = root;
+        for component in relative.components() {
+            match component {
+                Component::CurDir => {}
+                Component::Normal(name) => {
+                    dir = match open_directory_at(&dir, name) {
+                        Ok(dir) => dir,
+                        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                            return Ok(None);
+                        }
+                        Err(error) => return Err(error.into()),
+                    };
+                }
+                Component::RootDir | Component::ParentDir | Component::Prefix(_) => {
+                    bail!("Project settings directory is not beneath its project root");
+                }
+            }
+        }
+        self.check_locked_project_path(&self.project_path, locked_path)?;
+        if !same_inode(&dir.metadata()?, &fs::metadata(parent_path)?) {
+            bail!("Project settings directory changed while opening");
+        }
+        Ok(Some(dir))
     }
 
     fn read_file(&self, scope: SettingsScope, path: &Path, locked_path: &Path) -> Result<String> {
@@ -354,6 +460,12 @@ impl SettingsStorage for FileSettingsStorage {
         if scope == SettingsScope::Project {
             self.check_locked_project_path(path, &locked_path)?;
         }
+        #[cfg(unix)]
+        let mut project_parent = if scope == SettingsScope::Project {
+            self.project_parent_anchor(&locked_path)?
+        } else {
+            None
+        };
         let file_exists = path.exists();
         let mut held: Option<LockGuard> = None;
         if file_exists {
@@ -379,6 +491,13 @@ impl SettingsStorage for FileSettingsStorage {
             if scope == SettingsScope::Project {
                 self.check_locked_project_path(path, &locked_path)?;
             }
+            #[cfg(unix)]
+            if scope == SettingsScope::Project && project_parent.is_none() {
+                project_parent = Some(
+                    self.project_parent_anchor(&locked_path)?
+                        .ok_or_else(|| anyhow!("Project settings directory is missing"))?,
+                );
+            }
             if held.is_none() {
                 held = Some(Self::acquire_lock(&locked_path)?);
                 // A racing first writer may have landed since the unlocked read.
@@ -389,7 +508,40 @@ impl SettingsStorage for FileSettingsStorage {
             if let Some(content) = next {
                 if scope == SettingsScope::Project {
                     self.check_locked_project_path(path, &locked_path)?;
+                    #[cfg(unix)]
+                    {
+                        let parent = project_parent
+                            .as_ref()
+                            .ok_or_else(|| anyhow!("Project settings directory is missing"))?;
+                        let parent_path = locked_path
+                            .parent()
+                            .ok_or_else(|| anyhow!("Project settings path has no parent"))?;
+                        if !same_inode(&parent.metadata()?, &fs::metadata(parent_path)?) {
+                            bail!("Project settings directory changed while locked");
+                        }
+                    }
                 }
+                #[cfg(all(test, unix))]
+                if scope == SettingsScope::Project {
+                    BEFORE_PROJECT_WRITE.with(|hook| {
+                        if let Some(callback) = hook.borrow_mut().take() {
+                            callback();
+                        }
+                    });
+                }
+                #[cfg(unix)]
+                if scope == SettingsScope::Project {
+                    let parent = project_parent
+                        .as_ref()
+                        .ok_or_else(|| anyhow!("Project settings directory is missing"))?;
+                    let name = locked_path
+                        .file_name()
+                        .ok_or_else(|| anyhow!("Project settings path has no file name"))?;
+                    atomic_write_project_at(parent, name, &content)?;
+                } else {
+                    atomic_write_with(&locked_path, &content, AtomicWriteOptions { fsync: true })?;
+                }
+                #[cfg(not(unix))]
                 atomic_write_with(&locked_path, &content, AtomicWriteOptions { fsync: true })?;
             }
         }
@@ -410,6 +562,8 @@ pub struct AtomicWriteOptions {
 #[cfg(test)]
 thread_local! {
     static OPT_IN_FSYNC: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    #[cfg(unix)]
+    static BEFORE_PROJECT_WRITE: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
 }
 
 /// The per-thread count of opt-in fsync branches taken by [`atomic_write_with`] (test-only).
@@ -447,6 +601,61 @@ pub fn atomic_write_with(path: &Path, content: &str, options: AtomicWriteOptions
         crate::platform::fs::sync_directory(path.parent().unwrap_or_else(|| Path::new(".")))?;
     }
     Ok(())
+}
+
+/// Keep the project settings write and rename under the directory already
+/// checked against the project root. The path-based writer above cannot do
+/// this: another process can replace a checked ancestor with a symlink.
+#[cfg(unix)]
+fn atomic_write_project_at(parent: &fs::File, name: &OsStr, content: &str) -> Result<()> {
+    let target = CString::new(name.as_bytes())?;
+    let mut temp_name = name.to_os_string();
+    temp_name.push(format!(
+        ".tmp{}-{}",
+        std::process::id(),
+        uuid::Uuid::new_v4()
+    ));
+    let temp = CString::new(temp_name.as_bytes())?;
+    // O_EXCL prevents a planted temp from receiving the settings bytes, and
+    // the parent handle prevents path changes from redirecting the write.
+    let fd = unsafe {
+        libc::openat(
+            parent.as_raw_fd(),
+            temp.as_ptr(),
+            libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+            0o600,
+        )
+    };
+    if fd < 0 {
+        return Err(std::io::Error::last_os_error().into());
+    }
+    // openat returned an owned descriptor; File closes it on every path.
+    let mut file = unsafe { fs::File::from_raw_fd(fd) };
+    let write_result = (|| -> Result<()> {
+        file.write_all(content.as_bytes())?;
+        #[cfg(test)]
+        OPT_IN_FSYNC.with(|count| count.set(count.get() + 1));
+        file.sync_all()?;
+        drop(file);
+        let renamed = unsafe {
+            libc::renameat(
+                parent.as_raw_fd(),
+                temp.as_ptr(),
+                parent.as_raw_fd(),
+                target.as_ptr(),
+            )
+        };
+        if renamed != 0 {
+            return Err(std::io::Error::last_os_error().into());
+        }
+        parent.sync_all()?;
+        Ok(())
+    })();
+    if write_result.is_err() {
+        // The temp name belongs to this invocation because openat used O_EXCL.
+        let _ = unsafe { libc::unlinkat(parent.as_raw_fd(), temp.as_ptr(), 0) };
+    }
+    write_result
 }
 
 #[derive(Default)]
@@ -533,6 +742,123 @@ mod tests {
             })
             .is_err());
         assert!(!outside.exists());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn project_settings_write_is_bound_to_the_validated_directory() {
+        use std::os::unix::fs::symlink;
+
+        let root = tempfile::tempdir().unwrap();
+        let project = root.path().join("project");
+        let settings_dir = project.join(".prime/agent");
+        let moved = project.join(".prime/agent-moved");
+        let settings = settings_dir.join("settings.json");
+        let external = root.path().join("external");
+        fs::create_dir_all(&settings_dir).unwrap();
+        fs::create_dir_all(&external).unwrap();
+        fs::write(&settings, r#"{"theme":"old"}"#).unwrap();
+        fs::write(external.join("settings.json"), "outside untouched").unwrap();
+        let storage = FileSettingsStorage::new(&project, root.path().join("agent"));
+
+        BEFORE_PROJECT_WRITE.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(move || {
+                fs::rename(&settings_dir, &moved).unwrap();
+                symlink(&external, &settings_dir).unwrap();
+            }));
+        });
+        storage
+            .with_lock(SettingsScope::Project, &mut |current| {
+                assert_eq!(current.as_deref(), Some(r#"{"theme":"old"}"#));
+                Some(r#"{"theme":"new"}"#.to_string())
+            })
+            .unwrap();
+
+        assert_eq!(
+            fs::read_to_string(root.path().join("external/settings.json")).unwrap(),
+            "outside untouched"
+        );
+        assert_eq!(
+            fs::read_to_string(project.join(".prime/agent-moved/settings.json")).unwrap(),
+            r#"{"theme":"new"}"#
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn project_settings_write_is_bound_across_a_regular_directory_swap() {
+        let root = tempfile::tempdir().unwrap();
+        let project = root.path().join("project");
+        let settings_dir = project.join(".prime/agent");
+        let moved = project.join(".prime/agent-moved");
+        let external = root.path().join("external");
+        fs::create_dir_all(&settings_dir).unwrap();
+        fs::create_dir_all(&external).unwrap();
+        fs::write(settings_dir.join("settings.json"), r#"{"theme":"old"}"#).unwrap();
+        fs::write(external.join("settings.json"), "outside untouched").unwrap();
+        let storage = FileSettingsStorage::new(&project, root.path().join("agent"));
+        let external_for_swap = external.clone();
+
+        BEFORE_PROJECT_WRITE.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(move || {
+                fs::rename(&settings_dir, &moved).unwrap();
+                fs::rename(&external_for_swap, &settings_dir).unwrap();
+            }));
+        });
+        storage
+            .with_lock(SettingsScope::Project, &mut |current| {
+                assert_eq!(current.as_deref(), Some(r#"{"theme":"old"}"#));
+                Some(r#"{"theme":"new"}"#.to_string())
+            })
+            .unwrap();
+
+        fs::rename(project.join(".prime/agent"), &external).unwrap();
+        assert_eq!(
+            fs::read_to_string(external.join("settings.json")).unwrap(),
+            "outside untouched"
+        );
+        assert_eq!(
+            fs::read_to_string(project.join(".prime/agent-moved/settings.json")).unwrap(),
+            r#"{"theme":"new"}"#
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn linked_project_root_and_shared_settings_keep_their_links() {
+        use std::os::unix::fs::symlink;
+
+        let root = tempfile::tempdir().unwrap();
+        let project = root.path().join("project");
+        let linked_root = root.path().join("linked-project");
+        let settings_dir = project.join(".prime/agent");
+        let settings = settings_dir.join("settings.json");
+        let shared = project.join("shared/settings.json");
+        fs::create_dir_all(&settings_dir).unwrap();
+        fs::create_dir_all(shared.parent().unwrap()).unwrap();
+        fs::write(&shared, r#"{"theme":"old"}"#).unwrap();
+        symlink("../../shared/settings.json", &settings).unwrap();
+        symlink(&project, &linked_root).unwrap();
+        let storage = FileSettingsStorage::new(&linked_root, root.path().join("agent"));
+
+        let before = opt_in_fsync_calls();
+        storage
+            .with_lock(SettingsScope::Project, &mut |current| {
+                assert_eq!(current.as_deref(), Some(r#"{"theme":"old"}"#));
+                Some(r#"{"theme":"new"}"#.to_string())
+            })
+            .unwrap();
+
+        assert_eq!(fs::read_to_string(shared).unwrap(), r#"{"theme":"new"}"#);
+        assert!(fs::symlink_metadata(settings)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert!(fs::symlink_metadata(linked_root)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert_eq!(opt_in_fsync_calls(), before + 1);
     }
 
     #[test]
