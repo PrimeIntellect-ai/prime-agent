@@ -1,0 +1,1 @@
+- Shell and PowerShell installers now bound channel pointer, manifest, and checksum downloads before parsing, preventing an oversized release feed from exhausting memory or temporary disk space.
