@@ -160,10 +160,12 @@ impl LogDir {
             use rustix::fs::{openat, Mode, OFlags};
 
             let flags = match mode {
-                OpenMode::Read => OFlags::RDONLY | OFlags::NONBLOCK,
+                OpenMode::Read => OFlags::RDONLY,
                 OpenMode::Append => OFlags::WRONLY | OFlags::APPEND | OFlags::CREATE,
                 OpenMode::Write => OFlags::WRONLY | OFlags::CREATE,
-            } | OFlags::NOFOLLOW
+            } | OFlags::NONBLOCK
+                | OFlags::NOCTTY
+                | OFlags::NOFOLLOW
                 | OFlags::CLOEXEC;
             File::from(openat(&self.fd, name, flags, Mode::from_raw_mode(0o600))?)
         };
@@ -189,7 +191,14 @@ impl LogDir {
         {
             use std::os::unix::fs::MetadataExt;
 
-            if file.metadata()?.nlink() > 1 {
+            let metadata = file.metadata()?;
+            if !metadata.is_file() {
+                return Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    "diagnostic log is not a regular file",
+                ));
+            }
+            if metadata.nlink() > 1 {
                 return Err(io::Error::new(
                     io::ErrorKind::PermissionDenied,
                     "diagnostic log has multiple hard links",
@@ -409,6 +418,43 @@ mod tests {
         fs::set_permissions(&logs, fs::Permissions::from_mode(0o700)).unwrap();
         drop(spawned_log.unwrap());
         assert!(worker_path.exists());
+    }
+
+    #[test]
+    fn fifo_is_not_a_managed_log() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir().unwrap();
+        let logs = temp.path().join("logs");
+        let dir = LogDir::for_write(&logs).unwrap();
+        let name = OsStr::new("worker-a.stderr.log");
+        let fifo = logs.join(name);
+        let status = std::process::Command::new("mkfifo")
+            .arg(&fifo)
+            .status()
+            .unwrap();
+        assert!(status.success(), "mkfifo failed: {status}");
+        fs::set_permissions(&fifo, fs::Permissions::from_mode(0o644)).unwrap();
+
+        // Holding a nonblocking reader makes the old write opens return
+        // immediately, so the regression can fail without hanging CI.
+        let reader = rustix::fs::openat(
+            rustix::fs::CWD,
+            &fifo,
+            rustix::fs::OFlags::RDONLY | rustix::fs::OFlags::NONBLOCK,
+            rustix::fs::Mode::empty(),
+        )
+        .unwrap();
+        let read_rejected = dir.open_file(name, OpenMode::Read).is_err();
+        let append_rejected = dir.open_file(name, OpenMode::Append).is_err();
+        let write_rejected = dir.open_file(name, OpenMode::Write).is_err();
+        drop(reader);
+
+        assert_eq!([read_rejected, append_rejected, write_rejected], [true; 3]);
+        assert_eq!(
+            fs::metadata(&fifo).unwrap().permissions().mode() & 0o777,
+            0o644
+        );
     }
 }
 
