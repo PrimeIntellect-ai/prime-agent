@@ -19,6 +19,7 @@ type Handle = *mut c_void;
 // Windows SDK crate dependency to a platform-private diagnostic path.
 const INVALID_HANDLE_VALUE: Handle = -1isize as Handle;
 const FILE_READ_DATA: u32 = 0x0001;
+const FILE_LIST_DIRECTORY: u32 = 0x0001;
 const FILE_WRITE_DATA: u32 = 0x0002;
 const FILE_APPEND_DATA: u32 = 0x0004;
 const FILE_TRAVERSE: u32 = 0x0020;
@@ -216,30 +217,17 @@ impl AnchoredDir {
         // The configured root can deliberately be a junction or symlink.
         let root_access = FILE_TRAVERSE | FILE_READ_ATTRIBUTES | SYNCHRONIZE;
         let root_fd = open_root(root, root_access)?;
-        let log_access = FILE_TRAVERSE | FILE_READ_ATTRIBUTES | SYNCHRONIZE;
-        let existing = open_relative(
-            &root_fd,
-            name,
-            log_access,
-            FILE_OPEN,
-            FILE_OPEN_FOR_BACKUP_INTENT,
-        );
+        let existing = open_log_directory(&root_fd, name, FILE_OPEN, FILE_OPEN_FOR_BACKUP_INTENT);
         let fd = match existing {
-            Ok(file) => checked_directory(file)?,
+            Ok(file) => file,
             Err(error)
                 if creation == DirectoryCreation::CreateMissing
                     && error.kind() == io::ErrorKind::NotFound =>
             {
-                match open_relative(&root_fd, name, log_access, FILE_CREATE, FILE_DIRECTORY_FILE) {
-                    Ok(file) => checked_directory(file)?,
+                match open_log_directory(&root_fd, name, FILE_CREATE, FILE_DIRECTORY_FILE) {
+                    Ok(file) => file,
                     Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
-                        checked_directory(open_relative(
-                            &root_fd,
-                            name,
-                            log_access,
-                            FILE_OPEN,
-                            FILE_OPEN_FOR_BACKUP_INTENT,
-                        )?)?
+                        open_log_directory(&root_fd, name, FILE_OPEN, FILE_OPEN_FOR_BACKUP_INTENT)?
                     }
                     Err(error) => return Err(error),
                 }
@@ -467,6 +455,30 @@ fn checked_directory(file: File) -> io::Result<File> {
         ));
     }
     Ok(file)
+}
+
+fn open_log_directory(
+    root: &File,
+    name: &OsStr,
+    disposition: u32,
+    file_type: u32,
+) -> io::Result<File> {
+    let access = FILE_TRAVERSE | FILE_READ_ATTRIBUTES | SYNCHRONIZE;
+    match open_relative(
+        root,
+        name,
+        access | FILE_LIST_DIRECTORY,
+        disposition,
+        file_type,
+    ) {
+        Ok(file) => checked_directory(file),
+        // Existing ACLs may allow opening a named log but deny directory
+        // listing. Keep those writes working; pruning was best-effort there.
+        Err(error) if error.kind() == io::ErrorKind::PermissionDenied => {
+            checked_directory(open_relative(root, name, access, disposition, file_type)?)
+        }
+        Err(error) => Err(error),
+    }
 }
 
 fn nt_error(status: i32) -> io::Error {
