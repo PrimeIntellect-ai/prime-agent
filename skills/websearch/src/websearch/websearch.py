@@ -16,6 +16,8 @@ from pathlib import Path
 if importlib.util.find_spec("httpx") is None:
     raise ModuleNotFoundError("No module named 'httpx'")
 
+SERPER_MAX_RESPONSE_BYTES = 2 * 1024 * 1024
+
 
 def _env_int(name: str, default: int) -> int:
     """Read an int from the environment, falling back to default on bad values."""
@@ -115,24 +117,79 @@ def _format_serper_results(data: dict, query: str, num_results: int = 5) -> str:
 
 
 async def _fetch_serper(query: str, api_key: str, timeout: int = 45, num_results: int = 5) -> str:
-    """Execute a single Serper API search."""
+    """Execute a Serper search with a bounded response body."""
     import httpx
+    import zlib
 
-    try:
-        async with httpx.AsyncClient(timeout=timeout) as client:
-            resp = await client.post(
-                "https://google.serper.dev/search",
-                json={"q": query},
-                headers={
-                    "X-API-KEY": api_key,
-                    "Content-Type": "application/json",
-                },
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        async with client.stream(
+            "POST",
+            "https://google.serper.dev/search",
+            json={"q": query},
+            headers={
+                "X-API-KEY": api_key,
+                "Content-Type": "application/json",
+                "Accept-Encoding": "gzip",
+            },
+        ) as resp:
+            try:
+                declared_size = int(resp.headers.get("Content-Length", "0"))
+            except ValueError:
+                declared_size = 0
+            if declared_size > SERPER_MAX_RESPONSE_BYTES:
+                raise ValueError(
+                    f"Serper response exceeds {SERPER_MAX_RESPONSE_BYTES} bytes"
+                )
+
+            encoding = resp.headers.get("Content-Encoding", "identity").strip().lower()
+            if encoding not in ("identity", "gzip"):
+                raise ValueError(f"Unsupported Serper response encoding: {encoding}")
+            decompressor = (
+                zlib.decompressobj(16 + zlib.MAX_WBITS) if encoding == "gzip" else None
             )
-            resp.raise_for_status()
-            data = resp.json()
-    except httpx.HTTPStatusError as e:
-        body = e.response.text if e.response is not None else ""
-        raise RuntimeError(f"Serper search error ({e.response.status_code}): {body}") from e
+            body = bytearray()
+            raw_size = 0
+            async for raw_chunk in resp.aiter_raw(chunk_size=8192):
+                raw_size += len(raw_chunk)
+                if raw_size > SERPER_MAX_RESPONSE_BYTES:
+                    raise ValueError(
+                        f"Serper response exceeds {SERPER_MAX_RESPONSE_BYTES} bytes"
+                    )
+                if decompressor is None:
+                    if len(raw_chunk) > SERPER_MAX_RESPONSE_BYTES - len(body):
+                        raise ValueError(
+                            f"Serper response exceeds {SERPER_MAX_RESPONSE_BYTES} bytes"
+                        )
+                    body.extend(raw_chunk)
+                    continue
+
+                pending = raw_chunk
+                while pending:
+                    if decompressor.eof:
+                        # Gzip permits concatenated members. Each member shares
+                        # this response's single decoded-byte budget.
+                        decompressor = zlib.decompressobj(16 + zlib.MAX_WBITS)
+                    remaining = SERPER_MAX_RESPONSE_BYTES - len(body)
+                    decoded = decompressor.decompress(pending, remaining + 1)
+                    if len(decoded) > remaining:
+                        raise ValueError(
+                            f"Serper response exceeds {SERPER_MAX_RESPONSE_BYTES} bytes"
+                        )
+                    body.extend(decoded)
+                    tail = decompressor.unconsumed_tail or decompressor.unused_data
+                    if tail == pending and not decoded:
+                        raise ValueError("Invalid compressed Serper response")
+                    pending = tail
+
+            if decompressor is not None and not decompressor.eof:
+                raise ValueError("Incomplete compressed Serper response")
+
+            if not resp.is_success:
+                error_body = body.decode(resp.encoding or "utf-8", errors="replace")
+                raise RuntimeError(
+                    f"Serper search error ({resp.status_code}): {error_body}"
+                )
+            data = json.loads(body)
 
     return _format_serper_results(data, query, num_results=num_results)
 

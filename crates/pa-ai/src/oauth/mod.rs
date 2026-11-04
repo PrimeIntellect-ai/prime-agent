@@ -38,6 +38,23 @@ pub use xai::{
 use std::future::Future;
 use std::time::Duration;
 
+const MAX_OAUTH_RESPONSE_BYTES: usize = 1024 * 1024;
+
+async fn read_oauth_body(mut response: reqwest::Response) -> Result<String, String> {
+    let mut bytes = Vec::new();
+    while let Some(chunk) = response.chunk().await.map_err(|error| error.to_string())? {
+        if chunk.len() > MAX_OAUTH_RESPONSE_BYTES - bytes.len() {
+            return Err(format!(
+                "OAuth response exceeds {MAX_OAUTH_RESPONSE_BYTES} bytes"
+            ));
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    // Reqwest is built without its charset feature in this workspace; text()
+    // uses this same lossy UTF-8 decoding after collecting the response.
+    Ok(String::from_utf8_lossy(&bytes).into_owned())
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CodexHttpResponse {
     pub status: u16,
@@ -106,7 +123,7 @@ impl CodexHttp for ReqwestCodexHttp {
                     }
                 })?;
             let status = response.status().as_u16();
-            let body = response.text().await.map_err(|error| error.to_string())?;
+            let body = read_oauth_body(response).await?;
             Ok(CodexHttpResponse { status, body })
         })
     }
@@ -115,6 +132,7 @@ impl CodexHttp for ReqwestCodexHttp {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     struct ScriptedHttp(std::collections::HashMap<String, CodexHttpResponse>);
 
@@ -143,6 +161,107 @@ mod tests {
         }
     }
 
+    async fn oversized_stalled_response(chunked: bool) -> (String, tokio::task::JoinHandle<()>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/token", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = [0u8; 4096];
+            assert!(socket.read(&mut request).await.unwrap() > 0);
+            let body = vec![b'x'; 1024 * 1024 + 1];
+            let headers = if chunked {
+                "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n"
+                    .to_string()
+            } else {
+                format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len() + 1
+                )
+            };
+            socket.write_all(headers.as_bytes()).await.unwrap();
+            if chunked {
+                socket
+                    .write_all(format!("{:x}\r\n", body.len()).as_bytes())
+                    .await
+                    .unwrap();
+            }
+            socket.write_all(&body).await.unwrap();
+            if chunked {
+                socket.write_all(b"\r\n").await.unwrap();
+            }
+            tokio::time::sleep(Duration::from_secs(5)).await;
+        });
+        (url, server)
+    }
+
+    #[tokio::test]
+    async fn provider_oauth_refuses_oversized_body_before_peer_finishes() {
+        let (url, server) = oversized_stalled_response(false).await;
+        let transport = ReqwestProviderHttp::new();
+        let result = tokio::time::timeout(
+            Duration::from_secs(2),
+            transport.request(
+                ProviderHttpRequest {
+                    method: ProviderHttpMethod::Get,
+                    url,
+                    headers: Vec::new(),
+                    body: None,
+                    follow_redirects: true,
+                },
+                30_000,
+            ),
+        )
+        .await
+        .expect("oversized OAuth response should fail before the peer closes");
+        server.abort();
+        assert!(result.unwrap_err().contains("exceeds 1048576 bytes"));
+    }
+
+    #[tokio::test]
+    async fn codex_oauth_refuses_oversized_body_before_peer_finishes() {
+        let (url, server) = oversized_stalled_response(true).await;
+        let transport = ReqwestCodexHttp::new();
+        let result = tokio::time::timeout(
+            Duration::from_secs(2),
+            transport.post_form(&url, "grant_type=authorization_code", 30_000),
+        )
+        .await
+        .expect("oversized OAuth response should fail before the peer closes");
+        server.abort();
+        assert!(result.unwrap_err().contains("exceeds 1048576 bytes"));
+    }
+
+    #[tokio::test]
+    async fn provider_oauth_preserves_small_error_status_and_lossy_utf8_text() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/token", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = [0u8; 4096];
+            assert!(socket.read(&mut request).await.unwrap() > 0);
+            socket
+                .write_all(b"HTTP/1.1 400 Bad Request\r\nContent-Length: 3\r\n\r\nx\xffy")
+                .await
+                .unwrap();
+        });
+        let transport = ReqwestProviderHttp::new();
+        let response = transport
+            .request(
+                ProviderHttpRequest {
+                    method: ProviderHttpMethod::Get,
+                    url,
+                    headers: Vec::new(),
+                    body: None,
+                    follow_redirects: true,
+                },
+                30_000,
+            )
+            .await
+            .unwrap();
+        server.await.unwrap();
+        assert_eq!(response.status, 400);
+        assert_eq!(response.body, "x\u{fffd}y");
+    }
     #[tokio::test]
     async fn the_seam_serves_scripted_responses() {
         let http = ScriptedHttp(

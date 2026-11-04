@@ -209,10 +209,10 @@ impl BedrockResponse {
         }
     }
 
-    async fn read_all_text(&mut self) -> Result<String, ProviderError> {
+    async fn read_error_text(&mut self) -> Result<String, ProviderError> {
         match self {
-            BedrockResponse::Http(response) => response.read_all_text().await,
-            BedrockResponse::H2(response) => response.read_all_text().await,
+            BedrockResponse::Http(response) => response.read_error_text().await,
+            BedrockResponse::H2(response) => response.read_error_text().await,
         }
     }
 }
@@ -652,7 +652,7 @@ async fn run_stream(
     }
 
     if response.status() >= 400 {
-        let body = response.read_all_text().await.unwrap_or_default();
+        let body = response.read_error_text().await.unwrap_or_default();
         let status = response.status();
         let headers = response.headers();
         return Err(bedrock_http_error(status, &body, &headers));

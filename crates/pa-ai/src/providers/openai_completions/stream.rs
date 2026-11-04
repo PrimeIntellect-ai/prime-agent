@@ -622,7 +622,7 @@ async fn run_stream(
     // and whose `APIError` message the provider surfaces verbatim as the assistant message's error
     // message.
     if !(200..300).contains(&response.status) {
-        let body = response.read_all_text().await.unwrap_or_default();
+        let body = response.read_error_text().await.unwrap_or_default();
         return Err(openai_http_error(
             response.status,
             &body,

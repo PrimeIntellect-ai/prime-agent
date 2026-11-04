@@ -313,7 +313,7 @@ pub async fn parse_error_response(response: &mut HttpResponse) -> CodexApiError 
     let mut code: Option<String> = None;
     let mut retry_after_ms = parse_retry_after_ms(&response.headers);
 
-    let raw = response.read_all_text().await.unwrap_or_default();
+    let raw = response.read_error_text().await.unwrap_or_default();
     // TS: `raw || response.statusText || "Request failed"`. The HTTP reason phrase is the canonical
     // one (what real servers send).
     message = if raw.is_empty() {

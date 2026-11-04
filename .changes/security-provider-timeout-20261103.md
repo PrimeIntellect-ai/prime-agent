@@ -1,0 +1,1 @@
+- Configured provider request timeouts now apply when a request also has a cancellation signal.
