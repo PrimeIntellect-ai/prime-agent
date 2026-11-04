@@ -162,7 +162,117 @@ pub async fn bind_transport(path: &Path) -> Result<Box<dyn TransportListener>> {
 pub async fn connect_transport(path: &Path) -> Result<Box<dyn TransportStream>> {
     let address = UnixSocketAddress::new(path)?;
     let stream = tokio::net::UnixStream::connect(address.effective()).await?;
+    verify_default_socket_peer(path, &stream)?;
     Ok(Box::new(stream))
+}
+
+/// The product's default sockets live below a predictable name in a shared
+/// temporary directory. Verify the connected process, not the socket path:
+/// the path can be replaced by another user who precreated its parent.
+#[cfg(unix)]
+fn verify_default_socket_peer(
+    path: &Path,
+    stream: &impl std::os::fd::AsRawFd,
+) -> std::io::Result<()> {
+    let uid = unsafe { libc::getuid() };
+    let tmp = std::env::var_os("TMPDIR").map_or_else(
+        || std::path::PathBuf::from("/tmp"),
+        std::path::PathBuf::from,
+    );
+    verify_default_socket_peer_with_root(path, stream, &tmp, uid)
+}
+
+#[cfg(unix)]
+fn verify_default_socket_peer_with_root(
+    path: &Path,
+    stream: &impl std::os::fd::AsRawFd,
+    tmp: &Path,
+    uid: u32,
+) -> std::io::Result<()> {
+    let name = format!("prime-agent-{uid}");
+    let default_dir = tmp.join(&name);
+    #[cfg(not(target_os = "linux"))]
+    let default_dir = if std::os::unix::net::SocketAddr::from_pathname(
+        default_dir.join("worker-000000000000-000000000000.sock"),
+    )
+    .is_err()
+    {
+        Path::new("/tmp").join(name)
+    } else {
+        default_dir
+    };
+    if path.parent() != Some(default_dir.as_path()) {
+        return Ok(());
+    }
+    let actual_uid = peer_uid(stream.as_raw_fd())?;
+    if actual_uid != uid {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            format!("daemon socket peer belongs to uid {actual_uid}, expected {uid}"),
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(any(target_os = "linux", target_os = "android"))]
+fn peer_uid(fd: std::os::fd::RawFd) -> std::io::Result<u32> {
+    let mut credentials: libc::ucred = unsafe { std::mem::zeroed() };
+    let mut length = libc::socklen_t::try_from(std::mem::size_of::<libc::ucred>())
+        .expect("ucred size fits socklen_t");
+    let status = unsafe {
+        libc::getsockopt(
+            fd,
+            libc::SOL_SOCKET,
+            libc::SO_PEERCRED,
+            (&raw mut credentials).cast(),
+            &raw mut length,
+        )
+    };
+    if status != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    if length as usize != std::mem::size_of::<libc::ucred>() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "daemon socket peer credentials have an invalid length",
+        ));
+    }
+    Ok(credentials.uid)
+}
+
+#[cfg(any(
+    target_os = "macos",
+    target_os = "freebsd",
+    target_os = "openbsd",
+    target_os = "netbsd",
+    target_os = "dragonfly"
+))]
+fn peer_uid(fd: std::os::fd::RawFd) -> std::io::Result<u32> {
+    let mut uid = 0;
+    let mut gid = 0;
+    if unsafe { libc::getpeereid(fd, &raw mut uid, &raw mut gid) } != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(uid)
+}
+
+#[cfg(all(
+    unix,
+    not(any(
+        target_os = "linux",
+        target_os = "android",
+        target_os = "macos",
+        target_os = "freebsd",
+        target_os = "openbsd",
+        target_os = "netbsd",
+        target_os = "dragonfly"
+    ))
+))]
+fn peer_uid(_fd: std::os::fd::RawFd) -> std::io::Result<u32> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "daemon socket peer credentials are unavailable on this platform",
+    ))
 }
 
 /// Definitive nonblocking Unix listener refusal, used by the exit cleanup.
@@ -350,6 +460,7 @@ impl BlockingTransportStream for std::os::unix::net::UnixStream {
 pub fn connect_blocking(path: &Path) -> std::io::Result<Box<dyn BlockingTransportStream>> {
     let address = UnixSocketAddress::new(path).map_err(std::io::Error::other)?;
     let stream = std::os::unix::net::UnixStream::connect(address.effective())?;
+    verify_default_socket_peer(path, &stream)?;
     Ok(Box::new(stream))
 }
 
@@ -370,6 +481,41 @@ mod tests {
     use super::*;
     #[cfg(target_os = "linux")]
     use std::os::unix::fs::FileTypeExt;
+
+    #[test]
+    fn default_socket_peer_must_belong_to_the_current_user() {
+        let tmp = tempfile::tempdir().unwrap();
+        let uid = unsafe { libc::getuid() };
+        let own_dir = tmp.path().join(format!("prime-agent-{uid}"));
+        std::fs::create_dir(&own_dir).unwrap();
+        let own_socket = own_dir.join("daemon.sock");
+        let _own_listener = std::os::unix::net::UnixListener::bind(&own_socket).unwrap();
+        let own_stream = std::os::unix::net::UnixStream::connect(&own_socket).unwrap();
+        verify_default_socket_peer_with_root(&own_socket, &own_stream, tmp.path(), uid).unwrap();
+
+        // A socket from this test process stands in for another user's fake
+        // daemon by validating it against a distinct expected UID.
+        let foreign_uid = uid.wrapping_add(1);
+        let foreign_dir = tmp.path().join(format!("prime-agent-{foreign_uid}"));
+        std::fs::create_dir(&foreign_dir).unwrap();
+        let fake_socket = foreign_dir.join("daemon.sock");
+        let _fake_listener = std::os::unix::net::UnixListener::bind(&fake_socket).unwrap();
+        let fake_stream = std::os::unix::net::UnixStream::connect(&fake_socket).unwrap();
+        let error = verify_default_socket_peer_with_root(
+            &fake_socket,
+            &fake_stream,
+            tmp.path(),
+            foreign_uid,
+        )
+        .unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
+
+        // Explicitly pinned paths outside the product directory retain their
+        // current connection behavior.
+        let custom_socket = tmp.path().join("custom.sock");
+        verify_default_socket_peer_with_root(&custom_socket, &fake_stream, tmp.path(), foreign_uid)
+            .unwrap();
+    }
 
     /// A directory whose full path length is exactly `target` bytes; falls
     /// back to `/tmp` when the ambient `TMPDIR` is already too deep.
