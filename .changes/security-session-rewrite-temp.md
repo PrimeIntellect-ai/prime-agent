@@ -1,0 +1,1 @@
+- Secured session rewrites against planted temporary files and restricted transcript permissions.

@@ -19,6 +19,83 @@ fn fixture() -> String {
     rows.into_iter().map(|row| row.to_string() + "\n").collect()
 }
 
+#[test]
+#[cfg(unix)]
+fn session_window_sidecar_is_owner_only() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("private-session.jsonl");
+    std::fs::write(&path, fixture()).unwrap();
+
+    WindowedSessionStore::open(&path).unwrap().unwrap();
+    let sidecar = path.with_extension("window-cache.json");
+    assert!(std::fs::read_to_string(&sidecar)
+        .unwrap()
+        .contains(&"x".repeat(128)));
+    assert_eq!(crate::platform::perms::file_mode(&sidecar), Some(0o600));
+}
+
+#[test]
+#[cfg(unix)]
+fn opening_a_legacy_loose_sidecar_restricts_its_mode() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("legacy-session.jsonl");
+    std::fs::write(&path, fixture()).unwrap();
+    WindowedSessionStore::open(&path).unwrap().unwrap();
+    let sidecar = path.with_extension("window-cache.json");
+    std::fs::set_permissions(&sidecar, std::fs::Permissions::from_mode(0o664)).unwrap();
+    super::super::window_cache::evict_live_snapshot(&path);
+
+    let warm = WindowedSessionStore::open(&path).unwrap().unwrap();
+    assert!(warm.read_stats().cache_hit);
+    assert_eq!(crate::platform::perms::file_mode(&sidecar), Some(0o600));
+}
+
+#[test]
+#[cfg(unix)]
+fn sidecar_directory_is_left_accessible() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("directory-session.jsonl");
+    let sidecar = path.with_extension("window-cache.json");
+    std::fs::write(&path, fixture()).unwrap();
+    std::fs::create_dir(&sidecar).unwrap();
+    std::fs::set_permissions(&sidecar, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    let opened = WindowedSessionStore::open(&path).unwrap();
+    let mode = crate::platform::perms::file_mode(&sidecar);
+    std::fs::set_permissions(&sidecar, std::fs::Permissions::from_mode(0o755)).unwrap();
+    assert!(opened.is_some());
+    assert_eq!(mode, Some(0o755));
+}
+
+#[test]
+#[cfg(unix)]
+fn linked_sidecar_does_not_modify_its_target() {
+    use std::os::unix::fs::{symlink, PermissionsExt};
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("linked-session.jsonl");
+    let sidecar = path.with_extension("window-cache.json");
+    let target = dir.path().join("shared-cache.json");
+    std::fs::write(&path, fixture()).unwrap();
+    WindowedSessionStore::open(&path).unwrap().unwrap();
+    let original = std::fs::read(&sidecar).unwrap();
+    std::fs::write(&target, &original).unwrap();
+    std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o644)).unwrap();
+    std::fs::remove_file(&sidecar).unwrap();
+    symlink(&target, &sidecar).unwrap();
+    super::super::window_cache::evict_live_snapshot(&path);
+
+    let reopened = WindowedSessionStore::open(&path).unwrap().unwrap();
+    assert!(!reopened.read_stats().cache_hit);
+    assert_eq!(std::fs::read(&target).unwrap(), original);
+    assert_eq!(crate::platform::perms::file_mode(&target), Some(0o644));
+    assert!(std::fs::symlink_metadata(&sidecar).unwrap().is_file());
+}
+
 /// The stats carry the cumulative aggregate, not the raw row.
 #[test]
 fn older_path_stats_fold_child_usage_attributions() {

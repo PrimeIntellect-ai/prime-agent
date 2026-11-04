@@ -20,11 +20,11 @@ thiserror = { workspace = true }
 tokio = { workspace = true }
 tokio-util = "0.7"
 sha2 = "0.10"
+tempfile = "3"
 uuid = { version = "1", features = ["v4", "v7"] }
 
 [dev-dependencies]
 filetime = "0.2"
-tempfile = "3"
 # The orphan-journal e2e signals and probes process groups directly.
 nix = { version = "0.29", features = ["signal", "process"] }
 socket2 = "0.6"

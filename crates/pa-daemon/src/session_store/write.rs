@@ -121,15 +121,21 @@ impl SessionFile {
         }) else {
             return Ok(());
         };
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)
-                .with_context(|| format!("create session dir {}", parent.display()))?;
-        }
-        let temp = path.with_extension(format!("jsonl.tmp-{}", std::process::id()));
+        let parent = path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .unwrap_or_else(|| std::path::Path::new("."));
+        fs::create_dir_all(parent)
+            .with_context(|| format!("create session dir {}", parent.display()))?;
+        // A random, exclusive file avoids following a planted PID-named symlink. tempfile opens
+        // it at mode 0600 on Unix, and the rename keeps the full transcript private even when
+        // replacing a legacy session that was created with broader permissions.
+        let mut temp = tempfile::Builder::new()
+            .prefix(".prime-session-")
+            .tempfile_in(parent)
+            .with_context(|| format!("create session temp in {}", parent.display()))?;
         {
-            let file =
-                fs::File::create(&temp).with_context(|| format!("create {}", temp.display()))?;
-            let mut writer = std::io::BufWriter::new(file);
+            let mut writer = std::io::BufWriter::new(temp.as_file_mut());
             write_line(&mut writer, &session_header_line(&self.header))?;
             for entry in &self.entries {
                 write_line(&mut writer, entry)?;
@@ -137,7 +143,10 @@ impl SessionFile {
             writer.flush()?;
             writer.get_ref().sync_all()?;
         }
-        pa_core::platform::rename_onto(&temp, path)
+        // Close before rename so Windows can replace the destination too. TempPath removes the
+        // staged file if any write, sync, or rename step fails.
+        let temp_path = temp.into_temp_path();
+        pa_core::platform::rename_onto(temp_path.as_ref(), path)
             .with_context(|| format!("persist {}", path.display()))?;
         if let Some(traces) = &self.trace_upload {
             traces.persisted(&self.path);

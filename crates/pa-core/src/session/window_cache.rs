@@ -3,7 +3,7 @@ use super::window::{WindowReadStats, WindowStats};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs::{File, Metadata};
-use std::io::{self, Write};
+use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 
@@ -117,7 +117,22 @@ pub(super) fn load(path: &Path, file: &File, stats: &mut WindowReadStats) -> Opt
         }
         live_snapshots().lock().ok()?.remove(path);
     }
-    let data = std::fs::read(cache_path(path)).ok()?;
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW);
+    }
+    let mut sidecar = options.open(cache_path(path)).ok()?;
+    if !sidecar.metadata().ok()?.is_file() {
+        return None;
+    }
+    // Older caches may have inherited broad umask permissions. Tighten the
+    // opened file before reading it; no-follow avoids chmoding a linked target.
+    crate::platform::perms::restrict_open_file(&sidecar).ok()?;
+    let mut data = Vec::new();
+    sidecar.read_to_end(&mut data).ok()?;
     stats.cache_bytes += data.len() as u64;
     let snapshot: Snapshot = serde_json::from_slice(&data).ok()?;
     if snapshot.version != SNAPSHOT_VERSION || !snapshot.generation.valid(file, path).ok()? {
@@ -140,10 +155,10 @@ pub(super) fn evict_live_snapshot(path: &Path) {
 pub(super) fn save(path: &Path, snapshot: &Snapshot) -> io::Result<()> {
     let temp = path.with_extension(format!("window-cache-{}.tmp", uuid::Uuid::new_v4()));
     let result = (|| {
-        let mut file = std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&temp)?;
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        crate::platform::perms::set_private_mode(&mut options);
+        let mut file = options.open(&temp)?;
         serde_json::to_writer(&mut file, snapshot)?;
         file.flush()?;
         std::fs::rename(&temp, cache_path(path))
