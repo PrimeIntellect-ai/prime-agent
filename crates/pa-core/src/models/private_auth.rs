@@ -469,6 +469,43 @@ mod tests {
     }
 
     #[test]
+    fn parse_snapshot_sees_equal_size_equal_time_replacement() {
+        let dir = tempfile::tempdir().unwrap();
+        let models_json = dir.path().join("models.json");
+        let path = private_prime_authorization_cache_path(&models_json);
+        write_private_prime_authorization_cache(&models_json, &cache("fingerprint-a"));
+        assert_eq!(
+            read_private_prime_authorization_cache(&models_json)
+                .unwrap()
+                .fingerprint,
+            "fingerprint-a"
+        );
+
+        let before = std::fs::metadata(&path).unwrap();
+        let original = std::fs::read_to_string(&path).unwrap();
+        let replacement = original.replace("fingerprint-a", "fingerprint-b");
+        assert_ne!(original, replacement);
+        let temp = dir.path().join("external.tmp");
+        std::fs::write(&temp, replacement).unwrap();
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&temp)
+            .unwrap()
+            .set_times(std::fs::FileTimes::new().set_modified(before.modified().unwrap()))
+            .unwrap();
+        std::fs::rename(&temp, &path).unwrap();
+        let after = std::fs::metadata(&path).unwrap();
+        assert_eq!(before.len(), after.len());
+        assert_eq!(before.modified().unwrap(), after.modified().unwrap());
+        assert_eq!(
+            read_private_prime_authorization_cache(&models_json)
+                .unwrap()
+                .fingerprint,
+            "fingerprint-b"
+        );
+    }
+
+    #[test]
     fn parse_snapshot_never_pins_a_failed_read_or_resurrects_a_deleted_file() {
         let dir = tempfile::tempdir().unwrap();
         let models_json = dir.path().join("models.json");

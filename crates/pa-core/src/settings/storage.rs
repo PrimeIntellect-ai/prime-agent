@@ -456,6 +456,37 @@ mod tests {
     }
 
     #[test]
+    fn read_arm_sees_equal_size_equal_time_replacement_in_both_scopes() {
+        for scope in [SettingsScope::Global, SettingsScope::Project] {
+            let dir = tempfile::tempdir().unwrap();
+            let cwd = dir.path().join("cwd");
+            let agent = dir.path().join("agent");
+            let storage = FileSettingsStorage::new(&cwd, &agent);
+            let path = storage.path(scope);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            let original = r#"{ "theme": "blue" }"#;
+            let replacement = r#"{ "theme": "dark" }"#;
+            fs::write(path, original).unwrap();
+            assert_eq!(storage.read(scope).unwrap().as_deref(), Some(original));
+
+            let before = fs::metadata(path).unwrap();
+            let temp = path.with_extension("json.external");
+            fs::write(&temp, replacement).unwrap();
+            fs::OpenOptions::new()
+                .write(true)
+                .open(&temp)
+                .unwrap()
+                .set_times(fs::FileTimes::new().set_modified(before.modified().unwrap()))
+                .unwrap();
+            fs::rename(&temp, path).unwrap();
+            let after = fs::metadata(path).unwrap();
+            assert_eq!(before.len(), after.len());
+            assert_eq!(before.modified().unwrap(), after.modified().unwrap());
+            assert_eq!(storage.read(scope).unwrap().as_deref(), Some(replacement));
+        }
+    }
+
+    #[test]
     fn read_arm_error_matches_with_lock_read() {
         let dir = tempfile::tempdir().unwrap();
         let agent = dir.path().join("agent");

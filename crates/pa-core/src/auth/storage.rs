@@ -383,6 +383,32 @@ mod tests {
     }
 
     #[test]
+    fn read_sees_equal_size_equal_time_replacement() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("auth.json");
+        let backend = FileAuthStorageBackend::new(&path);
+        let original = r#"{ "key": "AAAA" }"#;
+        let replacement = r#"{ "key": "BBBB" }"#;
+        fs::write(&path, original).unwrap();
+        assert_eq!(backend.read().unwrap().as_deref(), Some(original));
+
+        let before = fs::metadata(&path).unwrap();
+        let temp = dir.path().join("external.tmp");
+        fs::write(&temp, replacement).unwrap();
+        fs::OpenOptions::new()
+            .write(true)
+            .open(&temp)
+            .unwrap()
+            .set_times(fs::FileTimes::new().set_modified(before.modified().unwrap()))
+            .unwrap();
+        fs::rename(&temp, &path).unwrap();
+        let after = fs::metadata(&path).unwrap();
+        assert_eq!(before.len(), after.len());
+        assert_eq!(before.modified().unwrap(), after.modified().unwrap());
+        assert_eq!(backend.read().unwrap().as_deref(), Some(replacement));
+    }
+
+    #[test]
     fn read_sees_external_in_place_writes() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("auth.json");
