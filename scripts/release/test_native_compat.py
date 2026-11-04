@@ -27,12 +27,16 @@ class InstallerMetadataBoundsTests(unittest.TestCase):
             "\n# --- platform detection", 1
         )[0]
         oversized = b"x" * (1024 * 1024 + 1)
+        # The old-curl case must exceed the output allowance even without
+        # head; otherwise deleting the pipe would leave this test green.
+        legacy_oversized = b"x" * (2 * 1024 * 1024 + 1)
 
         class Handler(http.server.BaseHTTPRequestHandler):
             def do_GET(self):
                 body = (
                     b"1.2.3\n" if self.path == "/valid" else
-                    b"x" * 1024 if self.path == "/boundary" else oversized
+                    b"x" * 1024 if self.path == "/boundary" else
+                    legacy_oversized if self.path == "/chunked_legacy" else oversized
                 )
                 if not self.path.startswith("/chunked"):
                     self.send_response(200)
@@ -105,7 +109,7 @@ class InstallerMetadataBoundsTests(unittest.TestCase):
                     if success:
                         self.assertEqual(output.read_bytes(), b"1.2.3\n" if name == "valid" else b"x" * 1024)
                     elif output.exists():
-                        self.assertLessEqual(output.stat().st_size, max_bytes * 2)
+                        self.assertLessEqual(output.stat().st_size, max_bytes + 1)
 
 
 class NativeCompatibilityTests(unittest.TestCase):
