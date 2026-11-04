@@ -491,6 +491,14 @@ impl SettingsStorage for FileSettingsStorage {
         } else {
             None
         };
+        #[cfg(all(test, windows))]
+        if scope == SettingsScope::Project {
+            BEFORE_PROJECT_LOCK.with(|hook| {
+                if let Some(callback) = hook.borrow_mut().take() {
+                    callback();
+                }
+            });
+        }
         let file_exists = path.exists();
         let mut held: Option<LockGuard> = None;
         if file_exists {
@@ -605,6 +613,8 @@ thread_local! {
     static OPT_IN_FSYNC: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     #[cfg(any(unix, windows))]
     static BEFORE_PROJECT_WRITE: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
+    #[cfg(windows)]
+    static BEFORE_PROJECT_LOCK: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
     #[cfg(any(unix, windows))]
     static PROJECT_READ_STEP: std::cell::RefCell<Option<ProjectReadHook>> = const { std::cell::RefCell::new(None) };
     #[cfg(windows)]
@@ -984,6 +994,45 @@ mod tests {
         assert_eq!(
             fs::read_to_string(project.join(".prime/agent-moved/settings.json")).unwrap(),
             r#"{"theme":"new"}"#
+        );
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn project_settings_rejects_a_parent_swap_before_locking() {
+        let root = tempfile::tempdir().unwrap();
+        let project = root.path().join("project");
+        let settings_dir = project.join(".prime/agent");
+        let moved = project.join(".prime/agent-moved");
+        let external = root.path().join("external");
+        fs::create_dir_all(&settings_dir).unwrap();
+        fs::create_dir_all(&external).unwrap();
+        fs::write(settings_dir.join("settings.json"), "project old").unwrap();
+        fs::write(external.join("settings.json"), "outside old").unwrap();
+        let storage = FileSettingsStorage::new(&project, root.path().join("agent"));
+        let settings_for_hook = settings_dir.clone();
+        let moved_for_hook = moved.clone();
+        let external_for_hook = external.clone();
+        BEFORE_PROJECT_LOCK.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(move || {
+                fs::rename(&settings_for_hook, &moved_for_hook).unwrap();
+                fs::rename(&external_for_hook, &settings_for_hook).unwrap();
+            }));
+        });
+
+        let result = storage.with_lock(SettingsScope::Project, &mut |_| Some("new".into()));
+        BEFORE_PROJECT_LOCK.with(|hook| *hook.borrow_mut() = None);
+        fs::rename(&settings_dir, &external).unwrap();
+        fs::rename(&moved, &settings_dir).unwrap();
+
+        assert!(result.is_err());
+        assert_eq!(
+            fs::read_to_string(settings_dir.join("settings.json")).unwrap(),
+            "project old"
+        );
+        assert_eq!(
+            fs::read_to_string(external.join("settings.json")).unwrap(),
+            "outside old"
         );
     }
 

@@ -16,6 +16,9 @@ use std::ptr;
 use std::thread;
 use std::time::Duration;
 
+#[cfg(test)]
+use std::cell::RefCell;
+
 /// Whether a directory walk may create a missing component under its held parent.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum DirectoryCreation {
@@ -45,6 +48,15 @@ const OBJ_CASE_INSENSITIVE: u32 = 0x0000_0040;
 const FILE_RENAME_INFORMATION_CLASS: i32 = 10;
 const FILE_DISPOSITION_INFO_CLASS: u32 = 4;
 const FILE_ID_INFO_CLASS: i32 = 18;
+
+#[cfg(test)]
+type SettingsRaceHook = Box<dyn FnOnce(&OsStr)>;
+
+#[cfg(test)]
+thread_local! {
+    static BEFORE_MISSING_DIRECTORY_CREATE: RefCell<Option<SettingsRaceHook>> = const { RefCell::new(None) };
+    static BEFORE_TEMP_RENAME: RefCell<Option<SettingsRaceHook>> = const { RefCell::new(None) };
+}
 
 #[repr(C)]
 struct UnicodeString {
@@ -390,6 +402,12 @@ pub(crate) fn open_search_directory_at(
             if error.kind() == io::ErrorKind::NotFound
                 && creation == DirectoryCreation::CreateMissing =>
         {
+            #[cfg(test)]
+            BEFORE_MISSING_DIRECTORY_CREATE.with(|hook| {
+                if let Some(callback) = hook.borrow_mut().take() {
+                    callback(name);
+                }
+            });
             match open_relative(
                 parent,
                 name,
@@ -540,10 +558,90 @@ pub(crate) fn atomic_write_private_at(
     let result = (|| {
         temp.write_all(content.as_bytes())?;
         temp.sync_all()?;
+        #[cfg(test)]
+        BEFORE_TEMP_RENAME.with(|hook| {
+            if let Some(callback) = hook.borrow_mut().take() {
+                callback(&temp_name);
+            }
+        });
         rename_in_same_directory(&temp, name)
     })();
     if result.is_err() {
         delete_on_close(&temp);
     }
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::cell::Cell;
+    use std::os::windows::fs::symlink_dir;
+    use std::rc::Rc;
+
+    #[test]
+    fn missing_directory_create_does_not_follow_a_planted_link() {
+        let root = tempfile::tempdir().unwrap();
+        let project = root.path().join("project");
+        let child = project.join("agent");
+        let outside = root.path().join("outside-created");
+        std::fs::create_dir(&project).unwrap();
+        let parent =
+            open_search_absolute_directory(&project, DirectoryCreation::ExistingOnly).unwrap();
+        let child_for_hook = child.clone();
+        let outside_for_hook = outside.clone();
+        BEFORE_MISSING_DIRECTORY_CREATE.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(move |_| {
+                symlink_dir(&outside_for_hook, &child_for_hook).unwrap();
+            }));
+        });
+
+        let opened = open_search_directory_at(
+            &parent,
+            OsStr::new("agent"),
+            DirectoryCreation::CreateMissing,
+        );
+        BEFORE_MISSING_DIRECTORY_CREATE.with(|hook| *hook.borrow_mut() = None);
+
+        assert!(opened.is_err());
+        assert!(!outside.exists());
+    }
+
+    #[test]
+    fn temp_cannot_move_before_same_directory_rename() {
+        let root = tempfile::tempdir().unwrap();
+        let project = root.path().join("project");
+        let outside = root.path().join("outside");
+        std::fs::create_dir(&project).unwrap();
+        std::fs::create_dir(&outside).unwrap();
+        std::fs::write(project.join("settings.json"), "old").unwrap();
+        let parent =
+            open_search_absolute_directory(&project, DirectoryCreation::ExistingOnly).unwrap();
+        let move_succeeded = Rc::new(Cell::new(false));
+        let moved_for_hook = Rc::clone(&move_succeeded);
+        let project_for_hook = project.clone();
+        let outside_for_hook = outside.clone();
+        BEFORE_TEMP_RENAME.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(move |temp_name| {
+                moved_for_hook.set(
+                    std::fs::rename(
+                        project_for_hook.join(temp_name),
+                        outside_for_hook.join(temp_name),
+                    )
+                    .is_ok(),
+                );
+            }));
+        });
+
+        let result = atomic_write_private_at(&parent, OsStr::new("settings.json"), "new");
+        BEFORE_TEMP_RENAME.with(|hook| *hook.borrow_mut() = None);
+
+        result.unwrap();
+        assert!(!move_succeeded.get());
+        assert_eq!(
+            std::fs::read_to_string(project.join("settings.json")).unwrap(),
+            "new"
+        );
+        assert!(!outside.join("settings.json").exists());
+    }
 }
