@@ -214,6 +214,8 @@ jobs:
           set -euo pipefail
           python3 scripts/release/bundle_catalog.py generate --network \
             --catalog-ref "${CATALOG_REF}" --out "target/${{ matrix.target }}/catalog-assets"
+      - name: Install cargo-about (renders the archive's third-party notices)
+        uses: ./.github/actions/install-cargo-about
       - name: Assemble tarball + checksums + manifest (commit-stamped)
         run: |
           set -euo pipefail
@@ -306,6 +308,8 @@ jobs:
           set -euo pipefail
           python3 scripts/release/bundle_catalog.py generate --network \
             --catalog-ref "${CATALOG_REF}" --out "target/${{ matrix.target }}/catalog-assets"
+      - name: Install cargo-about (renders the archive's third-party notices)
+        uses: ./.github/actions/install-cargo-about
       - name: Assemble tarball + checksums + manifest (commit-stamped)
         run: |
           set -euo pipefail

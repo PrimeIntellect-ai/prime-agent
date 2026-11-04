@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -15,12 +16,15 @@ ASSEMBLER = HERE / "assemble_artifacts.py"
 SPLITTER = HERE / "split_debug.py"
 VERIFIER = HERE / "verify_decoders.py"
 CATALOG = HERE / "bundle_catalog.py"
+# The synthetic repo has no Cargo workspace for cargo-about to scan.
+FAKE_CARGO_ABOUT_DIR = HERE / "testdata" / "bin"
 TARGETS = (("x86_64-unknown-linux-gnu", "linux-x64"),
            ("aarch64-unknown-linux-gnu", "linux-arm64"))
 
 
 def run(*args: str, success: bool = True) -> subprocess.CompletedProcess:
-    result = subprocess.run(args, capture_output=True, text=True)
+    env = {**os.environ, "PATH": f"{FAKE_CARGO_ABOUT_DIR}{os.pathsep}{os.environ['PATH']}"}
+    result = subprocess.run(args, capture_output=True, text=True, env=env)
     if success and result.returncode:
         raise AssertionError(f"{' '.join(args)} failed: {result.stderr[-1200:]}")
     return result
@@ -36,6 +40,7 @@ class DecoderManifest(unittest.TestCase):
                 (repo / directory).mkdir()
             (repo / "prime-agent-runtime/pyproject.toml").write_text("[project]\nname = 'fixture'\nversion = '0.1.0'\n")
             (repo / "LICENSE").write_text("fixture\n")
+            (repo / "deny.toml").write_text('[licenses]\nallow = ["MIT"]\n')
             (repo / "README.md").write_text("fixture\n")
             catalog = root / "catalog"
             run(sys.executable, str(CATALOG), "generate", "--fixture", "--out", str(catalog))
