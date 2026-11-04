@@ -1483,6 +1483,11 @@ async def _poll_journal(path: str, pid: int, count: int, timeout: float = 2.0) -
     return records
 
 
+def _forget_persistent_activity(activity_id):
+    with bash_module._live_lock:
+        bash_module._activity_handles.pop(activity_id, None)
+
+
 @unittest.skipUnless(os.name == "posix", "persistent shells are POSIX-only")
 class PersistentBashTest(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
@@ -1623,6 +1628,7 @@ class PersistentBashTest(unittest.IsolatedAsyncioTestCase):
         finally:
             os.umask(old_umask)
         self.pgids.append(handle.pid)
+        self.addCleanup(_forget_persistent_activity, handle._activity_id)
         self.assertEqual(os.stat(self.home).st_mode & 0o777, 0o700)
         for kind in ("json", "out"):
             path = os.path.join(self.home, f"{handle._activity_id}.{kind}")
@@ -1639,13 +1645,14 @@ class PersistentBashTest(unittest.IsolatedAsyncioTestCase):
         os.symlink(shared, self.home)
         handle = bash("sleep 60", persistent=True)
         self.pgids.append(handle.pid)
+        self.addCleanup(_forget_persistent_activity, handle._activity_id)
         self.assertEqual(os.stat(shared).st_mode & 0o777, 0o755)
         for kind in ("json", "out"):
             path = os.path.join(shared, f"{handle._activity_id}.{kind}")
             self.assertEqual(os.stat(path).st_mode & 0o777, 0o600)
 
     async def test_persistent_record_write_does_not_follow_a_planted_temp_link(self):
-        shell_id = "a" * 32
+        shell_id = "0" * 32
         os.makedirs(self.home)
         victim = os.path.join(os.path.dirname(self.home), "victim")
         with open(victim, "w") as f:
@@ -1654,6 +1661,7 @@ class PersistentBashTest(unittest.IsolatedAsyncioTestCase):
         with mock.patch.object(bash_module.secrets, "token_hex", return_value=shell_id):
             handle = bash("sleep 60", persistent=True)
         self.pgids.append(handle.pid)
+        self.addCleanup(_forget_persistent_activity, handle._activity_id)
         with open(victim) as f:
             self.assertEqual(f.read(), "untouched")
 
