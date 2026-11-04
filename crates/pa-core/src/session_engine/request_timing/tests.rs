@@ -43,6 +43,56 @@ fn request_timing_log_and_rotation_are_private() {
     assert_eq!(mode(&path), 0o600);
 }
 
+#[cfg(unix)]
+#[test]
+fn request_timing_log_does_not_touch_linked_files_or_log_directory() {
+    use std::os::unix::fs::{symlink, PermissionsExt};
+
+    let root = tempfile::tempdir().unwrap();
+    let agent = root.path().join("agent");
+    std::fs::create_dir(&agent).unwrap();
+    let logs = agent.join("logs");
+    let outside = root.path().join("outside");
+    std::fs::create_dir(&outside).unwrap();
+    let victim = outside.join("shared.jsonl");
+    std::fs::write(&victim, b"shared collector\n").unwrap();
+    std::fs::set_permissions(&victim, std::fs::Permissions::from_mode(0o644)).unwrap();
+    symlink(&outside, &logs).unwrap();
+    RequestTimingLog::new(&agent).info("private timing", Map::new());
+    assert!(!outside.join("agent.jsonl").exists());
+    std::fs::remove_file(&logs).unwrap();
+    std::fs::create_dir(&logs).unwrap();
+
+    let log = logs.join("agent.jsonl");
+    symlink(&victim, &log).unwrap();
+    RequestTimingLog::new(&agent).info("private timing", Map::new());
+    std::fs::remove_file(&log).unwrap();
+    std::fs::hard_link(&victim, &log).unwrap();
+    RequestTimingLog::new(&agent).info("private timing", Map::new());
+    std::fs::remove_file(&log).unwrap();
+
+    let retained = log.with_extension("jsonl.old");
+    symlink(&victim, &retained).unwrap();
+    RequestTimingLog::new(&agent).info("safe timing", Map::new());
+    assert_eq!(std::fs::read(&victim).unwrap(), b"shared collector\n");
+    assert_eq!(
+        std::fs::metadata(&victim).unwrap().permissions().mode() & 0o777,
+        0o644
+    );
+    assert!(std::fs::read_to_string(&log)
+        .unwrap()
+        .contains("safe timing"));
+
+    std::fs::remove_file(&retained).unwrap();
+    std::fs::hard_link(&victim, &retained).unwrap();
+    RequestTimingLog::new(&agent).info("another safe timing", Map::new());
+    assert_eq!(std::fs::read(&victim).unwrap(), b"shared collector\n");
+    assert_eq!(
+        std::fs::metadata(&victim).unwrap().permissions().mode() & 0o777,
+        0o644
+    );
+}
+
 fn test_model() -> pa_agent::types::Model {
     pa_agent::types::Model {
         id: "bench/bench-model".to_string(),

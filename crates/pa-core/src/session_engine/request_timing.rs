@@ -101,49 +101,34 @@ impl RequestTimingLog {
     fn append_rotating_log(&self, line: &str) {
         use std::io::Write;
         let append = || -> std::io::Result<()> {
-            std::fs::create_dir_all(self.path.parent().unwrap_or_else(|| Path::new(".")))?;
+            let parent = self.path.parent().unwrap_or_else(|| Path::new("."));
+            let dir = crate::platform::log_files::LogDir::for_write(parent)?;
+            let name = self.path.file_name().ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "timing log has no filename",
+                )
+            })?;
             // Older versions may have left a readable retained copy. Repair
             // it on the next write without making diagnostics depend on it.
             let rotated = self.path.with_extension("jsonl.old");
-            if let Ok(file) = std::fs::OpenOptions::new().append(true).open(&rotated) {
-                let _ = crate::platform::perms::restrict_open_file(&file);
-            }
+            let rotated_name = rotated.file_name().expect("rotated log has a filename");
+            let _ = dir.repair_existing(rotated_name);
             // Best-effort rotation: keep appending when the rotate fails.
-            let _ = self.rotate_if_needed();
-            let mut options = std::fs::OpenOptions::new();
-            options.create(true).append(true);
-            crate::platform::perms::set_private_mode(&mut options);
-            let mut file = options.open(&self.path)?;
-            // A legacy log may already have loose permissions. Tighten the
-            // opened inode before any diagnostic detail is appended.
-            crate::platform::perms::restrict_open_file(&file)?;
+            let mut file = dir.open_append(name)?;
+            if file.metadata()?.len() > self.max_bytes {
+                // Drop the prior `.old` first: rename otherwise fails on Windows.
+                drop(file);
+                let _ = dir.remove(rotated_name);
+                let _ = dir.rename(name, rotated_name);
+                file = dir.open_append(name)?;
+            }
             file.write_all(line.as_bytes())?;
             file.flush()
         };
         if let Err(error) = append() {
             tracing::debug!(path = %self.path.display(), %error, "request-timing log append failed");
         }
-    }
-
-    fn rotate_if_needed(&self) -> std::io::Result<()> {
-        let size = match std::fs::metadata(&self.path) {
-            Ok(meta) => meta.len(),
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-            Err(err) => return Err(err),
-        };
-        if size <= self.max_bytes {
-            return Ok(());
-        }
-        // Rotation retains the old log, so tighten it before moving it to
-        // the `.old` name as well.
-        let file = std::fs::OpenOptions::new().append(true).open(&self.path)?;
-        crate::platform::perms::restrict_open_file(&file)?;
-        drop(file);
-        // Drop any prior `.old` first: the rename fails on Windows if the
-        // destination exists.
-        let rotated = self.path.with_extension("jsonl.old");
-        let _ = std::fs::remove_file(&rotated);
-        std::fs::rename(&self.path, &rotated)
     }
 }
 

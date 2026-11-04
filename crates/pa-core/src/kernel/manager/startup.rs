@@ -1,6 +1,8 @@
 //! Startup and child wiring: kernel process spawn, python resolution, stderr
 //! capture, and readiness handshake.
 
+use anyhow::Context as _;
+
 use super::{
     anyhow, live_kernels, lock, oneshot, orphan_journal, parse_event, Arc, AsyncReadExt, BufReader,
     ChildHandle, Duration, ExitInfo, HashMap, Inner, KernelShutdownOptions, KernelStartOptions,
@@ -59,11 +61,6 @@ impl Inner {
     }
 
     fn open_stderr_log_at(&self, path: &std::path::Path) -> anyhow::Result<Arc<Mutex<StderrLog>>> {
-        if let Some(parent) = path.parent() {
-            // Owner-only directory, matching the other private session
-            // artifacts the kernel manager creates.
-            crate::platform::perms::create_dir_all_private(parent)?;
-        }
         // The provisioner owns this fixed session-artifact path. Custom
         // stderr destinations may deliberately be links to a shared log, but
         // the managed path must never append to a planted link's target.
@@ -75,42 +72,25 @@ impl Inner {
                     .is_some_and(|dir| dir.join("kernel-stderr.log") == path)
             });
         if managed_session_log {
-            let mut options = std::fs::OpenOptions::new();
-            options.create(true).append(true);
-            crate::platform::perms::set_private_mode(&mut options);
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::OpenOptionsExt;
-                options.custom_flags(libc::O_NOFOLLOW);
-            }
-            #[cfg(windows)]
-            {
-                use std::os::windows::fs::OpenOptionsExt;
-                // Win32 FILE_FLAG_OPEN_REPARSE_POINT: open the link itself,
-                // never its target, if it appears between checks.
-                options.custom_flags(0x0020_0000);
-            }
-            let open_managed = || -> anyhow::Result<std::fs::File> {
-                // Reject a visible link before opening, including for
-                // platforms where the no-follow flag differs from Unix.
-                if std::fs::symlink_metadata(path).is_ok_and(|meta| meta.file_type().is_symlink()) {
-                    anyhow::bail!("managed kernel stderr log is a symbolic link");
-                }
-                let file = options.open(path)?;
-                #[cfg(windows)]
-                if std::fs::symlink_metadata(path).is_ok_and(|meta| meta.file_type().is_symlink()) {
-                    anyhow::bail!("managed kernel stderr log is a symbolic link");
-                }
-                Ok(file)
-            };
-            let file = open_managed()?;
+            let parent = path
+                .parent()
+                .context("managed kernel stderr log has no parent")?;
+            // Session artifacts have always been created owner-only.
+            crate::platform::perms::create_dir_all_private(parent)?;
+            let dir = crate::platform::log_files::LogDir::for_write(parent)?;
+            let name = path
+                .file_name()
+                .context("managed kernel stderr log has no filename")?;
+            let file = dir.open_append(name)?;
             let mut size = file.metadata()?.len();
             let file = if size > MAX_KERNEL_STDERR_LOG_BYTES {
-                crate::platform::perms::restrict_open_file(&file)?;
                 drop(file);
                 let old = path.with_extension("log.old");
-                let _ = std::fs::remove_file(&old);
-                match std::fs::rename(path, &old) {
+                let old_name = old
+                    .file_name()
+                    .context("rotated stderr log has no filename")?;
+                let _ = dir.remove(old_name);
+                match dir.rename(name, old_name) {
                     Ok(()) => size = 0,
                     Err(error) => {
                         self.append_diagnostic(&format!(
@@ -118,15 +98,18 @@ impl Inner {
                         ));
                     }
                 }
-                open_managed()?
+                dir.open_append(name)?
             } else {
                 file
             };
-            crate::platform::perms::restrict_open_file(&file)?;
             return Ok(Arc::new(Mutex::new(StderrLog {
                 file,
                 budget: MAX_KERNEL_STDERR_LOG_BYTES.saturating_sub(size),
             })));
+        }
+        if let Some(parent) = path.parent() {
+            // Explicit destinations retain their existing path semantics.
+            crate::platform::perms::create_dir_all_private(parent)?;
         }
         let mut size = path.metadata().map_or(0, |m| m.len());
         if size > MAX_KERNEL_STDERR_LOG_BYTES {
@@ -754,6 +737,51 @@ mod tests {
         );
         assert_eq!(crate::platform::perms::file_mode(&victim), Some(0o644));
         assert!(opened.is_err());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn default_session_stderr_log_rejects_a_linked_artifact_directory() {
+        use std::os::unix::fs::{symlink, PermissionsExt};
+
+        let root = tempfile::tempdir().unwrap();
+        let outside = root.path().join("outside");
+        std::fs::create_dir(&outside).unwrap();
+        let victim = outside.join("kernel-stderr.log");
+        std::fs::write(&victim, b"shared collector\n").unwrap();
+        std::fs::set_permissions(&victim, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let artifacts = root.path().join("artifacts");
+        symlink(&outside, &artifacts).unwrap();
+        let path = artifacts.join("kernel-stderr.log");
+
+        assert!(session_manager(&path)
+            .inner
+            .open_stderr_log_at(&path)
+            .is_err());
+        assert_eq!(std::fs::read(&victim).unwrap(), b"shared collector\n");
+        assert_eq!(crate::platform::perms::file_mode(&victim), Some(0o644));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn default_session_stderr_log_rejects_a_hard_linked_file() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = tempfile::tempdir().unwrap();
+        let artifacts = root.path().join("artifacts");
+        std::fs::create_dir(&artifacts).unwrap();
+        let victim = root.path().join("shared.log");
+        std::fs::write(&victim, b"shared collector\n").unwrap();
+        std::fs::set_permissions(&victim, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let path = artifacts.join("kernel-stderr.log");
+        std::fs::hard_link(&victim, &path).unwrap();
+
+        assert!(session_manager(&path)
+            .inner
+            .open_stderr_log_at(&path)
+            .is_err());
+        assert_eq!(std::fs::read(&victim).unwrap(), b"shared collector\n");
+        assert_eq!(crate::platform::perms::file_mode(&victim), Some(0o644));
     }
 
     #[test]
