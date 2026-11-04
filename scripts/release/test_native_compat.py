@@ -34,7 +34,7 @@ class InstallerMetadataBoundsTests(unittest.TestCase):
                     b"1.2.3\n" if self.path == "/valid" else
                     b"x" * 1024 if self.path == "/boundary" else oversized
                 )
-                if self.path != "/chunked":
+                if not self.path.startswith("/chunked"):
                     self.send_response(200)
                     self.send_header("Content-Length", str(len(body)))
                     self.end_headers()
@@ -61,12 +61,31 @@ class InstallerMetadataBoundsTests(unittest.TestCase):
             self.addCleanup(server.shutdown)
             env = {name: os.environ[name] for name in ("PATH", "LANG") if name in os.environ}
             env.update(HOME=str(root), TMPDIR=str(root))
+            # Simulate macOS curl before 8.4, where --max-filesize does not
+            # enforce a limit during an unknown-length transfer. The pipe
+            # itself must still cap the output.
+            real_curl = shutil.which("curl")
+            self.assertIsNotNone(real_curl)
+            shim_dir = root / "shim"
+            shim_dir.mkdir()
+            shim_marker = root / "shim-used"
+            shim = shim_dir / "curl"
+            shim.write_text(
+                "#!/usr/bin/env python3\nimport os, sys\n"
+                "args = sys.argv[1:]\n"
+                "removed = '--max-filesize' in args\n"
+                "if removed:\n    index = args.index('--max-filesize')\n    del args[index:index + 2]\n"
+                f"open({str(shim_marker)!r}, 'w').write('removed' if removed else 'absent')\n"
+                f"os.execv({real_curl!r}, [{real_curl!r}, *args])\n"
+            )
+            shim.chmod(0o755)
             for shell in ("sh", "bash"):
-                for name, max_bytes, success in (
-                    ("valid", 1024, True),
-                    ("boundary", 1024, True),
-                    ("length", 1024 * 1024, False),
-                    ("chunked", 1024 * 1024, False),
+                for name, max_bytes, success, legacy in (
+                    ("valid", 1024, True, False),
+                    ("boundary", 1024, True, False),
+                    ("length", 1024 * 1024, False, False),
+                    ("chunked", 1024 * 1024, False, False),
+                    ("chunked_legacy", 1024 * 1024, False, True),
                 ):
                     output = root / f"{shell}-{name}"
                     script = (
@@ -76,10 +95,13 @@ class InstallerMetadataBoundsTests(unittest.TestCase):
                         + f'"{output}" 3 "" {max_bytes}\n'
                     )
                     result = subprocess.run(
-                        [shell, "-c", script], cwd=root, env=env,
+                        [shell, "-c", script], cwd=root,
+                        env={**env, "PATH": str(shim_dir) + os.pathsep + env["PATH"]} if legacy else env,
                         capture_output=True, text=True, timeout=10,
                     )
                     self.assertEqual(result.returncode == 0, success, result.stderr)
+                    if legacy:
+                        self.assertEqual(shim_marker.read_text(), "removed")
                     if success:
                         self.assertEqual(output.read_bytes(), b"1.2.3\n" if name == "valid" else b"x" * 1024)
                     elif output.exists():
