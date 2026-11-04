@@ -124,8 +124,8 @@ fn process_lock(path: &Path) -> MutexGuard<'static, ()> {
         .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
-/// The stat identity a cached read is validated against: every writer renames the document in
-/// place, so a matching identity means the cached content is byte-identical to a locked read now.
+/// The stat identity is a cheap reject for cached reads. A matching identity
+/// still needs an exact byte check because timestamps can be preserved or coarse.
 #[derive(Clone, Copy, PartialEq, Eq)]
 struct FileIdentity {
     dev: u64,
@@ -183,7 +183,7 @@ fn read_cache() -> &'static Mutex<HashMap<PathBuf, CachedRead>> {
 }
 
 impl AuthStorageBackend for FileAuthStorageBackend {
-    /// On a hit, one `stat` and the cached content; on a miss, the full
+    /// On a hit, `stat` plus a bounded byte check; on a miss, the full
     /// locked protocol cycle, which also populates the cache.
     fn read(&self) -> Result<Option<String>> {
         let _process_guard = process_lock(&self.auth_path);
@@ -191,13 +191,16 @@ impl AuthStorageBackend for FileAuthStorageBackend {
             .ok()
             .and_then(|metadata| stat_identity(&metadata));
         if let Some(identity) = now_identity {
-            let cache = read_cache()
+            let cached = read_cache()
                 .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            if let Some(entry) = cache.get(&self.auth_path) {
-                if entry.identity == identity {
-                    return Ok(Some(entry.content.clone()));
-                }
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .get(&self.auth_path)
+                .filter(|entry| entry.identity == identity)
+                .map(|entry| entry.content.clone());
+            if let Some(content) = cached.filter(|content| {
+                crate::platform::cache_content::matches(&self.auth_path, content.as_bytes())
+            }) {
+                return Ok(Some(content));
             }
         }
         self.ensure_parent_dir()?;
@@ -406,6 +409,19 @@ mod tests {
         assert_eq!(before.len(), after.len());
         assert_eq!(before.modified().unwrap(), after.modified().unwrap());
         assert_eq!(backend.read().unwrap().as_deref(), Some(replacement));
+
+        let rewritten = r#"{ "key": "CCCC" }"#;
+        fs::write(&path, rewritten).unwrap();
+        fs::OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_times(fs::FileTimes::new().set_modified(after.modified().unwrap()))
+            .unwrap();
+        let current = fs::metadata(&path).unwrap();
+        assert_eq!(after.len(), current.len());
+        assert_eq!(after.modified().unwrap(), current.modified().unwrap());
+        assert_eq!(backend.read().unwrap().as_deref(), Some(rewritten));
     }
 
     #[test]

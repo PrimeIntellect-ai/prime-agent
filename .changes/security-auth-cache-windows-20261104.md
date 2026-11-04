@@ -1,0 +1,1 @@
+- Fixed stale credentials and settings being reused after external file updates on Windows and filesystems with coarse timestamps.

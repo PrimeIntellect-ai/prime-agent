@@ -4,6 +4,7 @@
 use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use hmac::{Hmac, Mac};
 use pa_types::ai::Model;
@@ -178,11 +179,8 @@ pub fn private_prime_authorization_cache_path(models_json_path: &Path) -> PathBu
         .join(PRIVATE_PRIME_AUTHORIZATION_CACHE_FILE)
 }
 
-/// The stat identity a cached parse is validated against: device, inode,
-/// mtime (nanoseconds), and length (same shape as the auth document's
-/// read-through cache). Every known writer replaces the file by atomic
-/// rename or rewrites in place, so a matching identity means the cached
-/// parse is what a fresh read would return.
+/// The stat identity is a cheap reject for a cached parse. A matching identity
+/// still needs an exact byte check because timestamps can be preserved or coarse.
 #[derive(Clone, Copy, PartialEq, Eq)]
 struct CacheFileIdentity {
     dev: u64,
@@ -226,6 +224,7 @@ fn cache_file_identity(metadata: &std::fs::Metadata) -> Option<CacheFileIdentity
 /// registry), so the parse would otherwise re-run on every resolution.
 struct CachedParse {
     identity: CacheFileIdentity,
+    content: Arc<str>,
     cache: PrivatePrimeAuthorizationCache,
 }
 
@@ -236,8 +235,8 @@ fn parse_cache() -> &'static std::sync::Mutex<HashMap<PathBuf, CachedParse>> {
 }
 
 /// Read and validate the authorization cache; `None` on any mismatch.
-/// The parse is served from the stat-identity snapshot while the file is
-/// unchanged. Only a successful parse under an unchanged identity pins; a
+/// The parse is served after its raw bytes match the current file. Only a
+/// successful parse under an unchanged stat identity pins; a
 /// failed read unpins any stale entry so the next call retries.
 pub fn read_private_prime_authorization_cache(
     models_json_path: &Path,
@@ -247,17 +246,19 @@ pub fn read_private_prime_authorization_cache(
         .ok()
         .and_then(|m| cache_file_identity(&m));
     if let Some(identity) = before {
-        if let Some(entry) = parse_cache()
+        let cached = parse_cache()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .get(&path)
-        {
-            if entry.identity == identity {
-                return Some(entry.cache.clone());
-            }
+            .filter(|entry| entry.identity == identity)
+            .map(|entry| (Arc::clone(&entry.content), entry.cache.clone()));
+        if let Some((_, cache)) = cached.filter(|(content, _)| {
+            crate::platform::cache_content::matches(&path, content.as_bytes())
+        }) {
+            return Some(cache);
         }
     }
-    let Some(cache) = parse_private_prime_authorization_cache(&path) else {
+    let Some((cache, content)) = parse_private_prime_authorization_cache(&path) else {
         // A failed read never pins: drop any superseded entry so the next
         // call retries the parse from the file as it stands.
         parse_cache()
@@ -278,6 +279,7 @@ pub fn read_private_prime_authorization_cache(
                 path,
                 CachedParse {
                     identity: after,
+                    content: Arc::from(content),
                     cache: cache.clone(),
                 },
             );
@@ -290,19 +292,24 @@ pub fn read_private_prime_authorization_cache(
 }
 
 /// The uncached read+parse (the read-through cache's miss arm).
-fn parse_private_prime_authorization_cache(path: &Path) -> Option<PrivatePrimeAuthorizationCache> {
+fn parse_private_prime_authorization_cache(
+    path: &Path,
+) -> Option<(PrivatePrimeAuthorizationCache, String)> {
     let content = std::fs::read_to_string(path).ok()?;
     let parsed: serde_json::Value = serde_json::from_str(&content).ok()?;
     let fingerprint = parsed.get("fingerprint")?.as_str()?.to_string();
     let refreshed_at = parsed.get("refreshedAt")?.as_u64()?;
     let items = parsed.get("data")?.as_array()?.clone();
     let models = build_authorized_private_models(&items).ok()?;
-    Some(PrivatePrimeAuthorizationCache {
-        fingerprint,
-        items,
-        models,
-        refreshed_at,
-    })
+    Some((
+        PrivatePrimeAuthorizationCache {
+            fingerprint,
+            items,
+            models,
+            refreshed_at,
+        },
+        content,
+    ))
 }
 
 /// Persist the authorization cache (best-effort atomic temp+rename write,
@@ -502,6 +509,24 @@ mod tests {
                 .unwrap()
                 .fingerprint,
             "fingerprint-b"
+        );
+
+        let rewritten = original.replace("fingerprint-a", "fingerprint-c");
+        std::fs::write(&path, rewritten).unwrap();
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_times(std::fs::FileTimes::new().set_modified(after.modified().unwrap()))
+            .unwrap();
+        let current = std::fs::metadata(&path).unwrap();
+        assert_eq!(after.len(), current.len());
+        assert_eq!(after.modified().unwrap(), current.modified().unwrap());
+        assert_eq!(
+            read_private_prime_authorization_cache(&models_json)
+                .unwrap()
+                .fingerprint,
+            "fingerprint-c"
         );
     }
 
