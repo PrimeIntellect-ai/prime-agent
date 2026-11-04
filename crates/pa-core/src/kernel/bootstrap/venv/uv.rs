@@ -13,14 +13,15 @@ fn find_executable(name: &str, path_value: &OsStr, project: Option<&Path>) -> Op
     #[cfg(not(windows))]
     let candidates = vec![name.to_string()];
     for dir in std::env::split_paths(path_value) {
-        // A relative PATH entry or one overlapping the repository can select
-        // a checked-in executable before any user action.
-        if !crate::kernel::python_env::safe_path(&dir, project) {
+        // Relative or repository-contained PATH entries can select a
+        // checked-in executable before any user action. An ancestor is safe
+        // when the selected binary itself stays outside the project.
+        if !crate::kernel::python_env::safe_executable_path(&dir, project) {
             continue;
         }
         for candidate in &candidates {
             let full_path = dir.join(candidate);
-            if crate::kernel::python_env::safe_path(&full_path, project)
+            if crate::kernel::python_env::safe_executable_path(&full_path, project)
                 && full_path.is_file()
                 && is_executable(&full_path)
             {
@@ -92,7 +93,9 @@ pub(crate) fn ensure_uv(project: Option<&Path>) -> anyhow::Result<String> {
     }
     let uv_name = if cfg!(windows) { "uv.exe" } else { "uv" };
     let local_uv = home_dir().join(".local").join("bin").join(uv_name);
-    if crate::kernel::python_env::safe_path(&local_uv, project) && is_executable(&local_uv) {
+    if crate::kernel::python_env::safe_executable_path(&local_uv, project)
+        && is_executable(&local_uv)
+    {
         return Ok(local_uv.to_string_lossy().to_string());
     }
     Err(anyhow!(
@@ -106,7 +109,7 @@ mod safe_uv_tests {
     use std::os::unix::fs::PermissionsExt;
 
     #[test]
-    fn uv_search_skips_repository_and_relative_path_entries() {
+    fn uv_search_skips_repository_paths_and_allows_safe_ancestor_directory() {
         use std::os::unix::fs::symlink;
 
         let root = tempfile::tempdir().unwrap();
@@ -126,6 +129,15 @@ mod safe_uv_tests {
             find_executable("uv", &path, Some(&project)),
             Some(trusted.join("uv"))
         );
+
+        let ancestor_uv = root.path().join("uv");
+        std::fs::write(&ancestor_uv, "#!/bin/sh\nexit 0\n").unwrap();
+        std::fs::set_permissions(&ancestor_uv, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let path = std::env::join_paths([root.path()]).unwrap();
+        assert_eq!(
+            find_executable("uv", &path, Some(&project)),
+            Some(ancestor_uv)
+        );
     }
 
     #[test]
@@ -139,6 +151,7 @@ mod safe_uv_tests {
             std::fs::create_dir_all(dir).unwrap();
         }
         std::fs::create_dir(repo.join(".git")).unwrap();
+        std::fs::write(repo.join(".git/HEAD"), "ref: refs/heads/main\n").unwrap();
         for path in [sibling.join("uv"), trusted.join("uv")] {
             std::fs::write(&path, "#!/bin/sh\nexit 0\n").unwrap();
             std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();

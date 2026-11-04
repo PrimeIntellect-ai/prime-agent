@@ -110,6 +110,21 @@ pub fn get_agent_dir() -> PathBuf {
     }
 }
 
+/// The CLI checks this before any command can read agent settings. Keep the
+/// error at the command boundary so a missing home is reported without a
+/// panic or a fallback into the repository.
+pub fn require_agent_dir() -> Result<(), String> {
+    if std::env::var(ENV_AGENT_DIR).is_ok_and(|dir| !dir.is_empty())
+        || pa_types::platform::home_dir().is_some()
+    {
+        Ok(())
+    } else {
+        Err(format!(
+            "HOME or {ENV_AGENT_DIR} is required for agent settings"
+        ))
+    }
+}
+
 pub fn get_session_dir_env_override() -> Option<PathBuf> {
     std::env::var(ENV_SESSION_DIR)
         .ok()

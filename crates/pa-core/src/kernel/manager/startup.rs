@@ -538,7 +538,7 @@ impl Inner {
 /// its process groups under.
 fn kernel_spawn_env(
     options_env: &HashMap<String, String>,
-    _project: Option<&std::path::Path>,
+    project: Option<&std::path::Path>,
 ) -> HashMap<std::ffi::OsString, std::ffi::OsString> {
     let mut env: HashMap<std::ffi::OsString, std::ffi::OsString> = std::env::vars_os().collect();
     for (key, value) in options_env {
@@ -555,7 +555,7 @@ fn kernel_spawn_env(
         "PRIME_AGENT_KERNEL_OWNER_PID".into(),
         std::process::id().to_string().into(),
     );
-    crate::kernel::python_env::sanitize_python_env(&mut env);
+    crate::kernel::python_env::sanitize_python_env(&mut env, project);
     env
 }
 
@@ -575,7 +575,7 @@ mod tests {
     }
 
     #[test]
-    fn kernel_spawn_drops_python_overrides_after_applying_options() {
+    fn kernel_spawn_filters_project_python_overrides_after_applying_options() {
         let root = tempfile::tempdir().unwrap();
         let project = root.path().join("project");
         let trusted = root.path().join("trusted");
@@ -600,7 +600,10 @@ mod tests {
         ]);
 
         let env = kernel_spawn_env(&options, Some(&project));
-        assert!(!env.contains_key(std::ffi::OsStr::new("PYTHONPATH")));
+        assert_eq!(
+            env.get(std::ffi::OsStr::new("PYTHONPATH")),
+            Some(&trusted.into_os_string())
+        );
         assert!(!env.contains_key(std::ffi::OsStr::new("PYTHONHOME")));
         assert!(!env.contains_key(std::ffi::OsStr::new("PYTHONUSERBASE")));
     }

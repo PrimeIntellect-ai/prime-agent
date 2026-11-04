@@ -18,7 +18,7 @@ fn factory_dispatch_and_probes_drop_project_python_paths() {
         &python,
         r#"#!/bin/sh
 [ "$1" = "-P" ] || exit 41
-[ -z "${PYTHONPATH+x}" ] || exit 42
+[ "$PYTHONPATH" = "$EXPECTED_TRUSTED" ] || exit 42
 [ -z "${PYTHONHOME+x}" ] || exit 43
 [ -z "${PYTHONUSERBASE+x}" ] || exit 44
 case "$*" in
@@ -41,6 +41,7 @@ esac
         .env("PYTHONPATH", path)
         .env("PYTHONHOME", &project)
         .env("PYTHONUSERBASE", &project)
+        .env("EXPECTED_TRUSTED", &trusted)
         .env("DISPATCH_MARKER", &marker)
         .output()
         .unwrap();
@@ -51,4 +52,29 @@ esac
         String::from_utf8_lossy(&output.stderr)
     );
     assert!(marker.exists(), "the factory dispatch never reached Python");
+}
+
+#[test]
+fn missing_home_reports_agent_directory_requirement_without_a_panic() {
+    let output = Command::new(env!("CARGO_BIN_EXE_prime-agent"))
+        .arg("config")
+        .env_remove("HOME")
+        .env_remove("PRIME_AGENT_CODING_AGENT_DIR")
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("HOME or PRIME_AGENT_CODING_AGENT_DIR is required"),
+        "unexpected stderr: {stderr}"
+    );
+    assert!(!stderr.contains("panicked"), "unexpected panic: {stderr}");
+
+    let help = Command::new(env!("CARGO_BIN_EXE_prime-agent"))
+        .arg("--help")
+        .env_remove("HOME")
+        .env_remove("PRIME_AGENT_CODING_AGENT_DIR")
+        .output()
+        .unwrap();
+    assert!(help.status.success(), "help should not require a home");
 }
