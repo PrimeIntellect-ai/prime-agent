@@ -301,7 +301,7 @@ fn open_relative(
     let mut attributes = ObjectAttributes {
         length: u32::try_from(size_of::<ObjectAttributes>()).expect("fixed Win32 structure"),
         root_directory: parent.as_raw_handle(),
-        object_name: &mut unicode,
+        object_name: &raw mut unicode,
         attributes: OBJ_CASE_INSENSITIVE,
         security_descriptor: ptr::null_mut(),
         security_quality_of_service: ptr::null_mut(),
@@ -313,10 +313,10 @@ fn open_relative(
     let mut handle = ptr::null_mut();
     let status = unsafe {
         nt_create_file(
-            &mut handle,
+            &raw mut handle,
             desired_access,
-            &mut attributes,
-            &mut io_status,
+            &raw mut attributes,
+            &raw mut io_status,
             ptr::null_mut(),
             FILE_ATTRIBUTE_NORMAL,
             FILE_SHARE_ALL,
@@ -486,7 +486,7 @@ fn rename_in_same_directory(file: &File, name: &OsStr) -> io::Result<()> {
         let status = unsafe {
             nt_set_information_file(
                 file.as_raw_handle(),
-                &mut io_status,
+                &raw mut io_status,
                 storage.as_mut_ptr().cast::<c_void>(),
                 used_bytes_u32,
                 FILE_RENAME_INFORMATION_CLASS,

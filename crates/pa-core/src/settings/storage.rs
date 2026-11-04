@@ -250,21 +250,16 @@ impl FileSettingsStorage {
                 }
             }
         }
+        #[cfg(windows)]
+        if !platform_fs::same_directory_at_path(&dir, parent_path)? {
+            bail!("Project settings directory changed while opening");
+        }
         self.check_locked_project_path(&self.project_path, locked_path)?;
         #[cfg(unix)]
-        {
-            if !same_inode(&dir.metadata()?, &fs::metadata(parent_path)?) {
-                bail!("Project settings directory changed while opening");
-            }
-            Ok(Some(open_readable_directory_at(&dir)?))
+        if !same_inode(&dir.metadata()?, &fs::metadata(parent_path)?) {
+            bail!("Project settings directory changed while opening");
         }
-        #[cfg(windows)]
-        {
-            if !platform_fs::same_directory_at_path(&dir, parent_path)? {
-                bail!("Project settings directory changed while opening");
-            }
-            Ok(Some(dir))
-        }
+        Ok(Some(dir))
     }
 
     fn read_file(&self, scope: SettingsScope, path: &Path, locked_path: &Path) -> Result<String> {
@@ -289,6 +284,10 @@ impl FileSettingsStorage {
         #[cfg(not(any(unix, windows)))]
         let mut file = fs::File::open(path)?;
         let opened = file.metadata()?;
+        #[cfg(windows)]
+        if !opened.is_file() {
+            bail!("Project settings target is not a regular file");
+        }
         #[cfg(unix)]
         if is_multiply_linked(&opened) {
             bail!("Project settings file has multiple hard links");
@@ -552,6 +551,13 @@ impl SettingsStorage for FileSettingsStorage {
                             bail!("Project settings directory changed while locked");
                         }
                     }
+                }
+                #[cfg(unix)]
+                if scope == SettingsScope::Project {
+                    let parent = project_parent
+                        .as_ref()
+                        .ok_or_else(|| anyhow!("Project settings directory is missing"))?;
+                    project_parent = Some(open_readable_directory_at(parent)?);
                 }
                 #[cfg(all(test, any(unix, windows)))]
                 if scope == SettingsScope::Project {
@@ -1060,7 +1066,7 @@ mod tests {
         .unwrap();
         let storage = FileSettingsStorage::new(&project, root.path().join("agent"));
         let project_for_swap = project.clone();
-        let moved_for_swap = moved.clone();
+        let moved_for_swap = moved;
         let external_for_swap = external.clone();
 
         PROJECT_ANCHOR_STEP.with(|hook| {
