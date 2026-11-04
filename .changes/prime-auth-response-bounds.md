@@ -1,0 +1,1 @@
+- Prime Inference login and team-list HTTP responses now stop after 2 MiB, preventing oversized remote bodies from exhausting memory.
