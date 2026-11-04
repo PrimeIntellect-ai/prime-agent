@@ -681,19 +681,32 @@ pub fn agent_traces_log_path(agent_dir: &Path) -> PathBuf {
     agent_dir.join("logs").join("agent-traces.log")
 }
 
+fn open_private_trace_log(path: &Path) -> std::io::Result<std::fs::File> {
+    let mut options = std::fs::OpenOptions::new();
+    options.create(true).append(true);
+    crate::platform::perms::set_private_mode(&mut options);
+    let file = options.open(path)?;
+    crate::platform::perms::restrict_open_file(&file)?;
+    Ok(file)
+}
+
 /// Every failure stays silent: a broken log dir must not break the upload.
 fn append_rotating_log(log_path: &Path, message: &str) {
     let write = || -> std::io::Result<()> {
         use std::io::Write;
         std::fs::create_dir_all(log_path.parent().unwrap_or(Path::new("")))?;
-        if std::fs::metadata(log_path).map_or(0, |meta| meta.len()) > MAX_LOG_BYTES {
-            let _ = std::fs::remove_file(log_path.with_extension("log.old"));
-            let _ = std::fs::rename(log_path, log_path.with_extension("log.old"));
+        let old_path = log_path.with_extension("log.old");
+        // Repair a retained log from older versions on the next write.
+        if let Ok(old) = std::fs::File::open(&old_path) {
+            let _ = crate::platform::perms::restrict_open_file(&old);
         }
-        let mut file = std::fs::OpenOptions::new()
-            .append(true)
-            .create(true)
-            .open(log_path)?;
+        let mut file = open_private_trace_log(log_path)?;
+        if file.metadata()?.len() > MAX_LOG_BYTES {
+            drop(file);
+            let _ = std::fs::remove_file(&old_path);
+            let _ = std::fs::rename(log_path, &old_path);
+            file = open_private_trace_log(log_path)?;
+        }
         writeln!(file, "{message}")?;
         Ok(())
     };

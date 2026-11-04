@@ -9,6 +9,35 @@ use std::io::Write as _;
 use std::pin::Pin;
 use std::sync::Mutex;
 
+#[cfg(unix)]
+#[test]
+fn trace_upload_log_and_rotation_are_private() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempfile::tempdir().unwrap();
+    let log = agent_traces_log_path(dir.path());
+    let old = log.with_extension("log.old");
+    let mode = |path: &Path| std::fs::metadata(path).unwrap().permissions().mode() & 0o777;
+
+    append_rotating_log(&log, "session secret");
+    assert_eq!(mode(&log), 0o600, "new trace log must be private");
+
+    std::fs::set_permissions(&log, std::fs::Permissions::from_mode(0o644)).unwrap();
+    append_rotating_log(&log, "another detail");
+    assert_eq!(mode(&log), 0o600, "existing trace log must be tightened");
+
+    std::fs::write(&old, "previous session secret").unwrap();
+    std::fs::set_permissions(&old, std::fs::Permissions::from_mode(0o644)).unwrap();
+    append_rotating_log(&log, "new detail");
+    assert_eq!(mode(&old), 0o600, "retained legacy log must be tightened");
+
+    std::fs::write(&log, vec![b'x'; MAX_LOG_BYTES as usize + 1]).unwrap();
+    std::fs::set_permissions(&log, std::fs::Permissions::from_mode(0o644)).unwrap();
+    append_rotating_log(&log, "after rotation");
+    assert_eq!(mode(&old), 0o600, "rotated trace log must be private");
+    assert_eq!(mode(&log), 0o600, "replacement trace log must be private");
+}
+
 /// One captured request (url, headers, body).
 type CapturedRequest = (String, Vec<(String, String)>, String);
 
