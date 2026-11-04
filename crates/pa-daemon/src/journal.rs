@@ -86,13 +86,13 @@ pub(crate) fn rewrite_records(path: &Path, records: &[Value], finalize: Finalize
         std::process::id(),
         uuid::Uuid::new_v4().simple()
     ));
-    {
-        let mut options = OpenOptions::new();
-        options.write(true).create_new(true);
-        pa_core::platform::perms::set_private_mode(&mut options);
-        let file = options
-            .open(&temp)
-            .with_context(|| format!("create {}", temp.display()))?;
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    pa_core::platform::perms::set_private_mode(&mut options);
+    let file = options
+        .open(&temp)
+        .with_context(|| format!("create {}", temp.display()))?;
+    let result = (|| -> Result<()> {
         let mut writer = BufWriter::new(file);
         for record in records {
             let mut line = serde_json::to_string(record)?;
@@ -103,10 +103,13 @@ pub(crate) fn rewrite_records(path: &Path, records: &[Value], finalize: Finalize
         if !matches!(finalize, Finalize::Bare) {
             writer.get_ref().sync_all()?;
         }
+        drop(writer);
+        fs::rename(&temp, path).with_context(|| format!("persist {}", path.display()))
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&temp);
     }
-    let rename = fs::rename(&temp, path);
-    rename.with_context(|| format!("persist {}", path.display()))?;
-    Ok(())
+    result
 }
 
 // Complete records must decode exactly before recovery can replace their history.
@@ -703,6 +706,20 @@ mod tests {
         assert!(fs::read_to_string(&path)
             .unwrap()
             .contains("private prompt"));
+        let _ = fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn journal_rewrite_removes_private_temp_after_failed_rename() {
+        let path = temp_path("blocked.recovery.jsonl");
+        fs::create_dir(&path).unwrap();
+        let result = rewrite_records(
+            &path,
+            &[serde_json::json!({"message": "private prompt"})],
+            Finalize::Bare,
+        );
+        assert!(result.is_err());
+        assert_eq!(fs::read_dir(path.parent().unwrap()).unwrap().count(), 1);
         let _ = fs::remove_dir_all(path.parent().unwrap());
     }
 
