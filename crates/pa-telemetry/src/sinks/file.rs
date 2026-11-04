@@ -74,13 +74,36 @@ impl FileSink {
         if size < self.max_bytes {
             return Ok(());
         }
+        self.rotate_existing().await
+    }
+
+    async fn rotate_existing(&self) -> Result<()> {
         // A mirror left with loose legacy permissions must not carry those
         // permissions into the retained rotation.
-        drop(self.open_private().await?);
-        let rotated = self.path.with_extension("jsonl.1");
-        tokio::fs::rename(&self.path, &rotated)
+        // The current mirror may have been rotated by another sink since the
+        // size check. Do not create an empty replacement that could overwrite
+        // the retained rotation.
+        let file = match tokio::fs::OpenOptions::new()
+            .append(true)
+            .open(&self.path)
             .await
-            .with_context(|| format!("rotate {} -> {}", self.path.display(), rotated.display()))?;
+        {
+            Ok(file) => file,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(err) => return Err(err).with_context(|| format!("open {}", self.path.display())),
+        };
+        self.make_private(&file).await?;
+        drop(file);
+        let rotated = self.path.with_extension("jsonl.1");
+        match tokio::fs::rename(&self.path, &rotated).await {
+            Ok(()) => {}
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(err) => {
+                return Err(err).with_context(|| {
+                    format!("rotate {} -> {}", self.path.display(), rotated.display())
+                });
+            }
+        }
         tracing::info!(from = %self.path.display(), to = %rotated.display(), "telemetry mirror rotated");
         Ok(())
     }
@@ -104,6 +127,11 @@ impl FileSink {
             .open(&self.path)
             .await
             .with_context(|| format!("open {}", self.path.display()))?;
+        self.make_private(&file).await?;
+        Ok(file)
+    }
+
+    async fn make_private(&self, file: &tokio::fs::File) -> Result<()> {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -112,7 +140,9 @@ impl FileSink {
                 .await
                 .with_context(|| format!("chmod 600 {}", self.path.display()))?;
         }
-        Ok(file)
+        #[cfg(not(unix))]
+        let _ = file;
+        Ok(())
     }
 }
 
@@ -236,5 +266,32 @@ mod tests {
             .permissions()
             .mode();
         assert_eq!(mode & 0o777, 0o600);
+    }
+
+    #[tokio::test]
+    async fn concurrent_rotation_does_not_replace_retained_history() {
+        let dir = tempfile::tempdir().unwrap();
+        let sink = FileSink::new(dir.path());
+        let rotated = sink.path().with_extension("jsonl.1");
+        tokio::fs::write(sink.path(), "retained history\n")
+            .await
+            .unwrap();
+
+        // Another sink rotates the current mirror after this sink has checked
+        // its size, just before it opens the current path for rotation.
+        tokio::fs::rename(sink.path(), &rotated).await.unwrap();
+        sink.rotate_existing().await.unwrap();
+
+        assert_eq!(
+            tokio::fs::read_to_string(&rotated).await.unwrap(),
+            "retained history\n"
+        );
+        assert!(!sink.path().exists());
+
+        sink.send_batch("install-1", vec![event("new event")]).await;
+        assert_eq!(
+            tokio::fs::read_to_string(&rotated).await.unwrap(),
+            "retained history\n"
+        );
     }
 }
