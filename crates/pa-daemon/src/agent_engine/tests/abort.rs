@@ -6,9 +6,6 @@ use super::*;
 /// never the goal accounting.
 #[test]
 fn abort_in_flight_turn_cancels_a_mid_provider_wait() {
-    let _faux = FAUX_TEST_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let dir = tempfile::TempDir::new().unwrap();
     let agent_dir = dir.path().join("agent");
     std::fs::create_dir_all(&agent_dir).unwrap();
@@ -22,7 +19,7 @@ fn abort_in_flight_turn_cancels_a_mid_provider_wait() {
         json!({
             "providers": {
                 "faux": {
-                    "api": "faux",
+                    "api": registration.api,
                     "baseUrl": "http://localhost:0",
                     "apiKey": "sk-faux",
                     "models": [{
@@ -172,9 +169,6 @@ fn abort_in_flight_turn_cancels_a_mid_provider_wait() {
 /// untouched (the next delivery serves it).
 #[test]
 fn abort_racing_the_admission_prefix_settles_the_turn_before_the_provider_call() {
-    let _faux = FAUX_TEST_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let (engine, _engine_dir) = faux_engine_with_settings(
         &serde_json::json!({ "responses": ["raced reply", "next reply"] }),
         1,
@@ -237,9 +231,6 @@ fn abort_racing_the_admission_prefix_settles_the_turn_before_the_provider_call()
 
 #[test]
 fn settled_turn_emits_the_terminal_turn_end_payload() {
-    let _faux = FAUX_TEST_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let (engine, _engine_dir) = faux_engine_with_settings(
         &serde_json::json!({ "responses": [{"text": "settled reply"}] }),
         1,
@@ -280,9 +271,6 @@ fn settled_turn_emits_the_terminal_turn_end_payload() {
 
 #[test]
 fn settled_turn_emits_the_run_agent_end_payload() {
-    let _faux = FAUX_TEST_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let (engine, _engine_dir) = faux_engine_with_settings(
         &serde_json::json!({ "responses": [{"text": "settled reply"}] }),
         1,
@@ -345,9 +333,6 @@ fn settled_turn_emits_the_run_agent_end_payload() {
 /// failed row left the loop context first), and its opening frames forward.
 #[test]
 fn retried_run_restarts_with_its_own_agent_frames() {
-    let _faux = FAUX_TEST_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let dir = tempfile::TempDir::new().unwrap();
     std::fs::create_dir_all(dir.path().join("agent")).unwrap();
     std::fs::write(
@@ -459,16 +444,19 @@ fn retried_run_restarts_with_its_own_agent_frames() {
 }
 
 /// Scoped process-env overrides for the live-kernel tests: applied on
-/// construction, restored on drop. Serialized by the faux lock, so
-/// nothing races.
+/// construction, restored on drop, under the crate-wide env lock.
 #[cfg(test)]
 struct KernelEnvOverride {
     saved: Vec<(String, Option<String>)>,
+    _env_lock: std::sync::MutexGuard<'static, ()>,
 }
 
 #[cfg(test)]
 impl KernelEnvOverride {
     fn apply(pairs: &[(&str, Option<String>)]) -> Self {
+        let env_lock = crate::test_support::TELEMETRY_ENV_MUTEX
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let saved = pairs
             .iter()
             .map(|(key, _)| ((*key).to_string(), std::env::var(key).ok()))
@@ -479,7 +467,10 @@ impl KernelEnvOverride {
                 None => std::env::remove_var(key),
             }
         }
-        KernelEnvOverride { saved }
+        KernelEnvOverride {
+            saved,
+            _env_lock: env_lock,
+        }
     }
 }
 
@@ -527,9 +518,6 @@ fn abort_in_flight_turn_cancels_a_running_kernel_cell() {
         ("PRIME_AGENT_CODING_AGENT_DIR", None),
         ("PRIME_API_KEY", None),
     ]);
-    let _faux = FAUX_TEST_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let dir = tempfile::TempDir::new().unwrap();
     let engine = AgentSessionEngine::new(AgentEngineConfig {
         cwd: dir.path().to_path_buf(),

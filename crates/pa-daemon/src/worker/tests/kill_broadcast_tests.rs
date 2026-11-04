@@ -3,12 +3,8 @@ use super::*;
 
 /// The #245 gap: the aborted row broadcasts and persists, but the goal's
 /// accounting skips it.
-#[allow(clippy::await_holding_lock)] // the faux registry is process-global: the guard must span the async flow
 #[tokio::test]
 async fn aborted_turn_row_broadcasts_and_persists_through_the_worker_gate() {
-    let _faux = crate::agent_engine::tests::FAUX_TEST_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let dir = std::env::temp_dir().join(format!("pa-worker-aborted-row-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(&dir).unwrap();
     let config = WorkerConfig {
@@ -178,12 +174,8 @@ async fn aborted_turn_row_broadcasts_and_persists_through_the_worker_gate() {
 
 /// The job's cancel is durable and the file archives, so no scheduled wake
 /// revives the session.
-#[allow(clippy::await_holding_lock)] // the faux registry is process-global: the guard must span the async flow
 #[tokio::test]
 async fn kill_cancels_the_sessions_scheduled_jobs() {
-    let _faux = crate::agent_engine::tests::FAUX_TEST_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let dir = std::env::temp_dir().join(format!("pa-worker-kill-jobs-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(&dir).unwrap();
     let sessions_dir = dir.join("sessions");
@@ -253,12 +245,8 @@ async fn kill_cancels_the_sessions_scheduled_jobs() {
 /// The #247 matrix: the aborted row still broadcasts and persists, the
 /// `archived` entry lands ahead of the row, and the close surfaces as a
 /// `session_closed` frame.
-#[allow(clippy::await_holding_lock)] // the faux registry is process-global: the guard must span the async flow
 #[tokio::test]
 async fn kill_cancels_a_mid_provider_wait_turn_and_surfaces_the_aborted_row() {
-    let _faux = crate::agent_engine::tests::FAUX_TEST_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let dir = std::env::temp_dir().join(format!("pa-worker-kill-path-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(&dir).unwrap();
     let config = WorkerConfig {
@@ -398,12 +386,8 @@ async fn kill_cancels_a_mid_provider_wait_turn_and_surfaces_the_aborted_row() {
 
 /// TS `compact()` detaches from agent events before the abort, so this row
 /// stays off the wire and file while `abort` broadcasts it.
-#[allow(clippy::await_holding_lock)] // the faux registry is process-global: the guard must span the async flow
 #[tokio::test]
 async fn compact_interrupt_swallows_the_aborted_row() {
-    let _faux = crate::agent_engine::tests::FAUX_TEST_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let dir =
         std::env::temp_dir().join(format!("pa-worker-compact-abort-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(&dir).unwrap();

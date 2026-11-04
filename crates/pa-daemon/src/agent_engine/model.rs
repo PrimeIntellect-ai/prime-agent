@@ -312,7 +312,7 @@ impl AgentSessionEngine {
     ///
     /// The script model serves the session while the selection is unset or
     /// names it; any other selection resolves through the registry (a
-    /// models.json faux-api model streams through the same registered
+    /// models.json faux-api model streams through this engine's scripted
     /// provider).
     pub(crate) fn resolve_model(&self) -> anyhow::Result<Model> {
         if let Some(script) = &self.config.faux_script {
@@ -335,7 +335,11 @@ impl AgentSessionEngine {
             if names_script_model {
                 return Ok(model);
             }
-            return self.resolve_registry_model();
+            let mut resolved = self.resolve_registry_model()?;
+            if resolved.api == "faux" {
+                resolved.api = model.api;
+            }
+            return Ok(resolved);
         }
         self.resolve_registry_model()
     }
