@@ -1540,7 +1540,6 @@ dependencies = [
  "rsa",
  "serde",
  "serde_json",
- "sha1",
  "sha2",
  "tar",
  "tempfile",
