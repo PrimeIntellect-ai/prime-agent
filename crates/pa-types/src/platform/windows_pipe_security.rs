@@ -447,6 +447,54 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn other_ipv4_loopback_alias_keeps_the_built_in_peer_check() {
+        let suffix = format!(
+            "prime-agent-worker-{:012x}-000000000005",
+            std::process::id()
+        );
+        let canonical = format!(r"\\.\pipe\{suffix}");
+        let alias = format!(r"\\127.0.0.2\pipe\{suffix}");
+        let _server = ServerOptions::new()
+            .reject_remote_clients(false)
+            .first_pipe_instance(true)
+            .create(&canonical)
+            .expect("local server");
+        super::set_test_foreign_owner(true);
+        let result = super::super::windows_pipe::connect(&alias).await;
+        super::set_test_foreign_owner(false);
+        assert_eq!(
+            result
+                .expect_err("IPv4 loopback alias must enforce built-in policy")
+                .kind(),
+            std::io::ErrorKind::PermissionDenied
+        );
+    }
+
+    #[tokio::test]
+    async fn trailing_dot_localhost_alias_keeps_the_built_in_peer_check() {
+        let suffix = format!(
+            "prime-agent-worker-{:012x}-000000000006",
+            std::process::id()
+        );
+        let canonical = format!(r"\\.\pipe\{suffix}");
+        let alias = format!(r"\\localhost.\pipe\{suffix}");
+        let _server = ServerOptions::new()
+            .reject_remote_clients(false)
+            .first_pipe_instance(true)
+            .create(&canonical)
+            .expect("local server");
+        super::set_test_foreign_owner(true);
+        let result = super::super::windows_pipe::connect(&alias).await;
+        super::set_test_foreign_owner(false);
+        assert_eq!(
+            result
+                .expect_err("trailing-dot localhost alias must enforce built-in policy")
+                .kind(),
+            std::io::ErrorKind::PermissionDenied
+        );
+    }
+
     #[test]
     fn local_pipe_aliases_keep_reserved_names_private() {
         for name in [
