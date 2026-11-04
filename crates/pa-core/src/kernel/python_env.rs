@@ -68,11 +68,20 @@ fn safe_value(name: &str, value: &OsStr, project: Option<&Path>) -> Option<OsStr
 /// override is dropped. This leaves unrelated environment settings intact.
 pub(crate) fn sanitize_python_env(env: &mut HashMap<OsString, OsString>, project: Option<&Path>) {
     for name in ["PYTHONPATH", "PYTHONHOME", "PYTHONUSERBASE"] {
-        // Windows environment names are case-insensitive. Normalize every
-        // spelling before the subprocess receives its environment.
+        // Windows environment names are case-insensitive. On Unix, a
+        // lowercase name is a separate variable that Python ignores.
         let keys: Vec<_> = env
             .keys()
-            .filter(|key| key.to_string_lossy().eq_ignore_ascii_case(name))
+            .filter(|key| {
+                #[cfg(windows)]
+                {
+                    key.to_string_lossy().eq_ignore_ascii_case(name)
+                }
+                #[cfg(not(windows))]
+                {
+                    key.as_os_str() == OsStr::new(name)
+                }
+            })
             .cloned()
             .collect();
         let value = keys
@@ -141,6 +150,8 @@ mod tests {
             ),
             (OsString::from("PYTHONUTF8"), OsString::from("1")),
         ]);
+        #[cfg(not(windows))]
+        env.insert(OsString::from("pythonpath"), OsString::from("untouched"));
 
         sanitize_python_env(&mut env, Some(&project));
         assert_eq!(
@@ -152,6 +163,11 @@ mod tests {
         assert_eq!(
             env.get(OsStr::new("PYTHONUTF8")),
             Some(&OsString::from("1"))
+        );
+        #[cfg(not(windows))]
+        assert_eq!(
+            env.get(OsStr::new("pythonpath")),
+            Some(&OsString::from("untouched"))
         );
     }
 
