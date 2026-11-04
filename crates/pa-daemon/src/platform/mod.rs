@@ -3,6 +3,7 @@
 //! sockets bind/connect through it, so named pipes slot in without
 //! touching the supervisor or worker loops).
 
+pub(crate) mod log_files;
 mod paths;
 
 pub use paths::{
