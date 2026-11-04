@@ -6,6 +6,7 @@ import asyncio
 import atexit
 import functools
 import json
+import logging
 import os
 import secrets
 import selectors
@@ -15,6 +16,7 @@ import socket
 import struct
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import uuid
@@ -1463,6 +1465,30 @@ def _persistent_home() -> str:
     return os.path.join(os.environ["PRIME_AGENT_CODING_AGENT_DIR"], _PERSISTENT_DIR)
 
 
+def _tighten_persistent_home(home: str) -> None:
+    # Older releases created this directory with the user's umask (often 0755).
+    # Reattach must protect those legacy records even before another shell is
+    # spawned. A deliberate symlink to a shared home keeps its target mode.
+    if os.path.islink(home):
+        return
+    try:
+        home_fd = os.open(home, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        try:
+            if os.fstat(home_fd).st_uid == os.geteuid():
+                os.fchmod(home_fd, 0o700)
+        finally:
+            os.close(home_fd)
+    except FileNotFoundError:
+        return
+    except OSError as error:
+        # A read-only or ACL-managed custom home can still reattach its
+        # existing shells; report the failed privacy upgrade without dropping
+        # every session's persistent handles during kernel boot.
+        logging.getLogger(__name__).warning(
+            "could not restrict persistent shell directory %s: %s", home, error
+        )
+
+
 def _persistent_file(home: str, shell_id: str, kind: str) -> str:
     return os.path.join(home, f"{shell_id}.{kind}")
 
@@ -1542,10 +1568,14 @@ def _spawn_persistent(command: str) -> PersistentBashHandle:
         )
     home = _persistent_home()
     shell_id = secrets.token_hex(16)
-    os.makedirs(home, exist_ok=True)
+    os.makedirs(home, mode=0o700, exist_ok=True)
+    _tighten_persistent_home(home)
     shell = _shell()
     script = f'{{\n{_with_prefix(command)}\n}}\n__prime_status=$?\nwait\nexit "$__prime_status"\n'
-    with open(_persistent_file(home, shell_id, "out"), "wb") as out:
+    output_fd = os.open(
+        _persistent_file(home, shell_id, "out"), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600
+    )
+    with os.fdopen(output_fd, "wb") as out:
         proc = subprocess.Popen(
             [shell, "-c", _PERSISTENT_WRAPPER, "prime-agent-persistent", shell, script,
              _persistent_file(home, shell_id, "rc")],
@@ -1569,9 +1599,16 @@ def _spawn_persistent(command: str) -> PersistentBashHandle:
             "startedAt": started_at, "sessionId": session_id,
         }
         path = _persistent_file(home, shell_id, "json")
-        with open(f"{path}.tmp", "w") as f:
-            json.dump(record, f)
-        os.replace(f"{path}.tmp", path)
+        record_fd, temp_path = tempfile.mkstemp(dir=home, prefix=f".{shell_id}.", suffix=".tmp")
+        try:
+            with os.fdopen(record_fd, "w") as f:
+                json.dump(record, f)
+            os.replace(temp_path, path)
+        finally:
+            try:
+                os.unlink(temp_path)
+            except FileNotFoundError:
+                pass
         gate.write(b"\n")
     finally:
         gate.close()
@@ -1597,6 +1634,7 @@ def _rehydrate_persistent_shells() -> None:
     if not session_id or not _IS_POSIX:
         return
     home = _persistent_home()
+    _tighten_persistent_home(home)
     for record in _session_records(home, session_id):
         identity = _shell_identity(record["pid"], record["startId"])
         if identity is None:

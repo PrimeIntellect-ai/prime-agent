@@ -6,6 +6,7 @@ import json
 import os
 import resource
 import shlex
+import shutil
 import signal
 import socket
 import subprocess
@@ -1482,6 +1483,11 @@ async def _poll_journal(path: str, pid: int, count: int, timeout: float = 2.0) -
     return records
 
 
+def _forget_persistent_activity(activity_id):
+    with bash_module._live_lock:
+        bash_module._activity_handles.pop(activity_id, None)
+
+
 @unittest.skipUnless(os.name == "posix", "persistent shells are POSIX-only")
 class PersistentBashTest(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
@@ -1608,6 +1614,80 @@ class PersistentBashTest(unittest.IsolatedAsyncioTestCase):
         rows = {row["pid"]: row for row in bash_module.activity_request("list")["activities"]}
         self.assertFalse(rows[plain.pid]["persistent"])
         await plain
+
+    async def test_persistent_shell_records_and_output_are_private(self):
+        # A user may place the agent directory under a traversable custom path.
+        # The command and captured output must be private even with a 022 umask
+        # and an existing persistent-shell directory created by an older release.
+        os.chmod(os.path.dirname(self.home), 0o755)
+        os.makedirs(self.home)
+        os.chmod(self.home, 0o755)
+        old_umask = os.umask(0o022)
+        try:
+            handle = bash("printf 'still works\\n'; sleep 60", persistent=True)
+        finally:
+            os.umask(old_umask)
+        self.pgids.append(handle.pid)
+        self.addCleanup(_forget_persistent_activity, handle._activity_id)
+        self.assertEqual(os.stat(self.home).st_mode & 0o777, 0o700)
+        for kind in ("json", "out"):
+            path = os.path.join(self.home, f"{handle._activity_id}.{kind}")
+            self.assertEqual(os.stat(path).st_mode & 0o777, 0o600)
+        output = os.path.join(self.home, f"{handle._activity_id}.out")
+        await self.wait_for(lambda: os.path.getsize(output) > 0)
+        with open(output) as f:
+            self.assertEqual(f.read(), "still works\n")
+
+    async def test_symlinked_persistent_home_keeps_its_shared_directory_mode(self):
+        shared = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, shared)
+        os.chmod(shared, 0o755)
+        os.symlink(shared, self.home)
+        handle = bash("sleep 60", persistent=True)
+        self.pgids.append(handle.pid)
+        self.addCleanup(_forget_persistent_activity, handle._activity_id)
+        self.assertEqual(os.stat(shared).st_mode & 0o777, 0o755)
+        for kind in ("json", "out"):
+            path = os.path.join(shared, f"{handle._activity_id}.{kind}")
+            self.assertEqual(os.stat(path).st_mode & 0o777, 0o600)
+
+    async def test_persistent_record_write_does_not_follow_a_planted_temp_link(self):
+        shell_id = "0" * 32
+        os.makedirs(self.home)
+        victim = os.path.join(os.path.dirname(self.home), "victim")
+        with open(victim, "w") as f:
+            f.write("untouched")
+        os.symlink(victim, os.path.join(self.home, f"{shell_id}.json.tmp"))
+        with mock.patch.object(bash_module.secrets, "token_hex", return_value=shell_id):
+            handle = bash("sleep 60", persistent=True)
+        self.pgids.append(handle.pid)
+        self.addCleanup(_forget_persistent_activity, handle._activity_id)
+        with open(victim) as f:
+            self.assertEqual(f.read(), "untouched")
+
+    def test_rehydration_tightens_an_owned_legacy_record_directory(self):
+        shell_id = "4" * 32
+        self.write_record(self.record(shell_id, 1234, "old", session_id="other"))
+        os.chmod(self.home, 0o755)
+        record_path = os.path.join(self.home, f"{shell_id}.json")
+        with open(record_path, "rb") as f:
+            before = f.read()
+
+        bash_module._rehydrate_persistent_shells()
+
+        self.assertEqual(os.stat(self.home).st_mode & 0o777, 0o700)
+        with open(record_path, "rb") as f:
+            self.assertEqual(f.read(), before)
+
+    def test_rehydration_still_reads_records_if_chmod_is_denied(self):
+        shell_id = "5" * 32
+        self.write_record(self.record(shell_id, 1234, "old", session_id="other"))
+        os.chmod(self.home, 0o755)
+        read_records = bash_module._session_records
+        with mock.patch.object(bash_module.os, "fchmod", side_effect=PermissionError("denied")):
+            with mock.patch.object(bash_module, "_session_records", wraps=read_records) as records:
+                bash_module._rehydrate_persistent_shells()
+        records.assert_called_once_with(self.home, "own-session")
 
     async def test_a_watched_leader_exit_kills_the_members_it_leaves_behind(self):
         handle = bash("( sleep 30 & ); exit 0", persistent=True)

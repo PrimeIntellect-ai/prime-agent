@@ -823,7 +823,11 @@ impl OutputSpill {
             "{SPILL_PREFIX}-{}.log",
             uuid::Uuid::new_v4().simple()
         ));
-        let Ok(mut file) = std::fs::File::create(&path) else {
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        // Set the mode atomically at creation before replaying secret-bearing output.
+        pa_core::platform::perms::set_private_mode(&mut options);
+        let Ok(mut file) = options.open(&path) else {
             self.failed = true;
             return;
         };
@@ -948,6 +952,39 @@ mod tests {
     use super::*;
     use serde_json::json;
     use std::sync::Arc;
+
+    /// Shell output may contain credentials. Run the check with a normal 022 umask in a child
+    /// process, since changing the test process's umask would race its other tests.
+    #[cfg(unix)]
+    #[test]
+    fn output_spill_is_private_and_keeps_its_contents() {
+        use std::os::unix::fs::PermissionsExt;
+
+        if std::env::var_os("PA_BASH_SPILL_MODE_TEST_CHILD").is_none() {
+            let status = std::process::Command::new("/bin/sh")
+                .arg("-c")
+                .arg("umask 022; exec \"$@\"")
+                .arg("sh")
+                .arg(std::env::current_exe().unwrap())
+                .arg("--exact")
+                .arg("user_bash::tests::output_spill_is_private_and_keeps_its_contents")
+                .env("PA_BASH_SPILL_MODE_TEST_CHILD", "1")
+                .status()
+                .unwrap();
+            assert!(status.success(), "spill permission check failed in child");
+            return;
+        }
+
+        let mut spill = OutputSpill::new();
+        spill.open(&["before ".to_string()]);
+        spill.write("after");
+        let path = spill.finalize().expect("spill path");
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        let content = std::fs::read_to_string(&path).unwrap();
+        std::fs::remove_file(&path).unwrap();
+        assert_eq!(mode, 0o600);
+        assert_eq!(content, "before after");
+    }
 
     async fn created_worker(cwd: &std::path::Path) -> Arc<Worker> {
         std::fs::create_dir_all(cwd).unwrap();
