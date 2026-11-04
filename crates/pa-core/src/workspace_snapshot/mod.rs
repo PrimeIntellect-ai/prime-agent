@@ -33,6 +33,7 @@ pub use manifest::{Baseline, CapturedEntry, ExcludeReason, ExcludedEntry, Snapsh
 pub use verify::verify_workspace_snapshot;
 
 use std::collections::HashSet;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use sha1::{Digest as Sha1Digest, Sha1};
@@ -919,10 +920,26 @@ fn write_manifest(
             ),
         ));
     }
-    let temp_path = staging_dir.join(format!("{MANIFEST_FILE}.tmp"));
-    std::fs::write(&temp_path, &bytes).map_err(|error| io_error(&temp_path, error))?;
-    crate::platform::rename_onto(&temp_path, &manifest_path)
-        .map_err(|error| io_error(&manifest_path, error))?;
+    // A staging directory can be shared before capture starts. Never follow
+    // a pre-planted manifest temp symlink while writing the capture metadata.
+    let temp_path = staging_dir.join(format!(
+        "{MANIFEST_FILE}.tmp{}-{}",
+        std::process::id(),
+        uuid::Uuid::new_v4().simple()
+    ));
+    let result = (|| -> std::io::Result<()> {
+        let mut options = std::fs::OpenOptions::new();
+        options.create_new(true).write(true);
+        crate::platform::perms::set_private_mode(&mut options);
+        let mut file = options.open(&temp_path)?;
+        file.write_all(&bytes)?;
+        drop(file);
+        crate::platform::rename_onto(&temp_path, &manifest_path)
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&temp_path);
+    }
+    result.map_err(|error| io_error(&manifest_path, error))?;
     tighten_private_file(&manifest_path)?;
     Ok(manifest_path)
 }

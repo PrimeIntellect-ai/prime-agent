@@ -1,0 +1,1 @@
+- Protected settings and credential saves from planted temporary-file symlinks.

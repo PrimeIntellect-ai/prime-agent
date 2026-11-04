@@ -288,10 +288,20 @@ pub fn atomic_write(path: &Path, content: &str) -> Result<()> {
 /// [`atomic_write`] with explicit [`AtomicWriteOptions`]: the TS
 /// `writeFileAtomicSync(path, data, options)` shape.
 pub fn atomic_write_with(path: &Path, content: &str, options: AtomicWriteOptions) -> Result<()> {
-    let temp = PathBuf::from(format!("{}.tmp{}", path.display(), std::process::id()));
-    {
+    // A predictable temp name can be planted as a symlink in a project-local
+    // config directory. Exclusive creation also protects against a collision
+    // even if a random name is guessed.
+    // Keep the staging component independent of the destination basename:
+    // a valid long credentials filename must still be writable on filesystems
+    // with a 255-byte per-component limit.
+    let temp = path.with_file_name(format!(
+        ".prime-agent-tmp-{}-{}",
+        std::process::id(),
+        uuid::Uuid::new_v4().simple()
+    ));
+    let result = (|| -> Result<()> {
         let mut open = fs::OpenOptions::new();
-        open.create(true).write(true).truncate(true);
+        open.create_new(true).write(true);
         crate::platform::perms::set_private_mode(&mut open);
         let mut file = open.open(&temp)?;
         file.write_all(content.as_bytes())?;
@@ -300,12 +310,17 @@ pub fn atomic_write_with(path: &Path, content: &str, options: AtomicWriteOptions
             OPT_IN_FSYNC.with(|count| count.set(count.get() + 1));
             file.sync_all()?;
         }
+        drop(file);
+        crate::platform::rename_onto(&temp, path)?;
+        if options.fsync {
+            crate::platform::fs::sync_directory(path.parent().unwrap_or_else(|| Path::new(".")))?;
+        }
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&temp);
     }
-    crate::platform::rename_onto(&temp, path)?;
-    if options.fsync {
-        crate::platform::fs::sync_directory(path.parent().unwrap_or_else(|| Path::new(".")))?;
-    }
-    Ok(())
+    result
 }
 
 #[derive(Default)]
@@ -402,6 +417,20 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
+    fn atomic_write_accepts_a_valid_long_destination_basename() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("c".repeat(220));
+        fs::write(&path, "old credentials").unwrap();
+
+        atomic_write(&path, "new credentials").unwrap();
+
+        assert_eq!(fs::read_to_string(&path).unwrap(), "new credentials");
+        assert_eq!(crate::platform::perms::file_mode(&path), Some(0o600));
+        assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 1);
+    }
+
+    #[test]
     fn settings_write_takes_exactly_one_fsync() {
         let dir = tempfile::tempdir().unwrap();
         let storage = FileSettingsStorage::new(dir.path().join("cwd"), dir.path().join("agent"));
@@ -417,6 +446,26 @@ mod tests {
         );
         let path = dir.path().join("agent").join("settings.json");
         assert_eq!(fs::read_to_string(&path).unwrap(), document);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn atomic_write_does_not_follow_a_planted_temp_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("settings.json");
+        let victim = dir.path().join("unrelated.txt");
+        fs::write(&victim, "keep this content").unwrap();
+        let predictable_temp =
+            PathBuf::from(format!("{}.tmp{}", target.display(), std::process::id()));
+        symlink(&victim, &predictable_temp).unwrap();
+
+        atomic_write(&target, "new settings").unwrap();
+
+        assert_eq!(fs::read_to_string(&victim).unwrap(), "keep this content");
+        assert_eq!(fs::read_to_string(&target).unwrap(), "new settings");
+        assert_eq!(fs::read_link(&predictable_temp).unwrap(), victim);
     }
 
     #[test]

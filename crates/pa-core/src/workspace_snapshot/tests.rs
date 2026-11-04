@@ -144,6 +144,34 @@ fn stage(manifest: &SnapshotManifest, blobs: &[(&str, &[u8])]) -> tempfile::Temp
     staging
 }
 
+#[test]
+#[cfg(unix)]
+fn manifest_write_does_not_follow_a_planted_temp_symlink() {
+    use std::os::unix::fs::symlink;
+
+    let staging = tempfile::tempdir().unwrap();
+    let victim = staging.path().join("unrelated.txt");
+    std::fs::write(&victim, "keep this content").unwrap();
+    let predictable_temp = staging.path().join("manifest.json.tmp");
+    symlink(&victim, &predictable_temp).unwrap();
+
+    let manifest = bare_manifest(vec![], vec![]);
+    super::write_manifest(staging.path(), &manifest).unwrap();
+
+    assert_eq!(
+        std::fs::read_to_string(&victim).unwrap(),
+        "keep this content"
+    );
+    assert_eq!(std::fs::read_link(&predictable_temp).unwrap(), victim);
+    assert_eq!(
+        serde_json::from_slice::<SnapshotManifest>(
+            &std::fs::read(staging.path().join("manifest.json")).unwrap()
+        )
+        .unwrap(),
+        manifest
+    );
+}
+
 #[cfg(unix)]
 fn read_blob(staging: &Path, sha256: &str) -> Vec<u8> {
     std::fs::read(staging.join("blobs").join(sha256)).unwrap()

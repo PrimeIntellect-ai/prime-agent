@@ -4,6 +4,7 @@
 //! on a hit; every I/O error is fail-open. A caller-owned `PRIME_AGENT_KERNEL_PYTHON`
 //! override never reads or writes this memo (the d14 ruling).
 
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -68,7 +69,6 @@ pub(crate) fn disk_memo_invalidate(path: &Path) -> bool {
         Ok(()) => true,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => true,
         Err(_) => {
-            let tmp = tmp_path(path);
             let empty = DiskMemo {
                 schema: DISK_MEMO_SCHEMA,
                 keys: Vec::new(),
@@ -76,12 +76,7 @@ pub(crate) fn disk_memo_invalidate(path: &Path) -> bool {
             let Ok(body) = serde_json::to_vec(&empty) else {
                 return false;
             };
-            if std::fs::write(&tmp, &body).is_ok() && std::fs::rename(&tmp, path).is_ok() {
-                true
-            } else {
-                let _ = std::fs::remove_file(&tmp);
-                false
-            }
+            write_atomic(path, &body).is_ok()
         }
     }
 }
@@ -110,13 +105,25 @@ fn write_map(path: &Path, keys: &[String]) {
     let Ok(body) = serde_json::to_vec(&map) else {
         return;
     };
+    let _ = write_atomic(path, &body);
+}
+
+/// Stage a memo beside its destination without opening any pre-existing path.
+/// A failed write is best-effort, but cannot truncate another file.
+fn write_atomic(path: &Path, body: &[u8]) -> std::io::Result<()> {
     let tmp = tmp_path(path);
-    if std::fs::write(&tmp, &body).is_err() {
-        return;
-    }
-    if std::fs::rename(&tmp, path).is_err() {
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    crate::platform::perms::set_private_mode(&mut options);
+    let mut file = options.open(&tmp)?;
+    let write_result =
+        crate::platform::perms::restrict_open_file(&file).and_then(|()| file.write_all(body));
+    drop(file);
+    let result = write_result.and_then(|()| std::fs::rename(&tmp, path));
+    if result.is_err() {
         let _ = std::fs::remove_file(&tmp);
     }
+    result
 }
 
 fn tmp_path(path: &Path) -> PathBuf {
@@ -125,7 +132,7 @@ fn tmp_path(path: &Path) -> PathBuf {
         |name| name.to_string_lossy().into_owned(),
     );
     name.push_str(".tmp.");
-    name.push_str(std::process::id().to_string().as_str());
+    name.push_str(&uuid::Uuid::new_v4().simple().to_string());
     path.with_file_name(name)
 }
 
@@ -235,5 +242,28 @@ mod tests {
         disk_memo_write(&path, "k1");
         assert!(!path.exists());
         assert!(!disk_memo_hit(&path, "k1"));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn planted_pid_temp_symlink_cannot_overwrite_another_file() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = disk_memo_path(dir.path());
+        let planted = path.with_file_name(format!("{DISK_MEMO_FILE}.tmp.{}", std::process::id()));
+        let victim = dir.path().join("victim.txt");
+        std::fs::write(&victim, "keep this file").unwrap();
+        symlink(&victim, &planted).unwrap();
+
+        disk_memo_write(&path, "probe-key");
+
+        assert_eq!(std::fs::read_to_string(&victim).unwrap(), "keep this file");
+        assert!(disk_memo_hit(&path, "probe-key"));
+        assert_eq!(crate::platform::perms::file_mode(&path), Some(0o600));
+        assert!(std::fs::symlink_metadata(&planted)
+            .unwrap()
+            .file_type()
+            .is_symlink());
     }
 }
