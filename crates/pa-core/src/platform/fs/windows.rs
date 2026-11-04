@@ -16,7 +16,12 @@ use std::ptr;
 use std::thread;
 use std::time::Duration;
 
-use super::DirectoryCreation;
+/// Whether a directory walk may create a missing component under its held parent.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DirectoryCreation {
+    ExistingOnly,
+    CreateMissing,
+}
 
 const FILE_SHARE_ALL: u32 = 0x0000_0007;
 const FILE_READ_ATTRIBUTES: u32 = 0x0000_0080;
@@ -193,7 +198,7 @@ fn directory_identity(file: &File) -> io::Result<DirectoryId> {
     })
 }
 
-pub(super) fn same_directory_at_path(file: &File, path: &Path) -> io::Result<bool> {
+pub(crate) fn same_directory_at_path(file: &File, path: &Path) -> io::Result<bool> {
     let mut options = OpenOptions::new();
     options
         .access_mode(FILE_READ_ATTRIBUTES | FILE_TRAVERSE | SYNCHRONIZE)
@@ -327,7 +332,7 @@ fn open_relative(
     Ok(unsafe { File::from_raw_handle(handle) })
 }
 
-pub(super) fn open_regular_file_at(parent: &File, name: &OsStr) -> io::Result<File> {
+pub(crate) fn open_regular_file_at(parent: &File, name: &OsStr) -> io::Result<File> {
     let file = open_relative(
         parent,
         name,
@@ -356,7 +361,7 @@ fn checked_directory(file: File) -> io::Result<File> {
     Ok(file)
 }
 
-pub(super) fn open_search_directory_at(
+pub(crate) fn open_search_directory_at(
     parent: &File,
     name: &OsStr,
     creation: DirectoryCreation,
@@ -402,7 +407,7 @@ pub(super) fn open_search_directory_at(
     }
 }
 
-pub(super) fn open_search_absolute_directory(
+pub(crate) fn open_search_absolute_directory(
     path: &Path,
     creation: DirectoryCreation,
 ) -> io::Result<File> {
@@ -499,7 +504,7 @@ fn delete_on_close(file: &File) {
     };
 }
 
-pub(super) fn atomic_write_private_at(
+pub(crate) fn atomic_write_private_at(
     parent: &File,
     name: &OsStr,
     content: &str,
