@@ -261,15 +261,71 @@ function ExpectedFileName($version, $platform) {
 # the old pointer with the new manifest — a transient window, not a broken
 # channel — install-rust.sh's consistency retry). Both explicitly selected
 # channels use the same pair reader and retry discipline.
+function Read-ChannelBytes {
+    param([string]$Uri, [int]$MaxBytes, [string]$Name)
+    # The web cmdlet materializes the entire body before it returns. Stream
+    # only the small release metadata into bounded memory instead; the same
+    # deadline covers headers and body, including a peer that stalls after
+    # sending some bytes. The release tarball still uses Save-Release.
+    $handler = [System.Net.Http.HttpClientHandler]::new()
+    $handler.AutomaticDecompression = [System.Net.DecompressionMethods]::GZip -bor [System.Net.DecompressionMethods]::Deflate
+    $client = [System.Net.Http.HttpClient]::new($handler)
+    $cancellation = [System.Threading.CancellationTokenSource]::new()
+    $response = $null
+    $stream = $null
+    $body = $null
+    $deadline = [TimeSpan]::FromSeconds(30)
+    $clock = [System.Diagnostics.Stopwatch]::StartNew()
+    try {
+        $client.Timeout = $deadline
+        $cancellation.CancelAfter($deadline)
+        $request = $client.GetAsync($Uri, [System.Net.Http.HttpCompletionOption]::ResponseHeadersRead, $cancellation.Token)
+        if (-not $request.Wait($deadline)) { Fail "$Name timed out after 30 seconds" }
+        $response = $request.Result
+        if (-not $response.IsSuccessStatusCode) { Fail "HTTP $([int]$response.StatusCode) for $Uri" }
+        if ($response.Content.Headers.ContentLength -gt $MaxBytes) { Fail "$Name exceeds $MaxBytes bytes" }
+        $remaining = $deadline - $clock.Elapsed
+        if ($remaining -le [TimeSpan]::Zero) { Fail "$Name timed out after 30 seconds" }
+        $streamTask = $response.Content.ReadAsStreamAsync()
+        if (-not $streamTask.Wait($remaining)) { Fail "$Name timed out after 30 seconds" }
+        $stream = $streamTask.Result
+        $body = [System.IO.MemoryStream]::new()
+        $buffer = New-Object byte[] (16 * 1024)
+        while ($true) {
+            $remaining = $deadline - $clock.Elapsed
+            if ($remaining -le [TimeSpan]::Zero) { Fail "$Name timed out after 30 seconds" }
+            $readCount = [Math]::Min($buffer.Length, ($MaxBytes - [int]$body.Length + 1))
+            $readTask = $stream.ReadAsync($buffer, 0, $readCount, $cancellation.Token)
+            if (-not $readTask.Wait($remaining)) { Fail "$Name timed out after 30 seconds" }
+            $read = $readTask.Result
+            if ($read -eq 0) { break }
+            if ($body.Length + $read -gt $MaxBytes) { Fail "$Name exceeds $MaxBytes bytes" }
+            $body.Write($buffer, 0, $read)
+        }
+        # Keep the byte array as one pipeline object. The checksum file uses
+        # these exact bytes; PowerShell otherwise enumerates a byte[] result.
+        return ,($body.ToArray())
+    } finally {
+        if ($body) { $body.Dispose() }
+        if ($stream) { $stream.Dispose() }
+        if ($response) { $response.Dispose() }
+        $cancellation.Dispose()
+        $client.Dispose()
+    }
+}
+
+function Read-ChannelText {
+    param([string]$Uri, [int]$MaxBytes, [string]$Name)
+    $bytes = Read-ChannelBytes $Uri $MaxBytes $Name
+    return [System.Text.Encoding]::UTF8.GetString($bytes).TrimStart([char]0xfeff)
+}
+
 function Read-ChannelPair($channelName) {
     $pairPointer = $channelName
     $pairManifestName = if ($channelName -eq 'beta') { 'beta.json' } else { 'latest.json' }
     $attempt = 0
-    # The same quiet discipline as the download block: these reads are web
-    # cmdlets too (their progress records flash the console); pinned here,
-    # restored on every exit - the quiet zone is the read, never the
-    # session. -UseBasicParsing keeps a stock PowerShell 5.1 (Internet
-    # Explorer never initialized) off the parsing COM path.
+    # Keep the pair read's quiet preferences scoped to this call; the
+    # caller's interactive session must retain its original preferences.
     $callerProgressPreference = $ProgressPreference
     $callerVerbosePreference = $VerbosePreference
     $ProgressPreference = 'SilentlyContinue'
@@ -280,9 +336,9 @@ function Read-ChannelPair($channelName) {
             # spelling is a valid historical form - normalize it (the manifest's
             # version is bare; the release prefix and the artifact names carry
             # no extra `v` - the bots' finding).
-            $pairVersion = (Invoke-RestMethod -Uri "$baseUrl/$pairPointer" -UseBasicParsing).ToString().Trim().TrimStart('v')
+            $pairVersion = (Read-ChannelText "$baseUrl/$pairPointer" 1024 'channel pointer').Trim().TrimStart('v')
             if (-not $pairVersion) { Fail "could not resolve the latest $channelName version from $baseUrl/$pairPointer" }
-            $pairManifest = Invoke-RestMethod -Uri "$baseUrl/$pairManifestName" -UseBasicParsing
+            $pairManifest = ConvertFrom-Json -InputObject (Read-ChannelText "$baseUrl/$pairManifestName" 1048576 'channel manifest')
             $pairManifestVersion = ($pairManifest.version).ToString().TrimStart('v')
             if ($pairManifestVersion -eq $pairVersion) { break }
             $attempt += 1
@@ -369,7 +425,8 @@ $VerbosePreference = 'SilentlyContinue'
 Write-Host "downloading $expectedFile"
 try {
     Save-Release -Uri "$baseUrl/$releasePrefix/$expectedFile" -OutFile $tarball -Name $expectedFile
-    Invoke-WebRequest -Uri "$baseUrl/$releasePrefix/SHA256SUMS" -OutFile $sumsPath -UseBasicParsing
+    $sumsBytes = Read-ChannelBytes "$baseUrl/$releasePrefix/SHA256SUMS" 1048576 'SHA256SUMS'
+    [System.IO.File]::WriteAllBytes($sumsPath, $sumsBytes)
     Write-Host "downloaded: $expectedFile ($([Math]::Round((Get-Item -LiteralPath $tarball).Length / 1MB, 1)) MB)"
 } catch {
     Fail "could not download $expectedFile from $baseUrl/$releasePrefix/: $($_.Exception.Message)"

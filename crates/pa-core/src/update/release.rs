@@ -11,6 +11,10 @@ use sha2::{Digest, Sha256};
 use super::install::{current_platform_alias, KNOWN_PLATFORMS};
 use super::version::{normalize_release_version, UpdateChannel};
 
+/// The release channel carries at most one row per known platform. Leave ample
+/// room for metadata while bounding memory from a faulty or hostile endpoint.
+const MAX_CHANNEL_MANIFEST_BYTES: usize = 1024 * 1024;
+
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct ReleaseArtifact {
     pub platform: String,
@@ -89,16 +93,27 @@ pub async fn latest_release(
         .timeout(timeout)
         .send()
         .await;
-    let response = match response {
+    let mut response = match response {
         Ok(response) if response.status().is_success() => response,
         // Network, timeout, and malformed-manifest failures all mean the
         // same thing here: nothing to install.
         _ => return Ok(None),
     };
-    let body = response
-        .bytes()
-        .await
-        .context("read the release manifest")?;
+    let mut body = Vec::new();
+    loop {
+        // The request's timeout above remains active through the body read.
+        let next = response
+            .chunk()
+            .await
+            .context("read the release manifest")?;
+        let Some(chunk) = next else {
+            break;
+        };
+        if chunk.len() > MAX_CHANNEL_MANIFEST_BYTES - body.len() {
+            return Ok(None);
+        }
+        body.extend_from_slice(&chunk);
+    }
     Ok(parse_channel_manifest(&body))
 }
 
@@ -320,6 +335,70 @@ mod tests {
             head.contains(&format!("user-agent: {}", update_user_agent("1.2.2"))),
             "the request identifies the release updater: {head}"
         );
+    }
+
+    /// A release endpoint can advertise or stream an oversized manifest and
+    /// hold the connection open; update checks must stop at the byte budget.
+    #[tokio::test]
+    async fn oversized_channel_manifests_stop_before_eof() {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+        for chunked in [false, true] {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let port = listener.local_addr().unwrap().port();
+            let (close_tx, close_rx) = tokio::sync::oneshot::channel();
+            let server = tokio::spawn(async move {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut request = [0u8; 4096];
+                let mut head = String::new();
+                loop {
+                    let read = socket.read(&mut request).await.unwrap();
+                    if read == 0 {
+                        return;
+                    }
+                    head.push_str(&String::from_utf8_lossy(&request[..read]));
+                    if head.contains("\r\n\r\n") {
+                        break;
+                    }
+                }
+                let body = vec![b' '; 1024 * 1024 + 1];
+                if chunked {
+                    socket
+                        .write_all(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n")
+                        .await
+                        .unwrap();
+                    socket
+                        .write_all(format!("{:x}\r\n", body.len()).as_bytes())
+                        .await
+                        .unwrap();
+                    socket.write_all(&body).await.unwrap();
+                    socket.write_all(b"\r\n").await.unwrap();
+                } else {
+                    socket
+                        .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 1048578\r\n\r\n")
+                        .await
+                        .unwrap();
+                    socket.write_all(&body).await.unwrap();
+                }
+                close_rx.await.unwrap();
+            });
+            let base_url = format!("http://127.0.0.1:{port}");
+            let release = tokio::time::timeout(
+                std::time::Duration::from_secs(2),
+                latest_release(
+                    "1.2.2",
+                    Some(UpdateChannel::Stable),
+                    &base_url,
+                    std::time::Duration::from_secs(10),
+                ),
+            )
+            .await
+            .expect("oversized manifest must not wait for the peer to finish")
+            .unwrap();
+            assert!(release.is_none());
+            close_tx.send(()).unwrap();
+            server.await.unwrap();
+        }
     }
 
     #[tokio::test]

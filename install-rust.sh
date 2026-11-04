@@ -728,9 +728,12 @@ trap 'ui_interrupted; exit 143' HUP TERM
 # cap, a stall cutoff (under 1 KB/s for 30s), and 3 attempts — a stalled
 # connection fails with the URL named instead of hanging forever. The loop
 # replaces curl's --retry-all-errors, which older curls (macOS) lack; a
-# retry resumes the partial file (-C -) instead of starting over. The last
-# curl error lands in fetch_error for the caller's message.
-# Usage: fetch <url> <output file> <max seconds> [bar]
+# archive retry resumes the partial file (-C -) instead of starting over.
+# The last curl error lands in fetch_error for the caller's message.
+# A fifth argument caps small channel metadata. It streams through head
+# instead of relying on curl --max-filesize alone: curls before 8.4 do not
+# enforce that option while receiving a response without Content-Length.
+# Usage: fetch <url> <output file> <max seconds> [bar] [max bytes]
 fetch() {
   fetch_attempt=1
   fetch_error=""
@@ -748,7 +751,38 @@ fetch() {
     ui_set_active "$ui_step"
   fi
   while :; do
-    if curl -fsSL -C - --connect-timeout 10 --max-time "$3" \
+    if [ -n "${5:-}" ]; then
+      # Metadata is small, so a retry starts from byte zero. The pipe keeps
+      # even chunked responses at max+1 bytes on disk, on macOS's older curl
+      # and under Git Bash where file-size ulimits are not reliable. Record
+      # curl's status separately because POSIX sh reports head's status for
+      # the pipeline. curl's existing --max-time still bounds a peer that
+      # sends max+1 bytes and then stalls before the pipe can finish.
+      rm -f "$2" "$2.status"
+      if (
+        if curl -fsSL --max-filesize "$(($5 + 1))" --connect-timeout 10 \
+            --max-time "$3" --speed-limit 1024 --speed-time 30 "$1"; then
+          printf '0\n' > "$2.status"
+        else
+          printf '%s\n' "$?" > "$2.status"
+        fi
+      ) 2>"$2.err" | head -c "$(($5 + 1))" > "$2"; then
+        fetch_size="$(wc -c < "$2" | tr -d ' ')"
+        if [ "$fetch_size" -gt "$5" ]; then
+          fetch_error="response exceeds ${5} bytes"
+          return 1
+        fi
+        fetch_status="$(cat "$2.status" 2>/dev/null || true)"
+        if [ "$fetch_status" = 0 ]; then
+          rm -f "$2.err" "$2.status"
+          return 0
+        fi
+        if [ "$fetch_status" = 63 ]; then
+          fetch_error="response exceeds ${5} bytes"
+          return 1
+        fi
+      fi
+    elif curl -fsSL -C - --connect-timeout 10 --max-time "$3" \
          --speed-limit 1024 --speed-time 30 "$1" -o "$2" 2>"$2.err"; then
       rm -f "$2.err"
       return 0
@@ -866,7 +900,7 @@ BASE_URL="${BASE_URL%/}"
 
 # The channel pointer's one-line body (empty when the read fails).
 read_channel_version() {
-  if fetch "${BASE_URL}/${CHANNEL}" "$dl/channel-pointer" 30; then
+  if fetch "${BASE_URL}/${CHANNEL}" "$dl/channel-pointer" 30 "" 1024; then
     tr -d '[:space:]' < "$dl/channel-pointer"
   fi
 }
@@ -1465,8 +1499,8 @@ if [ "$VERSION_PINNED" = "yes" ]; then
 else
 manifest_attempt=1
 while :; do
-  fetch "${BASE_URL}/${CHANNEL_MANIFEST}" "$dl/${CHANNEL_MANIFEST}" 30 \
-    || die "could not read the ${CHANNEL} channel manifest: ${BASE_URL}/${CHANNEL_MANIFEST} (3 attempts)"
+  fetch "${BASE_URL}/${CHANNEL_MANIFEST}" "$dl/${CHANNEL_MANIFEST}" 30 "" 1048576 \
+    || die "could not read the ${CHANNEL} channel manifest: ${BASE_URL}/${CHANNEL_MANIFEST} (3 attempts${fetch_error:+, last error: $fetch_error})"
   row_py="$dl/channel_row.py"
   cat > "$row_py" <<'ROW_PY'
 import json, sys
@@ -1515,7 +1549,7 @@ RELEASE_PREFIX="releases/v${VERSION#v}"
 step_start "Downloading"
 fetch "${BASE_URL}/${RELEASE_PREFIX}/${asset_name}" "$dl/${asset_name}" 1800 bar \
   || die "could not download ${BASE_URL}/${RELEASE_PREFIX}/${asset_name} (3 attempts${fetch_error:+, last error: $fetch_error}; check the network and re-run)"
-fetch "${BASE_URL}/${RELEASE_PREFIX}/SHA256SUMS" "$dl/SHA256SUMS" 30 \
+fetch "${BASE_URL}/${RELEASE_PREFIX}/SHA256SUMS" "$dl/SHA256SUMS" 30 "" 1048576 \
   || die "could not download ${BASE_URL}/${RELEASE_PREFIX}/SHA256SUMS (3 attempts${fetch_error:+, last error: $fetch_error}; check the network and re-run)"
 asset="$dl/${asset_name}"
 step_ok "Downloaded" "$(ui_mb "$(wc -c < "$asset" | tr -d ' ')")"

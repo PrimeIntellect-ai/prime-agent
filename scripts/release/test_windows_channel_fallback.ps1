@@ -129,6 +129,50 @@ try {
     $marker = Get-Content -LiteralPath (Join-Path $prefixBeta 'share\prime-agent\.prime-agent-install') -Raw
     if ($marker -ne "install-rust.sh channel beta`nversion $betaVersion") { throw "unexpected beta marker: $marker" }
 
+    # The first checksum line remains valid; extra lines must not make the
+    # installer write an unbounded checksum response to the temp directory.
+    $betaSums = Join-Path $releaseDir 'SHA256SUMS'
+    $goodSums = [System.IO.File]::ReadAllBytes($betaSums)
+    [System.IO.File]::WriteAllText($betaSums, "$artifactSha  $artifactFile`n" + ('x' * (1MB)), [System.Text.Encoding]::ASCII)
+    $prefixHugeSums = Join-Path $scratch 'prefix-huge-sums'
+    $runHugeSums = Invoke-Installer -ChannelKnob 'beta' -Prefix $prefixHugeSums
+    if ($runHugeSums.Exit -eq 0 -or ($runHugeSums.Lines -join "`n") -notmatch 'SHA256SUMS exceeds 1048576 bytes') {
+        $runHugeSums.Lines | Write-Host
+        throw 'the installer did not refuse oversized checksums'
+    }
+    if (Test-Path (Join-Path $prefixHugeSums 'share\prime-agent\prime-agent.exe')) {
+        throw 'oversized checksums unexpectedly published a payload'
+    }
+    [System.IO.File]::WriteAllBytes($betaSums, $goodSums)
+
+    # A syntactically valid channel manifest can carry arbitrary extra data.
+    # Refuse it before the installer reads the whole response into memory.
+    $goodManifest = [System.IO.File]::ReadAllBytes((Join-Path $channel 'beta.json'))
+    $oversizedManifest = '{"version": "v' + $betaVersion + '", "binaries": [' + $betaRow + '], "binaries_v2": [' + $betaRow + '], "padding": "' + ('x' * (1MB)) + '"}'
+    Set-Content -LiteralPath (Join-Path $channel 'beta.json') -Value $oversizedManifest
+    $prefixHugeManifest = Join-Path $scratch 'prefix-huge-manifest'
+    $runHugeManifest = Invoke-Installer -ChannelKnob 'beta' -Prefix $prefixHugeManifest
+    if ($runHugeManifest.Exit -eq 0 -or ($runHugeManifest.Lines -join "`n") -notmatch 'channel manifest exceeds 1048576 bytes') {
+        $runHugeManifest.Lines | Write-Host
+        throw 'the installer did not refuse the oversized channel manifest'
+    }
+    if (Test-Path (Join-Path $prefixHugeManifest 'share\prime-agent\prime-agent.exe')) {
+        throw 'an oversized manifest unexpectedly published a payload'
+    }
+    [System.IO.File]::WriteAllBytes((Join-Path $channel 'beta.json'), $goodManifest)
+
+    Set-Content -LiteralPath (Join-Path $channel 'beta') -Value ('v' + ('1' * 1024)) -NoNewline
+    $prefixHugePointer = Join-Path $scratch 'prefix-huge-pointer'
+    $runHugePointer = Invoke-Installer -ChannelKnob 'beta' -Prefix $prefixHugePointer
+    if ($runHugePointer.Exit -eq 0 -or ($runHugePointer.Lines -join "`n") -notmatch 'channel pointer exceeds 1024 bytes') {
+        $runHugePointer.Lines | Write-Host
+        throw 'the installer did not refuse the oversized channel pointer'
+    }
+    if (Test-Path (Join-Path $prefixHugePointer 'share\prime-agent\prime-agent.exe')) {
+        throw 'an oversized pointer unexpectedly published a payload'
+    }
+    Set-Content -LiteralPath (Join-Path $channel 'beta') -Value $betaVersion -NoNewline
+
     # Publish stable and verify the production default selects its artifact.
     $stableFile = "prime-agent-$stableVersion-$platform.tar.gz"
     $stableDir = Join-Path $channel "releases\v$stableVersion"
