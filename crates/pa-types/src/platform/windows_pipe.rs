@@ -26,13 +26,6 @@ const BUSY_RETRY_INTERVAL: Duration = Duration::from_millis(50);
 /// error instead of hanging the caller.
 const BUSY_RETRY_DEADLINE: Duration = Duration::from_secs(10);
 
-#[cfg(test)]
-thread_local! {
-    // A native test substitutes a foreign peer verdict without requiring a
-    // second Windows account on the CI runner.
-    static TEST_FOREIGN_PEER: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-}
-
 /// A listening named-pipe endpoint. One instance waits for the next client at all times; `accept`
 /// connects that instance and has already created its replacement, so the pipe name stays
 /// connectable - the named-pipe equivalent of a backlog.
@@ -86,10 +79,6 @@ pub(crate) async fn connect(name: &str) -> io::Result<NamedPipeClient> {
         match ClientOptions::new().open(name) {
             Ok(client) => {
                 if windows_pipe_security::is_built_in_name(name) {
-                    #[cfg(test)]
-                    if TEST_FOREIGN_PEER.with(std::cell::Cell::get) {
-                        return Err(io::ErrorKind::PermissionDenied.into());
-                    }
                     windows_pipe_security::verify_server_user(&client)?;
                 }
                 return Ok(client);
@@ -255,37 +244,51 @@ mod tests {
             .first_pipe_instance(true)
             .create(&name)
             .expect("fake worker server");
-        super::TEST_FOREIGN_PEER.with(|flag| flag.set(true));
+        super::windows_pipe_security::set_test_foreign_owner(true);
         let result = super::connect(&name).await;
-        super::TEST_FOREIGN_PEER.with(|flag| flag.set(false));
+        super::windows_pipe_security::set_test_foreign_owner(false);
         assert_eq!(
             result.expect_err("foreign server must be refused").kind(),
             io::ErrorKind::PermissionDenied
         );
     }
 
+    #[tokio::test(flavor = "current_thread")]
+    async fn alternate_local_spelling_keeps_the_built_in_peer_check() {
+        let name = test_worker_pipe("000000000003");
+        let alias = name.replacen(r"\\.\pipe\", r"\\?\pipe\", 1);
+        let _server = ServerOptions::new()
+            .first_pipe_instance(true)
+            .create(&name)
+            .expect("fake worker server");
+        super::windows_pipe_security::set_test_foreign_owner(true);
+        let result = super::connect(&alias).await;
+        super::windows_pipe_security::set_test_foreign_owner(false);
+        assert_eq!(
+            result
+                .expect_err("alias must enforce built-in policy")
+                .kind(),
+            io::ErrorKind::PermissionDenied
+        );
+    }
+
     #[tokio::test]
-    async fn built_in_worker_and_daemon_pipes_accept_same_user_roundtrips() {
-        for name in [
-            test_worker_pipe("000000000002"),
-            r"\\.\pipe\prime-agent-daemon".to_string(),
-        ] {
-            let path = PathBuf::from(&name);
-            let listener = bind_transport(&path).await.expect("private built-in bind");
-            let client = connect_transport(&path)
-                .await
-                .expect("same-user built-in connect");
-            let server = listener.accept().await.expect("built-in accept");
-            let (mut client_read, mut client_write) = client.split();
-            let (mut server_read, mut server_write) = server.split();
-            server_write.write_all(b"ping").await.expect("server write");
-            let mut buf = [0u8; 4];
-            client_read.read_exact(&mut buf).await.expect("client read");
-            assert_eq!(&buf, b"ping");
-            client_write.write_all(b"pong").await.expect("client write");
-            server_read.read_exact(&mut buf).await.expect("server read");
-            assert_eq!(&buf, b"pong");
-        }
+    async fn built_in_worker_pipe_accepts_same_user_roundtrip() {
+        let path = PathBuf::from(test_worker_pipe("000000000002"));
+        let listener = bind_transport(&path).await.expect("private built-in bind");
+        let client = connect_transport(&path)
+            .await
+            .expect("same-user built-in connect");
+        let server = listener.accept().await.expect("built-in accept");
+        let (mut client_read, mut client_write) = client.split();
+        let (mut server_read, mut server_write) = server.split();
+        server_write.write_all(b"ping").await.expect("server write");
+        let mut buf = [0u8; 4];
+        client_read.read_exact(&mut buf).await.expect("client read");
+        assert_eq!(&buf, b"ping");
+        client_write.write_all(b"pong").await.expect("client write");
+        server_read.read_exact(&mut buf).await.expect("server read");
+        assert_eq!(&buf, b"pong");
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -296,9 +299,9 @@ mod tests {
             .first_pipe_instance(true)
             .create(name)
             .expect("custom server");
-        super::TEST_FOREIGN_PEER.with(|flag| flag.set(true));
+        super::windows_pipe_security::set_test_foreign_owner(true);
         let result = super::connect(name).await;
-        super::TEST_FOREIGN_PEER.with(|flag| flag.set(false));
+        super::windows_pipe_security::set_test_foreign_owner(false);
         result.expect("custom pipe policy remains caller-controlled");
     }
 

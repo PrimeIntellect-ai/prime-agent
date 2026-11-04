@@ -13,29 +13,86 @@ use windows_sys::Win32::Security::Authorization::{
     ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW, GetSecurityInfo,
     SDDL_REVISION_1, SE_FILE_OBJECT,
 };
+#[cfg(test)]
+use windows_sys::Win32::Security::{CreateWellKnownSid, WinWorldSid};
 use windows_sys::Win32::Security::{
     EqualSid, GetTokenInformation, IsWellKnownSid, TokenUser, WinBuiltinAdministratorsSid,
     OWNER_SECURITY_INFORMATION, PSID, SECURITY_ATTRIBUTES, TOKEN_QUERY, TOKEN_USER,
 };
 use windows_sys::Win32::System::Pipes::GetNamedPipeServerProcessId;
+use windows_sys::Win32::System::SystemInformation::{
+    ComputerNameDnsFullyQualified, ComputerNameNetBIOS, GetComputerNameExW,
+};
 use windows_sys::Win32::System::Threading::{
     GetCurrentProcess, OpenProcess, OpenProcessToken, PROCESS_QUERY_LIMITED_INFORMATION,
 };
 
-const DAEMON_PIPE: &str = r"\\.\pipe\prime-agent-daemon";
-const WORKER_PIPE_PREFIX: &str = r"\\.\pipe\prime-agent-worker-";
+const DAEMON_NAME: &str = "prime-agent-daemon";
+const WORKER_NAME_PREFIX: &str = "prime-agent-worker-";
+
+#[cfg(test)]
+thread_local! {
+    // Native tests substitute the kernel-reported owner SID, then exercise
+    // the real comparison and denial path without another Windows account.
+    static TEST_FOREIGN_OWNER: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+#[cfg(test)]
+pub(super) fn set_test_foreign_owner(value: bool) {
+    TEST_FOREIGN_OWNER.with(|flag| flag.set(value));
+}
+
+fn local_computer_name_matches(host: &str) -> bool {
+    [ComputerNameNetBIOS, ComputerNameDnsFullyQualified]
+        .into_iter()
+        .any(|format| {
+            let mut name = [0u16; 256];
+            let mut length = u32::try_from(name.len()).expect("computer name buffer fits DWORD");
+            // SAFETY: `name` is writable, and `length` describes its capacity.
+            if unsafe { GetComputerNameExW(format, name.as_mut_ptr(), &raw mut length) } == 0 {
+                return false;
+            }
+            usize::try_from(length)
+                .ok()
+                .and_then(|len| String::from_utf16(name.get(..len)?).ok())
+                .is_some_and(|local| host.eq_ignore_ascii_case(&local))
+        })
+}
+
+fn local_pipe_tail(name: &str) -> Option<&str> {
+    let rest = name.strip_prefix(r"\\")?;
+    let (host, path) = rest.split_once(['\\', '/'])?;
+    let (namespace, tail) = path.split_once(['\\', '/'])?;
+    if !namespace.eq_ignore_ascii_case("pipe") {
+        return None;
+    }
+    if host == "."
+        || host == "?"
+        || host.eq_ignore_ascii_case("localhost")
+        || host == "127.0.0.1"
+        || host == "[::1]"
+        || local_computer_name_matches(host)
+    {
+        Some(tail)
+    } else {
+        None
+    }
+}
 
 pub(super) fn is_built_in_name(name: &str) -> bool {
-    if name.eq_ignore_ascii_case(DAEMON_PIPE) {
-        return true;
-    }
-    let Some(prefix) = name.get(..WORKER_PIPE_PREFIX.len()) else {
+    let Some(name) = local_pipe_tail(name) else {
         return false;
     };
-    if !prefix.eq_ignore_ascii_case(WORKER_PIPE_PREFIX) {
+    if name.eq_ignore_ascii_case(DAEMON_NAME) {
+        return true;
+    }
+    let Some(prefix) = name.get(..WORKER_NAME_PREFIX.len()) else {
+        return false;
+    };
+    if !prefix.eq_ignore_ascii_case(WORKER_NAME_PREFIX) {
         return false;
     }
-    let remainder = &name[WORKER_PIPE_PREFIX.len()..];
+    let remainder = &name[WORKER_NAME_PREFIX.len()..];
     let Some((key, worker)) = remainder.split_once('-') else {
         return false;
     };
@@ -158,6 +215,26 @@ pub(super) fn verify_server_user(client: &NamedPipeClient) -> io::Result<()> {
     if owner_sid.is_null() {
         return Err(io::Error::other("named pipe has no owner SID"));
     }
+    #[cfg(test)]
+    let mut foreign_sid = [0usize; 17];
+    #[cfg(test)]
+    if TEST_FOREIGN_OWNER.with(std::cell::Cell::get) {
+        let mut length = u32::try_from(size_of::<[usize; 17]>()).expect("SID buffer fits DWORD");
+        // SAFETY: The buffer is aligned and writable; the well-known World SID
+        // stands in for a foreign owner after the real pipe descriptor is read.
+        if unsafe {
+            CreateWellKnownSid(
+                WinWorldSid,
+                ptr::null_mut(),
+                foreign_sid.as_mut_ptr().cast(),
+                &raw mut length,
+            )
+        } == 0
+        {
+            return Err(io::Error::last_os_error());
+        }
+        owner_sid = foreign_sid.as_mut_ptr().cast();
+    }
     // SAFETY: The owner SID is part of the live descriptor and current.sid() is live.
     if unsafe { EqualSid(owner_sid, current.sid()) } != 0 {
         return Ok(());
@@ -231,6 +308,22 @@ mod tests {
     use std::os::windows::io::AsRawHandle;
 
     use tokio::net::windows::named_pipe::{ClientOptions, ServerOptions};
+
+    #[test]
+    fn local_pipe_aliases_keep_reserved_names_private() {
+        for name in [
+            r"\\?\pipe\prime-agent-daemon",
+            r"\\localhost\pipe\prime-agent-daemon",
+            r"\\.\pipe/prime-agent-daemon",
+            r"\\localhost/pipe/prime-agent-daemon",
+        ] {
+            assert!(super::is_built_in_name(name), "local alias: {name}");
+        }
+        assert!(
+            !super::is_built_in_name(r"\\other-host\pipe\prime-agent-daemon"),
+            "a genuinely remote custom pipe retains its former policy"
+        );
+    }
 
     #[tokio::test]
     async fn client_handle_identifies_same_user_server_process() {
