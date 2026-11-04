@@ -1,0 +1,1 @@
+- Kept Windows project settings reads and writes inside the selected project when a settings path changes during an update.
