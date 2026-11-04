@@ -474,6 +474,7 @@ fn run_skill_prompt_body(
                 .map(|text| PromptBatchRow {
                     text: text.to_string(),
                     images: Vec::new(),
+                    custom_message: None,
                 })
                 .collect(),
             images: Vec::new(),

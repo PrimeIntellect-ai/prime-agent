@@ -409,6 +409,89 @@ async fn follow_up_mode_all_batches_the_follow_up_lane() {
     );
 }
 
+/// Notifications queued while a turn runs deliver as ONE next turn, steering
+/// first, then follow-up, each persisted as its own custom row.
+#[tokio::test]
+async fn notifications_queued_during_a_turn_run_as_one_turn() {
+    fn notification(text: &str) -> QueuedItem {
+        let mut item = queued_prompt(text, TurnPolicy::Queued);
+        item.priority = QueuePriority::Background;
+        item.custom_message = Some(
+            json!({ "role": "custom", "customType": "notice", "content": text, "display": true }),
+        );
+        item
+    }
+    let engine: Arc<dyn SessionEngine> = Arc::new(
+        ScriptedEngine::from_value(
+            &json!({ "responses": [{ "text": "working", "delayMs": 300 }, "noted"] }),
+        )
+        .unwrap_or_default(),
+    );
+    let runner = burst_runner(Arc::clone(&engine));
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("session.jsonl");
+    let mut store = crate::session_store::SessionFile::create("/fixture", None, 0);
+    store.set_path(path.clone());
+    store.rewrite().unwrap();
+    {
+        let mut core = runner.core.lock().unwrap();
+        core.store = Some(store);
+        core.steering
+            .push_back(queued_prompt("work", TurnPolicy::Queued));
+    }
+    let mut subscription = runner.events.subscribe();
+    let core = std::sync::Arc::clone(&runner.core);
+    let work_notify = std::sync::Arc::clone(&runner.work_notify);
+    let running = tokio::spawn(async move { runner.run().await });
+    work_notify.notify_one();
+    while !core.lock().unwrap().busy {
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
+    {
+        let mut core = core.lock().unwrap();
+        core.steering.push_back(notification("[bash-done pid:1]"));
+        core.steering
+            .push_back(notification("[agent_message from a]"));
+        core.follow_up.push_back(notification("[child-exited b]"));
+    }
+    drain_pump(&core, &work_notify).await;
+    running.abort();
+
+    let events = runner_events(&mut subscription);
+    let starts = events
+        .iter()
+        .filter(|event| event.get("type").and_then(Value::as_str) == Some("agent_start"))
+        .count();
+    assert_eq!(starts, 2, "the held turn, then one notification turn");
+    let rows = delivered_rows(&events);
+    assert_eq!(
+        rows[2..],
+        [
+            ("custom".to_string(), "[bash-done pid:1]".to_string()),
+            ("custom".to_string(), "[agent_message from a]".to_string()),
+            ("custom".to_string(), "[child-exited b]".to_string()),
+            ("assistant".to_string(), "noted".to_string()),
+        ],
+        "the notification run delivered as one turn: {rows:?}"
+    );
+    let persisted: Vec<Value> = std::fs::read_to_string(&path)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).unwrap())
+        .filter(|row| row["type"] == "custom_message")
+        .map(|row| row["content"].clone())
+        .collect();
+    assert_eq!(
+        persisted,
+        [
+            "[bash-done pid:1]",
+            "[agent_message from a]",
+            "[child-exited b]"
+        ],
+        "each notification persisted as its own custom row"
+    );
+}
+
 /// Kevin's acceptance case: ALL visible steers send together; the follow-up runs once idle.
 #[tokio::test]
 #[allow(clippy::await_holding_lock)] // the faux registry is process-global: the guard must span the async flow

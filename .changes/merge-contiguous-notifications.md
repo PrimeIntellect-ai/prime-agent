@@ -1,0 +1,1 @@
+- Contiguous queued notifications (bash completions, agent messages, child notices) now deliver together as one turn instead of one turn each.

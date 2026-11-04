@@ -104,16 +104,16 @@ fn queue_priority_interleaves_lanes_fifo_and_preserves_explicit_order() {
         ]
     );
     assert_eq!(
-        gather_delivery_batch(&mut core, Lane::Steering)[0].message,
+        gather_delivery(&mut core, RunBoundary::RunEnd).1[0].message,
         "machine steer 1"
     );
     assert_eq!(
-        gather_delivery_batch(&mut core, Lane::Steering)[0].message,
+        gather_delivery(&mut core, RunBoundary::RunEnd).1[0].message,
         "human steer 2"
     );
     core.steering.clear();
     assert_eq!(
-        gather_delivery_batch(&mut core, Lane::FollowUp)[0].message,
+        gather_delivery(&mut core, RunBoundary::RunEnd).1[0].message,
         "human follow 1"
     );
 }
@@ -139,12 +139,12 @@ fn queue_priority_drains_four_tiers_and_pinned_front() {
     }
     let mut delivered = Vec::new();
     while !core.steering.is_empty() || !core.follow_up.is_empty() {
-        let lane = if core.steering.is_empty() {
-            Lane::FollowUp
-        } else {
-            Lane::Steering
-        };
-        delivered.push(gather_delivery_batch(&mut core, lane).remove(0).message);
+        delivered.push(
+            gather_delivery(&mut core, RunBoundary::RunEnd)
+                .1
+                .remove(0)
+                .message,
+        );
     }
     assert_eq!(
         delivered,
@@ -158,6 +158,53 @@ fn queue_priority_drains_four_tiers_and_pinned_front() {
     );
 }
 
+/// Contiguous notifications deliver as one turn, in arrival order; user
+/// prompts and session commands stay single. At a run end, a steering
+/// notification run that empties its lane takes follow-up's leading
+/// notification run along; after a mid-run cut, follow-up waits.
+#[test]
+fn contiguous_notifications_deliver_together_and_user_input_stays_single() {
+    fn notification(text: &str) -> QueuedItem {
+        let mut item = priority_test_item(text, TurnPolicy::Queued);
+        item.priority = QueuePriority::Background;
+        item.custom_message =
+            Some(json!({ "role": "custom", "customType": "notice", "content": text }));
+        item
+    }
+    fn delivered(core: &mut SessionCore, boundary: RunBoundary) -> Vec<String> {
+        gather_delivery(core, boundary)
+            .1
+            .into_iter()
+            .map(|item| item.message)
+            .collect()
+    }
+    let mut core = SessionCore::test_core(None, "/tmp".to_string());
+    core.steering.extend([
+        notification("n1"),
+        notification("n2"),
+        priority_test_item("user", TurnPolicy::Queued),
+        priority_test_item("/compact", TurnPolicy::Queued),
+        notification("n3"),
+    ]);
+    core.follow_up.extend([
+        notification("f1"),
+        priority_test_item("follow", TurnPolicy::Queued),
+        notification("f2"),
+    ]);
+    let end = RunBoundary::RunEnd;
+    assert_eq!(delivered(&mut core, end), ["n1", "n2"]);
+    assert_eq!(delivered(&mut core, end), ["user"]);
+    assert_eq!(delivered(&mut core, end), ["/compact"]);
+    assert_eq!(delivered(&mut core, end), ["n3", "f1"]);
+    assert_eq!(delivered(&mut core, end), ["follow"]);
+    assert_eq!(delivered(&mut core, end), ["f2"]);
+
+    core.steering.push_back(notification("n4"));
+    core.follow_up.push_back(notification("f3"));
+    assert_eq!(delivered(&mut core, RunBoundary::MidRun), ["n4"]);
+    assert_eq!(delivered(&mut core, end), ["f3"]);
+}
+
 #[tokio::test]
 async fn rpc_custom_rows_do_not_gain_human_queue_priority() {
     let worker = created_dispatch_worker().await;
@@ -167,7 +214,8 @@ async fn rpc_custom_rows_do_not_gain_human_queue_priority() {
     assert!(pause.success, "pause failed: {pause:?}");
     let custom = |content: &str| {
         json!({
-            "role": "custom", "customType": "user", "content": content
+            "role": "custom", "customType": "user", "content": content,
+            "display": true, "timestamp": 1_000
         })
     };
     for (command, message, row) in [
@@ -213,6 +261,35 @@ async fn rpc_custom_rows_do_not_gain_human_queue_priority() {
             QueuePriority::Background,
         ]
     );
+}
+
+/// A `customMessage` the delivery could not persist (no `display`/`timestamp`)
+/// is rejected at intake, so it never joins a notification run it would fail.
+#[tokio::test]
+async fn rpc_custom_rows_missing_the_session_shape_are_rejected_at_intake() {
+    let worker = created_dispatch_worker().await;
+    for command in ["prompt", "steer", "follow_up"] {
+        let response = worker
+            .dispatch(
+                command,
+                &json!({
+                    "activeSessionId": "suspension-session",
+                    "message": "notice",
+                    "customMessage": { "role": "custom", "customType": "notice", "content": "notice" },
+                }),
+            )
+            .await;
+        assert!(
+            !response.success
+                && response
+                    .error
+                    .as_deref()
+                    .is_some_and(|error| error.starts_with("Invalid customMessage")),
+            "{command}: {response:?}"
+        );
+    }
+    let core = worker.core.lock().unwrap();
+    assert!(core.steering.is_empty() && core.follow_up.is_empty());
 }
 
 #[tokio::test]

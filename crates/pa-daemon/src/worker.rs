@@ -25,12 +25,11 @@ pub use queue::Lane;
 pub use queue::QueuePriority;
 pub(crate) use queue::{
     admit_autonomous_follow_up, admit_goal_follow_up, admit_kernel_notice,
-    checkpoint_queue_recovery, clear_withdrawn_progress_note, enqueue_priority,
-    gather_delivery_batch, parse_custom_message, parse_prompt_images, queue_lanes,
-    restore_queue_snapshot, restored_turn_policy, withdraw_bash_completion_notice, QueueCheckpoint,
-    QueueLanes, QueuedItem, TurnPolicy, TurnSettle, ABORTED_TURN_SETTLE_ERROR,
-    PROMPT_ABORTED_BEFORE_DELIVERY, QUEUED_INPUT_SUSPENDED, QUEUED_PROMPT_DELETED,
-    SIDE_QUESTION_SETTLE_TIMEOUT,
+    checkpoint_queue_recovery, clear_withdrawn_progress_note, enqueue_priority, gather_delivery,
+    parse_custom_message, parse_prompt_images, queue_lanes, restore_queue_snapshot,
+    restored_turn_policy, withdraw_bash_completion_notice, QueueCheckpoint, QueueLanes, QueuedItem,
+    RunBoundary, TurnPolicy, TurnSettle, ABORTED_TURN_SETTLE_ERROR, PROMPT_ABORTED_BEFORE_DELIVERY,
+    QUEUED_INPUT_SUSPENDED, QUEUED_PROMPT_DELETED, SIDE_QUESTION_SETTLE_TIMEOUT,
 };
 
 mod create;

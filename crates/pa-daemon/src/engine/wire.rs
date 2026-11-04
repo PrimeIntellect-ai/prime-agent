@@ -22,11 +22,13 @@ pub struct PromptRequest {
     pub batch: Vec<PromptBatchRow>,
 }
 
-/// One co-delivered user row of a batched prompt request.
+/// One co-delivered row of a batched prompt request: a user row, or a
+/// notification's custom row when the batch is a notification run.
 #[derive(Debug, Clone)]
 pub struct PromptBatchRow {
     pub text: String,
     pub images: Vec<pa_agent::types::ImageContent>,
+    pub custom_message: Option<Value>,
 }
 
 /// The saved session context read off a session's already-loaded entries:
