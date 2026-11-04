@@ -7,6 +7,15 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+#[cfg(unix)]
+use std::ffi::CString;
+#[cfg(unix)]
+use std::io::Read;
+#[cfg(unix)]
+use std::os::fd::{AsRawFd, FromRawFd};
+#[cfg(unix)]
+use std::os::unix::ffi::OsStrExt;
+
 /// Minimum staleness threshold, like proper-lockfile's floor.
 const MIN_STALE: Duration = Duration::from_secs(2);
 
@@ -171,6 +180,8 @@ mod win32 {
 pub struct LockDir {
     path: PathBuf,
     owner: Option<String>,
+    #[cfg(unix)]
+    parent: fs::File,
 }
 
 impl LockDir {
@@ -201,8 +212,38 @@ impl LockDir {
     ) -> io::Result<Self> {
         let path = Self::path_for(file);
         let stale_after = stale_after.max(MIN_STALE);
+        #[cfg(unix)]
+        let parent = {
+            // Search-only handles preserve the existing ability to create a
+            // lock in a writable/searchable directory without read access.
+            #[cfg(any(target_os = "linux", target_os = "android"))]
+            let flags = libc::O_PATH | libc::O_DIRECTORY | libc::O_CLOEXEC;
+            #[cfg(target_vendor = "apple")]
+            let flags = libc::O_SEARCH | libc::O_CLOEXEC;
+            #[cfg(all(
+                unix,
+                not(any(target_os = "linux", target_os = "android", target_vendor = "apple"))
+            ))]
+            let flags = libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC;
+            let parent_path = CString::new(Self::parent_path(&path).as_os_str().as_bytes())?;
+            let fd = unsafe { libc::open(parent_path.as_ptr(), flags) };
+            if fd < 0 {
+                return Err(io::Error::last_os_error());
+            }
+            // open returned an owned descriptor.
+            unsafe { fs::File::from_raw_fd(fd) }
+        };
         match Self::create(&path, owner.as_deref()) {
-            Ok(()) => Ok(LockDir { path, owner }),
+            Ok(()) => {
+                #[cfg(unix)]
+                Self::check_parent(&parent, &path)?;
+                Ok(LockDir {
+                    path,
+                    owner,
+                    #[cfg(unix)]
+                    parent,
+                })
+            }
             // Only an existing path is a lock collision; other failures
             // (missing parent, permissions) are real errors, never contention.
             Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
@@ -210,7 +251,16 @@ impl LockDir {
                 // The judge path removed (or raced away) the incumbent: one
                 // fresh attempt; a reappearing rival is contention.
                 match Self::create(&path, owner.as_deref()) {
-                    Ok(()) => Ok(LockDir { path, owner }),
+                    Ok(()) => {
+                        #[cfg(unix)]
+                        Self::check_parent(&parent, &path)?;
+                        Ok(LockDir {
+                            path,
+                            owner,
+                            #[cfg(unix)]
+                            parent,
+                        })
+                    }
                     Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
                         Err(io::Error::new(
                             io::ErrorKind::WouldBlock,
@@ -222,6 +272,26 @@ impl LockDir {
             }
             Err(error) => Err(error),
         }
+    }
+
+    #[cfg(unix)]
+    fn parent_path(path: &Path) -> &Path {
+        path.parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."))
+    }
+
+    #[cfg(unix)]
+    fn check_parent(parent: &fs::File, path: &Path) -> io::Result<()> {
+        use std::os::unix::fs::MetadataExt;
+        let opened = parent.metadata()?;
+        let current = fs::metadata(Self::parent_path(path))?;
+        if opened.dev() != current.dev() || opened.ino() != current.ino() {
+            return Err(io::Error::other(
+                "Lock directory parent changed while acquiring",
+            ));
+        }
+        Ok(())
     }
 
     /// [`Self::acquire`] with a bounded retry: only a fresh foreign lock
@@ -463,18 +533,86 @@ impl LockDir {
     /// else already reclaimed it (the TS release tolerates ENOENT); other
     /// failures go to the trace log (`Drop` cannot propagate).
     pub fn release(&self) {
-        if let Some(owner) = &self.owner {
-            if !Self::owner_matches(&self.path, owner) {
+        #[cfg(unix)]
+        {
+            let Some(name) = self.path.file_name() else {
+                tracing::warn!(
+                    "failed to release lock {}: missing file name",
+                    self.path.display()
+                );
                 return;
+            };
+            let Ok(name) = CString::new(name.as_bytes()) else {
+                tracing::warn!(
+                    "failed to release lock {}: invalid file name",
+                    self.path.display()
+                );
+                return;
+            };
+            if let Some(owner) = &self.owner {
+                // Open the lock relative to its original parent. A renamed
+                // ancestor cannot redirect the owner check or cleanup.
+                let fd = unsafe {
+                    libc::openat(
+                        self.parent.as_raw_fd(),
+                        name.as_ptr(),
+                        libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+                    )
+                };
+                if fd < 0 {
+                    return;
+                }
+                // openat returned an owned descriptor.
+                let dir = unsafe { fs::File::from_raw_fd(fd) };
+                let owner_fd = unsafe {
+                    libc::openat(
+                        dir.as_raw_fd(),
+                        c"owner".as_ptr(),
+                        libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC,
+                    )
+                };
+                if owner_fd < 0 {
+                    return;
+                }
+                // openat returned an owned descriptor.
+                let mut owner_file = unsafe { fs::File::from_raw_fd(owner_fd) };
+                let mut recorded = String::new();
+                if owner_file.read_to_string(&mut recorded).is_err() || recorded.trim() != owner {
+                    return;
+                }
+                if unsafe { libc::unlinkat(dir.as_raw_fd(), c"owner".as_ptr(), 0) } != 0 {
+                    tracing::warn!(
+                        "failed to release lock {}: {}",
+                        self.path.display(),
+                        io::Error::last_os_error()
+                    );
+                    return;
+                }
             }
-            if let Err(error) = fs::remove_file(self.path.join("owner")) {
-                tracing::warn!("failed to release lock {}: {error}", self.path.display());
-                return;
+            if unsafe { libc::unlinkat(self.parent.as_raw_fd(), name.as_ptr(), libc::AT_REMOVEDIR) }
+                != 0
+            {
+                let error = io::Error::last_os_error();
+                if error.kind() != io::ErrorKind::NotFound {
+                    tracing::warn!("failed to release lock {}: {error}", self.path.display());
+                }
             }
         }
-        if let Err(error) = fs::remove_dir(&self.path) {
-            if error.kind() != io::ErrorKind::NotFound {
-                tracing::warn!("failed to release lock {}: {error}", self.path.display());
+        #[cfg(not(unix))]
+        {
+            if let Some(owner) = &self.owner {
+                if !Self::owner_matches(&self.path, owner) {
+                    return;
+                }
+                if let Err(error) = fs::remove_file(self.path.join("owner")) {
+                    tracing::warn!("failed to release lock {}: {error}", self.path.display());
+                    return;
+                }
+            }
+            if let Err(error) = fs::remove_dir(&self.path) {
+                if error.kind() != io::ErrorKind::NotFound {
+                    tracing::warn!("failed to release lock {}: {error}", self.path.display());
+                }
             }
         }
     }
@@ -542,6 +680,135 @@ mod tests {
             assert!(std::fs::read_dir(&path).unwrap().next().is_none());
         }
         assert!(!lock_of(&file).exists(), "release removes the directory");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn release_removes_its_original_lock_after_an_ancestor_swap() {
+        use std::os::unix::fs::symlink;
+
+        let root = tempfile::tempdir().unwrap();
+        let project = root.path().join("project");
+        let moved = root.path().join("project-moved");
+        let outside = root.path().join("outside");
+        fs::create_dir(&project).unwrap();
+        fs::create_dir(&outside).unwrap();
+        let guard = LockDir::acquire(&project.join("settings.json"), MIN_STALE).unwrap();
+        let original_lock = moved.join("settings.json.lock");
+        let outside_lock = outside.join("settings.json.lock");
+        fs::create_dir(&outside_lock).unwrap();
+
+        fs::rename(&project, &moved).unwrap();
+        symlink(&outside, &project).unwrap();
+        drop(guard);
+
+        assert!(
+            outside_lock.is_dir(),
+            "release must not remove a foreign lock"
+        );
+        assert!(!original_lock.exists(), "release must remove its own lock");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn release_removes_its_original_lock_after_a_regular_directory_swap() {
+        let root = tempfile::tempdir().unwrap();
+        let project = root.path().join("project");
+        let moved = root.path().join("project-moved");
+        let outside = root.path().join("outside");
+        fs::create_dir(&project).unwrap();
+        fs::create_dir(&outside).unwrap();
+        let guard = LockDir::acquire(&project.join("settings.json"), MIN_STALE).unwrap();
+        let original_lock = moved.join("settings.json.lock");
+        let outside_lock = outside.join("settings.json.lock");
+        fs::create_dir(&outside_lock).unwrap();
+
+        fs::rename(&project, &moved).unwrap();
+        fs::rename(&outside, &project).unwrap();
+        drop(guard);
+        fs::rename(&project, &outside).unwrap();
+
+        assert!(
+            outside_lock.is_dir(),
+            "release must not remove a foreign lock"
+        );
+        assert!(!original_lock.exists(), "release must remove its own lock");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn owned_release_checks_and_removes_its_original_owner_file() {
+        use std::os::unix::fs::symlink;
+
+        let root = tempfile::tempdir().unwrap();
+        let project = root.path().join("project");
+        let moved = root.path().join("project-moved");
+        let outside = root.path().join("outside");
+        fs::create_dir(&project).unwrap();
+        fs::create_dir(&outside).unwrap();
+        let guard = LockDir::acquire_owned_retrying(
+            &project.join("state.json"),
+            Duration::from_secs(10),
+            1,
+            MIN_STALE,
+        )
+        .unwrap();
+        let outside_lock = outside.join("state.json.lock");
+        fs::create_dir(&outside_lock).unwrap();
+        let recorded = fs::read_to_string(guard.path.join("owner")).unwrap();
+        fs::write(outside_lock.join("owner"), &recorded).unwrap();
+
+        fs::rename(&project, &moved).unwrap();
+        symlink(&outside, &project).unwrap();
+        drop(guard);
+
+        assert_eq!(
+            fs::read_to_string(outside_lock.join("owner")).unwrap(),
+            recorded
+        );
+        assert!(!moved.join("state.json.lock").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn linked_lock_parent_keeps_its_layout_and_cleans_up() {
+        use std::os::unix::fs::symlink;
+
+        let root = tempfile::tempdir().unwrap();
+        let real = root.path().join("real-project");
+        let linked = root.path().join("linked-project");
+        fs::create_dir(&real).unwrap();
+        symlink(&real, &linked).unwrap();
+        let file = linked.join("settings.json");
+        let guard = LockDir::acquire(&file, MIN_STALE).unwrap();
+        let target_lock = real.join("settings.json.lock");
+
+        assert!(target_lock.is_dir());
+        assert!(fs::read_dir(&target_lock).unwrap().next().is_none());
+        drop(guard);
+
+        assert!(!target_lock.exists());
+        assert!(fs::symlink_metadata(linked)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn writable_searchable_parent_does_not_need_read_permission() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = tempfile::tempdir().unwrap();
+        let restricted = root.path().join("restricted");
+        fs::create_dir(&restricted).unwrap();
+        fs::set_permissions(&restricted, fs::Permissions::from_mode(0o300)).unwrap();
+        let file = restricted.join("settings.json");
+        let guard = LockDir::acquire(&file, MIN_STALE).unwrap();
+        assert!(lock_of(&file).is_dir());
+        drop(guard);
+        assert!(!lock_of(&file).exists());
+        fs::set_permissions(&restricted, fs::Permissions::from_mode(0o700)).unwrap();
     }
 
     #[test]

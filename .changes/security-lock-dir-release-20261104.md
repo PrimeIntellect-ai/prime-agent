@@ -1,0 +1,1 @@
+- Kept directory-lock cleanup bound to its original directory when project paths change concurrently.
