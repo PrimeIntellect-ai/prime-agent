@@ -75,6 +75,11 @@ pub const TRANSCRIPT_READ_DISPLAY_MIME: &str = "application/vnd.prime-agent.tran
 /// default on its presence.
 pub const BASH_COMPLETED_REQUEST_TYPE: &str = "bash.completed";
 
+/// The kernel host request that ends the turn from inside a cell
+/// (`rlm.end_turn()`). The host-request dispatch answers it by marking
+/// the executing cell's result, so the turn ends once the batch settles.
+pub const END_TURN_REQUEST_TYPE: &str = "rlm.end_turn";
+
 pub const EXECUTE_STATUS_OK: &str = "ok";
 pub const EXECUTE_STATUS_ERROR: &str = "error";
 pub const EXECUTE_STATUS_ABORTED: &str = "aborted";
@@ -212,6 +217,9 @@ pub struct ExecuteResult {
     pub transcript_reads: Option<Vec<Value>>,
     /// Output that arrived without this cell's id (user threads, other cells' leftovers, raw fd writes).
     pub background_output: Option<String>,
+    /// The cell called the sanctioned `rlm.end_turn()`: the host marked
+    /// this execution, and the turn ends once the batch settles.
+    pub ended_turn: bool,
     pub status: ExecuteStatus,
     pub error: Option<KernelError>,
     pub duration_ms: u64,

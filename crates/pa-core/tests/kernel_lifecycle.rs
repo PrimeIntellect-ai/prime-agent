@@ -282,6 +282,17 @@ async fn host_requests_round_trip_to_registered_handlers() {
         error.error
     );
 
+    // rlm.end_turn needs no registration: the manager answers it before the
+    // registry lookup (a reorder would fail the cell like `nope.custom`),
+    // marks the executing cell, and the flag rides the settled result.
+    let ended = execute(&manager, "result = await rlm.end_turn()\nresult").await;
+    assert_eq!(ended.status, ExecuteStatus::Ok, "cell: {:?}", ended.error);
+    assert_eq!(ended.result.as_deref(), Some("{'endedTurn': True}"));
+    assert!(
+        ended.ended_turn,
+        "the end-turn flag must ride the settled result"
+    );
+
     manager
         .shutdown(KernelShutdownOptions::default())
         .await
