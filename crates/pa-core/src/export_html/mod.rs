@@ -83,16 +83,30 @@ fn generate_html(data: &SessionExportData, theme: &theme::ExportTheme) -> String
     let session_data = serde_json::to_string(data).unwrap_or_default();
     let session_data = base64::engine::general_purpose::STANDARD.encode(session_data);
     let css = TEMPLATE_CSS
-        .replacen("{{THEME_VARS}}", &theme.theme_vars, 1)
-        .replacen("{{BODY_BG}}", &theme.body_bg, 1)
-        .replacen("{{CONTAINER_BG}}", &theme.container_bg, 1)
-        .replacen("{{INFO_BG}}", &theme.info_bg, 1);
+        .replacen(
+            "{{THEME_VARS}}",
+            &escape_style_raw_text(&theme.theme_vars),
+            1,
+        )
+        .replacen("{{BODY_BG}}", &escape_style_raw_text(&theme.body_bg), 1)
+        .replacen(
+            "{{CONTAINER_BG}}",
+            &escape_style_raw_text(&theme.container_bg),
+            1,
+        )
+        .replacen("{{INFO_BG}}", &escape_style_raw_text(&theme.info_bg), 1);
     TEMPLATE_HTML
         .replacen("{{CSS}}", &css, 1)
         .replacen("{{JS}}", TEMPLATE_JS, 1)
         .replacen("{{SESSION_DATA}}", &session_data, 1)
         .replacen("{{MARKED_JS}}", MARKED_JS, 1)
         .replacen("{{HIGHLIGHT_JS}}", HIGHLIGHT_JS, 1)
+}
+
+/// A literal `<` can close the export's HTML style element before CSS parsing.
+/// CSS hex escaping keeps valid custom color values intact inside that element.
+fn escape_style_raw_text(value: &str) -> String {
+    value.replace('<', "\\3C ")
 }
 
 /// Write the export file and return the output path as the caller will
@@ -198,6 +212,56 @@ mod tests {
     use super::*;
     use std::io::Write;
 
+    #[test]
+    fn read_tool_range_escapes_untrusted_session_offset() {
+        // Execute the embedded viewer's actual tool-call renderer with a
+        // hostile session argument. Node is present in CI; Rust-only local
+        // setups can still run the rest of the crate's tests without it.
+        let script = r#"
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const vm = require('node:vm');
+const source = fs.readFileSync(process.argv[1], 'utf8');
+const start = source.indexOf('function renderToolCall(call) {');
+const end = source.indexOf('\n      /**\n       * Download the session data', start);
+assert(start >= 0 && end > start, 'exported viewer tool renderer');
+const context = {
+  findToolResult: () => null,
+  str: value => typeof value === 'string' ? value : value == null ? '' : null,
+  shortenPath: value => value,
+  escapeHtml: value => String(value).replace(/[&<>"']/g, char => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+  })[char]),
+};
+const renderToolCall = vm.runInNewContext(source.slice(start, end) + '\nrenderToolCall', context);
+const hostileOffset = '<img src=x onerror=alert(1)>';
+const html = renderToolCall({ id: 'read-1', name: 'read', arguments: {
+  path: 'notes.txt', offset: hostileOffset
+} });
+assert(html.includes('&lt;img src=x onerror=alert(1)&gt;'), html);
+assert(!html.includes('<img'), html);
+"#;
+        let template = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/assets/export-html/template.js"
+        );
+        let output = match std::process::Command::new("node")
+            .arg("-e")
+            .arg(script)
+            .arg(template)
+            .output()
+        {
+            Ok(output) => output,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return,
+            Err(error) => panic!("run exported viewer renderer: {error}"),
+        };
+        assert!(
+            output.status.success(),
+            "renderer test failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
     fn fixture_session(dir: &Path) -> std::path::PathBuf {
         let path = dir.join("fixture-session.jsonl");
         let mut file = std::fs::File::create(&path).expect("create fixture");
@@ -257,6 +321,29 @@ mod tests {
             data.get("systemPrompt").is_none(),
             "absent sections are omitted: {data}"
         );
+    }
+
+    #[test]
+    fn generated_html_cannot_break_out_of_export_style_element() {
+        // Keep this boundary safe even if another caller supplies a theme
+        // without going through the file parser's color validation.
+        let theme = theme::ExportTheme {
+            theme_vars: "--accent: #fff</style><script>window.themeValue=1</script>;".to_string(),
+            body_bg: "#000</style><script>window.themeBackground=1</script>".to_string(),
+            container_bg: "#123456".to_string(),
+            info_bg: "#654321".to_string(),
+        };
+        let data = SessionExportData {
+            header: serde_json::json!({"type": "session", "id": "s"}),
+            entries: vec![],
+            leaf_id: None,
+            system_prompt: None,
+            tools: None,
+            rendered_tools: None,
+        };
+        let html = generate_html(&data, &theme);
+        assert_eq!(html.matches("</style>").count(), 1);
+        assert!(!html.contains("<script>window.theme"));
     }
 
     #[test]
