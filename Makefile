@@ -13,7 +13,7 @@ check:
 deny:
 	@command -v cargo-deny >/dev/null 2>&1 || { echo "cargo-deny not installed (cargo install cargo-deny --locked)"; exit 1; }
 	cargo deny --all-features --workspace check advisories licenses
-	python3 scripts/check_lru_advisory_scope.py
+	python3 scripts/audit_lru_advisory_scope.py
 
 # Windows cfg-hygiene gate: cross-target check +
 # clippy at -D warnings for every crate and test, the local mirror of the
