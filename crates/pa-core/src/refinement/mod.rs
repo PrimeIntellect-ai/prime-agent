@@ -429,6 +429,19 @@ pub fn infer_refinement_result_scope(result: &RefinementResult) -> Option<Harnes
     (scopes.len() == 1).then(|| scopes[0])
 }
 
+/// Resolve the symlink that was rejected by `O_NOFOLLOW`. If the path was
+/// replaced by a regular file meanwhile, `read_link` fails instead of opening
+/// that file without the ordinary permission check.
+#[cfg(unix)]
+fn linked_history_target(path: &Path) -> std::io::Result<PathBuf> {
+    let target = std::fs::read_link(path)?;
+    Ok(if target.is_absolute() {
+        target
+    } else {
+        path.parent().unwrap_or_else(|| Path::new(".")).join(target)
+    })
+}
+
 /// Append a refinement to the global history log (JSONL).
 ///
 /// # Errors
@@ -458,10 +471,11 @@ pub fn append_global_refinement(
         Err(error) if error.raw_os_error() == Some(libc::ELOOP) => {
             // Keep user-created links to shared history working, but do not
             // change the target's deliberately chosen permissions.
+            let target = linked_history_target(&history_path)?;
             let mut linked_options = std::fs::OpenOptions::new();
             linked_options.create(true).append(true);
             crate::platform::perms::set_private_mode(&mut linked_options);
-            (linked_options.open(&history_path)?, true)
+            (linked_options.open(target)?, true)
         }
         Err(error) => return Err(error.into()),
     };
@@ -488,20 +502,20 @@ fn read_refinement_history(path: &Path) -> Option<String> {
     let opened = match opened {
         Err(error) if error.raw_os_error() == Some(libc::ELOOP) => {
             // User-linked shared history keeps its existing permission policy.
-            return std::fs::read_to_string(path).ok();
+            return std::fs::read_to_string(linked_history_target(path).ok()?).ok();
         }
         other => other,
     };
     let mut file = opened.ok()?;
+    let metadata = file.metadata().ok()?;
+    if !metadata.is_file() {
+        return None;
+    }
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        if file
-            .metadata()
-            .is_ok_and(|metadata| metadata.permissions().mode() & 0o077 != 0)
-        {
-            // Best effort: a read-only shared volume must still load history.
-            let _ = crate::platform::perms::restrict_open_file(&file);
+        if metadata.permissions().mode() & 0o077 != 0 {
+            crate::platform::perms::restrict_open_file(&file).ok()?;
         }
     }
     let mut content = String::new();
@@ -949,6 +963,44 @@ mod tests {
 
     #[test]
     #[cfg(unix)]
+    fn history_load_does_not_chmod_a_directory() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let path = get_refinement_history_path(tmp.path());
+        std::fs::create_dir(&path).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let loaded = read_refinement_history(&path);
+        let mode = crate::platform::perms::file_mode(&path);
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(loaded.is_none());
+        assert_eq!(mode, Some(0o755));
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn history_load_rejects_an_unrestrictable_file() {
+        let path = Path::new("/proc/version");
+        let file = std::fs::File::open(path).unwrap();
+        assert!(crate::platform::perms::restrict_open_file(&file).is_err());
+        assert!(read_refinement_history(path).is_none());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn linked_history_fallback_rejects_a_swapped_regular_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("history.jsonl");
+        std::fs::write(&path, "original\n").unwrap();
+
+        // Simulate a symlink being replaced after O_NOFOLLOW returned ELOOP.
+        assert!(linked_history_target(&path).is_err());
+        assert_eq!(std::fs::read_to_string(path).unwrap(), "original\n");
+    }
+
+    #[test]
+    #[cfg(unix)]
     fn history_append_preserves_a_deliberately_linked_file() {
         use std::os::unix::fs::{symlink, PermissionsExt};
 
@@ -979,6 +1031,12 @@ mod tests {
             .is_symlink());
         assert_eq!(crate::platform::perms::file_mode(&shared), Some(0o664));
         assert_eq!(load_global_refinement_history(&dir).len(), 1);
+        assert_eq!(crate::platform::perms::file_mode(&shared), Some(0o664));
+
+        std::fs::remove_file(&path).unwrap();
+        symlink("../shared-history.jsonl", &path).unwrap();
+        append_global_refinement(&dir, &result).unwrap();
+        assert_eq!(load_global_refinement_history(&dir).len(), 2);
         assert_eq!(crate::platform::perms::file_mode(&shared), Some(0o664));
     }
 
