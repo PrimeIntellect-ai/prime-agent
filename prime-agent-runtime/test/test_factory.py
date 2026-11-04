@@ -3902,6 +3902,46 @@ class FactoryExecutorTest(_ExecutorTestCase):
         self.assertIn(f"- design: {json.dumps(body['design'])}", build_prompt)
 
     @async_test
+    async def test_json_output_binds_from_a_plain_text_tail_settle(self) -> None:
+        # The dogfooding parser-pause class (runs 55a2c852, 9ad9e794): a
+        # child settles after real work with its terminal JSON emitted as a
+        # plain-text tail after prose, no fence anywhere. The capture binds
+        # the declared port from the terminal object, so the run proceeds
+        # instead of failing the settle and burning a re-admission.
+        self.host.outcomes["src"] = {
+            "status": "done",
+            "answer": 'Gate ran: fmt, the touched suites, and clippy are green.\n\n{"verdict": "pass", "head": "abc12345"}',
+        }
+        self.host.outcomes["dep"] = {"status": "done", "answer": "DONE"}
+        self.store_machine(
+            {
+                "run": {"failure_policy": "escalate", "max_parallel": 4},
+                "states": [
+                    {
+                        "id": "src",
+                        "entry": True,
+                        "subagent": "worker",
+                        "outputs": [{"name": "verdict", "type": "json"}],
+                    },
+                    {
+                        "id": "dep",
+                        "subagent": {"prompt": "Ship the {verdict} head."},
+                        "inputs": [{"name": "verdict", "type": "json", "from": "src.verdict"}],
+                    },
+                ],
+                "transitions": [{"from": "src", "to": "dep"}],
+            }
+        )
+        result = await self.start()
+        status = await self.settle(result)
+        self.assertEqual(status["state"], "done")
+        self.assertEqual(
+            [call["prompt"] for call in self.host.spawn_calls("dep")],
+            ['Ship the "pass" head.'],
+        )
+        self.assertEqual(self.all_events_of(result, "output_capture_failed"), [])
+
+    @async_test
     async def test_a_json_null_output_is_a_captured_value_not_a_failure(self) -> None:
         # Review finding (PR #3462): the capture-complete check conflated a
         # port that parsed as JSON null with a missing port — a legit null
@@ -5812,6 +5852,69 @@ class FactoryExecutorTest(_ExecutorTestCase):
         value, error = _parse_json_output(two_fences, "missing")
         self.assertIsNone(value)
         self.assertIn("no JSON object containing output 'missing'", error)
+
+    def test_json_output_binds_from_terminal_bare_and_dirty_tails(self) -> None:
+        # the settle shapes the strict fence rejected, every one binding the
+        # same declared port with the same output-name requirement: a JSON
+        # tail emitted as plain text after prose (the validate-class parser
+        # pause), a fence that lost its closing markers, and benign
+        # punctuation residue around the emit
+        plain_tail = 'Gate ran clean on the worktree.\n\n{"verdict": "pass", "head": "abc"}'
+        self.assertEqual(_parse_json_output(plain_tail, "verdict"), ("pass", None))
+        unclosed = '```json\n{"verdict": "pass"}'
+        self.assertEqual(_parse_json_output(unclosed, "verdict"), ("pass", None))
+        dirty = '---\n{"verdict": "pass"}\n``` --'
+        self.assertEqual(_parse_json_output(dirty, "verdict"), ("pass", None))
+        # braces inside string literals never break the balanced scan
+        braces = 'note: {"verdict": "pass", "detail": "quoted } and { inside"}'
+        self.assertEqual(_parse_json_output(braces, "verdict"), ("pass", None))
+        # a fence still wins over the bare tail (the authored contract), and
+        # the terminal emit is the LAST object when several are bare
+        fenced_then_bare = '```json\n{"verdict": "fenced"}\n```\n\n{"verdict": "bare"}'
+        self.assertEqual(_parse_json_output(fenced_then_bare, "verdict"), ("fenced", None))
+        two_bare = '{"verdict": "stale"}\n.\n{"verdict": "last"}'
+        self.assertEqual(_parse_json_output(two_bare, "verdict"), ("last", None))
+        # an object that trailing prose follows is not terminal and does not
+        # bind; a terminal object without the declared port fails; no JSON
+        # anywhere keeps the same failure sentence
+        not_terminal = '{"verdict": "pass"}\n\nAll checks green, done.'
+        value, error = _parse_json_output(not_terminal, "verdict")
+        self.assertIsNone(value)
+        self.assertIn("no JSON object containing output 'verdict'", error)
+        wrong_port = 'gate done\n\n{"status": "done"}'
+        value, error = _parse_json_output(wrong_port, "verdict")
+        self.assertIsNone(value)
+        self.assertIn("no JSON object containing output 'verdict'", error)
+        prose_only = "The gate ran clean; there is nothing to bind."
+        value, error = _parse_json_output(prose_only, "verdict")
+        self.assertIsNone(value)
+        self.assertEqual(
+            error, "no JSON object containing output 'verdict' in the upstream answer"
+        )
+
+    def test_terminal_object_survives_prose_delimiters(self) -> None:
+        # Macroscope + Bugbot (PR #3906): the scan applied JSON quote and
+        # brace rules from the start of the answer, so prose that left a
+        # quote or a brace open nested or hid a valid tail object; syntax
+        # tracks within candidate objects only, so a settle that mentions a
+        # block or leaves a quote open still binds
+        stray_quote = 'The gate said "all green, and\n\n{"verdict": "pass"}'
+        self.assertEqual(_parse_json_output(stray_quote, "verdict"), ("pass", None))
+        stray_brace = 'here is the { stray brace in prose\n\n{"verdict": "pass"}'
+        self.assertEqual(_parse_json_output(stray_brace, "verdict"), ("pass", None))
+        between = '{"verdict": "stale"} and "so on\n\n{"verdict": "last"}'
+        self.assertEqual(_parse_json_output(between, "verdict"), ("last", None))
+        # a truncated emit owns the tail: an unterminated object never
+        # binds its nested spans, and the same failure sentence reads
+        truncated = '{"outer": {"verdict": "x"}'
+        value, error = _parse_json_output(truncated, "verdict")
+        self.assertIsNone(value)
+        self.assertIn("no JSON object containing output 'verdict'", error)
+        # prose delimiters change nothing for the non-terminal contract
+        not_terminal = '{"verdict": "pass"}\nAll checks green, "done."'
+        value, error = _parse_json_output(not_terminal, "verdict")
+        self.assertIsNone(value)
+        self.assertIn("no JSON object containing output 'verdict'", error)
 
     def test_guard_primitives_json_strict_and_defensive(self) -> None:
         outputs = {"verdict": {"approved": True, "count": 1.0, "tags": ["a"]}}
