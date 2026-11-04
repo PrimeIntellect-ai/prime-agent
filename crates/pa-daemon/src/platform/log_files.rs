@@ -1,9 +1,17 @@
-//! Log-file operations anchored to the opened directory on Unix.
+//! Log-file operations anchored to opened directories on Unix and Windows.
 
 use std::ffi::{OsStr, OsString};
-use std::fs::{self, File};
+#[cfg(not(windows))]
+use std::fs;
+use std::fs::File;
 use std::io;
 use std::path::Path;
+
+#[cfg(windows)]
+// Native relative opens and held-handle metadata are unavailable in std.
+#[allow(unsafe_code)]
+#[path = "log_files/windows.rs"]
+mod windows;
 
 #[cfg(all(test, unix))]
 thread_local! {
@@ -18,7 +26,7 @@ pub(crate) enum OpenMode {
     Write,
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum DirectoryCreation {
     ExistingOnly,
@@ -28,7 +36,9 @@ enum DirectoryCreation {
 pub(crate) struct LogDir {
     #[cfg(unix)]
     fd: File,
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    dir: windows::AnchoredDir,
+    #[cfg(not(any(unix, windows)))]
     path: std::path::PathBuf,
 }
 
@@ -38,20 +48,29 @@ impl LogDir {
         {
             Self::open_from_root(path, DirectoryCreation::CreateMissing)
         }
-        #[cfg(not(unix))]
+        #[cfg(windows)]
+        {
+            Ok(Self {
+                dir: windows::AnchoredDir::open(path, DirectoryCreation::CreateMissing)?,
+            })
+        }
+        #[cfg(not(any(unix, windows)))]
         {
             fs::create_dir_all(path)?;
             Self::for_read(path)
         }
     }
 
+    // Windows ACL inheritance makes this a no-op while callers retain the
+    // same method shape as the Unix permission restriction.
+    #[cfg_attr(windows, allow(clippy::unused_self))]
     pub(crate) fn restrict(&self) -> io::Result<()> {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
             self.fd.set_permissions(fs::Permissions::from_mode(0o700))?;
         }
-        #[cfg(not(unix))]
+        #[cfg(not(any(unix, windows)))]
         pa_core::platform::perms::restrict_dir(&self.path)?;
         Ok(())
     }
@@ -61,7 +80,13 @@ impl LogDir {
         {
             Self::open_from_root(path, DirectoryCreation::ExistingOnly)
         }
-        #[cfg(not(unix))]
+        #[cfg(windows)]
+        {
+            Ok(Self {
+                dir: windows::AnchoredDir::open(path, DirectoryCreation::ExistingOnly)?,
+            })
+        }
+        #[cfg(not(any(unix, windows)))]
         {
             fs::metadata(path)?;
             Ok(Self {
@@ -139,7 +164,9 @@ impl LogDir {
                 | OFlags::CLOEXEC;
             File::from(openat(&self.fd, name, flags, Mode::from_raw_mode(0o600))?)
         };
-        #[cfg(not(unix))]
+        #[cfg(windows)]
+        let file = self.dir.open_file(name, mode)?;
+        #[cfg(not(any(unix, windows)))]
         let file = {
             let mut options = fs::OpenOptions::new();
             match mode {
@@ -177,7 +204,11 @@ impl LogDir {
         {
             rustix::fs::renameat(&self.fd, from, &self.fd, to)?;
         }
-        #[cfg(not(unix))]
+        #[cfg(windows)]
+        {
+            self.dir.rename(from, to)?;
+        }
+        #[cfg(not(any(unix, windows)))]
         {
             fs::rename(self.path.join(from), self.path.join(to))?;
         }
@@ -189,7 +220,11 @@ impl LogDir {
         {
             rustix::fs::unlinkat(&self.fd, name, rustix::fs::AtFlags::empty())?;
         }
-        #[cfg(not(unix))]
+        #[cfg(windows)]
+        {
+            self.dir.remove(name)?;
+        }
+        #[cfg(not(any(unix, windows)))]
         {
             fs::remove_file(self.path.join(name))?;
         }
@@ -207,7 +242,11 @@ impl LogDir {
                 .map(|entry| OsString::from_vec(entry.file_name().to_bytes().to_vec()))
                 .collect())
         }
-        #[cfg(not(unix))]
+        #[cfg(windows)]
+        {
+            self.dir.names()
+        }
+        #[cfg(not(any(unix, windows)))]
         {
             Ok(fs::read_dir(&self.path)?
                 .filter_map(Result::ok)
@@ -301,6 +340,7 @@ mod tests {
 #[cfg(all(test, windows))]
 mod windows_tests {
     use super::*;
+    use std::fs;
     use std::io::Write as _;
 
     #[test]
@@ -314,6 +354,7 @@ mod windows_tests {
         let outside = temp.path().join("outside");
         fs::create_dir(&outside).unwrap();
         fs::write(outside.join("worker-a.stderr.log"), b"outside\n").unwrap();
+        fs::write(outside.join("foreign-only.log"), b"outside\n").unwrap();
 
         fs::rename(&logs, &original).unwrap();
         let output = std::process::Command::new("cmd")
@@ -332,6 +373,16 @@ mod windows_tests {
             fs::read(original.join("worker-a.stderr.log")).unwrap(),
             b"inside\n"
         );
+        let names = dir.names().unwrap();
+        assert!(names.contains(&OsString::from("worker-a.stderr.log")));
+        assert!(!names.contains(&OsString::from("foreign-only.log")));
+        dir.rename(
+            OsStr::new("worker-a.stderr.log"),
+            OsStr::new("worker-a.stderr.log.1"),
+        )
+        .unwrap();
+        dir.remove(OsStr::new("worker-a.stderr.log.1")).unwrap();
+        assert!(!original.join("worker-a.stderr.log.1").exists());
         assert_eq!(
             fs::read(outside.join("worker-a.stderr.log")).unwrap(),
             b"outside\n"
