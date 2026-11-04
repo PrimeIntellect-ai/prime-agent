@@ -1464,6 +1464,23 @@ def _persistent_home() -> str:
     return os.path.join(os.environ["PRIME_AGENT_CODING_AGENT_DIR"], _PERSISTENT_DIR)
 
 
+def _tighten_persistent_home(home: str) -> None:
+    # Older releases created this directory with the user's umask (often 0755).
+    # Reattach must protect those legacy records even before another shell is
+    # spawned. A deliberate symlink to a shared home keeps its target mode.
+    if os.path.islink(home):
+        return
+    try:
+        home_fd = os.open(home, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    except FileNotFoundError:
+        return
+    try:
+        if os.fstat(home_fd).st_uid == os.geteuid():
+            os.fchmod(home_fd, 0o700)
+    finally:
+        os.close(home_fd)
+
+
 def _persistent_file(home: str, shell_id: str, kind: str) -> str:
     return os.path.join(home, f"{shell_id}.{kind}")
 
@@ -1544,16 +1561,7 @@ def _spawn_persistent(command: str) -> PersistentBashHandle:
     home = _persistent_home()
     shell_id = secrets.token_hex(16)
     os.makedirs(home, mode=0o700, exist_ok=True)
-    # Older releases created this directory with the user's umask (often 0755).
-    # Tighten an owned real directory, including its existing shell records;
-    # a deliberate symlink to a shared home keeps its target directory mode.
-    if not os.path.islink(home):
-        home_fd = os.open(home, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
-        try:
-            if os.fstat(home_fd).st_uid == os.geteuid():
-                os.fchmod(home_fd, 0o700)
-        finally:
-            os.close(home_fd)
+    _tighten_persistent_home(home)
     shell = _shell()
     script = f'{{\n{_with_prefix(command)}\n}}\n__prime_status=$?\nwait\nexit "$__prime_status"\n'
     output_fd = os.open(
@@ -1618,6 +1626,7 @@ def _rehydrate_persistent_shells() -> None:
     if not session_id or not _IS_POSIX:
         return
     home = _persistent_home()
+    _tighten_persistent_home(home)
     for record in _session_records(home, session_id):
         identity = _shell_identity(record["pid"], record["startId"])
         if identity is None:

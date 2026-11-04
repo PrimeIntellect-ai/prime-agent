@@ -1665,6 +1665,20 @@ class PersistentBashTest(unittest.IsolatedAsyncioTestCase):
         with open(victim) as f:
             self.assertEqual(f.read(), "untouched")
 
+    def test_rehydration_tightens_an_owned_legacy_record_directory(self):
+        shell_id = "4" * 32
+        self.write_record(self.record(shell_id, 1234, "old", session_id="other"))
+        os.chmod(self.home, 0o755)
+        record_path = os.path.join(self.home, f"{shell_id}.json")
+        with open(record_path, "rb") as f:
+            before = f.read()
+
+        bash_module._rehydrate_persistent_shells()
+
+        self.assertEqual(os.stat(self.home).st_mode & 0o777, 0o700)
+        with open(record_path, "rb") as f:
+            self.assertEqual(f.read(), before)
+
     async def test_a_watched_leader_exit_kills_the_members_it_leaves_behind(self):
         handle = bash("( sleep 30 & ); exit 0", persistent=True)
         self.pgids.append(handle.pid)
