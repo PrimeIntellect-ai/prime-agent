@@ -74,6 +74,46 @@ fn stat_file(file: &fs::File) -> io::Result<libc::stat> {
 }
 
 #[cfg(unix)]
+fn open_lock_dir_at(parent: &fs::File, name: &CStr) -> io::Result<fs::File> {
+    // A restrictive umask can remove read permission from a new lock
+    // directory before its final mode is applied. Search-only handles still
+    // allow owner-file operations relative to the pinned directory.
+    #[cfg(any(target_os = "linux", target_os = "android", target_os = "freebsd"))]
+    let access = libc::O_PATH;
+    #[cfg(any(
+        target_vendor = "apple",
+        target_os = "netbsd",
+        target_os = "solaris",
+        target_os = "illumos",
+        target_os = "aix"
+    ))]
+    let access = libc::O_SEARCH;
+    #[cfg(not(any(
+        target_os = "linux",
+        target_os = "android",
+        target_os = "freebsd",
+        target_vendor = "apple",
+        target_os = "netbsd",
+        target_os = "solaris",
+        target_os = "illumos",
+        target_os = "aix"
+    )))]
+    let access = libc::O_RDONLY;
+    let fd = unsafe {
+        libc::openat(
+            parent.as_raw_fd(),
+            name.as_ptr(),
+            access | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+        )
+    };
+    if fd < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // openat returned an owned descriptor.
+    Ok(unsafe { fs::File::from_raw_fd(fd) })
+}
+
+#[cfg(unix)]
 fn lock_identity(stat: &libc::stat) -> LockIdentity {
     LockIdentity {
         dev: stat.st_dev,
@@ -101,6 +141,7 @@ fn read_owner_at(dir: &fs::File) -> io::Result<String> {
 thread_local! {
     static BEFORE_LOCK_CREATE: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
     static AFTER_LOCK_MKDIR: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
+    static BEFORE_STALE_DIR_OPEN: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
 }
 
 /// The mtime bump proper-lockfile's precision probe writes: the next whole
@@ -332,7 +373,7 @@ impl LockDir {
         match first_create {
             Ok(created) => {
                 #[cfg(not(unix))]
-                let _ = created;
+                let () = created;
                 let guard = LockDir {
                     path,
                     owner,
@@ -361,7 +402,7 @@ impl LockDir {
                 match next_create {
                     Ok(created) => {
                         #[cfg(not(unix))]
-                        let _ = created;
+                        let () = created;
                         let guard = LockDir {
                             path,
                             owner,
@@ -494,18 +535,7 @@ impl LockDir {
                 if !self.current_lock_matches(&name)? {
                     return Ok(false);
                 }
-                let fd = unsafe {
-                    libc::openat(
-                        self.parent.as_raw_fd(),
-                        name.as_ptr(),
-                        libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
-                    )
-                };
-                if fd < 0 {
-                    return Err(io::Error::last_os_error());
-                }
-                // openat returned an owned descriptor.
-                let dir = unsafe { fs::File::from_raw_fd(fd) };
+                let dir = open_lock_dir_at(&self.parent, &name)?;
                 Ok(lock_identity(&stat_file(&dir)?) == self.identity
                     && read_owner_at(&dir).is_ok_and(|recorded| recorded.trim() == owner))
             })()
@@ -593,24 +623,18 @@ impl LockDir {
                 .ok_or_else(|| io::Error::other("Created lock directory changed"))?;
             created_identity = Some(created);
             if let Some(owner) = owner {
-                let fd = unsafe {
-                    libc::openat(
-                        parent.as_raw_fd(),
-                        name.as_ptr(),
-                        libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
-                    )
-                };
-                if fd < 0 {
-                    return Err(io::Error::last_os_error());
-                }
-                // openat returned an owned descriptor.
-                owned_dir = Some(unsafe { fs::File::from_raw_fd(fd) });
+                owned_dir = Some(open_lock_dir_at(parent, &name)?);
                 let dir = owned_dir.as_ref().expect("opened lock directory");
                 if lock_identity(&stat_file(dir)?) != created {
                     return Err(io::Error::other("Created lock directory changed"));
                 }
                 owned_dir_verified = true;
-                dir.set_permissions(fs::Permissions::from_mode(0o700))?;
+                // fchmod on O_PATH is unavailable; resolving "." from the
+                // pinned directory handle changes this directory, not a
+                // replacement at the fixed lock name.
+                if unsafe { libc::fchmodat(dir.as_raw_fd(), c".".as_ptr(), 0o700, 0) } != 0 {
+                    return Err(io::Error::last_os_error());
+                }
                 let owner_fd = unsafe {
                     libc::openat(
                         dir.as_raw_fd(),
@@ -735,15 +759,18 @@ impl LockDir {
                     format!("Lock file is already being held: {}", path.display()),
                 ));
             }
-            if !stat_at(parent, &name)?.is_some_and(|current| lock_identity(&current) == incumbent)
-            {
-                return Err(io::Error::new(
-                    io::ErrorKind::WouldBlock,
-                    format!(
-                        "Lock file changed while being reclaimed: {}",
-                        path.display()
-                    ),
-                ));
+            match stat_at(parent, &name)? {
+                None => return Ok(()),
+                Some(current) if lock_identity(&current) == incumbent => {}
+                Some(_) => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::WouldBlock,
+                        format!(
+                            "Lock file changed while being reclaimed: {}",
+                            path.display()
+                        ),
+                    ));
+                }
             }
             if unsafe { libc::unlinkat(parent.as_raw_fd(), name.as_ptr(), 0) } == 0 {
                 return Ok(());
@@ -763,18 +790,17 @@ impl LockDir {
             let modified_ns =
                 i128::from(stat.st_mtime) * 1_000_000_000 + i128::from(stat.st_mtime_nsec);
             if now_ns.saturating_sub(modified_ns) > stale_after.as_nanos() as i128 {
-                let fd = unsafe {
-                    libc::openat(
-                        parent.as_raw_fd(),
-                        name.as_ptr(),
-                        libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
-                    )
+                #[cfg(test)]
+                BEFORE_STALE_DIR_OPEN.with(|hook| {
+                    if let Some(callback) = hook.borrow_mut().take() {
+                        callback();
+                    }
+                });
+                let dir = match open_lock_dir_at(parent, &name) {
+                    Ok(dir) => dir,
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+                    Err(error) => return Err(error),
                 };
-                if fd < 0 {
-                    return Err(io::Error::last_os_error());
-                }
-                // openat returned an owned descriptor.
-                let dir = unsafe { fs::File::from_raw_fd(fd) };
                 if lock_identity(&stat_file(&dir)?) != incumbent {
                     return Err(io::Error::new(
                         io::ErrorKind::WouldBlock,
@@ -800,16 +826,18 @@ impl LockDir {
                         return Err(error);
                     }
                 }
-                if !stat_at(parent, &name)?
-                    .is_some_and(|current| lock_identity(&current) == incumbent)
-                {
-                    return Err(io::Error::new(
-                        io::ErrorKind::WouldBlock,
-                        format!(
-                            "Lock directory changed while being reclaimed: {}",
-                            path.display()
-                        ),
-                    ));
+                match stat_at(parent, &name)? {
+                    None => return Ok(()),
+                    Some(current) if lock_identity(&current) == incumbent => {}
+                    Some(_) => {
+                        return Err(io::Error::new(
+                            io::ErrorKind::WouldBlock,
+                            format!(
+                                "Lock directory changed while being reclaimed: {}",
+                                path.display()
+                            ),
+                        ));
+                    }
                 }
                 if unsafe { libc::unlinkat(parent.as_raw_fd(), name.as_ptr(), libc::AT_REMOVEDIR) }
                     != 0
@@ -937,18 +965,9 @@ impl LockDir {
             if let Some(owner) = &self.owner {
                 // Open the lock relative to its original parent. A renamed
                 // ancestor cannot redirect the owner check or cleanup.
-                let fd = unsafe {
-                    libc::openat(
-                        self.parent.as_raw_fd(),
-                        name.as_ptr(),
-                        libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
-                    )
-                };
-                if fd < 0 {
+                let Ok(dir) = open_lock_dir_at(&self.parent, &name) else {
                     return;
-                }
-                // openat returned an owned descriptor.
-                let dir = unsafe { fs::File::from_raw_fd(fd) };
+                };
                 if !stat_file(&dir).is_ok_and(|stat| lock_identity(&stat) == self.identity) {
                     return;
                 }
@@ -1045,6 +1064,28 @@ pub fn unlock_file(file: &std::fs::File) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    fn in_restrictive_umask_subprocess(test_filter: &str, check: impl FnOnce()) {
+        if std::env::var_os("PRIME_LOCK_DIR_UMASK_CHILD").is_some() {
+            unsafe { libc::umask(0o477) };
+            check();
+            return;
+        }
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .arg(test_filter)
+            .arg("--test-threads=1")
+            .arg("--nocapture")
+            .env("PRIME_LOCK_DIR_UMASK_CHILD", "1")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "restricted-umask child failed:\n{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
 
     fn lock_of(file: &Path) -> PathBuf {
         LockDir::path_for(file)
@@ -1314,6 +1355,55 @@ mod tests {
         drop(guard);
         assert!(!lock_of(&file).exists());
         fs::set_permissions(&restricted, fs::Permissions::from_mode(0o700)).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn owned_lock_acquires_with_restrictive_umask() {
+        in_restrictive_umask_subprocess("owned_lock_acquires_with_restrictive_umask", || {
+            use std::os::unix::fs::PermissionsExt;
+
+            let root = tempfile::tempdir().unwrap();
+            let file = root.path().join("harness_state.json");
+            let guard = LockDir::acquire_owned_retrying(&file, MIN_STALE, 1, MIN_STALE).unwrap();
+            assert_eq!(
+                fs::metadata(&guard.path).unwrap().permissions().mode() & 0o777,
+                0o700
+            );
+            guard.ensure_owned().unwrap();
+            drop(guard);
+            assert!(!LockDir::path_for(&file).exists());
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn stale_lock_reclaims_with_restrictive_umask() {
+        in_restrictive_umask_subprocess("stale_lock_reclaims_with_restrictive_umask", || {
+            let root = tempfile::tempdir().unwrap();
+            let file = root.path().join("settings.json");
+            let lock = LockDir::path_for(&file);
+            fs::create_dir(&lock).unwrap();
+            set_mtime(&lock, 1, 0).unwrap();
+            let guard = LockDir::acquire(&file, MIN_STALE).unwrap();
+            drop(guard);
+            assert!(!lock.exists());
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn stale_lock_vanishing_before_open_allows_retry() {
+        let root = tempfile::tempdir().unwrap();
+        let file = root.path().join("settings.json");
+        let lock = LockDir::path_for(&file);
+        fs::create_dir(&lock).unwrap();
+        set_mtime(&lock, 1, 0).unwrap();
+        BEFORE_STALE_DIR_OPEN.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(move || fs::remove_dir(&lock).unwrap()));
+        });
+        let guard = LockDir::acquire(&file, MIN_STALE).unwrap();
+        drop(guard);
     }
 
     #[test]
