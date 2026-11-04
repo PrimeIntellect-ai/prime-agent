@@ -1,0 +1,1 @@
+- Kept full bash output spill files private to the current user.
