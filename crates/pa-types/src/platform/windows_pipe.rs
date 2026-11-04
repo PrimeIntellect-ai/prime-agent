@@ -272,14 +272,10 @@ mod tests {
         ] {
             let path = PathBuf::from(&name);
             let listener = bind_transport(&path).await.expect("private built-in bind");
-            let client_path = path.clone();
-            let client = tokio::spawn(async move {
-                connect_transport(&client_path)
-                    .await
-                    .expect("same-user built-in connect")
-            });
+            let client = connect_transport(&path)
+                .await
+                .expect("same-user built-in connect");
             let server = listener.accept().await.expect("built-in accept");
-            let client = client.await.expect("client task");
             let (mut client_read, mut client_write) = client.split();
             let (mut server_read, mut server_write) = server.split();
             server_write.write_all(b"ping").await.expect("server write");
