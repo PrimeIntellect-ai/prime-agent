@@ -30,17 +30,16 @@ fn paths_overlap(path: &Path, project: &Path) -> bool {
 }
 
 /// A session can start in a repository subdirectory. Treat every directory
-/// under the outermost checkout root as project controlled.
+/// under the nearest checkout root as project controlled.
 fn project_root(project: Option<&Path>) -> Option<PathBuf> {
     let project = project?.canonicalize().ok()?;
     Some(
         project
             .ancestors()
-            .filter(|ancestor| {
+            .find(|ancestor| {
                 let marker = ancestor.join(".git");
                 marker.is_file() || marker.join("HEAD").is_file()
             })
-            .last()
             .unwrap_or(&project)
             .to_path_buf(),
     )
@@ -454,6 +453,8 @@ mod tests {
         for dir in [&project, &sibling, &trusted] {
             std::fs::create_dir_all(dir).unwrap();
         }
+        std::fs::create_dir(root.path().join(".git")).unwrap();
+        std::fs::write(root.path().join(".git/HEAD"), "ref: refs/heads/main\n").unwrap();
         std::fs::create_dir(repo.join(".git")).unwrap();
         std::fs::write(repo.join(".git/HEAD"), "ref: refs/heads/main\n").unwrap();
         let mut env = HashMap::from([(

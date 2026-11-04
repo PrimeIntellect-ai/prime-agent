@@ -77,4 +77,28 @@ fn missing_home_reports_agent_directory_requirement_without_a_panic() {
         .output()
         .unwrap();
     assert!(help.status.success(), "help should not require a home");
+
+    for args in [["help", "package"], ["package", "--help"]] {
+        let help = Command::new(env!("CARGO_BIN_EXE_prime-agent"))
+            .args(args)
+            .env_remove("HOME")
+            .env_remove("PRIME_AGENT_CODING_AGENT_DIR")
+            .output()
+            .unwrap();
+        assert!(
+            help.status.success(),
+            "{args:?} should show help without a home: {}",
+            String::from_utf8_lossy(&help.stderr)
+        );
+    }
+
+    let package = Command::new(env!("CARGO_BIN_EXE_prime-agent"))
+        .args(["package", "list"])
+        .env_remove("HOME")
+        .env_remove("PRIME_AGENT_CODING_AGENT_DIR")
+        .output()
+        .unwrap();
+    assert_eq!(package.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&package.stderr)
+        .contains("HOME or PRIME_AGENT_CODING_AGENT_DIR is required"));
 }
