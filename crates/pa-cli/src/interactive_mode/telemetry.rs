@@ -253,6 +253,11 @@ impl pa_tui::interactive::InteractionTelemetry for CliInteractionTelemetry {
         Box::pin(std::future::ready(()))
     }
 
+    fn scrollback_flush_used(&self) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
+        self.count("tui_scrollback_flush_count");
+        Box::pin(std::future::ready(()))
+    }
+
     fn agents_view_action(
         &self,
         _action: &'static str,

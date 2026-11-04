@@ -251,6 +251,14 @@ pub fn settings_menu_rows(current: &SettingsCurrentValues) -> Vec<SettingsMenuRo
             submenu: None,
         },
         SettingsMenuRow {
+            id: "scrollback-flush",
+            label: "Scrollback flush",
+            description: "Append each settled turn's rows into the terminal's native scrollback",
+            current: current.scrollback_flush.to_string(),
+            values: Some(bool_value()),
+            submenu: None,
+        },
+        SettingsMenuRow {
             id: "idle-eviction-minutes",
             label: "Idle worker eviction",
             description: "Stop fully idle agent trees after this many minutes (global daemon policy)",
@@ -362,6 +370,7 @@ pub struct SettingsCurrentValues {
     pub autocomplete_max_visible: u64,
     pub clear_on_shrink: bool,
     pub terminal_progress: bool,
+    pub scrollback_flush: bool,
     pub idle_eviction_minutes: String,
     pub steering_mode: String,
     pub follow_up_mode: String,

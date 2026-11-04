@@ -362,6 +362,7 @@ pub(crate) struct SessionUi {
     /// Adoption telemetry (counted into `tui exit`); `None` drops events.
     pub(crate) telemetry: Option<std::sync::Arc<dyn crate::interactive::InteractionTelemetry>>,
     scroll_adoption_emitted: bool,
+    scrollback_flush_emitted: bool,
     pub(crate) exit_reason: &'static str,
     /// The §10 reattach contract: set when a `daemon_closing` update frame
     /// arrived; the interactive loop drives the reconnect from it.
