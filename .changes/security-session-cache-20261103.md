@@ -1,0 +1,1 @@
+- Saved session window cache files with owner-only permissions.

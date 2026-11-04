@@ -429,6 +429,19 @@ pub fn infer_refinement_result_scope(result: &RefinementResult) -> Option<Harnes
     (scopes.len() == 1).then(|| scopes[0])
 }
 
+/// Resolve the symlink that was rejected by `O_NOFOLLOW`. If the path was
+/// replaced by a regular file meanwhile, `read_link` fails instead of opening
+/// that file without the ordinary permission check.
+#[cfg(unix)]
+fn linked_history_target(path: &Path) -> std::io::Result<PathBuf> {
+    let target = std::fs::read_link(path)?;
+    Ok(if target.is_absolute() {
+        target
+    } else {
+        path.parent().unwrap_or_else(|| Path::new(".")).join(target)
+    })
+}
+
 /// Append a refinement to the global history log (JSONL).
 ///
 /// # Errors
@@ -444,19 +457,77 @@ pub fn append_global_refinement(
     let history_path = get_refinement_history_path(harness_state_dir);
     let mut line = serde_json::to_string(result)?;
     line.push('\n');
-    let mut file = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&history_path)?;
+    let mut options = std::fs::OpenOptions::new();
+    options.create(true).append(true);
+    crate::platform::perms::set_private_mode(&mut options);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW);
+    }
+    let (mut file, linked) = match options.open(&history_path) {
+        Ok(file) => (file, false),
+        #[cfg(unix)]
+        Err(error) if error.raw_os_error() == Some(libc::ELOOP) => {
+            // Keep user-created links to shared history working, but do not
+            // change the target's deliberately chosen permissions.
+            let target = linked_history_target(&history_path)?;
+            let mut linked_options = std::fs::OpenOptions::new();
+            linked_options.create(true).append(true);
+            crate::platform::perms::set_private_mode(&mut linked_options);
+            (linked_options.open(target)?, true)
+        }
+        Err(error) => return Err(error.into()),
+    };
+    if !linked {
+        // Tighten legacy history files before appending more private data.
+        crate::platform::perms::restrict_open_file(&file)?;
+    }
     file.write_all(line.as_bytes())?;
     Ok(history_path)
+}
+
+fn read_refinement_history(path: &Path) -> Option<String> {
+    use std::io::Read;
+
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW);
+    }
+    let opened = options.open(path);
+    #[cfg(unix)]
+    let opened = match opened {
+        Err(error) if error.raw_os_error() == Some(libc::ELOOP) => {
+            // User-linked shared history keeps its existing permission policy.
+            return std::fs::read_to_string(linked_history_target(path).ok()?).ok();
+        }
+        other => other,
+    };
+    let mut file = opened.ok()?;
+    let metadata = file.metadata().ok()?;
+    if !metadata.is_file() {
+        return None;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if metadata.permissions().mode() & 0o077 != 0 {
+            crate::platform::perms::restrict_open_file(&file).ok()?;
+        }
+    }
+    let mut content = String::new();
+    file.read_to_string(&mut content).ok()?;
+    Some(content)
 }
 
 /// Load the global refinement history; malformed lines are skipped.
 #[must_use]
 pub fn load_global_refinement_history(harness_state_dir: &Path) -> Vec<RefinementResult> {
     let history_path = get_refinement_history_path(harness_state_dir);
-    let Ok(content) = std::fs::read_to_string(&history_path) else {
+    let Some(content) = read_refinement_history(&history_path) else {
         return Vec::new();
     };
     let mut results = Vec::new();
@@ -815,6 +886,11 @@ mod tests {
             scope: None,
         };
         append_global_refinement(&dir, &result).unwrap();
+        #[cfg(unix)]
+        assert_eq!(
+            crate::platform::perms::file_mode(&get_refinement_history_path(&dir)),
+            Some(0o600)
+        );
         let loaded = load_global_refinement_history(&dir);
         assert_eq!(loaded.len(), 1);
         assert_eq!(loaded[0].scope, Some(HarnessScope::Global));
@@ -825,6 +901,143 @@ mod tests {
         assert_eq!(merged.len(), 1);
         assert_eq!(merged[0].summary, "session version");
         assert_eq!(merged[0].scope, Some(HarnessScope::Global));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn history_append_tightens_an_existing_loose_file() {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = get_global_harness_state_dir(tmp.path());
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = get_refinement_history_path(&dir);
+        let result = RefinementResult {
+            id: "r1".into(),
+            summary: "private project detail".into(),
+            rationale: "private rationale".into(),
+            expected_outcome: String::new(),
+            applied_edits: Vec::new(),
+            harness_state_path: get_harness_state_path(&dir).display().to_string(),
+            rollback_of: None,
+            scope: None,
+        };
+        std::fs::write(
+            &path,
+            format!("{}\n", serde_json::to_string(&result).unwrap()),
+        )
+        .unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o664)).unwrap();
+        let inode = std::fs::metadata(&path).unwrap().ino();
+
+        append_global_refinement(&dir, &result).unwrap();
+
+        assert_eq!(crate::platform::perms::file_mode(&path), Some(0o600));
+        assert_eq!(std::fs::metadata(&path).unwrap().ino(), inode);
+        assert_eq!(load_global_refinement_history(&dir).len(), 2);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn history_load_tightens_an_existing_loose_file() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = get_global_harness_state_dir(tmp.path());
+        let result = RefinementResult {
+            id: "legacy".into(),
+            summary: "private project detail".into(),
+            rationale: "private rationale".into(),
+            expected_outcome: String::new(),
+            applied_edits: Vec::new(),
+            harness_state_path: get_harness_state_path(&dir).display().to_string(),
+            rollback_of: None,
+            scope: None,
+        };
+        let path = append_global_refinement(&dir, &result).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o664)).unwrap();
+
+        assert_eq!(load_global_refinement_history(&dir).len(), 1);
+        assert_eq!(crate::platform::perms::file_mode(&path), Some(0o600));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn history_load_does_not_chmod_a_directory() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let path = get_refinement_history_path(tmp.path());
+        std::fs::create_dir(&path).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let loaded = read_refinement_history(&path);
+        let mode = crate::platform::perms::file_mode(&path);
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(loaded.is_none());
+        assert_eq!(mode, Some(0o755));
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn history_load_rejects_an_unrestrictable_file() {
+        let path = Path::new("/proc/version");
+        let file = std::fs::File::open(path).unwrap();
+        assert!(crate::platform::perms::restrict_open_file(&file).is_err());
+        assert!(read_refinement_history(path).is_none());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn linked_history_fallback_rejects_a_swapped_regular_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("history.jsonl");
+        std::fs::write(&path, "original\n").unwrap();
+
+        // Simulate a symlink being replaced after O_NOFOLLOW returned ELOOP.
+        assert!(linked_history_target(&path).is_err());
+        assert_eq!(std::fs::read_to_string(path).unwrap(), "original\n");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn history_append_preserves_a_deliberately_linked_file() {
+        use std::os::unix::fs::{symlink, PermissionsExt};
+
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = get_global_harness_state_dir(tmp.path());
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = get_refinement_history_path(&dir);
+        let shared = tmp.path().join("shared-history.jsonl");
+        std::fs::write(&shared, "").unwrap();
+        std::fs::set_permissions(&shared, std::fs::Permissions::from_mode(0o664)).unwrap();
+        symlink(&shared, &path).unwrap();
+        let result = RefinementResult {
+            id: "shared".into(),
+            summary: "shared history".into(),
+            rationale: String::new(),
+            expected_outcome: String::new(),
+            applied_edits: Vec::new(),
+            harness_state_path: get_harness_state_path(&dir).display().to_string(),
+            rollback_of: None,
+            scope: None,
+        };
+
+        append_global_refinement(&dir, &result).unwrap();
+
+        assert!(std::fs::symlink_metadata(&path)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert_eq!(crate::platform::perms::file_mode(&shared), Some(0o664));
+        assert_eq!(load_global_refinement_history(&dir).len(), 1);
+        assert_eq!(crate::platform::perms::file_mode(&shared), Some(0o664));
+
+        std::fs::remove_file(&path).unwrap();
+        symlink("../shared-history.jsonl", &path).unwrap();
+        append_global_refinement(&dir, &result).unwrap();
+        assert_eq!(load_global_refinement_history(&dir).len(), 2);
+        assert_eq!(crate::platform::perms::file_mode(&shared), Some(0o664));
     }
 
     #[test]
