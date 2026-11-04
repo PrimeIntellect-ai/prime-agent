@@ -50,27 +50,6 @@ pub struct ReqwestTraceHttp;
 
 const MAX_TRACE_RESPONSE_BYTES: usize = 1024 * 1024;
 
-async fn read_trace_response_body(
-    mut response: reqwest::Response,
-) -> Result<String, TraceHttpError> {
-    let mut bytes = Vec::new();
-    while let Some(chunk) = response
-        .chunk()
-        .await
-        .map_err(|error| TraceHttpError::Transport(error.to_string()))?
-    {
-        if chunk.len() > MAX_TRACE_RESPONSE_BYTES - bytes.len() {
-            return Err(TraceHttpError::Transport(format!(
-                "Trace upload response exceeds {MAX_TRACE_RESPONSE_BYTES} bytes"
-            )));
-        }
-        bytes.extend_from_slice(&chunk);
-    }
-    // Reqwest's text() uses this lossy UTF-8 decoding without its charset
-    // feature, which is disabled throughout this workspace.
-    Ok(String::from_utf8_lossy(&bytes).into_owned())
-}
-
 impl TraceHttp for ReqwestTraceHttp {
     fn put<'a>(
         &'a self,
@@ -90,7 +69,7 @@ impl TraceHttp for ReqwestTraceHttp {
                 request = request.header(name, value);
             }
             let send = async {
-                let response = request.send().await.map_err(|error| {
+                let mut response = request.send().await.map_err(|error| {
                     if error.is_timeout() {
                         TraceHttpError::TimedOut { timeout_ms }
                     } else {
@@ -103,7 +82,22 @@ impl TraceHttp for ReqwestTraceHttp {
                     .get("retry-after")
                     .and_then(|value| value.to_str().ok())
                     .map(str::to_string);
-                let body = read_trace_response_body(response).await?;
+                let mut bytes = Vec::new();
+                while let Some(chunk) = response
+                    .chunk()
+                    .await
+                    .map_err(|error| TraceHttpError::Transport(error.to_string()))?
+                {
+                    if chunk.len() > MAX_TRACE_RESPONSE_BYTES - bytes.len() {
+                        return Err(TraceHttpError::Transport(format!(
+                            "Trace upload response exceeds {MAX_TRACE_RESPONSE_BYTES} bytes"
+                        )));
+                    }
+                    bytes.extend_from_slice(&chunk);
+                }
+                // Reqwest's text() uses this lossy UTF-8 decoding without its
+                // charset feature, which is disabled throughout this workspace.
+                let body = String::from_utf8_lossy(&bytes).into_owned();
                 Ok(TraceHttpResponse {
                     status,
                     body,

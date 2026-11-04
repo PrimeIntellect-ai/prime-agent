@@ -53,7 +53,15 @@ mod tests {
     use super::*;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-    async fn oversized_stalled_catalog(chunked: bool) -> (String, tokio::task::JoinHandle<()>) {
+    #[derive(Clone, Copy)]
+    enum ResponseFraming {
+        ContentLength,
+        Chunked,
+    }
+
+    async fn oversized_stalled_catalog(
+        framing: ResponseFraming,
+    ) -> (String, tokio::task::JoinHandle<()>) {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let base = format!("http://{}", listener.local_addr().unwrap());
         let server = tokio::spawn(async move {
@@ -61,7 +69,7 @@ mod tests {
             let mut request = [0u8; 4096];
             assert!(socket.read(&mut request).await.unwrap() > 0);
             let body = vec![b'x'; MAX_RESPONSE_BYTES + 1];
-            let headers = if chunked {
+            let headers = if matches!(framing, ResponseFraming::Chunked) {
                 "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n"
                     .to_string()
             } else {
@@ -71,14 +79,14 @@ mod tests {
                 )
             };
             socket.write_all(headers.as_bytes()).await.unwrap();
-            if chunked {
+            if matches!(framing, ResponseFraming::Chunked) {
                 socket
                     .write_all(format!("{:x}\r\n", body.len()).as_bytes())
                     .await
                     .unwrap();
             }
             socket.write_all(&body).await.unwrap();
-            if chunked {
+            if matches!(framing, ResponseFraming::Chunked) {
                 socket.write_all(b"\r\n").await.unwrap();
             }
             tokio::time::sleep(std::time::Duration::from_secs(5)).await;
@@ -88,10 +96,10 @@ mod tests {
 
     #[tokio::test]
     async fn catalog_rejects_oversized_length_response_before_peer_finishes() {
-        let (base, server) = oversized_stalled_catalog(false).await;
+        let (base, server) = oversized_stalled_catalog(ResponseFraming::ContentLength).await;
         let result = tokio::time::timeout(
             std::time::Duration::from_secs(2),
-            fetch_prime_inference_model_catalog(&base, None, 30_000),
+            fetch_prime_inference_model_catalog(&base, /*headers*/ None, 30_000),
         )
         .await
         .expect("oversized catalog should fail before the peer closes");
@@ -101,10 +109,10 @@ mod tests {
 
     #[tokio::test]
     async fn catalog_rejects_oversized_chunked_response_before_peer_finishes() {
-        let (base, server) = oversized_stalled_catalog(true).await;
+        let (base, server) = oversized_stalled_catalog(ResponseFraming::Chunked).await;
         let result = tokio::time::timeout(
             std::time::Duration::from_secs(2),
-            fetch_prime_inference_model_catalog(&base, None, 30_000),
+            fetch_prime_inference_model_catalog(&base, /*headers*/ None, 30_000),
         )
         .await
         .expect("oversized catalog should fail before the peer closes");
@@ -127,7 +135,7 @@ mod tests {
                 .await
                 .unwrap();
         });
-        let payload = fetch_prime_inference_model_catalog(&base, None, 30_000)
+        let payload = fetch_prime_inference_model_catalog(&base, /*headers*/ None, 30_000)
             .await
             .unwrap();
         server.await.unwrap();
