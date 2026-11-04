@@ -107,6 +107,16 @@ pub struct ImageContent {
     pub mime_type: String,
 }
 
+/// Base64-encoded video content block.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct VideoContent {
+    /// Base64 encoded video data.
+    pub data: String,
+    /// e.g. "video/mp4", "video/webm".
+    #[serde(rename = "mimeType")]
+    pub mime_type: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "camelCase")]
 pub enum AssistantContent {
@@ -312,6 +322,7 @@ pub struct ToolResultMessage {
 pub enum ToolResultContent {
     Text(TextContent),
     Image(ImageContent),
+    Video(VideoContent),
 }
 
 impl ToolResultContent {

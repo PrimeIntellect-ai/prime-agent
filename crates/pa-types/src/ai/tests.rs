@@ -108,6 +108,20 @@ fn user_message_content_string_or_blocks() {
 }
 
 #[test]
+fn video_block_is_modeled_and_roundtrips() {
+    let json = r#"{"type":"video","data":"QQ==","mimeType":"video/mp4"}"#;
+    assert_roundtrip::<UserContentBlock>(json);
+    assert_eq!(
+        serde_json::from_str::<UserContentBlock>(json).unwrap(),
+        UserContentBlock::Video(VideoContent {
+            data: "QQ==".to_string(),
+            mime_type: "video/mp4".to_string(),
+            rest: JsonMap::default(),
+        })
+    );
+}
+
+#[test]
 fn assistant_message_roundtrip_and_unknown_fields() {
     assert_roundtrip::<Message>(
         r#"{"role":"assistant","content":[{"type":"thinking","thinking":"t","thinkingSignature":"r","redacted":false},{"type":"toolCall","id":"1","name":"bash","arguments":{"code":"ls"},"thoughtSignature":"g"},{"type":"text","text":"done","textSignature":"{\"v\":1,\"id\":\"x\"}"}],"api":"openai-completions","provider":"p","model":"m","responseModel":"m2","responseId":"rid","usage":{"input":1,"output":2,"cacheRead":3,"cacheWrite":4,"totalTokens":10,"cost":{"input":0.5,"output":0.25,"cacheRead":0,"cacheWrite":0,"total":0.75}},"stopReason":"toolUse","stopReasonRaw":"stop_sequence","timestamp":9,"future":"kept"}"#,

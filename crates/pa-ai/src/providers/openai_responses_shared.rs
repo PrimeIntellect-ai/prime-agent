@@ -181,6 +181,10 @@ pub fn convert_responses_messages(
                                 "detail": "auto",
                                 "image_url": format!("data:{mime_type};base64,{data}"),
                             }),
+                            crate::types::UserBlockPayload::Video { .. } => json!({
+                                "type": "input_text",
+                                "text": crate::types::UNSUPPORTED_VIDEO_PLACEHOLDER,
+                            }),
                             crate::types::UserBlockPayload::Opaque(json) => json!({
                                 "type": "input_text",
                                 "text": sanitize_surrogates(&json),

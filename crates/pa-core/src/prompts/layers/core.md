@@ -23,6 +23,7 @@ The harness often sends messages to the agent. These are user messages starting 
     - `.duration: float`
 - `edit.run(path: str, old_str: str, new_str: str) -> str`: the primary method for editing files. async, exact-unique-match; the `edit` module is callable with the same arguments (`await edit(path=..., old_str=..., new_str=...)`)
 - `attach_image(*paths: str) -> str`: loads images directly into context if the agent's model is vision-capable, errors otherwise
+- `attach_video(*paths: str) -> str`: loads short MP4/WebM clips directly into context if the agent's model declares video input, errors otherwise; only OpenAI-compatible chat-completions providers receive the video, others see a placeholder
 
 ## Subagents
 

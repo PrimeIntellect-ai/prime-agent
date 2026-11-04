@@ -265,6 +265,7 @@ fn model_inputs(values: Option<&Vec<String>>) -> Vec<ModelInput> {
                 .iter()
                 .map(|item| match item.as_str() {
                     "image" => ModelInput::Image,
+                    "video" => ModelInput::Video,
                     _ => ModelInput::Text,
                 })
                 .collect()
@@ -552,6 +553,25 @@ mod tests {
         let model = &result.models[0];
         assert_eq!(model.max_tokens, 131_072);
         assert!(model.max_tokens_explicit);
+    }
+
+    #[test]
+    fn a_custom_model_declares_video_input() {
+        let result = load_custom_models(
+            r#"{ "providers": { "intercept": {
+                "baseUrl": "http://localhost:8000/v1",
+                "apiKey": "none",
+                "api": "openai-completions",
+                "models": [ { "id": "qwen", "input": ["text", "image", "video"] } ]
+            } } }"#,
+            &|_| false,
+            &|_| None,
+        );
+        assert!(result.error.is_none());
+        assert_eq!(
+            result.models[0].input,
+            vec![ModelInput::Text, ModelInput::Image, ModelInput::Video]
+        );
     }
 
     /// A custom model that omits `maxTokens` defaults to 16384 and stays

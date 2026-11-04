@@ -266,9 +266,9 @@ fn tool_result_text(content: &[pa_types::ai::UserContentBlock]) -> String {
         .iter()
         .map(|block| match block {
             pa_types::ai::UserContentBlock::Text(text) => text.text.clone(),
-            pa_types::ai::UserContentBlock::Image(_) | pa_types::ai::UserContentBlock::Raw(_) => {
-                String::new()
-            }
+            pa_types::ai::UserContentBlock::Image(_)
+            | pa_types::ai::UserContentBlock::Video(_)
+            | pa_types::ai::UserContentBlock::Raw(_) => String::new(),
         })
         .collect::<Vec<_>>()
         .join("\n")

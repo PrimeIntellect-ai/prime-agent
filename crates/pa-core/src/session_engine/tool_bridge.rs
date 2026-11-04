@@ -41,6 +41,9 @@ fn convert_content_blocks(
             crate::tools::tool_definition::ToolContentBlock::Image { data, mime_type } => {
                 ToolResultContent::Image(pa_agent::types::ImageContent { data, mime_type })
             }
+            crate::tools::tool_definition::ToolContentBlock::Video { data, mime_type } => {
+                ToolResultContent::Video(pa_agent::types::VideoContent { data, mime_type })
+            }
         })
         .collect()
 }
