@@ -75,7 +75,7 @@ impl AgentSessionEngine {
         pending_model_changes: &std::sync::Arc<
             std::sync::Mutex<Vec<pa_types::session::ModelChangeEntry>>,
         >,
-        aborted: &dyn Fn() -> bool,
+        cancel_requested: &dyn Fn() -> bool,
         emit: &mut dyn FnMut(EngineEvent) -> bool,
     ) -> anyhow::Result<TurnOnce> {
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<EngineEvent>();
@@ -87,8 +87,12 @@ impl AgentSessionEngine {
         // item's first run; this subscription forwards them only once a
         // boundary frame already passed.
         let boundary_passed = std::sync::Arc::clone(boundary_passed);
+        // Fires once the agent run is registered, so the forwarding loop can
+        // re-consult the cancel flag.
+        let run_registered = std::sync::Arc::new(tokio::sync::Notify::new());
         let subscription = {
             let tx = tx.clone();
+            let run_registered = std::sync::Arc::clone(&run_registered);
             let pending_model_changes = pending_model_changes.clone();
             let boundary_passed = std::sync::Arc::clone(&boundary_passed);
             let autonomous_state = std::sync::Arc::clone(&self.autonomous);
@@ -101,6 +105,7 @@ impl AgentSessionEngine {
             agent
                 .subscribe(move |event, _signal| {
                     let tx = tx.clone();
+                    let run_registered = std::sync::Arc::clone(&run_registered);
                     let pending_model_changes = pending_model_changes.clone();
                     let boundary_passed = std::sync::Arc::clone(&boundary_passed);
                     let autonomous_state = std::sync::Arc::clone(&autonomous_state);
@@ -251,6 +256,7 @@ impl AgentSessionEngine {
                                 }
                             }
                             AgentEvent::AgentStart => {
+                                run_registered.notify_one();
                                 if boundary_passed.load(std::sync::atomic::Ordering::SeqCst) {
                                     let _ = tx.send(EngineEvent::AgentStart);
                                 }
@@ -329,12 +335,13 @@ impl AgentSessionEngine {
         // hands each streamed event to `emit` the moment it arrives (buffering
         // made clients render a turn as one final batch).
         let prompt = prompt.clone();
-        // The same admission consult as [`Self::run_model_turn`]'s, at the
-        // admission future's head: the whole [pickup, registration] window
-        // honours the delivery's cancel flag.
+        // The delivery's cancel flag is consulted twice: at the admission
+        // future's head (covers [pickup, admission]) and once the run registers
+        // (its `AgentStart`, below), because `Agent::abort` is a no-op before
+        // registration.
         let abort_raced_admission = std::sync::atomic::AtomicBool::new(false);
         let mut admitted = std::pin::pin!(async {
-            if aborted() {
+            if cancel_requested() {
                 abort_raced_admission.store(true, std::sync::atomic::Ordering::SeqCst);
                 return Ok(());
             }
@@ -394,8 +401,16 @@ impl AgentSessionEngine {
         let mut aborted = false;
         let mut admission_error: Option<anyhow::Error> = None;
         let mut settled = false;
+        let mut registration_consulted = false;
         loop {
             tokio::select! {
+                // The registration consult (see the admission comment above).
+                () = run_registered.notified(), if !registration_consulted => {
+                    registration_consulted = true;
+                    if cancel_requested() {
+                        aborted = true;
+                    }
+                }
                 event = rx.recv() => {
                     match event {
                         Some(event) => {
