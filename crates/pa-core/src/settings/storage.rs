@@ -14,8 +14,8 @@ use std::path::Component;
 
 #[cfg(unix)]
 use crate::platform::fs::{
-    self as platform_fs, open_readable_directory_at, open_search_absolute_directory,
-    open_search_directory_at, DirectoryCreation,
+    self as platform_fs, open_readable_directory_at, open_regular_file_at,
+    open_search_absolute_directory, open_search_directory_at, DirectoryCreation,
 };
 
 pub const CONFIG_DIR_NAME: &str = ".prime/agent";
@@ -254,17 +254,41 @@ impl FileSettingsStorage {
         if scope == SettingsScope::Global {
             return Ok(fs::read_to_string(path)?);
         }
+        #[cfg(unix)]
+        let mut file = {
+            // The locked path is the resolved in-project target, including for
+            // an intentional in-project settings symlink. Hold its parent and
+            // open only its final regular basename from that directory.
+            let parent = self
+                .project_parent_anchor(locked_path, DirectoryCreation::ExistingOnly)?
+                .ok_or_else(|| anyhow!("Project settings directory is missing"))?;
+            let name = locked_path
+                .file_name()
+                .ok_or_else(|| anyhow!("Project settings path has no file name"))?;
+            #[cfg(test)]
+            project_read_step(ProjectReadStep::BeforeOpen);
+            open_regular_file_at(&parent, name)?
+        };
+        #[cfg(not(unix))]
         let mut file = fs::File::open(path)?;
-        // Verify the file actually opened, not only the path checked before
-        // open: a swapped symlink cannot make an outside file pass the check.
         let opened = file.metadata()?;
         if is_multiply_linked(&opened) {
             bail!("Project settings file has multiple hard links");
         }
+        #[cfg(all(test, unix))]
+        // Preserve the pre-fix path-check interleavings in the race test.
+        project_read_step(ProjectReadStep::BeforeContainmentCheck);
+        #[cfg(not(unix))]
         self.check_locked_project_path(path, locked_path)?;
-        let checked = fs::metadata(locked_path)?;
-        if stat_identity(&opened).is_none() || stat_identity(&opened) != stat_identity(&checked) {
-            bail!("Project settings path changed while reading");
+        #[cfg(all(test, unix))]
+        project_read_step(ProjectReadStep::BeforeMetadataCheck);
+        #[cfg(not(unix))]
+        {
+            let checked = fs::metadata(locked_path)?;
+            if stat_identity(&opened).is_none() || stat_identity(&opened) != stat_identity(&checked)
+            {
+                bail!("Project settings path changed while reading");
+            }
         }
         let mut content = String::new();
         file.read_to_string(&mut content)?;
@@ -541,6 +565,25 @@ thread_local! {
     static OPT_IN_FSYNC: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     #[cfg(unix)]
     static BEFORE_PROJECT_WRITE: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
+    #[cfg(unix)]
+    static PROJECT_READ_STEP: std::cell::RefCell<Option<Box<dyn FnMut(ProjectReadStep)>>> = const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(all(test, unix))]
+#[derive(Clone, Copy)]
+enum ProjectReadStep {
+    BeforeOpen,
+    BeforeContainmentCheck,
+    BeforeMetadataCheck,
+}
+
+#[cfg(all(test, unix))]
+fn project_read_step(step: ProjectReadStep) {
+    PROJECT_READ_STEP.with(|hook| {
+        if let Some(callback) = hook.borrow_mut().as_mut() {
+            callback(step);
+        }
+    });
 }
 
 /// The per-thread count of opt-in fsync branches taken by [`atomic_write_with`] (test-only).
@@ -717,6 +760,57 @@ mod tests {
 
         assert!(result.is_err());
         assert!(!external.join(".prime").exists());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn project_settings_read_stays_on_the_validated_directory() {
+        use std::os::unix::fs::symlink;
+
+        let root = tempfile::tempdir().unwrap();
+        let project = root.path().join("project");
+        let settings_dir = project.join(".prime/agent");
+        let moved = project.join(".prime/agent-moved");
+        let external = root.path().join("external");
+        fs::create_dir_all(&settings_dir).unwrap();
+        fs::create_dir_all(&external).unwrap();
+        fs::write(settings_dir.join("settings.json"), "project settings").unwrap();
+        fs::write(external.join("settings.json"), "outside secret").unwrap();
+        let storage = FileSettingsStorage::new(&project, root.path().join("agent"));
+
+        let target = settings_dir.clone();
+        let moved_for_swap = moved.clone();
+        let outside = external.clone();
+        PROJECT_READ_STEP.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(move |step| match step {
+                ProjectReadStep::BeforeOpen | ProjectReadStep::BeforeMetadataCheck => {
+                    fs::rename(&target, &moved_for_swap).unwrap();
+                    symlink(&outside, &target).unwrap();
+                }
+                ProjectReadStep::BeforeContainmentCheck => {
+                    fs::remove_file(&target).unwrap();
+                    fs::rename(&moved_for_swap, &target).unwrap();
+                }
+            }));
+        });
+        let result = storage.read(SettingsScope::Project);
+        PROJECT_READ_STEP.with(|hook| *hook.borrow_mut() = None);
+        if fs::symlink_metadata(&settings_dir)
+            .is_ok_and(|metadata| metadata.file_type().is_symlink())
+        {
+            fs::remove_file(&settings_dir).unwrap();
+            fs::rename(&moved, &settings_dir).unwrap();
+        }
+
+        assert_eq!(result.unwrap().as_deref(), Some("project settings"));
+        assert_eq!(
+            fs::read_to_string(settings_dir.join("settings.json")).unwrap(),
+            "project settings"
+        );
+        assert_eq!(
+            fs::read_to_string(external.join("settings.json")).unwrap(),
+            "outside secret"
+        );
     }
 
     #[test]

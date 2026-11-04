@@ -137,6 +137,30 @@ pub(crate) fn open_readable_directory_at(parent: &File) -> io::Result<File> {
     Ok(unsafe { File::from_raw_fd(fd) })
 }
 
+/// Open a regular file relative to a held directory without following a new link.
+#[cfg(unix)]
+pub(crate) fn open_regular_file_at(parent: &File, name: &OsStr) -> io::Result<File> {
+    let name = CString::new(name.as_bytes())?;
+    let fd = unsafe {
+        libc::openat(
+            parent.as_raw_fd(),
+            name.as_ptr(),
+            libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC,
+        )
+    };
+    if fd < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let file = unsafe { File::from_raw_fd(fd) };
+    if !file.metadata()?.is_file() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "Project settings target is not a regular file",
+        ));
+    }
+    Ok(file)
+}
+
 /// Write, rename, and sync a private settings file beneath one held directory.
 #[cfg(unix)]
 pub(crate) fn atomic_write_private_at(
