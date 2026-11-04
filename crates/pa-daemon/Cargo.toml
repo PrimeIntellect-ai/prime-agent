@@ -20,6 +20,7 @@ thiserror = { workspace = true }
 tokio = { workspace = true }
 tokio-util = "0.7"
 sha2 = "0.10"
+libc = "0.2"
 uuid = { version = "1", features = ["v4", "v7"] }
 
 [target.'cfg(unix)'.dependencies]

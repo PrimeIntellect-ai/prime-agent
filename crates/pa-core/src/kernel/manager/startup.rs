@@ -75,9 +75,30 @@ impl Inner {
             let parent = path
                 .parent()
                 .context("managed kernel stderr log has no parent")?;
-            // Session artifacts have always been created owner-only.
-            crate::platform::perms::create_dir_all_private(parent)?;
-            let dir = crate::platform::log_files::LogDir::for_write(parent)?;
+            let artifact_root = parent
+                .parent()
+                .context("managed kernel stderr log has no artifact root")?;
+            // The provisioner's session layout is
+            // `<session-root>/session-artifacts/<id>`. Accept an explicitly
+            // linked session root, then never follow its managed descendants.
+            let trusted_root =
+                if artifact_root.file_name() == Some(std::ffi::OsStr::new("session-artifacts")) {
+                    artifact_root
+                        .parent()
+                        .context("managed kernel stderr log has no session root")?
+                } else {
+                    artifact_root
+                };
+            let trusted_root = if trusted_root.as_os_str().is_empty() {
+                std::path::Path::new(".")
+            } else {
+                trusted_root
+            };
+            let dir = crate::platform::log_files::LogDir::for_write(
+                parent,
+                trusted_root,
+                crate::platform::log_files::DirectoryMode::OwnerOnly,
+            )?;
             let name = path
                 .file_name()
                 .context("managed kernel stderr log has no filename")?;
@@ -760,6 +781,69 @@ mod tests {
             .is_err());
         assert_eq!(std::fs::read(&victim).unwrap(), b"shared collector\n");
         assert_eq!(crate::platform::perms::file_mode(&victim), Some(0o644));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn default_session_stderr_log_rejects_a_linked_artifacts_ancestor_before_creation() {
+        use std::os::unix::fs::{symlink, PermissionsExt};
+
+        let root = tempfile::tempdir().unwrap();
+        let agent = root.path().join("agent");
+        std::fs::create_dir(&agent).unwrap();
+        let outside = root.path().join("outside");
+        std::fs::create_dir(&outside).unwrap();
+        std::fs::set_permissions(&outside, std::fs::Permissions::from_mode(0o755)).unwrap();
+        symlink(&outside, agent.join("session-artifacts")).unwrap();
+        let path = agent
+            .join("session-artifacts")
+            .join("session-id")
+            .join("kernel-stderr.log");
+
+        assert!(session_manager(&path)
+            .inner
+            .open_stderr_log_at(&path)
+            .is_err());
+        assert!(!outside.join("session-id").exists());
+        assert_eq!(
+            std::fs::metadata(&outside).unwrap().permissions().mode() & 0o777,
+            0o755
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn default_session_stderr_log_allows_a_linked_agent_root() {
+        use std::os::unix::fs::symlink;
+
+        let root = tempfile::tempdir().unwrap();
+        let real_agent = root.path().join("real-agent");
+        std::fs::create_dir(&real_agent).unwrap();
+        let linked_agent = root.path().join("agent");
+        symlink(&real_agent, &linked_agent).unwrap();
+        let path = linked_agent
+            .join("session-artifacts")
+            .join("session-id")
+            .join("kernel-stderr.log");
+
+        let log = session_manager(&path)
+            .inner
+            .open_stderr_log_at(&path)
+            .unwrap();
+        log.lock()
+            .unwrap()
+            .file
+            .write_all(b"kernel stderr")
+            .unwrap();
+        assert_eq!(
+            std::fs::read(real_agent.join("session-artifacts/session-id/kernel-stderr.log"))
+                .unwrap(),
+            b"kernel stderr"
+        );
+        assert!(std::fs::symlink_metadata(&linked_agent)
+            .unwrap()
+            .file_type()
+            .is_symlink());
     }
 
     #[test]

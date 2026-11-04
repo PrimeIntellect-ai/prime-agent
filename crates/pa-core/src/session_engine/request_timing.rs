@@ -102,7 +102,15 @@ impl RequestTimingLog {
         use std::io::Write;
         let append = || -> std::io::Result<()> {
             let parent = self.path.parent().unwrap_or_else(|| Path::new("."));
-            let dir = crate::platform::log_files::LogDir::for_write(parent)?;
+            let trusted_root = parent
+                .parent()
+                .filter(|root| !root.as_os_str().is_empty())
+                .unwrap_or_else(|| Path::new("."));
+            let dir = crate::platform::log_files::LogDir::for_write(
+                parent,
+                trusted_root,
+                crate::platform::log_files::DirectoryMode::Inherited,
+            )?;
             let name = self.path.file_name().ok_or_else(|| {
                 std::io::Error::new(
                     std::io::ErrorKind::InvalidInput,

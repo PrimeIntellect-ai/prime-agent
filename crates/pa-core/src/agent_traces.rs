@@ -686,7 +686,15 @@ fn append_rotating_log(log_path: &Path, message: &str) {
     let write = || -> std::io::Result<()> {
         use std::io::Write;
         let parent = log_path.parent().unwrap_or(Path::new(""));
-        let dir = crate::platform::log_files::LogDir::for_write(parent)?;
+        let trusted_root = parent
+            .parent()
+            .filter(|root| !root.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        let dir = crate::platform::log_files::LogDir::for_write(
+            parent,
+            trusted_root,
+            crate::platform::log_files::DirectoryMode::Inherited,
+        )?;
         let name = log_path.file_name().ok_or_else(|| {
             std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,

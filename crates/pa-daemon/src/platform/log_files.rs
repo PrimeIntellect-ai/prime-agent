@@ -5,11 +5,24 @@ use std::fs::{self, File};
 use std::io;
 use std::path::Path;
 
+#[cfg(all(test, unix))]
+thread_local! {
+    static BEFORE_LOGS_DIRECTORY_CREATE: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum OpenMode {
     Read,
     Append,
     Write,
+}
+
+#[cfg(unix)]
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum DirectoryCreation {
+    ExistingOnly,
+    CreateMissing,
 }
 
 pub(crate) struct LogDir {
@@ -21,8 +34,15 @@ pub(crate) struct LogDir {
 
 impl LogDir {
     pub(crate) fn for_write(path: &Path) -> io::Result<Self> {
-        fs::create_dir_all(path)?;
-        Self::for_read(path)
+        #[cfg(unix)]
+        {
+            Self::open_from_root(path, DirectoryCreation::CreateMissing)
+        }
+        #[cfg(not(unix))]
+        {
+            fs::create_dir_all(path)?;
+            Self::for_read(path)
+        }
     }
 
     pub(crate) fn restrict(&self) -> io::Result<()> {
@@ -39,11 +59,7 @@ impl LogDir {
     pub(crate) fn for_read(path: &Path) -> io::Result<Self> {
         #[cfg(unix)]
         {
-            use rustix::fs::{openat, Mode, OFlags, CWD};
-
-            let flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
-            let fd = openat(CWD, path, flags, Mode::empty())?;
-            Ok(Self { fd: File::from(fd) })
+            Self::open_from_root(path, DirectoryCreation::ExistingOnly)
         }
         #[cfg(not(unix))]
         {
@@ -52,6 +68,62 @@ impl LogDir {
                 path: path.to_path_buf(),
             })
         }
+    }
+
+    #[cfg(unix)]
+    fn open_from_root(path: &Path, creation: DirectoryCreation) -> io::Result<Self> {
+        use rustix::fs::{mkdirat, openat, Mode, OFlags, CWD};
+
+        let root = path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        let name = path.file_name().ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "diagnostic log directory has no name",
+            )
+        })?;
+        if creation == DirectoryCreation::CreateMissing {
+            fs::create_dir_all(root)?;
+        }
+        // The agent state root may be intentionally linked. Pin its target
+        // before creating/opening the managed `logs` child.
+        #[cfg(any(target_os = "linux", target_os = "android"))]
+        let root_access = OFlags::PATH;
+        #[cfg(target_os = "macos")]
+        let root_access = OFlags::from_bits_retain(
+            u32::try_from(libc::O_SEARCH).expect("Darwin O_SEARCH is nonnegative"),
+        );
+        // Other Unix targets retain the prior read requirement until their
+        // search-only directory-open flag is verified on that platform.
+        #[cfg(not(any(target_os = "linux", target_os = "android", target_os = "macos")))]
+        let root_access = OFlags::RDONLY;
+        let root_fd = openat(
+            CWD,
+            root,
+            root_access | OFlags::DIRECTORY | OFlags::CLOEXEC,
+            Mode::empty(),
+        )?;
+        if creation == DirectoryCreation::CreateMissing {
+            #[cfg(test)]
+            BEFORE_LOGS_DIRECTORY_CREATE.with(|hook| {
+                if let Some(callback) = hook.borrow_mut().take() {
+                    callback();
+                }
+            });
+            match mkdirat(&root_fd, name, Mode::from_raw_mode(0o777)) {
+                Ok(()) | Err(rustix::io::Errno::EXIST) => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
+        let fd = openat(
+            &root_fd,
+            name,
+            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::empty(),
+        )?;
+        Ok(Self { fd: File::from(fd) })
     }
 
     pub(crate) fn open_file(&self, name: &OsStr, mode: OpenMode) -> io::Result<File> {
@@ -183,5 +255,45 @@ mod tests {
             std::fs::read(outside.join("worker-a.stderr.log")).unwrap(),
             b"outside\n"
         );
+    }
+
+    #[test]
+    fn root_swap_before_logs_creation_does_not_redirect_worker_logs() {
+        let temp = tempfile::tempdir().unwrap();
+        let agent = temp.path().join("agent");
+        let original_agent = temp.path().join("original-agent");
+        let outside = temp.path().join("outside");
+        fs::create_dir(&agent).unwrap();
+        fs::create_dir(&outside).unwrap();
+        let logs = agent.join("logs");
+        let moved_agent = agent;
+        let moved_original = original_agent.clone();
+        let linked_outside = outside.clone();
+        BEFORE_LOGS_DIRECTORY_CREATE.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(move || {
+                fs::rename(&moved_agent, &moved_original).unwrap();
+                std::os::unix::fs::symlink(&linked_outside, &moved_agent).unwrap();
+            }));
+        });
+
+        let opened = LogDir::for_write(&logs);
+        BEFORE_LOGS_DIRECTORY_CREATE.with(|hook| *hook.borrow_mut() = None);
+        assert!(opened.is_ok());
+        assert!(original_agent.join("logs").is_dir());
+        assert!(!outside.join("logs").exists());
+    }
+
+    #[test]
+    fn search_only_agent_root_can_contain_worker_logs() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir().unwrap();
+        let agent = temp.path().join("agent");
+        fs::create_dir(&agent).unwrap();
+        fs::set_permissions(&agent, fs::Permissions::from_mode(0o300)).unwrap();
+        let opened = LogDir::for_write(&agent.join("logs"));
+        fs::set_permissions(&agent, fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(opened.is_ok(), "agent root needs search, not read");
+        assert!(agent.join("logs").is_dir());
     }
 }

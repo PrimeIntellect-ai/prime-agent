@@ -5,6 +5,8 @@
 use std::ffi::OsStr;
 use std::fs::{self, File};
 use std::io;
+#[cfg(unix)]
+use std::path::Component;
 use std::path::Path;
 #[cfg(not(unix))]
 use std::path::PathBuf;
@@ -16,37 +18,114 @@ pub(crate) struct LogDir {
     path: PathBuf,
 }
 
-impl LogDir {
-    pub(crate) fn for_write(path: &Path) -> io::Result<Self> {
-        fs::create_dir_all(path)?;
-        Self::for_read(path)
+#[derive(Clone, Copy)]
+pub(crate) enum DirectoryMode {
+    Inherited,
+    OwnerOnly,
+}
+
+impl DirectoryMode {
+    fn create(self, path: &Path) -> io::Result<()> {
+        match self {
+            Self::Inherited => fs::create_dir_all(path),
+            Self::OwnerOnly => super::perms::create_dir_all_private(path),
+        }
     }
 
-    fn for_read(path: &Path) -> io::Result<Self> {
+    #[cfg(unix)]
+    fn bits(self) -> u32 {
+        match self {
+            Self::Inherited => 0o777,
+            Self::OwnerOnly => super::perms::PRIVATE_DIR_MODE,
+        }
+    }
+}
+
+impl LogDir {
+    /// On Unix, the configured root may itself be a symlink. Every managed
+    /// component below it is created and opened relative to its held handle,
+    /// without following links or re-resolving an ancestor pathname.
+    pub(crate) fn for_write(
+        path: &Path,
+        trusted_root: &Path,
+        mode: DirectoryMode,
+    ) -> io::Result<Self> {
         #[cfg(unix)]
         {
-            use std::os::unix::fs::OpenOptionsExt;
+            use nix::fcntl::{openat, OFlag};
+            use nix::sys::stat::{mkdirat, Mode};
+            use std::os::fd::{AsRawFd, FromRawFd};
 
-            let mut options = fs::OpenOptions::new();
-            options
-                .read(true)
-                .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC);
-            Ok(Self {
-                dir: options.open(path)?,
-            })
+            mode.create(trusted_root)?;
+            // A directory needs search, not read, permission for create and
+            // openat. O_PATH on Linux (O_SEARCH on macOS) preserves roots that
+            // users deliberately make write/search-only.
+            #[cfg(any(target_os = "linux", target_os = "android"))]
+            let access = OFlag::O_PATH;
+            #[cfg(target_os = "macos")]
+            let access = OFlag::from_bits_retain(libc::O_SEARCH);
+            // Other Unix targets retain the prior read requirement until
+            // their search-only directory-open flag is verified there.
+            #[cfg(not(any(target_os = "linux", target_os = "android", target_os = "macos")))]
+            let access = OFlag::O_RDONLY;
+            let root_flags = access | OFlag::O_DIRECTORY | OFlag::O_CLOEXEC;
+            let root_fd =
+                openat(None, trusted_root, root_flags, Mode::empty()).map_err(errno_to_io)?;
+            // SAFETY: openat returned a new owned descriptor, transferred to File once.
+            let mut dir = unsafe { File::from_raw_fd(root_fd) };
+            let relative = match path.strip_prefix(trusted_root) {
+                Ok(relative) => relative,
+                Err(_) if trusted_root == Path::new(".") && path.is_relative() => path,
+                Err(_) => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "managed log directory is outside its trusted root",
+                    ));
+                }
+            };
+            for component in relative.components() {
+                let Component::Normal(name) = component else {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "managed log directory has a non-normal component",
+                    ));
+                };
+                let dir_mode = Mode::from_bits_truncate(mode.bits());
+                match mkdirat(Some(dir.as_raw_fd()), name, dir_mode) {
+                    Ok(()) | Err(nix::errno::Errno::EEXIST) => {}
+                    Err(errno) => return Err(errno_to_io(errno)),
+                }
+                let fd = openat(
+                    Some(dir.as_raw_fd()),
+                    name,
+                    access | OFlag::O_DIRECTORY | OFlag::O_NOFOLLOW | OFlag::O_CLOEXEC,
+                    Mode::empty(),
+                )
+                .map_err(errno_to_io)?;
+                // SAFETY: openat returned a new owned descriptor, transferred to File once.
+                dir = unsafe { File::from_raw_fd(fd) };
+            }
+            Ok(Self { dir })
         }
         #[cfg(not(unix))]
         {
-            if fs::symlink_metadata(path)?.file_type().is_symlink() {
-                return Err(io::Error::new(
-                    io::ErrorKind::PermissionDenied,
-                    "managed log directory is a symbolic link",
-                ));
-            }
-            Ok(Self {
-                path: path.to_path_buf(),
-            })
+            let _ = trusted_root;
+            mode.create(path)?;
+            Self::for_read(path)
         }
+    }
+
+    #[cfg(not(unix))]
+    fn for_read(path: &Path) -> io::Result<Self> {
+        if fs::symlink_metadata(path)?.file_type().is_symlink() {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "managed log directory is a symbolic link",
+            ));
+        }
+        Ok(Self {
+            path: path.to_path_buf(),
+        })
     }
 
     pub(crate) fn open_append(&self, name: &OsStr) -> io::Result<File> {
@@ -185,7 +264,7 @@ mod tests {
     fn directory_handle_keeps_log_operations_in_the_original_directory() {
         let root = tempfile::tempdir().unwrap();
         let logs = root.path().join("logs");
-        let dir = LogDir::for_write(&logs).unwrap();
+        let dir = LogDir::for_write(&logs, root.path(), DirectoryMode::Inherited).unwrap();
         let original = root.path().join("original-logs");
         let outside = root.path().join("outside");
         fs::create_dir(&outside).unwrap();
@@ -217,7 +296,12 @@ mod tests {
         let linked_agent = root.path().join("agent");
         std::os::unix::fs::symlink(&real_agent, &linked_agent).unwrap();
 
-        let dir = LogDir::for_write(&linked_agent.join("logs")).unwrap();
+        let dir = LogDir::for_write(
+            &linked_agent.join("logs"),
+            &linked_agent,
+            DirectoryMode::Inherited,
+        )
+        .unwrap();
         dir.open_append(OsStr::new("agent.log"))
             .unwrap()
             .write_all(b"inside\n")
@@ -226,5 +310,19 @@ mod tests {
             fs::read(real_agent.join("logs/agent.log")).unwrap(),
             b"inside\n"
         );
+    }
+
+    #[test]
+    fn search_only_agent_root_can_contain_managed_logs() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = tempfile::tempdir().unwrap();
+        let agent = root.path().join("agent");
+        fs::create_dir(&agent).unwrap();
+        fs::set_permissions(&agent, fs::Permissions::from_mode(0o300)).unwrap();
+        let opened = LogDir::for_write(&agent.join("logs"), &agent, DirectoryMode::Inherited);
+        fs::set_permissions(&agent, fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(opened.is_ok(), "agent root needs search, not read");
+        assert!(agent.join("logs").is_dir());
     }
 }
