@@ -346,7 +346,7 @@ fn post_compaction_goal_continuation_mint() {
     // TS #2465: a live background bash handle holds the post-compaction
     // mint the same way: the mint defers (owed, not consumed) until the
     // handle settles.
-    let live_probe: std::sync::Arc<dyn Fn() -> bool + Send + Sync> = std::sync::Arc::new(|| true);
+    let live_probe: std::sync::Arc<dyn Fn() -> usize + Send + Sync> = std::sync::Arc::new(|| 1);
     *engine.background_bash_probe.lock().unwrap() = Some(live_probe);
     assert!(
         engine.mint_post_compaction_goal_continuation().is_none(),
@@ -366,8 +366,7 @@ fn post_compaction_goal_continuation_mint() {
             "the deferred mint must be owed"
         );
     }
-    let settled_probe: std::sync::Arc<dyn Fn() -> bool + Send + Sync> =
-        std::sync::Arc::new(|| false);
+    let settled_probe: std::sync::Arc<dyn Fn() -> usize + Send + Sync> = std::sync::Arc::new(|| 0);
     *engine.background_bash_probe.lock().unwrap() = Some(settled_probe);
     assert!(
         engine.mint_post_compaction_goal_continuation().is_some(),

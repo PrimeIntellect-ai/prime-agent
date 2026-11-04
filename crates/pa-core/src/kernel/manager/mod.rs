@@ -479,9 +479,19 @@ impl ReplKernelManager {
         self.inner.options.session_id.as_deref()
     }
 
+    /// Whether any background `bash()` handle is live: the `> 0` form of
+    /// [`Self::background_bash_handle_count`], read by the CLI's inline
+    /// quiescence drive through `SessionEngine::has_background_bash`.
     #[must_use]
     pub fn has_background_work(&self) -> bool {
-        !lock(&self.inner.guarded).background_bash_handles.is_empty()
+        self.background_bash_handle_count() > 0
+    }
+
+    /// The number of live background `bash()` handles (the count behind
+    /// [`Self::has_background_work`], read by the quiescence observation).
+    #[must_use]
+    pub fn background_bash_handle_count(&self) -> usize {
+        lock(&self.inner.guarded).background_bash_handles.len()
     }
 
     /// Process id of the spawned kernel child, when present. Used by tests and

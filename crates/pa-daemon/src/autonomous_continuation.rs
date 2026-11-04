@@ -341,11 +341,11 @@ mod tests {
     use crate::agent_engine::tests::{admit, faux_engine_with_settings, FAUX_TEST_LOCK};
     use crate::engine::EngineEvent;
 
-    /// Inject the engine's background-bash liveness probe (a `true` probe
+    /// Inject the engine's background-bash liveness probe (a `1` probe
     /// = a live background `bash()` handle).
     fn set_background_bash_probe(
         engine: &Arc<AgentSessionEngine>,
-        probe: std::sync::Arc<dyn Fn() -> bool + Send + Sync>,
+        probe: std::sync::Arc<dyn Fn() -> usize + Send + Sync>,
     ) {
         *engine
             .background_bash_probe
@@ -374,11 +374,11 @@ mod tests {
         admit(&engine, "warm".to_string(), &mut events);
         // The probe reads live exactly once (the consult's gate); every
         // later read is settled — the settle tail of the raced window.
-        let flip = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let flip = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(1));
         let flip_read = std::sync::Arc::clone(&flip);
         set_background_bash_probe(
             &engine,
-            Arc::new(move || flip_read.swap(false, std::sync::atomic::Ordering::SeqCst)),
+            Arc::new(move || flip_read.swap(0, std::sync::atomic::Ordering::SeqCst)),
         );
         admit(
             &engine,
@@ -426,7 +426,7 @@ mod tests {
         // The first prompt builds the session; the probe injected after stands in for a live
         // handle.
         admit(&engine, "warm".to_string(), &mut events);
-        set_background_bash_probe(&engine, Arc::new(|| true));
+        set_background_bash_probe(&engine, Arc::new(|| 1));
         admit(
             &engine,
             "/autonomous on --max-continuations 1 --max-turns 5".to_string(),
@@ -452,7 +452,7 @@ mod tests {
         );
         assert!(admitted.lock().unwrap().is_empty());
         assert_eq!(engine.autonomous.blocking_lock().continuations_used, 0);
-        set_background_bash_probe(&engine, Arc::new(|| false));
+        set_background_bash_probe(&engine, Arc::new(|| 0));
         engine
             .runtime
             .block_on(async { engine.autonomous_children_settled().await });
