@@ -477,6 +477,14 @@ impl SettingsStorage for FileSettingsStorage {
         } else {
             None
         };
+        #[cfg(all(test, unix))]
+        if scope == SettingsScope::Project {
+            BEFORE_PROJECT_READ_LOCK.with(|hook| {
+                if let Some(callback) = hook.borrow_mut().take() {
+                    callback();
+                }
+            });
+        }
         let guard = Self::acquire_lock(&locked_path)?;
         #[cfg(unix)]
         if let Some(parent) = project_parent.as_ref() {
@@ -678,6 +686,8 @@ thread_local! {
     static OPT_IN_FSYNC: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     #[cfg(unix)]
     static BEFORE_PROJECT_WRITE: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
+    #[cfg(unix)]
+    static BEFORE_PROJECT_READ_LOCK: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
     #[cfg(unix)]
     static PROJECT_READ_STEP: std::cell::RefCell<Option<ProjectReadHook>> = const { std::cell::RefCell::new(None) };
 }
@@ -1043,6 +1053,53 @@ mod tests {
             "the held parent must match the lock parent"
         );
         assert!(!original.join("settings.json").exists());
+        assert_eq!(
+            fs::read_to_string(replacement.join("settings.json")).unwrap(),
+            "replacement"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn project_settings_read_rejects_a_lock_in_a_swapped_parent() {
+        let root = tempfile::tempdir().unwrap();
+        let project = root.path().join("project");
+        let original = project.join(".prime/agent");
+        let moved_original = project.join(".prime/agent-original");
+        let replacement = project.join(".prime/replacement");
+        fs::create_dir_all(&original).unwrap();
+        fs::create_dir(&replacement).unwrap();
+        fs::write(original.join("settings.json"), "original").unwrap();
+        fs::write(replacement.join("settings.json"), "replacement").unwrap();
+        let storage = FileSettingsStorage::new(&project, root.path().join("agent"));
+
+        BEFORE_PROJECT_READ_LOCK.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new({
+                let original = original.clone();
+                let moved_original = moved_original.clone();
+                let replacement = replacement.clone();
+                move || {
+                    fs::rename(&original, &moved_original).unwrap();
+                    fs::rename(&replacement, &original).unwrap();
+                }
+            }));
+        });
+        let result = storage.read(SettingsScope::Project);
+        BEFORE_PROJECT_READ_LOCK.with(|hook| *hook.borrow_mut() = None);
+        fs::rename(&original, &replacement).unwrap();
+        fs::rename(&moved_original, &original).unwrap();
+
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("lock directory changed"),
+            "the read lock must match the held settings parent"
+        );
+        assert_eq!(
+            fs::read_to_string(original.join("settings.json")).unwrap(),
+            "original"
+        );
         assert_eq!(
             fs::read_to_string(replacement.join("settings.json")).unwrap(),
             "replacement"
