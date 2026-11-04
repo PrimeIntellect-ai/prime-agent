@@ -908,6 +908,12 @@ mod tests {
         let harness = root.path().join("harness");
         std::fs::create_dir_all(&harness).unwrap();
         std::fs::set_permissions(&harness, std::fs::Permissions::from_mode(0o300)).unwrap();
+        if std::fs::File::open(&harness).is_ok() {
+            // Root or CAP_DAC_OVERRIDE can still read this directory, so the
+            // permission-dependent behavior cannot be observed here.
+            std::fs::set_permissions(&harness, std::fs::Permissions::from_mode(0o700)).unwrap();
+            return;
+        }
 
         let mut state = empty_harness_state();
         state.schema = 13;
