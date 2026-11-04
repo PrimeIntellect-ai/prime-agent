@@ -70,25 +70,31 @@ async fn download_once(
     if !response.status().is_success() {
         anyhow::bail!("download {url} returned {}", response.status());
     }
-    let temporary = destination.with_extension("part");
+    let parent = destination
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let mut temporary = tempfile::NamedTempFile::new_in(parent)
+        .with_context(|| format!("create temporary archive beside {}", destination.display()))?;
     let mut digest = Sha256::new();
-    let mut file = std::fs::File::create(&temporary)
-        .with_context(|| format!("create {}", temporary.display()))?;
     let mut stream = response.bytes_stream();
     while let Some(chunk) = stream.next().await {
         let chunk = chunk.context("read the archive stream")?;
         digest.update(&chunk);
-        std::io::Write::write_all(&mut file, &chunk)
-            .with_context(|| format!("write {}", temporary.display()))?;
+        std::io::Write::write_all(&mut temporary, &chunk)
+            .with_context(|| format!("write {}", temporary.path().display()))?;
     }
-    file.sync_data().context("sync the downloaded archive")?;
-    drop(file);
+    temporary
+        .as_file()
+        .sync_data()
+        .context("sync the downloaded archive")?;
     let observed = hex(&digest.finalize());
     if observed != expected_sha256 {
-        let _ = std::fs::remove_file(&temporary);
         anyhow::bail!("archive digest mismatch: expected {expected_sha256}, observed {observed}");
     }
-    std::fs::rename(&temporary, destination)
+    temporary
+        .persist(destination)
+        .map_err(|error| error.error)
         .with_context(|| format!("finalize {}", destination.display()))?;
     Ok(())
 }
@@ -895,5 +901,40 @@ mod tests {
             assert!(error.is_err(), "a wrong digest is never installed");
             assert!(!destination.exists(), "a refused download lands nothing");
         }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn downloaded_archive_does_not_follow_a_planted_part_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let payload = b"release archive bytes";
+        let (base_url, _) = fake_release_endpoint(payload.to_vec()).await;
+        let dir = tempfile::tempdir().unwrap();
+        let destination = dir.path().join("update.tar.gz");
+        let part = destination.with_extension("part");
+        let victim = dir.path().join("victim");
+        std::fs::write(&victim, b"untouched").unwrap();
+        symlink(&victim, &part).unwrap();
+
+        download_archive(
+            &format!("{base_url}/prime-agent-1.2.3.tar.gz"),
+            &sha256_hex(payload),
+            &destination,
+            DownloadBudget {
+                total_ms: 10_000,
+                attempts: 1,
+            },
+            "prime-agent/1.2.2 (test)",
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(std::fs::read(&victim).unwrap(), b"untouched");
+        assert_eq!(std::fs::read(&destination).unwrap(), payload);
+        assert!(std::fs::symlink_metadata(&part)
+            .unwrap()
+            .file_type()
+            .is_symlink());
     }
 }
