@@ -142,8 +142,11 @@ pub fn select_headless_terminal_result(messages: &[AgentMessage]) -> HeadlessTer
             }
             // An ended turn's last assistant row can be only its
             // `rlm.end_turn()` tool call: keep walking to the batch's
-            // answer text.
-            AgentMessage::Assistant(assistant) if !has_visible_text(assistant) => {
+            // answer text. A textless row without a tool call stays
+            // primary (a failed turn's error row must answer the print).
+            AgentMessage::Assistant(assistant)
+                if !has_visible_text(assistant) && has_tool_call(assistant) =>
+            {
                 index -= 1;
             }
             _ => break,
@@ -178,6 +181,14 @@ pub fn select_headless_terminal_result(messages: &[AgentMessage]) -> HeadlessTer
     }
 }
 
+/// Whether an assistant message carries any tool call.
+fn has_tool_call(assistant: &pa_types::ai::AssistantMessage) -> bool {
+    assistant
+        .content
+        .iter()
+        .any(|block| matches!(block, pa_types::ai::AssistantContentBlock::ToolCall(_)))
+}
+
 /// Whether an assistant message carries any non-blank text block.
 fn has_visible_text(assistant: &pa_types::ai::AssistantMessage) -> bool {
     assistant.content.iter().any(|block| match block {
@@ -208,6 +219,14 @@ mod tests {
         ToolResultMessage, UserContent, UserContentBlock, UserMessage,
     };
     use pa_types::session::{CompactionSummaryMessage, CustomMessage};
+
+    fn error_assistant() -> AgentMessage {
+        let mut error = text_assistant("", StopReason::Error);
+        if let AgentMessage::Assistant(message) = &mut error {
+            message.error_message = Some("provider exploded".to_string());
+        }
+        error
+    }
 
     fn text_assistant(text: &str, stop_reason: StopReason) -> AgentMessage {
         AgentMessage::Assistant(AssistantMessage {
@@ -244,6 +263,25 @@ mod tests {
             timestamp: 0,
             rest: serde_json::Map::default(),
         })
+    }
+
+    #[test]
+    fn a_textless_error_row_stays_the_headless_answer() {
+        // A failed turn's terminal row (error, no text, no tool call) must
+        // answer the print with its failure, never be walked over.
+        let messages = vec![
+            AgentMessage::User(UserMessage {
+                content: UserContent::Text("go".to_string()),
+                timestamp: 0,
+                rest: serde_json::Map::default(),
+            }),
+            text_assistant("the answer", StopReason::Stop),
+            error_assistant(),
+        ];
+        let result = select_headless_terminal_result(&messages);
+        let primary = result.primary.unwrap();
+        let mut exit_code = 0;
+        assert!(primary.stderr_text(&mut exit_code).is_some());
     }
 
     #[test]
