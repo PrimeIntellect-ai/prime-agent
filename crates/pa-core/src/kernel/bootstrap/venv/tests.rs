@@ -43,6 +43,7 @@ fn windows_executable_candidates_skips_suffix_and_duplicates() {
 
 use super::*;
 
+#[cfg(unix)]
 fn kernel_ready(
     python: &str,
     venv: &Path,
