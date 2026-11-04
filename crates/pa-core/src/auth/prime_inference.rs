@@ -518,6 +518,70 @@ mod tests {
         ))
     }
 
+    async fn oversized_stalled_auth_response(
+        chunked: bool,
+    ) -> (String, tokio::task::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!(
+            "http://{}/api/v1/user/whoami",
+            listener.local_addr().unwrap()
+        );
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = [0u8; 4096];
+            assert!(socket.read(&mut request).await.unwrap() > 0);
+            let body = vec![b'x'; 2 * 1024 * 1024 + 1];
+            let headers = if chunked {
+                "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n"
+                    .to_string()
+            } else {
+                format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len() + 1
+                )
+            };
+            socket.write_all(headers.as_bytes()).await.unwrap();
+            if chunked {
+                socket
+                    .write_all(format!("{:x}\r\n", body.len()).as_bytes())
+                    .await
+                    .unwrap();
+            }
+            socket.write_all(&body).await.unwrap();
+            if chunked {
+                socket.write_all(b"\r\n").await.unwrap();
+            }
+            tokio::time::sleep(Duration::from_secs(5)).await;
+        });
+        (url, server)
+    }
+
+    #[tokio::test]
+    async fn prime_auth_get_rejects_oversized_body_before_peer_finishes() {
+        let (url, server) = oversized_stalled_auth_response(false).await;
+        let result = tokio::time::timeout(
+            Duration::from_secs(2),
+            ReqwestPrimeHttp.get(&url, "sk-test", DEFAULT_REQUEST_TIMEOUT_MS),
+        )
+        .await
+        .expect("oversized Prime auth response should fail before the peer closes");
+        server.abort();
+        assert!(result.unwrap_err().contains("exceeds 2097152 bytes"));
+    }
+
+    #[tokio::test]
+    async fn prime_auth_post_rejects_oversized_chunked_body_before_peer_finishes() {
+        let (url, server) = oversized_stalled_auth_response(true).await;
+        let result = tokio::time::timeout(
+            Duration::from_secs(2),
+            ReqwestPrimeHttp.post_json(&url, "{}", None, DEFAULT_REQUEST_TIMEOUT_MS),
+        )
+        .await
+        .expect("oversized Prime auth response should fail before the peer closes");
+        server.abort();
+        assert!(result.unwrap_err().contains("exceeds 2097152 bytes"));
+    }
+
     #[test]
     fn the_config_resolution_matches_ts_normalization() {
         assert_eq!(
@@ -721,70 +785,6 @@ mod tests {
                 body: "{}".to_string()
             }
         );
-    }
-
-    async fn oversized_stalled_auth_response(
-        chunked: bool,
-    ) -> (String, tokio::task::JoinHandle<()>) {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let url = format!(
-            "http://{}/api/v1/user/whoami",
-            listener.local_addr().unwrap()
-        );
-        let server = tokio::spawn(async move {
-            let (mut socket, _) = listener.accept().await.unwrap();
-            let mut request = [0u8; 4096];
-            assert!(socket.read(&mut request).await.unwrap() > 0);
-            let body = vec![b'x'; 2 * 1024 * 1024 + 1];
-            let headers = if chunked {
-                "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n"
-                    .to_string()
-            } else {
-                format!(
-                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-                    body.len() + 1
-                )
-            };
-            socket.write_all(headers.as_bytes()).await.unwrap();
-            if chunked {
-                socket
-                    .write_all(format!("{:x}\r\n", body.len()).as_bytes())
-                    .await
-                    .unwrap();
-            }
-            socket.write_all(&body).await.unwrap();
-            if chunked {
-                socket.write_all(b"\r\n").await.unwrap();
-            }
-            tokio::time::sleep(Duration::from_secs(5)).await;
-        });
-        (url, server)
-    }
-
-    #[tokio::test]
-    async fn prime_auth_get_rejects_oversized_body_before_peer_finishes() {
-        let (url, server) = oversized_stalled_auth_response(false).await;
-        let result = tokio::time::timeout(
-            Duration::from_secs(2),
-            ReqwestPrimeHttp.get(&url, "sk-test", DEFAULT_REQUEST_TIMEOUT_MS),
-        )
-        .await
-        .expect("oversized Prime auth response should fail before the peer closes");
-        server.abort();
-        assert!(result.unwrap_err().contains("exceeds 2097152 bytes"));
-    }
-
-    #[tokio::test]
-    async fn prime_auth_post_rejects_oversized_chunked_body_before_peer_finishes() {
-        let (url, server) = oversized_stalled_auth_response(true).await;
-        let result = tokio::time::timeout(
-            Duration::from_secs(2),
-            ReqwestPrimeHttp.post_json(&url, "{}", None, DEFAULT_REQUEST_TIMEOUT_MS),
-        )
-        .await
-        .expect("oversized Prime auth response should fail before the peer closes");
-        server.abort();
-        assert!(result.unwrap_err().contains("exceeds 2097152 bytes"));
     }
 
     #[test]
