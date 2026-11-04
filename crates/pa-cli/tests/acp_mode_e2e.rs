@@ -1860,15 +1860,19 @@ fn acp_autonomous_disabled_reports_end_turn_without_accounting() {
 }
 
 #[test]
-fn acp_truncated_final_response_maps_to_max_tokens_stop_reason() {
-    // Issue #3363: a turn whose final assistant message stopped at the
-    // provider's output-token cap resolves with max_tokens, not end_turn;
-    // and the stop reason is per-turn — the following /compact prompt runs
-    // no model call (the faux session is short, so it skips), so it must
-    // not inherit the truncated turn's length.
+fn acp_truncated_final_response_retries_then_fails_the_turn() {
+    // A final reply cut off at the provider's output-token cap never ends
+    // the turn as its answer: it is retried once, and a second cut-off
+    // fails the prompt with an error instead of a stop reason. The stop
+    // reason stays per-turn: the following /compact prompt runs no model
+    // call and resolves end_turn.
     let script = json!({
         "engine": "faux",
-        "responses": [{ "text": "half an answer", "stopReason": "length" }],
+        "responses": [
+            { "text": "half an answer", "stopReason": "length" },
+            { "text": "half an answer again", "stopReason": "length" },
+            { "text": "never reached" },
+        ],
     });
     let mut client = AcpChild::spawn(&["--mode", "acp", "--no-session"], &script);
     let init = client.request("initialize", &initialize_params());
@@ -1886,9 +1890,12 @@ fn acp_truncated_final_response_maps_to_max_tokens_stop_reason() {
     );
     let (prompt_response, _) = client.wait_response(prompt, TIMEOUT);
     assert_eq!(
-        prompt_response["result"],
-        json!({ "stopReason": "max_tokens" })
+        prompt_response["error"]["code"], -32603,
+        "the turn's response envelope: {prompt_response}"
     );
+    assert!(prompt_response["error"]["data"]["details"]
+        .as_str()
+        .is_some_and(|details| details.contains("cut off at its output limit")));
 
     let slash = client.request(
         "session/prompt",
@@ -1899,6 +1906,40 @@ fn acp_truncated_final_response_maps_to_max_tokens_stop_reason() {
         slash_response["result"],
         json!({ "stopReason": "end_turn" })
     );
+}
+
+#[test]
+fn acp_silent_final_response_is_retried_before_the_turn_ends() {
+    // A thinking-only clean stop is not an answer: the retry's reply is.
+    let script = json!({
+        "engine": "faux",
+        "responses": [
+            { "content": [{ "type": "thinking", "thinking": "planned the answer" }], "stopReason": "stop" },
+            "the answer",
+        ],
+    });
+    let mut client = AcpChild::spawn(&["--mode", "acp", "--no-session"], &script);
+    let init = client.request("initialize", &initialize_params());
+    let _ = client.wait_response(init, TIMEOUT);
+    let new = client.request("session/new", &json!({ "mcpServers": [] }));
+    let (new_response, _) = client.wait_response(new, TIMEOUT);
+    let session_id = new_response["result"]["sessionId"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let prompt = client.request(
+        "session/prompt",
+        &json!({ "sessionId": session_id, "prompt": [{ "type": "text", "text": "explain the slow query" }] }),
+    );
+    let (prompt_response, updates) = client.wait_response(prompt, TIMEOUT);
+    assert_end_turn(&prompt_response);
+    let streamed: String = updates
+        .iter()
+        .filter(|update| update["params"]["update"]["sessionUpdate"] == "agent_message_chunk")
+        .filter_map(|update| update["params"]["update"]["content"]["text"].as_str())
+        .collect();
+    assert_eq!(streamed, "the answer");
 }
 
 #[test]
