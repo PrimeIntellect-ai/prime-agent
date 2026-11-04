@@ -293,10 +293,24 @@ mod win32 {
         FileId: [u8; 16],
     }
 
+    #[repr(C)]
+    struct ByHandleFileInformation {
+        FileAttributes: u32,
+        CreationTime: FileTime,
+        LastAccessTime: FileTime,
+        LastWriteTime: FileTime,
+        VolumeSerialNumber: u32,
+        FileSizeHigh: u32,
+        FileSizeLow: u32,
+        NumberOfLinks: u32,
+        FileIndexHigh: u32,
+        FileIndexLow: u32,
+    }
+
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-    pub(super) struct FileId {
-        volume: u64,
-        id: [u8; 16],
+    pub(super) enum FileId {
+        Extended { volume: u64, id: [u8; 16] },
+        Legacy { volume: u32, index: u64 },
     }
 
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -318,6 +332,20 @@ mod win32 {
             information_class: i32,
             information: *mut c_void,
             size: u32,
+        ) -> i32;
+        fn GetFileInformationByHandle(
+            handle: Handle,
+            information: *mut ByHandleFileInformation,
+        ) -> i32;
+        fn GetVolumeInformationByHandleW(
+            handle: Handle,
+            volume_name: *mut u16,
+            volume_name_size: u32,
+            volume_serial: *mut u32,
+            maximum_component_length: *mut u32,
+            filesystem_flags: *mut u32,
+            filesystem_name: *mut u16,
+            filesystem_name_size: u32,
         ) -> i32;
         fn SetFileInformationByHandle(
             handle: Handle,
@@ -504,13 +532,68 @@ mod win32 {
                 std::mem::size_of::<FileIdInfo>() as u32,
             )
         };
+        if ok != 0 {
+            let info = unsafe { info.assume_init() };
+            if info.FileId != [0; 16] {
+                return Ok(FileId::Extended {
+                    volume: info.VolumeSerialNumber,
+                    id: info.FileId,
+                });
+            }
+        }
+        legacy_file_id(file)
+    }
+
+    pub(super) fn legacy_file_id(file: &File) -> io::Result<FileId> {
+        // On filesystems without 128-bit IDs, FILE_ID_INFORMATION can report
+        // an all-zero ID. Compare the legacy volume/file index only on known
+        // filesystems where it is unique; ReFS requires the 128-bit form.
+        let mut filesystem = [0_u16; 64];
+        let ok = unsafe {
+            GetVolumeInformationByHandleW(
+                file.as_raw_handle(),
+                std::ptr::null_mut(),
+                0,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                filesystem.as_mut_ptr(),
+                filesystem.len() as u32,
+            )
+        };
         if ok == 0 {
             return Err(io::Error::last_os_error());
         }
+        let end = filesystem
+            .iter()
+            .position(|&ch| ch == 0)
+            .unwrap_or(filesystem.len());
+        let name = String::from_utf16(&filesystem[..end])
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "invalid filesystem name"))?;
+        if !["NTFS", "FAT", "FAT32", "exFAT"]
+            .iter()
+            .any(|supported| name.eq_ignore_ascii_case(supported))
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "filesystem does not provide a stable lock identity",
+            ));
+        }
+        let mut info = std::mem::MaybeUninit::<ByHandleFileInformation>::uninit();
+        if unsafe { GetFileInformationByHandle(file.as_raw_handle(), info.as_mut_ptr()) } == 0 {
+            return Err(io::Error::last_os_error());
+        }
         let info = unsafe { info.assume_init() };
-        Ok(FileId {
+        let index = u64::from(info.FileIndexHigh) << 32 | u64::from(info.FileIndexLow);
+        if index == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "filesystem returned no stable lock file index",
+            ));
+        }
+        Ok(FileId::Legacy {
             volume: info.VolumeSerialNumber,
-            id: info.FileId,
+            index,
         })
     }
 
@@ -1681,6 +1764,27 @@ mod tests {
         assert!(LockDir::path_for(&file).is_dir());
         drop(guard);
         assert!(!LockDir::path_for(&file).exists());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_legacy_file_ids_distinguish_dirs_and_preserve_links() {
+        use std::os::windows::fs::symlink_dir;
+
+        let root = tempfile::tempdir().unwrap();
+        let first = root.path().join("first");
+        let second = root.path().join("second");
+        let linked = root.path().join("linked");
+        fs::create_dir(&first).unwrap();
+        fs::create_dir(&second).unwrap();
+        symlink_dir(&first, &linked).unwrap();
+
+        let first = win32::open_parent(&first).unwrap();
+        let second = win32::open_parent(&second).unwrap();
+        let linked = win32::open_parent(&linked).unwrap();
+        let first_id = win32::legacy_file_id(&first).unwrap();
+        assert_ne!(first_id, win32::legacy_file_id(&second).unwrap());
+        assert_eq!(first_id, win32::legacy_file_id(&linked).unwrap());
     }
 
     #[cfg(unix)]
