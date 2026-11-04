@@ -1057,6 +1057,31 @@ mod tests {
 
     #[test]
     #[cfg(unix)]
+    fn project_settings_cannot_copy_a_hard_linked_auth_document() {
+        let root = tempfile::tempdir().unwrap();
+        let project = root.path().join("project");
+        let agent_dir = root.path().join("global");
+        let project_settings = project.join(".prime/agent/settings.json");
+        let auth = agent_dir.join("auth.json");
+        std::fs::create_dir_all(project_settings.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(&agent_dir).unwrap();
+        let secret = r#"{"prime-inference":{"type":"api_key","key":"sensitive-key"}}"#;
+        std::fs::write(&auth, secret).unwrap();
+        std::fs::hard_link(&auth, &project_settings).unwrap();
+
+        let mut manager = SettingsManager::create(&project, &agent_dir);
+        manager.set_project_packages(vec![serde_json::json!({"source": "example"})]);
+
+        assert_eq!(std::fs::read_to_string(&project_settings).unwrap(), secret);
+        assert_eq!(std::fs::read_to_string(&auth).unwrap(), secret);
+        assert!(manager
+            .errors()
+            .iter()
+            .any(|error| error.scope == SettingsScope::Project));
+    }
+
+    #[test]
+    #[cfg(unix)]
     fn project_settings_can_link_to_another_file_inside_the_project() {
         use std::os::unix::fs::symlink;
 
