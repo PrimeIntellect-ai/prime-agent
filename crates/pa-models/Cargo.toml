@@ -20,9 +20,9 @@ reqwest = { version = "0.12", default-features = false, features = [
 hmac = "0.12"
 sha2 = "0.10"
 hex = "0.4"
+tempfile = "3"
 
 [dev-dependencies]
-tempfile = "3"
 rcgen = { version = "0.14", default-features = false, features = ["pem", "ring"] }
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
 

@@ -1,0 +1,1 @@
+- Prevented model catalog cache writes from following planted temporary-file links.
