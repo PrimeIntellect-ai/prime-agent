@@ -278,9 +278,6 @@ impl FileSettingsStorage {
         if is_multiply_linked(&opened) {
             bail!("Project settings file has multiple hard links");
         }
-        if opened.len() > MAX_PROJECT_SETTINGS_BYTES as u64 {
-            bail!("Project settings file exceeds {MAX_PROJECT_SETTINGS_BYTES} bytes");
-        }
         #[cfg(all(test, unix))]
         // Preserve the pre-fix path-check interleavings in the race test.
         project_read_step(ProjectReadStep::Restore);
@@ -295,6 +292,9 @@ impl FileSettingsStorage {
             {
                 bail!("Project settings path changed while reading");
             }
+        }
+        if opened.len() > MAX_PROJECT_SETTINGS_BYTES as u64 {
+            bail!("Project settings file exceeds {MAX_PROJECT_SETTINGS_BYTES} bytes");
         }
         let mut content = String::new();
         // A writer can grow the file after metadata inspection, so the read
