@@ -94,26 +94,55 @@ impl FileSettingsStorage {
     /// Resolve a path through its closest existing ancestor, preserving
     /// missing descendants (including a deleted project working directory).
     fn resolve_with_missing(path: &Path) -> Result<PathBuf> {
-        let mut candidate = path;
+        let mut candidate = if path.as_os_str().is_empty() {
+            PathBuf::from(".")
+        } else {
+            path.to_path_buf()
+        };
         let mut missing = Vec::new();
+        let mut symlink_hops = 0;
         loop {
-            match fs::symlink_metadata(candidate) {
-                Ok(_) => {
-                    let mut resolved = fs::canonicalize(candidate)?;
-                    for component in missing.iter().rev() {
-                        resolved.push(component);
+            match fs::symlink_metadata(&candidate) {
+                Ok(metadata) => match fs::canonicalize(&candidate) {
+                    Ok(mut resolved) => {
+                        for component in missing.iter().rev() {
+                            resolved.push(component);
+                        }
+                        return Ok(resolved);
                     }
-                    return Ok(resolved);
-                }
+                    Err(error)
+                        if error.kind() == std::io::ErrorKind::NotFound
+                            && metadata.file_type().is_symlink() =>
+                    {
+                        symlink_hops += 1;
+                        if symlink_hops > 40 {
+                            bail!("Project settings path has too many symbolic links");
+                        }
+                        let target = fs::read_link(&candidate)?;
+                        candidate = if target.is_absolute() {
+                            target
+                        } else {
+                            candidate
+                                .parent()
+                                .filter(|parent| !parent.as_os_str().is_empty())
+                                .unwrap_or_else(|| Path::new("."))
+                                .join(target)
+                        };
+                    }
+                    Err(error) => return Err(error.into()),
+                },
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                     missing.push(
                         candidate
                             .file_name()
-                            .ok_or_else(|| anyhow!("Project settings path has no file name"))?,
+                            .ok_or_else(|| anyhow!("Project settings path has no file name"))?
+                            .to_os_string(),
                     );
                     candidate = candidate
                         .parent()
-                        .ok_or_else(|| anyhow!("Project settings path has no parent"))?;
+                        .filter(|parent| !parent.as_os_str().is_empty())
+                        .unwrap_or_else(|| Path::new("."))
+                        .to_path_buf();
                 }
                 Err(error) => return Err(error.into()),
             }
@@ -337,7 +366,12 @@ impl SettingsStorage for FileSettingsStorage {
         };
         let mut next = update(current);
         if next.is_some() {
-            if let Some(dir) = path.parent() {
+            let write_dir = if scope == SettingsScope::Project {
+                locked_path.parent()
+            } else {
+                path.parent()
+            };
+            if let Some(dir) = write_dir {
                 if !dir.exists() {
                     fs::create_dir_all(dir)?;
                 }
@@ -450,6 +484,55 @@ mod tests {
         let storage = FileSettingsStorage::new(&missing_project, root.path().join("agent"));
 
         assert_eq!(storage.read(SettingsScope::Project).unwrap(), None);
+    }
+
+    #[test]
+    fn missing_single_component_relative_path_resolves_through_dot() {
+        let project = PathBuf::from(format!("missing-project-{}", uuid::Uuid::new_v4().simple()));
+        let resolved = FileSettingsStorage::resolve_with_missing(&project).unwrap();
+
+        assert!(resolved.is_absolute());
+        assert_eq!(resolved.file_name(), project.file_name());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn dangling_in_project_settings_link_reads_absent_and_updates_shared_target() {
+        use std::os::unix::fs::symlink;
+
+        let root = tempfile::tempdir().unwrap();
+        let project = root.path().join("project");
+        let settings_dir = project.join(".prime/agent");
+        fs::create_dir_all(&settings_dir).unwrap();
+        let settings = settings_dir.join("settings.json");
+        let target = project.join("shared/settings.json");
+        symlink("../../shared/settings.json", &settings).unwrap();
+        let storage = FileSettingsStorage::new(&project, root.path().join("agent"));
+
+        assert_eq!(storage.read(SettingsScope::Project).unwrap(), None);
+        storage
+            .with_lock(SettingsScope::Project, &mut |current| {
+                assert_eq!(current, None);
+                Some(r#"{"theme":"prime"}"#.to_string())
+            })
+            .unwrap();
+        assert!(fs::symlink_metadata(&settings)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert_eq!(fs::read_to_string(target).unwrap(), r#"{"theme":"prime"}"#);
+
+        // A missing target outside the project stays forbidden.
+        fs::remove_file(&settings).unwrap();
+        let outside = root.path().join("outside/settings.json");
+        symlink(&outside, &settings).unwrap();
+        assert!(storage.read(SettingsScope::Project).is_err());
+        assert!(storage
+            .with_lock(SettingsScope::Project, &mut |_| {
+                Some(r#"{"theme":"unsafe"}"#.to_string())
+            })
+            .is_err());
+        assert!(!outside.exists());
     }
 
     #[test]
