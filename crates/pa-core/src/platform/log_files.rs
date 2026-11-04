@@ -326,3 +326,62 @@ mod tests {
         assert!(agent.join("logs").is_dir());
     }
 }
+
+#[cfg(all(test, windows))]
+mod windows_tests {
+    use super::*;
+    use std::io::Write as _;
+    use std::os::windows::fs::symlink_dir;
+
+    #[test]
+    fn directory_swap_keeps_managed_log_operations_on_original_dir() {
+        let root = tempfile::tempdir().unwrap();
+        let agent = root.path().join("agent");
+        fs::create_dir(&agent).unwrap();
+        let logs = agent.join("logs");
+        let dir = LogDir::for_write(&logs, &agent, DirectoryMode::Inherited).unwrap();
+        let original = agent.join("original-logs");
+        let outside = root.path().join("outside");
+        fs::create_dir(&outside).unwrap();
+        let victim = outside.join("agent.log");
+        fs::write(&victim, b"outside\n").unwrap();
+
+        fs::rename(&logs, &original).unwrap();
+        symlink_dir(&outside, &logs).unwrap();
+        dir.open_append(OsStr::new("agent.log"))
+            .unwrap()
+            .write_all(b"inside\n")
+            .unwrap();
+        dir.rename(OsStr::new("agent.log"), OsStr::new("agent.log.old"))
+            .unwrap();
+        dir.remove(OsStr::new("agent.log.old")).unwrap();
+
+        assert_eq!(fs::read(&victim).unwrap(), b"outside\n");
+        assert!(!original.join("agent.log.old").exists());
+    }
+
+    #[test]
+    fn linked_agent_root_can_still_contain_managed_logs() {
+        let root = tempfile::tempdir().unwrap();
+        let real_agent = root.path().join("real-agent");
+        fs::create_dir(&real_agent).unwrap();
+        let linked_agent = root.path().join("agent");
+        symlink_dir(&real_agent, &linked_agent).unwrap();
+
+        let dir = LogDir::for_write(
+            &linked_agent.join("logs"),
+            &linked_agent,
+            DirectoryMode::Inherited,
+        )
+        .unwrap();
+        dir.open_append(OsStr::new("agent.log"))
+            .unwrap()
+            .write_all(b"inside\n")
+            .unwrap();
+
+        assert_eq!(
+            fs::read(real_agent.join("logs/agent.log")).unwrap(),
+            b"inside\n"
+        );
+    }
+}

@@ -297,3 +297,44 @@ mod tests {
         assert!(agent.join("logs").is_dir());
     }
 }
+
+#[cfg(all(test, windows))]
+mod windows_tests {
+    use super::*;
+    use std::io::Write as _;
+
+    #[test]
+    fn directory_swap_keeps_worker_log_operations_on_original_dir() {
+        let temp = tempfile::tempdir().unwrap();
+        let agent = temp.path().join("agent");
+        fs::create_dir(&agent).unwrap();
+        let logs = agent.join("logs");
+        let dir = LogDir::for_write(&logs).unwrap();
+        let original = agent.join("original-logs");
+        let outside = temp.path().join("outside");
+        fs::create_dir(&outside).unwrap();
+        fs::write(outside.join("worker-a.stderr.log"), b"outside\n").unwrap();
+
+        fs::rename(&logs, &original).unwrap();
+        let output = std::process::Command::new("cmd")
+            .args(["/C", "mklink", "/J"])
+            .arg(&logs)
+            .arg(&outside)
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
+
+        dir.open_file(OsStr::new("worker-a.stderr.log"), OpenMode::Write)
+            .unwrap()
+            .write_all(b"inside\n")
+            .unwrap();
+        assert_eq!(
+            fs::read(original.join("worker-a.stderr.log")).unwrap(),
+            b"inside\n"
+        );
+        assert_eq!(
+            fs::read(outside.join("worker-a.stderr.log")).unwrap(),
+            b"outside\n"
+        );
+    }
+}
