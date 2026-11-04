@@ -25,6 +25,13 @@ const BUSY_RETRY_INTERVAL: Duration = Duration::from_millis(50);
 /// error instead of hanging the caller.
 const BUSY_RETRY_DEADLINE: Duration = Duration::from_secs(10);
 
+#[cfg(test)]
+thread_local! {
+    // A native test substitutes a foreign peer verdict without requiring a
+    // second Windows account on the CI runner.
+    static TEST_FOREIGN_PEER: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
 /// A listening named-pipe endpoint. One instance waits for the next client at all times; `accept`
 /// connects that instance and has already created its replacement, so the pipe name stays
 /// connectable - the named-pipe equivalent of a backlog.
@@ -198,11 +205,12 @@ mod tests {
     //! Round-trips through the public transport API. Windows-only; the sandbox verifies compilation
     //! for the cross target, a real Windows runner executes them.
 
-    use std::io::{Read, Write};
+    use std::io::{self, Read, Write};
     use std::path::PathBuf;
     use std::time::Duration;
 
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::windows::named_pipe::ServerOptions;
 
     use super::super::transport::{bind_transport, connect_blocking, connect_transport};
 
@@ -213,6 +221,29 @@ mod tests {
             r"\\.\pipe\prime-agent-pa-types-test-{}-{tag}",
             std::process::id()
         ))
+    }
+
+    fn test_worker_pipe(tag: &str) -> String {
+        format!(
+            r"\\.\pipe\prime-agent-worker-{:012x}-{tag}",
+            std::process::id()
+        )
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn built_in_pipe_refuses_a_foreign_server_before_protocol_io() {
+        let name = test_worker_pipe("000000000001");
+        let _server = ServerOptions::new()
+            .first_pipe_instance(true)
+            .create(&name)
+            .expect("fake worker server");
+        super::TEST_FOREIGN_PEER.with(|flag| flag.set(true));
+        let result = super::connect(&name).await;
+        super::TEST_FOREIGN_PEER.with(|flag| flag.set(false));
+        assert_eq!(
+            result.expect_err("foreign server must be refused").kind(),
+            io::ErrorKind::PermissionDenied
+        );
     }
 
     #[tokio::test]
