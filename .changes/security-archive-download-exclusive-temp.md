@@ -1,0 +1,1 @@
+- Prevented release archive downloads from following planted temporary-file links.

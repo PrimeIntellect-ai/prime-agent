@@ -261,6 +261,19 @@ pub(super) fn validate_release_dir(release_dir: &Path, archive_sha256: &str) -> 
             );
         }
     }
+    // An older staged release may already contain archive-supplied links.
+    // Never activate a linked binary or read/update through metadata links.
+    for name in ["prime-agent", ".archive-sha256", ".install-source"] {
+        let path = release_dir.join(name);
+        let metadata = std::fs::symlink_metadata(&path)
+            .with_context(|| format!("read release entry at {}", path.display()))?;
+        if !metadata.file_type().is_file() {
+            anyhow::bail!(
+                "release {} is damaged: {name} is not a regular file",
+                release_dir.display()
+            );
+        }
+    }
     let recorded = std::fs::read_to_string(release_dir.join(".archive-sha256"))
         .with_context(|| format!("read the archive digest of {}", release_dir.display()))?;
     if recorded.trim() != archive_sha256 {
@@ -362,7 +375,7 @@ mod tests {
         std::fs::create_dir_all(&release_dir).unwrap();
         for asset in RELEASE_ASSETS {
             let path = release_dir.join(asset);
-            if asset.contains('.') {
+            if *asset == "prime-agent" || asset.contains('.') {
                 std::fs::write(&path, "x").unwrap();
             } else {
                 std::fs::create_dir_all(&path).unwrap();
@@ -403,6 +416,23 @@ mod tests {
         fixture(root, CURRENT_LAUNCHER, "0.2.0", &sha);
         let release_dir = root.join("releases").join(format!("0.2.0-linux-x64-{sha}"));
         std::fs::remove_file(release_dir.join("README.md")).unwrap();
+        assert!(read_installation(root, CURRENT_LAUNCHER).is_err());
+    }
+
+    #[test]
+    fn rejects_a_release_with_a_linked_binary() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let sha = "b".repeat(64);
+        fixture(root, CURRENT_LAUNCHER, "0.2.0", &sha);
+        let binary = root
+            .join("releases")
+            .join(format!("0.2.0-linux-x64-{sha}"))
+            .join("prime-agent");
+        std::fs::remove_file(&binary).unwrap();
+        let victim = root.join("outside.txt");
+        std::fs::write(&victim, "outside").unwrap();
+        std::os::unix::fs::symlink(victim, binary).unwrap();
         assert!(read_installation(root, CURRENT_LAUNCHER).is_err());
     }
 

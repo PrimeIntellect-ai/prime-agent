@@ -402,6 +402,12 @@ New-Item -ItemType Directory -Path $stage | Out-Null
 $script:primeAgentInstallStage = $stage
 & tar -xzf $tarball -C $stage
 if ($LASTEXITCODE -ne 0) { Fail "could not extract $expectedFile (tar exited $LASTEXITCODE)" }
+$markerPath = Join-Path $stage '.prime-agent-install'
+# Enumerate directory entries so a dangling link is rejected too; Test-Path
+# can report a missing target even though the marker link itself exists.
+if (Get-ChildItem -LiteralPath $stage -Force | Where-Object { $_.Name -eq '.prime-agent-install' }) {
+    Fail 'the tarball contains an installer-owned .prime-agent-install marker'
+}
 $payloadExe = Join-Path $stage 'prime-agent.exe'
 if (-not (Test-Path $payloadExe -PathType Leaf)) { Fail "the tarball did not contain a prime-agent.exe payload" }
 Step-Ok 'extracted' $expectedFile
@@ -414,7 +420,7 @@ $marker = "$channelLine`nversion $version"
 # encoding follows $PSDefaultParameterValues['*:Encoding'] (UTF-16 or a
 # BOM), and the update funnel's channel-stickiness read + the rollback's
 # marker validation grep the raw ASCII line.
-Set-Content -LiteralPath (Join-Path $stage '.prime-agent-install') -Value $marker -Encoding Ascii -NoNewline
+Set-Content -LiteralPath $markerPath -Value $marker -Encoding Ascii -NoNewline
 
 # The launcher paths (the section below the publish writes both).
 $launcher = Join-Path $bin 'prime-agent.cmd'

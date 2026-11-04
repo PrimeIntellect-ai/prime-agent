@@ -446,26 +446,37 @@ fn validate_successor(hello: &Value, pid: u64, version: &str) -> Result<()> {
 }
 
 pub(super) fn persist(path: &Path, value: &Value) -> Result<()> {
-    use std::io::Write;
-    let temporary = path.with_extension(format!("{}.tmp", std::process::id()));
-    let mut options = std::fs::OpenOptions::new();
-    options.write(true).create(true).truncate(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
-    }
-    let mut file = options.open(&temporary)?;
-    serde_json::to_writer(&mut file, value)?;
-    file.write_all(b"\n")?;
-    file.sync_all()?;
-    std::fs::rename(temporary, path)?;
-    Ok(())
+    let mut content = serde_json::to_vec(value)?;
+    content.push(b'\n');
+    super::atomic_state::replace(path, &content)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn legacy_status_write_does_not_follow_a_planted_temp_symlink() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("status.json");
+        let temporary = path.with_extension(format!("{}.tmp", std::process::id()));
+        let victim = dir.path().join("unrelated-file");
+        std::fs::write(&victim, b"keep this file").unwrap();
+        std::os::unix::fs::symlink(&victim, &temporary).unwrap();
+
+        let status = json!({"phase": "starting"});
+        persist(&path, &status).unwrap();
+        assert_eq!(std::fs::read(&victim).unwrap(), b"keep this file");
+        assert_eq!(
+            serde_json::from_slice::<Value>(&std::fs::read(&path).unwrap()).unwrap(),
+            status
+        );
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            format!("{}\n", serde_json::to_string(&status).unwrap())
+        );
+    }
 
     #[cfg(unix)]
     #[tokio::test]

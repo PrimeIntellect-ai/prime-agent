@@ -1,0 +1,1 @@
+- Prevented a planted activation-state link from redirecting update rollback writes.

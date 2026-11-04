@@ -1,10 +1,17 @@
 #!/usr/bin/env python3
-"""Packaging regressions; real old-installer execution lives in test_legacy_upgrade."""
+"""Packaging and installer archive regressions.
+
+Old-installer execution lives in test_legacy_upgrade.
+"""
 
 import argparse
+import io
 import json
+import platform
+import shlex
 import shutil
 import subprocess
+import sys
 import tarfile
 import tempfile
 import unittest
@@ -111,6 +118,71 @@ class NativeCompatibilityTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("Native compatibility verified:", result.stdout)
         self.assertNotIn("src.tar.gz", result.stdout)
+
+
+class InstallerArchiveSecurityTests(unittest.TestCase):
+    @unittest.skipUnless(sys.platform == "linux" and platform.machine() == "x86_64",
+                         "exercises the Linux x64 archive installer")
+    def test_archive_metadata_symlink_cannot_overwrite_file_outside_stage(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            prefix = root / "prefix"
+            share = prefix / "share"
+            share.mkdir(parents=True)
+            victim = share / "victim.txt"
+            victim.write_text("keep this")
+            archive = root / "prime-agent-9.9.9-linux-x64.tar.gz"
+            with tarfile.open(archive, "w:gz") as tar:
+                binary = b"#!/bin/sh\nprintf '9.9.9\\n'\n"
+                member = tarfile.TarInfo("prime-agent")
+                member.mode = 0o755
+                member.size = len(binary)
+                tar.addfile(member, io.BytesIO(binary))
+                marker = tarfile.TarInfo(".prime-agent-install")
+                marker.type = tarfile.SYMTYPE
+                marker.linkname = "../victim.txt"
+                tar.addfile(marker)
+
+            fake_bin = root / "fake-bin"
+            fake_bin.mkdir()
+            uv = fake_bin / "uv"
+            uv.write_text("#!/bin/sh\n[ \"$1 $2\" = 'python find' ] && printf '%s\\n' "
+                          + shlex.quote(sys.executable) + "\n")
+            uv.chmod(0o755)
+            user = root / "user"
+            user.mkdir()
+            (root / "tmp").mkdir()
+            env = {
+                "PATH": f"{fake_bin}:/usr/bin:/bin",
+                "HOME": str(user),
+                "TMPDIR": str(root / "tmp"),
+                "PRIME_AGENT_RUST_PREFIX": str(prefix),
+                "PRIME_AGENT_UV_BIN_DIR": str(fake_bin),
+                "PRIME_AGENT_BOOTSTRAP_KERNEL_ON_INSTALL": "0",
+                "PRIME_AGENT_INSTALLER_NONINTERACTIVE": "1",
+                "PRIME_AGENT_INSTALLER_PLAIN": "1",
+                "DO_NOT_TRACK": "1",
+                "npm_config_prefix": str(root / "npm"),
+            }
+            installer = Path(__file__).resolve().parents[2] / "install-rust.sh"
+            result = subprocess.run(["sh", str(installer), "--archive", str(archive)],
+                                    env=env, capture_output=True, text=True, timeout=30)
+            self.assertEqual(victim.read_text(), "keep this", result.stderr)
+            self.assertNotEqual(result.returncode, 0, result.stdout)
+            self.assertEqual(list(share.glob("prime-agent.stage.*")), [])
+
+            safe = root / "safe" / archive.name
+            safe.parent.mkdir()
+            with tarfile.open(safe, "w:gz") as tar:
+                member = tarfile.TarInfo("prime-agent")
+                member.mode = 0o755
+                member.size = len(binary)
+                tar.addfile(member, io.BytesIO(binary))
+            installed = subprocess.run(["sh", str(installer), "--archive", str(safe)],
+                                       env=env, capture_output=True, text=True, timeout=30)
+            self.assertEqual(installed.returncode, 0, installed.stderr)
+            self.assertEqual((share / "prime-agent/.prime-agent-install").read_text(),
+                             "install-rust.sh channel stable\nversion 9.9.9\n")
 
 
 if __name__ == "__main__":
