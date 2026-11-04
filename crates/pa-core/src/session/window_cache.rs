@@ -125,6 +125,9 @@ pub(super) fn load(path: &Path, file: &File, stats: &mut WindowReadStats) -> Opt
         options.custom_flags(libc::O_NOFOLLOW);
     }
     let mut sidecar = options.open(cache_path(path)).ok()?;
+    if !sidecar.metadata().ok()?.is_file() {
+        return None;
+    }
     // Older caches may have inherited broad umask permissions. Tighten the
     // opened file before reading it; no-follow avoids chmoding a linked target.
     crate::platform::perms::restrict_open_file(&sidecar).ok()?;
