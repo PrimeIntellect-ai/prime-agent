@@ -167,12 +167,12 @@ impl Editor {
                     // selection collapses with it.
                     self.selection_anchor = None;
                     let (cl, cc) = (self.cursor_line, self.cursor_col);
-                    let prefix = self
+                    let (prefix, kind) = self
                         .autocomplete
                         .as_ref()
-                        .map(|s| s.prefix.clone())
+                        .map(|s| (s.prefix.clone(), s.kind))
                         .unwrap_or_default();
-                    let result = self.apply_completion(&item, &prefix);
+                    let result = self.apply_completion(&item, &prefix, kind);
                     let completed_noop = result.lines == self.lines
                         && result.cursor_line == cl
                         && result.cursor_col == cc;

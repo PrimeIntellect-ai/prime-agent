@@ -233,6 +233,7 @@ impl SessionUi {
             values.builtin_skills = settings.enable_builtin_skills();
             values.harness_refinements = settings.harness_refinements();
             values.hardware_cursor = settings.show_hardware_cursor();
+            values.emoji_shortcodes = settings.emoji_shortcodes();
             values.editor_padding = settings.editor_padding_x();
             values.autocomplete_max_visible = settings.autocomplete_max_visible();
             values.clear_on_shrink = settings.clear_on_shrink();
@@ -251,6 +252,7 @@ impl SessionUi {
             values.skill_commands = true;
             values.builtin_skills = true;
             values.harness_refinements = true;
+            values.emoji_shortcodes = true;
             values.idle_eviction_minutes = "90".to_string();
             values.mermaid = "streaming".to_string();
             values.tree_filter_mode = "user-only".to_string();
@@ -407,6 +409,15 @@ impl SessionUi {
                 // The very next frame shows or hides the hardware cursor at the focused
                 // caret.
                 view.show_hardware_cursor = value == "true";
+            }
+            "emoji-shortcodes" => {
+                if let Some(settings) = &self.client_settings {
+                    if let Err(error) = settings.set_emoji_shortcodes(value == "true") {
+                        self.error_row(&format!("{error:#}"), view);
+                        return;
+                    }
+                }
+                view.editor.set_emoji_shortcodes(value == "true");
             }
             "editor-padding" => {
                 if let Some(settings) = &self.client_settings {

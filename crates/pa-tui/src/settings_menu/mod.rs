@@ -235,6 +235,14 @@ pub fn settings_menu_rows(current: &SettingsCurrentValues) -> Vec<SettingsMenuRo
             submenu: None,
         },
         SettingsMenuRow {
+            id: "emoji-shortcodes",
+            label: "Emoji shortcodes",
+            description: "Suggest emoji when typing :name in the editor",
+            current: current.emoji_shortcodes.to_string(),
+            values: Some(bool_value()),
+            submenu: None,
+        },
+        SettingsMenuRow {
             id: "clear-on-shrink",
             label: "Clear on shrink",
             description: "Clear empty rows when content shrinks (may cause flicker)",
@@ -358,6 +366,7 @@ pub struct SettingsCurrentValues {
     pub builtin_skills: bool,
     pub harness_refinements: bool,
     pub hardware_cursor: bool,
+    pub emoji_shortcodes: bool,
     pub editor_padding: u64,
     pub autocomplete_max_visible: u64,
     pub clear_on_shrink: bool,
