@@ -226,15 +226,12 @@ impl AgentSessionEngine {
                                             }
                                         }
                                     }
-                                    // An in-run continuation's user row: the
-                                    // `boundary_passed` gate separates it from
-                                    // the admitted prompt's row, which the loop
-                                    // already emitted.
+                                    // Every admitted user row, including the initial
+                                    // batch and later queued/continuation rows. The
+                                    // core emits these only after admission succeeds.
                                     pa_agent::types::AgentMessage::Standard(
                                         pa_agent::types::Message::User(_),
-                                    ) if boundary_passed
-                                        .load(std::sync::atomic::Ordering::SeqCst) =>
-                                    {
+                                    ) => {
                                         if let Some(value) = session_wire_value(agent_message) {
                                             let _ = tx.send(EngineEvent::UserMessage(value));
                                         }

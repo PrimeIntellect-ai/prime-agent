@@ -63,7 +63,7 @@ mod config;
 
 mod artifacts;
 
-pub(crate) use artifacts::{artifact_reference, now_millis};
+pub(crate) use artifacts::artifact_reference;
 
 pub use config::AgentEngineConfig;
 pub(crate) use config::AutonomousAdmission;

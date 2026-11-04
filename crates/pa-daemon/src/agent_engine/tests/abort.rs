@@ -196,10 +196,13 @@ fn abort_racing_the_admission_prefix_settles_the_turn_before_the_provider_call()
             true
         },
     );
-    // The accepted row persists; the turn settles the structural aborted.
+    // Cancellation precedes admission: no user event may reach the worker's
+    // durable sink. The aborted request must not become history for the next turn.
     assert!(
-        matches!(&events[0], EngineEvent::UserMessage(_)),
-        "the accepted row leads: {events:?}"
+        events
+            .iter()
+            .all(|event| !matches!(event, EngineEvent::UserMessage(_))),
+        "the canceled request was never admitted: {events:?}"
     );
     assert!(
         events
@@ -224,6 +227,42 @@ fn abort_racing_the_admission_prefix_settles_the_turn_before_the_provider_call()
     // The served-path proof: the scripted response was never consumed.
     let mut next_events: Vec<EngineEvent> = Vec::new();
     admit(&engine, "the next turn".to_string(), &mut next_events);
+    let users = engine.runtime.block_on(async {
+        let core = engine
+            .session
+            .lock()
+            .await
+            .clone()
+            .expect("next turn built core");
+        let state = core.session.agent().state().await;
+        state
+            .messages
+            .iter()
+            .filter_map(|message| match message {
+                pa_agent::types::AgentMessage::Standard(pa_agent::types::Message::User(user)) => {
+                    Some(serde_json::to_value(user).unwrap())
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+    });
+    assert_eq!(
+        users.len(),
+        1,
+        "the canceled request must not leak into model history: {users:?}"
+    );
+    assert_eq!(
+        users[0]["content"],
+        json!([{ "type": "text", "text": "the next turn" }])
+    );
+    assert_eq!(
+        next_events
+            .iter()
+            .filter(|event| matches!(event, EngineEvent::UserMessage(_)))
+            .count(),
+        1,
+        "the next accepted request persists exactly once: {next_events:?}"
+    );
     assert!(
         next_events.iter().any(|event| matches!(
             event,
