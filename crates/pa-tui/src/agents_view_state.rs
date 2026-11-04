@@ -2,7 +2,7 @@
 //! catalog into unified records, then section grouping, search, and the row/layout shapes the
 //! view renders. Pure functions on JSON summaries; the view module owns input and painting.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use pa_types::daemon::agent_roster::AgentRosterStatus;
 use serde_json::Value;
@@ -473,6 +473,29 @@ pub fn filter_unified_sessions(
     records: &[UnifiedRecord],
     query: &ParsedSearchQuery,
 ) -> Vec<UnifiedRecord> {
+    retain_hits_with_ancestors(records, |record| {
+        score_search(&record_search_text(record), query)
+    })
+}
+
+/// Keep the records whose durable session id is in `session_ids` (a message-text search's hits)
+/// plus every ancestor. Every hit scores alike, so hits order by recency.
+#[must_use]
+pub(crate) fn filter_by_session_ids(
+    records: &[UnifiedRecord],
+    session_ids: &HashSet<String>,
+) -> Vec<UnifiedRecord> {
+    retain_hits_with_ancestors(records, |record| {
+        session_ids
+            .contains(&record_search_text(record).id)
+            .then_some(0.0)
+    })
+}
+
+fn retain_hits_with_ancestors(
+    records: &[UnifiedRecord],
+    score: impl Fn(&UnifiedRecord) -> Option<f64>,
+) -> Vec<UnifiedRecord> {
     let by_alias: HashMap<&str, usize> = records
         .iter()
         .enumerate()
@@ -488,7 +511,7 @@ pub fn filter_unified_sessions(
     for index in 0..records.len() {
         // Every directly matching record carries its score, even one
         // already retained as an ancestor of an earlier hit.
-        let Some(score) = score_search(&record_search_text(&records[index]), query) else {
+        let Some(score) = score(&records[index]) else {
             continue;
         };
         scores[index] = Some(score);

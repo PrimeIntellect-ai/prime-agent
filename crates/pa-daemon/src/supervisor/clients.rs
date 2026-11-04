@@ -836,6 +836,38 @@ impl Supervisor {
                 .await;
                 (vec![line], false)
             }
+            DaemonCommand::SearchSessionContent {
+                session_dir, query, ..
+            } => {
+                let dir = match session_dir.as_deref() {
+                    Some(dir) => crate::paths::expand_tilde(dir),
+                    None => crate::paths::sessions_dir(&self.options.agent_dir),
+                };
+                let query = query.clone();
+                let response = match dir {
+                    Ok(dir) => match tokio::task::spawn_blocking(move || {
+                        crate::session_content_search::search_session_content(&dir, &query)
+                    })
+                    .await
+                    {
+                        Ok(session_ids) => response_success(
+                            Some(&command_id),
+                            &type_name,
+                            Some(json!({ "sessionIds": session_ids })),
+                        ),
+                        Err(error) => response_failure(
+                            Some(&command_id),
+                            &type_name,
+                            &error.to_string(),
+                            None,
+                        ),
+                    },
+                    Err(error) => {
+                        response_failure(Some(&command_id), &type_name, &error.to_string(), None)
+                    }
+                };
+                (vec![response_line(&response)], false)
+            }
             DaemonCommand::TailPersistentShell {
                 shell_id, lines, ..
             } => {
