@@ -161,30 +161,6 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn the_seam_serves_scripted_responses() {
-        let http = ScriptedHttp(
-            [ScriptedHttp::entry(
-                "https://fixture.example/token",
-                200,
-                r#"{"ok":true}"#,
-            )]
-            .into_iter()
-            .collect(),
-        );
-        let response = http
-            .post_form("https://fixture.example/token", "", 1)
-            .await
-            .unwrap();
-        assert_eq!(response.status, 200);
-        assert_eq!(response.body, r#"{"ok":true}"#);
-        assert!(response.ok());
-        assert!(http
-            .post_form("https://other.example/token", "", 1)
-            .await
-            .is_err());
-    }
-
     async fn oversized_stalled_response(chunked: bool) -> (String, tokio::task::JoinHandle<()>) {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("http://{}/token", listener.local_addr().unwrap());
@@ -285,5 +261,28 @@ mod tests {
         server.await.unwrap();
         assert_eq!(response.status, 400);
         assert_eq!(response.body, "x\u{fffd}y");
+    }
+    #[tokio::test]
+    async fn the_seam_serves_scripted_responses() {
+        let http = ScriptedHttp(
+            [ScriptedHttp::entry(
+                "https://fixture.example/token",
+                200,
+                r#"{"ok":true}"#,
+            )]
+            .into_iter()
+            .collect(),
+        );
+        let response = http
+            .post_form("https://fixture.example/token", "", 1)
+            .await
+            .unwrap();
+        assert_eq!(response.status, 200);
+        assert_eq!(response.body, r#"{"ok":true}"#);
+        assert!(response.ok());
+        assert!(http
+            .post_form("https://other.example/token", "", 1)
+            .await
+            .is_err());
     }
 }
