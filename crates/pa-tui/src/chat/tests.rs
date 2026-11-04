@@ -165,8 +165,12 @@ fn user_block_keeps_the_link_affordance() {
     let link_url = bg.patch(theme().fg_style(ThemeColor::MdLinkUrl));
     let rows = render_user_block("see [docs](https://x.dev/a)", &theme(), "  ", 60);
     assert_eq!(rows.len(), 3);
+    let visible_runs: Vec<_> = row_runs(&rows[1])
+        .into_iter()
+        .map(|(content, style)| (content, crate::hyperlinks::paint_style(style)))
+        .collect();
     assert_eq!(
-        row_runs(&rows[1]),
+        visible_runs,
         vec![
             ("  ".to_string(), bg),
             ("see ".to_string(), body),

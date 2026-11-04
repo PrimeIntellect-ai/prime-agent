@@ -134,17 +134,23 @@ fn render_inline_ctx(
                     &url,
                     style.link_base_url.as_ref(),
                 );
+                // A label can contain raw terminal escapes from model text. Remove them before
+                // giving this span the generated-link marker; otherwise a forged OSC 8 inside
+                // the label would inherit the renderer's provenance.
+                let safe_label = crate::ansi::strip_ansi(&label);
                 let (label_spans, label_slots, label_codes) =
-                    render_inline_ctx(&label, style, true);
+                    render_inline_ctx(&safe_label, style, true);
                 let mut label_spans = label_spans;
                 {
                     // OSC 8: the label stays clickable (TS `hyperlink()`).
                     let open = crate::hyperlinks::osc8_open(&href);
                     if let Some(first) = label_spans.first_mut() {
                         first.content.insert_str(0, &open);
+                        crate::hyperlinks::mark_generated_link(first);
                     }
                     if let Some(last) = label_spans.last_mut() {
                         last.content.push_str(crate::hyperlinks::OSC8_CLOSE);
+                        crate::hyperlinks::mark_generated_link(last);
                     }
                 }
                 append_inner(
@@ -369,7 +375,7 @@ fn render_inline_ctx(
             }
             // Every link render underlines, both capability forms.
             let mut label = Span::styled(
-                token.text.clone(),
+                crate::ansi::strip_ansi(&token.text),
                 base.add_modifier(m | Modifier::UNDERLINED),
             );
             {
@@ -381,6 +387,7 @@ fn render_inline_ctx(
                     .content
                     .insert_str(0, &crate::hyperlinks::osc8_open(&href));
                 label.content.push_str(crate::hyperlinks::OSC8_CLOSE);
+                crate::hyperlinks::mark_generated_link(&mut label);
             }
             spans.push(label);
             // Without OSC 8 support the URL rides beside the label in the dim

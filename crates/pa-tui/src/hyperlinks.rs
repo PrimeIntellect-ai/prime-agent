@@ -11,7 +11,27 @@
 use std::cell::RefCell;
 use std::io::{self, Write};
 
-use crate::Line;
+use ratatui::style::{Modifier, Style};
+
+use crate::{Line, Span};
+
+// Link metadata comes from styled renderer spans, never from raw model or tool text. The marker
+// lives in an otherwise unused style bit and is removed before paint, so it cannot change the
+// terminal's styling or the OSC 8 bytes emitted by HyperlinkWriter.
+const GENERATED_LINK: Modifier = Modifier::SLOW_BLINK;
+
+pub(crate) fn mark_generated_link(span: &mut Span) {
+    span.style.sub_modifier.insert(GENERATED_LINK);
+}
+
+pub(crate) fn is_generated_link_style(style: Style) -> bool {
+    style.sub_modifier.contains(GENERATED_LINK)
+}
+
+pub(crate) fn paint_style(mut style: Style) -> Style {
+    style.sub_modifier.remove(GENERATED_LINK);
+    style
+}
 
 /// The chat paint backend: a crossterm backend over the stdout
 /// [`HyperlinkWriter`], so painted link cells carry their OSC 8 regions.
@@ -161,7 +181,14 @@ pub fn frame_link_ranges(frame: &[Line]) -> Vec<LinkRange> {
     for row in 0..frame.len() {
         let mut col = 0usize;
         for span in &frame[row] {
-            scan_span(&span.content, row, &mut col, &mut carry, &mut ranges);
+            scan_span(
+                &span.content,
+                is_generated_link_style(span.style),
+                row,
+                &mut col,
+                &mut carry,
+                &mut ranges,
+            );
         }
         if let Some((start_row, start_col, url)) = carry.take() {
             let _ = start_row;
@@ -181,6 +208,7 @@ pub fn frame_link_ranges(frame: &[Line]) -> Vec<LinkRange> {
 
 fn scan_span(
     content: &str,
+    generated: bool,
     row: usize,
     col: &mut usize,
     carry: &mut Option<(usize, usize, String)>,
@@ -190,7 +218,7 @@ fn scan_span(
     while i < content.len() {
         if let Some(len) = crate::width::escape_len(&content[i..]) {
             let seq = &content[i..i + len];
-            if seq.starts_with("\x1b]8;;") && !is_osc8_close(seq) {
+            if generated && seq.starts_with("\x1b]8;;") && !is_osc8_close(seq) {
                 let url = &seq["\x1b]8;;".len()..];
                 let url = url.strip_suffix("\x1b\\").unwrap_or(url);
                 if let Some((start_row, start_col, url)) = carry.take() {
@@ -202,7 +230,7 @@ fn scan_span(
                     });
                 }
                 *carry = Some((row, *col, url.to_string()));
-            } else if is_osc8_close(seq) {
+            } else if generated && is_osc8_close(seq) {
                 if let Some((start_row, start_col, url)) = carry.take() {
                     ranges.push(LinkRange {
                         row: start_row,
@@ -233,6 +261,7 @@ pub fn strip_osc8(line: &mut Line) {
         if span.content.contains("\x1b]8;;") {
             span.content = strip_osc8_content(&span.content);
         }
+        span.style = paint_style(span.style);
     }
 }
 
@@ -508,6 +537,12 @@ mod tests {
         vec![Span::raw(text)]
     }
 
+    fn generated(content: impl Into<String>) -> Span {
+        let mut span = Span::raw(content);
+        mark_generated_link(&mut span);
+        span
+    }
+
     #[test]
     fn resolve_link_href_canonicalizes_parseable_targets() {
         // The deployed renderer always sets baseUrl, so every parseable
@@ -557,8 +592,42 @@ mod tests {
         );
         assert_eq!(openable_href("mailto:a@b.dev"), None);
         assert_eq!(openable_href("ftp://example.com/f"), None);
+        assert_eq!(openable_href("javascript:alert(1)"), None);
+        assert_eq!(openable_href("data:text/html,unsafe"), None);
+        assert_eq!(openable_href("--help"), None);
         assert_eq!(openable_href("not a url"), None);
         assert_eq!(openable_href("https://example.com/a\x1bb"), None);
+    }
+
+    #[test]
+    fn raw_code_block_osc8_does_not_create_a_clickable_link() {
+        let style = crate::markdown::MarkdownStyle::default();
+        let frame = crate::markdown::render_markdown(
+            "```\n\x1b]8;;https://attacker.example/\x1b\\safe text\x1b]8;;\x1b\\\n```",
+            40,
+            &style,
+        );
+        assert_eq!(frame_link_ranges(&frame), Vec::new());
+    }
+
+    #[test]
+    fn raw_tool_output_osc8_does_not_create_a_clickable_link() {
+        let frame = vec![vec![Span::raw(
+            "output: \x1b]8;;https://attacker.example/\x1b\\safe text\x1b]8;;\x1b\\",
+        )]];
+        assert_eq!(frame_link_ranges(&frame), Vec::new());
+    }
+
+    #[test]
+    fn raw_osc8_inside_an_autolink_cannot_replace_its_target() {
+        let style = crate::markdown::MarkdownStyle::default();
+        let frame = vec![crate::markdown::render_inline(
+            "www.example.com/\x1b]8;;https://attacker.example/\x1b\\safe\x1b]8;;\x1b\\",
+            &style,
+        )];
+        assert!(frame_link_ranges(&frame)
+            .iter()
+            .all(|link| link.url != "https://attacker.example/"));
     }
 
     #[test]
@@ -599,9 +668,9 @@ mod tests {
     fn frame_link_ranges_cover_label_cells() {
         let row0 = vec![
             Span::raw("see "),
-            Span::raw(osc8_open("https://x.dev/a")),
+            generated(osc8_open("https://x.dev/a")),
             Span::raw("the docs"),
-            Span::raw(OSC8_CLOSE),
+            generated(OSC8_CLOSE),
         ];
         let row1 = vec![Span::raw("tail row")];
         let ranges = frame_link_ranges(&[row0, row1]);
@@ -619,8 +688,8 @@ mod tests {
     #[test]
     fn open_link_wraps_to_row_end_and_next_row() {
         let frame = vec![
-            vec![Span::raw(osc8_open("https://x.dev")), Span::raw("abc")],
-            vec![Span::raw("def"), Span::raw(OSC8_CLOSE)],
+            vec![generated(osc8_open("https://x.dev")), Span::raw("abc")],
+            vec![Span::raw("def"), generated(OSC8_CLOSE)],
         ];
         let ranges = frame_link_ranges(&frame);
         assert_eq!(
@@ -779,9 +848,9 @@ mod tests {
         // Link covers the `cd` label at columns 4..6 of row 0.
         let frame = vec![vec![
             Span::raw("    "),
-            Span::raw(osc8_open("https://z")),
+            generated(osc8_open("https://z")),
             Span::raw("cd"),
-            Span::raw(OSC8_CLOSE),
+            generated(OSC8_CLOSE),
         ]];
         let out = paint(&frame, &[b"\x1b[1;3Hab", b"\x1b[1;5Hcd", b"\x1b[1;8Hxy"]);
         assert_eq!(
@@ -823,9 +892,9 @@ mod tests {
         // The link covers columns 0..4; a color SGR lands between the two
         // fragments, so the region must stay open across the SGR bytes.
         let frame = vec![vec![
-            Span::raw(osc8_open("https://z")),
+            generated(osc8_open("https://z")),
             Span::raw("abcd"),
-            Span::raw(OSC8_CLOSE),
+            generated(OSC8_CLOSE),
         ]];
         let out = paint(&frame, &[b"\x1b[1;1Hab\x1b[38;2;1;2;3mcd"]);
         assert_eq!(
