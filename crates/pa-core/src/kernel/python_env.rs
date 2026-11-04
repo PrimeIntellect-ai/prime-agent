@@ -111,9 +111,8 @@ fn safe_home_uv_with_home(path: &Path, project: Option<&Path>, home: Option<&Pat
     let nearest_checkout = project
         .ancestors()
         .find(|ancestor| ancestor.join(".git").exists());
-    let unmarked_home = nearest_checkout.is_none() && paths_equal(&project, &canonical_home);
     let active_boundary = nearest_checkout.unwrap_or(&project);
-    unmarked_home || !path_starts_with(&canonical_uv, active_boundary)
+    !path_starts_with(&canonical_uv, active_boundary)
 }
 
 /// Drop ambient Python import roots after caller overrides are applied.
@@ -446,7 +445,8 @@ mod tests {
         std::fs::create_dir_all(&untrusted).unwrap();
         std::fs::write(&uv, "uv").unwrap();
         std::fs::write(&untrusted_uv, "uv").unwrap();
-        assert!(safe_home_uv_with_home(&uv, Some(&home), Some(&home)));
+        // A no-Git archive opened at HOME can supply this exact path.
+        assert!(!safe_home_uv_with_home(&uv, Some(&home), Some(&home)));
         assert!(!safe_home_uv_with_home(
             &untrusted_uv,
             Some(&home),
