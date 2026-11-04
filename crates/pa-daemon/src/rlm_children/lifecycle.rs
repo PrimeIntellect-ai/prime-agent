@@ -90,6 +90,17 @@ impl SupervisorChildSessionsInner {
             "rlmDepth": depth,
             "rlmMaxDepth": identity.rlm_max_depth,
         });
+        // The refine child's runtime kind reaches the worker through the
+        // create config: it builds the refinement engine instead of the
+        // agent engine.
+        if runtime_metadata
+            .as_ref()
+            .and_then(|metadata| metadata.get("kind"))
+            .and_then(Value::as_str)
+            == Some("refine")
+        {
+            config["refineChild"] = json!(true);
+        }
         if let Some((provider, id)) = model.split_once('/') {
             config["provider"] = json!(provider);
             config["model"] = json!(id);
@@ -621,6 +632,9 @@ impl SupervisorChildSessionsInner {
                 self.deliver_settle_notice(record).await;
                 // A settled child releases an owed goal continuation.
                 self.fire_settle_hook(record).await;
+                // The one-shot refinement child retires at its settle —
+                // the registry observed it, so it owns the teardown.
+                self.retire_refine_child_record(record).await;
                 return;
             }
             // Still running (a timed-out slice or a re-queued continuation):
@@ -859,6 +873,7 @@ impl SupervisorChildSessionsInner {
         self.record_child_return(record).await;
         self.deliver_terminal_notice(record, message).await;
         self.fire_settle_hook(record).await;
+        self.retire_refine_child_record(record).await;
         true
     }
 

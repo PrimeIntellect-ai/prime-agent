@@ -2,6 +2,7 @@
 //! goal continuation), the stale boundary-request drop, and the
 //! auto-compaction abort clear.
 use super::{AbortController, AgentSessionEngine, BoundaryRun, EngineEvent, Value};
+use crate::engine::SessionEngine as _;
 
 impl AgentSessionEngine {
     /// Clear the automatic-compaction abort slot when `controller`'s run
@@ -60,7 +61,6 @@ impl AgentSessionEngine {
             }
         };
         let api_key = self.resolve_request_api_key(&model);
-        let global_harness_dir = self.config.agent_dir.clone();
         // The start event goes out before the summarizer runs, carrying the
         // pending instructions.
         let scheduled = {
@@ -101,17 +101,44 @@ impl AgentSessionEngine {
             };
             let consumed = self.runtime.block_on(async {
                 engine
-                    .consume_turn_boundary_requests(
-                        &model,
-                        api_key,
-                        global_harness_dir,
-                        Some(&signal),
-                    )
+                    .consume_turn_boundary_requests(&model, api_key, Some(&signal))
                     .await
             });
             self.clear_auto_compaction_abort(&controller);
             consumed
         };
+        // The kernel's scheduled `refine.run` consumes here: the pending
+        // refinement is the refinement child's, so the boundary spawns it
+        // (fire-and-wake) — the session lock and the compaction flight are
+        // never held; the child's proposal applies on its reply's arrival.
+        {
+            let guard = self.session.blocking_lock();
+            let pending = match guard.as_deref() {
+                Some(engine) => self
+                    .runtime
+                    .block_on(async { engine.turn_boundary.take_refine().await }),
+                None => None,
+            };
+            drop(guard);
+            if let Some(pending) = pending {
+                let options = pa_core::session_engine::refine::RefineOptions {
+                    global: pending.global,
+                    instructions: pending.instructions,
+                    rollback_id: None,
+                };
+                if let Err(error) = self.spawn_refinement_child(
+                    options,
+                    pa_core::session_engine::refine::RefinementSource::SelfRefine,
+                ) {
+                    eprintln!("pa-daemon: the requested refinement failed: {error:#}");
+                    if !emit(EngineEvent::RefineFailed {
+                        error: format!("{error:#}"),
+                    }) {
+                        return BoundaryRun::Cancelled;
+                    }
+                }
+            }
+        }
         let mut stopped_for_compaction = false;
         let mut compacted = false;
         match consumption.compaction {
@@ -194,42 +221,6 @@ impl AgentSessionEngine {
             }
             None => {}
         }
-        match consumption.refinement {
-            Some(Ok(refinement)) => {
-                let outcome =
-                    pa_core::session_engine::refine::create_refinement_outcome_message(&refinement);
-                if !emit(EngineEvent::CustomMessage(
-                    crate::session_commands::custom_message_value(&outcome),
-                )) {
-                    return BoundaryRun::Cancelled;
-                }
-                if refinement.applied_edits.iter().any(|edit| edit.applied) {
-                    let notice = pa_core::session_engine::refine::create_refinement_notice_message(
-                        &refinement,
-                        pa_core::session_engine::refine::RefinementSource::SelfRefine,
-                    );
-                    if !emit(EngineEvent::CustomMessage(
-                        crate::session_commands::custom_message_value(&notice),
-                    )) {
-                        return BoundaryRun::Cancelled;
-                    }
-                }
-                if let Ok(result) = serde_json::to_value(&refinement) {
-                    if !emit(EngineEvent::RefineComplete { result }) {
-                        return BoundaryRun::Cancelled;
-                    }
-                }
-            }
-            Some(Err(error)) => {
-                eprintln!("pa-daemon: requested refinement failed: {error:#}");
-                if !emit(EngineEvent::RefineFailed {
-                    error: format!("{error:#}"),
-                }) {
-                    return BoundaryRun::Cancelled;
-                }
-            }
-            None => {}
-        }
         if stopped_for_compaction {
             BoundaryRun::StoppedForCompaction { compacted }
         } else {
@@ -247,22 +238,15 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn requested_refinement_emits_its_durable_outcome_before_completion() {
+    fn a_requested_refinement_without_children_refuses_visibly() {
+        // The fire-and-wake contract: the boundary's pending refinement is
+        // the refinement child's spawn — a standalone engine (no child
+        // runtime) refuses visibly; the apply never runs inline here.
         let _faux = FAUX_TEST_LOCK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let (mut engine, dir) = faux_engine_with_settings(
-            &json!({"responses": [
-                {"text": "seed reply"},
-                {"text": json!({
-                    "summary": "No durable change justified",
-                    "rationale": "Fixture only",
-                    "expectedOutcome": "No change",
-                    "edits": []
-                }).to_string()}
-            ]}),
-            1,
-        );
+        let (mut engine, dir) =
+            faux_engine_with_settings(&json!({"responses": [{"text": "seed reply"}]}), 1);
         engine.config.session_dir = Some(dir.path().join("sessions"));
         admit(&engine, "seed turn".to_string(), &mut Vec::new());
         {
@@ -281,26 +265,33 @@ mod tests {
             true
         });
         assert!(matches!(boundary, BoundaryRun::Proceed));
-        let outcomes: Vec<_> = events
+        let failure = events
             .iter()
-            .enumerate()
-            .filter(|(_, event)| {
-                matches!(event, EngineEvent::CustomMessage(row) if row["customType"] == "refinement_outcome")
-            })
-            .map(|(index, _)| index)
-            .collect();
-        assert_eq!(
-            outcomes.len(),
-            1,
-            "one durable outcome, including a no-op refinement"
-        );
-        let completed = events
-            .iter()
-            .position(|event| matches!(event, EngineEvent::RefineComplete { .. }))
-            .expect("refinement completed");
+            .find(|event| matches!(event, EngineEvent::RefineFailed { .. }))
+            .expect("the refusal surfaced");
+        let EngineEvent::RefineFailed { error } = failure else {
+            unreachable!("matched above")
+        };
         assert!(
-            outcomes[0] < completed,
-            "persist the outcome before announcing completion"
+            error.contains("daemon-backed"),
+            "the refusal names the gate: {error}"
         );
+        assert!(
+            events.iter().all(|event| {
+                !matches!(
+                    event,
+                    EngineEvent::CustomMessage(row) if row["customType"] == "refinement_outcome"
+                )
+            }),
+            "no inline apply ran at the boundary: {events:?}"
+        );
+        let pending = {
+            let guard = engine.session.blocking_lock();
+            let session = guard.as_ref().expect("built session");
+            engine
+                .runtime
+                .block_on(session.turn_boundary.refine_pending())
+        };
+        assert!(!pending, "the pending request was consumed");
     }
 }

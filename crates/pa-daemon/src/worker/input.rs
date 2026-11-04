@@ -243,7 +243,7 @@ impl Worker {
     /// Agent-to-agent delivery: render the `[agent-message from ...]` prompt and queue
     /// it on the requested lane with the `agent_message` custom row (the turn renders
     /// the collapsed card). Answers `queued` when running, else `delivered`.
-    pub(crate) fn handle_worker_deliver_message(&self, payload: &Value) -> DaemonResponse {
+    pub(crate) async fn handle_worker_deliver_message(&self, payload: &Value) -> DaemonResponse {
         if let Err(response) = self.require_created("worker_deliver_message") {
             return response;
         }
@@ -251,6 +251,69 @@ impl Worker {
             .get("message")
             .and_then(Value::as_str)
             .unwrap_or_default();
+        let sender = payload.get("sender").cloned().unwrap_or(Value::Null);
+        // The in-flight refine child's reply is parked by the engine
+        // BEFORE the generic agent-message gates (the length cap, the
+        // pause hold, the suspend hold): the proposal is machine-authored
+        // — bounded only by the child's own turn budget — and the wake
+        // consumes it regardless of the parent's interactive state
+        // (fire-and-wake); a gate rejection would lose the child's only
+        // answer. The delivery is answered at once (the child's send
+        // never waits on the parent's apply); the parked reply applies at
+        // the session's idle boundary, where the runner owns turn
+        // admission, so the apply's rows never interleave with a running
+        // turn's history.
+        let sender_active_session_id = sender
+            .get("activeSessionId")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        if let Some(()) = self
+            .engine
+            .park_refine_child_reply(&sender_active_session_id, message)
+            .await
+        {
+            // The consumed reply is the child's reply for the settle
+            // watcher's no-reply notice.
+            if !sender_active_session_id.is_empty() {
+                self.engine.mark_child_reply(&sender_active_session_id);
+            }
+            // The receipt's target summary: composed under the core lock.
+            let target = {
+                let (core, inputs) = self.summary_inputs();
+                let summary = self.summary_locked(&core, inputs);
+                let mut target = json!({
+                    "activeSessionId": summary.active_session_id.clone().unwrap_or_default(),
+                    "sessionId": summary.session_id,
+                    "runtimeKind": summary
+                        .runtime_kind
+                        .clone()
+                        .unwrap_or_else(|| "top-level".to_string()),
+                });
+                if let Some(name) = summary.session_name.filter(|name| !name.is_empty()) {
+                    target["sessionName"] = json!(name);
+                }
+                target
+            };
+            // Wake the runner for the parked reply's idle-boundary apply:
+            // an idle runner parks on `work_notify`, and a busy one
+            // reaches the park branch at the turn's settle.
+            self.work_notify.notify_one();
+            return response_success(
+                None,
+                "worker_deliver_message",
+                Some(json!({
+                    "id": pa_core::session_engine::agent_messaging::create_agent_session_message_id(),
+                    "source": AGENT_MESSAGE_SOURCE,
+                    "target": target,
+                    "from": sender,
+                    "message": message,
+                    "deliveryMode": "steer",
+                    "deliveryStatus": "delivered",
+                    "deliveredAt": crate::util::now_iso(),
+                })),
+            );
+        }
         if let Err(error) =
             pa_core::session_engine::agent_messaging::normalize_agent_session_message(message)
         {
@@ -276,7 +339,6 @@ impl Worker {
                 );
             }
         }
-        let sender = payload.get("sender").cloned().unwrap_or(Value::Null);
         // A delivery from one of this session's RLM children counts as the
         // child's reply: the settle watcher withholds the no-reply notice.
         if let Some(child) = sender

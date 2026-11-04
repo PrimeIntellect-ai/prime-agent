@@ -12,6 +12,7 @@ use super::{
     ProviderTarget, QuotaParkState, SessionCommandExecution, SessionCommandParams,
     SessionEngineConfig, SupervisorChildSessions, Value,
 };
+use crate::engine::SessionEngine as _;
 
 /// The instruction the floor appends to a bare skill invocation: ask what
 /// the user wants first, never an imperative to execute.
@@ -173,6 +174,9 @@ impl AgentSessionEngine {
             )),
             link,
             children,
+            refine_flight: std::sync::Mutex::new(None),
+            pending_refine_reply: std::sync::Mutex::new(None),
+            refine_spawn_lock: tokio::sync::Mutex::new(()),
             usage_producer: std::sync::Mutex::new(None),
             rlm_usage_store: std::sync::Mutex::new(None),
             quota_park: std::sync::Arc::new(std::sync::Mutex::new(None)),
@@ -677,6 +681,23 @@ impl AgentSessionEngine {
         Ok(())
     }
 
+    /// Register one refinement child's spawn with the usage attribution:
+    /// the engine-side twin of the kernel spawn path's `register_spawn`
+    /// (`rlm.run`'s own handler). The refinement child spawns outside the
+    /// kernel bridge, so its planning rows bill on the parent only when
+    /// the engine registers the spawn itself — the child's usage folds
+    /// into the parent's last assistant row's aggregate at its settle.
+    pub(crate) async fn register_refine_child_usage(&self, rlm_child_id: &str) {
+        let producer = self
+            .usage_producer
+            .lock()
+            .expect("usage producer lock")
+            .clone();
+        if let Some(producer) = producer {
+            producer.register_spawn(rlm_child_id).await;
+        }
+    }
+
     /// Clear only the boundary this completed adoption observed. A failed
     /// build keeps it for the demand retry, and a newer captured leaf survives.
     fn finish_prompt_context_adoption(&self, adopted: Option<&PromptContextBoundary>) {
@@ -901,6 +922,19 @@ impl AgentSessionEngine {
         command: &pa_core::session_engine::slash_commands::SessionSlashCommand,
         images: &[pa_agent::types::ImageContent],
     ) -> anyhow::Result<SessionCommandExecution> {
+        // `/refine` is the refinement child's command (fire-and-wake): the
+        // planning spawn returns immediately and the child's proposal applies
+        // on its reply's arrival. Only the mechanical rollback runs inline
+        // through the base executor.
+        if command.name == "refine" {
+            let options = pa_core::session_engine::slash_commands::parse_refine_command_options(
+                &command.args,
+            )
+            .map_err(|error| anyhow::anyhow!(error))?;
+            if options.rollback_id.is_none() {
+                return self.execute_refine_session_command(command);
+            }
+        }
         let model = self.session_model()?;
         self.ensure_core_session(&model)?;
         let api_key = self.resolve_request_api_key(&model);
@@ -921,6 +955,39 @@ impl AgentSessionEngine {
         Ok(self
             .runtime
             .block_on(async { execute_session_command(&core, &mut params, command, images).await }))
+    }
+
+    /// `/refine` without a rollback: spawn the refinement child and return
+    /// immediately — the child's proposal applies on its reply's arrival,
+    /// whose wake emits the durable rows and the completion event.
+    fn execute_refine_session_command(
+        &self,
+        command: &pa_core::session_engine::slash_commands::SessionSlashCommand,
+    ) -> anyhow::Result<SessionCommandExecution> {
+        use pa_core::session_engine::refine::RefinementSource;
+        use pa_core::session_engine::session_commands::slash_command_result;
+
+        let options =
+            pa_core::session_engine::slash_commands::parse_refine_command_options(&command.args)
+                .map_err(|error| anyhow::anyhow!(error))?;
+        let refine_options = pa_core::session_engine::refine::RefineOptions {
+            global: options.global,
+            instructions: options.instructions,
+            rollback_id: options.rollback_id,
+        };
+        let child_id = self.spawn_refinement_child(refine_options, RefinementSource::User)?;
+        let content =
+            format!("Refinement child spawned ({child_id}); its reply applies on arrival.");
+        let row = slash_command_result(command, content, true, "info", None, false);
+        Ok(SessionCommandExecution {
+            messages: vec![row],
+            compaction: None,
+            compaction_skipped: None,
+            continuation_message: None,
+            error: None,
+            refinement: None,
+            refinement_failed: None,
+        })
     }
 
     /// The current explicit selection (create-config flags over the

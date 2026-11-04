@@ -89,7 +89,7 @@ impl Worker {
             "get_tool_definition" => self.handle_get_tool_definition(payload).await,
             "get_rlm_max_depth_status" => self.handle_get_rlm_max_depth_status(),
             "get_available_models" => self.handle_get_available_models(),
-            "worker_deliver_message" => self.handle_worker_deliver_message(payload),
+            "worker_deliver_message" => self.handle_worker_deliver_message(payload).await,
             "update_snapshot" => self.handle_update_snapshot(),
             "kill" => self.handle_kill(payload).await,
             "shutdown" => self.handle_shutdown(payload).await,

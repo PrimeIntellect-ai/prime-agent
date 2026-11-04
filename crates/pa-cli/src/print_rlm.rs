@@ -368,7 +368,7 @@ pub(crate) async fn drive_to_quiescence(
     boundary: &mut TurnBoundary,
     model: &Model,
     api_key: Option<String>,
-    global_harness_dir: std::path::PathBuf,
+    _global_harness_dir: std::path::PathBuf,
 ) -> Result<bool, String> {
     let mut drained = false;
     loop {
@@ -396,7 +396,7 @@ pub(crate) async fn drive_to_quiescence(
                 .map_err(|error| format!("{error:#}"))?;
             agent.wait_for_idle().await;
             boundary
-                .run_at_settled_turn(engine, model, api_key.clone(), global_harness_dir.clone())
+                .run_at_settled_turn(engine, model, api_key.clone())
                 .await?;
             drained = true;
             continue;
@@ -1297,6 +1297,7 @@ mod tests {
             model: None,
             thinking: None,
             cwd: None,
+            refine_child: false,
             spawned_by_request_id: None,
             factory: None,
         });

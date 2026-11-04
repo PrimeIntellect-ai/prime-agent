@@ -192,6 +192,10 @@ struct ChildRecord {
     /// A factory state's child: the factory reads its settle through
     /// collect, so no terminal notice reaches the parent conversation.
     factory: bool,
+    /// The refinement child (the daemon's `refine_child` spawn): a
+    /// one-shot planning pass whose record the registry retires at its
+    /// own settle — no engine-side teardown.
+    refine_child: bool,
     /// The task prompt was admitted; never settle a pre-prompt child (it
     /// is idle with an empty queue by construction).
     prompt_admitted: bool,
@@ -701,6 +705,20 @@ impl SupervisorChildSessions {
         identities
     }
 
+    /// Whether one child is live: only a record that is present and still
+    /// running can still reply — an absent record (deleted or replaced) and
+    /// a settled run cannot. The refine flight's liveness probe.
+    pub async fn child_live(&self, rlm_child_id: &str) -> bool {
+        let children = self.inner.children.lock().await;
+        for record in children.iter() {
+            let record = record.lock().await;
+            if record.rlm_child_id == rlm_child_id {
+                return record.settled_status.is_none();
+            }
+        }
+        false
+    }
+
     /// Re-arm usage observation for a child after an agent message was
     /// delivered to it; no-op for non-children or already-observed targets.
     pub async fn observe_child_usage(&self, target: &str) {
@@ -777,6 +795,7 @@ impl SupervisorChildSessions {
                 direct_observation: Arc::new(Mutex::new(())),
                 notice_delivered: false,
                 factory: false,
+                refine_child: false,
                 prompt_admitted: true,
                 error: None,
                 closed_by_parent: false,

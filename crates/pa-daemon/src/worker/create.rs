@@ -151,8 +151,13 @@ impl Worker {
         // no edge.
         let (rlm_child_id, parent_active_session_id, parent_session_id, semantic_spawn) =
             match payload.get("runtimeMetadata") {
+                // A refine child keeps its subagent identity: the same
+                // parent edge routes its proposal reply to the parent.
                 Some(metadata)
-                    if metadata.get("kind").and_then(Value::as_str) == Some("subagent") =>
+                    if matches!(
+                        metadata.get("kind").and_then(Value::as_str),
+                        Some("subagent" | "refine")
+                    ) =>
                 {
                     let parent_session_id = metadata
                         .get("parentSessionId")
@@ -681,7 +686,8 @@ impl Worker {
                 let core = std::sync::Arc::clone(&self.core);
                 let events = self.events.clone();
                 children.set_child_update_sink(std::sync::Arc::new(move |mut child| {
-                    if let Some(parent_id) = core.lock().unwrap().rlm_child_id.clone() {
+                    let parent_id = core.lock().unwrap().rlm_child_id.clone();
+                    if let Some(parent_id) = parent_id {
                         child["parentId"] = json!(parent_id);
                     }
                     crate::user_bash::emit_session_event_frame(

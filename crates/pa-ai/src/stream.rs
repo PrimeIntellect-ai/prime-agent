@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use crate::event_stream::AssistantMessageEventStream;
-use crate::providers::simple_options::default_request_max_tokens;
+use crate::providers::simple_options::{default_request_max_tokens, folded_request_max_tokens_at};
 use crate::registry::{ensure_builtins, get_api_provider};
 use crate::types::{AssistantMessage, Context, Model, SimpleStreamOptions, StreamOptions};
 use crate::utils_inner::ProviderError;
@@ -77,34 +77,80 @@ fn user_content_block_chars(blocks: &[crate::types::UserOrToolContent]) -> u64 {
         .sum()
 }
 
-/// Clamp the requested output budget against the model's combined input+output ceiling: a provider
-/// enforcing `input + max_tokens <= contextWindow` rejects an unsatisfiable request outright, so
-/// the facade shrinks the output budget to whatever room the estimated input leaves.
+/// The requested output budget clamped against the model's combined input+output ceiling: a
+/// provider enforcing `input + max_tokens <= contextWindow` rejects an unsatisfiable request
+/// outright, so the facade shrinks the output budget to whatever room the estimated input
+/// leaves. Zero room means the input alone fills the window — no budget can save the request,
+/// so it stays as sent for the overflow recovery arm.
 ///
-/// The TS facade never clamps; this is a deliberate Rust-side guard. Budget-folding thinking
-/// providers (Anthropic, Bedrock) add their budget after this clamp and cap it at
+/// The TS facade never clamps; this is a deliberate Rust-side guard.
+#[must_use]
+pub fn clamped_request_max_tokens(model: &Model, context: &Context, requested: u64) -> u64 {
+    if model.context_window == 0 {
+        return requested; // combined ceiling unknown — leave the request alone
+    }
+    let available = model
+        .context_window
+        .saturating_sub(estimated_input_tokens(context));
+    if requested > available && available > 0 {
+        available
+    } else {
+        requested
+    }
+}
+
+/// Clamp the requested output budget against the model's combined
+/// input+output ceiling (the facade guard over
+/// [`clamped_request_max_tokens`]). Budget-folding thinking providers
+/// (Anthropic, Bedrock) add their budget after this clamp and cap it at
 /// `model.max_tokens`.
 fn clamp_output_budget(model: &Model, context: &Context, options: Option<&mut StreamOptions>) {
     let Some(options) = options else {
         return;
     };
-    if model.context_window == 0 {
-        return; // combined ceiling unknown — leave the request alone
-    }
-    let requested = options
+    let Some(requested) = options
         .max_tokens
-        .or_else(|| default_request_max_tokens(model));
-    let Some(requested) = requested else {
+        .or_else(|| default_request_max_tokens(model))
+    else {
         return; // no default budget to clamp
     };
-    let available = model
-        .context_window
-        .saturating_sub(estimated_input_tokens(context));
-    // Zero room means the input alone fills the window — no budget can save the request, so it
-    // stays as sent for the overflow recovery arm.
-    if requested > available && available > 0 {
-        options.max_tokens = Some(available);
+    let sent = clamped_request_max_tokens(model, context, requested);
+    if sent != requested {
+        options.max_tokens = Some(sent);
     }
+}
+
+/// The `max_tokens` a simple completion will actually carry on the wire
+/// for `model` against `context` with `options`: the pinned (or default)
+/// budget clamped against the estimated input, with the budget-folding
+/// thinking providers' allowance folded on top — the number a `Length`
+/// stop hit. [`default_request_max_tokens`] names only the pre-facade
+/// budget; callers reporting the effective request limit (the refine
+/// child's output-limit failure) read it from here, never a second copy.
+///
+/// The fold uses the thinking-budget defaults (no `thinking_budgets`):
+/// every current caller pins none, so this is the wire number exactly.
+/// A caller that sets `SimpleStreamOptions::thinking_budgets` must thread
+/// it through [`folded_request_max_tokens_at`] or its report is
+/// approximate by the budgets' delta from the defaults.
+#[must_use]
+pub fn simple_request_max_tokens(
+    model: &Model,
+    context: &Context,
+    options: Option<&crate::types::SimpleStreamOptions>,
+) -> Option<u64> {
+    let requested = options
+        .and_then(|options| options.base.max_tokens)
+        .or_else(|| default_request_max_tokens(model))?;
+    let clamped = if model.context_window == 0 {
+        requested
+    } else {
+        clamped_request_max_tokens(model, context, requested)
+    };
+    let reasoning = options
+        .and_then(|options| options.reasoning)
+        .unwrap_or(crate::types::ModelThinkingLevel::Off);
+    Some(folded_request_max_tokens_at(model, clamped, reasoning))
 }
 
 /// Start streaming a completion for `model` using provider-native options.
@@ -203,6 +249,57 @@ mod tests {
             })],
             tools: None,
         }
+    }
+
+    #[test]
+    fn simple_request_max_tokens_names_the_wire_budget() {
+        // The refine child's Length failure must name the budget the wire
+        // request actually carries: the pinned default clamped against the
+        // estimated input (the facade guard), never the pre-facade number.
+        let model = test_model(10_000, 8_192);
+        let context = text_context(20_000); // ~5_000 estimated input tokens
+        let options = SimpleStreamOptions::from_base(StreamOptions {
+            max_tokens: Some(8_192),
+            ..Default::default()
+        });
+        assert_eq!(
+            simple_request_max_tokens(&model, &context, Some(&options)),
+            Some(5_000)
+        );
+        // No pinned budget: the model's default clamps the same way.
+        assert_eq!(
+            simple_request_max_tokens(&model, &context, None),
+            Some(5_000)
+        );
+        // A model with no default budget (providers that default
+        // server-side) has no wire number to name.
+        let bare = test_model(10_000, 0);
+        assert_eq!(simple_request_max_tokens(&bare, &context, None), None);
+        // An unknown combined ceiling leaves the request alone.
+        let unknown = test_model(0, 8_192);
+        assert_eq!(
+            simple_request_max_tokens(&unknown, &context, None),
+            Some(8_192)
+        );
+        // The budget-folding providers' thinking fold rides on the clamped
+        // base: a non-adaptive Anthropic model at medium reasoning adds its
+        // 8_192-token thinking budget.
+        let anthropic: Model = serde_json::from_value(serde_json::json!({
+            "id": "claude-sonnet-4-5", "name": "Claude", "api": "anthropic",
+            "provider": "p", "baseUrl": "http://localhost", "reasoning": true,
+            "input": ["text"], "cost": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0},
+            "contextWindow": 10_000, "maxTokens": 65_536,
+        }))
+        .expect("test model");
+        let mut options = SimpleStreamOptions::from_base(StreamOptions {
+            max_tokens: Some(8_192),
+            ..Default::default()
+        });
+        options.reasoning = Some(crate::types::ModelThinkingLevel::Medium);
+        assert_eq!(
+            simple_request_max_tokens(&anthropic, &context, Some(&options)),
+            Some(5_000 + 8_192)
+        );
     }
 
     #[test]
