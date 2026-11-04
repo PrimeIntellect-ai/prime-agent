@@ -48,12 +48,10 @@ pub fn activate(
         update_id: update_id.to_string(),
     };
     let state_path = root.join(".activation-state");
-    std::fs::write(&state_path, state.render())
+    super::atomic_state::replace(&state_path, state.render().as_bytes())
         .with_context(|| format!("write {}", state_path.display()))?;
-    // The rollback record must be durable BEFORE any launcher moves: a crash between
-    // the write and the repoint would leave a truncated state file that
-    // `read_rollback_installation` trusts over the valid `bin/previous`.
-    std::fs::File::open(&state_path)?.sync_all()?;
+    // The complete rollback record is synced before replacement. Sync its
+    // directory before moving launchers so the pointer survives a crash.
     pa_core::update::install::sync_directory(root)?;
     write_launcher(
         root,
@@ -217,6 +215,66 @@ mod tests {
         );
         clear_activation_state(&root).unwrap();
         assert!(!root.join(".activation-state").exists());
+    }
+
+    #[test]
+    fn activation_replaces_a_planted_state_symlink_without_touching_its_target() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let root = managed_root(dir.path());
+        let state_path = root.join(".activation-state");
+        let victim = dir.path().join("unrelated-file");
+        std::fs::write(&victim, b"keep this file").unwrap();
+        std::os::unix::fs::symlink(&victim, &state_path).unwrap();
+
+        let current = "../releases/0.1.0-linux-x64-0/prime-agent";
+        let candidate = "../releases/0.2.0-linux-x64-0/prime-agent";
+        activate(&root, current, candidate, "u1").unwrap();
+
+        assert_eq!(std::fs::read(&victim).unwrap(), b"keep this file");
+        assert!(std::fs::symlink_metadata(&state_path).unwrap().is_file());
+        assert_eq!(
+            std::fs::read_to_string(&state_path).unwrap(),
+            ActivationState {
+                current_target: current.to_string(),
+                previous_target: current.to_string(),
+                update_id: "u1".to_string(),
+            }
+            .render()
+        );
+        assert_eq!(
+            std::fs::metadata(&state_path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        assert_eq!(launcher_target(&root, "prime-agent").unwrap(), candidate);
+        assert_eq!(launcher_target(&root, "previous").unwrap(), current);
+
+        clear_activation_state(&root).unwrap();
+        assert!(!state_path.exists());
+        assert_eq!(std::fs::read(&victim).unwrap(), b"keep this file");
+    }
+
+    #[test]
+    fn failed_state_replacement_keeps_launchers_and_cleans_staging() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = managed_root(dir.path());
+        std::fs::create_dir(root.join(".activation-state")).unwrap();
+        let original_entries = std::fs::read_dir(&root).unwrap().count();
+
+        assert!(activate(
+            &root,
+            "../releases/0.1.0-linux-x64-0/prime-agent",
+            "../releases/0.2.0-linux-x64-0/prime-agent",
+            "u1",
+        )
+        .is_err());
+        assert_eq!(
+            launcher_target(&root, "prime-agent").unwrap(),
+            "../releases/0.1.0-linux-x64-0/prime-agent"
+        );
+        assert!(std::fs::symlink_metadata(root.join("bin/previous")).is_err());
+        assert_eq!(std::fs::read_dir(&root).unwrap().count(), original_entries);
     }
 
     #[tokio::test]
