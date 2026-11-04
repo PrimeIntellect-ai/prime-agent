@@ -1,0 +1,1 @@
+- Kept persistent bash commands and output private on disk.

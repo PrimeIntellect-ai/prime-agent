@@ -6,6 +6,7 @@ import json
 import os
 import resource
 import shlex
+import shutil
 import signal
 import socket
 import subprocess
@@ -1608,6 +1609,53 @@ class PersistentBashTest(unittest.IsolatedAsyncioTestCase):
         rows = {row["pid"]: row for row in bash_module.activity_request("list")["activities"]}
         self.assertFalse(rows[plain.pid]["persistent"])
         await plain
+
+    async def test_persistent_shell_records_and_output_are_private(self):
+        # A user may place the agent directory under a traversable custom path.
+        # The command and captured output must be private even with a 022 umask
+        # and an existing persistent-shell directory created by an older release.
+        os.chmod(os.path.dirname(self.home), 0o755)
+        os.makedirs(self.home)
+        os.chmod(self.home, 0o755)
+        old_umask = os.umask(0o022)
+        try:
+            handle = bash("printf 'still works\\n'; sleep 60", persistent=True)
+        finally:
+            os.umask(old_umask)
+        self.pgids.append(handle.pid)
+        self.assertEqual(os.stat(self.home).st_mode & 0o777, 0o700)
+        for kind in ("json", "out"):
+            path = os.path.join(self.home, f"{handle._activity_id}.{kind}")
+            self.assertEqual(os.stat(path).st_mode & 0o777, 0o600)
+        output = os.path.join(self.home, f"{handle._activity_id}.out")
+        await self.wait_for(lambda: os.path.getsize(output) > 0)
+        with open(output) as f:
+            self.assertEqual(f.read(), "still works\n")
+
+    async def test_symlinked_persistent_home_keeps_its_shared_directory_mode(self):
+        shared = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, shared)
+        os.chmod(shared, 0o755)
+        os.symlink(shared, self.home)
+        handle = bash("sleep 60", persistent=True)
+        self.pgids.append(handle.pid)
+        self.assertEqual(os.stat(shared).st_mode & 0o777, 0o755)
+        for kind in ("json", "out"):
+            path = os.path.join(shared, f"{handle._activity_id}.{kind}")
+            self.assertEqual(os.stat(path).st_mode & 0o777, 0o600)
+
+    async def test_persistent_record_write_does_not_follow_a_planted_temp_link(self):
+        shell_id = "a" * 32
+        os.makedirs(self.home)
+        victim = os.path.join(os.path.dirname(self.home), "victim")
+        with open(victim, "w") as f:
+            f.write("untouched")
+        os.symlink(victim, os.path.join(self.home, f"{shell_id}.json.tmp"))
+        with mock.patch.object(bash_module.secrets, "token_hex", return_value=shell_id):
+            handle = bash("sleep 60", persistent=True)
+        self.pgids.append(handle.pid)
+        with open(victim) as f:
+            self.assertEqual(f.read(), "untouched")
 
     async def test_a_watched_leader_exit_kills_the_members_it_leaves_behind(self):
         handle = bash("( sleep 30 & ); exit 0", persistent=True)
