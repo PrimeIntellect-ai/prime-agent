@@ -253,7 +253,13 @@ impl FileSettingsStorage {
         Ok(Some(dir))
     }
 
-    fn read_file(&self, scope: SettingsScope, path: &Path, locked_path: &Path) -> Result<String> {
+    fn read_file(
+        &self,
+        scope: SettingsScope,
+        path: &Path,
+        locked_path: &Path,
+        #[cfg(unix)] held_parent: Option<&fs::File>,
+    ) -> Result<String> {
         if scope == SettingsScope::Global {
             return Ok(fs::read_to_string(path)?);
         }
@@ -262,15 +268,20 @@ impl FileSettingsStorage {
             // The locked path is the resolved in-project target, including for
             // an intentional in-project settings symlink. Hold its parent and
             // open only its final regular basename from that directory.
-            let parent = self
-                .project_parent_anchor(locked_path, DirectoryCreation::ExistingOnly)?
+            let opened_parent = if held_parent.is_none() {
+                self.project_parent_anchor(locked_path, DirectoryCreation::ExistingOnly)?
+            } else {
+                None
+            };
+            let parent = held_parent
+                .or(opened_parent.as_ref())
                 .ok_or_else(|| anyhow!("Project settings directory is missing"))?;
             let name = locked_path
                 .file_name()
                 .ok_or_else(|| anyhow!("Project settings path has no file name"))?;
             #[cfg(test)]
             project_read_step(ProjectReadStep::Open);
-            open_regular_file_at(&parent, name)?
+            open_regular_file_at(parent, name)?
         };
         #[cfg(not(unix))]
         let mut file = fs::File::open(path)?;
@@ -328,6 +339,26 @@ impl FileSettingsStorage {
             "Failed to acquire settings lock: {}",
             last_error.map_or_else(|| "busy".into(), |e| e.to_string())
         ))
+    }
+
+    #[cfg(unix)]
+    fn project_file_exists(parent: &fs::File, locked_path: &Path) -> Result<bool> {
+        let name = locked_path
+            .file_name()
+            .ok_or_else(|| anyhow!("Project settings path has no file name"))?;
+        match open_regular_file_at(parent, name) {
+            Ok(_) => Ok(true),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+            Err(error) => Err(error.into()),
+        }
+    }
+
+    #[cfg(unix)]
+    fn check_project_lock_parent(guard: &LockGuard, parent: &fs::File) -> Result<()> {
+        if !guard.holds_parent(parent)? {
+            bail!("Project settings lock directory changed while acquiring");
+        }
+        Ok(())
     }
 }
 
@@ -439,8 +470,27 @@ impl SettingsStorage for FileSettingsStorage {
                 }
             }
         }
+        #[cfg(unix)]
+        let project_parent = if scope == SettingsScope::Project {
+            Some(
+                self.project_parent_anchor(&locked_path, DirectoryCreation::ExistingOnly)?
+                    .ok_or_else(|| anyhow!("Project settings directory is missing"))?,
+            )
+        } else {
+            None
+        };
         let guard = Self::acquire_lock(&locked_path)?;
-        let content = self.read_file(scope, path, &locked_path)?;
+        #[cfg(unix)]
+        if let Some(parent) = project_parent.as_ref() {
+            Self::check_project_lock_parent(&guard, parent)?;
+        }
+        let content = self.read_file(
+            scope,
+            path,
+            &locked_path,
+            #[cfg(unix)]
+            project_parent.as_ref(),
+        )?;
         drop(guard);
         read_cache()
             .lock()
@@ -472,13 +522,37 @@ impl SettingsStorage for FileSettingsStorage {
         } else {
             None
         };
+        #[cfg(unix)]
+        let file_exists = if scope == SettingsScope::Project {
+            if let Some(parent) = project_parent.as_ref() {
+                Self::project_file_exists(parent, &locked_path)?
+            } else {
+                false
+            }
+        } else {
+            path.exists()
+        };
+        #[cfg(not(unix))]
         let file_exists = path.exists();
         let mut held: Option<LockGuard> = None;
         if file_exists {
             held = Some(Self::acquire_lock(&locked_path)?);
+            #[cfg(unix)]
+            if scope == SettingsScope::Project {
+                Self::check_project_lock_parent(
+                    held.as_ref().expect("lock was just acquired"),
+                    project_parent.as_ref().expect("existing file has a parent"),
+                )?;
+            }
         }
         let current = if file_exists {
-            Some(self.read_file(scope, path, &locked_path)?)
+            Some(self.read_file(
+                scope,
+                path,
+                &locked_path,
+                #[cfg(unix)]
+                project_parent.as_ref(),
+            )?)
         } else {
             None
         };
@@ -512,9 +586,33 @@ impl SettingsStorage for FileSettingsStorage {
             }
             if held.is_none() {
                 held = Some(Self::acquire_lock(&locked_path)?);
+                #[cfg(unix)]
+                if scope == SettingsScope::Project {
+                    Self::check_project_lock_parent(
+                        held.as_ref().expect("lock was just acquired"),
+                        project_parent.as_ref().expect("write has a parent"),
+                    )?;
+                }
                 // A racing first writer may have landed since the unlocked read.
-                if path.exists() {
-                    next = update(Some(self.read_file(scope, path, &locked_path)?));
+                #[cfg(unix)]
+                let raced_exists = if scope == SettingsScope::Project {
+                    Self::project_file_exists(
+                        project_parent.as_ref().expect("write has a parent"),
+                        &locked_path,
+                    )?
+                } else {
+                    path.exists()
+                };
+                #[cfg(not(unix))]
+                let raced_exists = path.exists();
+                if raced_exists {
+                    next = update(Some(self.read_file(
+                        scope,
+                        path,
+                        &locked_path,
+                        #[cfg(unix)]
+                        project_parent.as_ref(),
+                    )?));
                 }
             }
             if let Some(content) = next {
@@ -936,6 +1034,55 @@ mod tests {
         assert_eq!(
             fs::read_to_string(project.join(".prime/agent-moved/settings.json")).unwrap(),
             r#"{"theme":"new"}"#
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn project_settings_update_rejects_a_lock_in_a_swapped_parent() {
+        let root = tempfile::tempdir().unwrap();
+        let project = root.path().join("project");
+        let original = project.join(".prime/agent");
+        let moved_original = project.join(".prime/agent-original");
+        let replacement = project.join(".prime/replacement");
+        fs::create_dir_all(&original).unwrap();
+        fs::create_dir(&replacement).unwrap();
+        fs::write(replacement.join("settings.json"), "replacement").unwrap();
+        let storage = FileSettingsStorage::new(&project, root.path().join("agent"));
+
+        let mut updates = 0;
+        let result = storage.with_lock(SettingsScope::Project, &mut |current| {
+            updates += 1;
+            match updates {
+                1 => {
+                    assert_eq!(current, None);
+                    fs::rename(&original, &moved_original).unwrap();
+                    fs::rename(&replacement, &original).unwrap();
+                    Some("first update".into())
+                }
+                2 => {
+                    assert_eq!(current.as_deref(), Some("replacement"));
+                    fs::rename(&original, &replacement).unwrap();
+                    fs::rename(&moved_original, &original).unwrap();
+                    Some("update from replacement".into())
+                }
+                _ => panic!("unexpected settings update retry"),
+            }
+        });
+
+        if updates == 1 {
+            fs::rename(&original, &replacement).unwrap();
+            fs::rename(&moved_original, &original).unwrap();
+        }
+
+        assert!(
+            result.is_err(),
+            "the held parent must match the lock parent"
+        );
+        assert!(!original.join("settings.json").exists());
+        assert_eq!(
+            fs::read_to_string(replacement.join("settings.json")).unwrap(),
+            "replacement"
         );
     }
 
