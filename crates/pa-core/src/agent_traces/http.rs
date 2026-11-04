@@ -316,7 +316,13 @@ mod transport_tests {
         let (url, server) = oversized_stalled_trace_response(ResponseFraming::ContentLength).await;
         let result = tokio::time::timeout(
             std::time::Duration::from_secs(2),
-            ReqwestTraceHttp.put(&url, Vec::new(), "{}".to_string(), 30_000, None),
+            ReqwestTraceHttp.put(
+                &url,
+                Vec::new(),
+                "{}".to_string(),
+                30_000,
+                /*cancel*/ None,
+            ),
         )
         .await
         .expect("oversized trace response should fail before the peer closes");
@@ -332,7 +338,13 @@ mod transport_tests {
         let (url, server) = oversized_stalled_trace_response(ResponseFraming::Chunked).await;
         let result = tokio::time::timeout(
             std::time::Duration::from_secs(2),
-            ReqwestTraceHttp.put(&url, Vec::new(), "{}".to_string(), 30_000, None),
+            ReqwestTraceHttp.put(
+                &url,
+                Vec::new(),
+                "{}".to_string(),
+                30_000,
+                /*cancel*/ None,
+            ),
         )
         .await
         .expect("oversized trace response should fail before the peer closes");
@@ -360,7 +372,13 @@ mod transport_tests {
             socket.write_all(body.as_bytes()).await.unwrap();
         });
         let response = ReqwestTraceHttp
-            .put(&url, Vec::new(), "{}".to_string(), 30_000, None)
+            .put(
+                &url,
+                Vec::new(),
+                "{}".to_string(),
+                30_000,
+                /*cancel*/ None,
+            )
             .await
             .unwrap();
         server.await.unwrap();
