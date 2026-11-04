@@ -140,6 +140,12 @@ pub fn select_headless_terminal_result(messages: &[AgentMessage]) -> HeadlessTer
             AgentMessage::ToolResult(_) => {
                 index -= 1;
             }
+            // An ended turn's last assistant row can be only its
+            // `rlm.end_turn()` tool call: keep walking to the batch's
+            // answer text.
+            AgentMessage::Assistant(assistant) if !has_visible_text(assistant) => {
+                index -= 1;
+            }
             _ => break,
         }
     }
@@ -170,6 +176,14 @@ pub fn select_headless_terminal_result(messages: &[AgentMessage]) -> HeadlessTer
         primary,
         compaction_outcomes,
     }
+}
+
+/// Whether an assistant message carries any non-blank text block.
+fn has_visible_text(assistant: &pa_types::ai::AssistantMessage) -> bool {
+    assistant.content.iter().any(|block| match block {
+        pa_types::ai::AssistantContentBlock::Text(text) => !text.text.trim().is_empty(),
+        _ => false,
+    })
 }
 
 /// Terminal-selection over session entries (rebuilds the message list).
@@ -230,6 +244,59 @@ mod tests {
             timestamp: 0,
             rest: serde_json::Map::default(),
         })
+    }
+
+    #[test]
+    fn an_ended_turn_whose_last_row_is_only_the_end_call_walks_to_its_answer() {
+        // The end_turn call rode a bare cell: its assistant row holds only
+        // the tool call, and the answer text sits on an earlier row of the
+        // same turn. The headless answer is that text.
+        let mut end_call = text_assistant("", StopReason::ToolUse);
+        if let AgentMessage::Assistant(message) = &mut end_call {
+            message
+                .content
+                .push(AssistantContentBlock::ToolCall(ToolCall {
+                    id: "call-1".to_string(),
+                    name: "python_repl".to_string(),
+                    arguments: serde_json::Map::default(),
+                    thought_signature: None,
+                    rest: serde_json::Map::default(),
+                }));
+        }
+        let messages = vec![
+            AgentMessage::User(UserMessage {
+                content: UserContent::Text("go".to_string()),
+                timestamp: 0,
+                rest: serde_json::Map::default(),
+            }),
+            text_assistant("the answer", StopReason::Stop),
+            AgentMessage::ToolResult(ToolResultMessage {
+                tool_call_id: "call-0".to_string(),
+                tool_name: "python_repl".to_string(),
+                content: vec![],
+                details: None,
+                is_error: false,
+                timestamp: 0,
+                rest: serde_json::Map::default(),
+            }),
+            end_call,
+            AgentMessage::ToolResult(ToolResultMessage {
+                tool_call_id: "call-1".to_string(),
+                tool_name: "python_repl".to_string(),
+                content: vec![UserContentBlock::Text(TextContent {
+                    text: "{'endedTurn': True}turn ended".to_string(),
+                    text_signature: None,
+                    rest: serde_json::Map::default(),
+                })],
+                details: None,
+                is_error: false,
+                timestamp: 0,
+                rest: serde_json::Map::default(),
+            }),
+        ];
+        let result = select_headless_terminal_result(&messages);
+        let primary = result.primary.unwrap();
+        assert_eq!(primary.stdout_text().as_deref(), Some("the answer"));
     }
 
     #[test]
