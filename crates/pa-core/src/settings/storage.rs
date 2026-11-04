@@ -856,6 +856,30 @@ mod tests {
     }
 
     #[test]
+    #[cfg(windows)]
+    fn project_settings_rejects_a_new_hard_link_after_cached_read() {
+        let root = tempfile::tempdir().unwrap();
+        let project = root.path().join("project");
+        let settings = project.join(".prime/agent/settings.json");
+        let external = root.path().join("auth.json");
+        fs::create_dir_all(settings.parent().unwrap()).unwrap();
+        fs::write(&settings, "{}").unwrap();
+        let storage = FileSettingsStorage::new(&project, root.path().join("agent"));
+
+        assert_eq!(
+            storage.read(SettingsScope::Project).unwrap().as_deref(),
+            Some("{}")
+        );
+        fs::hard_link(&settings, &external).unwrap();
+
+        assert!(storage.read(SettingsScope::Project).is_err());
+        assert!(storage
+            .with_lock(SettingsScope::Project, &mut |_| Some("replacement".into()))
+            .is_err());
+        assert_eq!(fs::read_to_string(external).unwrap(), "{}");
+    }
+
+    #[test]
     #[cfg(unix)]
     fn project_settings_rejects_an_external_directory_link() {
         use std::os::unix::fs::symlink;
