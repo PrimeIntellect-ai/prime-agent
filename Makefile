@@ -199,7 +199,15 @@ shard-gates:
 	python3 scripts/test_ci_test_shard.py
 	python3 scripts/test_ci_pr_crates.py
 
-.PHONY: check deny windows-cross actionlint glibc-gate release-dry-run continuous-dry-run audit-build package catalog-assets catalog-assets-fixture catalog-assets-gates fold-gates restamp-gates shard-gates perf
+# Real HTTPX regressions for the bundled skill; the runtime suite invokes
+# this target so the tests share one dependency-isolated command in CI and locally.
+websearch-gates:
+	@command -v uv >/dev/null 2>&1 || { echo "uv not installed"; exit 1; }
+	PYTHONPATH=skills/websearch/src uv run --no-project --python 3.11 \
+		--with 'httpx>=0.27,<1' --with 'pytest>=7,<9' \
+		python -B -m pytest -q -p no:cacheprovider skills/websearch/test
+
+.PHONY: check deny windows-cross actionlint glibc-gate release-dry-run continuous-dry-run audit-build package catalog-assets catalog-assets-fixture catalog-assets-gates fold-gates restamp-gates shard-gates websearch-gates perf
 
 # Offline packaging contract tests for updaters shipped since Prime Agent 0.6.
 legacy-upgrade-gates:
