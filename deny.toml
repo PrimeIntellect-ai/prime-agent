@@ -8,19 +8,30 @@ all-features = true
 version = 2
 # Fail the build on any reachable vulnerability or withdrawn advisory.
 yanked = "deny"
+# Inspect unsound transitive crates too; cargo-deny's default only checks
+# direct workspace dependencies.
+unsound = "all"
 # Triaged exceptions — every entry must carry a reason and a review date;
 # a landed fix upstream means the entry is removed instead of silenced.
 ignore = [
   # Marvin Attack timing sidechannel in rsa; no patch exists upstream
-  # (RustCrypto/RSA#626 tracks it). `rsa` is currently a dead dependency in
-  # pa-ai (declared, never referenced); no signing path executes it, so no
-  # timing oracle exists. Reviewed 2026-09-17; drop rsa (pa-ai lane) or
-  # re-triage when rsa publishes a fix.
-  { id = "RUSTSEC-2023-0071", reason = "unpatched upstream; rsa is an unused pa-ai dep, no signing path executes it (reviewed 2026-09-17)" },
+  # (RustCrypto/RSA#626 tracks it). pa-core uses RSA-OAEP to decrypt one
+  # local browser-login result under a fresh key per login; this path does
+  # not expose repeated decryptions of one key to a network observer.
+  # Re-triage when rsa publishes a fix. Reviewed 2026-11-03.
+  { id = "RUSTSEC-2023-0071", reason = "unpatched upstream; pa-core decrypts one local browser-login OAEP result per ephemeral key, without a network-observable repeated-decryption oracle (reviewed 2026-11-03)" },
   # `paste` proc-macro is unmaintained; pulled by ratatui (build-time only,
   # no vulnerable code path). Reviewed 2026-09-17; revisit when ratatui
   # drops the dep.
   { id = "RUSTSEC-2024-0436", reason = "unmaintained proc-macro via ratatui, build-time only (reviewed 2026-09-17)" },
+  # ratatui 0.29's private layout cache only calls get_or_insert and resize.
+  # It never constructs IterMut or calls pop; its (Rect, Layout) keys contain
+  # no custom Drop implementation. The fixed lru >=0.18.2 is outside
+  # ratatui 0.29's ^0.12 constraint, and a ratatui 0.30 upgrade changes the
+  # TUI surface. The make deny graph guard rejects new lru versions or users.
+  # Revisit with a parity-tested ratatui upgrade. Reviewed 2026-11-04.
+  { id = "RUSTSEC-2026-0002", reason = "lru via ratatui 0.29; private layout cache never constructs IterMut (reviewed 2026-11-04)" },
+  { id = "RUSTSEC-2026-0253", reason = "lru via ratatui 0.29; cache never calls pop and keys have no panicking Drop (reviewed 2026-11-04)" },
 ]
 
 [licenses]
