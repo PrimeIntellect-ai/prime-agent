@@ -324,9 +324,20 @@ impl SemanticEdgeRecorder {
         self.state().parked_retry = None;
     }
 
-    /// Commit one request (TS `finishRequest`).
+    /// Commit one request (TS `finishRequest`). A finished request is never
+    /// re-sent under its id: a retry of a completed reply (an incomplete
+    /// reply the turn runner rejected) mints a fresh id, so a gateway that
+    /// honors the idempotency key cannot replay the rejected reply. The id
+    /// stays the last turn's id for mid-turn child spawns.
     pub(crate) fn finish_request(&self, request_id: &str) {
         let mut state = self.state();
+        if let Some(turn) = state
+            .last_turn
+            .as_mut()
+            .filter(|turn| turn.request_id == request_id)
+        {
+            turn.fingerprint = None;
+        }
         self.append(
             &mut state,
             &SemanticEdgeLedgerEvent::RequestFinished {
