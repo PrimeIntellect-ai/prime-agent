@@ -21,4 +21,4 @@ runs:
         echo "$install_dir" >> "$GITHUB_PATH"
     - name: Check advisories and licenses
       shell: bash
-      run: cargo-deny --log-level warn --manifest-path ./Cargo.toml --all-features --workspace check advisories licenses
+      run: make deny

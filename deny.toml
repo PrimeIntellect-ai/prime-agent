@@ -28,7 +28,8 @@ ignore = [
   # It never constructs IterMut or calls pop; its (Rect, Layout) keys contain
   # no custom Drop implementation. The fixed lru >=0.18.2 is outside
   # ratatui 0.29's ^0.12 constraint, and a ratatui 0.30 upgrade changes the
-  # TUI surface. Revisit with a parity-tested ratatui upgrade. Reviewed 2026-11-04.
+  # TUI surface. The make deny graph guard rejects new lru versions or users.
+  # Revisit with a parity-tested ratatui upgrade. Reviewed 2026-11-04.
   { id = "RUSTSEC-2026-0002", reason = "lru via ratatui 0.29; private layout cache never constructs IterMut (reviewed 2026-11-04)" },
   { id = "RUSTSEC-2026-0253", reason = "lru via ratatui 0.29; cache never calls pop and keys have no panicking Drop (reviewed 2026-11-04)" },
 ]
