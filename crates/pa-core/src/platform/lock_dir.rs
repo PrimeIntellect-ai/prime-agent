@@ -479,7 +479,14 @@ mod win32 {
             | FILE_WRITE_ATTRIBUTES
             | DELETE
             | if owned { FILE_ADD_FILE } else { 0 };
-        open_relative(parent, name, access, FILE_CREATE, FILE_DIRECTORY_FILE)
+        // A raced junction at the final name must not redirect creation.
+        open_relative(
+            parent,
+            name,
+            access,
+            FILE_CREATE,
+            FILE_DIRECTORY_FILE | FILE_OPEN_REPARSE_POINT,
+        )
     }
 
     pub(super) fn open_entry_at(
@@ -503,12 +510,13 @@ mod win32 {
     pub(super) fn create_owner_at(dir: &File, owner: &str) -> io::Result<()> {
         use std::io::Write;
 
+        // A planted owner-file link must not redirect the owner record.
         let mut file = open_relative(
             dir,
             OsStr::new("owner"),
             FILE_WRITE_DATA | DELETE,
             FILE_CREATE,
-            FILE_NON_DIRECTORY_FILE,
+            FILE_NON_DIRECTORY_FILE | FILE_OPEN_REPARSE_POINT,
         )?;
         if let Err(error) = file.write_all(format!("{owner}\n").as_bytes()) {
             let _ = delete_handle(&file);
@@ -1671,6 +1679,37 @@ mod tests {
             .path()
             .join("project-moved/settings.json.lock")
             .exists());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_lock_create_does_not_follow_a_raced_dangling_link() {
+        use std::os::windows::fs::symlink_dir;
+
+        let root = tempfile::tempdir().unwrap();
+        let project = root.path().join("project");
+        let outside = root.path().join("outside");
+        fs::create_dir(&project).unwrap();
+        let file = project.join("settings.json");
+        let lock_path = LockDir::path_for(&file);
+        let planted = lock_path.clone();
+        let target = outside.clone();
+        BEFORE_LOCK_CREATE.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(move || {
+                symlink_dir(&target, &planted).unwrap();
+            }));
+        });
+
+        let result = LockDir::acquire(&file, MIN_STALE);
+        let accepted = result.is_ok();
+        let outside_created = outside.exists();
+        drop(result);
+        assert!(!accepted, "a planted link must not become a lock");
+        assert!(!outside_created, "a planted link must not create outside");
+        assert!(fs::symlink_metadata(&lock_path)
+            .unwrap()
+            .file_type()
+            .is_symlink());
     }
 
     #[cfg(windows)]
