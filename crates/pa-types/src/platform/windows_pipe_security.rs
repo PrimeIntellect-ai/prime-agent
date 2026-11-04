@@ -4,11 +4,16 @@
 use std::ffi::c_void;
 use std::io;
 use std::mem::size_of;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
 use std::ptr;
 
 use tokio::net::windows::named_pipe::{NamedPipeClient, NamedPipeServer, ServerOptions};
 use windows_sys::Win32::Foundation::{LocalFree, HANDLE};
+use windows_sys::Win32::NetworkManagement::IpHelper::{
+    FreeMibTable, GetUnicastIpAddressTable, MIB_UNICASTIPADDRESS_ROW, MIB_UNICASTIPADDRESS_TABLE,
+};
+use windows_sys::Win32::Networking::WinSock::{AF_INET, AF_INET6, AF_UNSPEC};
 use windows_sys::Win32::Security::Authorization::{
     ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW, GetSecurityInfo,
     SDDL_REVISION_1, SE_FILE_OBJECT,
@@ -21,7 +26,7 @@ use windows_sys::Win32::Security::{
 };
 use windows_sys::Win32::System::Pipes::GetNamedPipeServerProcessId;
 use windows_sys::Win32::System::SystemInformation::{
-    ComputerNameDnsFullyQualified, ComputerNameNetBIOS, GetComputerNameExW,
+    ComputerNameDnsFullyQualified, ComputerNameDnsHostname, ComputerNameNetBIOS, GetComputerNameExW,
 };
 use windows_sys::Win32::System::Threading::{
     GetCurrentProcess, OpenProcess, OpenProcessToken, PROCESS_QUERY_LIMITED_INFORMATION,
@@ -29,6 +34,11 @@ use windows_sys::Win32::System::Threading::{
 
 const DAEMON_NAME: &str = "prime-agent-daemon";
 const WORKER_NAME_PREFIX: &str = "prime-agent-worker-";
+
+#[cfg(test)]
+thread_local! {
+    static TEST_DNS_HOSTNAME: std::cell::Cell<Option<&'static str>> = const { std::cell::Cell::new(None) };
+}
 
 #[cfg(test)]
 thread_local! {
@@ -43,64 +53,131 @@ pub(super) fn set_test_foreign_owner(value: bool) {
 }
 
 fn local_computer_name_matches(host: &str) -> bool {
-    [ComputerNameNetBIOS, ComputerNameDnsFullyQualified]
-        .into_iter()
-        .any(|format| {
-            let mut name = [0u16; 256];
-            let mut length = u32::try_from(name.len()).expect("computer name buffer fits DWORD");
-            // SAFETY: `name` is writable, and `length` describes its capacity.
-            if unsafe { GetComputerNameExW(format, name.as_mut_ptr(), &raw mut length) } == 0 {
-                return false;
+    [
+        ComputerNameDnsHostname,
+        ComputerNameNetBIOS,
+        ComputerNameDnsFullyQualified,
+    ]
+    .into_iter()
+    .any(|format| {
+        #[cfg(test)]
+        if format == ComputerNameDnsHostname {
+            if let Some(name) = TEST_DNS_HOSTNAME.with(std::cell::Cell::get) {
+                return host.eq_ignore_ascii_case(name);
             }
-            usize::try_from(length)
-                .ok()
-                .and_then(|len| String::from_utf16(name.get(..len)?).ok())
-                .is_some_and(|local| host.eq_ignore_ascii_case(&local))
-        })
+        }
+        let mut name = [0u16; 256];
+        let mut length = u32::try_from(name.len()).expect("computer name buffer fits DWORD");
+        // SAFETY: `name` is writable, and `length` describes its capacity.
+        if unsafe { GetComputerNameExW(format, name.as_mut_ptr(), &raw mut length) } == 0 {
+            return false;
+        }
+        usize::try_from(length)
+            .ok()
+            .and_then(|len| String::from_utf16(name.get(..len)?).ok())
+            .is_some_and(|local| host.eq_ignore_ascii_case(&local))
+    })
 }
 
-fn local_pipe_tail(name: &str) -> Option<&str> {
+struct UnicastTable(*mut MIB_UNICASTIPADDRESS_TABLE);
+
+impl Drop for UnicastTable {
+    fn drop(&mut self) {
+        if !self.0.is_null() {
+            // SAFETY: GetUnicastIpAddressTable allocated this table.
+            unsafe { FreeMibTable(self.0.cast()) };
+        }
+    }
+}
+
+fn unicast_row_matches(row: &MIB_UNICASTIPADDRESS_ROW, target: IpAddr) -> bool {
+    // SAFETY: The discriminant selects the corresponding SOCKADDR_INET union arm.
+    match (target, unsafe { row.Address.si_family }) {
+        (IpAddr::V4(target), AF_INET) => {
+            // SAFETY: AF_INET selects Ipv4; S_addr stores network-order bytes.
+            let bytes = unsafe { row.Address.Ipv4.sin_addr.S_un.S_addr.to_ne_bytes() };
+            Ipv4Addr::from(bytes) == target
+        }
+        (IpAddr::V6(target), AF_INET6) => {
+            // SAFETY: AF_INET6 selects Ipv6 and its fixed 16-byte address.
+            let bytes = unsafe { row.Address.Ipv6.sin6_addr.u.Byte };
+            Ipv6Addr::from(bytes) == target
+        }
+        (IpAddr::V4(_) | IpAddr::V6(_), _) => false,
+    }
+}
+
+fn local_unicast_ip_matches(target: IpAddr) -> bool {
+    let mut raw_table = ptr::null_mut();
+    // SAFETY: The output pointer is writable; Windows owns the returned table.
+    let status = unsafe { GetUnicastIpAddressTable(AF_UNSPEC, &raw mut raw_table) };
+    let table = UnicastTable(raw_table);
+    if status != 0 || table.0.is_null() {
+        // Identity cannot be determined: protect the reserved name rather than
+        // sending a frame to a possibly local foreign server.
+        return true;
+    }
+    // SAFETY: Windows returned a table with NumEntries valid trailing rows.
+    let count = unsafe { (*table.0).NumEntries } as usize;
+    if count > 65_536 {
+        return true;
+    }
+    // SAFETY: GetUnicastIpAddressTable allocated `count` contiguous rows.
+    let rows = unsafe { std::slice::from_raw_parts((*table.0).Table.as_ptr(), count) };
+    rows.iter().any(|row| unicast_row_matches(row, target))
+}
+
+fn pipe_host_and_tail(name: &str) -> Option<(&str, &str)> {
     let rest = name.strip_prefix(r"\\")?;
     let (host, path) = rest.split_once(['\\', '/'])?;
     let (namespace, tail) = path.split_once(['\\', '/'])?;
     if !namespace.eq_ignore_ascii_case("pipe") {
         return None;
     }
+    Some((host, tail))
+}
+
+fn is_local_host(host: &str) -> bool {
     if host == "."
         || host == "?"
         || host.eq_ignore_ascii_case("localhost")
         || host == "127.0.0.1"
         || host == "[::1]"
-        || local_computer_name_matches(host)
     {
-        Some(tail)
-    } else {
-        None
+        return true;
     }
+    let numeric = host
+        .strip_prefix('[')
+        .and_then(|rest| rest.strip_suffix(']'))
+        .unwrap_or(host);
+    if let Ok(ip) = numeric.parse::<IpAddr>() {
+        return local_unicast_ip_matches(ip);
+    }
+    local_computer_name_matches(host)
 }
 
 pub(super) fn is_built_in_name(name: &str) -> bool {
-    let Some(name) = local_pipe_tail(name) else {
+    let Some((host, name)) = pipe_host_and_tail(name) else {
         return false;
     };
-    if name.eq_ignore_ascii_case(DAEMON_NAME) {
-        return true;
-    }
-    let Some(prefix) = name.get(..WORKER_NAME_PREFIX.len()) else {
-        return false;
+    let reserved = if name.eq_ignore_ascii_case(DAEMON_NAME) {
+        true
+    } else if let Some(prefix) = name.get(..WORKER_NAME_PREFIX.len()) {
+        if !prefix.eq_ignore_ascii_case(WORKER_NAME_PREFIX) {
+            false
+        } else if let Some((key, worker)) = name[WORKER_NAME_PREFIX.len()..].split_once('-') {
+            key.len() == 12
+                && key.bytes().all(|byte| byte.is_ascii_hexdigit())
+                && !worker.is_empty()
+                && worker.len() <= 12
+                && !worker.contains(['\\', '/'])
+        } else {
+            false
+        }
+    } else {
+        false
     };
-    if !prefix.eq_ignore_ascii_case(WORKER_NAME_PREFIX) {
-        return false;
-    }
-    let remainder = &name[WORKER_NAME_PREFIX.len()..];
-    let Some((key, worker)) = remainder.split_once('-') else {
-        return false;
-    };
-    key.len() == 12
-        && key.bytes().all(|byte| byte.is_ascii_hexdigit())
-        && !worker.is_empty()
-        && worker.len() <= 12
-        && !worker.contains(['\\', '/'])
+    reserved && is_local_host(host)
 }
 
 struct LocalAllocation(*mut c_void);
@@ -305,9 +382,51 @@ pub(super) fn create_private_server(
 
 #[cfg(test)]
 mod tests {
+    use std::net::UdpSocket;
     use std::os::windows::io::AsRawHandle;
 
     use tokio::net::windows::named_pipe::{ClientOptions, ServerOptions};
+
+    #[test]
+    fn dns_hostname_distinct_from_netbios_and_fqdn_is_local() {
+        super::TEST_DNS_HOSTNAME.with(|name| name.set(Some("prime-agent-dns-only-test")));
+        let recognized =
+            super::is_built_in_name(r"\\prime-agent-dns-only-test\pipe\prime-agent-daemon");
+        super::TEST_DNS_HOSTNAME.with(|name| name.set(None));
+        assert!(
+            recognized,
+            "the OS DNS hostname can differ from NetBIOS and FQDN"
+        );
+    }
+
+    #[tokio::test]
+    async fn local_adapter_ip_alias_keeps_the_built_in_peer_check() {
+        let route = UdpSocket::bind("0.0.0.0:0").expect("IPv4 route probe");
+        route.connect("8.8.8.8:80").expect("outbound IPv4 route");
+        let ip = route.local_addr().expect("adapter address").ip();
+        assert!(!ip.is_loopback(), "probe needs a non-loopback adapter");
+        let suffix = format!(
+            "prime-agent-worker-{:012x}-000000000004",
+            std::process::id()
+        );
+        let canonical = format!(r"\\.\pipe\{suffix}");
+        let alias = format!(r"\\{ip}\pipe\{suffix}");
+        let _server = ServerOptions::new()
+            .reject_remote_clients(false)
+            .first_pipe_instance(true)
+            .create(&canonical)
+            .expect("local server");
+        super::set_test_foreign_owner(true);
+        let result = super::super::windows_pipe::connect(&alias).await;
+        super::set_test_foreign_owner(false);
+        assert_eq!(
+            result
+                .expect_err("local adapter alias must enforce built-in policy")
+                .kind(),
+            std::io::ErrorKind::PermissionDenied,
+            "local adapter alias {alias} reached the reserved pipe"
+        );
+    }
 
     #[test]
     fn local_pipe_aliases_keep_reserved_names_private() {
