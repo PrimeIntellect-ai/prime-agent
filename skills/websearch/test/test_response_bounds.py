@@ -91,3 +91,16 @@ def test_gzip_bomb_rejected_without_eager_decode():
     ):
         with pytest.raises(ValueError, match="Serper response exceeds"):
             fetch_with_response(response)
+
+
+def test_concatenated_gzip_members_share_the_same_budget():
+    body = gzip.compress(b'{"organic": []}') + gzip.compress(
+        b" " * SERPER_MAX_RESPONSE_BYTES
+    )
+    response = httpx.Response(
+        200,
+        headers={"Content-Encoding": "gzip"},
+        stream=BodyStream(body),
+    )
+    with pytest.raises(ValueError, match="Serper response exceeds"):
+        fetch_with_response(response)

@@ -165,6 +165,10 @@ async def _fetch_serper(query: str, api_key: str, timeout: int = 45, num_results
 
                 pending = raw_chunk
                 while pending:
+                    if decompressor.eof:
+                        # Gzip permits concatenated members. Each member shares
+                        # this response's single decoded-byte budget.
+                        decompressor = zlib.decompressobj(16 + zlib.MAX_WBITS)
                     remaining = SERPER_MAX_RESPONSE_BYTES - len(body)
                     decoded = decompressor.decompress(pending, remaining + 1)
                     if len(decoded) > remaining:
@@ -172,7 +176,7 @@ async def _fetch_serper(query: str, api_key: str, timeout: int = 45, num_results
                             f"Serper response exceeds {SERPER_MAX_RESPONSE_BYTES} bytes"
                         )
                     body.extend(decoded)
-                    tail = decompressor.unconsumed_tail
+                    tail = decompressor.unconsumed_tail or decompressor.unused_data
                     if tail == pending and not decoded:
                         raise ValueError("Invalid compressed Serper response")
                     pending = tail
