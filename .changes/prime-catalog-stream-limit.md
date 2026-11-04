@@ -1,0 +1,1 @@
+- Prime Inference model catalog downloads now enforce their existing 2 MiB limit while streaming, so oversized responses cannot first fill memory.

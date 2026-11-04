@@ -1,0 +1,1 @@
+- Limited trace upload server responses to protect memory when a remote server sends oversized data.

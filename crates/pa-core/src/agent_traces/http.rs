@@ -48,6 +48,8 @@ pub trait TraceHttp: Send + Sync {
 /// The production transport (reqwest, the catalog fetch's shape).
 pub struct ReqwestTraceHttp;
 
+const MAX_TRACE_RESPONSE_BYTES: usize = 1024 * 1024;
+
 impl TraceHttp for ReqwestTraceHttp {
     fn put<'a>(
         &'a self,
@@ -67,7 +69,7 @@ impl TraceHttp for ReqwestTraceHttp {
                 request = request.header(name, value);
             }
             let send = async {
-                let response = request.send().await.map_err(|error| {
+                let mut response = request.send().await.map_err(|error| {
                     if error.is_timeout() {
                         TraceHttpError::TimedOut { timeout_ms }
                     } else {
@@ -80,10 +82,22 @@ impl TraceHttp for ReqwestTraceHttp {
                     .get("retry-after")
                     .and_then(|value| value.to_str().ok())
                     .map(str::to_string);
-                let body = response
-                    .text()
+                let mut bytes = Vec::new();
+                while let Some(chunk) = response
+                    .chunk()
                     .await
-                    .map_err(|error| TraceHttpError::Transport(error.to_string()))?;
+                    .map_err(|error| TraceHttpError::Transport(error.to_string()))?
+                {
+                    if chunk.len() > MAX_TRACE_RESPONSE_BYTES - bytes.len() {
+                        return Err(TraceHttpError::Transport(format!(
+                            "Trace upload response exceeds {MAX_TRACE_RESPONSE_BYTES} bytes"
+                        )));
+                    }
+                    bytes.extend_from_slice(&chunk);
+                }
+                // Reqwest's text() uses this lossy UTF-8 decoding without its
+                // charset feature, which is disabled throughout this workspace.
+                let body = String::from_utf8_lossy(&bytes).into_owned();
                 Ok(TraceHttpResponse {
                     status,
                     body,
@@ -249,3 +263,132 @@ pub(super) fn is_retriable_transport_error(error: &TraceHttpError) -> bool {
 /// The retriable HTTP statuses; 429 is deliberately absent — the caller
 /// reschedules instead.
 pub(super) const RETRIABLE_HTTP_STATUSES: [u16; 6] = [408, 425, 500, 502, 503, 504];
+
+#[cfg(test)]
+mod transport_tests {
+    use super::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    #[derive(Clone, Copy)]
+    enum ResponseFraming {
+        ContentLength,
+        Chunked,
+    }
+
+    async fn oversized_stalled_trace_response(
+        framing: ResponseFraming,
+    ) -> (String, tokio::task::JoinHandle<()>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/trace", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = [0u8; 4096];
+            assert!(socket.read(&mut request).await.unwrap() > 0);
+            let body = vec![b'x'; 1024 * 1024 + 1];
+            let headers = match framing {
+                ResponseFraming::ContentLength => format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len() + 1
+                ),
+                ResponseFraming::Chunked => {
+                    "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n"
+                        .to_string()
+                }
+            };
+            socket.write_all(headers.as_bytes()).await.unwrap();
+            if matches!(framing, ResponseFraming::Chunked) {
+                socket
+                    .write_all(format!("{:x}\r\n", body.len()).as_bytes())
+                    .await
+                    .unwrap();
+            }
+            socket.write_all(&body).await.unwrap();
+            if matches!(framing, ResponseFraming::Chunked) {
+                socket.write_all(b"\r\n").await.unwrap();
+            }
+            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+        });
+        (url, server)
+    }
+
+    #[tokio::test]
+    async fn trace_http_rejects_oversized_length_response_before_peer_finishes() {
+        let (url, server) = oversized_stalled_trace_response(ResponseFraming::ContentLength).await;
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            ReqwestTraceHttp.put(
+                &url,
+                Vec::new(),
+                "{}".to_string(),
+                30_000,
+                /*cancel*/ None,
+            ),
+        )
+        .await
+        .expect("oversized trace response should fail before the peer closes");
+        server.abort();
+        assert!(matches!(
+            result,
+            Err(TraceHttpError::Transport(message)) if message.contains("exceeds 1048576 bytes")
+        ));
+    }
+
+    #[tokio::test]
+    async fn trace_http_rejects_oversized_chunked_response_before_peer_finishes() {
+        let (url, server) = oversized_stalled_trace_response(ResponseFraming::Chunked).await;
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            ReqwestTraceHttp.put(
+                &url,
+                Vec::new(),
+                "{}".to_string(),
+                30_000,
+                /*cancel*/ None,
+            ),
+        )
+        .await
+        .expect("oversized trace response should fail before the peer closes");
+        server.abort();
+        assert!(matches!(
+            result,
+            Err(TraceHttpError::Transport(message)) if message.contains("exceeds 1048576 bytes")
+        ));
+    }
+
+    #[tokio::test]
+    async fn trace_http_preserves_small_body_status_and_retry_after() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/trace", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = [0u8; 4096];
+            assert!(socket.read(&mut request).await.unwrap() > 0);
+            let body = "{\"message\":\"later\"}";
+            let headers = format!(
+                "HTTP/1.1 429 Too Many Requests\r\nContent-Length: {}\r\nRetry-After: 2\r\n\r\n",
+                body.len()
+            );
+            socket.write_all(headers.as_bytes()).await.unwrap();
+            socket.write_all(body.as_bytes()).await.unwrap();
+        });
+        let response = ReqwestTraceHttp
+            .put(
+                &url,
+                Vec::new(),
+                "{}".to_string(),
+                30_000,
+                /*cancel*/ None,
+            )
+            .await
+            .unwrap();
+        server.await.unwrap();
+        assert_eq!(
+            response,
+            TraceHttpResponse {
+                status: 429,
+                retry_after: Some("2".to_string()),
+                body: "{\"message\":\"later\"}".to_string(),
+            }
+        );
+    }
+}
