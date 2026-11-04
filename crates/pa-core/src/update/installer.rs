@@ -826,7 +826,10 @@ mod tests {
 
     #[tokio::test]
     async fn installer_fetch_rejects_an_oversized_declared_length() {
-        let url = serve_script_body(b"small".to_vec(), Some(SCRIPT_FETCH_MAX_BYTES + 1));
+        let url = serve_script_body(
+            b"small".to_vec(),
+            /*declared_length*/ Some(SCRIPT_FETCH_MAX_BYTES + 1),
+        );
         let error = fetch_script(&url)
             .await
             .expect_err("oversized script refused");
@@ -835,7 +838,10 @@ mod tests {
 
     #[tokio::test]
     async fn installer_fetch_rejects_an_oversized_stream_without_length() {
-        let url = serve_script_body(vec![b'x'; SCRIPT_FETCH_MAX_BYTES + 1], None);
+        let url = serve_script_body(
+            vec![b'x'; SCRIPT_FETCH_MAX_BYTES + 1],
+            /*declared_length*/ None,
+        );
         let error = fetch_script(&url)
             .await
             .expect_err("oversized script refused");
