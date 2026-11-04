@@ -531,7 +531,7 @@ impl SettingsStorage for FileSettingsStorage {
                         }
                     }
                 }
-                #[cfg(all(test, unix))]
+                #[cfg(all(test, any(unix, windows)))]
                 if scope == SettingsScope::Project {
                     BEFORE_PROJECT_WRITE.with(|hook| {
                         if let Some(callback) = hook.borrow_mut().take() {
@@ -574,7 +574,7 @@ pub struct AtomicWriteOptions {
 #[cfg(test)]
 thread_local! {
     static OPT_IN_FSYNC: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     static BEFORE_PROJECT_WRITE: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
     #[cfg(unix)]
     static PROJECT_READ_STEP: std::cell::RefCell<Option<ProjectReadHook>> = const { std::cell::RefCell::new(None) };
@@ -903,6 +903,45 @@ mod tests {
         assert_eq!(
             fs::read_to_string(project.join(".prime/agent-moved/settings.json")).unwrap(),
             r#"{"theme":"new"}"#
+        );
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn project_settings_write_is_bound_across_a_windows_directory_swap() {
+        let root = tempfile::tempdir().unwrap();
+        let project = root.path().join("project");
+        let settings_dir = project.join(".prime/agent");
+        let moved = project.join(".prime/agent-moved");
+        let external = root.path().join("external");
+        fs::create_dir_all(&settings_dir).unwrap();
+        fs::create_dir_all(&external).unwrap();
+        fs::write(settings_dir.join("settings.json"), "project old").unwrap();
+        fs::write(external.join("settings.json"), "outside untouched").unwrap();
+        let storage = FileSettingsStorage::new(&project, root.path().join("agent"));
+        let external_for_swap = external.clone();
+
+        BEFORE_PROJECT_WRITE.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(move || {
+                fs::rename(&settings_dir, &moved).unwrap();
+                fs::rename(&external_for_swap, &settings_dir).unwrap();
+            }));
+        });
+        let result = storage.with_lock(SettingsScope::Project, &mut |current| {
+            assert_eq!(current.as_deref(), Some("project old"));
+            Some("project new".to_string())
+        });
+        BEFORE_PROJECT_WRITE.with(|hook| *hook.borrow_mut() = None);
+        result.unwrap();
+
+        fs::rename(project.join(".prime/agent"), &external).unwrap();
+        assert_eq!(
+            fs::read_to_string(external.join("settings.json")).unwrap(),
+            "outside untouched"
+        );
+        assert_eq!(
+            fs::read_to_string(moved.join("settings.json")).unwrap(),
+            "project new"
         );
     }
 
