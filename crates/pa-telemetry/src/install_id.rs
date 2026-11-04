@@ -12,7 +12,7 @@
 //! torn file is invalid state, replaced atomically.
 
 use std::fs::OpenOptions;
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
@@ -20,6 +20,9 @@ use serde::{Deserialize, Serialize};
 
 const STATE_FILE: &str = "telemetry.json";
 const STATE_VERSION: u64 = 1;
+// The persisted state is a short JSON object. Keep room for legacy whitespace
+// without allowing a replaced path to consume unbounded memory or CPU.
+const MAX_STATE_BYTES: usize = 1024 * 1024;
 
 #[derive(Debug, Serialize, Deserialize)]
 struct State {
@@ -81,25 +84,35 @@ pub fn existing_install_id(agent_dir: &Path) -> Option<String> {
     read_install_id(&agent_dir.join(STATE_FILE)).ok().flatten()
 }
 
-/// Valid stored id, or `None` when the file is absent or holds invalid state.
+/// Valid stored id, or `None` when the file is absent, non-regular, oversized,
+/// or holds invalid state. Links to regular state files remain supported.
 fn read_install_id(path: &Path) -> Result<Option<String>> {
-    // The state is opened non-blocking (unix O_NONBLOCK): a special
-    // file swapped onto the path (a FIFO) would block a plain read
-    // forever, and no caller — including the `/telemetry` confirmation
-    // after a saved opt-out — may hang on the telemetry state. A
-    // non-blocking FIFO with no writer reads empty and parses to no id.
-    let mut file = match open_state_nonblocking(path) {
+    // O_NONBLOCK lets us inspect a swapped-in FIFO without blocking in open.
+    // The opened handle must then be a bounded regular file: a device such as
+    // /dev/zero otherwise supplies bytes forever, including on /telemetry.
+    let file = match open_state_nonblocking(path) {
         Ok(file) => file,
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(err) => return Err(err).with_context(|| format!("open {}", path.display())),
     };
+    let metadata = file
+        .metadata()
+        .with_context(|| format!("inspect {}", path.display()))?;
+    if !metadata.is_file() || metadata.len() > MAX_STATE_BYTES as u64 {
+        return Ok(None);
+    }
     let mut bytes = Vec::new();
-    match std::io::Read::read_to_end(&mut file, &mut bytes) {
+    match file
+        .take(MAX_STATE_BYTES as u64 + 1)
+        .read_to_end(&mut bytes)
+    {
         Ok(_) => {}
-        // A non-blocking empty read (EAGAIN on a writer-less FIFO) is
-        // no id, not an error.
+        // A transient non-blocking read has no usable id.
         Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => return Ok(None),
         Err(err) => return Err(err).with_context(|| format!("read {}", path.display())),
+    }
+    if bytes.len() > MAX_STATE_BYTES {
+        return Ok(None);
     }
     let state: Option<State> = serde_json::from_slice(&bytes).ok();
     let valid = state
@@ -109,8 +122,8 @@ fn read_install_id(path: &Path) -> Result<Option<String>> {
 }
 
 /// Open the state file read-only, non-blocking on unix (`O_NONBLOCK`):
-/// whatever now sits on the path — a regular state file or a swapped-in
-/// special file — opens and reads without ever parking the caller.
+/// whatever now sits on the path opens without parking the caller. The reader
+/// inspects the opened handle and only reads regular files with a size cap.
 #[cfg(unix)]
 fn open_state_nonblocking(path: &Path) -> std::io::Result<std::fs::File> {
     use std::os::unix::fs::OpenOptionsExt;
@@ -267,6 +280,57 @@ mod tests {
             .expect("mkfifo");
         assert!(status.success(), "mkfifo created the fifo");
         assert_eq!(existing_install_id(&agent_dir), None);
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn a_streaming_device_on_the_state_path_reads_as_no_id() {
+        let dir = tempfile::tempdir().unwrap();
+        std::os::unix::fs::symlink("/dev/zero", dir.path().join(STATE_FILE)).unwrap();
+        assert_eq!(existing_install_id(dir.path()), None);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_linked_regular_state_keeps_its_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let shared = dir.path().join("shared-state.json");
+        let id = "550e8400-e29b-41d4-a716-446655440000";
+        std::fs::write(
+            &shared,
+            serde_json::to_vec(&State {
+                version: STATE_VERSION,
+                installation_id: id.into(),
+            })
+            .unwrap(),
+        )
+        .unwrap();
+        std::os::unix::fs::symlink(&shared, dir.path().join(STATE_FILE)).unwrap();
+
+        assert_eq!(install_id(dir.path()).unwrap(), id);
+        assert_eq!(
+            std::fs::read_link(dir.path().join(STATE_FILE)).unwrap(),
+            shared
+        );
+    }
+
+    #[test]
+    fn oversized_state_is_replaced_without_reading_it_all() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(STATE_FILE);
+        let previous = "550e8400-e29b-41d4-a716-446655440000";
+        let mut oversized = serde_json::to_vec(&State {
+            version: STATE_VERSION,
+            installation_id: previous.into(),
+        })
+        .unwrap();
+        oversized.extend(std::iter::repeat_n(b' ', MAX_STATE_BYTES + 1));
+        std::fs::write(&path, oversized).unwrap();
+
+        assert_eq!(existing_install_id(dir.path()), None);
+        let replacement = install_id(dir.path()).unwrap();
+        assert_ne!(replacement, previous);
+        assert_eq!(existing_install_id(dir.path()), Some(replacement));
     }
 
     #[test]

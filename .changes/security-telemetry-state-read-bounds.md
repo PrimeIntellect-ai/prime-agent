@@ -1,0 +1,1 @@
+- Prevent device-backed or oversized telemetry state files from hanging the app or exhausting memory.
