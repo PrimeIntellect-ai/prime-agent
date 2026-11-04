@@ -90,41 +90,52 @@ impl Drop for UnicastTable {
     }
 }
 
-fn unicast_row_matches(row: &MIB_UNICASTIPADDRESS_ROW, target: IpAddr) -> bool {
+fn unicast_row_ip(row: &MIB_UNICASTIPADDRESS_ROW) -> Option<IpAddr> {
     // SAFETY: The discriminant selects the corresponding SOCKADDR_INET union arm.
-    match (target, unsafe { row.Address.si_family }) {
-        (IpAddr::V4(target), AF_INET) => {
-            // SAFETY: AF_INET selects Ipv4; S_addr stores network-order bytes.
-            let bytes = unsafe { row.Address.Ipv4.sin_addr.S_un.S_addr.to_ne_bytes() };
-            Ipv4Addr::from(bytes) == target
-        }
-        (IpAddr::V6(target), AF_INET6) => {
-            // SAFETY: AF_INET6 selects Ipv6 and its fixed 16-byte address.
-            let bytes = unsafe { row.Address.Ipv6.sin6_addr.u.Byte };
-            Ipv6Addr::from(bytes) == target
-        }
-        (IpAddr::V4(_) | IpAddr::V6(_), _) => false,
+    let family = unsafe { row.Address.si_family };
+    if family == AF_INET {
+        // SAFETY: AF_INET selects Ipv4; S_addr stores network-order bytes.
+        let bytes = unsafe { row.Address.Ipv4.sin_addr.S_un.S_addr.to_ne_bytes() };
+        Some(IpAddr::V4(Ipv4Addr::from(bytes)))
+    } else if family == AF_INET6 {
+        // SAFETY: AF_INET6 selects Ipv6 and its fixed 16-byte address.
+        let bytes = unsafe { row.Address.Ipv6.sin6_addr.u.Byte };
+        Some(IpAddr::V6(Ipv6Addr::from(bytes)))
+    } else {
+        None
     }
 }
 
-fn local_unicast_ip_matches(target: IpAddr) -> bool {
+fn local_unicast_ips() -> io::Result<Vec<IpAddr>> {
     let mut raw_table = ptr::null_mut();
     // SAFETY: The output pointer is writable; Windows owns the returned table.
     let status = unsafe { GetUnicastIpAddressTable(AF_UNSPEC, &raw mut raw_table) };
     let table = UnicastTable(raw_table);
-    if status != 0 || table.0.is_null() {
-        // Identity cannot be determined: protect the reserved name rather than
-        // sending a frame to a possibly local foreign server.
-        return true;
+    if status != 0 {
+        return Err(io::Error::from_raw_os_error(status.cast_signed()));
+    }
+    if table.0.is_null() {
+        return Err(io::Error::other("Windows unicast address table is missing"));
     }
     // SAFETY: Windows returned a table with NumEntries valid trailing rows.
     let count = unsafe { (*table.0).NumEntries } as usize;
     if count > 65_536 {
-        return true;
+        return Err(io::Error::other(
+            "Windows unicast address table is too large",
+        ));
     }
     // SAFETY: GetUnicastIpAddressTable allocated `count` contiguous rows.
     let rows = unsafe { std::slice::from_raw_parts((*table.0).Table.as_ptr(), count) };
-    rows.iter().any(|row| unicast_row_matches(row, target))
+    Ok(rows.iter().filter_map(unicast_row_ip).collect())
+}
+
+fn local_unicast_ip_matches(target: IpAddr) -> bool {
+    // Identity cannot be determined: protect the reserved name rather than
+    // sending a frame to a possibly local foreign server.
+    match local_unicast_ips() {
+        Ok(addresses) => addresses.contains(&target),
+        Err(_error) => true,
+    }
 }
 
 fn pipe_host_and_tail(name: &str) -> Option<(&str, &str)> {
@@ -382,7 +393,7 @@ pub(super) fn create_private_server(
 
 #[cfg(test)]
 mod tests {
-    use std::net::UdpSocket;
+    use std::net::IpAddr;
     use std::os::windows::io::AsRawHandle;
 
     use tokio::net::windows::named_pipe::{ClientOptions, ServerOptions};
@@ -401,10 +412,18 @@ mod tests {
 
     #[tokio::test]
     async fn local_adapter_ip_alias_keeps_the_built_in_peer_check() {
-        let route = UdpSocket::bind("0.0.0.0:0").expect("IPv4 route probe");
-        route.connect("8.8.8.8:80").expect("outbound IPv4 route");
-        let ip = route.local_addr().expect("adapter address").ip();
-        assert!(!ip.is_loopback(), "probe needs a non-loopback adapter");
+        let Ok(addresses) = super::local_unicast_ips() else {
+            return; // No adapter table on this Windows host.
+        };
+        let Some(ip) = addresses.into_iter().find(|address| {
+            matches!(
+                address,
+                IpAddr::V4(ip)
+                    if !ip.is_loopback() && !ip.is_unspecified() && !ip.is_link_local()
+            )
+        }) else {
+            return; // No routable IPv4 adapter on this Windows host.
+        };
         let suffix = format!(
             "prime-agent-worker-{:012x}-000000000004",
             std::process::id()
