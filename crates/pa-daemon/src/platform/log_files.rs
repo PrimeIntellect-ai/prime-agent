@@ -344,6 +344,18 @@ mod windows_tests {
     use std::io::Write as _;
 
     #[test]
+    fn repeated_names_calls_start_at_the_beginning() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = LogDir::for_write(&temp.path().join("logs")).unwrap();
+        dir.open_file(OsStr::new("worker-a.stderr.log"), OpenMode::Write)
+            .unwrap();
+
+        let expected = vec![OsString::from("worker-a.stderr.log")];
+        assert_eq!(dir.names().unwrap(), expected);
+        assert_eq!(dir.names().unwrap(), expected);
+    }
+
+    #[test]
     fn directory_swap_keeps_worker_log_operations_on_original_dir() {
         let temp = tempfile::tempdir().unwrap();
         let agent = temp.path().join("agent");
