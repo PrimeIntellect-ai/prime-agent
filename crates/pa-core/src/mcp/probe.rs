@@ -19,6 +19,9 @@ pub type ProbeOutcome = Result<usize, &'static str>;
 
 /// The per-request timeout (TS default).
 const DEFAULT_TIMEOUT_MS: u64 = 15_000;
+/// A probe only verifies the handshake and counts the first tools page; its
+/// response must not grow without bound before the parser sees it.
+const MAX_PROBE_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
 
 /// The verification probe seam: hosts inject a fake in tests; the product path uses
 /// [`ReqwestMcpProbe`]..
@@ -122,7 +125,7 @@ async fn post_json_rpc(
             Err(_) => return Err(PROBE_ERROR_INVALID_RESPONSE),
         }
     }
-    let response = request.send().await.map_err(|error| {
+    let mut response = request.send().await.map_err(|error| {
         if error.is_timeout() {
             PROBE_ERROR_TIMEOUT
         } else {
@@ -141,10 +144,23 @@ async fn post_json_rpc(
         .and_then(|value| value.to_str().ok())
         .unwrap_or_default()
         .to_string();
-    let bytes = response
-        .bytes()
+    if response
+        .content_length()
+        .is_some_and(|length| length > MAX_PROBE_RESPONSE_BYTES as u64)
+    {
+        return Err(PROBE_ERROR_INVALID_RESPONSE);
+    }
+    let mut bytes = Vec::new();
+    while let Some(chunk) = response
+        .chunk()
         .await
-        .map_err(|_| PROBE_ERROR_INVALID_RESPONSE)?;
+        .map_err(|_| PROBE_ERROR_INVALID_RESPONSE)?
+    {
+        if chunk.len() > MAX_PROBE_RESPONSE_BYTES.saturating_sub(bytes.len()) {
+            return Err(PROBE_ERROR_INVALID_RESPONSE);
+        }
+        bytes.extend_from_slice(&chunk);
+    }
     let payload = parse_rpc_response(status, &content_type, &bytes)?;
     Ok((status, session_id, payload))
 }
@@ -244,4 +260,69 @@ async fn probe_endpoint(
         .and_then(|tools| tools.as_array())
         .map_or(0, std::vec::Vec::len);
     Ok(tool_count)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn probe_rejects_oversized_responses_before_the_peer_finishes() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        for chunked in [false, true] {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            let (close_tx, close_rx) = tokio::sync::oneshot::channel::<()>();
+            let server = tokio::spawn(async move {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut head = Vec::new();
+                let mut buffer = [0u8; 4096];
+                while !head.windows(4).any(|bytes| bytes == b"\r\n\r\n") {
+                    let read = socket.read(&mut buffer).await.unwrap();
+                    assert_ne!(read, 0);
+                    head.extend_from_slice(&buffer[..read]);
+                }
+                let body = vec![b'x'; 8 * 1024 * 1024 + 1];
+                let framing = if chunked {
+                    "Transfer-Encoding: chunked".to_string()
+                } else {
+                    format!("Content-Length: {}", body.len())
+                };
+                socket
+                    .write_all(format!("HTTP/1.1 200 OK\r\n{framing}\r\n\r\n").as_bytes())
+                    .await
+                    .unwrap();
+                if chunked {
+                    let _ = socket
+                        .write_all(format!("{:x}\r\n", body.len()).as_bytes())
+                        .await;
+                }
+                let _ = socket.write_all(&body).await;
+                if chunked {
+                    let _ = socket.write_all(b"\r\n").await;
+                }
+                let _ = close_rx.await;
+            });
+            let client = reqwest::Client::new();
+            let result = tokio::time::timeout(
+                Duration::from_secs(2),
+                post_json_rpc(
+                    &client,
+                    &format!("http://{addr}/mcp"),
+                    "",
+                    None,
+                    rpc("initialize", 1, &serde_json::json!({})),
+                    Duration::from_secs(15),
+                ),
+            )
+            .await;
+            let _ = close_tx.send(());
+            server.await.unwrap();
+            let error = result
+                .expect("probe should not wait for EOF")
+                .expect_err("probe should refuse oversized metadata");
+            assert_eq!(error, PROBE_ERROR_INVALID_RESPONSE);
+        }
+    }
 }
