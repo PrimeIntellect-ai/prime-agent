@@ -437,47 +437,52 @@ async fn await_inflight<T: Clone>(inflight: Arc<InFlight<T>>) -> Option<T> {
     }
 }
 
-/// Atomic snapshot write: temp file + rename at mode 0600. The temp file
-/// is unique per writer (`pid` + an in-process counter): one agent dir is
-/// shared by many processes, and a shared temp path would let concurrent
-/// refreshes truncate each other's temp file and publish a malformed snapshot.
+/// Atomic snapshot write: a random, exclusive temp file in the same directory
+/// as the cache, created at mode 0600. The agent dir is shared by many
+/// processes, and a predictable temp path can be pre-planted as a symlink.
 fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
-    static TMP_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
+        let mut temp = tempfile::NamedTempFile::new_in(parent)?;
+        temp.write_all(bytes)?;
+        temp.flush()?;
+        temp.persist(path).map_err(|error| error.error)?;
+        Ok(())
+    } else {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "catalog cache path has no parent",
+        ))
     }
-    let temp = path.with_extension(format!(
-        "{}-{}.tmp",
-        std::process::id(),
-        TMP_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-    ));
-    #[cfg(unix)]
-    let write = || {
-        use std::os::unix::fs::OpenOptionsExt;
-        std::fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .mode(0o600)
-            .open(&temp)
-    };
-    #[cfg(not(unix))]
-    let write = || {
-        std::fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .open(&temp)
-    };
-    let mut file = write()?;
-    file.write_all(bytes)?;
-    file.flush()?;
-    std::fs::rename(&temp, path)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn planted_legacy_temp_paths_cannot_clobber_another_file() {
+        use std::os::unix::fs::{symlink, PermissionsExt};
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("snapshot.json");
+        let victim = dir.path().join("victim");
+        std::fs::write(&victim, b"untouched").unwrap();
+        // Older releases used a predictable pid/counter name. Cover the
+        // writer's counters even when another cache test ran in this process.
+        for counter in 0..4096 {
+            let temp = path.with_extension(format!("{}-{counter}.tmp", std::process::id()));
+            symlink(&victim, temp).unwrap();
+        }
+        write_atomic(&path, b"catalog").unwrap();
+        assert_eq!(std::fs::read(&victim).unwrap(), b"untouched");
+        assert_eq!(std::fs::read(&path).unwrap(), b"catalog");
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+    }
 
     /// The multi-process snapshot-write invariant (Macroscope on #2576):
     /// a reader racing concurrent `write_atomic` writers always parses a
