@@ -16,6 +16,8 @@ from pathlib import Path
 if importlib.util.find_spec("httpx") is None:
     raise ModuleNotFoundError("No module named 'httpx'")
 
+SERPER_MAX_RESPONSE_BYTES = 2 * 1024 * 1024
+
 
 def _env_int(name: str, default: int) -> int:
     """Read an int from the environment, falling back to default on bad values."""
@@ -115,24 +117,42 @@ def _format_serper_results(data: dict, query: str, num_results: int = 5) -> str:
 
 
 async def _fetch_serper(query: str, api_key: str, timeout: int = 45, num_results: int = 5) -> str:
-    """Execute a single Serper API search."""
+    """Execute a Serper search with a bounded response body."""
     import httpx
 
-    try:
-        async with httpx.AsyncClient(timeout=timeout) as client:
-            resp = await client.post(
-                "https://google.serper.dev/search",
-                json={"q": query},
-                headers={
-                    "X-API-KEY": api_key,
-                    "Content-Type": "application/json",
-                },
-            )
-            resp.raise_for_status()
-            data = resp.json()
-    except httpx.HTTPStatusError as e:
-        body = e.response.text if e.response is not None else ""
-        raise RuntimeError(f"Serper search error ({e.response.status_code}): {body}") from e
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        async with client.stream(
+            "POST",
+            "https://google.serper.dev/search",
+            json={"q": query},
+            headers={
+                "X-API-KEY": api_key,
+                "Content-Type": "application/json",
+            },
+        ) as resp:
+            try:
+                declared_size = int(resp.headers.get("Content-Length", "0"))
+            except ValueError:
+                declared_size = 0
+            if declared_size > SERPER_MAX_RESPONSE_BYTES:
+                raise ValueError(
+                    f"Serper response exceeds {SERPER_MAX_RESPONSE_BYTES} bytes"
+                )
+
+            body = bytearray()
+            async for chunk in resp.aiter_bytes():
+                if len(chunk) > SERPER_MAX_RESPONSE_BYTES - len(body):
+                    raise ValueError(
+                        f"Serper response exceeds {SERPER_MAX_RESPONSE_BYTES} bytes"
+                    )
+                body.extend(chunk)
+
+            if not resp.is_success:
+                error_body = body.decode(resp.encoding or "utf-8", errors="replace")
+                raise RuntimeError(
+                    f"Serper search error ({resp.status_code}): {error_body}"
+                )
+            data = json.loads(body)
 
     return _format_serper_results(data, query, num_results=num_results)
 
