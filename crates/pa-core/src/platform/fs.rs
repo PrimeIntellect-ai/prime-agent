@@ -23,52 +23,6 @@ pub(crate) enum DirectoryCreation {
     CreateMissing,
 }
 
-/// Ask Windows for the link count of the file handle that settings will read.
-/// The stable `MetadataExt` API does not expose `nNumberOfLinks`.
-#[cfg(windows)]
-pub(crate) fn has_multiple_hard_links(file: &File) -> io::Result<bool> {
-    use std::ffi::c_void;
-    use std::mem::MaybeUninit;
-    use std::os::windows::io::AsRawHandle;
-
-    // All fields are required for the Win32 BY_HANDLE_FILE_INFORMATION layout.
-    #[allow(dead_code)]
-    #[repr(C)]
-    struct ByHandleFileInformation {
-        attributes: u32,
-        creation_time: [u32; 2],
-        last_access_time: [u32; 2],
-        last_write_time: [u32; 2],
-        volume_serial_number: u32,
-        file_size_high: u32,
-        file_size_low: u32,
-        number_of_links: u32,
-        file_index_high: u32,
-        file_index_low: u32,
-    }
-
-    #[link(name = "kernel32")]
-    unsafe extern "system" {
-        #[link_name = "GetFileInformationByHandle"]
-        fn get_file_information_by_handle(
-            file: *mut c_void,
-            information: *mut ByHandleFileInformation,
-        ) -> i32;
-    }
-
-    let mut information = MaybeUninit::<ByHandleFileInformation>::uninit();
-    if unsafe { get_file_information_by_handle(file.as_raw_handle(), information.as_mut_ptr()) }
-        == 0
-    {
-        return Err(io::Error::last_os_error());
-    }
-    let count = unsafe { information.assume_init() }.number_of_links;
-    if count == 0 {
-        return Err(io::Error::other("Windows file link count is unavailable"));
-    }
-    Ok(count > 1)
-}
-
 #[cfg(any(target_os = "linux", target_os = "android"))]
 const SEARCH_DIRECTORY_FLAG: libc::c_int = libc::O_PATH;
 #[cfg(any(
@@ -306,4 +260,50 @@ pub fn fsync(file: &File) -> io::Result<()> {
 #[cfg(not(unix))]
 pub fn fsync(file: &File) -> io::Result<()> {
     file.sync_data()
+}
+
+/// Ask Windows for the link count of the file handle that settings will read.
+/// The stable `MetadataExt` API does not expose `nNumberOfLinks`.
+#[cfg(windows)]
+pub(crate) fn has_multiple_hard_links(file: &File) -> io::Result<bool> {
+    use std::ffi::c_void;
+    use std::mem::MaybeUninit;
+    use std::os::windows::io::AsRawHandle;
+
+    // All fields are required for the Win32 BY_HANDLE_FILE_INFORMATION layout.
+    #[allow(dead_code)]
+    #[repr(C)]
+    struct ByHandleFileInformation {
+        attributes: u32,
+        creation_time: [u32; 2],
+        last_access_time: [u32; 2],
+        last_write_time: [u32; 2],
+        volume_serial_number: u32,
+        file_size_high: u32,
+        file_size_low: u32,
+        number_of_links: u32,
+        file_index_high: u32,
+        file_index_low: u32,
+    }
+
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        #[link_name = "GetFileInformationByHandle"]
+        fn get_file_information_by_handle(
+            file: *mut c_void,
+            information: *mut ByHandleFileInformation,
+        ) -> i32;
+    }
+
+    let mut information = MaybeUninit::<ByHandleFileInformation>::uninit();
+    if unsafe { get_file_information_by_handle(file.as_raw_handle(), information.as_mut_ptr()) }
+        == 0
+    {
+        return Err(io::Error::last_os_error());
+    }
+    let count = unsafe { information.assume_init() }.number_of_links;
+    if count == 0 {
+        return Err(io::Error::other("Windows file link count is unavailable"));
+    }
+    Ok(count > 1)
 }
