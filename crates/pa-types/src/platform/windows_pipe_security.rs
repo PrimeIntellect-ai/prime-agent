@@ -32,6 +32,11 @@ const WORKER_NAME_PREFIX: &str = "prime-agent-worker-";
 
 #[cfg(test)]
 thread_local! {
+    static TEST_DNS_HOSTNAME: std::cell::Cell<Option<&'static str>> = const { std::cell::Cell::new(None) };
+}
+
+#[cfg(test)]
+thread_local! {
     // Native tests substitute the kernel-reported owner SID, then exercise
     // the real comparison and denial path without another Windows account.
     static TEST_FOREIGN_OWNER: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
@@ -46,6 +51,12 @@ fn local_computer_name_matches(host: &str) -> bool {
     [ComputerNameNetBIOS, ComputerNameDnsFullyQualified]
         .into_iter()
         .any(|format| {
+            #[cfg(test)]
+            if format == windows_sys::Win32::System::SystemInformation::ComputerNameDnsHostname {
+                if let Some(name) = TEST_DNS_HOSTNAME.with(std::cell::Cell::get) {
+                    return host.eq_ignore_ascii_case(name);
+                }
+            }
             let mut name = [0u16; 256];
             let mut length = u32::try_from(name.len()).expect("computer name buffer fits DWORD");
             // SAFETY: `name` is writable, and `length` describes its capacity.
@@ -305,9 +316,51 @@ pub(super) fn create_private_server(
 
 #[cfg(test)]
 mod tests {
+    use std::net::UdpSocket;
     use std::os::windows::io::AsRawHandle;
 
     use tokio::net::windows::named_pipe::{ClientOptions, ServerOptions};
+
+    #[test]
+    fn dns_hostname_distinct_from_netbios_and_fqdn_is_local() {
+        super::TEST_DNS_HOSTNAME.with(|name| name.set(Some("prime-agent-dns-only-test")));
+        let recognized =
+            super::is_built_in_name(r"\\prime-agent-dns-only-test\pipe\prime-agent-daemon");
+        super::TEST_DNS_HOSTNAME.with(|name| name.set(None));
+        assert!(
+            recognized,
+            "the OS DNS hostname can differ from NetBIOS and FQDN"
+        );
+    }
+
+    #[tokio::test]
+    async fn local_adapter_ip_alias_keeps_the_built_in_peer_check() {
+        let route = UdpSocket::bind("0.0.0.0:0").expect("IPv4 route probe");
+        route.connect("8.8.8.8:80").expect("outbound IPv4 route");
+        let ip = route.local_addr().expect("adapter address").ip();
+        assert!(!ip.is_loopback(), "probe needs a non-loopback adapter");
+        let suffix = format!(
+            "prime-agent-worker-{:012x}-000000000004",
+            std::process::id()
+        );
+        let canonical = format!(r"\\.\pipe\{suffix}");
+        let alias = format!(r"\\{ip}\pipe\{suffix}");
+        let _server = ServerOptions::new()
+            .reject_remote_clients(false)
+            .first_pipe_instance(true)
+            .create(&canonical)
+            .expect("local server");
+        super::set_test_foreign_owner(true);
+        let result = super::super::windows_pipe::connect(&alias).await;
+        super::set_test_foreign_owner(false);
+        assert_eq!(
+            result
+                .expect_err("local adapter alias must enforce built-in policy")
+                .kind(),
+            std::io::ErrorKind::PermissionDenied,
+            "local adapter alias {alias} reached the reserved pipe"
+        );
+    }
 
     #[test]
     fn local_pipe_aliases_keep_reserved_names_private() {
