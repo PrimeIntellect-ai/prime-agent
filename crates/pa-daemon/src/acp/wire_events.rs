@@ -117,15 +117,34 @@ pub fn wire_updates(event: &Value, state: &mut WireMappingState) -> Vec<AcpSessi
             }
         }
         "message_end" => {
-            if event
-                .get("message")
-                .and_then(|message| message.get("role"))
-                .and_then(Value::as_str)
-                == Some("assistant")
-            {
-                state.active_assistant_message_id = None;
+            let Some(message) = event.get("message") else {
+                return Vec::new();
+            };
+            match message.get("role").and_then(Value::as_str) {
+                Some("assistant") => {
+                    state.active_assistant_message_id = None;
+                    Vec::new()
+                }
+                // A message the model sent with `rlm.respond` is the agent's
+                // message to the client, delivered whole.
+                Some("custom")
+                    if message.get("customType").and_then(Value::as_str)
+                        == Some(pa_core::session_engine::messages::RLM_RESPONSE_CUSTOM_TYPE) =>
+                {
+                    let message_id = state.start_assistant_message();
+                    state.active_assistant_message_id = None;
+                    vec![AcpSessionUpdate::AgentMessageChunk {
+                        message_id,
+                        content: TextBlock::new(
+                            message
+                                .get("content")
+                                .and_then(Value::as_str)
+                                .unwrap_or_default(),
+                        ),
+                    }]
+                }
+                _ => Vec::new(),
             }
-            Vec::new()
         }
         "tool_execution_start" => {
             let tool_call_id = event
@@ -534,6 +553,29 @@ mod tests {
             serde_json::to_value(&updates[0]).unwrap()["sessionUpdate"],
             "agent_message_chunk"
         );
+    }
+
+    #[test]
+    fn a_sent_response_maps_to_one_agent_message_chunk() {
+        let mut state = WireMappingState::default();
+        let updates = wire_updates(
+            &json!({
+                "type": "message_end",
+                "message": {
+                    "role": "custom",
+                    "customType": "rlm_response",
+                    "content": "| a |\n|---|",
+                    "display": true,
+                },
+            }),
+            &mut state,
+        );
+        let [update] = updates.as_slice() else {
+            panic!("one update: {updates:?}");
+        };
+        let update = serde_json::to_value(update).unwrap();
+        assert_eq!(update["sessionUpdate"], "agent_message_chunk");
+        assert_eq!(update["content"]["text"], "| a |\n|---|");
     }
 
     #[test]

@@ -146,6 +146,18 @@ impl AgentSession {
         })
     }
 
+    /// The newest reply the user saw in the live loop context (see
+    /// [`super::messages::reply_text`]): the answer a sent `rlm.respond`
+    /// message gives when the turn ends with empty text.
+    pub async fn last_reply_text(&self) -> Option<String> {
+        let state = self.agent.state().await;
+        state.messages.iter().rev().find_map(|message| {
+            let value = serde_json::to_value(message).ok()?;
+            let message: SessionAgentMessage = serde_json::from_value(value).ok()?;
+            super::messages::reply_text(&message)
+        })
+    }
+
     /// Execute `/compact`: summarize the pre-cut prefix, persist the entry,
     /// and rebuild the loop context summary-first; a skip leaves the session
     /// untouched, an aborted run never commits.

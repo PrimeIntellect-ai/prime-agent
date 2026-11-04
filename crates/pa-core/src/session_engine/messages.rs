@@ -47,6 +47,11 @@ pub const ASYNC_BASH_COMPLETION_PREVIEW_LABEL: &str = "Background command finish
 pub const FACTORY_PROGRESS_NOTICE_CUSTOM_TYPE: &str = "factory_progress_notice";
 /// The queue-strip label the factory progress notice's queued row carries.
 pub const FACTORY_PROGRESS_PREVIEW_LABEL: &str = "Factory progress";
+/// The row one `rlm.respond` call leaves: the model's message to the user,
+/// shown as assistant text and read as the agent's reply.
+pub const RLM_RESPONSE_CUSTOM_TYPE: &str = "rlm_response";
+/// What the model reads before the text it sent with `rlm.respond`.
+pub const RLM_RESPONSE_PREFIX: &str = "[sent-to-user]\n\n";
 /// The queue-strip preview label for a parked heartbeat fire; the queued row reads
 /// `Heartbeat prompt: <content>` instead of the lane-labeled preview.
 pub const HEARTBEAT_PROMPT_PREVIEW_LABEL: &str = "Heartbeat prompt";
@@ -237,6 +242,41 @@ pub fn create_async_bash_completion_message(
     }
 }
 
+/// The row for one `rlm.respond` call: the text exactly as sent.
+#[must_use]
+pub fn create_rlm_response_message(text: &str) -> pa_types::session::CustomMessage {
+    pa_types::session::CustomMessage {
+        custom_type: RLM_RESPONSE_CUSTOM_TYPE.to_string(),
+        content: UserContent::Text(text.to_string()),
+        display: true,
+        details: None,
+        timestamp: now_millis(),
+        rest: serde_json::Map::default(),
+    }
+}
+
+/// The text a message showed the user as the agent's reply: an assistant
+/// message's text or an `rlm.respond` row; `None` for anything else or
+/// empty text. Child answers and print output read the newest match.
+#[must_use]
+pub fn reply_text(message: &AgentMessage) -> Option<String> {
+    let text = match message {
+        AgentMessage::Assistant(assistant) => assistant
+            .content
+            .iter()
+            .filter_map(|block| match block {
+                pa_types::ai::AssistantContentBlock::Text(text) => Some(text.text.as_str()),
+                _ => None,
+            })
+            .collect::<String>(),
+        AgentMessage::Custom(custom) if custom.custom_type == RLM_RESPONSE_CUSTOM_TYPE => {
+            custom.content.text()
+        }
+        _ => return None,
+    };
+    (!text.is_empty()).then_some(text)
+}
+
 /// The factory run milestone notice: `[factory-progress run:<id>] <kind>: <detail>`,
 /// the kernel's `snake_case` kind rendered with hyphens (`budget_exceeded` reads
 /// `budget-exceeded`). The details keep the kernel's raw values.
@@ -370,8 +410,15 @@ pub fn convert_to_llm(messages: &[AgentMessage]) -> Vec<AgentMessage> {
                 }
                 // TS wraps a string content into a text-part array and
                 // passes block content through (the request's cacheable
-                // shape is the array either way).
+                // shape is the array either way). A sent response reaches
+                // the model as a harness message after the tool results:
+                // an assistant row there would break turn alternation.
                 let content = match custom.content.clone() {
+                    UserContent::Text(text) if custom.custom_type == RLM_RESPONSE_CUSTOM_TYPE => {
+                        UserContent::Blocks(vec![text_block(format!(
+                            "{RLM_RESPONSE_PREFIX}{text}"
+                        ))])
+                    }
                     UserContent::Text(text) => UserContent::Blocks(vec![text_block(text)]),
                     blocks @ UserContent::Blocks(_) => blocks,
                 };

@@ -1766,6 +1766,17 @@ async fn run_prompts_and_emit(
             }
             if exit_code == 0 {
                 if let Some(text) = primary.stdout_text() {
+                    // A turn that answered with `rlm.respond` ends with empty
+                    // text; the newest reply the user saw is the answer.
+                    let text = if text.is_empty() {
+                        messages
+                            .iter()
+                            .rev()
+                            .find_map(pa_core::session_engine::messages::reply_text)
+                            .unwrap_or(text)
+                    } else {
+                        text
+                    };
                     println!("{text}");
                 }
             }

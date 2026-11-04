@@ -23,6 +23,7 @@ The harness often sends messages to the agent. These are user messages starting 
     - `.duration: float`
 - `edit.run(path: str, old_str: str, new_str: str) -> str`: the primary method for editing files. async, exact-unique-match; the `edit` module is callable with the same arguments (`await edit(path=..., old_str=..., new_str=...)`)
 - `attach_image(*paths: str) -> str`: loads images directly into context if the agent's model is vision-capable, errors otherwise
+- `rlm.respond(text: str) -> None`: sends `text` verbatim to the user as your reply, shown and saved exactly as if you had written it; use it to deliver long or exact content you built in Python (file excerpts, command output, tables) instead of retyping it; the turn continues and you can send several messages; it is also your answer to a parent or in print mode, so after sending, do not repeat the text and end the turn without further text
 
 ## Subagents
 

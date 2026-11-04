@@ -1192,6 +1192,13 @@
           </div>`;
         }
 
+        // A message the model sent with rlm.respond renders as its own text.
+        if (entry.type === 'custom_message' && entry.customType === 'rlm_response') {
+          return `<div class="assistant-message" id="${entryDomId}">${copyBtnHtml}${tsHtml}
+            <div class="assistant-text markdown-content">${safeMarkedParse(entry.content)}</div>
+          </div>`;
+        }
+
         if (entry.type === 'custom_message' && entry.display) {
           return `<div class="hook-message" id="${entryDomId}">${tsHtml}
             <div class="hook-type">[${escapeHtml(entry.customType)}]</div>

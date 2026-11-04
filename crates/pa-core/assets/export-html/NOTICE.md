@@ -5,6 +5,8 @@ The session HTML export template (`template.html`, `template.css`,
 files match the reference product byte-for-byte, including its wire-internal
 identifiers (`pi-url-params`, `pi-share-base-url`, and the `pi-share:v1`
 storage key - the share-viewer service injects those, so they must stay).
+One local change: `template.js` renders `rlm_response` rows (messages the
+model sent with `rlm.respond`) as assistant text.
 
 Vendored JavaScript (kept byte-identical, minified upstream):
 

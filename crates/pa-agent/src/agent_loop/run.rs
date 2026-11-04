@@ -54,19 +54,8 @@ pub(crate) async fn run_loop(
                 emit(AgentEvent::TurnStart).await?;
             }
 
-            if !pending_messages.is_empty() {
-                for message in pending_messages.drain(..) {
-                    emit(AgentEvent::MessageStart {
-                        message: message.clone(),
-                    })
-                    .await?;
-                    emit(AgentEvent::MessageEnd {
-                        message: message.clone(),
-                    })
-                    .await?;
-                    current_context.messages.push(message.clone());
-                    new_messages.push(message);
-                }
+            for message in pending_messages.drain(..) {
+                append_row(message, current_context, new_messages, emit).await?;
             }
 
             let message =
@@ -107,6 +96,11 @@ pub(crate) async fn run_loop(
                         .messages
                         .push(AgentMessage::from(result.clone()));
                     new_messages.push(AgentMessage::from(result.clone()));
+                }
+                if let Some(poll) = config.get_tool_batch_rows.as_ref() {
+                    for row in poll().await? {
+                        append_row(row, current_context, new_messages, emit).await?;
+                    }
                 }
             }
 
@@ -247,6 +241,26 @@ pub(crate) async fn run_loop(
         messages: new_messages.clone(),
     })
     .await?;
+    Ok(())
+}
+
+/// Emit one injected row's start/end pair and append it to the run.
+async fn append_row(
+    message: AgentMessage,
+    current_context: &mut AgentContext,
+    new_messages: &mut Vec<AgentMessage>,
+    emit: &AgentEventSink,
+) -> anyhow::Result<()> {
+    emit(AgentEvent::MessageStart {
+        message: message.clone(),
+    })
+    .await?;
+    emit(AgentEvent::MessageEnd {
+        message: message.clone(),
+    })
+    .await?;
+    current_context.messages.push(message.clone());
+    new_messages.push(message);
     Ok(())
 }
 
