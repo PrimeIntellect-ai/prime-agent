@@ -1,0 +1,1 @@
+- RLM spawn ledgers now use owner-only file permissions, including files rebuilt from legacy registries.

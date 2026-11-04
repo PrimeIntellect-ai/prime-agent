@@ -246,24 +246,42 @@ pub(crate) fn write_file_atomic_unsynced(path: &Path, content: &str) -> Result<(
     write_file_atomic_at(path, content, TempSync::Unsynced)
 }
 
+fn create_staging_file(path: &Path) -> Result<std::fs::File> {
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    pa_core::platform::perms::set_private_mode(&mut options);
+    options
+        .open(path)
+        .with_context(|| format!("create {}", path.display()))
+}
+
 fn write_file_atomic_at(path: &Path, content: &str, sync: TempSync) -> Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let temp = path.with_extension(format!("tmp-{}", std::process::id()));
-    {
-        let file =
-            std::fs::File::create(&temp).with_context(|| format!("create {}", temp.display()))?;
+    let temp = path.with_extension(format!(
+        "tmp-{}-{}",
+        std::process::id(),
+        uuid::Uuid::new_v4().simple()
+    ));
+    let file = create_staging_file(&temp)?;
+    let persist = (|| -> Result<()> {
         let mut writer = std::io::BufWriter::new(file);
         writer.write_all(content.as_bytes())?;
         writer.flush()?;
         if matches!(sync, TempSync::Synced) {
             writer.get_ref().sync_all()?;
         }
+        drop(writer);
+        let _ = pa_core::platform::perms::restrict_file(&temp);
+        pa_core::platform::rename_onto(&temp, path)
+            .with_context(|| format!("persist {}", path.display()))?;
+        Ok(())
+    })();
+    if persist.is_err() {
+        let _ = std::fs::remove_file(&temp);
     }
-    let _ = pa_core::platform::perms::restrict_file(&temp);
-    pa_core::platform::rename_onto(&temp, path)
-        .with_context(|| format!("persist {}", path.display()))?;
+    persist?;
     #[cfg(test)]
     atomic_write_probe::record(path, sync);
     Ok(())
@@ -485,6 +503,62 @@ mod tests {
         assert!(
             std::fs::read_dir(dir.path()).unwrap().count() == 1,
             "the temp file must not survive the rename"
+        );
+    }
+
+    #[test]
+    fn failed_descriptor_rename_removes_secret_bearing_staging_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("descriptor.json");
+        std::fs::create_dir(&path).unwrap();
+
+        assert!(write_file_atomic(&path, "authentication token").is_err());
+        let entries: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        assert_eq!(entries, vec![std::ffi::OsString::from("descriptor.json")]);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn descriptor_staging_file_is_private_and_exclusive() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().unwrap();
+        let staging = dir.path().join("staging");
+
+        let file = create_staging_file(&staging).unwrap();
+
+        assert_eq!(pa_core::platform::perms::file_mode(&staging), Some(0o600));
+        drop(file);
+
+        let victim = dir.path().join("victim");
+        let linked_staging = dir.path().join("linked-staging");
+        std::fs::write(&victim, "keep this file").unwrap();
+        symlink(&victim, &linked_staging).unwrap();
+        assert!(create_staging_file(&linked_staging).is_err());
+        assert_eq!(std::fs::read_to_string(victim).unwrap(), "keep this file");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn planted_descriptor_temp_link_cannot_overwrite_another_file() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("worker.json");
+        let predictable_temp = path.with_extension(format!("tmp-{}", std::process::id()));
+        let victim = dir.path().join("victim");
+        std::fs::write(&victim, "keep this file").unwrap();
+        symlink(&victim, &predictable_temp).unwrap();
+
+        write_file_atomic(&path, "authentication token").unwrap();
+
+        assert_eq!(std::fs::read_to_string(&victim).unwrap(), "keep this file");
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "authentication token"
         );
     }
 

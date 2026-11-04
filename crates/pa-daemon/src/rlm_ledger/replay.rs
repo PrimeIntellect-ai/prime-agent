@@ -333,6 +333,8 @@ pub(super) struct FileIdentity {
     mtime: Option<std::time::SystemTime>,
     #[cfg(unix)]
     ino: Option<u64>,
+    #[cfg(unix)]
+    mode: u32,
 }
 
 /// Resolve a path lexically (`.`/`..` folded) against the current dir.
@@ -396,6 +398,11 @@ fn path_identity(path: &Path) -> Option<FileIdentity> {
         ino: {
             use std::os::unix::fs::MetadataExt;
             Some(metadata.ino())
+        },
+        #[cfg(unix)]
+        mode: {
+            use std::os::unix::fs::PermissionsExt;
+            metadata.permissions().mode() & 0o777
         },
     })
 }
