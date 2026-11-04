@@ -3,6 +3,7 @@
 //! spawns the detached coordinator - the NEW binary - which adopts the
 //! status file and owns the FSM to a terminal state.
 
+mod atomic_state;
 pub mod coordinator;
 pub mod intent;
 mod legacy_admission;

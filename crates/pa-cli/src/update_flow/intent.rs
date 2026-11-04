@@ -157,29 +157,37 @@ fn is_intent_holder_alive(intent: &UpdateIntent) -> bool {
 }
 
 fn write_atomically(path: &Path, intent: &UpdateIntent) -> Result<()> {
-    let temporary = path.with_extension("tmp");
-    #[cfg(unix)]
-    {
-        use std::io::Write;
-        use std::os::unix::fs::OpenOptionsExt;
-        let mut file = std::fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .mode(0o600)
-            .open(&temporary)
-            .with_context(|| format!("create {}", temporary.display()))?;
-        file.write_all(serde_json::to_string_pretty(intent)?.as_bytes())?;
-        file.sync_all()?;
-    }
-    #[cfg(not(unix))]
-    std::fs::write(&temporary, serde_json::to_string_pretty(intent)?)?;
-    std::fs::rename(&temporary, path).with_context(|| format!("finalize {}", path.display()))
+    let content = serde_json::to_string_pretty(intent)?;
+    super::atomic_state::replace(path, content.as_bytes())
 }
 
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
+
+    #[test]
+    fn intent_write_does_not_follow_a_planted_temp_symlink() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("intent.json");
+        let temporary = path.with_extension("tmp");
+        let victim = dir.path().join("unrelated-file");
+        std::fs::write(&victim, b"keep this file").unwrap();
+        std::os::unix::fs::symlink(&victim, &temporary).unwrap();
+
+        let update_id = UpdateId::from("u1".to_string());
+        let intent = intent_record(
+            &update_id,
+            u64::from(std::process::id()),
+            &dir.path().join("status.json"),
+        );
+        write_atomically(&path, &intent).unwrap();
+        assert_eq!(std::fs::read(&victim).unwrap(), b"keep this file");
+        assert_eq!(read_intent(&path).unwrap().update_id, update_id);
+        assert_eq!(
+            std::fs::read_to_string(path).unwrap(),
+            serde_json::to_string_pretty(&intent).unwrap()
+        );
+    }
 
     #[test]
     fn acquire_then_join_then_stale_steal() {
