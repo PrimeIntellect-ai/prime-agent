@@ -430,6 +430,35 @@ fn encode_model_id(model_id: &str) -> String {
     encoded
 }
 
+/// Headers the Bedrock transport owns: caller/stream-option headers never override them — the
+/// `SigV4`/bearer credentials, the `SigV4` bookkeeping headers, and the fixed JSON body types.
+const BEDROCK_TRANSPORT_OWNED_HEADERS: [&str; 6] = [
+    "authorization",
+    "host",
+    "x-amz-date",
+    "x-amz-security-token",
+    "content-type",
+    "accept",
+];
+
+/// The caller/stream-option headers (the injected session identity among them) that travel on the
+/// Bedrock request. They join the signed header set on the `SigV4` path: AWS expects every sent
+/// header to be signed.
+fn bedrock_caller_headers(options: &BedrockOptions) -> Vec<(String, String)> {
+    options
+        .base
+        .headers
+        .iter()
+        .flatten()
+        .filter(|(name, _)| {
+            !BEDROCK_TRANSPORT_OWNED_HEADERS
+                .iter()
+                .any(|owned| name.eq_ignore_ascii_case(owned))
+        })
+        .map(|(name, value)| (name.to_lowercase(), value.clone()))
+        .collect()
+}
+
 // Long by design: mirrors the provider's stream shape.
 #[allow(clippy::too_many_lines)]
 async fn run_stream(
@@ -519,6 +548,12 @@ async fn run_stream(
             "x-amzn-bedrock-request-metadata".into(),
             serde_json::to_string(metadata).unwrap_or_default(),
         ));
+    }
+    // Caller headers ride along and are signed with the request on the SigV4 path (the bearer
+    // path sends them through unsigned). Without this, a session-scoped Bedrock request would
+    // never carry its session identity.
+    for (name, value) in bedrock_caller_headers(&options) {
+        extra_signed_headers.push((name, value));
     }
 
     // Bearer-token auth bypasses SigV4 entirely.
@@ -1004,6 +1039,38 @@ mod tests {
             "Throttling error"
         );
         assert_eq!(bedrock_error_prefix("Unknown"), "Unknown");
+    }
+
+    /// Caller headers (the injected session identity among them) travel on the Bedrock request;
+    /// transport-owned headers (credentials, `SigV4` bookkeeping, the fixed JSON body types) never
+    /// come from options.
+    #[test]
+    fn caller_headers_travel_but_transport_owned_headers_do_not() {
+        let options = BedrockOptions::from_base(StreamOptions {
+            session_id: Some("conversation".into()),
+            headers: Some(HashMap::from([
+                ("X-PI-Session-Id".to_string(), "conversation".to_string()),
+                ("x-custom-gateway".to_string(), "value".to_string()),
+                ("Content-Type".to_string(), "text/plain".to_string()),
+                ("authorization".to_string(), "Bearer nope".to_string()),
+                ("x-amz-date".to_string(), "2030-01-01".to_string()),
+            ])),
+            ..Default::default()
+        });
+        // The headers come from a `HashMap`, so their order is random: sort before comparing.
+        let mut merged = bedrock_caller_headers(&options);
+        merged.sort();
+        assert_eq!(
+            merged,
+            vec![
+                ("x-custom-gateway".to_string(), "value".to_string()),
+                ("x-pi-session-id".to_string(), "conversation".to_string()),
+            ]
+        );
+        assert_eq!(
+            bedrock_caller_headers(&BedrockOptions::default()),
+            Vec::new()
+        );
     }
 
     #[test]
