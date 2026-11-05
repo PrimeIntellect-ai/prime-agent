@@ -40,6 +40,11 @@ pub struct ResolvedRequestAuth {
     /// composed request headers randomly.
     pub headers: Option<BTreeMap<String, String>>,
     pub error: Option<String>,
+    /// Whether the credential store served a live credential for the
+    /// provider (the possibly-refreshing lookup's own outcome — one lookup
+    /// per resolution; a configured `models.json` fallback key is not a
+    /// credential and reports `false`).
+    pub store_auth: bool,
 }
 
 /// Why a `set_model` selection failed to resolve: the provider is not
@@ -818,6 +823,7 @@ impl ModelRegistry {
         let stored = self
             .auth
             .get_api_key_with_source_token(&model.provider, false);
+        let store_auth = stored.api_key.is_some();
         let mut api_key = stored.api_key;
         let provider_config = self.provider_request_configs.get(&model.provider).cloned();
         if api_key.is_none() {
@@ -873,6 +879,7 @@ impl ModelRegistry {
             api_key,
             headers: (!headers.is_empty()).then_some(headers),
             error: None,
+            store_auth,
         }
     }
 }

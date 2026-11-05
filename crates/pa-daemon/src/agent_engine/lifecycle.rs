@@ -6,8 +6,8 @@ use std::sync::atomic::Ordering;
 use super::{
     execute_session_command, json_round_trip, map_thinking_level,
     register_agent_message_host_handlers, register_agent_observe_host_handlers,
-    switchable_stream_fn, AgentEngineConfig, AgentSessionEngine, Arc, CoreSessionEngine,
-    EngineModelSelection, HostRequestHandlers, LinkAgentMessageController,
+    switchable_stream_fn_with_live_auth, AgentEngineConfig, AgentSessionEngine, Arc,
+    CoreSessionEngine, EngineModelSelection, HostRequestHandlers, LinkAgentMessageController,
     LinkAgentObserveController, Model, OverflowRecovery, ProducerUsageSink, PromptContextBoundary,
     ProviderTarget, QuotaParkState, SessionCommandExecution, SessionCommandParams,
     SessionEngineConfig, SupervisorChildSessions, Value,
@@ -1006,8 +1006,15 @@ impl AgentSessionEngine {
 
         // The session's stream reads its target from the live slot:
         // `set_model` swaps it so the built session follows without a
-        // rebuild.
-        let stream_fn = switchable_stream_fn(std::sync::Arc::clone(&self.provider_target));
+        // rebuild, and the live-auth resolver overlays fresh request auth
+        // from the credential store on every provider call (the TS
+        // streamFn's per-call `getApiKeyAndHeaders`): a `/login` from
+        // another process or an OAuth refresh at expiry serves the next
+        // request without a restart.
+        let stream_fn = switchable_stream_fn_with_live_auth(
+            std::sync::Arc::clone(&self.provider_target),
+            self.live_request_auth_resolver(),
+        );
         {
             // The build's resolve-and-install serializes with `/reload`'s
             // live-input refresh (the other slot writers' fence): a reload

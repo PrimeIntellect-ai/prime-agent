@@ -13,6 +13,7 @@ mod compaction;
 mod failover_facts;
 mod goal;
 mod incomplete_reply;
+mod live_auth;
 mod mcp_settings;
 mod model_resolution;
 mod quota_park;

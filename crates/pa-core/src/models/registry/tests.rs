@@ -129,6 +129,103 @@ fn models_json_custom_models_and_auth_header() {
     );
 }
 
+/// One refreshing lookup per `get_api_key_and_headers` call: an expired
+/// OAuth credential with a failing refresh reports `store_auth: false`
+/// (the configured `models.json` fallback key is not a credential) after
+/// exactly one refresh attempt — the live seam's per-request
+/// re-resolution must never re-fetch a token the same resolution just
+/// failed to refresh.
+#[test]
+fn get_api_key_and_headers_reports_store_auth_after_one_refresh_attempt() {
+    struct CountingFailingRefresh(std::sync::Mutex<usize>);
+    impl crate::auth::manager::OAuthIntegration for CountingFailingRefresh {
+        fn api_key_for(
+            &self,
+            _provider: &str,
+            credential: &crate::auth::types::AuthCredential,
+        ) -> Option<String> {
+            match credential {
+                crate::auth::types::AuthCredential::Oauth { access, .. } => Some(access.clone()),
+                _ => None,
+            }
+        }
+
+        fn refresh(
+            &self,
+            _provider: &str,
+            _credentials: &crate::auth::types::AuthStorageData,
+        ) -> Option<crate::auth::types::AuthCredential> {
+            *self.0.lock().unwrap() += 1;
+            None
+        }
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let models_path = dir.path().join("models.json");
+    std::fs::write(
+        &models_path,
+        r#"{ "providers": { "battery": {
+            "baseUrl": "https://battery.example", "apiKey": "sk-config-fallback",
+            "api": "openai-completions",
+            "models": [ { "id": "mock-1" } ]
+        } } }"#,
+    )
+    .unwrap();
+    let data = AuthStorageData(
+        serde_json::json!({
+            "battery": { "type": "oauth", "access": "stale-access", "refresh": "r", "expires": 1 }
+        })
+        .as_object()
+        .cloned()
+        .unwrap_or_default(),
+    );
+    let refreshes = std::sync::Arc::new(CountingFailingRefresh(std::sync::Mutex::new(0)));
+    let auth = AuthStorage::in_memory_without_env(&data, refreshes.clone());
+    let mut registry = ModelRegistry::create(auth, &models_path);
+    let battery = registry
+        .get_all()
+        .iter()
+        .find(|model| model.provider == "battery" && model.id == "mock-1")
+        .expect("the custom model merges")
+        .clone();
+    let resolved = registry.get_api_key_and_headers(&battery, None);
+    assert!(resolved.ok);
+    assert_eq!(
+        resolved.api_key.as_deref(),
+        Some("sk-config-fallback"),
+        "the failed refresh falls back to the configured key"
+    );
+    assert!(
+        !resolved.store_auth,
+        "a failed refresh serves no live credential"
+    );
+    assert_eq!(
+        *refreshes.0.lock().unwrap(),
+        1,
+        "one lookup, one refresh attempt"
+    );
+
+    // An unexpired stored credential serves with `store_auth: true` and no
+    // refresh attempt at all.
+    let fresh = AuthStorageData(
+        serde_json::json!({
+            "battery": {
+                "type": "oauth", "access": "live-access", "refresh": "r",
+                "expires": 4_102_444_800_000i64
+            }
+        })
+        .as_object()
+        .cloned()
+        .unwrap_or_default(),
+    );
+    let refreshes = std::sync::Arc::new(CountingFailingRefresh(std::sync::Mutex::new(0)));
+    let auth = AuthStorage::in_memory_without_env(&fresh, refreshes.clone());
+    let mut registry = ModelRegistry::create(auth, &models_path);
+    let resolved = registry.get_api_key_and_headers(&battery, None);
+    assert_eq!(resolved.api_key.as_deref(), Some("live-access"));
+    assert!(resolved.store_auth, "the stored credential is live");
+    assert_eq!(*refreshes.0.lock().unwrap(), 0, "no refresh fires");
+}
+
 #[test]
 fn models_json_error_keeps_built_ins() {
     let dir = tempfile::tempdir().unwrap();

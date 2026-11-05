@@ -3,6 +3,8 @@
 //! session's live-model and thinking-level surfaces, and the request
 //! API-key seam.
 
+use std::sync::Arc;
+
 use super::{
     AgentSessionEngine, EngineModelSelection, Model, RestoredSessionModel, SessionEngine,
     StartupScope,
@@ -446,6 +448,11 @@ impl AgentSessionEngine {
     /// source — which is not a credential and must never replace a
     /// serving pair (the create-config override is source-independent;
     /// callers apply it themselves).
+    ///
+    /// The live session's stream consults this per provider call through
+    /// [`Self::live_request_auth_resolver`], so a credential rotated by
+    /// another process (`/login`) or an OAuth token refreshed at expiry
+    /// serves the next request without a restart.
     pub(crate) fn resolve_request_key_and_headers_and_store_health(
         &self,
         model: &Model,
@@ -459,15 +466,11 @@ impl AgentSessionEngine {
         let mut registry =
             pa_core::models::ModelRegistry::create(auth, self.config.agent_dir.join("models.json"));
         let resolved = registry.get_api_key_and_headers(model, model.headers.as_ref());
-        // The credential check runs AFTER the resolution: the registry's
-        // lookup may OAuth-refresh and store a fresh token, so a check
-        // before it would read the stale one and discard the fresh pair.
-        let stored_credential = registry
-            .auth
-            .get_api_key_with_source_token(&model.provider, false)
-            .api_key
-            .is_some();
-        let store_auth = store_healthy && stored_credential;
+        // The registry's single possibly-refreshing lookup answers both the
+        // key and whether the store served a live credential (the lookup may
+        // OAuth-refresh and store a fresh token); a second refreshing lookup
+        // here would re-fetch a token the first just failed to refresh.
+        let store_auth = store_healthy && resolved.store_auth;
         if let Some(api_key) = &self.current_selection().api_key {
             // The create-config key override pins the key, never the headers:
             // the registry's merged headers still ship, exactly like the TS
@@ -477,6 +480,37 @@ impl AgentSessionEngine {
             return (Some(api_key.clone()), resolved.headers, store_auth);
         }
         (resolved.api_key, resolved.headers, store_auth)
+    }
+
+    /// The stream-time auth resolver the built session consults on every
+    /// provider call (the TS session streamFn's per-call
+    /// `getApiKeyAndHeaders`): the slot keeps the serving model and the
+    /// last-good pair, and this resolver overlays fresh request auth from
+    /// the credential store — a credential rotated by another process
+    /// (`/login`) or an OAuth token refreshed at its expiry serves the
+    /// live session's next request without a restart. A resolution for a
+    /// dead engine (the session torn down) serves nothing, so the
+    /// captured pair stands.
+    pub(crate) fn live_request_auth_resolver(
+        &self,
+    ) -> pa_core::session_engine::provider_adapter::LiveAuthResolver {
+        let weak = self
+            .self_weak
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        Arc::new(move |model: &Model| {
+            let Some(engine) = weak.as_ref().and_then(std::sync::Weak::upgrade) else {
+                return pa_core::session_engine::provider_adapter::LiveRequestAuth::default();
+            };
+            let (api_key, headers, store_auth) =
+                engine.resolve_request_key_and_headers_and_store_health(model);
+            pa_core::session_engine::provider_adapter::LiveRequestAuth {
+                api_key,
+                headers,
+                store_auth,
+            }
+        })
     }
 
     pub(crate) fn resolve_request_api_key(&self, model: &Model) -> Option<String> {

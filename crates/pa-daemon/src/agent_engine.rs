@@ -18,7 +18,7 @@ use pa_core::session_engine::agent_messaging::{
 };
 use pa_core::session_engine::engine::{SessionEngine as CoreSessionEngine, SessionEngineConfig};
 use pa_core::session_engine::provider_adapter::{
-    json_round_trip, map_thinking_level, switchable_stream_fn, ProviderTarget,
+    json_round_trip, map_thinking_level, switchable_stream_fn_with_live_auth, ProviderTarget,
 };
 use pa_core::session_engine::session_commands::{
     execute_session_command, SessionCommandExecution, SessionCommandParams,
