@@ -492,6 +492,30 @@ mod sigv4_tests {
         );
     }
 
+    /// The merged extra signed set — request-metadata mirror plus the session identity header,
+    /// exactly what the transport builds — signs as one canonical set: every name appears once
+    /// in `SignedHeaders`, and duplicates in the caller headers never reach the signer (they
+    /// collapse upstream in `bedrock_extra_signed_headers`; expected value computed against the
+    /// same botocore parameters as above).
+    #[test]
+    fn signature_covers_the_metadata_mirror_and_session_header_together() {
+        let merged = vec![
+            (
+                "x-amzn-bedrock-request-metadata".to_string(),
+                r#"{"team":"a"}"#.to_string(),
+            ),
+            ("x-pi-session-id".to_string(), "conversation".to_string()),
+        ];
+        assert_eq!(
+            sign(&merged, None),
+            (
+                "20150830T123600Z".to_string(),
+                "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/20150830/us-east-1/bedrock/aws4_request, SignedHeaders=content-type;host;x-amz-date;x-amzn-bedrock-request-metadata;x-pi-session-id, Signature=3ee824dddb30fc24da1b999c04e0a424d7b57a8082de2b6bbb0e08e69a89764b".to_string(),
+                None,
+            )
+        );
+    }
+
     #[test]
     fn canonical_request_has_an_empty_query_line_and_double_encodes_the_path() {
         assert_eq!(
