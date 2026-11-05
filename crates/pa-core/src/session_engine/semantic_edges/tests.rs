@@ -154,6 +154,37 @@ fn a_parked_retry_reuses_its_id_only_for_an_identical_body_in_the_same_epoch() {
     );
 }
 
+#[test]
+fn a_retry_of_a_finished_request_mints_a_fresh_id() {
+    let (identity, _dir) = identity("session-f");
+    let recorder = Arc::new(SemanticEdgeRecorder::open(identity));
+    // A failed request's retry reuses its id.
+    let failed = recorder
+        .start_turn_request(FINGERPRINT_A)
+        .expect("the recorder mints ids");
+    recorder.fail_request(&failed);
+    recorder.prepare_turn_retry();
+    assert_eq!(
+        recorder.start_turn_request(FINGERPRINT_A).as_deref(),
+        Some(failed.as_str())
+    );
+    // A finished request (a completed reply the turn runner rejected) is
+    // never re-sent under its id, and its id still anchors child spawns.
+    let finished = recorder
+        .start_turn_request(FINGERPRINT_B)
+        .expect("the recorder mints ids");
+    recorder.finish_request(&finished);
+    assert_eq!(
+        recorder.last_turn_request_id().as_deref(),
+        Some(finished.as_str())
+    );
+    recorder.prepare_turn_retry();
+    let retried = recorder
+        .start_turn_request(FINGERPRINT_B)
+        .expect("the recorder mints ids");
+    assert_ne!(retried, finished);
+}
+
 /// The parent cancels a child mid-run: one parent -> child
 /// `child_cancelled` line anchored to the cancelling request, recorded at
 /// most once per child — including across a reopen, whose replay rebuilds

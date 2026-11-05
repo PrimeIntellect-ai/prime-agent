@@ -645,6 +645,47 @@ async fn terminate_tool_result_stops_the_run() {
     assert!(!state.is_streaming);
 }
 
+/// The batch terminate rule is ANY, not ALL: a message pairing work calls
+/// with the sanctioned end-turn call (`rlm.end_turn()`) executes every call
+/// and still ends the turn — the strict all-rule would ignore the yield,
+/// stream another assistant message, and reintroduce the no-op churn.
+#[tokio::test]
+async fn any_terminating_result_ends_the_batch_after_other_calls_execute() {
+    let echo = EchoTool::new("echo");
+    let (agent, provider, _events) = scripted_agent(vec![
+        Arc::clone(&echo) as Arc<dyn AgentTool>,
+        Arc::new(TerminatingTool),
+    ])
+    .await;
+    provider.push_tool_call_turn(
+        None,
+        vec![
+            ("call-1", "echo", serde_json::json!({ "text": "work" })),
+            ("call-2", "stop_tool", serde_json::json!({})),
+        ],
+    );
+
+    agent.prompt("go").await.unwrap();
+    agent.wait_for_idle().await;
+
+    assert_eq!(
+        echo.calls.load(Ordering::SeqCst),
+        1,
+        "the work call executed"
+    );
+    // One assistant message only: the non-terminating echo result did not
+    // hold the turn open for another response.
+    assert_eq!(provider.calls().len(), 1);
+    let state = agent.state().await;
+    let results = state
+        .messages
+        .iter()
+        .filter(|message| matches!(message, AgentMessage::Standard(Message::ToolResult(_))))
+        .count();
+    assert_eq!(results, 2, "both tool results landed");
+    assert!(!state.is_streaming);
+}
+
 #[tokio::test]
 async fn prompt_while_processing_is_rejected_with_ts_message() {
     let (agent, provider, _events) = scripted_agent(vec![]).await;

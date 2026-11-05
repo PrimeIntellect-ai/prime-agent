@@ -466,6 +466,7 @@ fn convert_execute_result(
         bash_commands: result.bash_commands,
         transcript_reads: result.transcript_reads.unwrap_or_default(),
         timed_out_after_ms: result.timed_out_after_ms,
+        ended_turn: result.ended_turn,
     }
 }
 
