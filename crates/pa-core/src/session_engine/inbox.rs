@@ -26,6 +26,11 @@ pub const INBOX_READ_REQUEST_TYPE: &str = "rlm.inbox.read";
 pub const INBOX_COUNT_REQUEST_TYPE: &str = "rlm.inbox.count";
 /// The journal file one session's inbox appends under its session dir.
 pub const INBOX_JOURNAL_FILE: &str = "inbox.jsonl";
+/// The notice clause while the journal's last write failed: the inbox
+/// stays memory-only until a write succeeds again (nano-rlm's
+/// `inbox_error` visibility — the notice names the degradation).
+pub const INBOX_PERSISTENCE_ERROR_CLAUSE: &str =
+    "(inbox persistence failed; messages are memory-only)";
 
 /// The `bash.completed` notice class label.
 pub const INBOX_CLASS_BASH_DONE: &str = "bash-done";
@@ -113,6 +118,11 @@ struct InboxState {
 pub struct SessionInbox {
     journal: Option<PathBuf>,
     state: Mutex<InboxState>,
+    /// The journal's last write failure, surfaced in the notice text
+    /// (the [`INBOX_PERSISTENCE_ERROR_CLAUSE`] rides it) until a write
+    /// succeeds again. `append_journal` owns it; a separate slot because
+    /// it runs under the state lock.
+    persistence_error: Mutex<Option<String>>,
 }
 
 /// One journal record: a message arrival, a drain marker, one
@@ -155,6 +165,7 @@ impl SessionInbox {
         let inbox = Self {
             journal,
             state: Mutex::new(InboxState { messages, next_id }),
+            persistence_error: Mutex::new(None),
         };
         if readable {
             inbox.compact_journal();
@@ -168,6 +179,31 @@ impl SessionInbox {
         Self {
             journal: None,
             state: Mutex::new(InboxState::default()),
+            persistence_error: Mutex::new(None),
+        }
+    }
+
+    /// The journal's last write failure, while the inbox is memory-only:
+    /// the notice texts carry the [`INBOX_PERSISTENCE_ERROR_CLAUSE`]
+    /// until a write succeeds again.
+    #[must_use]
+    pub fn persistence_error(&self) -> Option<String> {
+        self.persistence_error
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    /// One notice text with the degradation named while the journal's
+    /// last write failed (the arrival, reminder, and withdrawal
+    /// re-render sites share this decoration, so a re-rendered queued row
+    /// never loses the clause its row was queued with).
+    #[must_use]
+    pub fn with_persistence_error_clause(&self, text: String) -> String {
+        if self.persistence_error().is_some() {
+            format!("{text} {INBOX_PERSISTENCE_ERROR_CLAUSE}")
+        } else {
+            text
         }
     }
 
@@ -262,12 +298,21 @@ impl SessionInbox {
                 writeln!(file, "{line}")
             });
         // Journal failures degrade durability only: the in-process
-        // surface stays truthful.
-        if let Err(error) = write {
-            eprintln!(
-                "pa-daemon: inbox journal append failed ({}): {error}",
-                journal.display()
-            );
+        // surface stays truthful, and the error slot names the
+        // degradation in the next notice until a write succeeds again.
+        let mut persistence_error = self
+            .persistence_error
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        match write {
+            Ok(()) => *persistence_error = None,
+            Err(error) => {
+                eprintln!(
+                    "pa-daemon: inbox journal append failed ({}): {error}",
+                    journal.display()
+                );
+                *persistence_error = Some(format!("{}: {error}", journal.display()));
+            }
         }
     }
 
@@ -303,6 +348,11 @@ impl SessionInbox {
                 "pa-daemon: inbox journal compaction failed ({}): {error}",
                 journal.display()
             );
+            *self
+                .persistence_error
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                Some(format!("{}: {error}", journal.display()));
         }
     }
 }
@@ -667,6 +717,53 @@ mod tests {
         assert!(
             journal < remove,
             "the Withdrawn record must reach the journal before the store removes the message"
+        );
+    }
+
+    /// A journal write failure degrades to memory-only and says so: the
+    /// error slot holds the failure until a later write succeeds.
+    #[cfg(unix)]
+    #[test]
+    fn a_journal_write_failure_surfaces_and_clears_on_success() {
+        let dir = tempfile::tempdir().unwrap();
+        let journal = dir.path().join(INBOX_JOURNAL_FILE);
+        let inbox = SessionInbox::open(Some(dir.path()));
+        inbox.push(
+            notice("sleep 1", INBOX_CLASS_BASH_DONE, "first", json!({"pid": 1})),
+            1_000,
+        );
+        assert_eq!(inbox.persistence_error(), None, "the first write succeeded");
+        // A directory in the journal's place fails the append even when
+        // the tests run as root (chmod alone does not).
+        std::fs::remove_file(&journal).unwrap();
+        std::fs::create_dir(&journal).unwrap();
+        inbox.push(
+            notice(
+                "sleep 2",
+                INBOX_CLASS_BASH_DONE,
+                "second",
+                json!({"pid": 2}),
+            ),
+            2_000,
+        );
+        let error = inbox
+            .persistence_error()
+            .expect("the failed append surfaced");
+        assert!(
+            error.contains("inbox.jsonl"),
+            "the error names the journal: {error}"
+        );
+        // The in-process surface stays truthful: both messages wait.
+        assert_eq!(inbox.count().0, 2);
+        std::fs::remove_dir(&journal).unwrap();
+        inbox.push(
+            notice("sleep 3", INBOX_CLASS_BASH_DONE, "third", json!({"pid": 3})),
+            3_000,
+        );
+        assert_eq!(
+            inbox.persistence_error(),
+            None,
+            "a successful write clears the degradation"
         );
     }
 
