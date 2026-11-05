@@ -107,6 +107,31 @@ fn clamp_output_budget(model: &Model, context: &Context, options: Option<&mut St
     }
 }
 
+/// The session-identity header a session-scoped request declares to its inference endpoint.
+///
+/// The `OTel GenAI` semantics put conversation identity in the client's hands: the client declares
+/// its real session id, and the gateway aggregates one session's calls into one trace instead of
+/// fabricating a fallback id per request. The Prime Inference gateway keys its trace aggregation on
+/// this header.
+const SESSION_ID_HEADER: &str = "X-PI-Session-Id";
+
+/// Declare the request's session identity on its caller headers. No session id means no header (a
+/// session-less one-off probe stays bare rather than carrying a fabricated id); an explicit caller
+/// value wins, like every caller header does over the provider's own.
+fn declare_session_identity(options: Option<&mut StreamOptions>) {
+    let Some(options) = options else {
+        return;
+    };
+    let Some(session_id) = options.session_id.clone() else {
+        return;
+    };
+    options
+        .headers
+        .get_or_insert_with(std::collections::HashMap::new)
+        .entry(SESSION_ID_HEADER.to_string())
+        .or_insert(session_id);
+}
+
 /// Start streaming a completion for `model` using provider-native options.
 ///
 /// # Errors
@@ -120,6 +145,7 @@ pub fn stream(
     let provider = resolve_provider(&model.api)?;
     let mut options = options;
     clamp_output_budget(model, context, options.as_mut());
+    declare_session_identity(options.as_mut());
     Ok(provider.stream(model, context, options.as_ref()))
 }
 
@@ -156,6 +182,7 @@ pub fn stream_simple(
     // materialized default builds the same request otherwise.
     let simple = options.get_or_insert_with(SimpleStreamOptions::default);
     clamp_output_budget(model, context, Some(&mut simple.base));
+    declare_session_identity(Some(&mut simple.base));
     Ok(provider.stream_simple(model, context, options.as_ref()))
 }
 
@@ -349,6 +376,83 @@ mod tests {
         let mut options = StreamOptions::default();
         clamp_output_budget(&model, &text_context(4_200), Some(&mut options));
         assert_eq!(options.max_tokens, None);
+    }
+
+    /// The facade is the seam every model request crosses, so the session identity rides it as a
+    /// caller header: a session-scoped call declares `X-PI-Session-Id`, an explicit caller value
+    /// wins, and a session-less call fabricates nothing.
+    #[tokio::test]
+    async fn session_scoped_calls_declare_their_session_identity_header() {
+        type Headers = Option<std::collections::HashMap<String, String>>;
+        let received: std::sync::Arc<std::sync::Mutex<Vec<Headers>>> =
+            std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let captured = received.clone();
+        let factory =
+            crate::faux::FauxResponseStep::Factory(std::sync::Arc::new(move |_, options, _, _| {
+                captured
+                    .lock()
+                    .unwrap()
+                    .push(options.and_then(|options| options.headers.clone()));
+                Ok(crate::faux::faux_assistant_text_message(
+                    "ok",
+                    crate::faux::FauxAssistantMessageOptions::default(),
+                ))
+            }));
+        let registration =
+            crate::faux::register_faux_provider(crate::faux::RegisterFauxProviderOptions {
+                api: Some("session-identity-test".to_string()),
+                ..Default::default()
+            });
+        registration.set_responses(vec![factory.clone(), factory.clone(), factory]);
+        let model = registration.get_model();
+        let context = Context::default();
+        let header = |value: &str| {
+            std::collections::HashMap::from([("X-PI-Session-Id".to_string(), value.to_string())])
+        };
+
+        // A session-scoped call carries the session id the harness persists.
+        complete_simple(
+            &model,
+            &context,
+            Some(crate::types::SimpleStreamOptions::from_base(
+                crate::types::StreamOptions {
+                    session_id: Some("session-1".into()),
+                    ..Default::default()
+                },
+            )),
+        )
+        .await
+        .expect("stream settles");
+        // An explicit caller header keeps its own value.
+        complete_simple(
+            &model,
+            &context,
+            Some(crate::types::SimpleStreamOptions::from_base(
+                crate::types::StreamOptions {
+                    session_id: Some("session-1".into()),
+                    headers: Some(header("explicit")),
+                    ..Default::default()
+                },
+            )),
+        )
+        .await
+        .expect("stream settles");
+        // A session-less call adds no header.
+        complete_simple(
+            &model,
+            &context,
+            Some(crate::types::SimpleStreamOptions::from_base(
+                crate::types::StreamOptions::default(),
+            )),
+        )
+        .await
+        .expect("stream settles");
+
+        let mut received = received.lock().unwrap();
+        assert_eq!(received.pop().flatten(), None);
+        assert_eq!(received.pop().flatten(), Some(header("explicit")));
+        assert_eq!(received.pop().flatten(), Some(header("session-1")));
+        registration.unregister();
     }
 
     #[test]
