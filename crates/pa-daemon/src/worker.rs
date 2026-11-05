@@ -624,8 +624,11 @@ impl Worker {
                 let notice_recovery = Arc::clone(&recovery);
                 let notice_agent_dir = config.agent_dir.clone();
                 // The coalescing batch the queued notice row covers (routing
-                // state, reset when the row delivers or clears).
+                // state, reset when the row delivers or clears). The
+                // consumed-bash withdrawal shares it: a collected handle
+                // trims the same batch its arrival grew.
                 let arrivals_for_sink = pa_core::session_engine::inbox::InboxArrivals::default();
+                let arrivals_for_consumed = Arc::clone(&arrivals_for_sink);
                 let notice_sink: crate::engine::KernelNoticeSink = Arc::new(move |notice| {
                     let Some(engine) = notice_engine.upgrade() else {
                         return;
@@ -673,9 +676,15 @@ impl Worker {
                 let withdraw_engine = Arc::downgrade(concrete);
                 let consumed: crate::engine::BashConsumedSink = Arc::new(move |notice| {
                     let engine = withdraw_engine.upgrade();
+                    // The consumed collection drains the pushed inbox
+                    // message too (the auto-read-on-collection parity):
+                    // a handle collected through its result leaves no
+                    // waiting bash-done.
+                    let inbox = engine.as_ref().and_then(|engine| engine.inbox());
                     withdraw_bash_completion_notice(
                         &withdraw_recovery,
                         &withdraw_core,
+                        inbox.as_ref().map(|store| (store, &arrivals_for_consumed)),
                         &notice,
                         engine.as_deref().map(|engine| engine as &dyn SessionEngine),
                     );
