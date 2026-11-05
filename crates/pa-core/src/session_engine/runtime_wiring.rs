@@ -38,6 +38,9 @@ pub struct RlmWiring {
     /// Announces every accepted `rlm.progress.note`; `None` keeps the store
     /// the only surface.
     pub progress_note_emit: Option<super::rlm_host::RlmProgressNoteEmit>,
+    /// The daemon-owned agent inbox whose `rlm.inbox.*` host requests
+    /// register here; `None` (daemonless) keeps the requests unregistered.
+    pub inbox: Option<Arc<super::inbox::SessionInbox>>,
 }
 
 /// The embedding's cron wiring for the kernel's `rlm_heartbeat.*` host
@@ -92,8 +95,9 @@ pub struct SessionKernelWiring {
     pub rlm_usage: Arc<super::rlm_usage::RlmChildUsageAttributions>,
 }
 
-/// Build the session runtime and register the `goal.*`, `rlm.*`, and —
-/// only when `cron_store` wiring exists — the `rlm_heartbeat.*` host
+/// Build the session runtime and register the `goal.*`, `rlm.*`, the
+/// `rlm.inbox.*` requests when an inbox store is supplied, and — only
+/// when `cron_store` wiring exists — the `rlm_heartbeat.*` host
 /// handlers; `goal_complete_purge` is the embedding's queued-goal-context purge.
 #[must_use]
 pub fn wire_session_runtime(
@@ -181,6 +185,9 @@ pub fn wire_session_runtime(
         rlm.progress_note_emit,
     ));
     register_rlm_host_handlers(&mut handlers, &rlm_bridge);
+    if let Some(inbox) = &rlm.inbox {
+        super::inbox::register_inbox_host_handlers(inbox, &mut handlers);
+    }
     SessionKernelWiring {
         session,
         handlers,
