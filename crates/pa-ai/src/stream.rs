@@ -125,11 +125,19 @@ fn declare_session_identity(options: Option<&mut StreamOptions>) {
     let Some(session_id) = options.session_id.clone() else {
         return;
     };
-    options
+    let headers = options
         .headers
-        .get_or_insert_with(std::collections::HashMap::new)
-        .entry(SESSION_ID_HEADER.to_string())
-        .or_insert(session_id);
+        .get_or_insert_with(std::collections::HashMap::new);
+    // Providers dedupe header names case-insensitively, so a caller entry in any casing is the
+    // same header as the injected one: its value always wins instead of racing the injected
+    // entry in the provider's header merging.
+    if headers
+        .keys()
+        .any(|key| key.eq_ignore_ascii_case(SESSION_ID_HEADER))
+    {
+        return;
+    }
+    headers.insert(SESSION_ID_HEADER.to_string(), session_id);
 }
 
 /// Start streaming a completion for `model` using provider-native options.
@@ -403,11 +411,11 @@ mod tests {
                 api: Some("session-identity-test".to_string()),
                 ..Default::default()
             });
-        registration.set_responses(vec![factory.clone(), factory.clone(), factory]);
+        registration.set_responses((0..5).map(|_| factory.clone()).collect());
         let model = registration.get_model();
         let context = Context::default();
-        let header = |value: &str| {
-            std::collections::HashMap::from([("X-PI-Session-Id".to_string(), value.to_string())])
+        let header = |name: &str, value: &str| {
+            std::collections::HashMap::from([(name.to_string(), value.to_string())])
         };
 
         // A session-scoped call carries the session id the harness persists.
@@ -423,20 +431,28 @@ mod tests {
         )
         .await
         .expect("stream settles");
-        // An explicit caller header keeps its own value.
-        complete_simple(
-            &model,
-            &context,
-            Some(crate::types::SimpleStreamOptions::from_base(
-                crate::types::StreamOptions {
-                    session_id: Some("session-1".into()),
-                    headers: Some(header("explicit")),
-                    ..Default::default()
-                },
-            )),
-        )
-        .await
-        .expect("stream settles");
+        // An explicit caller header keeps its own value, whatever casing it carries: providers
+        // dedupe header names case-insensitively, so a differently-cased entry must never race
+        // the injected one.
+        for (name, value) in [
+            ("X-PI-Session-Id", "explicit"),
+            ("x-pi-session-id", "explicit-lower"),
+            ("X-Pi-Session-Id", "explicit-mixed"),
+        ] {
+            complete_simple(
+                &model,
+                &context,
+                Some(crate::types::SimpleStreamOptions::from_base(
+                    crate::types::StreamOptions {
+                        session_id: Some("session-1".into()),
+                        headers: Some(header(name, value)),
+                        ..Default::default()
+                    },
+                )),
+            )
+            .await
+            .expect("stream settles");
+        }
         // A session-less call adds no header.
         complete_simple(
             &model,
@@ -450,8 +466,22 @@ mod tests {
 
         let mut received = received.lock().unwrap();
         assert_eq!(received.pop().flatten(), None);
-        assert_eq!(received.pop().flatten(), Some(header("explicit")));
-        assert_eq!(received.pop().flatten(), Some(header("session-1")));
+        assert_eq!(
+            received.pop().flatten(),
+            Some(header("X-Pi-Session-Id", "explicit-mixed"))
+        );
+        assert_eq!(
+            received.pop().flatten(),
+            Some(header("x-pi-session-id", "explicit-lower"))
+        );
+        assert_eq!(
+            received.pop().flatten(),
+            Some(header("X-PI-Session-Id", "explicit"))
+        );
+        assert_eq!(
+            received.pop().flatten(),
+            Some(header("X-PI-Session-Id", "session-1"))
+        );
         registration.unregister();
     }
 

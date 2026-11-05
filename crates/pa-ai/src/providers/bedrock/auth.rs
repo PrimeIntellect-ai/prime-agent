@@ -476,6 +476,22 @@ mod sigv4_tests {
         );
     }
 
+    /// A caller/session header that rides along on the request joins the signed header set:
+    /// AWS expects every sent header to be signed (expected value computed with the same
+    /// botocore parameters as above, plus `x-pi-session-id`).
+    #[test]
+    fn signature_covers_the_session_identity_header() {
+        let session = vec![("x-pi-session-id".to_string(), "conversation".to_string())];
+        assert_eq!(
+            sign(&session, None),
+            (
+                "20150830T123600Z".to_string(),
+                "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/20150830/us-east-1/bedrock/aws4_request, SignedHeaders=content-type;host;x-amz-date;x-pi-session-id, Signature=8fa82652d96bae9a4c2ddf377edd53edc77ccbdc81471e1ccf9d73adc4eab50a".to_string(),
+                None,
+            )
+        );
+    }
+
     #[test]
     fn canonical_request_has_an_empty_query_line_and_double_encodes_the_path() {
         assert_eq!(
