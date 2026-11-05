@@ -598,10 +598,19 @@ fn ledger_child_records(
                 },
                 |display| display.created_at,
             ),
+            decision_child: display
+                .as_ref()
+                .is_some_and(|display| display.decision_child),
+            // A decision child's display legitimately stays `running`
+            // (its spawn task is a readiness handshake, never its whole
+            // run, so the settle tail withholds the completed flip): a
+            // running display after a restart is the healthy serving
+            // state, not a crashed run. An ordinary child's running
+            // display still reads as the crash it is.
             settled_status: Some(
                 if display
                     .as_ref()
-                    .is_some_and(|display| display.status == "running")
+                    .is_some_and(|display| display.status == "running" && !display.decision_child)
                 {
                     "error"
                 } else {
