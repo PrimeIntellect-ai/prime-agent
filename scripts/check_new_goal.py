@@ -18,7 +18,7 @@ import tempfile
 import threading
 import time
 
-from lifecycle_lib import Terminal, digest, env_for, skill_pythonpath, stop, LIMIT
+from lifecycle_lib import Terminal, digest, env_for, use_skill_python, stop, LIMIT
 
 PROMPT = 'NEW_GOAL_PARITY_INITIAL_PROMPT'
 SETTLED = 'Parity fixture settled'
@@ -87,7 +87,7 @@ def setup(root, provider):
     root.mkdir(parents=True)
     env = env_for(root)
     env['PA_COMPACTION_TRACE'] = 'stderr'
-    env['PYTHONPATH'] = skill_pythonpath()
+    use_skill_python(root, env)
     env['PI_SESSION_DIR'] = env['PRIME_AGENT_SESSION_DIR'] = str(root / 'agent/sessions')
     (root / 'agent/models.json').write_text(json.dumps({'providers': {'parity-local': {
         'api': 'openai-completions', 'apiKey': 'fixture-only',

@@ -267,12 +267,16 @@ fn resolve_kernel_python() -> Result<PathBuf, String> {
 
 /// Drive one `rlm.factory.cli_dispatch` payload through the kernel Python.
 fn dispatch_via_kernel(python: &std::path::Path, payload: &Value) -> Result<Value, String> {
+    let project = std::env::current_dir()
+        .map_err(|error| format!("cannot resolve project directory: {error}"))?;
     let mut child = Command::new(python);
     child
-        .args(["-c", CLI_DISPATCH_RUNNER])
+        .args(["-P", "-s", "-c", CLI_DISPATCH_RUNNER])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
+        .stderr(Stdio::piped())
+        .env_clear()
+        .envs(pa_core::kernel::python_process_environment(&project));
     // Hidden window on Windows, matching the kernel probes.
     pa_core::platform::process::set_no_window(&mut child);
     let mut child = child
