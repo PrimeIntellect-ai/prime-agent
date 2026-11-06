@@ -57,25 +57,18 @@ impl Editor {
             .autocomplete
             .as_ref()
             .is_some_and(|s| s.kind == Some(crate::autocomplete::SuggestionKind::SlashCommand));
-        let default_slash = self.autocomplete.is_some()
-            && self.autocomplete.as_ref().unwrap().prefix.starts_with('/');
-        (kind_slash || default_slash)
+        kind_slash
             && matches!(ctx, Some(c) if c.kind == crate::autocomplete::SlashKind::Name && c.at_prompt_start)
     }
 
     pub(crate) fn apply_completion(
         &self,
         item: &crate::autocomplete::CompletionItem,
-        prefix: &str,
     ) -> crate::autocomplete::CompletionResult {
         match self.autocomplete_provider.as_ref() {
-            Some(provider) => provider.apply_completion(
-                &self.lines,
-                self.cursor_line,
-                self.cursor_col,
-                item,
-                prefix,
-            ),
+            Some(provider) => {
+                provider.apply_completion(&self.lines, self.cursor_line, self.cursor_col, item)
+            }
             None => crate::autocomplete::CompletionResult {
                 lines: self.lines.clone(),
                 cursor_line: self.cursor_line,
@@ -239,8 +232,7 @@ impl Editor {
             let item = suggestions.items[0].clone();
             self.push_undo_snapshot();
             self.last_action = None;
-            let prefix = suggestions.prefix;
-            let result = self.apply_completion(&item, &prefix);
+            let result = self.apply_completion(&item);
             self.lines = result.lines;
             self.cursor_line = result.cursor_line;
             self.set_cursor_col(result.cursor_col);
@@ -258,12 +250,8 @@ impl Editor {
             } else {
                 suggestions.prefix.clone()
             };
-        let mut state = crate::autocomplete::AutocompleteState::new(
-            suggestions.items,
-            5,
-            suggestions.prefix.clone(),
-            suggestions.kind,
-        );
+        let mut state =
+            crate::autocomplete::AutocompleteState::new(suggestions.items, 5, suggestions.kind);
         if let Some(idx) = state.best_match_index(&matching_prefix) {
             state.set_selected_index(idx);
         }
