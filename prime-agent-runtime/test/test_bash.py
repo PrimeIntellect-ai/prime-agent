@@ -16,6 +16,7 @@ import time
 import unittest
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import nullcontext
+from datetime import timezone
 from types import FunctionType, SimpleNamespace
 from unittest import mock
 
@@ -1500,8 +1501,6 @@ class BoundedAwaitTest(unittest.IsolatedAsyncioTestCase):
     def _wire_notices(self) -> None:
         bash_module._set_completion_notices_wired(True)
         self.addCleanup(bash_module._set_completion_notices_wired, False)
-        bash_module._degrade_hints_written = 0
-        self.addCleanup(setattr, bash_module, "_degrade_hints_written", 0)
 
     @mock.patch.object(bash_module, "_YIELD_AFTER_SECONDS", 0.3)
     async def test_bounded_await_degrades_to_a_snapshot(self):
@@ -1513,6 +1512,20 @@ class BoundedAwaitTest(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(returned.exit_code)
         self.assertTrue(returned.running)
         self.assertIsInstance(returned.output, str)
+        # The snapshot carries its timestamps: the command's elapsed running
+        # time (past the window) and the UTC wall-clock moment it was taken.
+        self.assertGreaterEqual(returned.duration, 0.3)
+        self.assertEqual(returned.result_time.tzinfo, timezone.utc)
+        # The repr is the directive: pid, elapsed, result time, and the
+        # end-the-turn contract, never the old "await .handle" invitation
+        # whose re-await degraded to the same snapshot again.
+        text = repr(returned)
+        self.assertIn(f"pid={handle.pid} ", text)
+        self.assertIn(f"after {returned.duration:g}s at ", text)
+        self.assertIn("do not await it again this turn", text)
+        self.assertIn("collect the final result on the completion notice", text)
+        self.assertIn(returned.result_time.strftime("%Y-%m-%dT%H:%M:%SZ"), text)
+        self.assertNotIn("await .handle", text)
         # The prompt's collect idiom: re-awaiting the live handle returns the
         # final result once the command finishes inside the window.
         result = await returned.handle
@@ -1554,18 +1567,33 @@ class BoundedAwaitTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.exit_code, 0)
 
     @mock.patch.object(bash_module, "_YIELD_AFTER_SECONDS", 0.2)
-    async def test_degrade_hints_are_budgeted_to_the_first_three(self):
+    async def test_every_degrade_notes_the_directive_with_growing_elapsed(self):
+        # The observed loop (T-0011): an agent re-awaits a running handle
+        # instead of ending the turn. Every degrade must write the
+        # directive (a quiet repeat reads as a successful empty call), and
+        # the elapsed it shows must grow so the loop is visible to the model.
         self._wire_notices()
-        handles = []
-        hints = io.StringIO()
-        with mock.patch.object(sys, "stderr", hints):
-            for _ in range(5):
-                handle = bash("sleep 3")
-                handles.append(handle)
-                self.assertIsInstance(await handle, bash_module.BashSnapshot)
-        for handle in handles:
-            handle.kill(grace=0.1)
-        self.assertEqual(hints.getvalue().count("still running after"), 3)
+        handle = bash("sleep 2")
+        notes = io.StringIO()
+        # Five degrades, past the size of the removed three-note budget:
+        # a budget revert (or an upstream parity sync restoring it) must go
+        # red here, not quietly silence degrades four and five.
+        with mock.patch.object(sys, "stderr", notes):
+            snapshots = [await handle for _ in range(5)]
+        handle.kill(grace=0.1)
+        for snapshot in snapshots:
+            self.assertIsInstance(snapshot, bash_module.BashSnapshot)
+        elapsed = [snapshot.duration for snapshot in snapshots]
+        self.assertTrue(all(a < b for a, b in zip(elapsed, elapsed[1:])), elapsed)
+        # Each note is its snapshot's directive: pid, elapsed, result time,
+        # and the end-the-turn contract, on every repeat.
+        note_text = notes.getvalue()
+        for snapshot in snapshots:
+            self.assertIn(snapshot.directive(), note_text)
+        self.assertEqual(note_text.count("still running after"), 5)
+        self.assertEqual(note_text.count("do not await it again this turn"), 5)
+        self.assertEqual(note_text.count("on the completion notice"), 5)
+        self.assertIn(f"(pid {handle.pid}, snapshot at ", note_text)
 
 
 async def _poll_group_dead(pgid: int, timeout: float = 5.0) -> None:
