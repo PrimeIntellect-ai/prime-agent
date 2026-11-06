@@ -203,6 +203,14 @@ pub fn settings_menu_rows(current: &SettingsCurrentValues) -> Vec<SettingsMenuRo
             submenu: None,
         },
         SettingsMenuRow {
+            id: "web-search-provider",
+            label: "Web search provider",
+            description: "Service the websearch skill queries in new sessions; add its API key via /mcp",
+            current: current.web_search_provider.clone(),
+            values: Some(vec!["serper".into(), "eco".into()]),
+            submenu: None,
+        },
+        SettingsMenuRow {
             id: "builtin-skills",
             label: "Built-in skills",
             description: "Load built-in skills shipped with prime-agent (takes effect after reload)",
@@ -357,6 +365,7 @@ pub struct SettingsCurrentValues {
     pub skill_commands: bool,
     pub builtin_skills: bool,
     pub harness_refinements: bool,
+    pub web_search_provider: String,
     pub hardware_cursor: bool,
     pub editor_padding: u64,
     pub autocomplete_max_visible: u64,

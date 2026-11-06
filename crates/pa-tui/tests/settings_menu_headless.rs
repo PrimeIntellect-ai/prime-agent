@@ -329,6 +329,9 @@ impl pa_tui::client_settings::ClientSettings for RecordingSettings {
     fn set_idle_eviction_minutes(&self, value: &str) -> Result<()> {
         self.record(&format!("idle-eviction-minutes={value}"))
     }
+    fn set_web_search_provider(&self, provider: &str) -> Result<()> {
+        self.record(&format!("web-search-provider={provider}"))
+    }
     fn mermaid_rendering_mode(&self) -> String {
         "streaming".to_string()
     }
@@ -545,7 +548,7 @@ fn the_settings_page_renders_the_spacing_and_the_new_keys() {
 }
 
 /// Right flips the Quiet startup toggle, left flips it back, Enter keeps its cycle; the
-/// multi-option Idle eviction row walks its list the same way.
+/// multi-option Idle eviction and Web search provider rows walk their lists the same way.
 #[test]
 fn the_arrows_cycle_values_and_the_writes_persist() {
     let mut steps = open_settings();
@@ -569,6 +572,12 @@ fn the_arrows_cycle_values_and_the_writes_persist() {
     steps.push(HeadlessStep::Key(key(KeyCode::Right)));
     steps.push(HeadlessStep::WaitMs(100));
     steps.push(HeadlessStep::Key(key(KeyCode::Left)));
+    steps.push(HeadlessStep::WaitMs(100));
+    // Down x3 more lands on Web search provider (the Agents tab's last row).
+    for _ in 0..3 {
+        steps.push(HeadlessStep::Key(key(KeyCode::Down)));
+    }
+    steps.push(HeadlessStep::Key(key(KeyCode::Right)));
     steps.push(HeadlessStep::WaitMs(150));
     let (frames, settings) = run_plan(steps);
     // The row shows true (Enter's cycle landed last), and the seam recorded the exact write
@@ -587,6 +596,7 @@ fn the_arrows_cycle_values_and_the_writes_persist() {
             "quiet-startup=true",
             "idle-eviction-minutes=180",
             "idle-eviction-minutes=90",
+            "web-search-provider=eco",
         ],
         "every arrow cycle persisted through the settings seam"
     );

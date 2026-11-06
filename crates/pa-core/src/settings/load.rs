@@ -47,6 +47,7 @@ const KNOWN_FIELDS: &[&str] = &[
     "themes",
     "enableSkillCommands",
     "bundledSkills",
+    "webSearchProvider",
     "enableBuiltinSkills",
     "terminal",
     "images",
