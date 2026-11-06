@@ -88,6 +88,7 @@ fn tabs_partition_the_settings_rows() {
                     "idle-eviction-minutes",
                     "tree-filter-mode",
                     "harness-refinements",
+                    "web-search-provider",
                 ]
             ),
         ]
