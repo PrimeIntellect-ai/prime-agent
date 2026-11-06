@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import asyncio
 import importlib.util
 import json
 import os
 from pathlib import Path
+from urllib.parse import urlsplit
 
-# httpx is imported inside each `_fetch_*` on first call: importing it at
+# httpx is imported inside the functions that use it: importing it at
 # module level would put its full import cost on every kernel bootstrap, in
 # every session, even when no search is ever run. `find_spec` keeps the
 # import-time contract — importing this module still fails with the same
@@ -156,6 +158,23 @@ def _format_eco_results(data: dict, query: str, num_results: int = 5) -> str:
     return _format_serper_results({"organic": organic}, query, num_results=num_results)
 
 
+async def _resolve_google_redirect(client, url: str | None) -> str | None:
+    """Return the target of a Google redirect link (www.google.com/goto); other URLs pass through.
+
+    One GET without following redirects reads the 3xx Location; an unresolved link is kept.
+    """
+    import httpx
+
+    parts = urlsplit(url or "")
+    if parts.hostname != "www.google.com" or parts.path != "/goto":
+        return url
+    try:
+        resp = await client.get(url, timeout=5)
+    except httpx.HTTPError:
+        return url
+    return resp.headers["location"] if resp.is_redirect else url
+
+
 async def _fetch_eco(query: str, api_key: str, timeout: int = 45, num_results: int = 5) -> str:
     """Execute a single You.com Eco Search (at most 10 results per page)."""
     import httpx
@@ -169,6 +188,11 @@ async def _fetch_eco(query: str, api_key: str, timeout: int = 45, num_results: i
             )
             resp.raise_for_status()
             data = resp.json()
+            # Eco often returns Google redirect links; resolve them all before slicing.
+            web = (data.get("results") or {}).get("web") or []
+            urls = await asyncio.gather(*(_resolve_google_redirect(client, item.get("url")) for item in web))
+            for item, url in zip(web, urls):
+                item["url"] = url
     except httpx.HTTPStatusError as e:
         body = e.response.text if e.response is not None else ""
         raise RuntimeError(f"Eco search error ({e.response.status_code}): {body}") from e
