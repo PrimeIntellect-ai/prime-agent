@@ -222,6 +222,37 @@ pub struct BundledSkillsSettings {
     pub websearch: Option<bool>,
 }
 
+/// `webSearchProvider`: the service the bundled websearch skill queries.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum WebSearchProvider {
+    #[default]
+    Serper,
+    /// You.com Eco Search.
+    Eco,
+}
+
+impl WebSearchProvider {
+    /// The provider's id: its settings value, its auth-store slot, and the
+    /// kernel's `PRIME_AGENT_WEBSEARCH_PROVIDER` value.
+    #[must_use]
+    pub fn id(self) -> &'static str {
+        match self {
+            WebSearchProvider::Serper => crate::auth::SERPER_CREDENTIAL_ID,
+            WebSearchProvider::Eco => crate::auth::ECO_CREDENTIAL_ID,
+        }
+    }
+
+    /// The environment variable whose nonblank value overrides the stored key.
+    #[must_use]
+    pub fn api_key_env(self) -> &'static str {
+        match self {
+            WebSearchProvider::Serper => "SERPER_API_KEY",
+            WebSearchProvider::Eco => "ECO_API_KEY",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WarningSettings {
@@ -321,6 +352,8 @@ pub struct Settings {
     pub themes: Option<Vec<String>>,
     pub enable_skill_commands: Option<bool>,
     pub bundled_skills: Option<BundledSkillsSettings>,
+    /// Read from global settings only, like the stored keys it selects between.
+    pub web_search_provider: Option<WebSearchProvider>,
     pub enable_builtin_skills: Option<bool>,
     pub terminal: Option<TerminalSettings>,
     pub images: Option<ImageSettings>,

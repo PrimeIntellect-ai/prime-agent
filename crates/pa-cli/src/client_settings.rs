@@ -93,6 +93,34 @@ impl ClientSettings for CliClientSettings {
         Ok(())
     }
 
+    fn web_search_provider(&self) -> String {
+        self.manager().get_web_search_provider().id().to_string()
+    }
+
+    fn set_web_search_provider(&self, provider: &str) -> Result<()> {
+        let parsed: pa_core::settings::WebSearchProvider = serde_json::from_value(
+            serde_json::Value::String(provider.to_string()),
+        )
+        .map_err(|error| anyhow::anyhow!("Invalid web search provider \"{provider}\": {error}"))?;
+        self.manager().set_web_search_provider(parsed)?;
+        let settings = self.clone();
+        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+            runtime.spawn(async move {
+                let manager = settings.manager();
+                if crate::mode::telemetry_disabled(&manager) {
+                    return;
+                }
+                let client =
+                    pa_core::session_engine::telemetry::build_client(&manager, &settings.agent_dir);
+                let mut properties = pa_telemetry::base_properties("interactive");
+                properties.set("provider", serde_json::json!(parsed.id()));
+                client.track("web search provider changed", properties);
+                let _ = client.shutdown().await;
+            });
+        }
+        Ok(())
+    }
+
     fn theme(&self) -> Option<String> {
         self.manager().get_theme().map(str::to_string)
     }
@@ -339,6 +367,15 @@ mod tests {
         assert_eq!(value["theme"], "dark");
         assert_eq!(value["idleEvictionMinutes"], "off");
         assert_eq!(value["treeFilterMode"], "all");
+
+        // The web search provider defaults to Serper and persists the choice.
+        assert_eq!(settings.web_search_provider(), "serper");
+        settings.set_web_search_provider("eco").expect("provider");
+        assert_eq!(settings.web_search_provider(), "eco");
+        let content =
+            std::fs::read_to_string(agent_dir.join("settings.json")).expect("settings file");
+        let value: serde_json::Value = serde_json::from_str(&content).expect("parse");
+        assert_eq!(value["webSearchProvider"], "eco");
 
         // The update channel starts unset (the version infers it) and
         // pins through the /nightly off path's seam.

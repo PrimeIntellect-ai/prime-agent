@@ -1438,6 +1438,43 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_stored_eco_key_reaches_the_kernel_env_when_eco_is_selected() {
+        let dir = tempfile::tempdir().unwrap();
+        let agent_dir = dir.path().join("agent");
+        let cwd = dir.path().join("project");
+        std::fs::create_dir_all(&agent_dir).unwrap();
+        std::fs::create_dir_all(cwd.join(".prime/agent")).unwrap();
+        std::fs::write(
+            agent_dir.join("settings.json"),
+            serde_json::json!({ "webSearchProvider": "eco" }).to_string(),
+        )
+        .unwrap();
+        // Only an eco key: the skill gate and the key both follow the selected provider.
+        std::fs::write(
+            agent_dir.join("auth.json"),
+            r#"{ "eco": { "type": "api_key", "key": "!printf eco-key-from-cmd" } }"#,
+        )
+        .unwrap();
+        let engine = shell_test_session(cwd, agent_dir).await.unwrap();
+        let websearch_env: std::collections::BTreeMap<&str, &str> = engine
+            .provisioner
+            .inner
+            .options
+            .env
+            .iter()
+            .filter(|(key, _)| key.contains("WEBSEARCH") || key.ends_with("_API_KEY"))
+            .map(|(key, value)| (key.as_str(), value.as_str()))
+            .collect();
+        let mut expected =
+            std::collections::BTreeMap::from([("PRIME_AGENT_WEBSEARCH_PROVIDER", "eco")]);
+        // A nonblank ambient ECO_API_KEY wins, like SERPER_API_KEY.
+        if !std::env::var("ECO_API_KEY").is_ok_and(|value| !value.trim().is_empty()) {
+            expected.insert("ECO_API_KEY", "eco-key-from-cmd");
+        }
+        assert_eq!(websearch_env, expected);
+    }
+
+    #[tokio::test]
     async fn an_unsaved_session_blanks_the_kernel_session_id() {
         let dir = tempfile::tempdir().unwrap();
         let agent_dir = dir.path().join("agent");

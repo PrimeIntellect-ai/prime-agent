@@ -171,8 +171,8 @@ impl PackageManager {
     }
 
     /// Settings flag for the bundled websearch skill: an explicit
-    /// `bundledSkills.websearch` value wins; unset rides with the credential
-    /// (see [`Self::websearch_enabled_by_credential`]).
+    /// `bundledSkills.websearch` value wins; unset rides with the selected
+    /// provider's credential (see [`Self::websearch_enabled_by_credential`]).
     pub(super) fn bundled_websearch_enabled(&self) -> bool {
         self.settings
             .settings()
@@ -180,21 +180,24 @@ impl PackageManager {
             .as_ref()
             .and_then(|bundled| bundled.websearch)
             .unwrap_or_else(|| {
+                let provider = self.settings.get_web_search_provider();
                 Self::websearch_enabled_by_credential(
                     self.agent_dir(),
-                    std::env::var("SERPER_API_KEY").ok().as_deref(),
+                    provider,
+                    std::env::var(provider.api_key_env()).ok().as_deref(),
                 )
             })
     }
 
     /// The unset-setting default: the skill follows its credential, so it is
-    /// enabled exactly when the machine carries a Serper key (the stored
-    /// `serper` auth slot or a nonblank ambient `SERPER_API_KEY`) and stays
-    /// off on keyless installs. Existing logged-in users keep the skill, and
-    /// removing the credential (or overriding with
-    /// `bundledSkills.websearch: false`) drops it.
+    /// enabled exactly when the machine carries a key for the selected
+    /// provider (its stored auth slot or a nonblank ambient key, e.g.
+    /// `SERPER_API_KEY`) and stays off on keyless installs. Existing
+    /// logged-in users keep the skill, and removing the credential (or
+    /// overriding with `bundledSkills.websearch: false`) drops it.
     fn websearch_enabled_by_credential(
         agent_dir: &std::path::Path,
+        provider: crate::settings::WebSearchProvider,
         ambient_api_key: Option<&str>,
     ) -> bool {
         if ambient_api_key.is_some_and(|value| !value.trim().is_empty()) {
@@ -205,7 +208,7 @@ impl PackageManager {
             .and_then(|content| {
                 crate::auth::parse_storage_data(Some(&content))
                     .ok()
-                    .and_then(|data| data.credential(crate::auth::SERPER_CREDENTIAL_ID))
+                    .and_then(|data| data.credential(provider.id()))
             });
         stored.is_some()
     }
@@ -690,47 +693,39 @@ mod tests {
 
     #[test]
     fn websearch_credential_presence_gates_the_skill() {
+        use crate::settings::WebSearchProvider;
         let (dir, _manager) = setup();
         let agent_dir = dir.path().join("agent");
+        let enabled = |provider, ambient_api_key| {
+            PackageManager::websearch_enabled_by_credential(&agent_dir, provider, ambient_api_key)
+        };
 
         // Keyless install: no stored credential, no ambient key.
-        assert!(!PackageManager::websearch_enabled_by_credential(
-            &agent_dir, None
-        ));
+        assert!(!enabled(WebSearchProvider::Serper, None));
 
         // A nonblank ambient key is enough; a blank one is not a key.
-        assert!(PackageManager::websearch_enabled_by_credential(
-            &agent_dir,
-            Some("the-key")
-        ));
-        assert!(!PackageManager::websearch_enabled_by_credential(
-            &agent_dir,
-            Some("   ")
-        ));
+        assert!(enabled(WebSearchProvider::Serper, Some("the-key")));
+        assert!(!enabled(WebSearchProvider::Serper, Some("   ")));
 
-        // A stored serper credential rides; another provider's does not.
+        // A stored credential rides for the selected provider only.
         std::fs::write(
             agent_dir.join("auth.json"),
             r#"{ "serper": { "type": "api_key", "key": "stored" } }"#,
         )
         .unwrap();
-        assert!(PackageManager::websearch_enabled_by_credential(
-            &agent_dir, None
-        ));
+        assert!(enabled(WebSearchProvider::Serper, None));
+        assert!(!enabled(WebSearchProvider::Eco, None));
         std::fs::write(
             agent_dir.join("auth.json"),
-            r#"{ "other": { "type": "api_key", "key": "x" } }"#,
+            r#"{ "eco": { "type": "api_key", "key": "stored" } }"#,
         )
         .unwrap();
-        assert!(!PackageManager::websearch_enabled_by_credential(
-            &agent_dir, None
-        ));
+        assert!(enabled(WebSearchProvider::Eco, None));
+        assert!(!enabled(WebSearchProvider::Serper, None));
 
         // An unparseable store is no credential, not an error.
         std::fs::write(agent_dir.join("auth.json"), "{ not json").unwrap();
-        assert!(!PackageManager::websearch_enabled_by_credential(
-            &agent_dir, None
-        ));
+        assert!(!enabled(WebSearchProvider::Serper, None));
     }
 
     #[test]
