@@ -28,6 +28,25 @@ pub const GOAL_BACKOFF_WAKE_CRON_LABEL: &str = "goal-backoff-wake";
 /// its turn re-probes the provider and re-consults the mint.
 pub const GOAL_BACKOFF_WAKE_MARKER_TEXT: &str = "<goal_backoff_wake>\nThe goal continuation backoff window (the consecutive-no-progress cap) has elapsed; this wake is automatic. Continue the goal work from where it stopped.\n</goal_backoff_wake>";
 
+/// The fallback wake's cron label: when the quiescence gate defers a goal
+/// continuation behind a live background `bash()` handle, the daemon arms a
+/// one-shot cron one [`GOAL_BACKGROUND_SKIP_WINDOW_MS`] out, so a shell that
+/// never completes cannot stall the goal forever.
+pub const GOAL_BACKGROUND_SKIP_WAKE_CRON_LABEL: &str = "goal-background-skip-wake";
+
+/// The fallback wake's window: the armed wake fires one marker turn per
+/// window while the shell stays live (each firing turn re-arms). Five
+/// minutes is generous to legitimate long builds yet bounds the stall; the
+/// shell's own `[bash-done]` notice is still the normal, immediate wake.
+/// Each firing marker turn is a real provider turn charging the goal, and
+/// while the quiescence gate holds the no-progress streak does not advance,
+/// so the loop is bounded only by the goal's token budget or the operator.
+pub const GOAL_BACKGROUND_SKIP_WINDOW_MS: u64 = 5 * 60 * 1000;
+
+/// The fallback wake's marker prompt: honest about why it fired, and that
+/// the shell's completion notice still arrives separately.
+pub const GOAL_BACKGROUND_SKIP_WAKE_MARKER_TEXT: &str = "<goal_background_skip_wake>\nThe background-shell skip window has elapsed; this wake is automatic. A live background bash() handle still holds the goal continuation. Continue the goal work from where it stopped; the [bash-done] notification still arrives when the shell ends.\n</goal_background_skip_wake>";
+
 /// Whether the turn produced any output: an EMPTY content block list OR one
 /// whose every block is empty (the abort corpse's single empty text part).
 #[must_use]

@@ -50,6 +50,8 @@ mod goalcore;
 mod lifecycle;
 mod turn_types;
 
+pub(crate) use goalcore::GoalWakeKind;
+
 use turn_types::{
     aborted_message, drop_trailing_assistant, retry_event_to_engine_event, BoundaryRun,
     TurnAdmission, TurnOnce, TurnPrompt, TurnResult,
@@ -143,9 +145,6 @@ pub struct AgentSessionEngine {
     /// The queued-goal-context purge (TS `_clearQueuedGoalContexts`):
     /// invoked by pause/clear/start and `goal.complete`.
     pub(crate) goal_queue_purge: std::sync::Mutex<Option<std::sync::Arc<dyn Fn() + Send + Sync>>>,
-    /// The armed backoff wake's cron job id: `Some` while a one-shot
-    /// `goal-backoff-wake` is pending (cancelled by a successful mint).
-    pub(crate) goal_backoff_wake_job_id: std::sync::Mutex<Option<String>>,
     /// The stale-row guard's DURABLE terminal row, deferred until after the
     /// context adoption; `Some` between the seed and the flush.
     pub(crate) stale_goal_terminal_pending: std::sync::Mutex<Option<pa_core::goals::GoalState>>,

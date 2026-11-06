@@ -5,7 +5,7 @@
 
 use std::sync::Arc;
 
-use crate::agent_engine::AgentSessionEngine;
+use crate::agent_engine::{AgentSessionEngine, GoalWakeKind};
 use crate::engine::{GoalContinuation, GoalTurnEndWork, PromptRequest};
 
 /// The outcome of the natural-boundary goal consult.
@@ -122,7 +122,7 @@ impl AgentSessionEngine {
 
     /// The settle-site body: exactly-once delivery under the driver lock,
     /// deferral kept while descendants or queued input own the boundary.
-    async fn goal_children_settled(&self) {
+    pub(crate) async fn goal_children_settled(&self) {
         // A closed session (killed/stopped) has no live handles: the retry drops.
         let Some(live) = self.live_handles() else {
             return;
@@ -135,6 +135,13 @@ impl AgentSessionEngine {
             }
         }
         if self.has_unsettled_rlm_work().await || self.has_live_background_bash_handles() {
+            // Self-heal: a fire that completed without running (withdrawn
+            // or cleared mid-teardown) strands the owed deferral with no
+            // wake; the next settle consult behind a still-live shell
+            // re-arms it so the bounded-stall guarantee survives.
+            if self.has_live_background_bash_handles() && !self.background_skip_wake_armed() {
+                self.arm_background_skip_wake().await;
+            }
             return;
         }
         // Queued input or the post-abort suspension owns the boundary.
@@ -167,7 +174,8 @@ impl AgentSessionEngine {
                 drop(driver);
                 live.publish_goal(&state);
                 if let Some(wake_at) = wake_at {
-                    self.schedule_goal_backoff_wake(wake_at).await;
+                    self.schedule_goal_wake(GoalWakeKind::Backoff, wake_at)
+                        .await;
                 }
                 return;
             }
@@ -179,7 +187,7 @@ impl AgentSessionEngine {
         };
         // The mint succeeded: retire the pending wake instead of firing
         // one more marker turn.
-        self.cancel_goal_backoff_wake();
+        self.cancel_goal_wake();
         // This mint's own guard handle: later releases clear exactly this
         // handle, never the mutable mirror (a core rebuild may have
         // re-swapped it meanwhile).
@@ -296,9 +304,18 @@ impl AgentSessionEngine {
                 return GoalBoundary::End;
             }
             // The quiescence gate: the continuation waits (not consumed)
-            // until the descendants settle or the bash handles finish.
-            if self.has_unsettled_rlm_work().await || self.has_live_background_bash_handles() {
+            // until the descendants settle or the bash handles finish. A
+            // live background bash handle also arms the fallback wake: the
+            // shell's [bash-done] notice is the normal retry, but a shell
+            // that never completes must not stall the goal past one
+            // window.
+            let live_background_bash = self.has_live_background_bash_handles();
+            if self.has_unsettled_rlm_work().await || live_background_bash {
                 driver.mark_continuation_owed();
+                if live_background_bash {
+                    drop(driver);
+                    self.arm_background_skip_wake().await;
+                }
                 return GoalBoundary::End;
             }
             // Now the trailing failed continuation pair can leave the
@@ -340,13 +357,14 @@ impl AgentSessionEngine {
                 drop(driver);
                 live.publish_goal(&state);
                 if let Some(wake_at) = wake_at {
-                    self.schedule_goal_backoff_wake(wake_at).await;
+                    self.schedule_goal_wake(GoalWakeKind::Backoff, wake_at)
+                        .await;
                 }
                 return GoalBoundary::End;
             }
             // The mint succeeded: retire any stale wake instead of firing
             // one more marker turn.
-            self.cancel_goal_backoff_wake();
+            self.cancel_goal_wake();
             // This mint's own guard handle.
             let pending_handle = Some(driver.pending_continuation_handle());
             // Input that arrived while the mint ran rolls the slot back

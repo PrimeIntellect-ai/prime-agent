@@ -775,6 +775,225 @@ fn running_children_owe_the_continuation_and_settle_delivers_it() {
     assert_eq!(engine.goal_state_value()["continuationsUsed"], 1);
 }
 
+/// T-0012: a live background `bash()` handle defers the goal continuation
+/// (owed, not consumed) and arms the fallback wake - a durable one-shot
+/// cron one skip-window out - so a shell that never completes cannot stall
+/// the goal. The shell's settle path (the `[bash-done]` sibling) delivers
+/// the owed continuation and retires the armed wake.
+#[test]
+fn background_shell_owes_the_continuation_and_arms_the_fallback_wake() {
+    let _faux = FAUX_TEST_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let dir = tempfile::TempDir::new().unwrap();
+    let session_file = dir.path().join("session.jsonl");
+    std::fs::write(
+        &session_file,
+        format!(
+            "{}\n",
+            serde_json::json!({
+                "type": "session",
+                "version": 3,
+                "id": "bg-skip-session",
+                "timestamp": "2026-01-01T00:00:00.000Z",
+                "cwd": dir.path().display().to_string(),
+            })
+        ),
+    )
+    .unwrap();
+    let store =
+        std::sync::Arc::new(pa_core::cron::store::AgentCronJobStore::for_session_artifacts());
+    store.register_session_artifact("bg-skip-session", &dir.path().join("artifacts"));
+    let cron_store = pa_core::session_engine::runtime_wiring::KernelCronWiring {
+        store: std::sync::Arc::clone(&store),
+        binding: None,
+        mutation_hook: None,
+    };
+    let engine = std::sync::Arc::new(
+        AgentSessionEngine::new(AgentEngineConfig {
+            cwd: dir.path().to_path_buf(),
+            agent_dir: dir.path().join("agent"),
+            provider: None,
+            model: None,
+            api_key: None,
+            thinking: None,
+            session_dir: None,
+            session_file: Some(session_file),
+            faux_script: Some(
+                serde_json::json!({
+                    "responses": [
+                        {"text": "warm ok"},
+                        {"text": "goal turn reply"},
+                        {"text": "marker turn reply"},
+                    ]
+                })
+                .to_string(),
+            ),
+            supervisor_link: Some(crate::agent_engine::SupervisorLinkConfig {
+                socket_path: dir.path().join("supervisor.sock"),
+                active_session_id: "active-bg-skip".to_string(),
+                worker_token: "token".to_string(),
+            }),
+            telemetry_disabled: None,
+            cron_store: Some(cron_store),
+            queued_steering_probe: None,
+        })
+        .unwrap(),
+    );
+    // The worker registers the engine's own arc: the live-auth resolver
+    // upgrades it per provider call.
+    engine.register_arc();
+    let goal_work = goal_admission_collector(&engine);
+    // The first prompt builds the session (the build installs the real
+    // provisioner probe); the live-handle probe is meaningful from here on.
+    let mut events: Vec<EngineEvent> = Vec::new();
+    admit(&engine, "warm".to_string(), &mut events);
+    engine.set_test_probes(Some(std::sync::Arc::new(|| 1)), None);
+    // The goal start behind a live handle: its natural end holds the
+    // continuation (owed, not consumed) and arms the fallback wake.
+    admit(
+        &engine,
+        "/goal ship behind the shell".to_string(),
+        &mut events,
+    );
+    {
+        let work = goal_work.lock().unwrap();
+        assert!(
+            work.is_empty(),
+            "work minted behind a live handle: {work:?}"
+        );
+    }
+    assert_eq!(engine.goal_state_value()["status"], "active");
+    assert_eq!(engine.goal_state_value()["continuationsUsed"], 0);
+    // THE FALLBACK WAKE: exactly one Active background-skip job, armed for
+    // this session with the honest marker prompt and a fire time.
+    let wakes: Vec<pa_core::cron::AgentCronJob> = store
+        .list()
+        .into_iter()
+        .filter(|job| {
+            job.label.as_deref()
+                == Some(pa_core::session_engine::goal_driver::GOAL_BACKGROUND_SKIP_WAKE_CRON_LABEL)
+        })
+        .collect();
+    let [wake] = wakes.as_slice() else {
+        panic!("expected exactly one background-skip wake: {wakes:?}");
+    };
+    assert_eq!(wake.status, pa_core::cron::JobStatus::Active);
+    assert_eq!(wake.session_id, "bg-skip-session");
+    assert_eq!(wake.active_session_id, "active-bg-skip");
+    assert_eq!(
+        wake.prompt,
+        pa_core::session_engine::goal_driver::GOAL_BACKGROUND_SKIP_WAKE_MARKER_TEXT
+    );
+    let armed_before_ms = crate::util::now_ms();
+    let fire_at_ms = pa_core::cron::parse_iso_millis(
+        wake.next_run_at
+            .as_deref()
+            .expect("the wake carries a fire time"),
+    )
+    .expect("the fire time parses");
+    let window = pa_core::session_engine::goal_driver::GOAL_BACKGROUND_SKIP_WINDOW_MS;
+    assert!(
+        fire_at_ms >= armed_before_ms.saturating_sub(60_000) + window
+            && fire_at_ms <= armed_before_ms + window + 60_000,
+        "the wake fires one skip window out: {fire_at_ms} vs {armed_before_ms}+{window}"
+    );
+    let first_wake_id = wake.id.clone();
+    // The settle consult (the [bash-done] sibling) while the handle is
+    // STILL live: the deferral stays owed and the armed wake stays put.
+    engine
+        .runtime
+        .block_on(async { engine.goal_children_settled().await });
+    {
+        let handles = engine.live_handles().expect("goal runtime").goal.clone();
+        assert!(
+            engine
+                .runtime
+                .block_on(async { handles.driver.lock().await.owes_continuation() }),
+            "a live handle must keep the deferral owed"
+        );
+    }
+    assert!(
+        goal_work.lock().unwrap().is_empty(),
+        "the settle consult delivered behind a live handle"
+    );
+    assert!(
+        store.list().into_iter().any(|job| {
+            job.label.as_deref()
+                == Some(pa_core::session_engine::goal_driver::GOAL_BACKGROUND_SKIP_WAKE_CRON_LABEL)
+                && job.status == pa_core::cron::JobStatus::Active
+        }),
+        "the still-live handle must keep the fallback wake armed"
+    );
+    // THE RE-ARM: the fired marker turn's own end re-consults the boundary
+    // and cancels-first into a fresh wake - exactly one Active, a new id.
+    let mut marker_events: Vec<EngineEvent> = Vec::new();
+    admit(
+        &engine,
+        pa_core::session_engine::goal_driver::GOAL_BACKGROUND_SKIP_WAKE_MARKER_TEXT.to_string(),
+        &mut marker_events,
+    );
+    let rearmed: Vec<_> = store
+        .list()
+        .into_iter()
+        .filter(|job| {
+            job.label.as_deref()
+                == Some(pa_core::session_engine::goal_driver::GOAL_BACKGROUND_SKIP_WAKE_CRON_LABEL)
+                && job.status == pa_core::cron::JobStatus::Active
+        })
+        .collect();
+    let [rewake] = rearmed.as_slice() else {
+        panic!("the marker turn must re-arm exactly one wake: {rearmed:?}");
+    };
+    assert!(
+        rewake.id != first_wake_id,
+        "the re-arm must replace the fired wake, not stack beside it"
+    );
+    // SELF-HEAL: a fire that completed without running (withdrawn or
+    // cleared) strands the owed deferral with no wake; the next settle
+    // consult behind the still-live shell re-arms it.
+    for job in store.list() {
+        if job.label.as_deref()
+            == Some(pa_core::session_engine::goal_driver::GOAL_BACKGROUND_SKIP_WAKE_CRON_LABEL)
+            && job.status == pa_core::cron::JobStatus::Active
+        {
+            store.cancel(&job.id, crate::util::now_ms()).unwrap();
+        }
+    }
+    assert!(
+        !engine.background_skip_wake_armed(),
+        "the test must first strand the wake"
+    );
+    engine
+        .runtime
+        .block_on(async { engine.goal_children_settled().await });
+    assert!(
+        engine.background_skip_wake_armed(),
+        "the settle consult must re-arm the stranded wake"
+    );
+    // The shell settles: the same consult delivers the owed continuation
+    // and the successful mint retires the armed wake.
+    engine.set_test_probes(Some(std::sync::Arc::new(|| 0)), None);
+    engine
+        .runtime
+        .block_on(async { engine.goal_children_settled().await });
+    let work = goal_work.lock().unwrap();
+    let [crate::engine::GoalTurnEndWork::Continuation(delivered)] = work.as_slice() else {
+        panic!("the settled shell never delivered the owed continuation: {work:?}");
+    };
+    assert!(delivered.request.message.contains("[goal: continuation]"));
+    assert_eq!(engine.goal_state_value()["continuationsUsed"], 1);
+    drop(work);
+    assert!(
+        !store.list().into_iter().any(|job| {
+            job.label.as_deref()
+                == Some(pa_core::session_engine::goal_driver::GOAL_BACKGROUND_SKIP_WAKE_CRON_LABEL)
+                && job.status == pa_core::cron::JobStatus::Active
+        }),
+        "the successful mint retired the armed wake"
+    );
+}
+
 /// The engine session's entries as their persisted wire shapes (the
 /// hydrating snapshot: a windowed manager holds only the suffix).
 fn engine_session_entries(engine: &AgentSessionEngine) -> Vec<pa_types::session::FileEntry> {

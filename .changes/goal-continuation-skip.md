@@ -1,0 +1,1 @@
+- A goal continuation held behind a live background `bash()` command now arms a fallback wake: if the shell is still running five minutes after the goal goes quiet, one marker turn continues the goal (the `[bash-done]` notification still arrives separately when the shell ends), so a hung shell can no longer stall an active goal indefinitely.

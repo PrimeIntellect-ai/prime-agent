@@ -3,6 +3,20 @@
 //! family.
 use super::{json, AgentSessionEngine, EngineEvent, Value};
 
+/// Which boundary outcome armed a goal wake: the no-progress backoff's
+/// retry window, or the fallback that bounds how long a live background
+/// `bash()` handle can hold an owed continuation. One pending-wake slot
+/// serves both — the consult outcomes are mutually exclusive, and a
+/// successful mint retires whichever is armed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum GoalWakeKind {
+    /// The no-progress backoff retry window.
+    Backoff,
+    /// The background-shell skip window (a hung shell must not stall the
+    /// goal; the shell's own `[bash-done]` notice is the normal wake).
+    BackgroundSkip,
+}
+
 impl AgentSessionEngine {
     /// Write the durable `rlm_max_depth_state` entry: straight into the
     /// built session's persistence handle, or parked for the build.
@@ -60,21 +74,50 @@ impl AgentSessionEngine {
         }
     }
 
-    /// Arm the no-progress backoff's one-shot wake: a durable cron job at
-    /// `wake_at_ms` whose prompt is the wake marker. Without it the advertised
-    /// 10s/20s/40s retry would never run. Best effort: `None` outside a
-    /// daemon worker.
-    pub(crate) async fn schedule_goal_backoff_wake(&self, wake_at_ms: u64) -> Option<String> {
+    /// Arm the background-skip fallback wake one window out: the deferred
+    /// mint sites and the settle consult's self-heal share the arming.
+    pub(crate) async fn arm_background_skip_wake(&self) {
+        self.schedule_goal_wake(
+            GoalWakeKind::BackgroundSkip,
+            crate::util::now_ms()
+                + pa_core::session_engine::goal_driver::GOAL_BACKGROUND_SKIP_WINDOW_MS,
+        )
+        .await;
+    }
+
+    /// Arm a goal wake: a durable one-shot cron job at `wake_at_ms` whose
+    /// prompt is the kind's wake marker. The backoff kind serves the
+    /// no-progress retry (without it the advertised 10s/20s/40s window would
+    /// never run); the background-skip kind bounds how long a live
+    /// background `bash()` handle can hold an owed continuation. Best
+    /// effort: `None` outside a daemon worker.
+    pub(crate) async fn schedule_goal_wake(
+        &self,
+        kind: GoalWakeKind,
+        wake_at_ms: u64,
+    ) -> Option<String> {
         // Exactly one wake per window: the prior job retires before the
         // replacement arms — repeated boundaries must never stack marker
         // turns.
-        self.cancel_goal_backoff_wake();
+        self.cancel_goal_wake();
         let wiring = self.cron_wiring()?;
         let binding = self.kernel_cron_binding()?;
         let schedule_text = format!(
             "at {}",
             pa_core::session::manager::format_iso(wake_at_ms as i64)
         );
+        let (source, label, marker) = match kind {
+            GoalWakeKind::Backoff => (
+                "goal_backoff_wake",
+                pa_core::session_engine::goal_driver::GOAL_BACKOFF_WAKE_CRON_LABEL,
+                pa_core::session_engine::goal_driver::GOAL_BACKOFF_WAKE_MARKER_TEXT,
+            ),
+            GoalWakeKind::BackgroundSkip => (
+                "goal_background_skip_wake",
+                pa_core::session_engine::goal_driver::GOAL_BACKGROUND_SKIP_WAKE_CRON_LABEL,
+                pa_core::session_engine::goal_driver::GOAL_BACKGROUND_SKIP_WAKE_MARKER_TEXT,
+            ),
+        };
         let job = wiring
             .store
             .create(&pa_core::cron::store::CreateAgentCronJobInput {
@@ -82,12 +125,9 @@ impl AgentSessionEngine {
                 session_id: binding.session_id.clone(),
                 session_file: binding.session_file.clone(),
                 cwd: binding.cwd.clone(),
-                source: Some("goal_backoff_wake".to_string()),
-                label: Some(
-                    pa_core::session_engine::goal_driver::GOAL_BACKOFF_WAKE_CRON_LABEL.to_string(),
-                ),
-                prompt: pa_core::session_engine::goal_driver::GOAL_BACKOFF_WAKE_MARKER_TEXT
-                    .to_string(),
+                source: Some(source.to_string()),
+                label: Some(label.to_string()),
+                prompt: marker.to_string(),
                 schedule_text,
                 now: Some(crate::util::now_ms()),
                 ..Default::default()
@@ -102,21 +142,34 @@ impl AgentSessionEngine {
             };
             hook(mutation).await;
         }
-        *self
-            .goal_backoff_wake_job_id
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(job.id.clone());
         Some(job.id)
     }
 
-    /// Cancel the pending backoff wake: the successful mint and the goal's
-    /// terminal transitions retire the stale wake. A fired job stays
-    /// untouched.
-    pub(crate) fn cancel_goal_backoff_wake(&self) {
-        self.goal_backoff_wake_job_id
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .take();
+    /// Whether the session's background-skip wake is still Active in the
+    /// cron store (the settle consult's self-heal: a fire that completed
+    /// without running must not strand the goal behind a hung shell).
+    pub(crate) fn background_skip_wake_armed(&self) -> bool {
+        let Some(wiring) = self.cron_wiring() else {
+            return false;
+        };
+        let Some(binding) = self.kernel_cron_binding() else {
+            return false;
+        };
+        wiring.store.list().into_iter().any(|job| {
+            job.status == pa_core::cron::JobStatus::Active
+                && job.label.as_deref()
+                    == Some(
+                        pa_core::session_engine::goal_driver::GOAL_BACKGROUND_SKIP_WAKE_CRON_LABEL,
+                    )
+                && job.session_id == binding.session_id
+        })
+    }
+
+    /// Cancel the pending goal wake: the successful mint and the goal's
+    /// terminal transitions retire the stale wake (either kind — the
+    /// no-progress backoff or the background-skip fallback). A fired job
+    /// stays untouched.
+    pub(crate) fn cancel_goal_wake(&self) {
         let Some(wiring) = self.cron_wiring() else {
             return;
         };
@@ -130,8 +183,13 @@ impl AgentSessionEngine {
         };
         for job in wiring.store.list() {
             if job.status != pa_core::cron::JobStatus::Active
-                || job.label.as_deref()
-                    != Some(pa_core::session_engine::goal_driver::GOAL_BACKOFF_WAKE_CRON_LABEL)
+                || !matches!(
+                    job.label.as_deref(),
+                    Some(
+                        pa_core::session_engine::goal_driver::GOAL_BACKOFF_WAKE_CRON_LABEL
+                            | pa_core::session_engine::goal_driver::GOAL_BACKGROUND_SKIP_WAKE_CRON_LABEL,
+                    )
+                )
                 || job.session_id != binding.session_id
             {
                 continue;
@@ -246,7 +304,7 @@ impl AgentSessionEngine {
             // REPLACEMENT goal retires it too — the old goal's wake would
             // fire its marker into the new goal.
             if goal.status != pa_core::goals::GoalStatus::Active || replaced {
-                self.cancel_goal_backoff_wake();
+                self.cancel_goal_wake();
             }
         }
         emit(EngineEvent::GoalUpdate {
