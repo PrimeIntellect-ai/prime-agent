@@ -248,7 +248,7 @@ impl WebSearchProvider {
     pub fn api_key_env(self) -> &'static str {
         match self {
             WebSearchProvider::Serper => "SERPER_API_KEY",
-            WebSearchProvider::Eco => "ECO_API_KEY",
+            WebSearchProvider::Eco => "YOU_API_KEY",
         }
     }
 }
