@@ -40,7 +40,7 @@ def _agent_dir() -> Path:
 # /mcp row is "<name> (web search)"), and where to get a key.
 _PROVIDERS = {
     "serper": ("SERPER_API_KEY", "Serper", "https://serper.dev"),
-    "eco": ("ECO_API_KEY", "You.com Eco", "https://you.com/platform"),
+    "eco": ("YOU_API_KEY", "You.com Eco", "https://you.com/platform"),
 }
 
 

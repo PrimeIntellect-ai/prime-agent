@@ -1475,9 +1475,9 @@ mod tests {
             .collect();
         let mut expected =
             std::collections::BTreeMap::from([("PRIME_AGENT_WEBSEARCH_PROVIDER", "eco")]);
-        // A nonblank ambient ECO_API_KEY wins, like SERPER_API_KEY.
-        if !std::env::var("ECO_API_KEY").is_ok_and(|value| !value.trim().is_empty()) {
-            expected.insert("ECO_API_KEY", "eco-key-from-cmd");
+        // A nonblank ambient YOU_API_KEY wins, like SERPER_API_KEY.
+        if !std::env::var("YOU_API_KEY").is_ok_and(|value| !value.trim().is_empty()) {
+            expected.insert("YOU_API_KEY", "eco-key-from-cmd");
         }
         assert_eq!(websearch_env, expected);
     }
