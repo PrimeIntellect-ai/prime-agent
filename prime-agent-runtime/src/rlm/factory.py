@@ -1911,7 +1911,7 @@ class FactoryExecutor:
             "run_id": run.run_id,
             "spec_id": run.spec_id,
             "name": run.name,
-            "state": run.state,
+            "state": run.state.value,
             "nodes": nodes,
             "events": [dict(event) for event in run.events[-EVENT_WINDOW:]],
             "elapsed_ms": int((self._now_fn() - run.started_at) * 1000),
@@ -1961,13 +1961,13 @@ class FactoryExecutor:
         # ledger event.
         finished = run.state in (RunState.DONE, RunState.FAILED) and self._running_instance_count(run) == 0
         if finished or run.state in (RunState.STOPPING, RunState.STOPPED):
-            return {"run_id": run.run_id, "state": run.state, "cancelled": []}
+            return {"run_id": run.run_id, "state": run.state.value, "cancelled": []}
         self._transition(run, RunState.STOPPING)
         self._touch(run)
         stopped = await self._halt_nonterminal(run, "run stopped")
         self._transition(run, RunState.STOPPED)
         self._event(run, "run_stopped", detail=f"stopped; {len(stopped)} state(s) cancelled")
-        return {"run_id": run.run_id, "state": run.state, "cancelled": stopped}
+        return {"run_id": run.run_id, "state": run.state.value, "cancelled": stopped}
 
     async def resume(self, run_id: str) -> dict[str, Any]:
         """Resume a paused run (escalate, budget, or max_transitions pause).
@@ -2013,7 +2013,7 @@ class FactoryExecutor:
             self._start_loop(run)
         return {
             "run_id": run.run_id,
-            "state": run.state,
+            "state": run.state.value,
             "started": started,
             "pending": self._pending_state_ids(run),
         }
@@ -2206,7 +2206,7 @@ class FactoryExecutor:
             "run_id": run.run_id,
             "spec_id": run.spec_id,
             "name": run.name,
-            "state": run.state,
+            "state": run.state.value,
             "pause_reason": run.pause_reason,
             "elapsed_ms": elapsed_ms,
             "machine": _machine_structure(
