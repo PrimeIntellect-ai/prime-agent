@@ -375,6 +375,10 @@ impl Supervisor {
         resident: &Arc<ResidentWorker>,
     ) -> Result<()> {
         resident.monitor_epoch.fetch_add(1, Ordering::SeqCst);
+        // The retired watch may not have reached its crash bookkeeping: a hard-killed
+        // parent's resident children close before the replacement, as the crash path
+        // closes them (a gracefully stopped parent already closed its own).
+        self.close_children_of_dead_parent(resident).await;
         match self.relaunch_worker(resident).await {
             Ok(child) => {
                 self.spawn_monitor(Arc::clone(resident), Some(child), 0, None);
