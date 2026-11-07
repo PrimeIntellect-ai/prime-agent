@@ -302,7 +302,6 @@ struct CaptureFreshness {
 struct Guarded {
     lifecycle: Lifecycle,
     start_generation: u64,
-    teardown_in_flight: u32,
     /// A repair discarded its kernel: the next fresh start must re-run the runtime bootstrap.
     pending_rebootstrap: bool,
     /// Restore the saved namespace on that fresh start too (false when the
@@ -463,7 +462,6 @@ impl ReplKernelManager {
             guarded: Mutex::new(Guarded {
                 lifecycle: Lifecycle::Idle,
                 start_generation: 0,
-                teardown_in_flight: 0,
                 pending_rebootstrap: false,
                 pending_restore: false,
                 completed_executions: 0,
@@ -962,7 +960,6 @@ impl ReplKernelManager {
             *memo = Some(slot.clone());
             slot
         };
-        lock(&self.inner.guarded).teardown_in_flight += 1;
         self.supersede_protocol_repair();
         let inner = self.inner.clone();
         let result = tokio::spawn(async move {
@@ -976,7 +973,6 @@ impl ReplKernelManager {
         })
         .await
         .unwrap_or(false);
-        lock(&self.inner.guarded).teardown_in_flight -= 1;
         Ok(result)
     }
 

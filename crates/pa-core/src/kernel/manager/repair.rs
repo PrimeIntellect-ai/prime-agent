@@ -28,11 +28,10 @@ impl Inner {
             }
         }
         self.reject_active_execution(&error);
+        if lock(&self.shutdown_memo).is_some()
+            || lock(&self.guarded).lifecycle.phase() != KernelState::Running
         {
-            let g = lock(&self.guarded);
-            if g.teardown_in_flight > 0 || g.lifecycle.phase() != KernelState::Running {
-                return;
-            }
+            return;
         }
         let existing = lock(&self.guarded).protocol_repair.clone();
         if let Some(existing) = existing {
@@ -209,7 +208,7 @@ impl Inner {
         // and a teardown's final snapshot must never trigger reprovisioning.
         if (!needs_restore && !needs_bootstrap)
             || lock(&self.guarded).protocol_repair.is_some()
-            || lock(&self.guarded).teardown_in_flight > 0
+            || lock(&self.shutdown_memo).is_some()
             || lock(&self.guarded).lifecycle.phase() != KernelState::Running
         {
             return Ok(());

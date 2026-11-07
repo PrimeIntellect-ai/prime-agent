@@ -24,10 +24,8 @@ impl Inner {
             *memo = Some(slot.clone());
             slot
         };
-        lock(&self.guarded).teardown_in_flight += 1;
         self.supersede_protocol_repair();
         let performed = self.perform_shutdown(opts).await;
-        lock(&self.guarded).teardown_in_flight -= 1;
         slot.finish(None);
         {
             let mut memo = lock(&self.shutdown_memo);
