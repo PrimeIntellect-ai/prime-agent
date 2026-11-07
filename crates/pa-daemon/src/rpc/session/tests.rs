@@ -2,7 +2,7 @@
 //! dispose flushes its final snapshot into the shared artifact dir: the reopened
 //! session must still revive that final namespace.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 
 use pa_core::kernel::provisioner::{IpythonKernelProvisioner, KernelReadyGate};
@@ -12,24 +12,7 @@ use pa_core::session_engine::engine::{create_session, SessionEngineConfig};
 
 use super::{RpcEngineFactory, RpcEngineHandle, RpcEngineRequest, RpcSession};
 use crate::rpc::LineWriter;
-
-/// The kernel Python with prime-agent-runtime installed; `PA_E2E_KERNEL_PYTHON`
-/// points at an explicit interpreter.
-fn kernel_python() -> Option<PathBuf> {
-    if let Some(explicit) = std::env::var_os("PA_E2E_KERNEL_PYTHON") {
-        return Some(PathBuf::from(explicit));
-    }
-    let candidate = PathBuf::from(std::env::var("HOME").unwrap_or_default())
-        .join(".prime/agent/kernel-venv/bin/python");
-    if candidate.exists() {
-        return Some(candidate);
-    }
-    eprintln!(
-        "kernel python {} not found; skipping the reopen snapshot test",
-        candidate.display()
-    );
-    None
-}
+use crate::test_support::{live_kernel_python, KernelEnvOverride};
 
 async fn engine_handle(
     cwd: &Path,
@@ -110,10 +93,13 @@ fn mkfifo(path: &Path) {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_same_path_reopen_revives_the_replaced_kernels_final_namespace() {
-    let Some(python) = kernel_python() else {
+    let Some(python) = live_kernel_python() else {
         return;
     };
-    std::env::set_var("PRIME_AGENT_KERNEL_PYTHON", &python);
+    let _env = KernelEnvOverride::apply(&[(
+        "PRIME_AGENT_KERNEL_PYTHON",
+        Some(python.display().to_string()),
+    )]);
     let dir = tempfile::tempdir().expect("tempdir");
     let cwd = dir.path().join("project");
     let agent_dir = dir.path().join("agent");
