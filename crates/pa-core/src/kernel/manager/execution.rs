@@ -65,7 +65,7 @@ impl Inner {
                 if g.active_execution.is_none() {
                     return Ok(());
                 }
-                if g.state == KernelState::Shutdown {
+                if g.lifecycle.phase() == KernelState::Shutdown {
                     return Err(anyhow!("Kernel has been shut down"));
                 }
             }

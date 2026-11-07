@@ -67,12 +67,49 @@ fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     m.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
+/// The coarse view of [`Lifecycle`] most readers need.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum KernelState {
     Idle,
     Starting,
     Running,
     Shutdown,
+}
+
+/// The kernel process lifecycle. Data that only exists in one phase lives in its variant.
+enum Lifecycle {
+    /// No child; the next start spawns one.
+    Idle,
+    Starting {
+        /// Concurrent starts join this run. `None` once the run failed after the handshake
+        /// (protocol error or mismatch): the caller tears the half-started kernel down.
+        start: Option<Arc<MemoSlot>>,
+        ready_tx: Option<oneshot::Sender<anyhow::Result<i64>>>,
+        /// A protocol error that arrived before the ready frame.
+        protocol_error: Option<String>,
+    },
+    Running,
+    /// A graceful shutdown owns the teardown of this start generation, so the exit
+    /// handler must not run it.
+    ShuttingDown {
+        generation: u64,
+    },
+    /// A protocol repair is killing the child to settle at `Idle` (not defunct).
+    Discarding,
+    /// Torn down. Only `restart()` and a failed start that resets for a retry (startup
+    /// or protocol repair) move it back to `Idle`.
+    Defunct,
+}
+
+impl Lifecycle {
+    fn phase(&self) -> KernelState {
+        match self {
+            Self::Idle => KernelState::Idle,
+            Self::Starting { .. } => KernelState::Starting,
+            Self::Running => KernelState::Running,
+            Self::ShuttingDown { .. } | Self::Discarding | Self::Defunct => KernelState::Shutdown,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -263,13 +300,9 @@ struct CaptureFreshness {
 // The mirrored TS API shape is deliberate (the booleans are the product's own surface).
 #[allow(clippy::struct_excessive_bools)]
 struct Guarded {
-    state: KernelState,
+    lifecycle: Lifecycle,
     start_generation: u64,
-    /// Generation whose graceful `shutdown()` owns the teardown, so the exit
-    /// handler must not run it.
-    graceful_shutdown_generation: Option<u64>,
     teardown_in_flight: u32,
-    startup_protocol_error: Option<String>,
     /// A repair discarded its kernel: the next fresh start must re-run the runtime bootstrap.
     pending_rebootstrap: bool,
     /// Restore the saved namespace on that fresh start too (false when the
@@ -325,7 +358,6 @@ struct Guarded {
     mcp_status_waiters: HashMap<String, oneshot::Sender<Value>>,
     host_inflight: Vec<tokio::task::JoinHandle<()>>,
     active_execution: Option<Arc<ActiveExecution>>,
-    ready_tx: Option<oneshot::Sender<anyhow::Result<i64>>>,
 }
 
 struct ChildHandle {
@@ -360,7 +392,6 @@ pub(crate) struct Inner {
     busy_notify: Notify,
     /// Serializes `execute()` calls — the runtime runs one request at a time.
     execution_queue: tokio::sync::Mutex<()>,
-    start_memo: Mutex<Option<Arc<MemoSlot>>>,
     shutdown_memo: Mutex<Option<Arc<MemoSlot>>>,
     rebootstrap_memo: Mutex<Option<Arc<MemoSlot>>>,
     flush_memo: Mutex<Option<Arc<MemoSlot>>>,
@@ -400,7 +431,7 @@ impl Drop for Inner {
     fn drop(&mut self) {
         // Synchronous best-effort cleanup.
         self.supersede_protocol_repair();
-        lock(&self.guarded).state = KernelState::Shutdown;
+        lock(&self.guarded).lifecycle = Lifecycle::Defunct;
         live_kernels::remove_inner(self);
         self.cleanup_resources(Signal::Kill);
     }
@@ -430,11 +461,9 @@ impl ReplKernelManager {
             freshness_stat_probe: std::sync::atomic::AtomicBool::new(false),
             resolved_python: Mutex::new(None),
             guarded: Mutex::new(Guarded {
-                state: KernelState::Idle,
+                lifecycle: Lifecycle::Idle,
                 start_generation: 0,
-                graceful_shutdown_generation: None,
                 teardown_in_flight: 0,
-                startup_protocol_error: None,
                 pending_rebootstrap: false,
                 pending_restore: false,
                 completed_executions: 0,
@@ -461,12 +490,10 @@ impl ReplKernelManager {
                 mcp_status_waiters: HashMap::new(),
                 host_inflight: Vec::new(),
                 active_execution: None,
-                ready_tx: None,
             }),
             child: Mutex::new(None),
             busy_notify: Notify::new(),
             execution_queue: tokio::sync::Mutex::new(()),
-            start_memo: Mutex::new(None),
             shutdown_memo: Mutex::new(None),
             rebootstrap_memo: Mutex::new(None),
             flush_memo: Mutex::new(None),
@@ -497,13 +524,17 @@ impl ReplKernelManager {
 
     #[must_use]
     pub fn is_running(&self) -> bool {
-        lock(&self.inner.guarded).state == KernelState::Running
+        lock(&self.inner.guarded).lifecycle.phase() == KernelState::Running
     }
 
-    /// Terminal: the kernel died or was torn down; only a fresh manager can serve again.
+    /// The kernel died or was torn down (or a graceful shutdown is under way): only
+    /// `restart()` or a fresh manager can serve again.
     #[must_use]
     pub fn is_defunct(&self) -> bool {
-        lock(&self.inner.guarded).state == KernelState::Shutdown
+        matches!(
+            lock(&self.inner.guarded).lifecycle,
+            Lifecycle::ShuttingDown { .. } | Lifecycle::Defunct
+        )
     }
 
     /// Diagnostics tail (kernel stderr, at most the last 8 KiB).
@@ -526,35 +557,27 @@ impl ReplKernelManager {
         }
         // The guard is strictly scoped: a conditionally dropped non-Send
         // MutexGuard would make the whole future non-Send.
-        let existing = lock(&self.inner.start_memo).as_ref().cloned();
-        if let Some(existing) = existing {
-            return existing
+        let (slot, owner) = {
+            let mut g = lock(&self.inner.guarded);
+            match &g.lifecycle {
+                Lifecycle::Starting {
+                    start: Some(slot), ..
+                } => (slot.clone(), false),
+                Lifecycle::Idle => (g.begin_start(), true),
+                _ => return Ok(()),
+            }
+        };
+        if !owner {
+            return slot
                 .wait_or_abort(options.signal.as_ref(), "Kernel startup aborted")
                 .await;
         }
-        let slot = {
-            let mut memo = lock(&self.inner.start_memo);
-            let slot = MemoSlot::new();
-            *memo = Some(slot.clone());
-            slot
-        };
         // Owner: run the startup to completion in a task so the caller\'s abort
         // signal can abandon the wait without killing the kernel for others.
         let inner = self.inner.clone();
         let run_slot = slot.clone();
         let wait_signal = options.signal.clone();
-        let task = tokio::spawn(async move {
-            let result = inner.do_start(&options).await;
-            run_slot.finish(result.as_ref().err().map(|e| anyhow!("{e:#}")));
-            if result.is_err() {
-                let mut memo = lock(&inner.start_memo);
-                // Only clear our own memoization: a stale start must not evict a newer one.
-                if matches!(memo.as_ref(), Some(current) if Arc::ptr_eq(current, &run_slot)) {
-                    *memo = None;
-                }
-            }
-            result
-        });
+        let task = tokio::spawn(async move { inner.run_start(&options, &run_slot).await });
         match wait_signal.as_ref() {
             None => match task.await {
                 Ok(result) => result,
@@ -974,17 +997,17 @@ impl ReplKernelManager {
         if !performed {
             return Ok(());
         }
-        lock(&self.inner.guarded).state = KernelState::Idle;
-        lock(&self.inner.guarded).kernel_stderr.clear();
+        {
+            let mut g = lock(&self.inner.guarded);
+            g.lifecycle = Lifecycle::Idle;
+            g.kernel_stderr.clear();
+        }
         self.start(KernelStartOptions::default()).await
     }
 
     pub fn kill(&self) {
         self.supersede_protocol_repair();
-        {
-            let mut g = lock(&self.inner.guarded);
-            g.state = KernelState::Shutdown;
-        }
+        lock(&self.inner.guarded).lifecycle = Lifecycle::Defunct;
         live_kernels::remove_inner(&self.inner);
         self.inner.cleanup_resources(Signal::Kill);
     }
@@ -992,7 +1015,7 @@ impl ReplKernelManager {
     /// Synchronous best-effort cleanup. Safe to call from drop paths.
     pub fn dispose_sync(&self) {
         self.supersede_protocol_repair();
-        lock(&self.inner.guarded).state = KernelState::Shutdown;
+        lock(&self.inner.guarded).lifecycle = Lifecycle::Defunct;
         live_kernels::remove_inner(&self.inner);
         self.inner.cleanup_resources(Signal::Term);
     }

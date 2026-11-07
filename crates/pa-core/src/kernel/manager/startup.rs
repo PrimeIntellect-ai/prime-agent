@@ -3,11 +3,25 @@
 
 use super::{
     anyhow, live_kernels, lock, oneshot, orphan_journal, parse_event, Arc, AsyncReadExt, BufReader,
-    ChildHandle, Duration, ExitInfo, HashMap, Inner, KernelShutdownOptions, KernelStartOptions,
-    KernelState, Mutex, Ordering, Signal, StderrLog, Write, KERNEL_STDERR_LOG_BUDGET_MARKER,
-    MAX_KERNEL_STDERR_CHARS, MAX_KERNEL_STDERR_LOG_BYTES, MAX_PROTOCOL_LINE_BYTES,
-    READY_TIMEOUT_MS, REPL_PROTOCOL_VERSION,
+    ChildHandle, Duration, ExitInfo, Guarded, HashMap, Inner, KernelShutdownOptions,
+    KernelStartOptions, KernelState, Lifecycle, MemoSlot, Mutex, Ordering, Signal, StderrLog,
+    Write, KERNEL_STDERR_LOG_BUDGET_MARKER, MAX_KERNEL_STDERR_CHARS, MAX_KERNEL_STDERR_LOG_BYTES,
+    MAX_PROTOCOL_LINE_BYTES, READY_TIMEOUT_MS, REPL_PROTOCOL_VERSION,
 };
+
+impl Guarded {
+    /// Idle -> Starting under a fresh generation; returns the slot concurrent starts join.
+    pub(super) fn begin_start(&mut self) -> Arc<MemoSlot> {
+        let slot = MemoSlot::new();
+        self.start_generation += 1;
+        self.lifecycle = Lifecycle::Starting {
+            start: Some(slot.clone()),
+            ready_tx: None,
+            protocol_error: None,
+        };
+        slot
+    }
+}
 
 impl Inner {
     /// True when a teardown (or newer start) superseded the start that
@@ -122,20 +136,48 @@ impl Inner {
         Ok(python)
     }
 
-    /// Perform the startup: resolve the interpreter, spawn `python -m rlm.repl`,
-    /// complete the protocol handshake, and mark the kernel running.
+    /// Start an idle kernel and run the startup; a no-op unless idle.
     pub(crate) async fn do_start(
         self: &Arc<Self>,
         options: &KernelStartOptions,
     ) -> anyhow::Result<()> {
-        {
+        let slot = {
             let mut g = lock(&self.guarded);
-            if g.state != KernelState::Idle {
+            if !matches!(g.lifecycle, Lifecycle::Idle) {
                 return Ok(());
             }
-            g.start_generation += 1;
-            g.state = KernelState::Starting;
+            g.begin_start()
+        };
+        self.run_start(options, &slot).await
+    }
+
+    /// Run the startup `slot` belongs to and settle the slot for every joined caller.
+    pub(super) async fn run_start(
+        self: &Arc<Self>,
+        options: &KernelStartOptions,
+        slot: &Arc<MemoSlot>,
+    ) -> anyhow::Result<()> {
+        let result = self.spawn_and_handshake(options).await;
+        slot.finish(result.as_ref().err().map(|e| anyhow!("{e:#}")));
+        if result.is_err() {
+            if let Lifecycle::Starting { start, .. } = &mut lock(&self.guarded).lifecycle {
+                if start
+                    .as_ref()
+                    .is_some_and(|current| Arc::ptr_eq(current, slot))
+                {
+                    *start = None;
+                }
+            }
         }
+        result
+    }
+
+    /// Resolve the interpreter, spawn `python -m rlm.repl`, complete the protocol
+    /// handshake, and mark the kernel running.
+    async fn spawn_and_handshake(
+        self: &Arc<Self>,
+        options: &KernelStartOptions,
+    ) -> anyhow::Result<()> {
         // Tracked from the moment startup begins so cleanup can dispose a
         // kernel that is still booting.
         live_kernels::add(self);
@@ -149,8 +191,8 @@ impl Inner {
                 }
                 live_kernels::remove(self);
                 let mut g = lock(&self.guarded);
-                if g.state != KernelState::Shutdown {
-                    g.state = KernelState::Idle;
+                if g.lifecycle.phase() != KernelState::Shutdown {
+                    g.lifecycle = Lifecycle::Idle;
                 }
                 return Err(error);
             }
@@ -159,7 +201,7 @@ impl Inner {
         if self.start_stale(generation) {
             return Err(anyhow!("Kernel start superseded"));
         }
-        if lock(&self.guarded).state == KernelState::Shutdown {
+        if lock(&self.guarded).lifecycle.phase() == KernelState::Shutdown {
             return Err(anyhow!("Kernel was disposed during startup"));
         }
 
@@ -186,14 +228,8 @@ impl Inner {
                 // is stale.
                 crate::kernel::bootstrap::invalidate_runtime_probe_cache();
                 self.append_diagnostic(&format!("spawn error: {error}"));
-                {
-                    let mut g = lock(&self.guarded);
-                    g.state = KernelState::Shutdown;
-                }
+                lock(&self.guarded).lifecycle = Lifecycle::Defunct;
                 live_kernels::remove(self);
-                if let Some(tx) = lock(&self.guarded).ready_tx.take() {
-                    let _ = tx.send(Err(anyhow!("spawn error: {error}")));
-                }
                 self.cleanup_resources(Signal::Term);
                 return Err(anyhow!(
                     "failed to spawn kernel python {}: {error}",
@@ -204,10 +240,11 @@ impl Inner {
         let pid = child.id().map_or(-1, |p| p as i32);
         orphan_journal::record_orphan_process_state(pid, true);
         let (ready_tx, ready_rx) = oneshot::channel::<anyhow::Result<i64>>();
+        if let Lifecycle::Starting {
+            ready_tx: waiting, ..
+        } = &mut lock(&self.guarded).lifecycle
         {
-            let mut g = lock(&self.guarded);
-            g.startup_protocol_error = None;
-            g.ready_tx = Some(ready_tx);
+            *waiting = Some(ready_tx);
         }
         self.wire_child(child, generation);
 
@@ -221,14 +258,15 @@ impl Inner {
                 // The child died or never reached ready, so the memoized runtime-ready
                 // result is stale: drop it and let a startup retry re-probe.
                 crate::kernel::bootstrap::invalidate_runtime_probe_cache();
-                let can_retry_startup = lock(&self.guarded).state != KernelState::Shutdown;
+                let can_retry_startup =
+                    lock(&self.guarded).lifecycle.phase() != KernelState::Shutdown;
                 // Only the call that performed the cleanup may resurrect to
                 // idle; a concurrent kill()/teardown owns the state otherwise.
                 let performed = self
                     .perform_shutdown(KernelShutdownOptions::default())
                     .await;
                 if performed && can_retry_startup {
-                    lock(&self.guarded).state = KernelState::Idle;
+                    lock(&self.guarded).lifecycle = Lifecycle::Idle;
                 }
                 return Err(error);
             }
@@ -236,7 +274,11 @@ impl Inner {
         if self.start_stale(generation) {
             return Err(anyhow!("Kernel start superseded"));
         }
-        if let Some(startup_error) = lock(&self.guarded).startup_protocol_error.clone() {
+        let startup_error = match &lock(&self.guarded).lifecycle {
+            Lifecycle::Starting { protocol_error, .. } => protocol_error.clone(),
+            _ => None,
+        };
+        if let Some(startup_error) = startup_error {
             return Err(anyhow!("{startup_error}"));
         }
         if protocol != REPL_PROTOCOL_VERSION as i64 {
@@ -250,7 +292,7 @@ impl Inner {
         }
         {
             let mut g = lock(&self.guarded);
-            g.state = KernelState::Running;
+            g.lifecycle = Lifecycle::Running;
             // The freshness memo describes the namespace of the kernel that committed it: a freshly
             // started kernel has no committed description yet.
             g.capture_freshness = None;
@@ -439,11 +481,17 @@ impl Inner {
             }
             // append_diagnostic re-locks `guarded`, so it must run OUTSIDE
             // this lock scope (a std Mutex is not reentrant).
-            let was_live = {
+            // An in-flight graceful shutdown() owns this exit: it runs cleanup itself.
+            let (was_live, graceful_in_flight) = {
                 let mut g = lock(&inner.guarded);
-                let was_live = g.state != KernelState::Shutdown;
-                g.state = KernelState::Shutdown;
-                was_live
+                if matches!(g.lifecycle, Lifecycle::ShuttingDown { generation } if generation == g.start_generation)
+                {
+                    (false, true)
+                } else {
+                    let was_live = g.lifecycle.phase() != KernelState::Shutdown;
+                    g.lifecycle = Lifecycle::Defunct;
+                    (was_live, false)
+                }
             };
             if was_live {
                 inner.append_diagnostic(&format!(
@@ -453,14 +501,6 @@ impl Inner {
                 ));
             }
             live_kernels::remove(&inner);
-            // This exit is part of an in-flight graceful shutdown(): that call owns
-            // the teardown and runs cleanup itself.
-            // Scoped reads: locking the same std Mutex twice in one expression
-            // self-deadlocks (non-reentrant).
-            let graceful_in_flight = {
-                let g = lock(&inner.guarded);
-                g.graceful_shutdown_generation == Some(g.start_generation)
-            };
             if graceful_in_flight {
                 return;
             }

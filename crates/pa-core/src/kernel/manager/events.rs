@@ -4,7 +4,7 @@
 use super::{
     append_truncated, lock, parse_attachment_display, parse_diff_display, parse_sent_agent_message,
     Arc, Event, ExecBuffers, ExecuteStatus, Guarded, Inner, KernelBashCommands, KernelError,
-    StreamName, Value, AGENT_MESSAGE_DISPLAY_MIME, ATTACHMENT_DISPLAY_MIME,
+    Lifecycle, StreamName, Value, AGENT_MESSAGE_DISPLAY_MIME, ATTACHMENT_DISPLAY_MIME,
     BASH_ACTIVITY_DISPLAY_MIME, BASH_COMMAND_DISPLAY_MIME, DIFF_DISPLAY_MIME,
     MAX_ATTACHMENT_DATA_CHARS, MAX_BACKGROUND_OUTPUT_CHARS, TRANSCRIPT_READ_DISPLAY_MIME,
 };
@@ -50,8 +50,10 @@ impl Inner {
                 self.dispatch_display(id.as_deref(), data);
             }
             Event::Ready { protocol } => {
-                if let Some(tx) = lock(&self.guarded).ready_tx.take() {
-                    let _ = tx.send(Ok(protocol));
+                if let Lifecycle::Starting { ready_tx, .. } = &mut lock(&self.guarded).lifecycle {
+                    if let Some(tx) = ready_tx.take() {
+                        let _ = tx.send(Ok(protocol));
+                    }
                 }
             }
             Event::HostRequest { id, data } => self.start_host_request(&id, data),

@@ -113,7 +113,7 @@ impl Inner {
     }
 
     fn is_running_state(&self) -> bool {
-        lock(&self.guarded).state == KernelState::Running
+        lock(&self.guarded).lifecycle.phase() == KernelState::Running
     }
 
     /// The recurring capture-freshness skip (see `CaptureFreshness`):

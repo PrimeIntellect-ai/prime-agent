@@ -254,7 +254,7 @@ impl ReplKernelManager {
     }
 
     fn state(&self) -> KernelState {
-        lock(&self.inner.guarded).state
+        lock(&self.inner.guarded).lifecycle.phase()
     }
 
     #[allow(clippy::too_many_lines)]
