@@ -411,6 +411,36 @@ async fn a_stale_epoch_never_overwrites_the_installed_channel() {
     assert_eq!(frame.command_type, "get_state");
 }
 
+/// A connection that ended before its handshake installed (the worker died right
+/// after answering auth) must not install its dead channel afterwards: the loss
+/// ends the epoch, so a crashed worker never reads as connected.
+#[tokio::test]
+async fn an_ended_connection_never_installs_its_channel() {
+    let dir = tempfile::TempDir::new().expect("temp dir");
+    let descriptor: DaemonWorkerDescriptor = serde_json::from_value(json!({
+        "version": 2, "workerId": "w-ended", "pid": 0, "socketPath": "/tmp/none.sock",
+        "recoveryJournalPath": "/tmp/none.jsonl", "supervisorSocketPath": "/tmp/none.sock",
+        "authenticationToken": "ended-token", "rootActiveSessionId": "none",
+        "createdAt": "2026-11-07T00:00:00Z", "updatedAt": "2026-11-07T00:00:00Z",
+        "lifecycle": "ready", "createCommand": {}, "consecutiveFailures": 0,
+    }))
+    .expect("descriptor");
+    let resident = ResidentWorker::new(
+        "w-ended".to_string(),
+        descriptor,
+        dir.path().join("w-ended.json"),
+    );
+    let (cmd_tx, _cmd_rx) =
+        mpsc::channel::<WorkerRequest>(crate::backpressure::WORKER_INFLIGHT_CAPACITY);
+    let epoch = resident.note_connection_live();
+    resident.note_connection_lost(epoch).await;
+    resident.install_command_channel(epoch, cmd_tx).await;
+    assert!(
+        resident.cmd_tx.lock().await.is_none(),
+        "the ended connection installs no channel"
+    );
+}
+
 /// A lost worker connection fails its in-flight routes right away (TS
 /// `notifyClosed` -> `rejectAll`): the reader drains the connection's reply
 /// slots when the socket ends, so a route waiting on the worker's answer

@@ -137,6 +137,9 @@ pub(crate) struct ResidentWorker {
     /// Monotonic connection epoch: only the current connection's pumps may flip `connected` false
     /// (a superseded socket's late EOF cannot retire a live replacement).
     connection_epoch: AtomicU64,
+    /// The epoch whose connection already ended (written under the channel lock): its
+    /// handshake must not install a channel after the loss.
+    ended_epoch: AtomicU64,
     /// The compaction-abort token: armed by `compaction_start`, cleared by
     /// `compaction_end`, so an `abort_compaction` never needs the worker's own answer.
     pub(crate) compaction: crate::compaction_supervision::CompactionSupervision,
@@ -197,6 +200,7 @@ impl ResidentWorker {
             identity_persist_pending: AtomicBool::new(false),
             identity_quarantined: AtomicBool::new(false),
             connection_epoch: AtomicU64::new(0),
+            ended_epoch: AtomicU64::new(0),
             compaction: crate::compaction_supervision::CompactionSupervision::default(),
             owner_cleanup: std::sync::Mutex::new(None),
             launch_env: std::sync::Mutex::new(None),
@@ -264,9 +268,13 @@ impl ResidentWorker {
         cmd_tx: tokio::sync::mpsc::Sender<WorkerRequest>,
     ) {
         // The epoch recheck runs UNDER the channel lock: a stale connect
-        // must never overwrite a newer connection's channel.
+        // must never overwrite a newer connection's channel, and a connection
+        // that already ended (its worker died right after the auth answer)
+        // must not install a dead one.
         let mut guard = self.cmd_tx.lock().await;
-        if !self.connection_is_current(epoch) {
+        if !self.connection_is_current(epoch)
+            || self.ended_epoch.load(std::sync::atomic::Ordering::SeqCst) == epoch
+        {
             return;
         }
         *guard = Some(cmd_tx);
@@ -281,6 +289,8 @@ impl ResidentWorker {
         if !self.connection_is_current(epoch) {
             return;
         }
+        self.ended_epoch
+            .store(epoch, std::sync::atomic::Ordering::SeqCst);
         *guard = None;
         self.publish_route_state(|state| state.connected = false);
     }
