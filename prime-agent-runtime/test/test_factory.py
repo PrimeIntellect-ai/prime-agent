@@ -5106,6 +5106,28 @@ class FactoryExecutorTest(_ExecutorTestCase):
         self.assertEqual(kinds[kinds.index("run_stopped"):], ["run_stopped", "cancelled"])
 
     @async_test
+    async def test_spawn_failure_after_stop_keeps_the_instance_cancelled(self) -> None:
+        # stop() cancels the pending instance while its last allowed
+        # rate-limited admission is in flight; that admission then fails the
+        # node. The late failure must not touch the cancelled instance or
+        # fail the control loop.
+        self.host.rate_limit_forever.add("a")
+        last_call = factory_module.BACKOFF_MAX_ATTEMPTS + 1  # + run()'s own deferred admission
+        spawn_gate = self.host.gate("rlm.run", last_call)
+        gate_entered = self.host.gate_entered("rlm.run", last_call)
+        self.store_factory({"nodes": [{"id": "a", "subagent": "worker"}]})
+        result = await self.start()
+        await gate_entered.wait()
+        stopped = await rlm_module.rlm.factory.stop(result["run_id"])
+        self.assertEqual(stopped["cancelled"], ["a"])
+        spawn_gate.set()
+        await self.executor._runs[result["run_id"]].task
+        status = await rlm_module.rlm.factory.status(result["run_id"])
+        self.assertEqual(status["state"], "stopped")
+        self.assertEqual(self.node_status(status, "a")["instances"][0]["status"], "cancelled")
+        self.assertEqual(self.all_events_of(result, "executor_error"), [])
+
+    @async_test
     async def test_stop_during_admission_backoff_cancels_the_instance(self) -> None:
         # stop() lands while the loop waits out a rate-limit backoff
         # deadline: waking must not retry the spawn; the instance is

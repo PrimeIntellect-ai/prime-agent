@@ -3675,6 +3675,8 @@ class FactoryExecutor:
     async def _apply_instance_failure(
         self, run: FactoryRun, state: _StateRun, entry: _StateEntry, instance: _NodeInstance, reason: str, *, retry: bool
     ) -> None:
+        if instance.status == NodeStatus.CANCELLED:
+            return  # a stop()/halt claimed the instance while its spawn was in flight
         instance.set_status(NodeStatus.ERROR)
         instance.error = reason
         self._event(
