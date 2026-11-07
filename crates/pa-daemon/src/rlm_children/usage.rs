@@ -1,5 +1,6 @@
 //! The child-usage attribution concern: the per-origin usage batches,
 //! the forget/emit pairing, and the rearming watch loop.
+use super::retirement::{RetirementEvent, RetirementIntent};
 use super::{
     Arc, ChildRecord, Duration, Instant, Mutex, PathBuf, RlmChildUsageReport,
     SupervisorChildSessionsInner, FOLLOWUP_START_GRACE_MS, FOLLOWUP_START_POLL_MS,
@@ -100,7 +101,7 @@ impl SupervisorChildSessionsInner {
         if self.emit_child_usage(record).await {
             return;
         }
-        if record.lock().await.closed_by_parent {
+        if record.lock().await.retirement.closed_by_parent() {
             return;
         }
         self.emit_child_usage(record).await;
@@ -139,45 +140,32 @@ impl SupervisorChildSessionsInner {
         true
     }
 
-    /// Keep a confirmed-dead child's final accounting reachable after roster retirement.
-    pub(super) fn retain_retired_usage(
+    /// Record a confirmed kill on the child and keep its final accounting
+    /// reachable after roster retirement; the first confirmed intent stands.
+    pub(super) async fn retain_retired_usage(
         &self,
         record: &Arc<Mutex<ChildRecord>>,
-        intent: super::RetirementIntent,
+        intent: RetirementIntent,
     ) {
+        record
+            .lock()
+            .await
+            .retirement
+            .apply(RetirementEvent::KillConfirmed(intent));
         let mut retired = self
             .retired_usage
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if !retired.iter().any(|held| Arc::ptr_eq(&held.record, record)) {
-            retired.push(super::RetiredChild {
-                record: Arc::clone(record),
-                intent,
-            });
+        if !retired.iter().any(|held| Arc::ptr_eq(held, record)) {
+            retired.push(Arc::clone(record));
         }
-    }
-
-    pub(super) fn retirement_intent(
-        &self,
-        record: &Arc<Mutex<ChildRecord>>,
-    ) -> Option<super::RetirementIntent> {
-        self.retired_usage
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .iter()
-            .find(|held| Arc::ptr_eq(&held.record, record))
-            .map(|held| held.intent)
-    }
-
-    pub(super) fn has_retired_usage(&self, record: &Arc<Mutex<ChildRecord>>) -> bool {
-        self.retirement_intent(record).is_some()
     }
 
     pub(super) fn remove_retired_usage(&self, record: &Arc<Mutex<ChildRecord>>) {
         self.retired_usage
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .retain(|held| !Arc::ptr_eq(&held.record, record));
+            .retain(|held| !Arc::ptr_eq(held, record));
     }
 
     /// One bounded replay per matching receipt; never repeat a confirmed worker kill.
@@ -188,8 +176,7 @@ impl SupervisorChildSessionsInner {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone();
         let mut persisted = true;
-        for retirement in retired {
-            let record = retirement.record;
+        for record in retired {
             let matches = {
                 let row = record.lock().await;
                 target.is_none_or(|target| row.matches(target))
@@ -204,7 +191,7 @@ impl SupervisorChildSessionsInner {
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .iter()
-                .any(|held| Arc::ptr_eq(&held.record, &record))
+                .any(|held| Arc::ptr_eq(held, &record))
             {
                 continue;
             }
@@ -232,7 +219,7 @@ impl SupervisorChildSessionsInner {
     /// busy again (a delayed agent-message turn): observation-only, it
     /// never touches the run status, notices, or the settle hook.
     pub(super) async fn arm_usage_watch(this: &Arc<Self>, record: &Arc<Mutex<ChildRecord>>) {
-        if record.lock().await.closed_by_parent {
+        if record.lock().await.retirement.closed_by_parent() {
             return;
         }
         // Prime a lazy cursor at the tail so the pre-restart history is never billed.
@@ -285,7 +272,7 @@ impl SupervisorChildSessionsInner {
             // delivered turn).
             let mut unreachable_polls: u32 = 0;
             loop {
-                if record.lock().await.closed_by_parent {
+                if record.lock().await.retirement.closed_by_parent() {
                     record.lock().await.usage_watch_live = false;
                     return;
                 }
@@ -311,7 +298,7 @@ impl SupervisorChildSessionsInner {
             let start_deadline = Instant::now() + Duration::from_millis(FOLLOWUP_START_GRACE_MS);
             let mut turn_started = false;
             loop {
-                if record.lock().await.closed_by_parent {
+                if record.lock().await.retirement.closed_by_parent() {
                     record.lock().await.usage_watch_live = false;
                     return;
                 }
@@ -331,7 +318,7 @@ impl SupervisorChildSessionsInner {
                 // watcher's cadence, minus its settle bookkeeping).
                 let mut unreachable_polls: u32 = 0;
                 loop {
-                    if record.lock().await.closed_by_parent {
+                    if record.lock().await.retirement.closed_by_parent() {
                         break;
                     }
                     let active_session_id = record.lock().await.active_session_id.clone();

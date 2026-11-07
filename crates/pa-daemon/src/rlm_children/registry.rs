@@ -4,6 +4,7 @@
 //! marker is registry-only.
 use std::path::{Path, PathBuf};
 
+use super::retirement::{FinishStep, Retirement, RetirementEvent, RetirementIntent};
 use super::run_state::{RunEvent, RunState, RunVerdict};
 use super::{
     bail, json, rlm_child_label, Arc, ChildCloseReason, ChildRecord, Context, DaemonCommand,
@@ -158,7 +159,7 @@ impl SupervisorChildSessionsInner {
             }
             let rename_lock = record.lock().await.rename_lock.clone();
             let _guard = rename_lock.lock().await;
-            let already_terminated = self.has_retired_usage(record);
+            let already_terminated = record.lock().await.retirement.intent().is_some();
             if !self
                 .children
                 .lock()
@@ -198,10 +199,8 @@ impl SupervisorChildSessionsInner {
                 // Rows can land between the pre-kill capture and the kill
                 // (a settle racing the kill): the post-kill walk is the last
                 // observation; the cursor keeps it free of double-billing.
-                self.retain_retired_usage(
-                    record,
-                    super::RetirementIntent::Delete { was_running: false },
-                );
+                self.retain_retired_usage(record, RetirementIntent::Delete { was_running: false })
+                    .await;
                 self.emit_child_usage(record).await;
             }
             let usage_persisted = self.forget_child_usage(record).await;
@@ -245,10 +244,10 @@ impl SupervisorChildSessionsInner {
             {
                 continue;
             }
-            if !self.has_retired_usage(record) {
+            if record.lock().await.retirement.intent().is_none() {
                 {
                     let mut record = record.lock().await;
-                    record.closed_by_parent = true;
+                    record.retirement.apply(RetirementEvent::BeginClose);
                     record.notice_delivered = true;
                 }
                 self.emit_child_usage(record).await;
@@ -289,7 +288,8 @@ impl SupervisorChildSessionsInner {
                     self.record_child_cancelled(record, ChildCancelledReason::CloseKilled)
                         .await;
                 }
-                self.retain_retired_usage(record, super::RetirementIntent::Close);
+                self.retain_retired_usage(record, RetirementIntent::Close)
+                    .await;
                 self.emit_child_usage(record).await;
             }
             let usage_persisted = self.forget_child_usage(record).await;
@@ -314,28 +314,27 @@ impl SupervisorChildSessionsInner {
 
     /// Complete a confirmed retirement once, including an interrupted caller's bookkeeping.
     pub(super) async fn finish_retirement(&self, record: &Arc<Mutex<ChildRecord>>) {
-        if record.lock().await.retirement_finished {
-            return;
-        }
-        let intent = self
-            .retirement_intent(record)
-            .expect("confirmed retirement receipt");
-        let deleted = matches!(intent, super::RetirementIntent::Delete { .. });
-        let cancelled_by_delete = matches!(
-            intent,
-            super::RetirementIntent::Delete { was_running: true }
-        );
+        let intent = {
+            let row = record.lock().await;
+            if row.retirement.finished() {
+                return;
+            }
+            row.retirement
+                .intent()
+                .expect("confirmed retirement receipt")
+        };
+        let deleted = matches!(intent, RetirementIntent::Delete { .. });
+        let cancelled_by_delete = matches!(intent, RetirementIntent::Delete { was_running: true });
         let child_id = {
             let mut row = record.lock().await;
-            row.closed_by_parent = true;
             match intent {
-                super::RetirementIntent::Delete { was_running } => {
+                RetirementIntent::Delete { was_running } => {
                     if was_running {
                         row.run.apply(RunEvent::DeleteCancel);
                     }
                     self.remember_deleted_child(&row);
                 }
-                super::RetirementIntent::Close => {
+                RetirementIntent::Close => {
                     row.notice_delivered = true;
                 }
             }
@@ -357,10 +356,10 @@ impl SupervisorChildSessionsInner {
                 .clone();
             let row = {
                 let mut row = record.lock().await;
-                if row.retirement_roster_emitted {
-                    None
-                } else {
-                    row.retirement_roster_emitted = true;
+                if row
+                    .retirement
+                    .apply(RetirementEvent::Claim(FinishStep::RosterEmitted))
+                {
                     Some(if cancelled_by_delete {
                         row.snapshot_value()
                     } else {
@@ -371,6 +370,8 @@ impl SupervisorChildSessionsInner {
                             "error": "Deleted by parent orchestrator"
                         })
                     })
+                } else {
+                    None
                 }
             };
             if let (Some(sink), Some(row)) = (sink, row) {
@@ -387,12 +388,11 @@ impl SupervisorChildSessionsInner {
                 .lock()
                 .expect("delete notifier lock")
                 .clone();
-            let claimed = {
-                let mut row = record.lock().await;
-                let claimed = !row.retirement_notified;
-                row.retirement_notified = true;
-                claimed
-            };
+            let claimed = record
+                .lock()
+                .await
+                .retirement
+                .apply(RetirementEvent::Claim(FinishStep::Notified));
             if let Some(notify) = notify.filter(|_| claimed) {
                 notify(&child_id);
             }
@@ -418,7 +418,8 @@ impl SupervisorChildSessionsInner {
         let notify_hook = {
             let mut row = record.lock().await;
             row.run.apply(RunEvent::Funnel);
-            row.retirement_finished = true;
+            row.retirement
+                .apply(RetirementEvent::Claim(FinishStep::Finished));
             deleted
         };
         // No await follows the completion claim: cancellation cannot strand its notifications.
@@ -609,11 +610,7 @@ fn ledger_child_records(
             notice_delivered: true,
             factory: edge.factory.is_some(),
             prompt_admitted: true,
-            closed_by_parent: false,
-            retiring: false,
-            retirement_finished: false,
-            retirement_notified: false,
-            retirement_roster_emitted: false,
+            retirement: Retirement::live(),
             usage_registration_forgotten: false,
             session_file: Some(edge.child),
             attributed_rows: None,
