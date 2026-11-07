@@ -18,7 +18,7 @@ use crate::session::manager::SessionManager;
 use crate::skills::{get_python_skill_runtime_info, Skill};
 use crate::tools::ipython::{
     IpythonKernelProvisioner, IpythonToolOptions, KernelAttachment, KernelErrorInfo,
-    KernelExecError, KernelExecuteOptions, KernelExecutor,
+    KernelExecuteOptions, KernelExecutor,
 };
 
 use super::host_requests::SessionBinding;
@@ -379,12 +379,8 @@ impl KernelExecutor for KernelManagerExecutor {
         &self,
         code: &str,
         options: KernelExecuteOptions<'_>,
-    ) -> Pin<
-        Box<
-            dyn Future<Output = Result<crate::tools::ipython::ExecuteResult, KernelExecError>>
-                + Send,
-        >,
-    > {
+    ) -> Pin<Box<dyn Future<Output = anyhow::Result<crate::tools::ipython::ExecuteResult>> + Send>>
+    {
         let manager = self.manager.clone();
         let code = code.to_string();
         let signal = options.signal;
@@ -406,8 +402,7 @@ impl KernelExecutor for KernelManagerExecutor {
                         ..Default::default()
                     },
                 )
-                .await
-                .map_err(KernelExecError::Other)?;
+                .await?;
             Ok(convert_execute_result(result))
         })
     }
@@ -478,7 +473,6 @@ pub fn ipython_tool_options(
 ) -> IpythonToolOptions {
     IpythonToolOptions {
         provisioner,
-        ui: None,
         on_late_sent_agent_message,
     }
 }
