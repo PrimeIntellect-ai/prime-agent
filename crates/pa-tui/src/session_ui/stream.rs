@@ -1,7 +1,7 @@
 //! The working loader's activity and token accounting over provider stream
 //! events, plus the `/speed` readout and the streaming/running/resume hint
 //! helpers.
-use super::{AgentView, SessionUi, Value, WorkingState};
+use super::{AgentView, SessionUi, Value};
 
 /// The loader's token accounting: the live count is completed-message output tokens plus
 /// max(reported usage, the chars/4 estimate), derived from the streamed message itself — never from
@@ -18,7 +18,7 @@ pub(super) struct LoaderTokenTracker {
 
 impl LoaderTokenTracker {
     /// A fresh run counts from zero.
-    fn reset(&mut self) {
+    pub(super) fn reset(&mut self) {
         self.completed_tokens = 0;
         self.start_message();
     }
@@ -80,25 +80,6 @@ fn format_rate(tokens_per_second: f64) -> String {
 }
 
 impl SessionUi {
-    pub(crate) fn start_loader(&mut self, view: &mut AgentView) {
-        self.start_loader_at(view, std::time::Instant::now());
-    }
-
-    /// [`Self::start_loader`] with an explicit anchor: the live paths pass
-    /// now; the rebuild path passes the LAST HUMAN PROMPT's instant (the
-    /// operator's 2026-09-28 rule: the timer never resets on a view transition).
-    pub(crate) fn start_loader_at(&mut self, view: &mut AgentView, since: std::time::Instant) {
-        view.working = Some(WorkingState {
-            activity: "Waiting",
-            message: None,
-            download: false,
-            tokens: 0,
-            elapsed_secs: 0,
-        });
-        view.working_since = Some(since);
-        self.working_tokens.reset();
-    }
-
     /// Update the loader's activity label from one provider stream event (thinking/text/toolcall
     /// events switch the label and direction): the message, not the delta, carries the token truth.
     pub(crate) fn track_stream_activity(event: &Value, view: &mut AgentView) {
@@ -178,10 +159,10 @@ impl SessionUi {
 /// exit hint outranks it at the call site).
 pub(super) fn streaming_tray_hint(
     keybindings: &crate::keybindings::KeybindingsManager,
-    turn_active: bool,
+    busy: bool,
     draft: &str,
 ) -> Option<String> {
-    if !turn_active || draft.trim().is_empty() {
+    if !busy || draft.trim().is_empty() {
         return None;
     }
     let follow_up = keybindings

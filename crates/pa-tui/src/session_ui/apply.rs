@@ -3,7 +3,8 @@
 use super::{
     assistant_message_parts, event_to_update, pop_superseded_attempt_row, AgentView, ChatEntry,
     CompactionReason, CompactionState, DaemonClientEvent, DaemonCommand, Map, MessageBlock,
-    Overlay, Result, RetryState, SessionUi, StatusKind, ToolResultView, TurnUpdate, Value,
+    Overlay, Result, RetryState, RunEvent, RunState, SessionUi, StatusKind, ToolResultView,
+    TurnUpdate, Value,
 };
 use crate::interactive::reconnect::{ConnectionEffect, ConnectionEvent};
 
@@ -270,10 +271,8 @@ impl SessionUi {
                 reason,
             } => {
                 if active_session_id == self.active_session_id {
-                    self.turn_active = false;
-                    self.run_open = false;
+                    self.apply_run_event(RunEvent::Ended, view);
                     self.outcome_after_compaction = None;
-                    view.working = None;
                     view.retry = None;
                     view.compaction = None;
                     // The closed session cannot run again: its remembered
@@ -397,9 +396,9 @@ impl SessionUi {
     fn apply_update(&mut self, update: TurnUpdate, view: &mut AgentView) {
         match update {
             TurnUpdate::TurnStarted => {
-                self.turn_active = true;
-                if !self.run_open {
-                    self.run_open = true;
+                let opening_run = self.run_state != RunState::Running;
+                self.apply_run_event(RunEvent::Started, view);
+                if opening_run {
                     self.run_outcome = crate::program_status::Status::Done;
                 }
                 self.settled = None;
@@ -412,7 +411,6 @@ impl SessionUi {
                     "the turn ended before this call returned",
                 );
                 self.aborted_tools.clear();
-                self.start_loader(view);
             }
             TurnUpdate::UserMessage(text) => {
                 match crate::custom_message::skill_invocation_entries(&text) {
@@ -456,7 +454,7 @@ impl SessionUi {
                 // frames — it would allocate a fresh card whose timer then
                 // reticks the settled id on this run's paints, so it lands
                 // on nothing too.
-                if !self.aborted_tools.contains(&tool_call_id) && self.turn_active {
+                if !self.aborted_tools.contains(&tool_call_id) && self.run_state.is_busy() {
                     crate::snapshot::apply_tool_execution_start(
                         view,
                         &tool_call_id,
@@ -507,12 +505,11 @@ impl SessionUi {
                 // One LLM turn ended; the run, and with it the busy state, lasts until
                 // `agent_end` (#3998). The OSC outcome tracks the run separately below.
                 self.streaming_index = None;
-                self.turn_ends_seen += 1;
                 // An aborted settle ends the run (the abort fallback frame
                 // has no agent_end); a failed step leaves the run open for
                 // its agent_end, which a pending retry follows first.
                 if aborted {
-                    self.run_open = false;
+                    self.apply_run_event(RunEvent::Ended, view);
                     self.settled = None;
                 } else if run_failed {
                     self.run_outcome = crate::program_status::Status::Error;
@@ -586,9 +583,8 @@ impl SessionUi {
                 reason,
                 custom_instructions,
             } => {
-                // The compaction loader replaces the working loader; the generation bump retires
-                // every in-flight abort outcome from an earlier run's loader.
-                view.working = None;
+                // The compaction loader renders over the working loader; the generation bump
+                // retires every in-flight abort outcome from an earlier run's loader.
                 view.compaction_generation += 1;
                 view.compaction = Some(CompactionState {
                     reason: CompactionReason::parse(&reason),
@@ -669,6 +665,7 @@ impl SessionUi {
                 // held here is the next attempt's, never a stale one (the
                 // loop's own frames close it).
                 let retry_pending = view.retry.is_some();
+                let run_was_open = self.run_state == RunState::Running;
                 self.end_run(view);
                 // The run's end settles its outcome. An abort between steps
                 // and tools keeps the original toolUse turn_end, so only the
@@ -676,8 +673,7 @@ impl SessionUi {
                 // pending rests working on the countdown instead, and one
                 // whose overflow recovery compaction runs leaves the outcome
                 // to that compaction's end.
-                if self.run_open {
-                    self.run_open = false;
+                if run_was_open {
                     self.settled = None;
                     if !aborted {
                         if view.compaction.is_some() {
@@ -770,9 +766,7 @@ impl SessionUi {
     /// failed attempt's `agent_end` until after `auto_retry_start`, so it survives here
     /// and the retry loop's own frames close it.
     fn end_run(&mut self, view: &mut AgentView) {
-        self.turn_active = false;
-        view.working = None;
-        view.working_since = None;
+        self.apply_run_event(RunEvent::Ended, view);
         // A run that ends without its `turn_end` (a pre-run abort, a detach) still
         // leaves no live streaming slot behind.
         self.streaming_index = None;
@@ -798,7 +792,7 @@ impl SessionUi {
             // The interrupt cancels the compaction run only — the agent is not
             // streaming, so no turn abort goes out.
             self.abort_compaction(view.compaction_generation);
-        } else if self.turn_active {
+        } else if self.run_state.is_busy() {
             // No transient abort hint: the aborted turn's own assistant row carries
             // the interrupt, so nothing is noted here.
             self.abort_turn();

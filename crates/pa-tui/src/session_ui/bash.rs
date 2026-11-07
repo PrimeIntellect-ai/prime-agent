@@ -478,7 +478,7 @@ impl SessionUi {
             view.chat.last(),
             Some(ChatEntry::AgentMessage(_) | ChatEntry::InboxNotice(_))
         );
-        if self.turn_active {
+        if self.run_busy() {
             view.pending_bash.push(card);
         } else {
             view.push_entry(ChatEntry::BashExecution(Box::new(card)));
