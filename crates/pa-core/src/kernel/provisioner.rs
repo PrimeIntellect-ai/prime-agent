@@ -421,7 +421,8 @@ async fn run_startup(
                 remaining_retries -= 1;
                 let backoff_ms =
                     RETRY_BACKOFF_MS[(attempt as usize - 1).min(RETRY_BACKOFF_MS.len() - 1)];
-                boot.emit(&format!("Kernel start failed; retrying in {backoff_ms}ms…"));
+                boot.emit(&format!("Kernel start failed; retrying in {backoff_ms}ms…"))
+                    .await;
                 tokio::select! {
                     () = tokio::time::sleep(std::time::Duration::from_millis(backoff_ms)) => {}
                     () = inner.dispose_signal.cancelled() => break Err(error),
@@ -538,7 +539,7 @@ async fn start_kernel_impl(
         stderr_log_path,
     });
 
-    boot.emit("Starting Python kernel...");
+    boot.emit("Starting Python kernel...").await;
     // Only the process spawn + ready handshake contends for OS resources under
     // a fan-out, and it is bounded by start()'s own timeout — so the permit
     // covers only start(). Restore/bootstrap run per-kernel afterwards.
@@ -600,13 +601,13 @@ async fn start_kernel_impl(
     let mut snapshot_existed = false;
     if let Some(dir) = &snapshot_dir {
         snapshot_existed = snapshot_path_in(dir).exists();
-        boot.emit("Restoring Python state...");
+        boot.emit("Restoring Python state...").await;
         let restore = manager.restore_state().await;
         if snapshot_existed {
             pending_restore = Some(restore.unwrap_or_default());
         }
     }
-    boot.emit("Preparing Python runtime...");
+    boot.emit("Preparing Python runtime...").await;
     // The bootstrap runs on the dispose signal (TS startKernel races every
     // boot stage against the dispose-linked abort): a dispose mid-bootstrap
     // settles the cell aborted, and the aborted-status arm below tears the
@@ -644,11 +645,14 @@ async fn start_kernel_impl(
             // Broken skill imports stay importable-looking placeholders;
             // report them so the model learns before its first call, not
             // from the placeholder's error (TS startKernel) - but only a
-            // LIVE generation may report (checked under the state lock): the callback
+            // LIVE generation may report (the owner checks): the callback
             // shares the restore notice's mailbox, and a boot kill()
             // invalidated must not append stale skills-unavailable rows.
             if let Some(errors) = parse_unavailable_python_skills(&bootstrap.stdout) {
-                boot.report_unavailable_skills(inner, &errors);
+                boot.send(owner::Command::UnavailableSkills {
+                    generation: boot.generation,
+                    errors,
+                });
             }
         }
         Ok(bootstrap) => {
@@ -699,12 +703,15 @@ async fn start_kernel_impl(
 
     // Only tell the model what was revived once the kernel is actually usable —
     // a notice claiming restored state must never outlive a failed bootstrap,
-    // and only a LIVE generation may surface it (checked under the state lock): a boot
+    // and only a LIVE generation may surface it (the owner checks): a boot
     // kill() invalidated restores its snapshot only for the settle to kill its
     // kernel, so its restore must not fire the notification nor pollute
     // last_restore for the fresher generation.
     if let Some(restore) = pending_restore {
-        boot.publish_restore(inner, restore);
+        boot.send(owner::Command::Restored {
+            generation: boot.generation,
+            restore,
+        });
     }
     Ok(manager)
 }
