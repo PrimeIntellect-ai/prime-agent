@@ -919,6 +919,40 @@ fn factory_page_picker_keys_paint_the_moved_selection_on_the_key() {
     );
 }
 
+/// A paste while the factory page owns the frame never lands in the editor hidden behind it: the
+/// page has no text input, so it consumes the paste like the other input-less frame owners.
+#[test]
+fn a_paste_on_the_factory_page_stays_out_of_the_hidden_editor() {
+    let graph = json!({ "runs": [factory_page_run("run-1", "only-run")] });
+    let steps = vec![
+        HeadlessStep::Key(alt_a()),
+        HeadlessStep::Key(down()),
+        HeadlessStep::Key(down()),
+        HeadlessStep::Key(down()),
+        HeadlessStep::Key(enter()),
+        HeadlessStep::WaitRender {
+            needle: "factory: only-run".to_string(),
+            timeout_ms: 5_000,
+        },
+        HeadlessStep::Paste("zq-stray-paste".to_string()),
+        HeadlessStep::Key(escape()),
+        HeadlessStep::WaitGone {
+            needle: "factory: only-run".to_string(),
+            timeout_ms: 5_000,
+        },
+    ];
+    let frames = run_plan_config(vec!["factory_activity".to_string()], Some(graph), steps);
+    let all = flat_text(&frames);
+    assert!(
+        all.contains("factory: only-run"),
+        "the page mounted before the paste:\n{all}"
+    );
+    assert!(
+        !all.contains("zq-stray-paste"),
+        "the paste must not reach the editor behind the page:\n{all}"
+    );
+}
+
 /// A session the daemon stops while its factory page is open leaves no stale run cards: the
 /// close clears the dock's run cache and the mounted page with it.
 #[test]
