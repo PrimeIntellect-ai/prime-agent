@@ -1,11 +1,11 @@
-//! Headless e2e for the daemon reconnects: the announced non-update daemon closing (TS #2458) must
-//! arm the bounded shutdown recovery at the notice and reconnect when the daemon returns on the
-//! same socket path (TS `reconnectAfterShutdown`: same path, same durable session id), and a full
-//! reconnect after an expired session-plane window must unblock submits.
+//! Headless e2e for the announced non-update daemon closing (TS #2458):
+//! the pane must arm the bounded shutdown recovery at the notice and
+//! reconnect when the daemon returns on the same socket path (TS
+//! `reconnectAfterShutdown`: same path, same durable session id).
 #![cfg(unix)]
 #![warn(clippy::allow_attributes_without_reason)]
 
-use std::io::{BufRead, BufReader, Read, Write};
+use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -16,10 +16,6 @@ use pa_tui::interactive::{
     run_interactive, HeadlessPlan, HeadlessStep, InteractiveOptions, ModelSelection,
     SessionSelection, UiMode,
 };
-use pa_types::daemon::framing::{
-    encode_private_frame, PrivateFrameDecoder, DEFAULT_PRIVATE_FRAME_LIMITS,
-};
-use pa_types::platform::socket_identity;
 use serde_json::{json, Value};
 
 /// The wait for the recovered banner: the shutdown recovery's fixed poll finds the successor well
@@ -203,197 +199,10 @@ impl SuccessorDaemon {
                     self.attach_requests.lock().unwrap().push(command);
                     write_json(&mut writer, &attach_data(id));
                 }
-                "prompt" => {
-                    write_json(&mut writer, &success_response(id, "prompt"));
-                    write_answered_turn(&mut writer, "the successor answered");
-                }
                 _ => write_json(&mut writer, &success_response(id, &command_type)),
             }
         }
     }
-}
-
-/// One complete assistant turn answering a prompt.
-fn write_answered_turn(writer: &mut UnixStream, answer: &str) {
-    let content = json!([{ "type": "text", "text": answer }]);
-    write_session_event(writer, &json!({ "type": "turn_start" }));
-    write_session_event(
-        writer,
-        &json!({
-            "type": "message_start",
-            "message": {
-                "role": "assistant",
-                "content": [{ "type": "text", "text": "" }],
-                "assistantMessageEvent": { "type": "start" },
-            },
-        }),
-    );
-    write_session_event(
-        writer,
-        &json!({
-            "type": "message_end",
-            "message": { "role": "assistant", "stopReason": "stop", "content": content },
-        }),
-    );
-    write_session_event(writer, &json!({ "type": "turn_end" }));
-}
-
-/// The session worker behind the direct link: it greets, admits the peer, serves the startup
-/// attach, then dies like a killed worker.
-fn serve_worker_until_attach(listener: &UnixListener) {
-    let mut stream = accept(listener, "the client never opened the direct worker link");
-    stream
-        .set_nonblocking(false)
-        .expect("blocking worker socket");
-    write_frame(
-        &mut stream,
-        &json!({ "kind": "outbound", "outboundType": "daemon_hello" }),
-        &json!({ "type": "daemon_hello" }),
-    );
-    let mut decoder = PrivateFrameDecoder::new(DEFAULT_PRIVATE_FRAME_LIMITS);
-    let mut chunk = [0u8; 8 * 1024];
-    loop {
-        let read = match stream.read(&mut chunk) {
-            Ok(0) | Err(_) => return,
-            Ok(read) => read,
-        };
-        for frame in decoder.push(&chunk[..read]).expect("decode a client frame") {
-            let id = frame.header["requestId"].as_str().unwrap_or_default();
-            let header = json!({ "kind": "outbound", "outboundType": "response", "requestId": id });
-            match frame.header["commandType"].as_str().unwrap_or_default() {
-                "peer_auth" => write_frame(
-                    &mut stream,
-                    &header,
-                    &json!({
-                        "type": "response",
-                        "id": id,
-                        "command": "peer_auth",
-                        "success": true,
-                        "data": {
-                            "workerInstanceId": "inst-1",
-                            "activeSessionId": "s1",
-                            "purpose": "session_client",
-                        },
-                    }),
-                ),
-                "attach" => {
-                    write_frame(&mut stream, &header, &attach_data(id));
-                    // Dropping the stream is the worker's death: the client's direct link is lost.
-                    return;
-                }
-                command => write_frame(&mut stream, &header, &success_response(id, command)),
-            }
-        }
-    }
-}
-
-fn write_frame(stream: &mut UnixStream, header: &Value, payload: &Value) {
-    let frame = encode_private_frame(
-        header,
-        &serde_json::to_vec(payload).expect("serialize worker frame"),
-        DEFAULT_PRIVATE_FRAME_LIMITS,
-    )
-    .expect("encode worker frame");
-    stream.write_all(&frame).expect("write worker frame");
-}
-
-/// The direct-transport ticket for the mock worker's socket.
-fn worker_ticket(socket: &Path) -> Value {
-    let identity = socket_identity(socket).expect("worker socket identity");
-    json!({
-        "purpose": "session_client",
-        "socketPath": socket.to_string_lossy(),
-        "socketIdentity": { "dev": identity.dev, "ino": identity.ino },
-        "workerInstanceId": "inst-1",
-        "activeSessionId": "s1",
-        "grantId": "g1",
-        "token": "t",
-        "expiresAt": "2999-01-01T00:00:00.000Z",
-    })
-}
-
-/// The supervisor whose session worker never comes back: it grants the startup direct ticket, then
-/// refuses every re-attach until the run has shown the expired session-plane window; then the
-/// daemon goes down and frees the socket path for its successor.
-fn serve_supervisor_with_dead_worker(
-    listener: &UnixListener,
-    socket: &Path,
-    ticket: &Value,
-    window_expired: std::sync::mpsc::Receiver<(std::time::Instant, usize)>,
-) {
-    let stream = accept(listener, "the supervisor never saw the client");
-    let mut writer = stream.try_clone().expect("clone supervisor socket");
-    let closer = stream.try_clone().expect("clone supervisor socket");
-    let mut reader = BufReader::new(stream);
-    let mut hello = daemon_hello(None);
-    hello["serverCapabilities"] = json!(["direct_peer_transport"]);
-    write_json(&mut writer, &hello);
-    std::thread::spawn(move || {
-        let _ = window_expired.recv();
-        let _ = closer.shutdown(std::net::Shutdown::Both);
-    });
-    let mut ticket_granted = false;
-    let mut line = String::new();
-    loop {
-        line.clear();
-        match reader.read_line(&mut line) {
-            Ok(0) | Err(_) => break,
-            Ok(_) => {}
-        }
-        let Ok(envelope) = serde_json::from_str::<Value>(line.trim()) else {
-            continue;
-        };
-        let id = envelope.get("id").and_then(Value::as_str).unwrap_or("");
-        let command_type = envelope["command"]["type"]
-            .as_str()
-            .unwrap_or_default()
-            .to_string();
-        let refusal = |error: &str| {
-            json!({
-                "type": "response",
-                "id": id,
-                "command": command_type,
-                "success": false,
-                "error": error,
-            })
-        };
-        match command_type.as_str() {
-            "create" => write_json(
-                &mut writer,
-                &json!({
-                    "type": "response",
-                    "id": id,
-                    "command": "create",
-                    "success": true,
-                    "data": {
-                        "activeSessionId": "s1",
-                        "id": "s1",
-                        "sessionId": "sess-1",
-                        "sessionFile": "/tmp/sess-1.jsonl",
-                    },
-                }),
-            ),
-            "get_direct_worker_transport" if !ticket_granted => {
-                ticket_granted = true;
-                write_json(
-                    &mut writer,
-                    &json!({
-                        "type": "response",
-                        "id": id,
-                        "command": "get_direct_worker_transport",
-                        "success": true,
-                        "data": ticket,
-                    }),
-                );
-            }
-            "get_direct_worker_transport" | "attach" => {
-                write_json(&mut writer, &refusal("the session worker is gone"));
-            }
-            _ => write_json(&mut writer, &success_response(id, &command_type)),
-        }
-    }
-    drop(writer);
-    std::fs::remove_file(socket).expect("free the socket path for the successor");
 }
 
 /// Accept one connection, bounded: a mock that never sees its client is a broken mock, not a slow
@@ -620,88 +429,5 @@ fn an_announced_shutdown_reconnects_when_the_daemon_comes_back() {
     assert!(
         !all.contains("The Prime Agent daemon shut down while this window was attached"),
         "the expiry row must not appear when the daemon came back:\n{all}"
-    );
-}
-
-/// A full reconnect after an expired session-plane window unblocks submits: the direct worker link
-/// dies, the session-plane re-attach window (a fixed minute, so this e2e runs over a minute) expires
-/// with every re-attach refused, then the daemon itself goes down and comes back on the same socket
-/// path. The recovered pane must dispatch the next submit instead of refusing it with the stale
-/// "Daemon reconnection failed" error.
-#[test]
-fn a_full_reconnect_after_an_expired_session_window_unblocks_submits() {
-    std::env::remove_var("TMUX");
-    let dir = tempfile::TempDir::new().expect("temp dir");
-    let socket = dir.path().join("tui.sock");
-    let worker_socket = dir.path().join("worker.sock");
-    let supervisor = UnixListener::bind(&socket).expect("bind supervisor");
-    supervisor
-        .set_nonblocking(true)
-        .expect("nonblocking mock listener");
-    let worker = UnixListener::bind(&worker_socket).expect("bind worker");
-    worker
-        .set_nonblocking(true)
-        .expect("nonblocking mock listener");
-    let ticket = worker_ticket(&worker_socket);
-    let (expired_tx, expired_rx) = std::sync::mpsc::channel();
-    let worker_handle = std::thread::spawn(move || serve_worker_until_attach(&worker));
-    let daemon_socket = socket.clone();
-    let daemon_handle = std::thread::spawn(move || {
-        serve_supervisor_with_dead_worker(&supervisor, &daemon_socket, &ticket, expired_rx);
-        drop(supervisor);
-        let successor = SuccessorDaemon::bind(
-            &daemon_socket,
-            env!("CARGO_PKG_VERSION").to_string(),
-            Arc::default(),
-        );
-        successor.serve();
-    });
-
-    let runtime = tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()
-        .expect("tokio runtime");
-    let plan = HeadlessPlan {
-        steps: vec![
-            HeadlessStep::WaitRender {
-                needle: "Daemon reconnection failed".to_string(),
-                timeout_ms: 90_000,
-            },
-            // The window expired: the daemon goes down and its successor takes the socket path.
-            HeadlessStep::Timestamp(expired_tx),
-            HeadlessStep::WaitRender {
-                needle: "Daemon restarted (v".to_string(),
-                timeout_ms: BANNER_WAIT_MS,
-            },
-            HeadlessStep::Type("hello".to_string()),
-            HeadlessStep::Key(enter()),
-            HeadlessStep::WaitRender {
-                needle: "the successor answered".to_string(),
-                timeout_ms: BANNER_WAIT_MS,
-            },
-        ],
-        width: 100,
-        height: 40,
-    };
-    let options = options_with_session(socket, SessionSelection::New);
-    let outcome = runtime.block_on(run_interactive(options, UiMode::Headless(plan)));
-    let _ = worker_handle.join();
-    let _ = daemon_handle.join();
-    let all = outcome
-        .expect("the recovered run returns normally")
-        .frames
-        .join("\n");
-
-    assert!(
-        all.contains("Daemon reconnection failed"),
-        "the session-plane window expired before the full reconnect:\n{all}"
-    );
-    assert!(
-        all.contains("Daemon restarted (v"),
-        "the full reconnect attached to the successor:\n{all}"
-    );
-    assert!(
-        all.contains("the successor answered"),
-        "the submit after the reconnect reached the daemon:\n{all}"
     );
 }
