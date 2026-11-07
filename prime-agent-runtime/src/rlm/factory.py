@@ -3409,7 +3409,11 @@ class FactoryExecutor:
                 answer=instance.answer[:ANSWER_CAPTURE_CAP],
                 stage="arrived",
             )
-        if entry.status == NodeStatus.RUNNING and entry.instances and all(i.status == NodeStatus.DONE for i in entry.instances):
+        if (
+            entry.status == NodeStatus.RUNNING
+            and entry.instances
+            and all(i.status == NodeStatus.DONE for i in entry.instances)
+        ):
             entry.answer = self._entry_answer(entry)
             capture_failure = await self._capture_outputs(run, state, entry)
             if entry.status != NodeStatus.RUNNING:
@@ -3528,7 +3532,11 @@ class FactoryExecutor:
 
     def _entry_answer(self, entry: _StateEntry) -> str | None:
         """Captured answer for binding: one preview, or all instances joined."""
-        answers = [instance.answer for instance in entry.instances if instance.status == NodeStatus.DONE and instance.answer]
+        answers = [
+            instance.answer
+            for instance in entry.instances
+            if instance.status == NodeStatus.DONE and instance.answer
+        ]
         if not answers:
             return None
         return "\n\n".join(answers)
