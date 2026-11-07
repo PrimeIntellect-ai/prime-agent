@@ -1921,7 +1921,9 @@ class FactoryExecutor:
         Sets the transitional ``stopping`` state before the first await so
         the control loop cannot admit new children or finalize the run while
         the cancellations are in flight. Idempotent: a second stop returns
-        the same result without another ledger event.
+        the same result without another ledger event. A ``done`` or
+        ``failed`` run with no child in flight keeps its state; one with
+        resident children still running is stopped like a live run.
         """
         run = self._require_run(run_id)
         # The transitional "stopping" state is guarded as well: two
@@ -1929,7 +1931,8 @@ class FactoryExecutor:
         # "stopped" check, both enter the cancellation pass, and issue
         # duplicate delete_subagent requests plus a second run_stopped
         # ledger event.
-        if run.state in ("stopping", "stopped"):
+        finished = run.state in ("done", "failed") and self._running_instance_count(run) == 0
+        if finished or run.state in ("stopping", "stopped"):
             return {"run_id": run.run_id, "state": run.state, "cancelled": []}
         run.state = "stopping"
         self._touch(run)

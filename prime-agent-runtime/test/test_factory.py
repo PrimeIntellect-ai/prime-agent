@@ -4935,6 +4935,22 @@ class FactoryExecutorTest(_ExecutorTestCase):
         self.assertEqual(len(run_stopped_events), 1)
 
     @async_test
+    async def test_stop_leaves_a_finished_run_as_it_is(self) -> None:
+        self.host.outcomes["b"] = {"status": "error", "error": "boom"}
+        self.store_factory({"nodes": [{"id": "a", "subagent": "worker"}]}, spec_id="ok")
+        self.store_factory(
+            {"run": {"failure_policy": "fail_fast"}, "nodes": [{"id": "b", "subagent": "worker"}]}, spec_id="bad"
+        )
+        for spec_id, final in (("ok", "done"), ("bad", "failed")):
+            with self.subTest(final=final):
+                result = await self.start(spec_id)
+                status = await self.settle(result)
+                self.assertEqual(status["state"], final)
+                stopped = await rlm_module.rlm.factory.stop(result["run_id"])
+                self.assertEqual(stopped, {"run_id": result["run_id"], "state": final, "cancelled": []})
+                self.assertEqual(self.all_events_of(result, "run_stopped"), [])
+
+    @async_test
     async def test_stop_delete_receipts_with_cancelled_status_complete_cleanly(self) -> None:
         # M5: the host's delete receipt reports a cancelled row (a live
         # child's delete settles it cancelled; a previously-cancelled

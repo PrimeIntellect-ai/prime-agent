@@ -1,0 +1,1 @@
+- `rlm.factory.stop()` on a finished run (`done` or `failed`) with no child still running now returns the run's state unchanged instead of relabelling it `stopped` and recording a `run_stopped` event. A finished run whose resident children are still running is stopped as before.
