@@ -365,16 +365,16 @@ impl Supervisor {
         self.shutting_down.load(Ordering::SeqCst)
     }
 
-    /// A relaunch outside the crash path that takes the resident's supervision over:
-    /// the bump retires the current watch (one sleeping in its backoff returns at its
-    /// superseded check instead of relaunching a second worker), and the outcome gets
-    /// a monitor — the new child's, or a failed relaunch handed to the crash path's
-    /// backoff instead of leaving the resident unsupervised.
+    /// A relaunch outside the crash path that takes the resident's supervision over.
+    /// The caller has already retired the current watch (a `monitor_epoch` bump: one
+    /// sleeping in its backoff returns at its superseded check instead of relaunching a
+    /// second worker). The outcome gets a monitor — the new child's, or a failed
+    /// relaunch handed to the crash path's backoff instead of leaving the resident
+    /// unsupervised.
     pub(crate) async fn relaunch_supervised(
         self: &Arc<Self>,
         resident: &Arc<ResidentWorker>,
     ) -> Result<()> {
-        resident.monitor_epoch.fetch_add(1, Ordering::SeqCst);
         match self.relaunch_worker(resident).await {
             Ok(child) => {
                 self.spawn_monitor(Arc::clone(resident), Some(child), 0, None);
