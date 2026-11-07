@@ -247,8 +247,8 @@ async fn gate_sighting_events(
     events
 }
 
-/// A sighting on the trailing `Done` of a self-completed run must not arm the
-/// fallback's silence — the closer still pairs the run's `agent_start`.
+/// A late abort sighting on the trailing `Done` of a self-completed run keeps the
+/// fallback closer that pairs the run's `agent_start`.
 #[tokio::test]
 async fn a_late_abort_sighting_on_a_completed_runs_done_keeps_the_fallback_closer() {
     let events = gate_sighting_events(vec![EngineEvent::Done(Ok(()))], true, false).await;
@@ -266,21 +266,19 @@ async fn a_late_abort_sighting_on_a_completed_runs_done_keeps_the_fallback_close
     );
 }
 
-/// `DoneAborted` with no engine `agent_end` (the pre-run abort): the fallback still
-/// closes the delivery's `agent_start`; only a detached (row-suppressed) run stays silent.
+/// `DoneAborted` with no engine `agent_end` (the pre-run abort, or a run a compaction or
+/// tree move detached): the fallback still closes the delivery's `agent_start`.
 #[tokio::test]
-async fn an_aborted_settle_closes_the_run_unless_detached() {
-    let aborted = gate_sighting_events(vec![EngineEvent::DoneAborted], true, false).await;
-    assert_eq!(
-        positions_of(&aborted, "agent_end").len(),
-        1,
-        "the aborted settle pairs the opening agent_start: {aborted:?}"
-    );
-    let detached = gate_sighting_events(vec![EngineEvent::DoneAborted], true, true).await;
-    assert!(
-        positions_of(&detached, "agent_end").is_empty(),
-        "the detached run stays silent: {detached:?}"
-    );
+async fn an_aborted_settle_closes_the_run() {
+    for suppress_aborted_row in [false, true] {
+        let events =
+            gate_sighting_events(vec![EngineEvent::DoneAborted], true, suppress_aborted_row).await;
+        assert_eq!(
+            positions_of(&events, "agent_end").len(),
+            1,
+            "the aborted settle pairs the opening agent_start: {events:?}"
+        );
+    }
 }
 
 /// A turn aborted under row suppression (a manual compaction or tree move)
@@ -398,9 +396,9 @@ async fn a_turns_tool_executions_count_onto_the_summary() {
 }
 
 /// A settle frame that would forward on a plain flag sighting drops when
-/// `suppress_aborted_row` is set.
+/// `suppress_aborted_row` is set; the fallback still closes the run.
 #[tokio::test]
-async fn the_suppressed_row_sighting_drops_and_arms_the_silence() {
+async fn the_suppressed_row_sighting_drops_the_settle_frame() {
     let events = gate_sighting_events(
         vec![
             EngineEvent::ToolResultMessage(json!({
@@ -418,9 +416,10 @@ async fn the_suppressed_row_sighting_drops_and_arms_the_silence() {
             && positions_of(&events, "message_end").is_empty(),
         "the suppressed settle frame never reaches the wire: {events:?}"
     );
-    assert!(
-        positions_of(&events, "agent_end").is_empty(),
-        "the suppressed-row sighting arms the silence: {events:?}"
+    assert_eq!(
+        positions_of(&events, "agent_end").len(),
+        1,
+        "the fallback closes the detached run: {events:?}"
     );
 }
 

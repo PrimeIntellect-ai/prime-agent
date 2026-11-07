@@ -399,8 +399,8 @@ impl TurnRunner {
             .collect();
         let turn_outcome = Arc::new(std::sync::Mutex::new(None::<TurnSettle>));
         let turn_outcome_slot = Arc::clone(&turn_outcome);
-        // Whether the engine surfaced any `agent_end` this run (the
-        // trailing synthesized frame is only a fallback).
+        // Whether an engine `agent_end` of this run passed the abort gate
+        // (the trailing synthesized frame is only a fallback).
         let engine_agent_end = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let engine_agent_end_seen = Arc::clone(&engine_agent_end);
         // The pane reporter's settle hold: a run that FAILED without the
@@ -411,19 +411,10 @@ impl TurnRunner {
         let herdr_settle_error = Arc::new(std::sync::Mutex::new(None::<String>));
         let herdr_settle_error_seen = Arc::clone(&herdr_settle_error);
         // Whether the PANE REPORTER already received this run's end —
-        // set only where `run_ended` is actually called (the engine
-        // `agent_end` flag above is set on SIGHT, before the abort gate
-        // can drop the event, so a swallowed `agent_end` must not make
-        // the settle's pane fallback skip and strand the pane working).
+        // set only where `run_ended` is actually called (a later run of the
+        // same turn re-opens it, so it is not the wire flag above).
         let herdr_run_end = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let herdr_run_end_seen = Arc::clone(&herdr_run_end);
-        // Whether the abort gate swallowed a frame of this turn under row
-        // suppression (a manual compaction or tree move detaches the run,
-        // TS `_disconnectFromAgent`): the fallback `agent_end` keys its
-        // silence on THIS observation during the turn, never on a post-join
-        // flag read (that raced `handle_abort`).
-        let run_detached = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let run_detached_seen = Arc::clone(&run_detached);
         let batch_len = items.len();
         // The accepted prefix must survive an engine panic after persistence.
         let accepted_prefix = Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -451,9 +442,6 @@ impl TurnRunner {
                 // forever).
                 if matches!(event, EngineEvent::TurnEnd { .. }) {
                     engine_turn_ended = true;
-                }
-                if matches!(event, EngineEvent::AgentEnd { .. }) {
-                    engine_agent_end_seen.store(true, std::sync::atomic::Ordering::SeqCst);
                 }
                 let aborted_row = matches!(
                     &event,
@@ -508,14 +496,14 @@ impl TurnRunner {
                 }
                 // Durable model cleanup is independent of visual abort-row
                 // suppression and emits no client-facing frame.
-                if core.abort_requested && !matches!(&event, EngineEvent::ModelChange(_)) {
-                    if core.suppress_aborted_row {
-                        run_detached_seen.store(true, std::sync::atomic::Ordering::SeqCst);
-                        return false;
-                    }
-                    if !(abort_settle || aborted_row) {
-                        return false;
-                    }
+                if core.abort_requested
+                    && !matches!(&event, EngineEvent::ModelChange(_))
+                    && (core.suppress_aborted_row || !(abort_settle || aborted_row))
+                {
+                    return false;
+                }
+                if matches!(event, EngineEvent::AgentEnd { .. }) {
+                    engine_agent_end_seen.store(true, std::sync::atomic::Ordering::SeqCst);
                 }
                 // The pane reporter's engine boundaries (the TS
                 // `agent_start` / `agent_end` hooks and the auto-retry
@@ -1097,13 +1085,13 @@ impl TurnRunner {
         };
         self.push_roster_delta();
         // The fallback `agent_end` closes this delivery's own `agent_start`
-        // when the engine reported no run end: session commands, pre-model
-        // failures, and the admission consult's pre-run abort (no run
-        // registered). The engine's per-run frames (one per agent run,
-        // retried and continued runs included — the TS `agent_end`
-        // `messages` payload) are the real frames. Only a detached run stays
-        // silent, exactly like TS (the compact path's swallowed run).
-        if !engine_reported_run_end && !run_detached.load(std::sync::atomic::Ordering::SeqCst) {
+        // whenever no engine `agent_end` reached the wire: session commands,
+        // pre-model failures, the admission consult's pre-run abort (no run
+        // registered), and a run a compaction or tree move detached (its
+        // frames were swallowed above). The engine's per-run frames (one per
+        // agent run, retried and continued runs included — the TS `agent_end`
+        // `messages` payload) are the real frames.
+        if !engine_reported_run_end {
             self.emit_turn_event(json!({ "type": "agent_end" }));
         }
         {

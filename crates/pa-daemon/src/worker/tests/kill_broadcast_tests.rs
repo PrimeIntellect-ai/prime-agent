@@ -466,15 +466,20 @@ async fn compact_interrupt_swallows_the_aborted_row() {
         aborted_rows, 0,
         "the compact path swallows the aborted row: {events:?}"
     );
-    // The suppressed run's `agent_end` stays off the wire entirely — neither
-    // the engine's per-run frame nor the worker's trailing fallback.
-    let agent_ends = events
+    // The suppressed run's own `agent_end` stays off the wire; the worker's
+    // fallback closes the delivery's `agent_start` once (a bare frame).
+    let agent_ends: Vec<&Value> = events
         .iter()
         .filter(|event| event.get("type").and_then(Value::as_str) == Some("agent_end"))
-        .count();
+        .collect();
     assert_eq!(
-        agent_ends, 0,
-        "the compact path emits no agent_end for the suppressed run: {events:?}"
+        agent_ends.len(),
+        1,
+        "the compact path closes the suppressed run once: {events:?}"
+    );
+    assert!(
+        agent_ends[0].get("messages").is_none(),
+        "the closer is the worker's fallback, not the engine's frame: {events:?}"
     );
     // And out of the session file.
     let aborted_store_rows = {
