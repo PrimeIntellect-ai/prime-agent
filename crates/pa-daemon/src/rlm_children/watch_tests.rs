@@ -2419,6 +2419,70 @@ async fn a_cancelled_rows_settle_survives_the_watcher_grace_recheck() {
     );
 }
 
+/// A confirmed cancel does not always stop the run (an abort that reached the
+/// idle worker before its task turn started): a cancelled row whose child
+/// reads idle once and then busy keeps its watcher, so the settle tail waits
+/// for the run to stop.
+#[tokio::test]
+async fn a_cancelled_child_reading_idle_once_keeps_its_watcher() {
+    let (follow_up_tx, _follow_up_rx) = mpsc::unbounded_channel();
+    let child_subagents = Arc::new(FakeChildSubagents::default());
+    child_subagents.live_state.lock().unwrap().replace(json!({
+        "isStreaming": true,
+        "hasRunningSubagents": false,
+        "sessionActions": { "queuedCount": 0 },
+    }));
+    let (sessions, _kill_rx) = sessions_with_fake_child_subagents(
+        follow_up_tx,
+        100,
+        FakeKill::Success,
+        FakeChild::Healthy,
+        Arc::clone(&child_subagents),
+    )
+    .await;
+    let (hook_tx, mut hook_rx) = mpsc::unbounded_channel();
+    sessions.set_settle_hook(Arc::new(move || {
+        let _ = hook_tx.send(());
+    }));
+    let handle = spawn_child(&sessions).await;
+    assert!(sessions.cancel_child_run(&handle.rlm_child_id).await);
+    tokio::time::timeout(Duration::from_secs(5), hook_rx.recv())
+        .await
+        .expect("the confirmed cancel fires the settle hook")
+        .expect("hook channel open");
+
+    child_subagents
+        .scripted_states
+        .lock()
+        .unwrap()
+        .push_back(json!({
+            "isStreaming": false,
+            "hasRunningSubagents": false,
+            "sessionActions": { "queuedCount": 0 },
+        }));
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !child_subagents.scripted_states.lock().unwrap().is_empty() {
+        assert!(
+            Instant::now() < deadline,
+            "the watcher never read the idle blip"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    // The watcher's next idle-wait slice proves it kept watching.
+    let slices = child_subagents.quiescent_waits.load(Ordering::SeqCst);
+    while child_subagents.quiescent_waits.load(Ordering::SeqCst) == slices {
+        assert!(
+            Instant::now() < deadline,
+            "the watcher stopped watching the still-running cancelled child"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(
+        hook_rx.try_recv().is_err(),
+        "the settle tail must wait for the cancelled run to stop"
+    );
+}
+
 #[tokio::test]
 async fn a_close_killed_child_never_records_a_clean_return() {
     let (follow_up_tx, _follow_up_rx) = mpsc::unbounded_channel();

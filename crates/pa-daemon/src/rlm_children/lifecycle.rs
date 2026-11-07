@@ -418,14 +418,15 @@ impl SupervisorChildSessionsInner {
                 return false;
             }
         }
-        let (active_session_id, direct_observation, unsettled, unsettled_session_file) = {
+        let (active_session_id, direct_observation, recheck_idle, unsettled_session_file) = {
             let record = record.lock().await;
-            let unsettled = record.settled_status.is_none();
             (
                 record.active_session_id.clone(),
                 Arc::clone(&record.direct_observation),
-                unsettled,
-                unsettled
+                !record.settled || record.settled_status == Some("cancelled"),
+                record
+                    .settled_status
+                    .is_none()
                     .then(|| record.session_file.clone())
                     .flatten()
                     .filter(|path| !path.is_empty()),
@@ -452,14 +453,17 @@ impl SupervisorChildSessionsInner {
         if busy || state.is_err() {
             return busy;
         }
-        // Stability re-check before a verdict: a prompt admitted to an idle
-        // worker can read idle once between the admission and the turn pop
-        // (the queue snapshot and the busy flag change under different locks
-        // on the far side of a socket). A short grace closes that window; a
-        // child that went busy again (a queued continuation) is still
-        // running. An unreachable worker (an idle passivation, a crash) does
-        // not undo the idle read.
-        if unsettled {
+        // Stability re-check of an idle read that can still end the run (a
+        // verdict, or the watcher's settle tail): a prompt admitted to an
+        // idle worker can read idle once between the admission and the turn
+        // pop (the queue snapshot and the busy flag change under different
+        // locks on the far side of a socket). A short grace closes that
+        // window; a child that went busy again (a queued continuation) is
+        // still running. A cancel stays re-checked after its funnel fired:
+        // an abort that reached the idle worker before the task turn started
+        // leaves the run going. An unreachable worker (an idle passivation,
+        // a crash) does not undo the idle read.
+        if recheck_idle {
             tokio::time::sleep(Duration::from_millis(WATCH_SETTLE_GRACE_MS)).await;
             if matches!(self.child_busy(&active_session_id).await, Ok(true)) {
                 return true;
