@@ -4951,6 +4951,16 @@ class FactoryExecutorTest(_ExecutorTestCase):
                 self.assertEqual(self.all_events_of(result, "run_stopped"), [])
 
     @async_test
+    async def test_invalid_run_transition_raises(self) -> None:
+        self.store_factory({"nodes": [{"id": "a", "subagent": "worker"}]})
+        result = await self.start()
+        await self.settle(result)
+        run = self.executor._runs[result["run_id"]]
+        with self.assertRaisesRegex(RuntimeError, "invalid transition done -> running"):
+            self.executor._transition(run, factory_module.RunState.RUNNING)
+        self.assertEqual(run.state, "done")
+
+    @async_test
     async def test_stop_delete_receipts_with_cancelled_status_complete_cleanly(self) -> None:
         # M5: the host's delete receipt reports a cancelled row (a live
         # child's delete settles it cancelled; a previously-cancelled
