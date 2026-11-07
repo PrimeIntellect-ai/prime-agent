@@ -890,9 +890,16 @@ impl SupervisorChildSessionsInner {
     /// Fire the settle hook off-thread (the settle sites run inside
     /// watcher tasks; the hook owns its own scheduling). The funnel marks
     /// the record settled and wakes the barrier only after the terminal
-    /// notice is delivered.
-    pub(crate) async fn fire_settle_hook(&self, record: &Arc<Mutex<ChildRecord>>) {
-        record.lock().await.run.apply(RunEvent::Funnel);
+    /// notice is delivered. Returns whether the run is settled: a run that a
+    /// refused cancel rolled back to running fires nothing.
+    pub(crate) async fn fire_settle_hook(&self, record: &Arc<Mutex<ChildRecord>>) -> bool {
+        {
+            let mut record = record.lock().await;
+            record.run.apply(RunEvent::Funnel);
+            if !record.run.funnel_fired() {
+                return false;
+            }
+        }
         self.refresh_running().await;
         self.settle_notify.notify_waiters();
         let hook = self
@@ -903,6 +910,7 @@ impl SupervisorChildSessionsInner {
         if let Some(hook) = hook {
             std::thread::spawn(move || hook());
         }
+        true
     }
 
     /// Whether any tracked child run's settle funnel has not fired yet.

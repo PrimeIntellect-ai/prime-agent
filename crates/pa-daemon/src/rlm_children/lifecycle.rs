@@ -603,9 +603,13 @@ impl SupervisorChildSessionsInner {
                     }
                 }
                 self.deliver_settle_notice(record).await;
-                // A settled child releases an owed goal continuation.
-                self.fire_settle_hook(record).await;
-                return;
+                // A settled child releases an owed goal continuation. A
+                // refused abort can roll a cancelled run back to running
+                // inside this tail: the live run keeps its watcher.
+                if self.fire_settle_hook(record).await {
+                    return;
+                }
+                continue;
             }
             // Still running (a timed-out slice or a re-queued continuation):
             // re-check liveness so a dead worker cannot spin the watch.
