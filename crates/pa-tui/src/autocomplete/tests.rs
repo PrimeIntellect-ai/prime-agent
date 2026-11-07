@@ -615,6 +615,9 @@ fn at_completion_keeps_the_typed_quoting() {
     let provider = provider(base.path().to_str().expect("utf8"));
     assert_eq!(at_item_values(&provider, "@'my"), ["@'my target/'"]);
     assert_eq!(at_item_values(&provider, "@'it"), ["@\"it's.md\""]);
+    // Accepting it before the typed closing quote replaces that quote too.
+    let result = provider.apply_completion(&["@'it'".to_string()], 0, 4, &item("@\"it's.md\""));
+    assert_eq!(result.lines[0], "@\"it's.md\" ");
     #[cfg(not(windows))]
     assert_eq!(at_item_values(&provider, r"@my\ ta"), [r"@my\ target/"]);
 }

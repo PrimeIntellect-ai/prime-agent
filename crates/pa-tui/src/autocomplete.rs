@@ -197,7 +197,7 @@ fn extract_path_token(text: &[char], force_extract: bool) -> Option<PathToken> {
     let token = path_token::path_token_before(text);
     let path = &token.path;
     let wanted = force_extract
-        || token.quoting.is_quoted()
+        || token.quoting.quote().is_some()
         || path.contains('/')
         || path.starts_with('.')
         || (path.is_empty() && text.last() == Some(&' '));
@@ -502,22 +502,17 @@ fn apply_file_completion(
     let line: Vec<char> = lines[cursor_line].chars().collect();
     let before_prefix: String = line[..token.start].iter().collect();
     let after_cursor: String = line[cursor_col.min(line.len())..].iter().collect();
-    let closing_quote = item
-        .value
-        .chars()
-        .last()
-        .filter(|c| matches!(c, '"' | '\''));
-    let adjusted_after_cursor = match closing_quote {
-        Some(quote) if token.quoting.is_quoted() && after_cursor.starts_with(quote) => {
-            after_cursor.chars().skip(1).collect()
-        }
+    // The typed token's closing quote after the cursor belongs to the replaced token, whatever
+    // quote the item renders.
+    let adjusted_after_cursor = match token.quoting.quote() {
+        Some(quote) if after_cursor.starts_with(quote) => after_cursor.chars().skip(1).collect(),
         _ => after_cursor,
     };
     let is_directory = item.label.ends_with('/');
     // TS `applyCompletion`'s `@` branch: a file leaves a trailing space so the next
     // word starts clean, a directory keeps the token open for further completion.
     let suffix = if token.at && !is_directory { " " } else { "" };
-    let cursor_offset = if is_directory && closing_quote.is_some() {
+    let cursor_offset = if is_directory && item.value.ends_with(['"', '\'']) {
         item.value.chars().count() - 1
     } else {
         item.value.chars().count()

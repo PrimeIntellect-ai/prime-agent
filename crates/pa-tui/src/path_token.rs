@@ -23,18 +23,23 @@ pub(crate) enum Quoting {
 }
 
 impl Quoting {
-    /// `path` written in this quoting: a quoted token keeps its quote unless the path holds it
-    /// (then the other one); an unquoted path that would end the token early takes double quotes,
-    /// or backslash escapes when escapes were typed.
+    /// `path` written in this quoting, so that it scans back as itself: a quoted token keeps
+    /// its quote unless the path holds it (then the other one); an unquoted path that would not
+    /// scan back takes double quotes, or backslash escapes when escapes were typed.
     pub(crate) fn render(self, path: &str) -> String {
         let quote = match self {
-            Quoting::Bare | Quoting::Escaped if !path.contains(ends_unquoted) => {
+            Quoting::Bare | Quoting::Escaped
+                if !path
+                    .chars()
+                    .enumerate()
+                    .any(|(index, c)| needs_escape(index, c)) =>
+            {
                 return path.to_string();
             }
             Quoting::Escaped => {
                 let mut escaped = String::with_capacity(path.len());
-                for c in path.chars() {
-                    if ends_unquoted(c) {
+                for (index, c) in path.chars().enumerate() {
+                    if needs_escape(index, c) {
                         escaped.push('\\');
                     }
                     escaped.push(c);
@@ -52,8 +57,13 @@ impl Quoting {
         format!("{quote}{path}{quote}")
     }
 
-    pub(crate) fn is_quoted(self) -> bool {
-        matches!(self, Quoting::Double | Quoting::Single)
+    /// The quote char of a quoted token.
+    pub(crate) fn quote(self) -> Option<char> {
+        match self {
+            Quoting::Double => Some('"'),
+            Quoting::Single => Some('\''),
+            Quoting::Bare | Quoting::Escaped => None,
+        }
     }
 }
 
@@ -81,6 +91,12 @@ pub(crate) fn is_token_start(line: &[char], index: usize) -> bool {
 
 fn ends_unquoted(c: char) -> bool {
     c.is_whitespace() || c == '|'
+}
+
+/// Whether `c`, at char `index` of an unquoted path, would not scan back as itself: it ends
+/// the token, opens a quote, or (where backslashes escape) is a backslash.
+fn needs_escape(index: usize, c: char) -> bool {
+    ends_unquoted(c) || (index == 0 && matches!(c, '"' | '\'')) || (ESCAPES && c == '\\')
 }
 
 /// The `@` tokens of `line`, left to right.
@@ -142,8 +158,7 @@ fn scan(line: &[char], start: usize) -> PathToken {
         Some('\'') => Quoting::Single,
         _ => Quoting::Bare,
     };
-    if quoting.is_quoted() {
-        let quote = line[index];
+    if let Some(quote) = quoting.quote() {
         index += 1;
         while let Some(&c) = line.get(index).filter(|c| **c != '\n') {
             index += 1;
@@ -231,14 +246,6 @@ mod tests {
         }
     }
 
-    #[cfg(not(windows))]
-    #[test]
-    fn backslash_escapes_are_part_of_an_unquoted_token() {
-        let token = at_token_before(&chars(r"see @/p/my\ target")).expect("token");
-        assert_eq!((token.start, token.path.as_str()), (4, "/p/my target"));
-        assert_eq!(token.quoting, Quoting::Escaped);
-    }
-
     #[test]
     fn only_an_open_token_ending_at_the_cursor_is_typed() {
         assert_eq!(
@@ -247,5 +254,32 @@ mod tests {
         );
         assert_eq!(at_token_before(&chars("@'a b'")), None);
         assert_eq!(at_token_before(&chars("@a ")), None);
+    }
+
+    #[test]
+    fn rendered_paths_scan_back_as_themselves() {
+        let mut cases = vec![
+            (Quoting::Bare, "my file"),
+            (Quoting::Bare, "'lead"),
+            (Quoting::Single, "it's here"),
+            (Quoting::Double, r#"say "hi""#),
+        ];
+        if ESCAPES {
+            cases.extend([
+                (Quoting::Bare, r"a\b"),
+                (Quoting::Escaped, r"my dir\x"),
+                (Quoting::Escaped, "'lead"),
+            ]);
+        }
+        for (quoting, path) in cases {
+            let text = format!("@{}", quoting.render(path));
+            let tokens = at_tokens(&chars(&text));
+            assert_eq!(tokens.len(), 1, "{text}");
+            assert_eq!(
+                (tokens[0].end, tokens[0].path.as_str()),
+                (text.chars().count(), path),
+                "{text}"
+            );
+        }
     }
 }
