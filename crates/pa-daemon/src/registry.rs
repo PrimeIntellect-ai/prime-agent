@@ -272,14 +272,16 @@ impl ResidentWorker {
         *guard = Some(cmd_tx);
     }
 
-    pub(crate) fn note_connection_lost(&self, epoch: u64) {
-        if epoch
-            != self
-                .connection_epoch
-                .load(std::sync::atomic::Ordering::SeqCst)
-        {
+    /// The connection's pumps ended: its channel leaves routing with it, so every
+    /// "connected" reader sees the loss. The epoch check runs under the channel lock
+    /// (the install's fence): a superseded connection's late end cannot clear its
+    /// replacement's channel.
+    pub(crate) async fn note_connection_lost(&self, epoch: u64) {
+        let mut guard = self.cmd_tx.lock().await;
+        if !self.connection_is_current(epoch) {
             return;
         }
+        *guard = None;
         self.publish_route_state(|state| state.connected = false);
     }
 

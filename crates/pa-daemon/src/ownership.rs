@@ -225,7 +225,7 @@ impl Supervisor {
             let mut descriptor = resident.descriptor.lock().await;
             descriptor.lifecycle = DaemonWorkerLifecycle::Ready;
             let _ = persist_worker(&resident.descriptor_path, &descriptor);
-        } else if let Err(error) = self.relaunch_worker(&resident).await {
+        } else if let Err(error) = self.relaunch_supervised(&resident).await {
             return Self::owned_failure(
                 command_id,
                 type_name,
