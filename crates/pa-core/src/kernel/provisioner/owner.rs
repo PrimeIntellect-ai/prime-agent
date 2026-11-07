@@ -9,7 +9,7 @@ use tokio::sync::{mpsc, oneshot};
 
 use super::{
     run_startup, AbortSignal, KernelBootstrapProgressHandler, KernelShutdownOptions,
-    ProvisionerInner, ReplKernelManager, RestoreResult, StartupFailure, UnavailablePythonSkills,
+    ProvisionerInner, ReplKernelManager, RestoreResult, StartupFailure,
 };
 
 pub(super) type EnsureReply = oneshot::Sender<anyhow::Result<ReplKernelManager>>;
@@ -38,13 +38,17 @@ pub(super) enum Command {
         message: String,
         listeners: oneshot::Sender<Vec<KernelBootstrapProgressHandler>>,
     },
+    /// A boot's restore outcome, recorded only for the armed, undisposed
+    /// generation; the reply says whether it was.
     Restored {
         generation: u64,
         restore: RestoreResult,
+        armed: oneshot::Sender<bool>,
     },
-    UnavailableSkills {
+    /// Whether the generation is still armed and undisposed.
+    Armed {
         generation: u64,
-        errors: UnavailablePythonSkills,
+        reply: oneshot::Sender<bool>,
     },
     TeardownPolicy {
         generation: u64,
@@ -152,6 +156,11 @@ impl OwnerState {
 
     pub(super) fn last_restore(&self) -> Option<RestoreResult> {
         self.last_restore.clone()
+    }
+
+    /// The generation is the armed boot of an undisposed provisioner.
+    fn is_armed(&self, generation: u64) -> bool {
+        matches!(&self.slot, Slot::Booting(boot) if boot.generation == generation)
     }
 
     /// The boot of the armed generation, disposed or not.
@@ -302,6 +311,27 @@ impl BootHandle {
                 let _ = gate.await;
             }
         }
+    }
+
+    /// Record this boot's restore if the generation is still armed; the caller
+    /// surfaces the notice only then.
+    pub(super) async fn record_restore(&self, restore: RestoreResult) -> bool {
+        let (armed, rx) = oneshot::channel();
+        self.send(Command::Restored {
+            generation: self.generation,
+            restore,
+            armed,
+        });
+        rx.await.unwrap_or(false)
+    }
+
+    pub(super) async fn is_armed(&self) -> bool {
+        let (reply, rx) = oneshot::channel();
+        self.send(Command::Armed {
+            generation: self.generation,
+            reply,
+        });
+        rx.await.unwrap_or(false)
     }
 
     pub(super) fn send(&self, command: Command) {
@@ -491,29 +521,17 @@ fn handle(inner: &Arc<ProvisionerInner>, state: &Mutex<OwnerState>, command: Com
         Command::Restored {
             generation,
             restore,
+            armed,
         } => {
-            let live = {
-                let mut s = lock(state);
-                let live = matches!(&s.slot, Slot::Booting(boot) if boot.generation == generation);
-                if live {
-                    s.last_restore = Some(restore.clone());
-                }
-                live
-            };
+            let mut s = lock(state);
+            let live = s.is_armed(generation);
             if live {
-                if let Some(on_restore) = &inner.options.on_restore {
-                    on_restore(&restore);
-                }
+                s.last_restore = Some(restore);
             }
+            let _ = armed.send(live);
         }
-        Command::UnavailableSkills { generation, errors } => {
-            let live =
-                matches!(&lock(state).slot, Slot::Booting(boot) if boot.generation == generation);
-            if live {
-                if let Some(on_unavailable_skills) = &inner.options.on_unavailable_skills {
-                    on_unavailable_skills(&errors);
-                }
-            }
+        Command::Armed { generation, reply } => {
+            let _ = reply.send(lock(state).is_armed(generation));
         }
         Command::TeardownPolicy { generation, reply } => {
             let _ = reply.send(lock(state).teardown_policy(generation));

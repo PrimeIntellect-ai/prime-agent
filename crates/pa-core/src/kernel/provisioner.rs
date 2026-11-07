@@ -656,10 +656,11 @@ async fn start_kernel_impl(
             // shares the restore notice's mailbox, and a boot kill()
             // invalidated must not append stale skills-unavailable rows.
             if let Some(errors) = parse_unavailable_python_skills(&bootstrap.stdout) {
-                boot.send(owner::Command::UnavailableSkills {
-                    generation: boot.generation,
-                    errors,
-                });
+                if boot.is_armed().await {
+                    if let Some(on_unavailable_skills) = &inner.options.on_unavailable_skills {
+                        on_unavailable_skills(&errors);
+                    }
+                }
             }
         }
         Ok(bootstrap) => {
@@ -715,10 +716,11 @@ async fn start_kernel_impl(
     // kernel, so its restore must not fire the notification nor pollute
     // last_restore for the fresher generation.
     if let Some(restore) = pending_restore {
-        boot.send(owner::Command::Restored {
-            generation: boot.generation,
-            restore,
-        });
+        if boot.record_restore(restore.clone()).await {
+            if let Some(on_restore) = &inner.options.on_restore {
+                on_restore(&restore);
+            }
+        }
     }
     Ok(manager)
 }
