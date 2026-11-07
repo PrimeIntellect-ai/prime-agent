@@ -81,12 +81,15 @@ async fn every_discarded_repair_reprovisions_the_next_kernel() {
 }
 
 /// A `start()` during the repair's own start joins it: once `start()` returns, the
-/// kernel is running (the repaired spawn holds its ready frame back a moment).
+/// kernel is running. The repaired spawn holds its ready frame until released, so
+/// nothing is ready before the start is entered.
 #[tokio::test]
 async fn a_start_during_the_repair_start_joins_it() {
     let dir = tempfile::tempdir().expect("tempdir");
     let fail_boots = dir.path().join("fail-boots");
     std::fs::write(&fail_boots, "0").expect("write counter");
+    let spawns = dir.path().join("spawns");
+    let release = dir.path().join("release");
     let manager = fake_kernel(
         dir.path(),
         HashMap::from([
@@ -94,10 +97,8 @@ async fn a_start_during_the_repair_start_joins_it() {
                 "FAIL_BOOTS_FILE".to_string(),
                 fail_boots.display().to_string(),
             ),
-            (
-                "SPAWNS_FILE".to_string(),
-                dir.path().join("spawns").display().to_string(),
-            ),
+            ("SPAWNS_FILE".to_string(), spawns.display().to_string()),
+            ("RELEASE_FILE".to_string(), release.display().to_string()),
         ]),
     );
     manager
@@ -108,14 +109,23 @@ async fn a_start_during_the_repair_start_joins_it() {
         .execute("corrupt", ExecuteOptions::default())
         .await
         .is_err());
-    // The repair task replaces the child: wait until it has left Running.
-    while manager.is_running() {
-        tokio::task::yield_now().await;
-    }
-    manager
-        .start(KernelStartOptions::default())
-        .await
-        .expect("the repair's start succeeds");
+    // The repair's own start has spawned its child, which holds its ready frame.
+    tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        while std::fs::metadata(&spawns).map_or(0, |m| m.len()) < 2 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the repair spawned its child");
+    let mut start = Box::pin(manager.start(KernelStartOptions::default()));
+    assert!(
+        futures::future::poll_immediate(start.as_mut())
+            .await
+            .is_none(),
+        "start() is waiting"
+    );
+    std::fs::write(&release, "").expect("release the repaired child");
+    start.await.expect("the repair's start succeeds");
     assert!(
         manager.is_running(),
         "start() returned before the repair's start finished"
