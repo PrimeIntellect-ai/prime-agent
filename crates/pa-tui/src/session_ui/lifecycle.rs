@@ -179,9 +179,7 @@ impl SessionUi {
             scroll_adoption_emitted: false,
             exit_reason: "daemon_closed",
             connection: crate::interactive::reconnect::Connection::Connected,
-            transport_lost: None,
             pending_rebind: None,
-            reconnection_failed: None,
             exit_guard: crate::exit_guard::ExitGuard::new(),
             escape_repeat_action: None,
             escape_repeat_until: None,
@@ -420,9 +418,8 @@ impl SessionUi {
         // keeps a cursor-less attach from stashing a handoff.
         self.last_event_sequence = reconstructed.last_event_sequence;
         self.attach_cursor_present = reconstructed.cursor_present;
-        // An expired re-attach window is per-connection: a recovered connection must not keep
-        // refusing submits.
-        self.reconnection_failed = None;
+        self.connection
+            .on(crate::interactive::reconnect::ConnectionEvent::Attached);
         self.session_name.clone_from(&reconstructed.session_name);
         self.service_tier.clone_from(&reconstructed.service_tier);
         self.pending_model_fallback_message = reconstructed.model_fallback_message;
@@ -970,9 +967,14 @@ mod backfill_tests {
             let dir = tempfile::tempdir().unwrap();
             let socket = dir.path().join("reconnect.sock");
             let (mut session, server) = mock_session(&socket, mpsc::unbounded_channel().0).await;
-            session.reconnection_failed = Some("the session worker is gone".to_string());
+            session.connection = crate::interactive::reconnect::Connection::SessionPlaneFailed(
+                "the session worker is gone".to_string(),
+            );
             session.attach_session("s1", DockFold::Held).await.unwrap();
-            assert_eq!(session.reconnection_failed, None);
+            assert!(matches!(
+                session.connection,
+                crate::interactive::reconnect::Connection::Connected
+            ));
             drop(session);
             server.abort();
         })

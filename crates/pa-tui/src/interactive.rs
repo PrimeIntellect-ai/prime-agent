@@ -42,7 +42,7 @@ use render::{
 pub(crate) mod reconnect;
 
 use reconnect::{
-    Connection, ConnectionEffect, ConnectionEvent, ReconnectConnect, SessionReconnect,
+    Connection, ConnectionEffect, ConnectionEvent, ReconnectConnect,
     SESSION_RECONNECT_ATTEMPT_TIMEOUT_S,
 };
 #[cfg(test)]

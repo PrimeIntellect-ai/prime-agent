@@ -5,9 +5,9 @@ use super::{
     apply_startup_chrome, check_tmux_keyboard_setup, mpsc, run_onboarding_phase,
     spawn_session_reader, AgentView, Connection, ConnectionEffect, ConnectionEvent, DaemonClient,
     Duration, ExitGuard, HeadlessSettle, Instant, InteractiveOptions, InteractiveOutcome,
-    PaneDrive, ReconnectConnect, Renderer, Result, SelectionOrigin, SessionPanel, SessionReconnect,
-    SessionSelection, SessionUi, TerminalHandoff, UiInput, UiMode, VecDeque,
-    ACTIVITY_POLL_INTERVAL, SESSION_RECONNECT_ATTEMPT_TIMEOUT_S, TELEMETRY_EXIT_TIMEOUT_MS,
+    PaneDrive, ReconnectConnect, Renderer, Result, SelectionOrigin, SessionPanel, SessionSelection,
+    SessionUi, TerminalHandoff, UiInput, UiMode, VecDeque, ACTIVITY_POLL_INTERVAL,
+    SESSION_RECONNECT_ATTEMPT_TIMEOUT_S, TELEMETRY_EXIT_TIMEOUT_MS,
 };
 use crate::suspend::SuspendTerminal;
 use anyhow::Context;
@@ -678,8 +678,9 @@ async fn run_interactive_surface(
     session.exit_guard = exit_guard.clone();
     // The supervisor reader's death watch: the event channel stays open across a supervisor socket
     // loss, so this watch is the signal the reconnect driver arms on. Taken from the LIVE session
-    // client after the open (a wait retry may have reconnected).
-    let mut reader_dead = session.client.reader_dead();
+    // client after the open (a wait retry may have reconnected). One-shot: the arm consumes it (a
+    // fired watch would hot-spin the select), and a reattach installs the fresh client's.
+    let mut reader_dead = Some(session.client.reader_dead());
     if headless {
         session.osc_sink = crate::clipboard::OscSink::Buffer(Vec::new());
     }
@@ -843,16 +844,6 @@ async fn run_interactive_surface(
     // The session's event stream; `None` once it closed, until a reattach installs the fresh one
     // (a closed receiver resolves instantly and forever, which would hot-spin the select).
     let mut events = Some(events);
-    // The reader-death watch is one-shot: once the loss is handled (or suppressed), the arm parks
-    // so the closed watch cannot hot-spin the select loop.
-    let mut reader_loss_handled = false;
-    // The supervisor connection died while a live direct link kept serving the session: the loss is
-    // retained until the direct link itself dies; then the full reconnect driver owns the recovery.
-    let mut supervisor_lost = false;
-    // The session re-attach driver: armed when the direct worker link dies (a killed or crashed
-    // worker); it re-attaches through the supervisor so the respawned worker serves the session
-    // again.
-    let mut session_reconnect: Option<SessionReconnect> = None;
 
     'run: while running {
         if !session.dirty {
@@ -1350,6 +1341,10 @@ async fn run_interactive_surface(
             (Connection::Recovering(driver), None) => Some(driver.next_attempt),
             _ => None,
         };
+        let session_tick_at = match &session.connection {
+            Connection::SessionPlane(state) => Some(state.next_attempt),
+            _ => None,
+        };
         tokio::select! {
             maybe_event = async {
                 match events.as_mut() {
@@ -1391,37 +1386,6 @@ async fn run_interactive_surface(
                             ),
                         }
                     }
-                    // A full reconnect driver owns the run: a session-plane retry armed by an
-                    // earlier direct-link loss would race it through a dying supervisor.
-                    if matches!(session.connection, Connection::Recovering(_)) {
-                        session_reconnect = None;
-                    }
-                    // A dead direct worker link arms the session re-attach driver: the warning
-                    // row rides the chat while the driver retries.
-                    if session_reconnect.is_none() {
-                        if let Some(lost) = session.transport_lost.take() {
-                            // A supervisor loss retained while the direct link lived: the
-                            // supervisor client is dead, so the session-plane retry loop could
-                            // never restore it — the full reconnect driver replaces the client and
-                            // reattaches.
-                            if supervisor_lost {
-                                session.connection_event(ConnectionEvent::ConnectionLost, &mut view);
-                                supervisor_lost = false;
-                            } else if matches!(session.connection, Connection::Recovering(_)) {
-                                // A full reconnect driver owns the run — the dead direct link
-                                // joins it instead of racing a session-plane retry through a
-                                // supervisor it cannot reach.
-                            } else {
-                                session.note_as(
-                                    "Daemon connection lost; reconnecting…",
-                                    crate::chat::StatusKind::Warning,
-                                    &mut view,
-                                );
-                                session_reconnect = Some(SessionReconnect::start(&lost));
-                            }
-                            session.dirty = true;
-                        }
-                    }
                 } else {
                     // The closed stream parks its arm; a recovery already in flight owns the run,
                     // otherwise the loss is a daemon hiccup.
@@ -1430,35 +1394,24 @@ async fn run_interactive_surface(
                 }
             }
             reader_death = async {
-                // One-shot: a ready arm would hot-spin the select.
-                if reader_loss_handled {
-                    std::future::pending::<()>().await;
+                match reader_dead.as_mut() {
+                    Some(watch) => watch.changed().await,
+                    None => std::future::pending().await,
                 }
-                reader_dead.changed().await
             } => {
-                reader_loss_handled = true;
-                if reader_death.is_ok() && *reader_dead.borrow_and_update() {
+                let watch = reader_dead.take();
+                if reader_death.is_ok() && watch.is_some_and(|mut watch| *watch.borrow_and_update()) {
                     // An update restart's close frame can race this signal (the reader emits the
                     // frame, then dies): drain every frame the reader already delivered before
                     // deciding, so the announced closing's own driver owns the recovery.
                     while let Some(Ok(event)) = events.as_mut().map(mpsc::UnboundedReceiver::try_recv) {
                         session.apply_client_event(event, &mut view);
                     }
-                    if matches!(session.connection, Connection::Recovering(_)) {
-                        // The recovery in flight owns the run: the supervisor socket's death joins
-                        // its driver.
-                        session_reconnect = None;
-                    } else if session.client.direct_session_id().is_some() {
-                        // A supervisor socket loss while a live direct link still serves the
-                        // session is not a pane-level loss: retain the loss instead of recovering,
-                        // and hand it to the full reconnect driver when the direct link later dies.
-                        supervisor_lost = true;
-                    } else {
-                        // A session-plane driver retrying through the NOW-DEAD supervisor stops (it
-                        // would ride a dead client): the full driver owns the recovery.
-                        session_reconnect = None;
-                        session.connection_event(ConnectionEvent::ConnectionLost, &mut view);
-                    }
+                    let direct_alive = session.client.direct_session_id().is_some();
+                    session.connection_event(
+                        ConnectionEvent::SupervisorDied { direct_alive },
+                        &mut view,
+                    );
                 }
             }
             maybe_input = async {
@@ -1612,17 +1565,10 @@ async fn run_interactive_surface(
                         // one (§10.4: a queued attach can legitimately wait out a slow restore).
                         match session.reattach_after_recovery(client, &mut view, kind).await {
                             Ok(crate::session_ui::ReattachOutcome::Attached) => {
+                                // The fresh connection's event stream and loss watch replace the
+                                // dead one's.
                                 events = Some(fresh_events);
-                                reader_dead = session.client.reader_dead();
-                                // The fresh connection owes nothing to the old one's loss states: a
-                                // retained supervisor-loss flag or a session-plane retry left over
-                                // from before the reconnect must not fire on the new link.
-                                supervisor_lost = false;
-                                session_reconnect = None;
-                                // Re-arm the loss watch for the fresh connection: the new client's
-                                // supervisor reader can die later, and the one-shot latch must not
-                                // park that loss.
-                                reader_loss_handled = false;
+                                reader_dead = Some(session.client.reader_dead());
                                 session.connection_event(ConnectionEvent::Reattached, &mut view);
                             }
                             Ok(crate::session_ui::ReattachOutcome::AttachBudgetExceeded) => {
@@ -1647,29 +1593,26 @@ async fn run_interactive_surface(
                 }
             }
             _session_reconnect_tick = async {
-                match session_reconnect.as_ref() {
-                    Some(state) => tokio::time::sleep_until(state.next_attempt).await,
+                match session_tick_at {
+                    Some(at) => tokio::time::sleep_until(at).await,
                     None => std::future::pending::<()>().await,
                 }
             } => {
-                let Some(state) = session_reconnect.take() else {
+                let ConnectionEffect::Attach(active_session_id) = session.connection_event(
+                    ConnectionEvent::SessionTick {
+                        active_session_id: session.active_session_id.clone(),
+                    },
+                    &mut view,
+                ) else {
                     continue;
                 };
-                // The user switched sessions while the link was down: the new attach owns its own
-                // connection, so this driver stops.
-                if state.active_session_id != session.active_session_id {
-                    continue;
-                }
                 // The reconnect attempt's budget covers the attach alone: the surface is already
                 // up and its dock holds, so the first-frame fold's bounded fetches cannot eat the
                 // 10s attempt budget on a slow daemon.
                 let anchor = session.reader_anchor(&view);
                 let attempt = tokio::time::timeout(
                     Duration::from_secs(SESSION_RECONNECT_ATTEMPT_TIMEOUT_S),
-                    session.attach_session(
-                        &state.active_session_id,
-                        crate::session_ui::DockFold::Held,
-                    ),
+                    session.attach_session(&active_session_id, crate::session_ui::DockFold::Held),
                 )
                 .await;
                 match attempt {
@@ -1677,45 +1620,22 @@ async fn run_interactive_surface(
                         // The resynced transcript replaces the chat, then the reconnected status
                         // lands on the rebuilt chat.
                         session.resync_view(anchor, &mut view).await;
-                        session.note_as(
-                            "Daemon reconnected",
-                            crate::chat::StatusKind::Info,
-                            &mut view,
-                        );
-                        session_reconnect = None;
+                        session.connection_event(ConnectionEvent::SessionAttached, &mut view);
                         session.spawn_heartbeat_refresh();
-                        session.dirty = true;
                     }
                     Ok(Err(error)) => {
-                        let mut state = state;
-                        state.last_error = format!("{error:#}");
-                        if tokio::time::Instant::now() > state.deadline {
-                            // The window expired: the last error surfaces as the closed event's
-                            // error row, and the UI stays mounted.
-                            let failure =
-                                format!("Daemon reconnection failed: {}", state.last_error);
-                            session.error_row(&failure, &mut view);
-                            session.reconnection_failed = Some(state.last_error.clone());
-                            session_reconnect = None;
-                            session.dirty = true;
-                        } else {
-                            session_reconnect = Some(state.next_attempt());
-                        }
+                        session.connection_event(
+                            ConnectionEvent::SessionAttachFailed(format!("{error:#}")),
+                            &mut view,
+                        );
                     }
                     Err(_) => {
-                        let mut state = state;
-                        state.last_error =
-                            "the session re-attach attempt timed out".to_string();
-                        if tokio::time::Instant::now() > state.deadline {
-                            let failure =
-                                format!("Daemon reconnection failed: {}", state.last_error);
-                            session.error_row(&failure, &mut view);
-                            session.reconnection_failed = Some(state.last_error.clone());
-                            session_reconnect = None;
-                            session.dirty = true;
-                        } else {
-                            session_reconnect = Some(state.next_attempt());
-                        }
+                        session.connection_event(
+                            ConnectionEvent::SessionAttachFailed(
+                                "the session re-attach attempt timed out".to_string(),
+                            ),
+                            &mut view,
+                        );
                     }
                 }
             }

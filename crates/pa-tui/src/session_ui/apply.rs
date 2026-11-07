@@ -18,8 +18,7 @@ pub(crate) struct CompactionAbortNote {
 }
 
 impl SessionUi {
-    /// The connection's one writer: apply `event` and show its note; the effect tells the run loop
-    /// what to do next.
+    /// Apply one connection event and show its row; the effect tells the run loop what to do next.
     pub(crate) fn connection_event(
         &mut self,
         event: ConnectionEvent,
@@ -31,8 +30,12 @@ impl SessionUi {
             ConnectionEffect::Note(text) | ConnectionEffect::Exit { note: text, .. } => {
                 self.note(text, view);
             }
+            ConnectionEffect::Info(text) => self.note_as(text, StatusKind::Info, view),
             ConnectionEffect::Warning(text) => self.note_as(text, StatusKind::Warning, view),
-            ConnectionEffect::None | ConnectionEffect::Connect { .. } => {}
+            ConnectionEffect::ErrorRow(text) => self.error_row(text, view),
+            ConnectionEffect::None
+            | ConnectionEffect::Connect { .. }
+            | ConnectionEffect::Attach(_) => {}
         }
         if let ConnectionEffect::Exit { reason, .. } = &effect {
             self.exit_reason = reason;
@@ -40,7 +43,9 @@ impl SessionUi {
         if before != std::mem::discriminant(&self.connection)
             || !matches!(
                 effect,
-                ConnectionEffect::None | ConnectionEffect::Connect { .. }
+                ConnectionEffect::None
+                    | ConnectionEffect::Connect { .. }
+                    | ConnectionEffect::Attach(_)
             )
         {
             self.dirty = true;
@@ -293,10 +298,13 @@ impl SessionUi {
                 }
             }
             DaemonClientEvent::DirectLinkLost { active_session_id } => {
-                // A direct-transport loss is never itself a session loss — the loop re-attaches
+                // A direct-transport loss is never itself a session loss — the session re-attaches
                 // through the supervisor; only the active session arms it.
                 if active_session_id == self.active_session_id {
-                    self.transport_lost = Some(active_session_id);
+                    self.connection_event(
+                        ConnectionEvent::DirectLinkLost { active_session_id },
+                        view,
+                    );
                 }
             }
             DaemonClientEvent::DaemonClosing { reason, update } => {

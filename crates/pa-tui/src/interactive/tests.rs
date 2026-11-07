@@ -80,6 +80,23 @@ fn an_update_notice_replaces_the_shutdown_recovery() {
     );
 }
 
+/// A supervisor loss while the session-plane driver retries hands the recovery to the full driver:
+/// the session-plane retry would ride the dead supervisor client.
+#[test]
+fn a_supervisor_loss_during_a_session_reattach_starts_the_full_recovery() {
+    let mut connection = Connection::Connected;
+    connection.on(ConnectionEvent::DirectLinkLost {
+        active_session_id: "s1".to_string(),
+    });
+    assert!(matches!(connection, Connection::SessionPlane(_)));
+    connection.on(ConnectionEvent::SupervisorDied {
+        direct_alive: false,
+    });
+    assert!(
+        matches!(&connection, Connection::Recovering(driver) if driver.kind == RecoveryKind::Lost)
+    );
+}
+
 #[test]
 fn flush_rows_write_crlf_and_keep_zone_markers() {
     // A marked row keeps its zero-width zone sequence inline (the flushed row persists

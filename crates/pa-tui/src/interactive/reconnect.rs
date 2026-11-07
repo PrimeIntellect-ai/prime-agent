@@ -1,5 +1,6 @@
-//! The reconnect machinery: the update-restart resume window, the unexpected-loss hiccup loop, and
-//! the announced shutdown's bounded recovery.
+//! The daemon connection's recovery state machine ([`Connection`]): the session-plane re-attach
+//! after a direct worker link dies, the update-restart resume window, the unexpected-loss hiccup
+//! loop, and the announced shutdown's bounded recovery.
 
 use super::{mpsc, DaemonClient, DaemonClientEvent, Duration, RecoveryKind};
 
@@ -37,12 +38,11 @@ pub(super) const SESSION_RECONNECT_ATTEMPT_TIMEOUT_S: u64 = 10;
 /// worker process behind the direct link died, so the attach retries through the supervisor — which
 /// respawns the worker and hands out a fresh peer ticket — with the TS backoff inside the TS
 /// window.
-pub(super) struct SessionReconnect {
+pub(crate) struct SessionReconnect {
     pub(super) active_session_id: String,
     pub(super) deadline: tokio::time::Instant,
     pub(super) next_attempt: tokio::time::Instant,
     delay: Duration,
-    pub(super) last_error: String,
 }
 
 impl SessionReconnect {
@@ -52,7 +52,6 @@ impl SessionReconnect {
             deadline: tokio::time::Instant::now() + SESSION_RECONNECT_WINDOW,
             next_attempt: tokio::time::Instant::now(),
             delay: Duration::from_millis(100),
-            last_error: String::new(),
         }
     }
 
@@ -128,6 +127,16 @@ impl ReconnectLoop {
 /// fold and the run loop's select arms feed it events, and the arms only perform the IO it asks for.
 pub(crate) enum Connection {
     Connected,
+    /// The supervisor connection died while a live direct link kept serving the session: the loss
+    /// is retained until the direct link itself dies; then the full reconnect driver owns the
+    /// recovery.
+    SupervisorLost,
+    /// The direct worker link died (a killed or crashed worker): the session re-attaches through
+    /// the supervisor, which respawns the worker.
+    SessionPlane(SessionReconnect),
+    /// The session-plane window expired: submits surface this error instead of leaving the UI on a
+    /// silent spinner, until an attach lands.
+    SessionPlaneFailed(String),
     /// The full reconnect driver owns the run (an update restart, a lost connection, or an
     /// announced shutdown).
     Recovering(ReconnectLoop),
@@ -139,8 +148,21 @@ pub(crate) enum ConnectionEvent {
     UpdateNotice { est_seconds: u64 },
     /// A `daemon_closing` frame announcing the daemon's own shutdown (TS #2458).
     ShutdownNotice,
-    /// The connection closed without a notice: a daemon hiccup.
+    /// The event stream closed without a notice: a daemon hiccup.
     ConnectionLost,
+    /// The supervisor connection's reader died; `direct_alive` when a direct link still serves the
+    /// session.
+    SupervisorDied { direct_alive: bool },
+    /// The active session's direct worker link died.
+    DirectLinkLost { active_session_id: String },
+    /// The session-plane driver's next attempt is due; `active_session_id` is the mounted session.
+    SessionTick { active_session_id: String },
+    /// The session-plane re-attach landed.
+    SessionAttached,
+    /// The session-plane re-attach failed.
+    SessionAttachFailed(String),
+    /// An attach landed (any path: open, switch, rebind, re-attach).
+    Attached,
     /// The reconnect driver's next attempt is due.
     Tick,
     /// The in-flight connect attempt returned.
@@ -160,7 +182,11 @@ pub(crate) enum ConnectionEvent {
 pub(crate) enum ConnectionEffect {
     None,
     Note(String),
+    Info(String),
     Warning(String),
+    ErrorRow(String),
+    /// Re-attach this session through the supervisor.
+    Attach(String),
     /// Spawn one connect attempt: `retry` picks the retrying connect, the announced shutdown's poll
     /// makes one bounded connect per attempt.
     Connect {
@@ -205,6 +231,65 @@ impl Connection {
                 *self = Connection::Recovering(ReconnectLoop::start_lost());
                 ConnectionEffect::Warning(LOST_NOTE.to_string())
             }
+            (Event::SupervisorDied { .. }, Connection::Recovering(_) | Connection::SupervisorLost) => {
+                ConnectionEffect::None
+            }
+            // A supervisor socket loss while a live direct link still serves the session is not a
+            // pane-level loss: retain it until the direct link dies.
+            (
+                Event::SupervisorDied { direct_alive: true },
+                Connection::Connected | Connection::SessionPlaneFailed(_),
+            ) => {
+                *self = Connection::SupervisorLost;
+                ConnectionEffect::None
+            }
+            // A session-plane driver would retry through the now-dead supervisor, and a retained
+            // supervisor loss could never be restored by one once the direct link dies too: the full
+            // driver replaces the client and reattaches.
+            (Event::SupervisorDied { .. }, _)
+            | (Event::DirectLinkLost { .. }, Connection::SupervisorLost) => {
+                *self = Connection::Recovering(ReconnectLoop::start_lost());
+                ConnectionEffect::Warning(LOST_NOTE.to_string())
+            }
+            (
+                Event::DirectLinkLost { active_session_id },
+                Connection::Connected | Connection::SessionPlaneFailed(_),
+            ) => {
+                *self = Connection::SessionPlane(SessionReconnect::start(&active_session_id));
+                ConnectionEffect::Warning("Daemon connection lost; reconnecting…".to_string())
+            }
+            // The user switched sessions while the link was down: the new attach owns its own
+            // connection, so this driver stops.
+            (Event::SessionTick { active_session_id }, Connection::SessionPlane(state))
+                if state.active_session_id != active_session_id =>
+            {
+                *self = Connection::Connected;
+                ConnectionEffect::None
+            }
+            (Event::SessionTick { .. }, Connection::SessionPlane(state)) => {
+                ConnectionEffect::Attach(state.active_session_id.clone())
+            }
+            (Event::SessionAttached, Connection::SessionPlane(_)) => {
+                *self = Connection::Connected;
+                ConnectionEffect::Info("Daemon reconnected".to_string())
+            }
+            // The window expired: the last error surfaces as the closed event's error row, and the
+            // UI stays mounted.
+            (Event::SessionAttachFailed(error), Connection::SessionPlane(state))
+                if now > state.deadline =>
+            {
+                let row = format!("Daemon reconnection failed: {error}");
+                *self = Connection::SessionPlaneFailed(error);
+                ConnectionEffect::ErrorRow(row)
+            }
+            (Event::SessionAttachFailed(_), Connection::SessionPlane(_)) => {
+                if let Connection::SessionPlane(state) =
+                    std::mem::replace(self, Connection::Connected)
+                {
+                    *self = Connection::SessionPlane(state.next_attempt());
+                }
+                ConnectionEffect::None
+            }
             (Event::Tick | Event::AttemptLanded, Connection::Recovering(driver))
                 if now > driver.deadline =>
             {
@@ -237,7 +322,9 @@ impl Connection {
                     ConnectionEffect::Warning(format!("reattach failed: {error} — retrying…"))
                 }
             },
-            (Event::Reattached, _) => {
+            // An expired re-attach window is per-connection: a recovered connection must not keep
+            // refusing submits.
+            (Event::Reattached, _) | (Event::Attached, Connection::SessionPlaneFailed(_)) => {
                 *self = Connection::Connected;
                 ConnectionEffect::None
             }
