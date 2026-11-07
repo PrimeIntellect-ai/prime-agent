@@ -374,6 +374,7 @@ pub(crate) struct SessionUi {
     pub(crate) pending_rebind: Option<String>,
     /// The re-attach window expired: dispatch is blocked and submits
     /// surface the error instead of leaving the UI on a silent spinner.
+    /// Cleared by the next successful attach.
     pub(crate) reconnection_failed: Option<String>,
     pub(crate) exit_guard: crate::exit_guard::ExitGuard,
     /// The armed double-Escape action: "tree" or "clear", taken by the

@@ -421,9 +421,11 @@ impl SessionUi {
         // keeps a cursor-less attach from stashing a handoff.
         self.last_event_sequence = reconstructed.last_event_sequence;
         self.attach_cursor_present = reconstructed.cursor_present;
-        // The closing notice is per-connection: it clears on every attach, so a later bare session
-        // stop must not route into a stale shutdown recovery's reconnect hang.
+        // The closing notice and an expired re-attach window are per-connection: both clear on every
+        // attach, so a later bare session stop must not route into a stale shutdown recovery's
+        // reconnect hang, and a recovered connection must not keep refusing submits.
         self.daemon_closing_notice = None;
+        self.reconnection_failed = None;
         self.session_name.clone_from(&reconstructed.session_name);
         self.service_tier.clone_from(&reconstructed.service_tier);
         self.pending_model_fallback_message = reconstructed.model_fallback_message;
