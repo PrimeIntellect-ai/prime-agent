@@ -1,68 +1,33 @@
 //! The path token grammar the prompt editor shares between completion and highlighting: an `@`
-//! reference (`@src/main.rs`, `@"my file.txt"`, `@'my file.txt'`, `@my\ file.txt`) or, for
-//! path completion, the same token without the `@`.
+//! reference (`@src/main.rs`, `@"my file.txt"`) or, for path completion, the same token without
+//! the `@`.
 //!
-//! A token starts at the start of the line or after whitespace. A quote opens a quoted token
-//! only as the token's first char after the optional `@`; it closes only when followed by
-//! whitespace or the end of the line, so any other quote is part of the name, and an unclosed
-//! token runs to the end of the line. An unquoted token ends at whitespace or `|`; on
-//! macOS/Linux a backslash escapes the next char (`my\ file`), on Windows it is the path
-//! separator.
-
-/// Whether a backslash escapes the next char of an unquoted token.
-const ESCAPES: bool = !cfg!(windows);
+//! A token starts at the start of the line or after a delimiter (whitespace, `"`, `'`, `=`). A
+//! `"` opens a quoted token only as the token's first char after the optional `@`; the next `"`
+//! closes it, and an unclosed token runs to the end of the line. An unquoted token ends at the
+//! next delimiter.
 
 /// How a path token is written.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Quoting {
     Bare,
-    /// Unquoted with at least one backslash escape.
-    Escaped,
     Double,
-    Single,
 }
 
 impl Quoting {
-    /// `path` written in this quoting, so that it scans back as itself: a quoted token keeps
-    /// its quote unless the path holds it (then the other one); an unquoted path that would not
-    /// scan back takes double quotes, or backslash escapes when escapes were typed.
+    /// `path` written in this quoting; an unquoted path with spaces takes double quotes.
     pub(crate) fn render(self, path: &str) -> String {
-        let quote = match self {
-            Quoting::Bare | Quoting::Escaped
-                if !path
-                    .chars()
-                    .enumerate()
-                    .any(|(index, c)| needs_escape(index, c)) =>
-            {
-                return path.to_string();
-            }
-            Quoting::Escaped => {
-                let mut escaped = String::with_capacity(path.len());
-                for (index, c) in path.chars().enumerate() {
-                    if needs_escape(index, c) {
-                        escaped.push('\\');
-                    }
-                    escaped.push(c);
-                }
-                return escaped;
-            }
-            Quoting::Single => '\'',
-            Quoting::Bare | Quoting::Double => '"',
-        };
-        let quote = match quote {
-            '"' if path.contains('"') => '\'',
-            '\'' if path.contains('\'') => '"',
-            quote => quote,
-        };
-        format!("{quote}{path}{quote}")
+        if self == Quoting::Bare && !path.contains(' ') {
+            return path.to_string();
+        }
+        format!("\"{path}\"")
     }
 
     /// The quote char of a quoted token.
     pub(crate) fn quote(self) -> Option<char> {
         match self {
             Quoting::Double => Some('"'),
-            Quoting::Single => Some('\''),
-            Quoting::Bare | Quoting::Escaped => None,
+            Quoting::Bare => None,
         }
     }
 }
@@ -77,26 +42,20 @@ pub(crate) struct PathToken {
     pub text: String,
     /// Whether the token starts with `@`.
     pub at: bool,
-    /// The path without the `@`, quotes, and escapes.
+    /// The path without the `@` and quotes.
     pub path: String,
     pub quoting: Quoting,
     /// Whether a quoted token found its closing quote.
     pub closed: bool,
 }
 
-/// Whether a token can start at `index`: the line start or after whitespace.
-pub(crate) fn is_token_start(line: &[char], index: usize) -> bool {
-    index == 0 || line[index - 1].is_whitespace()
+fn is_delimiter(c: char) -> bool {
+    c.is_whitespace() || matches!(c, '"' | '\'' | '=')
 }
 
-fn ends_unquoted(c: char) -> bool {
-    c.is_whitespace() || c == '|'
-}
-
-/// Whether `c`, at char `index` of an unquoted path, would not scan back as itself: it ends
-/// the token, opens a quote, or (where backslashes escape) is a backslash.
-fn needs_escape(index: usize, c: char) -> bool {
-    ends_unquoted(c) || (index == 0 && matches!(c, '"' | '\'')) || (ESCAPES && c == '\\')
+/// Whether a token can start at `index`: the line start or after a delimiter.
+fn is_token_start(line: &[char], index: usize) -> bool {
+    index == 0 || is_delimiter(line[index - 1])
 }
 
 /// The `@` tokens of `line`, left to right.
@@ -136,9 +95,9 @@ fn tokens(line: &[char], at_only: bool) -> Vec<PathToken> {
     let mut index = 0;
     while index < line.len() {
         let c = line[index];
-        if is_token_start(line, index) && !c.is_whitespace() && (!at_only || c == '@') {
+        if is_token_start(line, index) && (c == '"' || !is_delimiter(c)) && (!at_only || c == '@') {
             let token = scan(line, index);
-            index = token.end.max(index + 1);
+            index = token.end;
             found.push(token);
         } else {
             index += 1;
@@ -153,32 +112,23 @@ fn scan(line: &[char], start: usize) -> PathToken {
     let mut index = start + usize::from(at);
     let mut path = String::new();
     let mut closed = false;
-    let mut quoting = match line.get(index) {
+    let quoting = match line.get(index) {
         Some('"') => Quoting::Double,
-        Some('\'') => Quoting::Single,
         _ => Quoting::Bare,
     };
     if let Some(quote) = quoting.quote() {
         index += 1;
         while let Some(&c) = line.get(index).filter(|c| **c != '\n') {
             index += 1;
-            if c == quote && line.get(index).is_none_or(|next| next.is_whitespace()) {
+            if c == quote {
                 closed = true;
                 break;
             }
             path.push(c);
         }
     } else {
-        while let Some(&c) = line.get(index).filter(|c| !ends_unquoted(**c)) {
+        while let Some(&c) = line.get(index).filter(|c| !is_delimiter(**c)) {
             index += 1;
-            if ESCAPES && c == '\\' {
-                if let Some(&escaped) = line.get(index).filter(|next| **next != '\n') {
-                    index += 1;
-                    path.push(escaped);
-                    quoting = Quoting::Escaped;
-                    continue;
-                }
-            }
             path.push(c);
         }
     }
@@ -205,30 +155,30 @@ mod tests {
     type Expected = (usize, usize, &'static str, Quoting, bool);
 
     #[test]
-    fn at_tokens_follow_the_quote_and_boundary_rules() {
-        use Quoting::{Bare, Double, Single};
+    fn at_tokens_follow_the_quote_and_delimiter_rules() {
+        use Quoting::{Bare, Double};
         let cases: &[(&str, &[Expected])] = &[
-            ("@'a b' x", &[(0, 6, "a b", Single, true)]),
             (r#"@"a b" x"#, &[(0, 6, "a b", Double, true)]),
-            // A quote not followed by whitespace or the line end is part of the name.
+            // The next quote closes; an unclosed quote runs to the end of the line.
+            (r#"@"a"b"#, &[(0, 4, "a", Double, true)]),
+            ("x @\"open b\nnext", &[(2, 10, "open b", Double, false)]),
+            // Every delimiter starts a token and ends an unquoted one.
             (
-                "@'/path/to/weird'dir/file with spaces.txt'",
-                &[(
-                    0,
-                    42,
-                    "/path/to/weird'dir/file with spaces.txt",
-                    Single,
-                    true,
-                )],
+                r#"cfg=@a.rs '@b' "@c""#,
+                &[
+                    (4, 9, "a.rs", Bare, false),
+                    (11, 13, "b", Bare, false),
+                    (16, 18, "c", Bare, false),
+                ],
             ),
-            // An unclosed quote runs to the end of the line.
-            ("x @'open b\nnext", &[(2, 10, "open b", Single, false)]),
-            // Apostrophes after the token start are name chars; prose has no tokens.
-            ("don't @it's fine", &[(6, 11, "it's", Bare, false)]),
+            (
+                "@it's @a=b",
+                &[(0, 3, "it", Bare, false), (6, 8, "a", Bare, false)],
+            ),
             ("mail a@b.c (@x)", &[]),
             (
                 "@a|b @",
-                &[(0, 2, "a", Bare, false), (5, 6, "", Bare, false)],
+                &[(0, 4, "a|b", Bare, false), (5, 6, "", Bare, false)],
             ),
         ];
         for (line, expected) in cases {
@@ -249,37 +199,10 @@ mod tests {
     #[test]
     fn only_an_open_token_ending_at_the_cursor_is_typed() {
         assert_eq!(
-            at_token_before(&chars("@'a b")).map(|t| t.path),
+            at_token_before(&chars(r#"@"a b"#)).map(|t| t.path),
             Some("a b".to_string())
         );
-        assert_eq!(at_token_before(&chars("@'a b'")), None);
+        assert_eq!(at_token_before(&chars(r#"@"a b""#)), None);
         assert_eq!(at_token_before(&chars("@a ")), None);
-    }
-
-    #[test]
-    fn rendered_paths_scan_back_as_themselves() {
-        let mut cases = vec![
-            (Quoting::Bare, "my file"),
-            (Quoting::Bare, "'lead"),
-            (Quoting::Single, "it's here"),
-            (Quoting::Double, r#"say "hi""#),
-        ];
-        if ESCAPES {
-            cases.extend([
-                (Quoting::Bare, r"a\b"),
-                (Quoting::Escaped, r"my dir\x"),
-                (Quoting::Escaped, "'lead"),
-            ]);
-        }
-        for (quoting, path) in cases {
-            let text = format!("@{}", quoting.render(path));
-            let tokens = at_tokens(&chars(&text));
-            assert_eq!(tokens.len(), 1, "{text}");
-            assert_eq!(
-                (tokens[0].end, tokens[0].path.as_str()),
-                (text.chars().count(), path),
-                "{text}"
-            );
-        }
     }
 }

@@ -36,6 +36,15 @@ fn flag_pattern(include_bare_separator: bool) -> &'static fancy_regex::Regex {
     }
 }
 
+/// A flag must start at index 0 or after whitespace.
+fn has_token_boundary(text: &str, byte_start: usize) -> bool {
+    byte_start == 0
+        || text[..byte_start]
+            .chars()
+            .next_back()
+            .is_some_and(char::is_whitespace)
+}
+
 fn char_at_index(text: &str, byte_index: usize) -> usize {
     text[..byte_index].chars().count()
 }
@@ -51,8 +60,8 @@ pub(crate) fn char_slice(text: &str, start: usize, end: usize) -> &str {
 }
 
 /// The token spans of `text` at or after `from_index` (char offsets): the `@` path tokens
-/// (`success`; a bare `@` or empty quotes are no path) and the flags outside them (`mdLink`),
-/// each flag at a token start.
+/// (`success`; a lone `@` is no path) and the flags outside them (`mdLink`), each flag needing
+/// a whitespace boundary before it.
 pub fn find_arg_tokens(
     text: &str,
     from_index: usize,
@@ -62,7 +71,7 @@ pub fn find_arg_tokens(
     let paths = path_token::at_tokens(&chars);
     let mut spans: Vec<ArgTokenSpan> = paths
         .iter()
-        .filter(|token| token.start >= from_index && !token.path.is_empty())
+        .filter(|token| token.start >= from_index && token.text != "@")
         .map(|token| ArgTokenSpan {
             start: token.start,
             end: token.end,
@@ -73,7 +82,7 @@ pub fn find_arg_tokens(
         let Ok(m) = result else { continue };
         let start = char_at_index(text, m.start());
         if start < from_index
-            || !path_token::is_token_start(&chars, start)
+            || !has_token_boundary(text, m.start())
             || paths
                 .iter()
                 .any(|token| (token.start..token.end).contains(&start))
@@ -535,8 +544,8 @@ mod tests {
                 color: ThemeColor::Success
             }]
         );
-        // An unterminated quote runs to the end of the line; a single-quoted path is one token
-        // too, a flag inside it no flag.
+        // An unterminated quote runs to the end of the line; a flag inside a quoted path is no
+        // flag; a delimiter (`=`, a quote) starts an `@` token too.
         assert_eq!(
             find_arg_tokens(r#"a @"open b"#, 0, false),
             vec![ArgTokenSpan {
@@ -546,15 +555,22 @@ mod tests {
             }]
         );
         assert_eq!(
-            find_arg_tokens("a @'my --file' b", 0, false),
+            find_arg_tokens(r#"a @"my --file" b"#, 0, false),
             vec![ArgTokenSpan {
                 start: 2,
                 end: 14,
                 color: ThemeColor::Success
             }]
         );
-        // A backslash escape can carry a non-space char; the token stops at the first whitespace
-        // either way.
+        assert_eq!(
+            find_arg_tokens("cfg=@a.rs", 0, false),
+            vec![ArgTokenSpan {
+                start: 4,
+                end: 9,
+                color: ThemeColor::Success
+            }]
+        );
+        // A backslash is a plain path char.
         assert_eq!(
             find_arg_tokens(r"a @pa\th b", 0, false),
             vec![ArgTokenSpan {

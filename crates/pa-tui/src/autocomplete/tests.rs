@@ -188,6 +188,9 @@ fn path_completion_lists_directories_first() {
         values.iter().position(|v| *v == "./main.rs").unwrap()
             > values.iter().position(|v| *v == "./src/").unwrap()
     );
+    // `=` delimits a path token.
+    let suggestions = ready(provider.get_suggestions(&["--config=./ma".to_string()], 0, 13, false));
+    assert_eq!(suggestions.items[0].value, "./main.rs");
     // Non-path tokens do not trigger on natural typing.
     assert!(provider
         .get_suggestions(&["hello wor".to_string()], 0, 9, false)
@@ -270,6 +273,7 @@ fn at_prefix_lists_nested_fuzzy_matches() {
         ["@.hidden/partial", "@src/deep/partial_match.rs"]
     );
     assert_eq!(values("@src/par"), ["@src/deep/partial_match.rs"]);
+    assert_eq!(values("cfg=@src/par"), ["@src/deep/partial_match.rs"]);
     let item = CompletionItem {
         value: "@src/deep/partial_match.rs".to_string(),
         label: "partial_match.rs".to_string(),
@@ -603,23 +607,6 @@ fn at_item_values(provider: &CombinedAutocompleteProvider, text: &str) -> Vec<St
         .into_iter()
         .map(|item| item.value)
         .collect()
-}
-
-/// A completion keeps the typed quote, switching to the other one for a path holding it, and
-/// the typed escape form on macOS/Linux.
-#[test]
-fn at_completion_keeps_the_typed_quoting() {
-    let base = tempfile::TempDir::new().expect("temp dir");
-    std::fs::create_dir_all(base.path().join("my target")).expect("mkdir");
-    std::fs::write(base.path().join("it's.md"), "x").expect("write");
-    let provider = provider(base.path().to_str().expect("utf8"));
-    assert_eq!(at_item_values(&provider, "@'my"), ["@'my target/'"]);
-    assert_eq!(at_item_values(&provider, "@'it"), ["@\"it's.md\""]);
-    // Accepting it before the typed closing quote replaces that quote too.
-    let result = provider.apply_completion(&["@'it'".to_string()], 0, 4, &item("@\"it's.md\""));
-    assert_eq!(result.lines[0], "@\"it's.md\" ");
-    #[cfg(not(windows))]
-    assert_eq!(at_item_values(&provider, r"@my\ ta"), [r"@my\ target/"]);
 }
 
 /// A typed directory scope with an empty query lists the directory's children.

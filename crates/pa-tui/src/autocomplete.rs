@@ -502,8 +502,7 @@ fn apply_file_completion(
     let line: Vec<char> = lines[cursor_line].chars().collect();
     let before_prefix: String = line[..token.start].iter().collect();
     let after_cursor: String = line[cursor_col.min(line.len())..].iter().collect();
-    // The typed token's closing quote after the cursor belongs to the replaced token, whatever
-    // quote the item renders.
+    // The typed token's closing quote after the cursor belongs to the replaced token.
     let adjusted_after_cursor = match token.quoting.quote() {
         Some(quote) if after_cursor.starts_with(quote) => after_cursor.chars().skip(1).collect(),
         _ => after_cursor,
@@ -512,7 +511,7 @@ fn apply_file_completion(
     // TS `applyCompletion`'s `@` branch: a file leaves a trailing space so the next
     // word starts clean, a directory keeps the token open for further completion.
     let suffix = if token.at && !is_directory { " " } else { "" };
-    let cursor_offset = if is_directory && item.value.ends_with(['"', '\'']) {
+    let cursor_offset = if is_directory && item.value.ends_with('"') {
         item.value.chars().count() - 1
     } else {
         item.value.chars().count()
