@@ -6,27 +6,20 @@
 //! not stick, and a later discard must not reuse an earlier run's success.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use pa_core::kernel::manager::{KernelStartOptions, ReplKernelManager};
 use pa_core::kernel::shared::{
     ExecuteOptions, ExecuteStatus, HostRequestHandlers, KernelManagerOptions, KernelShutdownOptions,
 };
 
-#[tokio::test]
-async fn every_discarded_repair_reprovisions_the_next_kernel() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    let fail_boots = dir.path().join("fail-boots");
-    std::fs::write(&fail_boots, "0").expect("write counter");
-    let manager = ReplKernelManager::new(KernelManagerOptions {
+fn fake_kernel(dir: &Path, env: HashMap<String, String>) -> ReplKernelManager {
+    ReplKernelManager::new(KernelManagerOptions {
         python: Some(
             PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/rebootstrap_kernel.py"),
         ),
-        cwd: Some(dir.path().to_path_buf()),
-        env: HashMap::from([(
-            "FAIL_BOOTS_FILE".to_string(),
-            fail_boots.display().to_string(),
-        )]),
+        cwd: Some(dir.to_path_buf()),
+        env,
         session_id: Some("rebootstrap-test".to_string()),
         host_handlers: HostRequestHandlers::new(),
         python_skills: Vec::new(),
@@ -34,7 +27,21 @@ async fn every_discarded_repair_reprovisions_the_next_kernel() {
         bootstrap_code: Some("BOOT".to_string()),
         stderr_log_path: None,
         on_background_work_settled: None,
-    });
+    })
+}
+
+#[tokio::test]
+async fn every_discarded_repair_reprovisions_the_next_kernel() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let fail_boots = dir.path().join("fail-boots");
+    std::fs::write(&fail_boots, "0").expect("write counter");
+    let manager = fake_kernel(
+        dir.path(),
+        HashMap::from([(
+            "FAIL_BOOTS_FILE".to_string(),
+            fail_boots.display().to_string(),
+        )]),
+    );
     manager
         .start(KernelStartOptions::default())
         .await
@@ -67,6 +74,52 @@ async fn every_discarded_repair_reprovisions_the_next_kernel() {
         second.error
     );
 
+    assert!(manager
+        .shutdown(KernelShutdownOptions::default())
+        .await
+        .is_ok());
+}
+
+/// A `start()` during the repair's own start joins it: once `start()` returns, the
+/// kernel is running (the repaired spawn holds its ready frame back a moment).
+#[tokio::test]
+async fn a_start_during_the_repair_start_joins_it() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let fail_boots = dir.path().join("fail-boots");
+    std::fs::write(&fail_boots, "0").expect("write counter");
+    let manager = fake_kernel(
+        dir.path(),
+        HashMap::from([
+            (
+                "FAIL_BOOTS_FILE".to_string(),
+                fail_boots.display().to_string(),
+            ),
+            (
+                "SPAWNS_FILE".to_string(),
+                dir.path().join("spawns").display().to_string(),
+            ),
+        ]),
+    );
+    manager
+        .start(KernelStartOptions::default())
+        .await
+        .expect("fake kernel must start");
+    assert!(manager
+        .execute("corrupt", ExecuteOptions::default())
+        .await
+        .is_err());
+    // The repair task replaces the child: wait until it has left Running.
+    while manager.is_running() {
+        tokio::task::yield_now().await;
+    }
+    manager
+        .start(KernelStartOptions::default())
+        .await
+        .expect("the repair's start succeeds");
+    assert!(
+        manager.is_running(),
+        "start() returned before the repair's start finished"
+    );
     assert!(manager
         .shutdown(KernelShutdownOptions::default())
         .await

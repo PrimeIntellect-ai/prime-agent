@@ -2,12 +2,20 @@
 import json
 import os
 import sys
+import time
 
 # Protocol v3 fake: "BOOT" is the runtime bootstrap, failing while the counter
 # file at FAIL_BOOTS_FILE is positive; "check-boot" errors unless this process
-# ran a successful bootstrap; "corrupt" emits an invalid protocol frame.
+# ran a successful bootstrap; "corrupt" emits an invalid protocol frame. With
+# SPAWNS_FILE set, every spawn after the first holds its ready frame back a moment.
 fail_boots_file = os.environ["FAIL_BOOTS_FILE"]
 booted = False
+spawns_file = os.environ.get("SPAWNS_FILE")
+if spawns_file:
+    with open(spawns_file, "a") as f:
+        f.write("x")
+    if os.path.getsize(spawns_file) > 1:
+        time.sleep(1)
 
 
 def done(req_id, ok, evalue=""):
