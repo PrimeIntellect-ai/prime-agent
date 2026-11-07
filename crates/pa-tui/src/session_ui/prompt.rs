@@ -916,7 +916,12 @@ impl SessionUi {
                     }
                 }
                 // No retry follows: a run the daemon did start still arrives as `agent_start`.
-                self.apply_run_event(RunEvent::SubmitFailed, view);
+                self.apply_run_event(
+                    RunEvent::SubmitFailed {
+                        others_in_flight: self.work_in_flight(),
+                    },
+                    view,
+                );
                 if crate::daemon_client::is_daemon_timeout(&error) {
                     // Sent but unanswered: the turn may already be admitted — restoring the
                     // draft would invite a duplicate submission, so the error row names the

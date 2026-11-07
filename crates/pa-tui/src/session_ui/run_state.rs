@@ -20,9 +20,10 @@ pub(crate) enum RunState {
 pub(crate) enum RunEvent {
     /// The client submitted a prompt.
     Submitted,
-    /// The submit failed or its outcome is unknown (refused, unreachable, timed out, connection
-    /// closed); a run the daemon did start still arrives as `Started`.
-    SubmitFailed,
+    /// A submit failed or its outcome is unknown (refused, unreachable, timed out, connection
+    /// closed); a run the daemon did start still arrives as `Started`. `others_in_flight` keeps
+    /// the state while another submit can still start the run.
+    SubmitFailed { others_in_flight: bool },
     /// `agent_start` / `turn_start`.
     Started,
     /// `agent_end` / `session_closed`.
@@ -41,8 +42,10 @@ impl RunState {
             RunEvent::Started | RunEvent::Attached { streaming: true } => RunState::Running,
             RunEvent::Ended | RunEvent::Attached { streaming: false } => RunState::Idle,
             RunEvent::Submitted if self == RunState::Idle => RunState::Submitted,
-            RunEvent::SubmitFailed if self == RunState::Submitted => RunState::Idle,
-            RunEvent::Submitted | RunEvent::SubmitFailed => self,
+            RunEvent::SubmitFailed {
+                others_in_flight: false,
+            } if self == RunState::Submitted => RunState::Idle,
+            RunEvent::Submitted | RunEvent::SubmitFailed { .. } => self,
         }
     }
 }
@@ -89,6 +92,10 @@ impl SessionUi {
 mod tests {
     use super::{RunEvent, RunState};
 
+    const FAILED: RunEvent = RunEvent::SubmitFailed {
+        others_in_flight: false,
+    };
+
     fn after(events: &[RunEvent]) -> RunState {
         events
             .iter()
@@ -98,27 +105,27 @@ mod tests {
     #[test]
     fn a_failed_or_lost_submit_never_strands_the_loader() {
         assert_eq!(
-            after(&[RunEvent::Submitted, RunEvent::SubmitFailed]),
+            after(&[RunEvent::Submitted, FAILED]),
             RunState::Idle,
             "a refused, unreachable or unanswered submit returns to idle"
         );
         assert_eq!(
-            after(&[
-                RunEvent::Submitted,
-                RunEvent::SubmitFailed,
-                RunEvent::Started
-            ]),
+            after(&[RunEvent::Submitted, FAILED, RunEvent::Started]),
             RunState::Running,
             "a run the daemon started anyway still shows"
         );
         assert_eq!(
-            after(&[
-                RunEvent::Started,
-                RunEvent::Submitted,
-                RunEvent::SubmitFailed
-            ]),
+            after(&[RunEvent::Started, RunEvent::Submitted, FAILED]),
             RunState::Running,
             "a queued prompt's failure never ends the live run"
+        );
+        let other_pending = RunEvent::SubmitFailed {
+            others_in_flight: true,
+        };
+        assert_eq!(
+            after(&[RunEvent::Submitted, RunEvent::Submitted, other_pending]),
+            RunState::Submitted,
+            "a failed submit keeps the state while another submit is still in flight"
         );
     }
 }
