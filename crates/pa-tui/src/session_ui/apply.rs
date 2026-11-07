@@ -327,13 +327,13 @@ impl SessionUi {
                         .collect::<Vec<_>>()
                         .join(", ");
                     view.push_entry(crate::chat::ChatEntry::Status {
-                            text: format!(
-                                "Prime Agent is updating — restarting the daemon (about {}s). {} will resume automatically.",
-                                update.est_seconds.max(1),
-                                if names.is_empty() { "Your session".to_string() } else { names }
-                            ),
-                            kind: crate::chat::StatusKind::Info,
-                        });
+                        text: format!(
+                            "Prime Agent is updating — restarting the daemon (about {}s). {} will resume automatically.",
+                            update.est_seconds.max(1),
+                            if names.is_empty() { "Your session".to_string() } else { names }
+                        ),
+                        kind: crate::chat::StatusKind::Info,
+                    });
                     self.connection_event(
                         ConnectionEvent::UpdateNotice {
                             est_seconds: update.est_seconds,
