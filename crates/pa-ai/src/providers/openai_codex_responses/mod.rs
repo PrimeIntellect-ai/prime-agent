@@ -430,13 +430,15 @@ async fn run_websocket_attempt(
         );
     }
 
-    let mut events = connection
+    let sent = connection
         .send_request(&request_body, options.base.signal.clone())
-        .await?;
+        .await;
 
     let mut keep_connection = true;
     let start_partial = output.clone();
     let process = async {
+        // A failed send releases the connection through the error arm below, like a failed stream.
+        let mut events = sent?;
         let model_id = model.id.clone();
         let hooks = ResponsesStreamHooks {
             request_service_tier: options.service_tier,
@@ -1596,5 +1598,80 @@ mod tests {
             .map(|body| body.get("prompt_cache_key").cloned())
             .collect();
         assert_eq!(cache_keys, vec![Some(json!(session_id)); 2]);
+    }
+
+    /// A request aborted after it acquired the session's cached connection but before its
+    /// `response.create` went out still releases the connection: the session's next turn rides a
+    /// cached connection again, so the turn after it continues the chain.
+    #[tokio::test]
+    async fn an_abort_before_the_send_releases_the_cached_connection() {
+        let server = spawn_scripted_codex_server(vec![
+            vec![codex_response_events("resp_1", "msg_1", "Hello")],
+            vec![
+                codex_response_events("resp_3", "msg_3", "Hello again"),
+                codex_response_events("resp_4", "msg_4", "Done"),
+            ],
+        ])
+        .await;
+        let model = codex_test_model(server.port);
+        let session_id = format!("session-abort-before-send-{}", std::process::id());
+        let options = codex_test_options(&server, &session_id);
+        let first =
+            stream_openai_codex_responses(&model, &codex_test_context("Say hello"), Some(&options))
+                .result()
+                .await;
+        assert_eq!(first.stop_reason, StopReason::Stop);
+
+        // The abort lands after the provider's entry check, while the payload is being built: the
+        // attempt still acquires the idle cached connection and fails in `send_request`.
+        let signal = tokio_util::sync::CancellationToken::new();
+        let mut aborted_options = codex_test_options(&server, &session_id);
+        aborted_options.base.signal = Some(signal.clone());
+        aborted_options.base.on_payload = Some(std::sync::Arc::new(move |_, _| {
+            signal.cancel();
+            None
+        }));
+        let aborted = stream_openai_codex_responses(
+            &model,
+            &codex_followup_context(&first, "Now finish"),
+            Some(&aborted_options),
+        )
+        .result()
+        .await;
+        assert_eq!(aborted.stop_reason, StopReason::Aborted);
+        assert!(
+            !session::session_state()
+                .lock()
+                .expect("session state")
+                .connections
+                .get(&session_id)
+                .is_some_and(|entry| entry.busy),
+            "the aborted request must not leave the session's connection busy"
+        );
+
+        let third =
+            stream_openai_codex_responses(&model, &codex_test_context("Say hello"), Some(&options))
+                .result()
+                .await;
+        assert_eq!(third.response_id.as_deref(), Some("resp_3"));
+        let fourth = stream_openai_codex_responses(
+            &model,
+            &codex_followup_context(&third, "Now finish"),
+            Some(&options),
+        )
+        .result()
+        .await;
+        assert_eq!(codex_message_text(&fourth).as_deref(), Some("Done"));
+        let bodies = server.sent_bodies.lock().expect("bodies").clone();
+        assert_eq!(
+            bodies.len(),
+            3,
+            "the aborted request never reached the server: {bodies:?}"
+        );
+        assert_eq!(
+            bodies[2].get("previous_response_id"),
+            Some(&json!("resp_3")),
+            "the turn after the abort continues the chain"
+        );
     }
 }
