@@ -363,13 +363,8 @@ pub(crate) struct SessionUi {
     pub(crate) telemetry: Option<std::sync::Arc<dyn crate::interactive::InteractionTelemetry>>,
     scroll_adoption_emitted: bool,
     pub(crate) exit_reason: &'static str,
-    /// The §10 reattach contract: set when a `daemon_closing` update frame
-    /// arrived; the interactive loop drives the reconnect from it.
-    pub(crate) reconnect: Option<crate::daemon_client::DaemonClosingUpdate>,
-    /// The reason the daemon last announced itself closing; cleared once a fresh attach
-    /// (re)establishes the connection. An announced `shutdown` arms the bounded shutdown recovery,
-    /// so a bare session stop never routes into a reconnect.
-    pub(crate) daemon_closing_notice: Option<String>,
+    /// The daemon connection's recovery state; [`Self::connection_event`] is its only writer.
+    pub(crate) connection: crate::interactive::reconnect::Connection,
     pub(crate) transport_lost: Option<String>,
     pub(crate) pending_rebind: Option<String>,
     /// The re-attach window expired: dispatch is blocked and submits

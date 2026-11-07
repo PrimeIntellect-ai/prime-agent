@@ -178,8 +178,7 @@ impl SessionUi {
             telemetry: options.telemetry.clone(),
             scroll_adoption_emitted: false,
             exit_reason: "daemon_closed",
-            reconnect: None,
-            daemon_closing_notice: None,
+            connection: crate::interactive::reconnect::Connection::Connected,
             transport_lost: None,
             pending_rebind: None,
             reconnection_failed: None,
@@ -421,10 +420,8 @@ impl SessionUi {
         // keeps a cursor-less attach from stashing a handoff.
         self.last_event_sequence = reconstructed.last_event_sequence;
         self.attach_cursor_present = reconstructed.cursor_present;
-        // The closing notice and an expired re-attach window are per-connection: both clear on every
-        // attach, so a later bare session stop must not route into a stale shutdown recovery's
-        // reconnect hang, and a recovered connection must not keep refusing submits.
-        self.daemon_closing_notice = None;
+        // An expired re-attach window is per-connection: a recovered connection must not keep
+        // refusing submits.
         self.reconnection_failed = None;
         self.session_name.clone_from(&reconstructed.session_name);
         self.service_tier.clone_from(&reconstructed.service_tier);
