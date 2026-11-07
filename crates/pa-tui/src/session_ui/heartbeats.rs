@@ -26,11 +26,6 @@ impl SessionUi {
         let Some(id) = key_event_to_id(&key) else {
             return Ok(());
         };
-        // The view consumes Ctrl+C (close, not exit); report it so the force-quit
-        // guard can disarm.
-        if id == "ctrl+c" {
-            self.exit_guard.note_ctrl_c_handled();
-        }
         let action = view
             .heartbeats_picker
             .as_mut()

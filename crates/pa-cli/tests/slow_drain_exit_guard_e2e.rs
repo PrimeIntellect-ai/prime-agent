@@ -15,6 +15,7 @@
 //! the drain outlasts the 1500ms force-quit deadline armed at the second
 //! Ctrl+C. A DRAINING terminal is not a stalled shutdown (per-chunk progress
 //! holds the watchdog's fire; TS has no watchdog), and a stalled drain fires.
+//! A Ctrl+C pair the loop handled without exiting never fires it either.
 #![cfg(unix)]
 
 use std::io::{BufRead, Read, Write};
@@ -218,6 +219,53 @@ fn a_stalled_drain_still_fires_the_force_quit() {
     assert!(
         exit_wall < Duration::from_secs(8),
         "the forced exit lands inside the stall window plus the grace (wall {exit_wall:?})"
+    );
+}
+
+/// A Ctrl+C that a panel consumes is a handled press: closing `/settings` with Ctrl+C and
+/// pressing Ctrl+C at the editor inside the pair window shows the exit hint, and the
+/// watchdog must not force-quit the live process.
+#[test]
+fn a_ctrl_c_that_closes_settings_never_arms_the_force_quit() {
+    let _lock = match HARNESS_LOCK.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    let mut harness = SlowDrainHarness::start();
+
+    harness.wait_from_start(KITTY_QUERY, "the kitty capability query");
+    harness.write(KITTY_ANSWER);
+    harness.wait_from_start(LAST_ROW, "the attach snapshot rendered");
+    harness.settle();
+
+    // One key at a time: typed as one burst, the doubled letter was lost (`/setings`).
+    let mark = harness.mark();
+    for key in b"/settings\r" {
+        harness.write(&[*key]);
+        harness.master.drain_until_quiet(1);
+    }
+    harness
+        .master
+        .wait_from(mark, b"Type to search", "the settings menu");
+    harness.settle();
+
+    // The pair: the first press closes the menu, the second shows the exit hint.
+    let mark = harness.mark();
+    harness.write(b"\x03");
+    std::thread::sleep(Duration::from_millis(400));
+    harness.write(b"\x03");
+    harness
+        .master
+        .wait_from(mark, EXIT_HINT_ROW, "the exit hint");
+
+    // Past the force-quit deadline and its progress grace: the loop handled both presses.
+    let until = Instant::now() + Duration::from_millis(2_500);
+    while Instant::now() < until {
+        harness.master.drain_until_quiet(1);
+    }
+    assert!(
+        harness.child_alive(),
+        "the watchdog force-quit a live loop that handled every Ctrl+C press"
     );
 }
 
