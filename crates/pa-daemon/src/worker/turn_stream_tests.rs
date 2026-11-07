@@ -266,14 +266,20 @@ async fn a_late_abort_sighting_on_a_completed_runs_done_keeps_the_fallback_close
     );
 }
 
-/// `DoneAborted` with no engine `agent_end`: the aborted-outcome carrier arms the
-/// silence.
+/// `DoneAborted` with no engine `agent_end` (the pre-run abort): the fallback still
+/// closes the delivery's `agent_start`; only a detached (row-suppressed) run stays silent.
 #[tokio::test]
-async fn done_aborted_arms_the_fallback_silence() {
-    let events = gate_sighting_events(vec![EngineEvent::DoneAborted], true, false).await;
+async fn an_aborted_settle_closes_the_run_unless_detached() {
+    let aborted = gate_sighting_events(vec![EngineEvent::DoneAborted], true, false).await;
+    assert_eq!(
+        positions_of(&aborted, "agent_end").len(),
+        1,
+        "the aborted settle pairs the opening agent_start: {aborted:?}"
+    );
+    let detached = gate_sighting_events(vec![EngineEvent::DoneAborted], true, true).await;
     assert!(
-        positions_of(&events, "agent_end").is_empty(),
-        "the aborted settle keeps the suppressed-run silence: {events:?}"
+        positions_of(&detached, "agent_end").is_empty(),
+        "the detached run stays silent: {detached:?}"
     );
 }
 

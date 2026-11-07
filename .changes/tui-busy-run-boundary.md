@@ -1,0 +1,1 @@
+- The TUI stays busy for the whole agent run instead of going idle after each model turn: Esc and Ctrl+C between two tool turns now abort the run, the loader no longer blinks out between turns, and `!` bash output started mid-run is held until the run ends. An abort that lands before the run starts now still closes the run on the wire, so the TUI cannot stay busy after it.

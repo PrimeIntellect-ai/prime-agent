@@ -239,6 +239,7 @@ impl MockSupervisor {
                                     }),
                                 );
                                 write_session_event(&mut delayed, &json!({ "type": "turn_end" }));
+                                write_session_event(&mut delayed, &json!({ "type": "agent_end" }));
                             });
                         }
                     }

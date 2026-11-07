@@ -417,15 +417,13 @@ impl TurnRunner {
         // the settle's pane fallback skip and strand the pane working).
         let herdr_run_end = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let herdr_run_end_seen = Arc::clone(&herdr_run_end);
-        // Whether the abort gate ever observed the delivery's cancel flag
-        // DURING this turn (the per-event read below): the fallback
-        // `agent_end` keys its silence on THIS association — an abort
-        // landing after the turn's last emitted event (a late abort
-        // racing the settle) never armed the gate and must not suppress
-        // the completed run's fallback (the macroscope finding: the
-        // post-join flag read raced `handle_abort`).
-        let abort_gate_armed = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let abort_gate_armed_seen = Arc::clone(&abort_gate_armed);
+        // Whether the abort gate swallowed a frame of this turn under row
+        // suppression (a manual compaction or tree move detaches the run,
+        // TS `_disconnectFromAgent`): the fallback `agent_end` keys its
+        // silence on THIS observation during the turn, never on a post-join
+        // flag read (that raced `handle_abort`).
+        let run_detached = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let run_detached_seen = Arc::clone(&run_detached);
         let batch_len = items.len();
         // The accepted prefix must survive an engine panic after persistence.
         let accepted_prefix = Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -511,15 +509,12 @@ impl TurnRunner {
                 // Durable model cleanup is independent of visual abort-row
                 // suppression and emits no client-facing frame.
                 if core.abort_requested && !matches!(&event, EngineEvent::ModelChange(_)) {
-                    // The sighting arms the fallback's silence only when
-                    // load-bearing: a sighting on a run that completed on its own
-                    // cancels nothing.
-                    if core.suppress_aborted_row || !(abort_settle || aborted_row) {
-                        abort_gate_armed_seen.store(true, std::sync::atomic::Ordering::SeqCst);
+                    if core.suppress_aborted_row {
+                        run_detached_seen.store(true, std::sync::atomic::Ordering::SeqCst);
                         return false;
                     }
-                    if aborted_row || matches!(&event, EngineEvent::DoneAborted) {
-                        abort_gate_armed_seen.store(true, std::sync::atomic::Ordering::SeqCst);
+                    if !(abort_settle || aborted_row) {
+                        return false;
                     }
                 }
                 // The pane reporter's engine boundaries (the TS
@@ -1101,25 +1096,14 @@ impl TurnRunner {
             more_queued
         };
         self.push_roster_delta();
-        // The fallback `agent_end` for runs that ended without a model
-        // turn (session commands, pre-model failures): the engine's own
-        // per-run frames (one per agent run, retried and continued runs
-        // included — the TS `agent_end` `messages` payload) are the real
-        // frames, and a run whose `agent_end` the abort gate swallowed
-        // stays silent exactly like TS (the compact path's detached run).
-        // An ABORTED settle keeps the same silence: the admission
-        // consult's pre-run abort ends the turn with NO engine
-        // `agent_end` at all (no run registered — the
-        // compact-interrupt probe's suppressed-run wire shape, which the
-        // fallback would otherwise break with a synthesized frame). The
-        // association is the abort GATE's own observation during the
-        // turn (the per-event flag read), never a post-join re-read of
-        // the flag: an abort landing after the turn's last emitted event
-        // cancels nothing of this run and must not suppress its fallback
-        // (the flag stays armed until the next pickup — a settle-time
-        // re-read would race `handle_abort` and silence a completed
-        // session-command or pre-model-failure run).
-        if !engine_reported_run_end && !abort_gate_armed.load(std::sync::atomic::Ordering::SeqCst) {
+        // The fallback `agent_end` closes this delivery's own `agent_start`
+        // when the engine reported no run end: session commands, pre-model
+        // failures, and the admission consult's pre-run abort (no run
+        // registered). The engine's per-run frames (one per agent run,
+        // retried and continued runs included — the TS `agent_end`
+        // `messages` payload) are the real frames. Only a detached run stays
+        // silent, exactly like TS (the compact path's swallowed run).
+        if !engine_reported_run_end && !run_detached.load(std::sync::atomic::Ordering::SeqCst) {
             self.emit_turn_event(json!({ "type": "agent_end" }));
         }
         {
