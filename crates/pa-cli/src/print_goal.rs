@@ -9,6 +9,9 @@ use pa_agent::agent::Agent;
 use pa_agent::types::{AgentEvent, AgentMessage, Message};
 use pa_core::session_engine::engine::SessionEngine;
 use pa_core::session_engine::goal_boundary::custom_message_to_loop_row;
+use pa_core::session_engine::goal_continuation::{
+    ContinuationGates, ContinuationTrigger, GoalContinuationDecision,
+};
 use pa_core::session_engine::goal_driver::UsageOutcome;
 use pa_core::session_engine::provider_adapter::json_round_trip;
 use pa_types::session::CustomMessage;
@@ -477,41 +480,43 @@ impl PrintGoalSurface {
         if engine.turn_boundary.compaction_scheduled().await {
             return NaturalContinuation::RequestedCompaction;
         }
-        // The daemon's consult order: a goal that does not own the
-        // wake-up drops any armed RLM deferral (the deferral dies with
-        // the goal's loop); only an owning goal gates behind unsettled
-        // descendant work — an ownerless boundary never starves the
-        // autonomous arm.
-        let owns_wakeup = engine.goal_owns_continuation_wakeup().await;
-        if !owns_wakeup {
-            engine.drop_owed_goal_continuation().await;
-        } else if unsettled_rlm_work {
-            engine.mark_goal_continuation_owed().await;
-            return NaturalContinuation::HeldForRlmWork;
-        }
-        // The threshold arm: the crossing turn mints BEFORE the loop stops; the
-        // boundary compacts, and the driver runs the held turn post-compaction.
-        if engine.session.auto_compaction_due(model).await {
-            if let Some(message) = engine.mint_goal_continuation().await {
+        // The threshold arm reads the crossing before the consult: a crossing turn
+        // mints BEFORE the loop stops; the boundary compacts, and the driver runs
+        // the held turn post-compaction.
+        let threshold_due = engine.session.auto_compaction_due(model).await;
+        let gates = ContinuationGates {
+            // Queued input returned above.
+            input_queued: false,
+            work_unsettled: unsettled_rlm_work,
+        };
+        match engine
+            .consult_goal_continuation(ContinuationTrigger::TurnEnd, gates)
+            .await
+        {
+            GoalContinuationDecision::QueuedInput => NaturalContinuation::QueuedInput,
+            GoalContinuationDecision::Owed => NaturalContinuation::HeldForRlmWork,
+            GoalContinuationDecision::Minted { message, .. } => {
                 self.publish_goal_update(engine).await;
-                self.hold_threshold_continuation(message).await;
+                if threshold_due {
+                    self.hold_threshold_continuation(*message).await;
+                    return NaturalContinuation::ThresholdDue;
+                }
+                // The natural continuation: the goal's context turn runs as the next
+                // turn of the same run; a row that cannot convert drops the mint.
+                engine.clear_pending_goal_continuation().await;
+                match custom_message_to_loop_row(&message) {
+                    Some(row) => NaturalContinuation::GoalRow(Box::new(row)),
+                    None => NaturalContinuation::FallThrough,
+                }
             }
-            return NaturalContinuation::ThresholdDue;
+            GoalContinuationDecision::NotOwned | GoalContinuationDecision::NotMinted { .. } => {
+                if threshold_due {
+                    NaturalContinuation::ThresholdDue
+                } else {
+                    NaturalContinuation::FallThrough
+                }
+            }
         }
-        if !owns_wakeup {
-            return NaturalContinuation::FallThrough;
-        }
-        // The natural continuation mint: the goal's context turn runs as the next
-        // turn of the same run; a row that cannot convert drops the mint.
-        if let Some(message) = engine.mint_goal_continuation().await {
-            self.publish_goal_update(engine).await;
-            engine.clear_pending_goal_continuation().await;
-            return match custom_message_to_loop_row(&message) {
-                Some(row) => NaturalContinuation::GoalRow(Box::new(row)),
-                None => NaturalContinuation::FallThrough,
-            };
-        }
-        NaturalContinuation::FallThrough
     }
 
     /// The settled boundary's goal drain: the held continuation and the armed

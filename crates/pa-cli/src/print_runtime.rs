@@ -1683,7 +1683,17 @@ async fn run_prompts_and_emit(
         {
             continue;
         }
-        if let Some(continuation) = engine.take_owed_goal_continuation().await {
+        // Quiescence settled every descendant: only an owed continuation delivers.
+        if let pa_core::session_engine::goal_continuation::GoalContinuationDecision::Minted {
+            message: continuation,
+            ..
+        } = engine
+            .consult_goal_continuation(
+                pa_core::session_engine::goal_continuation::ContinuationTrigger::OwedRetry,
+                pa_core::session_engine::goal_continuation::ContinuationGates::default(),
+            )
+            .await
+        {
             goal.publish_goal_update(engine).await;
             goal.run_queued_turn(
                 engine,
