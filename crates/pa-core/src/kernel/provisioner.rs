@@ -342,6 +342,13 @@ impl IpythonKernelProvisioner {
     pub fn kill(&self) {
         self.send(owner::Command::Kill { done: None });
     }
+
+    /// Like [`Self::kill`], resolving once the owner has run it.
+    pub async fn kill_and_wait(&self) {
+        let (done, killed) = oneshot::channel();
+        self.send(owner::Command::Kill { done: Some(done) });
+        let _ = killed.await;
+    }
 }
 
 /// Extra startup attempts beyond the first. The promise here is resilience against a wedged boot,

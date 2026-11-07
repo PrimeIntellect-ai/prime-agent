@@ -361,9 +361,7 @@ impl IpythonKernelProvisioner for KernelProvisioner {
 
     fn kill(&self) -> Pin<Box<dyn Future<Output = ()> + Send>> {
         let this = self.clone();
-        Box::pin(async move {
-            this.kill();
-        })
+        Box::pin(async move { this.kill_and_wait().await })
     }
 }
 
