@@ -168,6 +168,10 @@ struct ProvisionerInner {
     /// The owner's inbox until the first command spawns the owner task.
     inbox: Mutex<Option<mpsc::UnboundedReceiver<owner::Command>>>,
     dispose_signal: AbortSignal,
+    /// Held across a boot notice's liveness check and callback, and by kill and
+    /// dispose while they invalidate a generation: a notice is either suppressed
+    /// or published before the invalidation. A callback must not re-enter kill.
+    notices: Mutex<()>,
 }
 
 impl IpythonKernelProvisioner {
@@ -181,6 +185,7 @@ impl IpythonKernelProvisioner {
                 commands,
                 inbox: Mutex::new(Some(inbox)),
                 dispose_signal: AbortSignal::new(),
+                notices: Mutex::new(()),
             }),
         }
     }
@@ -652,11 +657,12 @@ async fn start_kernel_impl(
             // Broken skill imports stay importable-looking placeholders;
             // report them so the model learns before its first call, not
             // from the placeholder's error (TS startKernel) - but only a
-            // LIVE generation may report (the owner checks): the callback
+            // LIVE generation may report (checked under the notices lock): the callback
             // shares the restore notice's mailbox, and a boot kill()
             // invalidated must not append stale skills-unavailable rows.
             if let Some(errors) = parse_unavailable_python_skills(&bootstrap.stdout) {
-                if boot.is_armed().await {
+                let _notices = owner::lock(&inner.notices);
+                if boot.is_live(&inner.dispose_signal) {
                     if let Some(on_unavailable_skills) = &inner.options.on_unavailable_skills {
                         on_unavailable_skills(&errors);
                     }
@@ -711,12 +717,17 @@ async fn start_kernel_impl(
 
     // Only tell the model what was revived once the kernel is actually usable —
     // a notice claiming restored state must never outlive a failed bootstrap,
-    // and only a LIVE generation may surface it (the owner checks): a boot
-    // kill() invalidated restores its snapshot only for the settle to kill its
-    // kernel, so its restore must not fire the notification nor pollute
-    // last_restore for the fresher generation.
+    // and only a LIVE generation may surface it: a boot kill() invalidated
+    // restores its snapshot only for the settle to kill its kernel, so its
+    // restore must not fire the notification nor pollute last_restore for the
+    // fresher generation. The liveness check and the notice share the notices
+    // lock, which kill and dispose take to invalidate the generation.
     if let Some(restore) = pending_restore {
-        if boot.record_restore(restore.clone()).await {
+        let _notices = owner::lock(&inner.notices);
+        if boot.is_live(&inner.dispose_signal) {
+            boot.send(owner::Command::Restored {
+                restore: restore.clone(),
+            });
             if let Some(on_restore) = &inner.options.on_restore {
                 on_restore(&restore);
             }

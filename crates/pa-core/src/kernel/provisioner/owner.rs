@@ -38,17 +38,9 @@ pub(super) enum Command {
         message: String,
         listeners: oneshot::Sender<Vec<KernelBootstrapProgressHandler>>,
     },
-    /// A boot's restore outcome, recorded only for the armed, undisposed
-    /// generation; the reply says whether it was.
+    /// A live boot's restore outcome (the boot checked under the notices lock).
     Restored {
-        generation: u64,
         restore: RestoreResult,
-        armed: oneshot::Sender<bool>,
-    },
-    /// Whether the generation is still armed and undisposed.
-    Armed {
-        generation: u64,
-        reply: oneshot::Sender<bool>,
     },
     TeardownPolicy {
         generation: u64,
@@ -156,11 +148,6 @@ impl OwnerState {
 
     pub(super) fn last_restore(&self) -> Option<RestoreResult> {
         self.last_restore.clone()
-    }
-
-    /// The generation is the armed boot of an undisposed provisioner.
-    fn is_armed(&self, generation: u64) -> bool {
-        matches!(&self.slot, Slot::Booting(boot) if boot.generation == generation)
     }
 
     /// The boot of the armed generation, disposed or not.
@@ -313,27 +300,6 @@ impl BootHandle {
         }
     }
 
-    /// Record this boot's restore if the generation is still armed; the caller
-    /// surfaces the notice only then.
-    pub(super) async fn record_restore(&self, restore: RestoreResult) -> bool {
-        let (armed, rx) = oneshot::channel();
-        self.send(Command::Restored {
-            generation: self.generation,
-            restore,
-            armed,
-        });
-        rx.await.unwrap_or(false)
-    }
-
-    pub(super) async fn is_armed(&self) -> bool {
-        let (reply, rx) = oneshot::channel();
-        self.send(Command::Armed {
-            generation: self.generation,
-            reply,
-        });
-        rx.await.unwrap_or(false)
-    }
-
     pub(super) fn send(&self, command: Command) {
         let _ = self.commands.send(command);
     }
@@ -387,7 +353,7 @@ pub(super) async fn run(
     }
 }
 
-#[allow(clippy::too_many_lines)]
+#[allow(clippy::too_many_lines)] // one dispatcher match over the owner's commands
 fn handle(inner: &Arc<ProvisionerInner>, state: &Mutex<OwnerState>, command: Command) {
     match command {
         Command::Ensure {
@@ -451,14 +417,19 @@ fn handle(inner: &Arc<ProvisionerInner>, state: &Mutex<OwnerState>, command: Com
         }
         Command::Kill { done } => {
             let mut s = lock(state);
-            if let Some(mut boot) = s.take_boot() {
-                boot.killed.abort();
+            let killed = s.take_boot().map(|mut boot| {
                 boot.listeners.clear();
                 boot.last_message = None;
+                let killed = boot.killed.clone();
                 s.doomed.push(boot);
-            }
+                killed
+            });
             let manager = s.take_published();
             drop(s);
+            if let Some(killed) = killed {
+                let _notices = lock(&inner.notices);
+                killed.abort();
+            }
             if let Some(manager) = manager {
                 manager.kill();
             }
@@ -503,8 +474,10 @@ fn handle(inner: &Arc<ProvisionerInner>, state: &Mutex<OwnerState>, command: Com
                 }
                 waiters.push(DisposeWaiter { boots, done });
             }
-            inner.dispose_signal.abort();
             finish_disposes(&mut s);
+            drop(s);
+            let _notices = lock(&inner.notices);
+            inner.dispose_signal.abort();
         }
         Command::Progress {
             generation,
@@ -518,28 +491,39 @@ fn handle(inner: &Arc<ProvisionerInner>, state: &Mutex<OwnerState>, command: Com
             });
             let _ = listeners.send(notify);
         }
-        Command::Restored {
-            generation,
-            restore,
-            armed,
-        } => {
-            let mut s = lock(state);
-            let live = s.is_armed(generation);
-            if live {
-                s.last_restore = Some(restore);
-            }
-            let _ = armed.send(live);
-        }
-        Command::Armed { generation, reply } => {
-            let _ = reply.send(lock(state).is_armed(generation));
-        }
+        Command::Restored { restore } => lock(state).last_restore = Some(restore),
         Command::TeardownPolicy { generation, reply } => {
             let _ = reply.send(lock(state).teardown_policy(generation));
         }
         Command::GateDone { gate } => lock(state).open_gate(gate),
         Command::BootSettled { generation, result } => {
-            let mut s = lock(state);
-            boot_settled(inner, &mut s, generation, result);
+            let doomed = {
+                let mut s = lock(state);
+                s.doomed
+                    .iter()
+                    .position(|boot| boot.generation == generation)
+                    .map(|index| s.doomed.remove(index))
+            };
+            match doomed {
+                // A boot kill() doomed tears its kernel down with kill semantics (no
+                // flush), outside the state lock: the kill runs cleanup callbacks.
+                Some(boot) => {
+                    let failure = match result {
+                        Ok((manager, duration_ms)) => {
+                            if !manager.is_defunct() {
+                                manager.kill();
+                            }
+                            StartupFailure {
+                                message: "Kernel provisioner killed during startup".to_string(),
+                                duration_ms,
+                            }
+                        }
+                        Err(failure) => failure,
+                    };
+                    deliver(inner, &mut lock(state), boot, &Err(failure));
+                }
+                None => boot_settled(inner, &mut lock(state), generation, result),
+            }
         }
         Command::BootTornDown {
             generation,
@@ -566,37 +550,16 @@ fn handle(inner: &Arc<ProvisionerInner>, state: &Mutex<OwnerState>, command: Com
     }
 }
 
-/// The settle's disposition. The generation check comes first: a boot `kill()`
-/// doomed tears down with kill semantics (no flush) even when a dispose raced in
-/// behind it; only the armed generation honors the dispose.
+/// The armed boot's settle. A doomed boot never gets here: the generation check
+/// comes first, so a boot `kill()` doomed tears down with kill semantics (no flush)
+/// even when a dispose raced in behind it; only the armed generation honors the
+/// dispose.
 fn boot_settled(
     inner: &Arc<ProvisionerInner>,
     s: &mut OwnerState,
     generation: u64,
     result: Result<(ReplKernelManager, u64), StartupFailure>,
 ) {
-    if let Some(index) = s
-        .doomed
-        .iter()
-        .position(|boot| boot.generation == generation)
-    {
-        let boot = s.doomed.remove(index);
-        let settled = result.map(|(manager, duration_ms)| {
-            if !manager.is_defunct() {
-                manager.kill();
-            }
-            duration_ms
-        });
-        let failure = match settled {
-            Ok(duration_ms) => StartupFailure {
-                message: "Kernel provisioner killed during startup".to_string(),
-                duration_ms,
-            },
-            Err(failure) => failure,
-        };
-        deliver(inner, s, boot, &Err(failure));
-        return;
-    }
     match std::mem::replace(&mut s.slot, Slot::Empty) {
         Slot::Booting(boot) if boot.generation == generation => match result {
             Ok((manager, _)) => {
