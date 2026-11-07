@@ -3,7 +3,8 @@
 //! rides it.
 use super::{
     format_goal_status, terminal_columns, AgentView, ChatEntry, DaemonCommand, Duration, Map,
-    SessionUi, StatusKind, Value, ANTHROPIC_SUBSCRIPTION_AUTH_WARNING, UI_REQUEST_TIMEOUT_MS,
+    Overlay, SessionUi, StatusKind, Value, ANTHROPIC_SUBSCRIPTION_AUTH_WARNING,
+    UI_REQUEST_TIMEOUT_MS,
 };
 
 impl SessionUi {
@@ -19,7 +20,7 @@ impl SessionUi {
         }
         // An open goal panel rides the live state, never a stale
         // snapshot of the objective it was opened to show.
-        if let Some(panel) = view.goal_panel.as_mut() {
+        if let Some(Overlay::Goal(panel)) = view.overlay.as_mut() {
             panel.goal = goal;
         }
         self.sync_goal_tray(view);

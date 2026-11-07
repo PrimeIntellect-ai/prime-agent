@@ -118,7 +118,7 @@ impl HeadlessSettle {
             share_pending: session.share_pending(),
             reload_pending: session.reload_pending(),
             traces_upload_pending: session.traces_upload_pending(),
-            auth_panel_open: view.auth_panel.is_some(),
+            auth_panel_open: matches!(view.overlay, Some(crate::view::Overlay::AuthPanel(_))),
             traces_login_pending: session.pending_traces_login(),
             mcp_auth_pending: session.pending_mcp_auth(),
             anthropic_warning_mark_pending: session.anthropic_warning_mark_pending(),

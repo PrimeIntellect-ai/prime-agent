@@ -2,7 +2,7 @@
 //! parked model sign-in, and the `/mcp` auth flow.
 use super::{
     key_event_to_id, picker_viewport_rows, AgentView, AuthSelectorAction, AuthSelectorKind,
-    DaemonCommand, Duration, KeyEvent, Map, ModelSelectionApplied, Result, SessionUi,
+    DaemonCommand, Duration, KeyEvent, Map, ModelSelectionApplied, Overlay, Result, SessionUi,
     UI_REQUEST_TIMEOUT_MS,
 };
 
@@ -60,7 +60,9 @@ impl SessionUi {
             return Ok(());
         }
         view.editor.set_text("");
-        view.provider_auth = Some(crate::provider_auth::ProviderAuthSelector::new(kind, rows));
+        view.overlay = Some(Overlay::ProviderAuth(
+            crate::provider_auth::ProviderAuthSelector::new(kind, rows),
+        ));
         self.dirty = true;
         Ok(())
     }
@@ -76,7 +78,7 @@ impl SessionUi {
             return Ok(());
         };
         let action = {
-            let Some(selector) = view.provider_auth.as_mut() else {
+            let Some(Overlay::ProviderAuth(selector)) = view.overlay.as_mut() else {
                 return Ok(());
             };
             let kb = view.editor.keybindings();
@@ -85,18 +87,18 @@ impl SessionUi {
         match action {
             AuthSelectorAction::None => {}
             AuthSelectorAction::Cancel => {
-                view.provider_auth = None;
+                view.overlay = None;
 
                 self.pending_model_sign_in = None;
             }
             AuthSelectorAction::LoginError { message } => {
-                view.provider_auth = None;
+                view.overlay = None;
 
                 self.pending_model_sign_in = None;
                 self.error_row(&message, view);
             }
             AuthSelectorAction::Login { provider, api_key } => {
-                view.provider_auth = None;
+                view.overlay = None;
                 // The panel-prompted key: store it directly, no panel needed.
                 if let Some(api_key) = api_key {
                     let auth = self.provider_auth.clone().expect("the selector was open");
@@ -126,7 +128,7 @@ impl SessionUi {
                 }
             }
             AuthSelectorAction::Logout { provider } => {
-                view.provider_auth = None;
+                view.overlay = None;
                 // The settled outcome drops any parked model sign-in, so a logout never
                 // leaves a model waiting on the credential it removed.
                 let auth = self.provider_auth.clone().expect("the selector was open");
@@ -158,7 +160,7 @@ impl SessionUi {
         let mut session_dialog =
             crate::auth_panel::AuthPanel::new(format!("Login to {}", provider.name));
         session_dialog.set_cancel_signal(panel.cancel_signal());
-        view.auth_panel = Some(session_dialog);
+        view.overlay = Some(Overlay::AuthPanel(session_dialog));
         // A still-running previous flow ends before its replacement arms: its
         // late settle is skipped below so it can never close the newer panel.
         if let Some(previous) = self.auth_panel_cancel.take() {
@@ -196,22 +198,22 @@ impl SessionUi {
             self.exit_guard.note_ctrl_c_handled();
         }
         let kb = view.editor.keybindings();
-        if let Some(panel) = view.auth_panel.as_mut() {
+        if let Some(Overlay::AuthPanel(panel)) = view.overlay.as_mut() {
             panel.handle_key(&id, kb, &mut self.osc_sink);
         }
         // A cancel key ends the mounted panel and arms the blocking body's flag. Only the binding
         // match unmounts: a raw ctrl+c with the binding remapped away is an unhandled key, not a
         // cancel — unmounting without marking leaves a live flow that can persist credentials.
         let cancel_key = kb.matches(&id, "tui.select.cancel");
-        let team_picker = view
-            .auth_panel
-            .as_ref()
-            .is_some_and(crate::auth_panel::AuthPanel::team_picker_mounted);
+        let team_picker = matches!(
+            &view.overlay,
+            Some(Overlay::AuthPanel(panel)) if panel.team_picker_mounted()
+        );
         if cancel_key && !team_picker {
             if let Some(cancel) = self.auth_panel_cancel.take() {
                 cancel.store(true, std::sync::atomic::Ordering::Relaxed);
             }
-            view.auth_panel = None;
+            view.overlay = None;
         }
         self.dirty = true;
         Ok(())
@@ -247,16 +249,6 @@ impl SessionUi {
         }
     }
 
-    /// One paste payload while the inline auth panel owns the frame: it lands in the panel's
-    /// mounted input — never the hidden editor, where a later Enter could submit the secret as a
-    /// prompt.
-    pub(crate) fn paste_to_auth_panel(&mut self, text: &str, view: &mut AgentView) {
-        if let Some(panel) = view.auth_panel.as_mut() {
-            panel.handle_paste(text);
-        }
-        self.dirty = true;
-    }
-
     /// One request from a login flow driving the inline auth panel: a request with no mounted panel
     /// cancels its flow; the settled requests unmount the panel and apply the outcome (a flow that
     /// never needed input still settles).
@@ -268,17 +260,17 @@ impl SessionUi {
         use crate::auth_panel::AuthPanelRequest;
         match request {
             AuthPanelRequest::Progress { message, .. } => {
-                if let Some(panel) = view.auth_panel.as_mut() {
+                if let Some(Overlay::AuthPanel(panel)) = view.overlay.as_mut() {
                     panel.push_progress(&message);
                 }
             }
             AuthPanelRequest::Waiting { message } => {
-                if let Some(panel) = view.auth_panel.as_mut() {
+                if let Some(Overlay::AuthPanel(panel)) = view.overlay.as_mut() {
                     panel.push_waiting(&message);
                 }
             }
             AuthPanelRequest::AuthUrl { url, instructions } => {
-                if let Some(panel) = view.auth_panel.as_mut() {
+                if let Some(Overlay::AuthPanel(panel)) = view.overlay.as_mut() {
                     panel.show_auth_url(url, instructions);
                 }
             }
@@ -289,7 +281,7 @@ impl SessionUi {
                 allow_empty,
                 reply,
             } => {
-                if let Some(panel) = view.auth_panel.as_mut() {
+                if let Some(Overlay::AuthPanel(panel)) = view.overlay.as_mut() {
                     panel.mount_paste(&prompt, tone, style, allow_empty, reply);
                 }
             }
@@ -298,13 +290,13 @@ impl SessionUi {
                 current,
                 reply,
             } => {
-                if let Some(panel) = view.auth_panel.as_mut() {
+                if let Some(Overlay::AuthPanel(panel)) = view.overlay.as_mut() {
                     panel.mount_teams(teams, current, reply);
                 }
             }
             AuthPanelRequest::ProviderSettled { provider, outcome } => {
                 self.auth_panel_cancel = None;
-                view.auth_panel = None;
+                view.close_overlay_if(|overlay| matches!(overlay, Overlay::AuthPanel(_)));
                 // The warning fires on a COMPLETED login only: a cancelled or errored flow
                 // never consumes the once-per-session gate.
                 let completed = matches!(
@@ -317,13 +309,13 @@ impl SessionUi {
                 }
             }
             AuthPanelRequest::McpSettled { note } => {
-                view.auth_panel = None;
+                view.close_overlay_if(|overlay| matches!(overlay, Overlay::AuthPanel(_)));
                 self.note(&note, view);
             }
             AuthPanelRequest::TracesSettled { outcome, gen } => {
                 // A superseded run's late settle cannot clear a newer login: the generation guard.
                 if gen == self.traces_login_gen {
-                    view.auth_panel = None;
+                    view.close_overlay_if(|overlay| matches!(overlay, Overlay::AuthPanel(_)));
                     self.finish_traces_login(outcome, view).await;
                 }
             }
@@ -365,7 +357,7 @@ impl SessionUi {
         let panel = crate::auth_panel::AuthPanelHandle::new(self.auth_panel_notes.clone());
         let mut mcp_dialog = crate::auth_panel::AuthPanel::new(intent.title);
         mcp_dialog.set_cancel_signal(panel.cancel_signal());
-        view.auth_panel = Some(mcp_dialog);
+        view.overlay = Some(Overlay::AuthPanel(mcp_dialog));
         let args = intent.args;
         tokio::spawn(async move {
             let note =
@@ -409,7 +401,7 @@ impl SessionUi {
         if !search.trim().is_empty() {
             mcp_view.set_search(search);
         }
-        view.mcp_view = Some(mcp_view);
+        view.overlay = Some(Overlay::Mcp(mcp_view));
         self.dirty = true;
         Ok(())
     }
@@ -430,19 +422,21 @@ impl SessionUi {
         if id == "ctrl+c" {
             self.exit_guard.note_ctrl_c_handled();
         }
-        let action = view
-            .mcp_view
-            .as_mut()
-            .map(|mcp_view| mcp_view.handle_key(&id, view.editor.keybindings()));
+        let action = match view.overlay.as_mut() {
+            Some(Overlay::Mcp(mcp_view)) => {
+                Some(mcp_view.handle_key(&id, view.editor.keybindings()))
+            }
+            _ => None,
+        };
         match action {
             Some(crate::mcp_view::McpViewAction::None) | None => {}
             Some(crate::mcp_view::McpViewAction::Cancel) => {
-                view.mcp_view = None;
+                view.overlay = None;
                 self.picker_restored_draft = false;
                 self.dirty = true;
             }
             Some(crate::mcp_view::McpViewAction::Select { server, label }) => {
-                view.mcp_view = None;
+                view.overlay = None;
                 self.dirty = true;
                 // The Tab path's typed partial is fulfilled by the resolution; the
                 // browse-restore path holds the user's draft instead.
@@ -459,7 +453,7 @@ impl SessionUi {
                 });
             }
             Some(crate::mcp_view::McpViewAction::Paste { server, label }) => {
-                view.mcp_view = None;
+                view.overlay = None;
                 self.dirty = true;
                 if self.picker_restored_draft {
                     self.picker_restored_draft = false;
@@ -474,7 +468,7 @@ impl SessionUi {
                 });
             }
             Some(crate::mcp_view::McpViewAction::Key { id, label }) => {
-                view.mcp_view = None;
+                view.overlay = None;
                 self.dirty = true;
                 if self.picker_restored_draft {
                     self.picker_restored_draft = false;
@@ -531,7 +525,7 @@ impl SessionUi {
         let mut selector =
             crate::provider_auth::ProviderAuthSelector::new(AuthSelectorKind::Login, rows);
         selector.preselect_provider(provider);
-        view.provider_auth = Some(selector);
+        view.overlay = Some(Overlay::ProviderAuth(selector));
         self.dirty = true;
     }
 

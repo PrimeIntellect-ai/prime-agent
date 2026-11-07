@@ -57,9 +57,8 @@ fn markdown_link_targets_use_the_owning_view_cwd() {
 fn the_factory_page_suppresses_the_stale_editor_cursor() {
     let mut v = view();
     v.dock_cursor = Some((10, 3));
-    v.factory_view = Some(crate::factory_view::FactoryView::from_reply(
-        &serde_json::json!({ "runs": [] }),
-        12,
+    v.overlay = Some(Overlay::Factory(
+        crate::factory_view::FactoryView::from_reply(&serde_json::json!({ "runs": [] }), 12),
     ));
     assert!(
         v.frame_cursor().is_none(),
@@ -67,7 +66,7 @@ fn the_factory_page_suppresses_the_stale_editor_cursor() {
     );
     // ...and the editor's position reports again once the page closes
     // (`frame_cursor` maps the dock row through the window offset).
-    v.factory_view = None;
+    v.overlay = None;
     assert_eq!(v.frame_cursor(), Some((11, 3)));
 }
 
@@ -80,29 +79,32 @@ fn a_paste_never_reaches_the_editor_behind_an_overlay() {
     let editor_text = |view: &AgentView| view.editor.get_lines().join("\n");
     // The /effort picker takes it into its search.
     let mut v = view();
-    v.choice_picker = Some(crate::choice_picker::ChoicePicker::effort(
-        &["high".to_string()],
-        None,
+    v.overlay = Some(Overlay::ChoicePicker(
+        crate::choice_picker::ChoicePicker::effort(&["high".to_string()], None),
     ));
     assert!(v.route_paste("effort"));
     assert_eq!(editor_text(&v), "");
     // The /login provider selector takes it into its search.
     let mut v = view();
-    v.provider_auth = Some(crate::provider_auth::ProviderAuthSelector::new(
-        crate::provider_auth::AuthSelectorKind::Login,
-        Vec::new(),
+    v.overlay = Some(Overlay::ProviderAuth(
+        crate::provider_auth::ProviderAuthSelector::new(
+            crate::provider_auth::AuthSelectorKind::Login,
+            Vec::new(),
+        ),
     ));
     assert!(v.route_paste("login"));
     assert_eq!(editor_text(&v), "");
     // The settings menu takes it into its search.
     let mut v = view();
-    v.settings_menu = Some(crate::settings_menu::SettingsMenu::new(Vec::new()));
+    v.overlay = Some(Overlay::Settings(crate::settings_menu::SettingsMenu::new(
+        Vec::new(),
+    )));
     assert!(v.route_paste("setting"));
     assert_eq!(editor_text(&v), "");
     // The input-less overlays consume it (the reload box stands in for
     // the whole consume set).
     let mut v = view();
-    v.reload_box = Some("reloading".to_string());
+    v.overlay = Some(Overlay::Reload("reloading".to_string()));
     assert!(v.route_paste("never"));
     assert_eq!(editor_text(&v), "");
     // The bare dock: the editor takes it.
@@ -292,7 +294,7 @@ fn filled(mut v: AgentView, turns: usize) -> AgentView {
     v.chrome.version = "0.0.0".to_string();
     v.chrome.cwd = "/w".to_string();
     v.chrome.chat_name = "w".to_string();
-    v.onboarding = None;
+    v.overlay = None;
     for index in 0..turns {
         v.push(TranscriptItem::UserMessage {
             text: format!("user line {index}"),

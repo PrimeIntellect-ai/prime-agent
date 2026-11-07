@@ -62,14 +62,14 @@ impl SessionUi {
                 self.dirty = true;
             }
             ClickAction::SelectModelRow(position) => {
-                if let Some(picker) = view.model_picker.as_mut() {
+                if let Some(crate::view::Overlay::ModelPicker(picker)) = view.overlay.as_mut() {
                     self.track_click("picker");
                     picker.select_filtered(position);
                     self.dirty = true;
                 }
             }
             ClickAction::SelectChoiceRow(position) => {
-                if let Some(picker) = view.choice_picker.as_mut() {
+                if let Some(crate::view::Overlay::ChoicePicker(picker)) = view.overlay.as_mut() {
                     self.track_click("picker");
                     picker.select_position(position);
                     self.dirty = true;

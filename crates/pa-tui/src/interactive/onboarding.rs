@@ -166,7 +166,7 @@ async fn drive_onboarding_pane(
                 barrier = Some(armed);
             }
         }
-        view.onboarding = Some(screen);
+        view.overlay = Some(crate::view::Overlay::Onboarding(screen));
         match drive.renderer {
             Renderer::Terminal { .. } => {
                 if let Some(renderer) = drive.renderer.is_terminal_mut() {
@@ -183,7 +183,7 @@ async fn drive_onboarding_pane(
             }
             Renderer::Headless { .. } => drive.renderer.render_headless_pane(view),
         }
-        let Some(mut pane) = view.onboarding.take() else {
+        let Some(crate::view::Overlay::Onboarding(mut pane)) = view.overlay.take() else {
             unreachable!("the pane mounts at the top of every iteration");
         };
         tokio::select! {

@@ -2,8 +2,8 @@
 //! rows, compaction aborts, and the telemetry seams.
 use super::{
     assistant_message_parts, event_to_update, pop_superseded_attempt_row, AgentView, ChatEntry,
-    CompactionReason, CompactionState, DaemonClientEvent, DaemonCommand, Map, MessageBlock, Result,
-    RetryState, SessionUi, StatusKind, ToolResultView, TurnUpdate, Value,
+    CompactionReason, CompactionState, DaemonClientEvent, DaemonCommand, Map, MessageBlock,
+    Overlay, Result, RetryState, SessionUi, StatusKind, ToolResultView, TurnUpdate, Value,
 };
 
 /// One backgrounded compaction-abort outcome: a failed abort surfaces as
@@ -240,7 +240,7 @@ impl SessionUi {
                     self.factory_list_epoch += 1;
                     self.bash_activities = serde_json::json!({"activities": []});
                     self.factory_graph = serde_json::json!({"runs": []});
-                    if let Some(factory_view) = view.factory_view.as_mut() {
+                    if let Some(Overlay::Factory(factory_view)) = view.overlay.as_mut() {
                         factory_view.apply_runs(Vec::new());
                     }
                     self.update_subagent_summary(view);

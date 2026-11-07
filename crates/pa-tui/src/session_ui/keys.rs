@@ -2,8 +2,8 @@
 //! selection/auto-scroll, and the input-state seams.
 use super::{
     key_event_to_id, AgentView, ChatEntry, ChoicePickerAction, ChoicePurpose, DaemonCommand,
-    DockFocusSource, Duration, Instant, KeyEvent, Map, QueueBrowseDirection, QueueLane, Result,
-    SessionUi, StatusKind, SubmitBehavior,
+    DockFocusSource, Duration, Instant, KeyEvent, Map, Overlay, QueueBrowseDirection, QueueLane,
+    Result, SessionUi, StatusKind, SubmitBehavior,
 };
 
 /// How long the Ctrl+C exit hint arms the second-press exit.
@@ -84,18 +84,17 @@ impl SessionUi {
         if !crate::mouse_tracking::active() {
             return;
         }
-        let overlay_focused = view.model_picker.is_some()
-            || view.choice_picker.is_some()
-            || view.heartbeats_picker.is_some()
-            || view.goal_panel.is_some()
-            || view.bash_view.is_some()
-            || view.info_panel.is_some()
-            || view.tree_selector.is_some()
-            || view.fork_selector.is_some()
-            || view.share_loader.is_some()
-            || view.mcp_view.is_some()
-            || view.factory_view.is_some()
-            || view.onboarding.is_some();
+        // The confirm, sign-in, auth, settings and reload panels leave the wheel to the transcript.
+        let overlay_focused = view.overlay.as_ref().is_some_and(|overlay| {
+            !matches!(
+                overlay,
+                Overlay::Confirm { .. }
+                    | Overlay::ProviderAuth(_)
+                    | Overlay::AuthPanel(_)
+                    | Overlay::Settings(_)
+                    | Overlay::Reload(_)
+            )
+        });
         let left = event.button == crate::mouse::BUTTON_LEFT;
         let release_was_drag = left && !event.press && self.left_mouse_dragged;
         let row = event.y.saturating_sub(1) as usize;
@@ -308,18 +307,20 @@ impl SessionUi {
         if id == "ctrl+c" {
             self.exit_guard.note_ctrl_c_handled();
         }
-        let action = view
-            .choice_picker
-            .as_mut()
-            .map(|picker| picker.handle_key(&id, view.editor.keybindings()));
+        let action = match view.overlay.as_mut() {
+            Some(Overlay::ChoicePicker(picker)) => {
+                Some(picker.handle_key(&id, view.editor.keybindings()))
+            }
+            _ => None,
+        };
         match action {
             Some(ChoicePickerAction::None) | None => {}
             Some(ChoicePickerAction::Cancel) => {
-                view.choice_picker = None;
+                view.overlay = None;
                 self.dirty = true;
             }
             Some(ChoicePickerAction::Apply { purpose, key }) => {
-                view.choice_picker = None;
+                view.overlay = None;
                 self.dirty = true;
                 match purpose {
                     ChoicePurpose::Effort => self.apply_thinking_level(&key, view).await,
@@ -340,56 +341,31 @@ impl SessionUi {
         if key_event_to_id(&key).is_some_and(|id| id != "escape") {
             self.escape_tree_shortcut_spent = false;
         }
-        // The `/model` picker owns the frame while open: its keys go before the
-        // editor, viewport keys, and Ctrl+C.
-        if view.model_picker.is_some() {
-            return self.handle_model_picker_key(key, view).await;
-        }
-        // The `/effort` picker owns the frame the same way.
-        if view.choice_picker.is_some() {
-            return self.handle_choice_picker_key(key, view).await;
-        }
-        if view.mcp_view.is_some() {
-            return self.handle_mcp_view_key(key, view);
-        }
-        // The factory page owns the frame the same way.
-        if view.factory_view.is_some() {
-            return self.handle_factory_view_key(key, view).await;
-        }
-        // The `/heartbeats` view owns the frame the same way.
-        if view.heartbeats_picker.is_some() {
-            return self.handle_heartbeats_picker_key(key, view).await;
-        }
-        if view.bash_view.is_some() {
-            return self.handle_bash_view_key(key, view);
-        }
-        if view.goal_panel.is_some() {
-            return self.handle_goal_panel_key(key, view);
-        }
-        if view.info_panel.is_some() {
-            return self.handle_info_panel_key(key, view);
-        }
-        if view.tree_selector.is_some() {
-            return self.handle_tree_selector_key(key, view).await;
-        }
-        if view.fork_selector.is_some() {
-            return self.handle_fork_selector_key(key, view).await;
-        }
-        if view.confirm.is_some() {
-            return self.handle_confirm_key(key, view).await;
-        }
-        if view.provider_auth.is_some() {
-            return self.handle_provider_auth_key(key, view).await;
-        }
-        if view.auth_panel.is_some() {
-            return self.handle_auth_panel_key(key, view);
-        }
-        if view.settings_menu.is_some() {
-            return self.handle_settings_menu_key(key, view).await;
-        }
-        // The `/share` loader owns the frame while an upload runs.
-        if view.share_loader.is_some() {
-            return self.handle_share_loader_key(key, view);
+        // The open overlay owns the frame: its keys go before the editor, viewport keys, and
+        // Ctrl+C. The onboarding pane drives its own input loop, and the reload box takes no keys.
+        match view.overlay {
+            Some(Overlay::ModelPicker(_)) => return self.handle_model_picker_key(key, view).await,
+            Some(Overlay::ChoicePicker(_)) => {
+                return self.handle_choice_picker_key(key, view).await
+            }
+            Some(Overlay::Mcp(_)) => return self.handle_mcp_view_key(key, view),
+            Some(Overlay::Factory(_)) => return self.handle_factory_view_key(key, view).await,
+            Some(Overlay::Heartbeats(_)) => {
+                return self.handle_heartbeats_picker_key(key, view).await;
+            }
+            Some(Overlay::Bash(_)) => return self.handle_bash_view_key(key, view),
+            Some(Overlay::Goal(_)) => return self.handle_goal_panel_key(key, view),
+            Some(Overlay::Info(_)) => return self.handle_info_panel_key(key, view),
+            Some(Overlay::Tree(_)) => return self.handle_tree_selector_key(key, view).await,
+            Some(Overlay::Fork(_)) => return self.handle_fork_selector_key(key, view).await,
+            Some(Overlay::Confirm { .. }) => return self.handle_confirm_key(key, view).await,
+            Some(Overlay::ProviderAuth(_)) => {
+                return self.handle_provider_auth_key(key, view).await;
+            }
+            Some(Overlay::AuthPanel(_)) => return self.handle_auth_panel_key(key, view),
+            Some(Overlay::Settings(_)) => return self.handle_settings_menu_key(key, view).await,
+            Some(Overlay::ShareLoader(_)) => return self.handle_share_loader_key(key, view),
+            None | Some(Overlay::Onboarding(_) | Overlay::Reload(_)) => {}
         }
         let Some(id) = key_event_to_id(&key) else {
             return Ok(());
@@ -837,7 +813,7 @@ impl SessionUi {
                         self.open_model_picker(view, partial.trim()).await?;
                         // Belt-and-braces (the picker always mounts here); keeps the
                         // failed-open contract symmetric with the mcp arm.
-                        if view.model_picker.is_none() {
+                        if !matches!(view.overlay, Some(Overlay::ModelPicker(_))) {
                             self.picker_restored_draft = false;
                         }
                         self.track_menu_opened("model", "tab");
@@ -848,7 +824,7 @@ impl SessionUi {
                         self.open_mcp_view("/mcp", view, partial.trim()).await?;
                         // A failed roster load leaves no view mounted; the flag must not leak into
                         // the NEXT picker.
-                        if view.mcp_view.is_none() {
+                        if !matches!(view.overlay, Some(Overlay::Mcp(_))) {
                             self.picker_restored_draft = false;
                         }
                         self.track_menu_opened("mcp", "tab");
