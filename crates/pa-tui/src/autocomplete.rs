@@ -207,7 +207,7 @@ fn extract_path_token(text: &[char], force_extract: bool) -> Option<PathToken> {
 /// A completion value: the path in the typed token's quoting (TS `buildCompletionValue`).
 fn build_completion_value(path: &str, is_at_prefix: bool, quoting: Quoting) -> String {
     let prefix = if is_at_prefix { "@" } else { "" };
-    format!("{prefix}{}", quoting.render(path))
+    format!("{prefix}{}", quoting.render(path, is_at_prefix))
 }
 
 /// Selection state for the autocomplete dropdown.
@@ -502,7 +502,8 @@ fn apply_file_completion(
     let line: Vec<char> = lines[cursor_line].chars().collect();
     let before_prefix: String = line[..token.start].iter().collect();
     let after_cursor: String = line[cursor_col.min(line.len())..].iter().collect();
-    // The typed token's closing quote after the cursor belongs to the replaced token.
+    // The typed token's closing quote after the cursor belongs to the replaced token, whatever
+    // quote the item renders.
     let adjusted_after_cursor = match token.quoting.quote() {
         Some(quote) if after_cursor.starts_with(quote) => after_cursor.chars().skip(1).collect(),
         _ => after_cursor,
@@ -511,7 +512,7 @@ fn apply_file_completion(
     // TS `applyCompletion`'s `@` branch: a file leaves a trailing space so the next
     // word starts clean, a directory keeps the token open for further completion.
     let suffix = if token.at && !is_directory { " " } else { "" };
-    let cursor_offset = if is_directory && item.value.ends_with('"') {
+    let cursor_offset = if is_directory && item.value.ends_with(['"', '\'']) {
         item.value.chars().count() - 1
     } else {
         item.value.chars().count()
