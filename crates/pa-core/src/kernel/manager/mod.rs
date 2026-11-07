@@ -480,8 +480,8 @@ impl ReplKernelManager {
         lock(&self.inner.guarded).lifecycle.phase() == KernelState::Running
     }
 
-    /// The kernel died or was torn down (or a graceful shutdown is under way): only
-    /// `restart()` or a fresh manager can serve again.
+    /// The kernel died or was torn down (or a graceful shutdown is under way): only a
+    /// fresh manager can serve again.
     #[must_use]
     pub fn is_defunct(&self) -> bool {
         matches!(
@@ -933,31 +933,6 @@ impl ReplKernelManager {
         .await
         .unwrap_or(false);
         Ok(result)
-    }
-
-    /// Restart the kernel: shut it down with the default options, then start
-    /// it again. Does nothing when a concurrent teardown wins the shutdown.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when a dispose flush owns the queue tail, or the shutdown or start fails.
-    pub async fn restart(&self) -> anyhow::Result<()> {
-        // Taking a slot now and joining the in-flight shutdown would deadlock:
-        // the flush\'s snapshot waits on our slot while we wait on the flush\'s shutdown.
-        if lock(&self.inner.guarded).flushing_snapshot_for_dispose {
-            return Err(anyhow!("Kernel is shutting down"));
-        }
-        let _queue_guard = self.inner.execution_queue.lock().await;
-        let performed = self.shutdown(KernelShutdownOptions::default()).await?;
-        if !performed {
-            return Ok(());
-        }
-        {
-            let mut g = lock(&self.inner.guarded);
-            g.lifecycle.transition(Lifecycle::Idle);
-            g.kernel_stderr.clear();
-        }
-        self.start(KernelStartOptions::default()).await
     }
 
     pub fn kill(&self) {

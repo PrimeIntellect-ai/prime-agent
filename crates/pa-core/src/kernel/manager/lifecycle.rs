@@ -24,8 +24,8 @@ pub(super) enum Lifecycle {
     },
     /// A protocol repair is killing the child to settle at `Idle` (not defunct).
     Discarding,
-    /// Torn down. Only `restart()` and a failed start that resets for a retry (startup
-    /// or protocol repair) move it back to `Idle`.
+    /// Torn down. Only a failed start that resets for a retry (startup or protocol
+    /// repair) moves it back to `Idle`.
     Defunct,
 }
 
