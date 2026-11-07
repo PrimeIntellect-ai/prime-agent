@@ -225,12 +225,17 @@ impl Supervisor {
             let mut descriptor = resident.descriptor.lock().await;
             descriptor.lifecycle = DaemonWorkerLifecycle::Ready;
             let _ = persist_worker(&resident.descriptor_path, &descriptor);
-        } else if let Err(error) = self.relaunch_supervised(&resident).await {
-            return Self::owned_failure(
-                command_id,
-                type_name,
-                &last_error.unwrap_or_else(|| error.to_string()),
-            );
+        } else {
+            // A retry can retire the crash watch before its bookkeeping ran: the
+            // dead parent's resident children close first, as the crash path closes them.
+            self.close_children_of_dead_parent(&resident).await;
+            if let Err(error) = self.relaunch_supervised(&resident).await {
+                return Self::owned_failure(
+                    command_id,
+                    type_name,
+                    &last_error.unwrap_or_else(|| error.to_string()),
+                );
+            }
         }
         let lifecycle = resident.descriptor.lock().await.lifecycle;
         if lifecycle != DaemonWorkerLifecycle::Ready {
