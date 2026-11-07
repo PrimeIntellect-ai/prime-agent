@@ -199,12 +199,9 @@ impl Supervisor {
                 "Session worker is stopping; retry after it finishes",
             );
         }
-        // The recovery reset (TS `retryWorkerRecovery`): the intentional-stop
-        // marker and the persisted stop flags go, the lifecycle reports
-        // recovering until the relaunch lands.
-        resident
-            .intentional_stop
-            .store(false, std::sync::atomic::Ordering::SeqCst);
+        // The recovery reset (TS `retryWorkerRecovery`): the persisted stop
+        // flags go, the lifecycle reports recovering until the relaunch lands.
+        // A stopping worker was refused above, so no stop intent is live.
         resident
             .consecutive_failures
             .store(0, std::sync::atomic::Ordering::SeqCst);
@@ -217,7 +214,7 @@ impl Supervisor {
             let _ = persist_worker(&resident.descriptor_path, &descriptor);
             last_error
         };
-        let connected = resident.cmd_tx.lock().await.is_some();
+        let connected = resident.route_state().connected;
         if connected {
             // A live worker's recovery is the marker reset itself: the
             // connection answers the lifecycle (TS `effectiveWorkerState`

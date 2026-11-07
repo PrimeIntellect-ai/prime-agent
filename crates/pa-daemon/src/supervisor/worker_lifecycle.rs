@@ -13,7 +13,7 @@ use super::{
     anyhow, create_command_payload, json, persist_worker, socket, util, Arc, Context,
     DaemonCommand, DaemonWorkerDescriptor, DaemonWorkerLifecycle, DurableDaemonCreateCommand,
     Duration, EngineModelSelection, Map, Ordering, Path, ResidentWorker, Result, RouteAdmission,
-    Supervisor, TempSync, TypedCreateRejection, Value, ROUTE_TIMEOUT_MS,
+    Supervisor, TempSync, TypedCreateRejection, Value, WorkerTransition, ROUTE_TIMEOUT_MS,
 };
 use crate::lease::is_process_alive;
 use crate::protocol::{response_failure, response_success, DaemonResponse};
@@ -39,7 +39,7 @@ impl Supervisor {
             // The worker outlived the stop: connect and forward the ORIGINAL stop intent —
             // kill for the kill stop, shutdown for the resumable stop. A failed connect
             // degrades to the finalize below.
-            resident.intentional_stop.store(true, Ordering::SeqCst);
+            resident.transition(WorkerTransition::RequestStop);
             // TS stopWorker(force) bounds the graceful IPC leg to one
             // second before process escalation. Auth and stop share that
             // budget: the ordinary route's 30s timeout begins only AFTER
@@ -521,7 +521,7 @@ impl Supervisor {
         }
         // The create completed with a validated session identity: client commands may
         // now be routed to this worker — nothing overtakes the session's create.
-        resident.note_session_ready();
+        resident.transition(WorkerTransition::SessionReady);
         let pid = child.id().unwrap_or(0);
         self.spawn_monitor(Arc::clone(&resident), Some(child), u64::from(pid), None);
         Ok((resident, create_summary))
@@ -749,10 +749,9 @@ impl Supervisor {
         // `persistWorkerStopTombstone`): a supervisor that dies mid-stop, or a worker that
         // survives the escalation, must never be adopted as healthy by a later boot.
         self.persist_stop_tombstone_stop(resident).await?;
-        resident.intentional_stop.store(true, Ordering::SeqCst);
-        // The stop is intentional: routes waiting out a replacement must
-        // fail fast instead of parking on this worker.
-        resident.note_retired();
+        // The stop is intentional and final: routes waiting out a replacement
+        // must fail fast instead of parking on this worker.
+        resident.transition(WorkerTransition::RetireStopped);
         // The fence releases past the retire (a tombstone-persist failure
         // fails the stop before it, and the worker stays fully
         // routable) and before the shutdown route, which needs a permit
@@ -1060,7 +1059,7 @@ impl crate::update_stop::WorkerStopTransport for std::sync::Arc<Supervisor> {
         resident: &Arc<ResidentWorker>,
         timeout: Duration,
     ) -> Result<()> {
-        resident.intentional_stop.store(true, Ordering::SeqCst);
+        resident.transition(WorkerTransition::RequestStop);
         let response = self
             .route_command_typed(
                 resident,
@@ -1220,7 +1219,7 @@ mod tests {
             "rootActiveSessionId": "w-retire",
             "createdAt": "2026-10-07T00:00:00Z",
             "updatedAt": "2026-10-07T00:00:00Z",
-            "lifecycle": "stopping",
+            "lifecycle": "ready",
             "createCommand": {},
             "consecutiveFailures": 0,
         }))
