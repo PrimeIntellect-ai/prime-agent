@@ -35,6 +35,9 @@
 //! venv); like `kernel_stop_revive.rs`, these tests skip (with a note) on
 //! machines without a live install so the suite stays hermetic elsewhere.
 
+mod script;
+
+use script::write_executable;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -42,7 +45,6 @@ use std::time::Duration;
 use pa_core::kernel::provisioner::{IpythonKernelProvisioner, IpythonKernelProvisionerOptions};
 use pa_core::kernel::shared::{ExecuteOptions, ExecuteStatus};
 use pa_core::kernel::state_snapshot::snapshot_path_in;
-use std::os::unix::fs::PermissionsExt;
 
 /// The kernel Python with prime-agent-runtime installed (see
 /// `kernel_stop_revive.rs`); skipped with a note when absent.
@@ -81,9 +83,9 @@ fn counting_gated_kernel(
     gates: &std::path::Path,
 ) -> PathBuf {
     let wrapper = dir.join("counting-gated-python");
-    std::fs::write(
+    write_executable(
         &wrapper,
-        format!(
+        &format!(
             "#!/bin/sh\nn=$(wc -c < '{}')\nprintf x >> '{}'\nwhile [ ! -f '{}'/gate$n ] && [ -d '{}' ]; do sleep 0.05; done\nexec '{}' \"$@\"\n",
             count.display(),
             count.display(),
@@ -91,9 +93,7 @@ fn counting_gated_kernel(
             gates.display(),
             python.display()
         ),
-    )
-    .unwrap();
-    std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o700)).unwrap();
+    );
     wrapper
 }
 
@@ -608,9 +608,9 @@ fn flaky_first_kernel(
     fail_gate: &std::path::Path,
 ) -> PathBuf {
     let wrapper = dir.join("flaky-first-python");
-    std::fs::write(
+    write_executable(
         &wrapper,
-        format!(
+        &format!(
             "#!/bin/sh\nprintf x >> '{}'\nif [ -f '{}' ]; then exec '{}' \"$@\"; fi\nwhile [ ! -f '{}' ] && [ -d '{}' ]; do sleep 0.05; done\nexit 1\n",
             count.display(),
             flip.display(),
@@ -618,9 +618,7 @@ fn flaky_first_kernel(
             fail_gate.display(),
             dir.display(),
         ),
-    )
-    .unwrap();
-    std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o700)).unwrap();
+    );
     wrapper
 }
 
