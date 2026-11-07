@@ -1157,7 +1157,6 @@ included) goes to stderr, and the returned dict is the only thing written
 to stdout."""
 
 _FENCED_JSON_RE = re.compile(r"```json\s*(.*?)\s*```", re.DOTALL)
-TERMINAL_ENTRY_STATUSES = ("done", "error", "cancelled")
 
 
 def _is_rate_limit_error(message: str) -> bool:
@@ -1576,13 +1575,47 @@ def _validate_spawn_settings(model: Any, thinking: Any) -> str | None:
     return None
 
 
+class NodeStatus(enum.StrEnum):
+    """The status of a state entry or one of its instances. The values are
+    the wire strings."""
+
+    PENDING = "pending"
+    RUNNING = "running"
+    DONE = "done"
+    ERROR = "error"
+    CANCELLED = "cancelled"
+
+
+TERMINAL_NODE_STATUSES = frozenset({NodeStatus.DONE, NodeStatus.ERROR, NodeStatus.CANCELLED})
+
+#: The allowed moves of ``_NodeInstance.set_status``.
+_INSTANCE_MOVES: dict[NodeStatus, frozenset[NodeStatus]] = {
+    NodeStatus.PENDING: frozenset({NodeStatus.RUNNING, NodeStatus.ERROR, NodeStatus.CANCELLED}),
+    NodeStatus.RUNNING: frozenset({NodeStatus.DONE, NodeStatus.ERROR, NodeStatus.PENDING, NodeStatus.CANCELLED}),
+    NodeStatus.DONE: frozenset({NodeStatus.ERROR}),
+    NodeStatus.ERROR: frozenset({NodeStatus.PENDING}),
+    # cancelled -> cancelled: a spawn that returns after stop() already
+    # cancelled its pending instance is retracted (_retract_admission).
+    NodeStatus.CANCELLED: frozenset({NodeStatus.PENDING, NodeStatus.CANCELLED}),
+}
+
+#: The allowed moves of ``_StateEntry.set_status``.
+_ENTRY_MOVES: dict[NodeStatus, frozenset[NodeStatus]] = {
+    NodeStatus.PENDING: frozenset({NodeStatus.RUNNING, NodeStatus.DONE, NodeStatus.ERROR, NodeStatus.CANCELLED}),
+    NodeStatus.RUNNING: frozenset({NodeStatus.DONE, NodeStatus.ERROR, NodeStatus.CANCELLED}),
+    NodeStatus.DONE: frozenset(),
+    NodeStatus.ERROR: frozenset({NodeStatus.PENDING, NodeStatus.RUNNING}),
+    NodeStatus.CANCELLED: frozenset(),
+}
+
+
 @dataclass
 class _NodeInstance:
     """One spawned child of one state entry (a foreach entry has one per item)."""
 
     index: int  # per-state running counter; unique within the state
     prompt: str  # fully rendered; re-spawns reuse it verbatim
-    status: str = "pending"  # pending | running | done | error | cancelled
+    status: NodeStatus = NodeStatus.PENDING
     attempt: int = 0  # spawn admissions tried for this instance; a rate-limit
     # deferral counts here too, and charged retries compare against
     # ``attempt - retry_base``, so one transient 429 admission consumes one
@@ -1614,6 +1647,12 @@ class _NodeInstance:
     process: "_PythonProcess | None" = None  # a python state's running call
     deadline: float | None = None  # a python call's time limit (seconds on the injected clock)
 
+    def set_status(self, new: NodeStatus) -> None:
+        """The one writer of ``status``; raises on a move outside ``_INSTANCE_MOVES``."""
+        if new not in _INSTANCE_MOVES[self.status]:
+            raise RuntimeError(f"factory instance {self.index}: invalid status move {self.status} -> {new}")
+        self.status = new
+
 
 @dataclass
 class _StateEntry:
@@ -1626,7 +1665,7 @@ class _StateEntry:
     """
 
     index: int  # per-state entry index, 0-based
-    status: str = "pending"  # pending | running | done | error | cancelled
+    status: NodeStatus = NodeStatus.PENDING
     instances: list[_NodeInstance] = field(default_factory=list)
     error: str | None = None
     answer: str | None = None  # joined captured answers of this entry
@@ -1638,6 +1677,12 @@ class _StateEntry:
     # (the M4 oversight mark): the entry failed, but the child's last
     # assistant text is preserved as a provisional answer and the run
     # surfaces the state in status()["needs_verify"].
+
+    def set_status(self, new: NodeStatus) -> None:
+        """The one writer of ``status``; raises on a move outside ``_ENTRY_MOVES``."""
+        if new not in _ENTRY_MOVES[self.status]:
+            raise RuntimeError(f"factory entry {self.index}: invalid status move {self.status} -> {new}")
+        self.status = new
 
 
 @dataclass
@@ -1663,10 +1708,10 @@ class _StateRun:
         return self.spec.get("lifecycle", NODE_LIFECYCLE_DEFAULT)
 
     @property
-    def status(self) -> str:
+    def status(self) -> NodeStatus:
         if self.entries:
             return self.entries[-1].status
-        return "cancelled" if self.cancelled else "pending"
+        return NodeStatus.CANCELLED if self.cancelled else NodeStatus.PENDING
 
     def latest_settle(self) -> _StateEntry | None:
         for entry in reversed(self.entries):
@@ -2036,16 +2081,16 @@ class FactoryExecutor:
         for state_id in run.order:
             state = run.states[state_id]
             for entry in state.entries:
-                if entry.status != "error" or entry.is_settle:
+                if entry.status != NodeStatus.ERROR or entry.is_settle:
                     continue
-                entry.status = "running" if entry.instances else "pending"
+                entry.set_status(NodeStatus.RUNNING if entry.instances else NodeStatus.PENDING)
                 entry.error = None
                 entry.needs_verify = False
                 state.error = None
                 for instance in entry.instances:
-                    if instance.status not in ("error", "cancelled"):
+                    if instance.status not in (NodeStatus.ERROR, NodeStatus.CANCELLED):
                         continue  # running and done siblings keep their state
-                    instance.status = "pending"
+                    instance.set_status(NodeStatus.PENDING)
                     instance.error = None
                     instance.answer = None
                     instance.provisional = False
@@ -2081,7 +2126,7 @@ class FactoryExecutor:
         """
         report: dict[str, Any] = {
             "id": state.state_id,
-            "status": state.status,
+            "status": state.status.value,
             "lifecycle": state.lifecycle,
             "attempts": sum(
                 instance.attempt for entry in state.entries for instance in entry.instances
@@ -2095,7 +2140,7 @@ class FactoryExecutor:
                 {
                     "index": instance.index,
                     "entry": entry.index,
-                    "status": instance.status,
+                    "status": instance.status.value,
                     "attempt": instance.attempt,
                     "child": instance.child_id,
                     "duration_ms": instance.duration_ms,
@@ -2108,13 +2153,13 @@ class FactoryExecutor:
                 1
                 for entry in state.entries
                 for instance in entry.instances
-                if instance.status == "running"
+                if instance.status == NodeStatus.RUNNING
             ),
             "queued": sum(
                 1
                 for entry in state.entries
                 for instance in entry.instances
-                if instance.status == "pending"
+                if instance.status == NodeStatus.PENDING
             ),
         }
         if include_answer:
@@ -2132,7 +2177,7 @@ class FactoryExecutor:
     def _entry_report(self, entry: _StateEntry) -> dict[str, Any]:
         """One entry's report row: its status/error plus, for a needs-verify
         entry, the provisional answer the child exit captured (compacted)."""
-        row: dict[str, Any] = {"index": entry.index, "status": entry.status, "error": entry.error}
+        row: dict[str, Any] = {"index": entry.index, "status": entry.status.value, "error": entry.error}
         if entry.needs_verify:
             row["needs_verify"] = True
             provisional = next(
@@ -2232,9 +2277,9 @@ class FactoryExecutor:
                 state_id
                 for state_id in run.order
                 if any(
-                    entry.status in ("pending", "running")
+                    entry.status not in TERMINAL_NODE_STATUSES
                     or any(
-                        instance.status in ("pending", "running")
+                        instance.status not in TERMINAL_NODE_STATUSES
                         for instance in entry.instances
                     )
                     for entry in run.states[state_id].entries
@@ -2887,7 +2932,7 @@ class FactoryExecutor:
         for state_id in run.order:
             state = run.states[state_id]
             for entry in state.entries:
-                if entry.status != "pending":
+                if entry.status != NodeStatus.PENDING:
                     continue
                 instances, reason = self._prepare_entry(run, state, entry)
                 if reason is not None:
@@ -2899,13 +2944,13 @@ class FactoryExecutor:
                     continue  # an input source has not settled yet; stay pending
                 entry.instances = instances
                 if instances:
-                    entry.status = "running"
+                    entry.set_status(NodeStatus.RUNNING)
                     self._event(
                         run, "node_ready", node=state_id, entry=entry.index,
                         detail=f"{len(instances)} instance(s) prepared",
                     )
                 else:
-                    entry.status = "done"
+                    entry.set_status(NodeStatus.DONE)
                     self._event(
                         run, "node_ready", node=state_id, entry=entry.index,
                         detail="foreach expanded to zero items; nothing to run",
@@ -2943,7 +2988,7 @@ class FactoryExecutor:
                 # no value for are all no-value conditions of a source
                 # that HAS settled -- the dependent sees none of them as a
                 # value.
-                if latest.status == "error":
+                if latest.status == NodeStatus.ERROR:
                     failure = f"input {name!r} from state {src_id!r} is unavailable (latest settle status 'error')"
                 else:
                     outputs = latest.outputs or {}
@@ -2967,7 +3012,7 @@ class FactoryExecutor:
                     # re-entering before their upstream partner has RUN.
                     if latest is None and src_id != state.state_id:
                         source_state_live = source_state is not None and any(
-                            other.status in ("pending", "running") for other in source_state.entries
+                            other.status not in TERMINAL_NODE_STATUSES for other in source_state.entries
                         )
                         if source_state_live:
                             return None, None  # wait for the in-flight source's settle
@@ -3047,10 +3092,10 @@ class FactoryExecutor:
         for state_id in run.order:
             state = run.states[state_id]
             for entry in state.entries:
-                if entry.status != "running":
+                if entry.status != NodeStatus.RUNNING:
                     continue
                 for instance in entry.instances:
-                    if instance.status == "pending":
+                    if instance.status == NodeStatus.PENDING:
                         return state, entry, instance
         return None
 
@@ -3138,7 +3183,7 @@ class FactoryExecutor:
             return "stopped"
         instance.child_id = handle.rlm_child_id
         instance.spawned_at = self._now_fn()
-        instance.status = "running"
+        instance.set_status(NodeStatus.RUNNING)
         instance.rate_limit_streak = 0
         run.spawn_count += 1
         self._event(
@@ -3170,13 +3215,13 @@ class FactoryExecutor:
         if run.state != RunState.RUNNING:
             # stop() ran while the process was starting; its pass could not see it.
             await process.stop()
-            instance.status = "cancelled"
+            instance.set_status(NodeStatus.CANCELLED)
             self._event(run, "cancelled", node=state.state_id, entry=entry.index, instance=instance.index)
             return "stopped"
         instance.process = process
         instance.spawned_at = self._now_fn()
         instance.deadline = instance.spawned_at + self._python_limit_ms(run, state) / 1000
-        instance.status = "running"
+        instance.set_status(NodeStatus.RUNNING)
         self._event(
             run,
             "started",
@@ -3238,7 +3283,7 @@ class FactoryExecutor:
         if isinstance(outputs, str):
             await self._apply_instance_failure(run, state, entry, instance, outputs, retry=True)
             return
-        instance.status = "done"
+        instance.set_status(NodeStatus.DONE)
         instance.answer = json.dumps(outputs, separators=(",", ":"))[:ANSWER_BINDING_CAP]
         self._event(
             run,
@@ -3261,7 +3306,7 @@ class FactoryExecutor:
         entry.answer = instance.answer
         entry.outputs = outputs
         entry.output_errors = {}
-        entry.status = "done"
+        entry.set_status(NodeStatus.DONE)
         self._queue_settle(run, state, entry)
 
     # -- settlement, retries, policies ---------------------------------------
@@ -3269,7 +3314,7 @@ class FactoryExecutor:
     async def _apply_settlement(
         self, run: FactoryRun, state: _StateRun, entry: _StateEntry, instance: _NodeInstance, result: Any
     ) -> None:
-        if instance.status != "running":
+        if instance.status != NodeStatus.RUNNING:
             return  # cancelled (stop/fail_fast) while the collect was in flight
         if result.status == "error" and _is_infra_error(result.error or ""):
             # A worker death or a lost supervisor link is infra, not the
@@ -3282,7 +3327,7 @@ class FactoryExecutor:
                 return  # a stop/fail_fast pass claimed it, or the worker answered
             result = fresh
             if (
-                entry.status == "running"
+                entry.status == NodeStatus.RUNNING
                 and not instance.infra_respawned
                 and result.status == "error"
                 and _is_infra_error(result.error or "")
@@ -3335,7 +3380,7 @@ class FactoryExecutor:
                     retry=False,
                 )
                 return
-        instance.status = "done"
+        instance.set_status(NodeStatus.DONE)
         # The binding lane first: the collect envelope's full final answer
         # keeps the whole fenced JSON; the 160-character roster preview is
         # the fallback (older hosts, a capture that raced a worker
@@ -3364,10 +3409,10 @@ class FactoryExecutor:
                 answer=instance.answer[:ANSWER_CAPTURE_CAP],
                 stage="arrived",
             )
-        if entry.status == "running" and entry.instances and all(i.status == "done" for i in entry.instances):
+        if entry.status == NodeStatus.RUNNING and entry.instances and all(i.status == NodeStatus.DONE for i in entry.instances):
             entry.answer = self._entry_answer(entry)
             capture_failure = await self._capture_outputs(run, state, entry)
-            if entry.status != "running":
+            if entry.status != NodeStatus.RUNNING:
                 return  # a stop()/fail_fast pass claimed the entry mid-capture
             if capture_failure is not None:
                 # A declared output that never bound after the capture
@@ -3382,7 +3427,7 @@ class FactoryExecutor:
                     run, state, entry, instance, capture_failure, retry=True
                 )
                 return
-            entry.status = "done"
+            entry.set_status(NodeStatus.DONE)
             self._queue_settle(run, state, entry)
 
     async def _recheck_infra_death(self, instance: _NodeInstance, result: Any) -> Any:
@@ -3401,10 +3446,10 @@ class FactoryExecutor:
 
         child_id = instance.child_id
         await self._sleep_fn(INFRA_VERIFY_QUIET_SECONDS)
-        if instance.status != "running" or instance.child_id != child_id:
+        if instance.status != NodeStatus.RUNNING or instance.child_id != child_id:
             return None  # a stop, fail_fast, or resumed lane claimed the instance
         results = await collect([child_id], timeout_ms=0)
-        if instance.status != "running" or instance.child_id != child_id:
+        if instance.status != NodeStatus.RUNNING or instance.child_id != child_id:
             return None
         row = next((r for r in results if r.rlm_child_id == child_id), None)
         if row is not None and not row.settled:
@@ -3442,7 +3487,7 @@ class FactoryExecutor:
             await delete_subagent(old_child)
         except Exception:
             pass
-        if instance.status != "running" or run.state not in (RunState.RUNNING, RunState.PAUSED):
+        if instance.status != NodeStatus.RUNNING or run.state not in (RunState.RUNNING, RunState.PAUSED):
             return  # a stop()/fail_fast pass claimed the instance mid-delete
         # A sibling may have paused the run in this same collect batch.
         # Preserve the verified death as pending; resume admits it for free
@@ -3453,7 +3498,7 @@ class FactoryExecutor:
         run.tool_use_total += instance.tool_uses
         instance.infra_respawned = True
         instance.retry_base += 1
-        instance.status = "pending"
+        instance.set_status(NodeStatus.PENDING)
         instance.error = None
         instance.answer = None
         instance.provisional = False
@@ -3483,7 +3528,7 @@ class FactoryExecutor:
 
     def _entry_answer(self, entry: _StateEntry) -> str | None:
         """Captured answer for binding: one preview, or all instances joined."""
-        answers = [instance.answer for instance in entry.instances if instance.status == "done" and instance.answer]
+        answers = [instance.answer for instance in entry.instances if instance.status == NodeStatus.DONE and instance.answer]
         if not answers:
             return None
         return "\n\n".join(answers)
@@ -3574,7 +3619,7 @@ class FactoryExecutor:
         child_ids = [
             instance.child_id
             for instance in entry.instances
-            if instance.child_id is not None and instance.status == "done"
+            if instance.child_id is not None and instance.status == NodeStatus.DONE
         ]
         if not child_ids:
             return False
@@ -3583,7 +3628,7 @@ class FactoryExecutor:
         # existing nonempty (but invalid) output still gets only one refresh.
         deadline = self._now_fn() + POLL_TIMEOUT_MS / 1000
         changed = False
-        while entry.status == "running":
+        while entry.status == NodeStatus.RUNNING:
             try:
                 results = await collect(child_ids, timeout_ms=0)
             except Exception as exc:
@@ -3596,7 +3641,7 @@ class FactoryExecutor:
                     detail="the first capture stands",
                 )
                 return changed
-            if entry.status != "running":
+            if entry.status != NodeStatus.RUNNING:
                 return changed  # stop/fail_fast claimed the entry during collect
             by_child = {result.rlm_child_id: result for result in results}
             for instance in entry.instances:
@@ -3610,7 +3655,7 @@ class FactoryExecutor:
             if changed:
                 entry.answer = self._entry_answer(entry)
             missing = any(
-                instance.status == "done" and instance.child_id is not None and not instance.answer
+                instance.status == NodeStatus.DONE and instance.child_id is not None and not instance.answer
                 for instance in entry.instances
             )
             remaining = deadline - self._now_fn()
@@ -3622,7 +3667,7 @@ class FactoryExecutor:
     async def _apply_instance_failure(
         self, run: FactoryRun, state: _StateRun, entry: _StateEntry, instance: _NodeInstance, reason: str, *, retry: bool
     ) -> None:
-        instance.status = "error"
+        instance.set_status(NodeStatus.ERROR)
         instance.error = reason
         self._event(
             run,
@@ -3650,9 +3695,9 @@ class FactoryExecutor:
         if (
             retry
             and instance.attempt - instance.retry_base <= retries
-            and entry.status == "running"
+            and entry.status == NodeStatus.RUNNING
         ):
-            instance.status = "pending"
+            instance.set_status(NodeStatus.PENDING)
             instance.error = None
             self._event(
                 run,
@@ -3711,10 +3756,10 @@ class FactoryExecutor:
             else:
                 detail = "child exit captured a provisional answer - verify the remote state"
             self._event(run, "needs_verify", node=state.state_id, entry=entry.index, detail=detail)
-        if entry.status in TERMINAL_ENTRY_STATUSES:
+        if entry.status in TERMINAL_NODE_STATUSES:
             return  # the policy already ran for this entry
         policy = state.spec.get("failure_policy", RUN_FAILURE_POLICY_DEFAULT)
-        entry.status = "error"
+        entry.set_status(NodeStatus.ERROR)
         entry.error = reason
         state.error = reason
         run.last_error = f"state {state.state_id!r} failed: {reason}"
@@ -3724,8 +3769,8 @@ class FactoryExecutor:
         # can never run now, so mark them cancelled with their own ledger
         # event instead of leaving them pending forever.
         for instance in entry.instances:
-            if instance.status == "pending":
-                instance.status = "cancelled"
+            if instance.status == NodeStatus.PENDING:
+                instance.set_status(NodeStatus.CANCELLED)
                 self._event(
                     run,
                     "cancelled",
@@ -3755,7 +3800,7 @@ class FactoryExecutor:
                 for other in run.states.values()
                 for other_entry in other.entries
                 for i in other_entry.instances
-                if i.status == "cancelled"
+                if i.status == NodeStatus.CANCELLED
             )
             self._transition(run, RunState.FAILED)
             await self._milestone(
@@ -3788,25 +3833,25 @@ class FactoryExecutor:
         stopped = [
             state_id
             for state_id in run.order
-            if any(entry.status in ("pending", "running") for entry in run.states[state_id].entries)
-            or (not run.states[state_id].entries and run.states[state_id].status == "pending")
+            if any(entry.status not in TERMINAL_NODE_STATUSES for entry in run.states[state_id].entries)
+            or (not run.states[state_id].entries and run.states[state_id].status == NodeStatus.PENDING)
         ]
         await self._cancel_running(run)
         for state_id in stopped:
             state = run.states[state_id]
-            if any(entry.status in ("pending", "running") for entry in state.entries) or not state.entries:
+            if any(entry.status not in TERMINAL_NODE_STATUSES for entry in state.entries) or not state.entries:
                 state.cancelled = True
                 for entry in state.entries:
-                    if entry.status in ("pending", "running"):
-                        entry.status = "cancelled"
+                    if entry.status not in TERMINAL_NODE_STATUSES:
+                        entry.set_status(NodeStatus.CANCELLED)
                         self._event(run, "node_cancelled", node=state_id, entry=entry.index, detail=reason)
                         for instance in entry.instances:
-                            if instance.status == "pending":
+                            if instance.status == NodeStatus.PENDING:
                                 # Prepared but never admitted (or still in
                                 # flight inside _admit): the cancelled entry
                                 # owns it, so it reads cancelled, not pending,
                                 # in the stopped/failed ledger.
-                                instance.status = "cancelled"
+                                instance.set_status(NodeStatus.CANCELLED)
                                 self._event(
                                     run,
                                     "cancelled",
@@ -3843,7 +3888,7 @@ class FactoryExecutor:
             self._event(run, "cancelled", node=state.state_id, entry=entry.index, instance=instance.index, child=child_id)
         # The child is supervisor-owned; a failed delete leaves it running
         # there, but the executor treats its slot as released.
-        instance.status = "cancelled"
+        instance.set_status(NodeStatus.CANCELLED)
 
     async def _cancel_python(self, run: FactoryRun) -> None:
         """Stop executor-owned calls when the run stops or its control lane fails."""
@@ -3851,11 +3896,11 @@ class FactoryExecutor:
             state = run.states[state_id]
             for entry in state.entries:
                 for instance in entry.instances:
-                    if instance.status == "running" and instance.process is not None:
+                    if instance.status == NodeStatus.RUNNING and instance.process is not None:
                         process, instance.process = instance.process, None
-                        instance.status = "cancelled"
-                        if entry.status == "running":
-                            entry.status = "cancelled"
+                        instance.set_status(NodeStatus.CANCELLED)
+                        if entry.status == NodeStatus.RUNNING:
+                            entry.set_status(NodeStatus.CANCELLED)
                         await process.stop()
                         self._event(run, "cancelled", node=state_id, entry=entry.index, instance=instance.index)
 
@@ -3867,7 +3912,7 @@ class FactoryExecutor:
             state = run.states[state_id]
             for entry in state.entries:
                 for instance in entry.instances:
-                    if instance.status != "running" or instance.child_id is None:
+                    if instance.status != NodeStatus.RUNNING or instance.child_id is None:
                         continue
                     child_id = instance.child_id
                     # Claim the instance BEFORE the await: a concurrent
@@ -3877,7 +3922,7 @@ class FactoryExecutor:
                     # releases the slot, so the terminal status is the same
                     # either way, and a settle landing inside the delete window
                     # is dropped instead of applying to a child being torn down.
-                    instance.status = "cancelled"
+                    instance.set_status(NodeStatus.CANCELLED)
                     try:
                         await delete_subagent(child_id)
                     except Exception as exc:
@@ -3914,13 +3959,13 @@ class FactoryExecutor:
         for state in run.states.values():
             resident = state.lifecycle == "resident"
             for entry in state.entries:
-                if entry.status in ("pending", "running"):
-                    if not (resident and entry.status == "running"):
+                if entry.status not in TERMINAL_NODE_STATUSES:
+                    if not (resident and entry.status == NodeStatus.RUNNING):
                         return False
                 for instance in entry.instances:
-                    if instance.status == "pending":
+                    if instance.status == NodeStatus.PENDING:
                         return False
-                    if instance.status == "running" and not (resident and entry.status == "running"):
+                    if instance.status == NodeStatus.RUNNING and not (resident and entry.status == NodeStatus.RUNNING):
                         return False
         return True
 
@@ -3930,7 +3975,7 @@ class FactoryExecutor:
         errors = [
             state
             for state in run.states.values()
-            if any(entry.status == "error" for entry in state.entries)
+            if any(entry.status == NodeStatus.ERROR for entry in state.entries)
         ]
         if errors:
             self._transition(run, RunState.FAILED)
@@ -3945,7 +3990,7 @@ class FactoryExecutor:
             state
             for state in run.states.values()
             if state.lifecycle == "resident"
-            and any(entry.status == "running" for entry in state.entries)
+            and any(entry.status == NodeStatus.RUNNING for entry in state.entries)
         ]
         detail = f"run complete: {len(run.states)} state(s), {run.transitions_fired} transition(s) fired"
         if residents:
@@ -4001,7 +4046,7 @@ class FactoryExecutor:
                 for state_id in run.order
                 for entry in run.states[state_id].entries
                 for instance in entry.instances
-                if instance.status == "running"
+                if instance.status == NodeStatus.RUNNING
             ]
             children = [item for item in in_flight if item[2].child_id is not None]
             python_calls = [item for item in in_flight if item[2].process is not None]
@@ -4035,7 +4080,7 @@ class FactoryExecutor:
                 if run.loop_generation != generation:
                     return
                 process = instance.process
-                if instance.status != "running" or process is None:
+                if instance.status != NodeStatus.RUNNING or process is None:
                     continue  # stop()/fail_fast claimed it during the wait
                 if process.proc.returncode is not None or self._now_fn() >= instance.deadline:
                     await self._apply_python_exit(run, state, entry, instance)
@@ -4104,7 +4149,7 @@ class FactoryExecutor:
                     state_id
                     for state_id in run.order
                     for entry in run.states[state_id].entries
-                    if entry.status == "pending" and not entry.instances
+                    if entry.status == NodeStatus.PENDING and not entry.instances
                 ]
                 if stuck:
                     reason = (
@@ -4134,7 +4179,7 @@ class FactoryExecutor:
             for state in run.states.values()
             for entry in state.entries
             for instance in entry.instances
-            if instance.status == "running"
+            if instance.status == NodeStatus.RUNNING
         )
 
     def _resident_cap_starved(self, run: FactoryRun) -> bool:
@@ -4152,7 +4197,7 @@ class FactoryExecutor:
             for state in run.states.values()
             for entry in state.entries
             for instance in entry.instances
-            if instance.status == "running"
+            if instance.status == NodeStatus.RUNNING
         ]
         if len(running) < run.max_parallel or not self._has_pending_instance(run):
             return False
@@ -4160,14 +4205,14 @@ class FactoryExecutor:
 
     def _has_pending_instance(self, run: FactoryRun) -> bool:
         return any(
-            instance.status == "pending"
+            instance.status == NodeStatus.PENDING
             for state in run.states.values()
             for entry in state.entries
             for instance in entry.instances
         )
 
     def _pending_state_ids(self, run: FactoryRun) -> list[str]:
-        return [state_id for state_id in run.order if run.states[state_id].status == "pending"]
+        return [state_id for state_id in run.order if run.states[state_id].status == NodeStatus.PENDING]
 
 
 # ---------------------------------------------------------------------------
