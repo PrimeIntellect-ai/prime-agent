@@ -4514,6 +4514,8 @@ class FactoryExecutorTest(_ExecutorTestCase):
         second = await self.settle(result)
         self.assertEqual(second["state"], "paused")
         self.assertEqual(self.executor._runs[result["run_id"]].pause_reason, "b boom")
+        await rlm_module.rlm.factory.stop(result["run_id"])
+        self.assertIsNone((await rlm_module.rlm.factory.graph(result["run_id"]))["pause_reason"])
         milestones = [event for event in second["events"] if event["kind"] == "milestone"]
         self.assertEqual([event["milestone"] for event in milestones], ["paused", "paused"])
         self.assertIn("a boom", milestones[0]["detail"])
