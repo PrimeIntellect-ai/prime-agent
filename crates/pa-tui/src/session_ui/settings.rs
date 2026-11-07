@@ -391,8 +391,8 @@ impl SessionUi {
                     value,
                     view,
                 );
-                // The toggle takes effect after a reload.
-                let _ = self.handle_reload_command(view);
+                // The toggle takes effect after a reload; the menu stays open while it runs.
+                self.start_reload();
             }
             "show-hardware-cursor" => {
                 // A failed persist changes nothing: the live flag flips only when the
@@ -773,12 +773,17 @@ impl SessionUi {
         }
     }
 
-    /// The reload box replaces the editor while the daemon reload runs; the
-    /// run loop folds the outcome in when it lands.
+    /// `/reload`: the reload box replaces the editor while the daemon reload runs.
     pub(super) fn handle_reload_command(&mut self, view: &mut AgentView) -> Result<()> {
         view.overlay = Some(Overlay::Reload(
             "Reloading keybindings, skills, prompts, themes...".to_string(),
         ));
+        self.start_reload();
+        Ok(())
+    }
+
+    /// Start the daemon reload; the run loop folds the outcome in when it lands.
+    fn start_reload(&mut self) {
         self.dirty = true;
         let client = self.client.clone();
         let active_session_id = self.active_session_id.clone();
@@ -796,7 +801,6 @@ impl SessionUi {
             let _ = notes.send(outcome);
         });
         self.reload = Some(task);
-        Ok(())
     }
 
     /// Drop the box, re-read the user keybindings and theme, refresh the model

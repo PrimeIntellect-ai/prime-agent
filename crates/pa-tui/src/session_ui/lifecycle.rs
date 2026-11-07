@@ -966,6 +966,30 @@ mod backfill_tests {
         .expect("mock session open and both panel opens complete within ten seconds");
     }
 
+    /// A reload outcome closes only the reload box: the settings menu that started the reload stays
+    /// open.
+    #[tokio::test]
+    async fn a_reload_outcome_leaves_the_settings_menu_open() {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            let dir = tempfile::tempdir().unwrap();
+            let socket = dir.path().join("reload.sock");
+            let (mut session, server) = mock_session(&socket, mpsc::unbounded_channel().0).await;
+            let mut view = AgentView::new(crate::theme::Theme::builtin(
+                "prime",
+                crate::theme::ColorMode::TrueColor,
+            ));
+            session.open_settings_menu(&mut view).await;
+            session
+                .apply_reload_outcome(Err("reload failed".to_string()), &mut view)
+                .await;
+            assert!(matches!(view.overlay, Some(Overlay::Settings(_))));
+            drop(session);
+            server.abort();
+        })
+        .await
+        .expect("mock session open and reload outcome complete within ten seconds");
+    }
+
     #[tokio::test]
     async fn an_attach_summary_model_fallback_warns_at_the_session_open() {
         tokio::time::timeout(Duration::from_secs(10), async {
