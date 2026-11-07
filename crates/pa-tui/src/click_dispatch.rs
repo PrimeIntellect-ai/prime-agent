@@ -75,9 +75,13 @@ impl SessionUi {
                     self.dirty = true;
                 }
             }
+            // An open panel keeps the frame: replacing it from the dock would skip its own close
+            // (a login flow's cancel, a parked model sign-in).
             ClickAction::OpenDockGroup(group) => {
-                self.track_click("dock");
-                self.open_dock_group_from_click(group, view);
+                if view.overlay.is_none() {
+                    self.track_click("dock");
+                    self.open_dock_group_from_click(group, view);
+                }
             }
             ClickAction::OpenAgentsView => {
                 // The click keeps the LEFT ARROW's contract — the pane
