@@ -78,7 +78,7 @@ impl AgentSessionEngine {
     /// An error assistant message fails an active goal (an abort keeps
     /// it); the state change surfaces through the run's tracking wrapper.
     pub(crate) fn finish_goal_for_terminal_error(&self, error: &str) {
-        let Some(handles) = self.goal_runtime.lock().expect("goal runtime lock").clone() else {
+        let Some(handles) = self.live_handles().map(|live| live.goal.clone()) else {
             return;
         };
         self.runtime.block_on(async {
@@ -127,7 +127,7 @@ impl AgentSessionEngine {
         if self.session_is_closed() {
             return;
         }
-        let Some(handles) = self.goal_runtime.lock().expect("goal runtime lock").clone() else {
+        let Some(handles) = self.live_handles().map(|live| live.goal.clone()) else {
             return;
         };
         {
@@ -229,11 +229,8 @@ impl AgentSessionEngine {
     /// probe reads the kernel manager without the session mutex (the
     /// consult can run inside a compaction turn, which holds it).
     pub(crate) fn has_live_background_bash_handles(&self) -> bool {
-        self.background_bash_probe
-            .lock()
-            .expect("background bash probe lock")
-            .clone()
-            .is_some_and(|probe| probe())
+        self.live_handles()
+            .is_some_and(|live| (live.background_bash_probe)())
     }
 
     /// The settled passivation gates (the kernel release and the whole-worker idle
@@ -274,7 +271,7 @@ impl AgentSessionEngine {
         if self.session_is_closed() {
             return GoalBoundary::Proceed;
         }
-        let Some(handles) = self.goal_runtime.lock().expect("goal runtime lock").clone() else {
+        let Some(handles) = self.live_handles().map(|live| live.goal.clone()) else {
             return GoalBoundary::Proceed;
         };
         // Read the just-settled turn BEFORE the driver lock (the session
@@ -382,11 +379,7 @@ impl AgentSessionEngine {
         if self.session_is_closed() {
             return None;
         }
-        let handles = self
-            .goal_runtime
-            .lock()
-            .expect("goal runtime lock")
-            .clone()?;
+        let handles = self.live_handles()?.goal.clone();
         let message = self.runtime.block_on(async {
             let driver = handles.driver.lock().await;
             let state = driver.state_with_creation_elapsed();
@@ -414,7 +407,10 @@ impl AgentSessionEngine {
         &self,
         goal: &pa_core::goals::GoalState,
     ) -> Option<serde_json::Value> {
-        let mut published = self.published_goal.lock().expect("published goal lock");
+        let Some(handles) = self.built_handles() else {
+            return Some(serde_json::to_value(goal).unwrap_or(serde_json::Value::Null));
+        };
+        let mut published = handles.published_goal.lock().expect("published goal lock");
         // The dedupe is age-invariant: the creation-based timer's age ticks
         // with the wall clock (a second boundary between reads must not
         // re-emit an unchanged goal).
@@ -483,10 +479,7 @@ mod tests {
         engine: &Arc<AgentSessionEngine>,
         probe: std::sync::Arc<dyn Fn() -> bool + Send + Sync>,
     ) {
-        *engine
-            .background_bash_probe
-            .lock()
-            .expect("background bash probe lock") = Some(probe);
+        engine.set_test_probes(Some(probe), None);
     }
 
     #[test]
@@ -517,12 +510,7 @@ mod tests {
                 "work minted behind a live handle: {work:?}"
             );
         }
-        let handles = engine
-            .goal_runtime
-            .lock()
-            .unwrap()
-            .clone()
-            .expect("goal runtime");
+        let handles = engine.live_handles().expect("goal runtime").goal.clone();
         assert!(
             engine
                 .runtime

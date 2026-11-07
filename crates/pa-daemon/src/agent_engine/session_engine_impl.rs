@@ -51,10 +51,8 @@ impl SessionEngine for AgentSessionEngine {
             // The release itself: best-effort; a retired runtime releases
             // nothing. The probe lock drops before the await (`Send`).
             let release = self
-                .kernel_release_probe
-                .lock()
-                .expect("kernel release probe lock")
-                .clone();
+                .live_handles()
+                .map(|live| Arc::clone(&live.kernel_release));
             if let Some(release) = release {
                 release().await;
             }
@@ -67,8 +65,14 @@ impl SessionEngine for AgentSessionEngine {
         }
         // The driver is mid-mutation or the session is unbuilt: fall back to the published state,
         // then empty.
-        let published = self.published_goal.lock().expect("published goal lock");
-        published
+        self.built_handles()
+            .and_then(|handles| {
+                handles
+                    .published_goal
+                    .lock()
+                    .expect("published goal lock")
+                    .clone()
+            })
             .as_ref()
             .and_then(|goal| serde_json::to_value(goal).ok())
             .or_else(|| serde_json::to_value(pa_core::goals::empty_goal_state()).ok())
@@ -77,11 +81,7 @@ impl SessionEngine for AgentSessionEngine {
 
     fn mint_post_compaction_goal_continuation(&self) -> Option<crate::engine::GoalContinuation> {
         // The mirrored locks are async, so the mint runs on the engine runtime.
-        let handles = self
-            .goal_runtime
-            .lock()
-            .expect("goal runtime lock")
-            .clone()?;
+        let handles = self.live_handles()?.goal.clone();
         // The progress check's input, read before the driver lock. The
         // failed pair's DROP happens INSIDE the quiescence gate (an early
         // drop would remint).
@@ -340,23 +340,15 @@ impl SessionEngine for AgentSessionEngine {
     /// The session's newest accepted progress note; `None` before the
     /// first build and after a run boundary cleared it.
     fn progress_note(&self) -> Option<String> {
-        self.progress_notes
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .as_ref()
-            .and_then(|notes| notes.latest_note())
+        self.built_handles()
+            .and_then(|handles| handles.progress_notes.latest_note())
             .map(|(note, _)| note)
     }
 
     /// Clears the stored note at the run boundary; the throttle clock stays.
     fn clear_progress_note(&self) {
-        if let Some(notes) = self
-            .progress_notes
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .as_ref()
-        {
-            notes.clear();
+        if let Some(handles) = self.built_handles() {
+            handles.progress_notes.clear();
         }
     }
 
@@ -1483,7 +1475,9 @@ impl SessionEngine for AgentSessionEngine {
 
     fn abort_in_flight_turn(&self) {
         // The active run aborts and the in-flight fetch cancels; none in flight: nothing.
-        let agent = self.turn_agent.lock().expect("turn agent lock").clone();
+        let agent = self
+            .built_handles()
+            .map(|handles| Arc::clone(&handles.turn_agent));
         if let Some(agent) = agent {
             agent.abort();
         }
@@ -1502,7 +1496,9 @@ impl SessionEngine for AgentSessionEngine {
                 modes.1 = Some(mode.to_string());
             }
         }
-        let agent = self.turn_agent.lock().expect("turn agent lock").clone();
+        let agent = self
+            .built_handles()
+            .map(|handles| Arc::clone(&handles.turn_agent));
         if let Some(agent) = agent {
             if let Some(mode) = steering.and_then(Self::queue_mode) {
                 agent.set_steering_mode(mode);

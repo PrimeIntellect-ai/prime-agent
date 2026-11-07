@@ -24,12 +24,10 @@ pub(crate) struct AutonomousBoundaryMirror {
 }
 
 impl AgentSessionEngine {
-    /// The built session's consult mirror (cleared with the runtime's retirement).
+    /// The built session's consult mirror (gone once the session retires or closes).
     fn autonomous_boundary_mirror(&self) -> Option<AutonomousBoundaryMirror> {
-        self.autonomous_boundary
-            .lock()
-            .expect("autonomous boundary lock")
-            .clone()
+        self.live_handles()
+            .map(|live| live.autonomous_boundary.clone())
     }
 }
 
@@ -157,7 +155,7 @@ impl AgentSessionEngine {
 
     /// Whether an active thread goal owns the continuation wakeup.
     async fn goal_owns_continuation_wakeup(&self) -> bool {
-        let Some(handles) = self.goal_runtime.lock().expect("goal runtime lock").clone() else {
+        let Some(handles) = self.live_handles().map(|live| live.goal.clone()) else {
             return false;
         };
         let driver = handles.driver.lock().await;
@@ -347,10 +345,7 @@ mod tests {
         engine: &Arc<AgentSessionEngine>,
         probe: std::sync::Arc<dyn Fn() -> bool + Send + Sync>,
     ) {
-        *engine
-            .background_bash_probe
-            .lock()
-            .expect("background bash probe lock") = Some(probe);
+        engine.set_test_probes(Some(probe), None);
     }
 
     /// The consult's lost-wakeup guard (Macroscope's #2826 review).

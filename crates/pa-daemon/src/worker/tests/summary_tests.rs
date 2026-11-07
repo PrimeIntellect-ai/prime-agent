@@ -371,11 +371,10 @@ async fn summary_carries_the_live_note_until_the_run_boundaries_clear_it() {
         .as_ref()
         .expect("the faux worker runs the real engine");
     let notes = engine
+        .built_handles()
+        .expect("the built session mirrored its note store")
         .progress_notes
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .clone()
-        .expect("the built session mirrored its note store");
+        .clone();
     assert!(
         notes.note("running tests", 0).accepted,
         "the fresh store accepts the injected note"

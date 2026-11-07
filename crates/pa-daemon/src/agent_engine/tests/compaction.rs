@@ -1320,7 +1320,7 @@ fn low_custom_percentage_compacts_real_history_once_and_then_makes_progress() {
     let mut settings =
         pa_core::settings::SettingsManager::create(dir.path(), dir.path().join("agent"));
     settings.set_compaction_threshold_percent(75.0).unwrap();
-    let mirror = engine.autonomous_boundary.lock().unwrap().clone().unwrap();
+    let mirror = engine.live_handles().unwrap().autonomous_boundary.clone();
     let session = mirror.session.upgrade().unwrap();
     assert_eq!(
         session.session.compaction_settings(),
