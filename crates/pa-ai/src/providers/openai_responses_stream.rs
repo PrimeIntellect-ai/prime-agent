@@ -495,6 +495,9 @@ impl<'a> ResponsesStreamProcessor<'a> {
                 }
             }
             "response.output_item.done" => {
+                let content_index = self
+                    .current_slot(output_index)
+                    .map(|slot| slot.content_index);
                 if let Some(index) = output_index {
                     self.slots.remove(&index);
                 }
@@ -503,9 +506,6 @@ impl<'a> ResponsesStreamProcessor<'a> {
                     .get("type")
                     .and_then(|value| value.as_str())
                     .unwrap_or("");
-                let content_index = self
-                    .current_slot(output_index)
-                    .map(|slot| slot.content_index);
                 match item_type {
                     "reasoning" => {
                         if let Some(content_index) = content_index {
@@ -938,5 +938,61 @@ fn map_responses_stop_reason(status: Option<&str>) -> StopReason {
         None | Some("completed" | "in_progress" | "queued") => StopReason::Stop,
         Some("incomplete") => StopReason::Length,
         Some(_) => StopReason::Error,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::event_stream::{create_assistant_message_event_stream, initial_assistant_message};
+    use crate::providers::openai_responses_shared::{
+        convert_responses_messages, ConvertResponsesMessagesOptions, OPENAI_TOOL_CALL_PROVIDERS,
+    };
+    use crate::types::{Context, Message};
+
+    #[test]
+    fn completed_reasoning_is_preserved_for_replay() {
+        let model: Model = serde_json::from_value(json!({
+            "id": "gpt-5", "name": "GPT-5", "provider": "openai", "api": "openai-responses",
+            "baseUrl": "https://unused.invalid", "reasoning": true, "input": ["text"],
+            "contextWindow": 10000, "maxTokens": 100,
+            "cost": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0}
+        }))
+        .unwrap();
+        let mut output = initial_assistant_message(&model.api, &model.provider, &model.id);
+        let (writer, _stream) = create_assistant_message_event_stream();
+        let reasoning = json!({
+            "id": "rs_test", "type": "reasoning", "status": "completed",
+            "summary": [{"type": "summary_text", "text": "A reasoning summary."}],
+            "encrypted_content": "opaque-reasoning"
+        });
+        {
+            let mut processor = ResponsesStreamProcessor::new(
+                &model,
+                &mut output,
+                &writer,
+                ResponsesStreamHooks::default(),
+            );
+            for event in [
+                json!({"type": "response.output_item.added", "output_index": 0,
+                    "item": {"id": "rs_test", "type": "reasoning", "summary": []}}),
+                json!({"type": "response.reasoning_summary_text.delta", "output_index": 0,
+                    "summary_index": 0, "delta": "A reasoning summary."}),
+                json!({"type": "response.output_item.done", "output_index": 0, "item": reasoning}),
+            ] {
+                processor.handle_event(&event).unwrap();
+            }
+        }
+        let replay = convert_responses_messages(
+            &model,
+            &Context {
+                system_prompt: None,
+                messages: vec![Message::Assistant(output)],
+                tools: None,
+            },
+            &OPENAI_TOOL_CALL_PROVIDERS,
+            ConvertResponsesMessagesOptions::default(),
+        );
+        assert_eq!(replay, vec![reasoning]);
     }
 }
