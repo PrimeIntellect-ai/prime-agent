@@ -30,9 +30,10 @@ pub struct ContinuationGates {
 /// The consult's outcome.
 #[derive(Debug)]
 pub enum GoalContinuationDecision {
-    /// No active goal owns the boundary (an armed deferral is dropped), or a
-    /// retry found nothing owed.
+    /// No active goal owns the boundary (an armed deferral is dropped).
     NotOwned,
+    /// A retry found nothing owed; the active goal still owns the boundary.
+    NothingOwed,
     /// Queued input owns the boundary; its own turn end consults again.
     QueuedInput,
     /// The continuation is owed behind unsettled work, not consumed.
@@ -86,7 +87,7 @@ pub async fn consult_goal_continuation(
         return GoalContinuationDecision::NotOwned;
     }
     if trigger == ContinuationTrigger::OwedRetry && !driver.owes_continuation() {
-        return GoalContinuationDecision::NotOwned;
+        return GoalContinuationDecision::NothingOwed;
     }
     if gates.input_queued {
         return GoalContinuationDecision::QueuedInput;

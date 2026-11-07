@@ -509,7 +509,9 @@ impl PrintGoalSurface {
                     None => NaturalContinuation::FallThrough,
                 }
             }
-            GoalContinuationDecision::NotOwned | GoalContinuationDecision::NotMinted { .. } => {
+            GoalContinuationDecision::NotOwned
+            | GoalContinuationDecision::NothingOwed
+            | GoalContinuationDecision::NotMinted { .. } => {
                 if threshold_due {
                     NaturalContinuation::ThresholdDue
                 } else {
