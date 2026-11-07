@@ -16,6 +16,7 @@ mod notes;
 mod panels;
 mod prompt;
 mod queue;
+mod run_state;
 mod sessions_fork;
 mod settings;
 mod share;
@@ -42,6 +43,7 @@ pub(crate) use panels::ActivityUpdates;
 use prompt::PromptOrder;
 pub(crate) use prompt::PromptSubmitNote;
 pub(crate) use prompt::SubmitBehavior;
+use run_state::{RunEvent, RunState};
 use sessions_fork::{create_session, terminal_columns};
 use settings::PendingConfirm;
 pub(crate) use settings::ReloadNote;
@@ -238,14 +240,14 @@ pub(crate) struct SessionUi {
     pending_model_provider: Option<String>,
     pending_thinking_suffix: Option<String>,
     pending_queue: Option<crate::queued::QueuedMessages>,
+    /// The attach snapshot's live-run flag. Every successful `attach_session` is followed by its
+    /// `rebuild_view` in the same handler, and session events apply only in the run loop's arms,
+    /// never in between (the same order `pending_snapshot` and `pending_queue` rely on).
+    pending_run_streaming: Option<bool>,
     queue_selection: crate::queued::QueueSelection,
     context: Option<crate::chrome::ContextUsage>,
     list_rows: Vec<Value>,
-    pub(crate) turn_active: bool,
-    /// Completed turns observed on this connection. A prompt ACK may arrive
-    /// after its entire streamed turn; it must not restart the loader then.
-    turn_ends_seen: u64,
-    last_prompt_turn_end: u64,
+    run_state: RunState,
     /// The session's queue delivery mode: `all` delivers the queued steering prefix as one batched
     /// turn at the boundary; `one-at-a-time` one per turn (product default `all`).
     pub(crate) steering_mode: String,

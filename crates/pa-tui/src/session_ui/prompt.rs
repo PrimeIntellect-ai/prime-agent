@@ -5,7 +5,7 @@
 use super::{
     anyhow, collect_marked_images, evict_images_to_budget, format_image_marker, image_marker_ids,
     mpsc, AgentView, DaemonClient, DaemonCommand, DockFold, Duration, LoadedImage, Map,
-    PromptStash, RebuildKind, Result, SessionUi, SlashCommandRegistry, StatusKind, Value,
+    PromptStash, RebuildKind, Result, RunEvent, SessionUi, SlashCommandRegistry, StatusKind, Value,
     UI_REQUEST_TIMEOUT_MS,
 };
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -39,8 +39,6 @@ pub(crate) struct PromptSubmitNote {
     /// flag after its await, which nothing could move while the loop was
     /// blocked).
     pub(crate) turn_was_active: bool,
-    /// The expected end of this admitted prompt in submit order.
-    pub(crate) expected_turn_end: u64,
     /// A newer submit supersedes an older one's draft-restore right.
     pub(crate) generation: u64,
     /// The submission's `input_id` (`agent input stage`).
@@ -68,7 +66,6 @@ pub(crate) struct PromptOrder {
     pub(crate) stashed_images: Vec<(u64, LoadedImage)>,
     pub(crate) stash_to_restore: Option<PromptStash>,
     pub(crate) turn_was_active: bool,
-    pub(crate) expected_turn_end: u64,
     pub(crate) generation: u64,
     pub(crate) rebind_available: bool,
     /// A fresh uuid per submitted prompt (`agent input stage`), pairing the stage observations.
@@ -681,6 +678,7 @@ impl SessionUi {
             stash_to_restore,
             true,
             generation,
+            view,
         );
         self.dirty = true;
         Ok(())
@@ -706,12 +704,12 @@ impl SessionUi {
         stash_to_restore: Option<PromptStash>,
         rebind_available: bool,
         generation: u64,
+        view: &mut AgentView,
     ) {
-        // The turn state at submit time gates the telemetry; an earlier submit
+        // The run state at submit time gates the telemetry; an earlier submit
         // still in flight counts as active here.
-        let turn_was_active = self.turn_active || self.prompt_in_flight > 0;
-        let expected_turn_end = self.last_prompt_turn_end.max(self.turn_ends_seen) + 1;
-        self.last_prompt_turn_end = expected_turn_end;
+        let turn_was_active = self.run_state.is_busy() || self.prompt_in_flight > 0;
+        self.apply_run_event(RunEvent::Submitted, view);
         self.prompt_in_flight += 1;
         let _ = self.prompt_orders.send(PromptOrder {
             client: self.client.clone(),
@@ -723,7 +721,6 @@ impl SessionUi {
             stashed_images,
             stash_to_restore,
             turn_was_active,
-            expected_turn_end,
             generation,
             rebind_available,
             input_id: uuid::Uuid::new_v4().to_string(),
@@ -781,7 +778,6 @@ impl SessionUi {
                 stashed_images: order.stashed_images,
                 stash_to_restore: order.stash_to_restore,
                 turn_was_active: order.turn_was_active,
-                expected_turn_end: order.expected_turn_end,
                 generation: order.generation,
                 input_id: order.input_id,
                 submitted_at: order.submitted_at,
@@ -859,15 +855,6 @@ impl SessionUi {
                         });
                     }
                 }
-                // The daemon can stream the complete turn before the ACK reaches this channel:
-                // turn_end already owns the idle state, and re-arming it would strand WaitIdle
-                // until timeout. The per-submit end watermark also keeps a prior turn's end from
-                // settling a queued later prompt.
-                if self.turn_ends_seen < note.expected_turn_end {
-                    self.turn_active = true;
-                    self.start_loader(view);
-                    self.dirty = true;
-                }
                 // TS `onSubmit`'s finally: the current submit's admitted prompt
                 // restores the stash head it captured, if that is still the head.
                 if note.generation == self.input_submission_generation {
@@ -923,10 +910,13 @@ impl SessionUi {
                             note.stash_to_restore.clone(),
                             false,
                             note.generation,
+                            view,
                         );
                         return Ok(());
                     }
                 }
+                // No retry follows: a run the daemon did start still arrives as `agent_start`.
+                self.apply_run_event(RunEvent::SubmitFailed, view);
                 if crate::daemon_client::is_daemon_timeout(&error) {
                     // Sent but unanswered: the turn may already be admitted — restoring the
                     // draft would invite a duplicate submission, so the error row names the

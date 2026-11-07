@@ -540,7 +540,7 @@ impl SessionUi {
                 self.dirty = true;
                 return Ok(());
             }
-            let action = if self.turn_active || view.editor.get_text().trim().is_empty() {
+            let action = if self.run_state.is_busy() || view.editor.get_text().trim().is_empty() {
                 "tree"
             } else {
                 "clear"

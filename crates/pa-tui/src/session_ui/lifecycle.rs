@@ -7,8 +7,8 @@ use super::{
     CompactionAbortNote, Context, DaemonClient, DaemonCommand, DockFold, Duration, GoalView,
     HashSet, InteractiveOptions, LoaderTokenTracker, Map, ModelCatalogUpdate, PromptOrder,
     PromptSubmitNote, ReattachOutcome, RebuildKind, RecoveryKind, ReloadNote, Result, ResyncBash,
-    SessionSelection, SessionUi, ShareNote, TranscriptPageNote, UpdateNote, Value,
-    EXIT_DETACH_TIMEOUT_MS, EXIT_STATS_TIMEOUT_MS, UI_REQUEST_TIMEOUT_MS,
+    RunEvent, RunState, SessionSelection, SessionUi, ShareNote, TranscriptPageNote, UpdateNote,
+    Value, EXIT_DETACH_TIMEOUT_MS, EXIT_STATS_TIMEOUT_MS, UI_REQUEST_TIMEOUT_MS,
 };
 
 impl SessionUi {
@@ -110,9 +110,8 @@ impl SessionUi {
             queue_selection: crate::queued::QueueSelection::default(),
             context: None,
             list_rows: Vec::new(),
-            turn_active: false,
-            turn_ends_seen: 0,
-            last_prompt_turn_end: 0,
+            run_state: RunState::Idle,
+            pending_run_streaming: None,
             steering_mode: "all".to_string(),
             streaming_index: None,
             working_tokens: LoaderTokenTracker::default(),
@@ -394,7 +393,6 @@ impl SessionUi {
         self.user_bash_running = resync_bash.snap_running;
         self.resync_bash = Some(resync_bash);
         let reconstructed = reconstruct(&attach);
-        let mounted_session_changes = previous != attach.active_session_id;
         self.active_session_id = attach.active_session_id;
         // Retire the superseded id's subscription now, addressed by the captured previous id (the
         // detach must target the OLD address, not the newly adopted one).
@@ -494,16 +492,8 @@ impl SessionUi {
                 .iter()
                 .any(|flag| state.get(flag).and_then(Value::as_bool).unwrap_or(false))
         });
-        self.turn_active = streaming;
+        self.pending_run_streaming = Some(streaming);
         self.streaming_index = None;
-        // The turn-end watermark restarts only when the mounted session CHANGES: an end owed by the
-        // detached session's stream must not pin the watermark (without the reset a later prompt's
-        // ack would re-arm `turn_active` against an end count that can never catch up); a
-        // SAME-SESSION rebind keeps the counters, or in-flight acks orphan the same way.
-        if mounted_session_changes {
-            self.turn_ends_seen = 0;
-            self.last_prompt_turn_end = 0;
-        }
         // The stash state follows the stable id of the session now rendered: the initial attach and
         // every in-place switch rebind through here.
         let stash_session_id = self.session_id.clone();
@@ -688,16 +678,8 @@ impl SessionUi {
                 }
             }
         }
-        // An attached turn that survived the re-attach keeps its loader; the re-mounted loader
-        // anchors at the LAST HUMAN PROMPT (the operator's 2026-09-28 rule).
-        if self.turn_active {
-            let anchor = self
-                .loader_anchor_ms
-                .and_then(Self::loader_anchor_instant)
-                .unwrap_or_else(std::time::Instant::now);
-            self.start_loader_at(view, anchor);
-        } else {
-            view.working = None;
+        if let Some(streaming) = self.pending_run_streaming.take() {
+            self.apply_run_event(RunEvent::Attached { streaming }, view);
         }
         view.follow();
         // An open `/heartbeats` picker follows the rebuilt session's catalog — otherwise a rebind
