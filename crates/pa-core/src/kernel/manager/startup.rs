@@ -3,31 +3,17 @@
 
 use super::{
     anyhow, live_kernels, lock, oneshot, orphan_journal, parse_event, Arc, AsyncReadExt, BufReader,
-    ChildHandle, Duration, ExitInfo, Guarded, HashMap, Inner, KernelShutdownOptions,
-    KernelStartOptions, KernelState, Lifecycle, MemoSlot, Mutex, Ordering, Signal, StderrLog,
-    Write, KERNEL_STDERR_LOG_BUDGET_MARKER, MAX_KERNEL_STDERR_CHARS, MAX_KERNEL_STDERR_LOG_BYTES,
+    ChildHandle, Duration, ExitInfo, HashMap, Inner, KernelShutdownOptions, KernelStartOptions,
+    KernelState, Lifecycle, MemoSlot, Mutex, Ordering, Signal, Starting, StderrLog, Write,
+    KERNEL_STDERR_LOG_BUDGET_MARKER, MAX_KERNEL_STDERR_CHARS, MAX_KERNEL_STDERR_LOG_BYTES,
     MAX_PROTOCOL_LINE_BYTES, READY_TIMEOUT_MS, REPL_PROTOCOL_VERSION,
 };
-
-impl Guarded {
-    /// Idle -> Starting under a fresh generation; returns the slot concurrent starts join.
-    pub(super) fn begin_start(&mut self) -> Arc<MemoSlot> {
-        let slot = MemoSlot::new();
-        self.start_generation += 1;
-        self.lifecycle = Lifecycle::Starting {
-            start: Some(slot.clone()),
-            ready_tx: None,
-            protocol_error: None,
-        };
-        slot
-    }
-}
 
 impl Inner {
     /// True when a teardown (or newer start) superseded the start that
     /// captured `generation`.
     pub(crate) fn start_stale(&self, generation: u64) -> bool {
-        lock(&self.guarded).start_generation != generation
+        lock(&self.guarded).lifecycle.generation() != generation
     }
 
     /// Child stderr tail for error messages: at most the last 1024 chars.
@@ -143,10 +129,12 @@ impl Inner {
     ) -> anyhow::Result<()> {
         let slot = {
             let mut g = lock(&self.guarded);
-            if !matches!(g.lifecycle, Lifecycle::Idle) {
+            if !matches!(g.lifecycle.current(), Lifecycle::Idle) {
                 return Ok(());
             }
-            g.begin_start()
+            let slot = MemoSlot::new();
+            g.lifecycle.transition(Lifecycle::starting(slot.clone()));
+            slot
         };
         self.run_start(options, &slot).await
     }
@@ -160,7 +148,7 @@ impl Inner {
         let result = self.spawn_and_handshake(options).await;
         slot.finish(result.as_ref().err().map(|e| anyhow!("{e:#}")));
         if result.is_err() {
-            if let Lifecycle::Starting { start, .. } = &mut lock(&self.guarded).lifecycle {
+            if let Some(Starting { start, .. }) = lock(&self.guarded).lifecycle.starting_mut() {
                 if start
                     .as_ref()
                     .is_some_and(|current| Arc::ptr_eq(current, slot))
@@ -192,7 +180,7 @@ impl Inner {
                 live_kernels::remove(self);
                 let mut g = lock(&self.guarded);
                 if g.lifecycle.phase() != KernelState::Shutdown {
-                    g.lifecycle = Lifecycle::Idle;
+                    g.lifecycle.transition(Lifecycle::Idle);
                 }
                 return Err(error);
             }
@@ -228,7 +216,7 @@ impl Inner {
                 // is stale.
                 crate::kernel::bootstrap::invalidate_runtime_probe_cache();
                 self.append_diagnostic(&format!("spawn error: {error}"));
-                lock(&self.guarded).lifecycle = Lifecycle::Defunct;
+                lock(&self.guarded).lifecycle.transition(Lifecycle::Defunct);
                 live_kernels::remove(self);
                 self.cleanup_resources(Signal::Term);
                 return Err(anyhow!(
@@ -240,11 +228,8 @@ impl Inner {
         let pid = child.id().map_or(-1, |p| p as i32);
         orphan_journal::record_orphan_process_state(pid, true);
         let (ready_tx, ready_rx) = oneshot::channel::<anyhow::Result<i64>>();
-        if let Lifecycle::Starting {
-            ready_tx: waiting, ..
-        } = &mut lock(&self.guarded).lifecycle
-        {
-            *waiting = Some(ready_tx);
+        if let Some(starting) = lock(&self.guarded).lifecycle.starting_mut() {
+            starting.ready_tx = Some(ready_tx);
         }
         self.wire_child(child, generation);
 
@@ -266,7 +251,7 @@ impl Inner {
                     .perform_shutdown(KernelShutdownOptions::default())
                     .await;
                 if performed && can_retry_startup {
-                    lock(&self.guarded).lifecycle = Lifecycle::Idle;
+                    lock(&self.guarded).lifecycle.transition(Lifecycle::Idle);
                 }
                 return Err(error);
             }
@@ -274,8 +259,8 @@ impl Inner {
         if self.start_stale(generation) {
             return Err(anyhow!("Kernel start superseded"));
         }
-        let startup_error = match &lock(&self.guarded).lifecycle {
-            Lifecycle::Starting { protocol_error, .. } => protocol_error.clone(),
+        let startup_error = match lock(&self.guarded).lifecycle.current() {
+            Lifecycle::Starting(starting) => starting.protocol_error.clone(),
             _ => None,
         };
         if let Some(startup_error) = startup_error {
@@ -292,7 +277,7 @@ impl Inner {
         }
         {
             let mut g = lock(&self.guarded);
-            g.lifecycle = Lifecycle::Running;
+            g.lifecycle.transition(Lifecycle::Running);
             // The freshness memo describes the namespace of the kernel that committed it: a freshly
             // started kernel has no committed description yet.
             g.capture_freshness = None;
@@ -302,7 +287,7 @@ impl Inner {
     }
 
     pub(crate) fn current_generation(&self) -> u64 {
-        lock(&self.guarded).start_generation
+        lock(&self.guarded).lifecycle.generation()
     }
 
     /// Wire the spawned child: protocol reader, stderr tail + log, and the
@@ -484,12 +469,11 @@ impl Inner {
             // An in-flight graceful shutdown() owns this exit: it runs cleanup itself.
             let (was_live, graceful_in_flight) = {
                 let mut g = lock(&inner.guarded);
-                if matches!(g.lifecycle, Lifecycle::ShuttingDown { generation } if generation == g.start_generation)
-                {
+                if g.lifecycle.graceful_shutdown_in_flight() {
                     (false, true)
                 } else {
                     let was_live = g.lifecycle.phase() != KernelState::Shutdown;
-                    g.lifecycle = Lifecycle::Defunct;
+                    g.lifecycle.transition(Lifecycle::Defunct);
                     (was_live, false)
                 }
             };

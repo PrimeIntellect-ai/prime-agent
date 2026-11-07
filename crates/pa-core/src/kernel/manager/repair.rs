@@ -16,14 +16,9 @@ impl Inner {
         }
         self.append_diagnostic(diagnostic);
         let error = format!("Kernel protocol error: {diagnostic}");
-        if let Lifecycle::Starting {
-            ready_tx,
-            protocol_error,
-            ..
-        } = &mut lock(&self.guarded).lifecycle
-        {
-            *protocol_error = Some(error.clone());
-            if let Some(tx) = ready_tx.take() {
+        if let Some(starting) = lock(&self.guarded).lifecycle.starting_mut() {
+            starting.protocol_error = Some(error.clone());
+            if let Some(tx) = starting.ready_tx.take() {
                 let _ = tx.send(Err(anyhow!("{error}")));
             }
         }
@@ -283,11 +278,11 @@ impl Inner {
             let mut g = lock(&self.guarded);
             g.pending_rebootstrap = true;
             g.pending_restore = true;
-            g.lifecycle = Lifecycle::Discarding;
+            g.lifecycle.transition(Lifecycle::Discarding);
         }
         live_kernels::remove(self);
         self.cleanup_resources(Signal::Kill);
-        lock(&self.guarded).lifecycle = Lifecycle::Idle;
+        lock(&self.guarded).lifecycle.transition(Lifecycle::Idle);
     }
 
     fn finish_failed_protocol_repair(&self, owner: &Arc<RepairOwner>, error: Option<String>) {
@@ -299,7 +294,7 @@ impl Inner {
         }
         let mut g = lock(&self.guarded);
         if g.lifecycle.phase() == KernelState::Shutdown {
-            g.lifecycle = Lifecycle::Idle;
+            g.lifecycle.transition(Lifecycle::Idle);
         }
     }
 

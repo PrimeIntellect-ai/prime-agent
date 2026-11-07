@@ -39,11 +39,7 @@ impl Inner {
     pub(crate) async fn perform_shutdown(self: &Arc<Self>, opts: KernelShutdownOptions) -> bool {
         if lock(&self.guarded).lifecycle.phase() == KernelState::Shutdown {
             live_kernels::remove(self);
-            // Scoped read: re-locking inside the comparison self-deadlocks.
-            let graceful_in_flight = {
-                let g = lock(&self.guarded);
-                matches!(g.lifecycle, Lifecycle::ShuttingDown { generation } if generation == g.start_generation)
-            };
+            let graceful_in_flight = lock(&self.guarded).lifecycle.graceful_shutdown_in_flight();
             if graceful_in_flight {
                 return false;
             }
@@ -51,7 +47,7 @@ impl Inner {
             return true;
         }
         // Captured before any await: teardowns and newer starts bump the counter.
-        let generation = lock(&self.guarded).start_generation;
+        let generation = lock(&self.guarded).lifecycle.generation();
         if opts.snapshot {
             self.flush_snapshot_for_dispose().await;
             if self.start_stale(generation) {
@@ -62,7 +58,9 @@ impl Inner {
         // live bash() process groups a bare hard-kill would leak.
         let protocol_shutdown_available =
             lock(&self.guarded).lifecycle.phase() == KernelState::Running;
-        lock(&self.guarded).lifecycle = Lifecycle::ShuttingDown { generation };
+        lock(&self.guarded)
+            .lifecycle
+            .transition(Lifecycle::ShuttingDown { generation });
         live_kernels::remove(self);
 
         let mut performed_cleanup = false;
@@ -136,9 +134,9 @@ impl Inner {
         }
         {
             let mut g = lock(&self.guarded);
-            if matches!(g.lifecycle, Lifecycle::ShuttingDown { generation: owner } if owner == generation)
+            if matches!(g.lifecycle.current(), Lifecycle::ShuttingDown { generation: owner } if *owner == generation)
             {
-                g.lifecycle = Lifecycle::Defunct;
+                g.lifecycle.transition(Lifecycle::Defunct);
             }
         }
         if !self.start_stale(generation) {
@@ -153,8 +151,7 @@ impl Inner {
     pub(crate) fn cleanup_resources(&self, kill_signal: Signal) {
         let had_background_work = {
             let mut g = lock(&self.guarded);
-            // Any teardown invalidates in-flight starts.
-            g.start_generation += 1;
+            g.lifecycle.invalidate_starts();
             if let Some(timer) = lock(&self.snapshot_timer).take() {
                 timer.abort();
             }
