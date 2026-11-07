@@ -12,7 +12,7 @@ use crate::engine::{BranchSummaryRequest, SessionEngine};
 use crate::protocol::{response_failure, response_success, DaemonResponse};
 use crate::session_store::{SessionEntry, SessionFile};
 use crate::session_tree;
-use crate::worker::{SessionCore, Worker};
+use crate::worker::{SessionCore, TurnTransition, Worker};
 use pa_agent::abort::AbortController;
 
 /// One completed abandoned-branch summary to persist: the text, its usage block, its
@@ -493,12 +493,10 @@ impl TreeNavigation {
         loop {
             let busy = {
                 let mut core = self.core.lock().unwrap();
-                if core.busy {
-                    core.abort_requested = true;
-                    core.turn_cancelled = true;
+                if core.turn.busy() {
                     // The interrupted turn's aborted row stays off the wire and out of the
                     // store (TS's navigation path never surfaces one).
-                    core.suppress_aborted_row = true;
+                    core.turn.apply(TurnTransition::CancelDetached);
                     true
                 } else {
                     false
@@ -517,7 +515,11 @@ impl TreeNavigation {
             .await;
         }
         // The interrupted turn settled; the suppression owns only that drain window.
-        self.core.lock().unwrap().suppress_aborted_row = false;
+        self.core
+            .lock()
+            .unwrap()
+            .turn
+            .apply(TurnTransition::EndRowSuppression);
     }
 }
 
@@ -609,7 +611,7 @@ impl Worker {
                 // session).
                 let (active, session_ref) = {
                     let core = self.core.lock().unwrap();
-                    (core.busy, Worker::herdr_session_ref(&core))
+                    (core.turn.busy(), Worker::herdr_session_ref(&core))
                 };
                 self.herdr
                     .lock()

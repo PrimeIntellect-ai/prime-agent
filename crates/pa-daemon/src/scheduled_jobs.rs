@@ -53,11 +53,11 @@ impl QueueHooks {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         HeartbeatSessionActivity {
-            is_streaming: core.busy,
+            is_streaming: core.turn.busy(),
             is_compacting: core.compacting,
             // The abort flag the retry lane reads: the closest live signal
             // for an in-flight retry.
-            is_retrying: core.retry_abort_requested,
+            is_retrying: core.turn.retry_abort_requested(),
             is_bash_running: self.user_bash.is_running(),
             has_pending_session_work: !core.pending_next_turn.is_empty(),
             unfinished_action_count: core.steering.len() + core.follow_up.len(),

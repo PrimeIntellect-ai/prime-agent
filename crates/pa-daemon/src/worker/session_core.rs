@@ -1,4 +1,5 @@
 //! The live session's state block.
+use super::turn_state::TurnState;
 use super::QueuedItem;
 
 use std::collections::VecDeque;
@@ -18,18 +19,10 @@ pub(crate) struct SessionCore {
     pub(crate) cwd: String,
     pub(crate) steering: VecDeque<QueuedItem>,
     pub(crate) follow_up: VecDeque<QueuedItem>,
-    pub(crate) busy: bool,
+    /// The runner's turn: phase and the picked delivery's abort facts.
+    pub(crate) turn: TurnState,
     pub(crate) created: bool,
     pub(crate) attached_client_ids: Vec<String>,
-    pub(crate) abort_requested: bool,
-    /// Explicit cancellation of this picked delivery; graceful shutdown is excluded.
-    pub(crate) turn_cancelled: bool,
-    /// A successful terminal Done was observed for this picked delivery.
-    pub(crate) turn_completed: bool,
-    /// A flow that detaches from the interrupted turn's events (a manual
-    /// `compact`, a branch navigation) swallowed the aborted row in TS, so the
-    /// gate's aborted-row exception stays closed while it settles its turn.
-    pub(crate) suppress_aborted_row: bool,
     pub(crate) shutdown_requested: bool,
     /// True while a compaction run is in flight (TS `isCompacting`).
     pub(crate) compacting: bool,
@@ -84,9 +77,6 @@ pub(crate) struct SessionCore {
     /// The scoped model list (TS `_scopedModels`): wire entries
     /// `{ model, thinkingLevel? }` the model cycler cycles within.
     pub(crate) scoped_models: Vec<Value>,
-    /// A retry in flight was aborted (`abort_retry`); the turn's abort
-    /// probe reads it and the next turn start clears it.
-    pub(crate) retry_abort_requested: bool,
     /// Queued-input admission is suspended (`requestAbort` and manual `compact()`
     /// set it): the runner drains nothing and a plain prompt is rejected. Cleared
     /// by the resume sites: `steer`/`follow_up`, `streamingBehavior`, `resume_queue`,
@@ -95,17 +85,16 @@ pub(crate) struct SessionCore {
     /// Restored next-turn rows (TS `_pendingNextTurnMessages`,
     /// `restore_next_turn`): delivered as prefix rows with the next turn.
     pub(crate) pending_next_turn: Vec<Value>,
-    /// The queue projection's active action: the runner sets the phase transitions
-    /// (`preparing` at pickup, `committing` at the first row, `running` at the
-    /// first assistant frame) and clears it once the turn settles.
-    pub(crate) active_action: Option<crate::types::SessionActionActive>,
 }
 
 impl SessionCore {
     /// Whether a turn, compaction, or queued action is in flight (TS
     /// `hasOngoingSessionWork`); the supervisor-lost exit waits for it to settle.
     pub(crate) fn has_ongoing_work(&self) -> bool {
-        self.busy || self.compacting || !self.steering.is_empty() || !self.follow_up.is_empty()
+        self.turn.busy()
+            || self.compacting
+            || !self.steering.is_empty()
+            || !self.follow_up.is_empty()
     }
 
     /// A created session core for command modules' unit tests (the private
@@ -123,13 +112,9 @@ impl SessionCore {
             cwd,
             steering: VecDeque::new(),
             follow_up: VecDeque::new(),
-            busy: false,
+            turn: TurnState::default(),
             created: true,
             attached_client_ids: Vec::new(),
-            abort_requested: false,
-            turn_cancelled: false,
-            turn_completed: false,
-            suppress_aborted_row: false,
             shutdown_requested: false,
             last_activity_ms: 0,
             compacting: false,
@@ -150,10 +135,8 @@ impl SessionCore {
             follow_up_mode: "one-at-a-time".to_string(),
             forced_all_steering: false,
             scoped_models: Vec::new(),
-            retry_abort_requested: false,
             queued_input_suspended: false,
             pending_next_turn: Vec::new(),
-            active_action: None,
         }
     }
 }

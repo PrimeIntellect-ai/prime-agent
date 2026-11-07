@@ -934,7 +934,11 @@ impl Worker {
             if let Some(config) = crate::herdr::HerdrConfig::from_env(&client_env) {
                 let (active, session_ref, rlm_depth) = {
                     let core = self.core.lock().unwrap();
-                    (core.busy, Worker::herdr_session_ref(&core), core.rlm_depth)
+                    (
+                        core.turn.busy(),
+                        Worker::herdr_session_ref(&core),
+                        core.rlm_depth,
+                    )
                 };
                 if rlm_depth == 0 {
                     // The adopt is check-and-install under ONE lock

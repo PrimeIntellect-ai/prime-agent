@@ -10,7 +10,7 @@ use pa_types::ai::{ServiceTier, Transport};
 
 use crate::engine::EngineModelSelection;
 use crate::protocol::{response_failure, response_success, DaemonResponse};
-use crate::worker::Worker;
+use crate::worker::{TurnTransition, Worker};
 
 const QUEUE_MODES: &[&str] = &["all", "one-at-a-time"];
 
@@ -569,7 +569,11 @@ impl Worker {
         if let Err(response) = self.require_created("abort_retry") {
             return response;
         }
-        self.core.lock().unwrap().retry_abort_requested = true;
+        self.core
+            .lock()
+            .unwrap()
+            .turn
+            .apply(TurnTransition::AbortRetry);
         response_success(None, "abort_retry", None)
     }
 }

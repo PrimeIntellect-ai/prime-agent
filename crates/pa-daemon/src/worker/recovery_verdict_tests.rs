@@ -143,7 +143,12 @@ async fn a_bash_completion_notice_admits_the_steering_lane_with_busy_evidence() 
 #[tokio::test]
 async fn a_bash_completion_notice_on_a_busy_session_queues_a_visible_steer_row() {
     let worker = created_worker_with_journal().await;
-    worker.core.lock().unwrap().busy = true;
+    worker
+        .core
+        .lock()
+        .unwrap()
+        .turn
+        .apply(crate::worker::TurnTransition::Pickup { action_label: None });
     let notify = Arc::new(Notify::new());
     admit_kernel_notice(
         &worker.recovery,
@@ -268,7 +273,12 @@ async fn mid_turn_withdrawal_keeps_the_in_flight_turn_busy() {
     let worker = created_worker_with_journal().await;
     // Mid-turn: the runner is streaming, and the withdrawal leaves
     // nothing queued behind it.
-    worker.core.lock().unwrap().busy = true;
+    worker
+        .core
+        .lock()
+        .unwrap()
+        .turn
+        .apply(crate::worker::TurnTransition::Pickup { action_label: None });
     worker.dispatch("clear_queue", &json!({})).await;
     let latest = latest_record(&worker);
     assert_eq!(latest.operation, "queue_cleared");
@@ -288,7 +298,12 @@ async fn mid_turn_withdrawal_keeps_the_in_flight_turn_busy() {
     );
     // The turn ends: the runner's idle flip precedes its settle, so the
     // same empty lanes now record busy=false.
-    worker.core.lock().unwrap().busy = false;
+    worker
+        .core
+        .lock()
+        .unwrap()
+        .turn
+        .apply(crate::worker::TurnTransition::Settle);
     worker.dispatch("clear_queue", &json!({})).await;
     let latest = latest_record(&worker);
     assert_eq!(latest.operation, "queue_cleared");

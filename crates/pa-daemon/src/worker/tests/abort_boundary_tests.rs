@@ -135,7 +135,7 @@ async fn abort_and_send_queued_delivers_the_parked_queue_at_the_boundary() {
     assert!(prompt.success, "prompt failed: {prompt:?}");
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
     loop {
-        if worker.core.lock().unwrap().busy {
+        if worker.core.lock().unwrap().turn.busy() {
             break;
         }
         assert!(
@@ -319,7 +319,7 @@ async fn abort_and_send_queued_with_only_follow_ups_starts_the_oldest() {
     assert!(prompt.success, "prompt failed: {prompt:?}");
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
     loop {
-        if worker.core.lock().unwrap().busy {
+        if worker.core.lock().unwrap().turn.busy() {
             break;
         }
         assert!(
@@ -350,7 +350,7 @@ async fn abort_and_send_queued_with_only_follow_ups_starts_the_oldest() {
     loop {
         let (busy, queued) = {
             let core = worker.core.lock().unwrap();
-            (core.busy, core.follow_up.len())
+            (core.turn.busy(), core.follow_up.len())
         };
         if busy && queued == 1 {
             break;
@@ -651,7 +651,7 @@ async fn cancel_owned_admission_aborts_the_running_prompt() {
         .await;
     assert_eq!(stale.data, Some(json!({ "status": "owned" })));
     assert!(
-        !worker.core.lock().unwrap().abort_requested,
+        !worker.core.lock().unwrap().turn.abort_requested(),
         "stale admission must not abort the unrelated running turn"
     );
     let cancel = json!({
@@ -969,7 +969,7 @@ async fn abort_and_send_queued_under_a_held_pause_delivers_on_the_release() {
     loop {
         let (busy, queued) = {
             let core = worker.core.lock().unwrap();
-            (core.busy, core.steering.len())
+            (core.turn.busy(), core.steering.len())
         };
         if !busy && queued == 1 {
             break;

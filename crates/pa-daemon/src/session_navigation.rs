@@ -360,7 +360,7 @@ impl Worker {
                 // session reference immediately — same pane, new session).
                 let (active, session_ref) = {
                     let core = self.core.lock().unwrap();
-                    (core.busy, Worker::herdr_session_ref(&core))
+                    (core.turn.busy(), Worker::herdr_session_ref(&core))
                 };
                 self.herdr
                     .lock()

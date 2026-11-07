@@ -35,9 +35,9 @@ fn dump_hang_state(worker: &Worker) -> String {
          queued_input_suspended={} compacting={} shutdown_requested={} \
          forced_all_steering={} steering_len={} follow_up_len={} \
          running_tool_calls={}",
-        core.busy,
-        core.abort_requested,
-        core.retry_abort_requested,
+        core.turn.busy(),
+        core.turn.abort_requested(),
+        core.turn.retry_abort_requested(),
         core.queued_input_suspended,
         core.compacting,
         core.shutdown_requested,
@@ -153,7 +153,7 @@ async fn abort_and_send_idle_race_rate_harness() {
         assert!(prompt.success, "rep {rep}: prompt failed: {prompt:?}");
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
         loop {
-            if worker.core.lock().unwrap().busy {
+            if worker.core.lock().unwrap().turn.busy() {
                 break;
             }
             assert!(

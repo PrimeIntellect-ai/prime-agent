@@ -5,9 +5,10 @@ use super::{
     emit_refinement_event_for_session, emit_refinement_row, gather_delivery_batch, json, oneshot,
     session_snapshot, AssistantSnapshot, DaemonOutbound, EngineEvent, EventPump, Lane, Map, Notify,
     OutboundFrame, PromptRequest, QueueCheckpoint, QueuedItem, Result, SessionActionSnapshot,
-    SessionCore, SessionEngine, TurnSettle, Value, WorkerRecoveryJournal,
+    SessionCore, SessionEngine, TurnSettle, TurnTransition, Value, WorkerRecoveryJournal,
     ABORTED_TURN_SETTLE_ERROR,
 };
+use crate::types::TurnPhase;
 
 use std::sync::{Arc, Mutex};
 
@@ -57,32 +58,12 @@ impl TurnRunner {
                 // A cleared suspension alone must not admit: a manual
                 // compaction is a busy state the resume sites do NOT clear.
                 if self.input_pauses.paused() || core.queued_input_suspended || core.compacting {
-                    core.busy = false;
                     None
                 } else if core.steering.front().is_some() {
-                    let items = gather_delivery_batch(&mut core, Lane::Steering);
-                    core.running_admission_ids = items
-                        .iter()
-                        .filter_map(|item| item.admission_id.clone())
-                        .collect();
-                    core.busy = true;
-                    core.abort_requested = false;
-                    core.retry_abort_requested = false;
-                    core.running_tool_calls.clear();
-                    Some((Lane::Steering, items))
+                    Some(Self::pick_up(&mut core, Lane::Steering))
                 } else if core.follow_up.front().is_some() {
-                    let items = gather_delivery_batch(&mut core, Lane::FollowUp);
-                    core.running_admission_ids = items
-                        .iter()
-                        .filter_map(|item| item.admission_id.clone())
-                        .collect();
-                    core.busy = true;
-                    core.abort_requested = false;
-                    core.retry_abort_requested = false;
-                    core.running_tool_calls.clear();
-                    Some((Lane::FollowUp, items))
+                    Some(Self::pick_up(&mut core, Lane::FollowUp))
                 } else {
-                    core.busy = false;
                     None
                 }
             };
@@ -91,19 +72,8 @@ impl TurnRunner {
                 // settle's `turn_end` verdict parks the session later. The item leaves
                 // the queue projection BEFORE its turn starts (a stale row would
                 // reject a browse edit).
-                let visible_index = items.iter().position(|item| item.queue_visible);
-                let anchor = visible_index.map(|index| &items[index]);
                 {
-                    let mut core = self.core.lock().unwrap();
-                    if let Some(anchor) = anchor {
-                        core.active_action = Some(crate::types::SessionActionActive {
-                            kind: "turn".to_string(),
-                            phase: "preparing".to_string(),
-                            label: Some(compact_action_label(
-                                anchor.preview.as_deref().unwrap_or(&anchor.message),
-                            )),
-                        });
-                    }
+                    let core = self.core.lock().unwrap();
                     let snapshot = Self::snapshot_from(&core);
                     drop(core);
                     let _ = self.emit_action_update(&snapshot);
@@ -142,6 +112,22 @@ impl TurnRunner {
                 }
             }
         }
+    }
+
+    /// Take the lane's next delivery and start its turn: the batch leaves the
+    /// lane, and its first queue-visible item labels the active action.
+    fn pick_up(core: &mut SessionCore, lane: Lane) -> (Lane, Vec<QueuedItem>) {
+        let items = gather_delivery_batch(core, lane);
+        core.running_admission_ids = items
+            .iter()
+            .filter_map(|item| item.admission_id.clone())
+            .collect();
+        let action_label = items.iter().find(|item| item.queue_visible).map(|anchor| {
+            compact_action_label(anchor.preview.as_deref().unwrap_or(&anchor.message))
+        });
+        core.turn.apply(TurnTransition::Pickup { action_label });
+        core.running_tool_calls.clear();
+        (lane, items)
     }
 
     /// Release a parked parent-owned child's kernel; the engine owns the
@@ -510,11 +496,11 @@ impl TurnRunner {
                 }
                 // Durable model cleanup is independent of visual abort-row
                 // suppression and emits no client-facing frame.
-                if core.abort_requested && !matches!(&event, EngineEvent::ModelChange(_)) {
+                if core.turn.abort_requested() && !matches!(&event, EngineEvent::ModelChange(_)) {
                     // The sighting arms the fallback's silence only when
                     // load-bearing: a sighting on a run that completed on its own
                     // cancels nothing.
-                    if core.suppress_aborted_row || !(abort_settle || aborted_row) {
+                    if core.turn.suppresses_aborted_row() || !(abort_settle || aborted_row) {
                         abort_gate_armed_seen.store(true, std::sync::atomic::Ordering::SeqCst);
                         return false;
                     }
@@ -684,9 +670,8 @@ impl TurnRunner {
                     accepted_rows += 1;
                     accepted_prefix_seen.store(accepted_rows, std::sync::atomic::Ordering::SeqCst);
                     if accepted_rows == 1 {
-                        if let Some(active) = core.active_action.as_mut() {
-                            active.phase = "committing".to_string();
-                        }
+                        core.turn
+                            .apply(TurnTransition::Advance(TurnPhase::Committing));
                         action_frame = Some(session_snapshot(&core));
                     }
                 } else if !active_running
@@ -696,15 +681,13 @@ impl TurnRunner {
                     )
                 {
                     active_running = true;
-                    if let Some(active) = core.active_action.as_mut() {
-                        active.phase = "running".to_string();
-                    }
+                    core.turn.apply(TurnTransition::Advance(TurnPhase::Running));
                     action_frame = Some(session_snapshot(&core));
                 }
                 let done_result = match &event {
                     EngineEvent::Done(result) => {
                         if result.is_ok() {
-                            core.turn_completed = true;
+                            core.turn.apply(TurnTransition::Completed);
                         }
                         pa_core::session_engine::compaction_trace::trace(
                             "turn.done_emitted",
@@ -1029,8 +1012,8 @@ impl TurnRunner {
                 // `abort_retry` stops an in-flight retry without
                 // aborting the turn itself.
                 move || {
-                    core.lock().unwrap().abort_requested
-                        || core.lock().unwrap().retry_abort_requested
+                    let core = core.lock().unwrap();
+                    core.turn.abort_requested() || core.turn.retry_abort_requested()
                 }
             };
             let parked = {
@@ -1076,7 +1059,7 @@ impl TurnRunner {
             // A shutdown never loses admitted input: the batch items whose
             // transcript row never persisted exist nowhere else, so they
             // return to the front of their lane, in order.
-            if core.shutdown_requested && !core.turn_cancelled {
+            if core.shutdown_requested && !core.turn.cancelled() {
                 let lane_items = match lane {
                     Lane::Steering => &mut core.steering,
                     Lane::FollowUp => &mut core.follow_up,
@@ -1095,8 +1078,7 @@ impl TurnRunner {
             if !more_queued {
                 settle_engine.clear_progress_note();
             }
-            core.busy = false;
-            core.active_action = None;
+            core.turn.apply(TurnTransition::Settle);
             core.running_admission_ids.clear();
             more_queued
         };
@@ -1135,7 +1117,7 @@ impl TurnRunner {
             // pane). A failed run (Done(Err) with no `agent_end`) parks
             // its error in the settle cell and blocks like the TS
             // error-hold arm instead of reporting a false idle.
-            // `core.busy` flipped to false above; queued lanes still
+            // The turn settled above; queued lanes still
             // holding items keep the settle debounced so the next pickup
             // cancels the idle flip.
             let error_hold = herdr_settle_error.lock().unwrap().take();

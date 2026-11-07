@@ -2,8 +2,8 @@
 //! resume, compaction triggers, and the wait-for-settled arms.
 use super::{
     json, queue_lanes, response_failure, response_success, session_snapshot, AgentSessionEngine,
-    DaemonResponse, QueueCheckpoint, QueuePriority, QueuedItem, SessionFile, TurnPolicy, Value,
-    Worker, SIDE_QUESTION_SETTLE_TIMEOUT,
+    DaemonResponse, QueueCheckpoint, QueuePriority, QueuedItem, SessionFile, TurnAbort, TurnPolicy,
+    TurnTransition, Value, Worker, SIDE_QUESTION_SETTLE_TIMEOUT,
 };
 
 impl Worker {
@@ -34,7 +34,7 @@ impl Worker {
                     "steering": core.steering.iter().map(|item| item.message.clone()).collect::<Vec<_>>(),
                     "followUps": core.follow_up.iter().map(|item| item.message.clone()).collect::<Vec<_>>(),
                 },
-                "busy": core.busy,
+                "busy": core.turn.busy(),
                 "compacting": core.compacting,
             });
             (data, queue_lanes(&core), core.queued_input_suspended)
@@ -77,14 +77,14 @@ impl Worker {
             .await;
         let interrupted_turn = {
             let mut core = self.core.lock().unwrap();
-            // Every explicit cancellation also sets `abort_requested`.
-            let interrupted_turn = core.busy && !core.abort_requested && !core.turn_completed;
+            let interrupted_turn =
+                core.turn.busy() && !core.turn.abort_requested() && !core.turn.completed();
             // The shutdown gate closes FIRST: a racing execute_bash must see the
             // stop before the abort runs — a claim that slipped in after the
             // abort would register a controller nothing later cancels, and the
             // exit leaves its child running.
             core.shutdown_requested = true;
-            core.abort_requested = true;
+            core.turn.apply(TurnTransition::Abort(TurnAbort::Shutdown));
             interrupted_turn
         };
         // The running user bash goes with the stop: the passivation stop must
@@ -106,7 +106,7 @@ impl Worker {
         // continuation prompt so the next boot resumes the turn.
         let continue_turn = daemon_wide && interrupted_turn && {
             let mut core = self.core.lock().unwrap();
-            let still_interrupted = !core.turn_cancelled && !core.turn_completed;
+            let still_interrupted = !core.turn.cancelled() && !core.turn.completed();
             if still_interrupted {
                 core.steering.push_front(QueuedItem {
                     priority: QueuePriority::Human,
@@ -172,7 +172,7 @@ impl Worker {
             let notified = self.idle_notify.notified();
             {
                 let core = self.core.lock().unwrap();
-                if !core.busy && !core.compacting {
+                if !core.turn.busy() && !core.compacting {
                     return;
                 }
             }
@@ -245,10 +245,9 @@ impl Worker {
         loop {
             let busy = {
                 let mut core = self.core.lock().unwrap();
-                let busy = core.busy || core.compacting;
+                let busy = core.turn.busy() || core.compacting;
                 if busy {
-                    core.abort_requested = true;
-                    core.turn_cancelled = true;
+                    core.turn.apply(TurnTransition::Abort(TurnAbort::Cancelled));
                 }
                 busy
             };
@@ -377,7 +376,7 @@ impl Worker {
             // picked their inputs out of these lanes; rewriting that snapshot
             // could erase their original recovery evidence. An idle compaction
             // picks nothing, so it checkpoints like any idle resume.
-            let checkpoint_idle_resume = core.queued_input_suspended && !core.busy;
+            let checkpoint_idle_resume = core.queued_input_suspended && !core.turn.busy();
             if let (true, Some(journal)) = (checkpoint_idle_resume, recovery.as_mut()) {
                 let lanes = crate::worker::queue_lanes(&core);
                 let store = core.store.as_ref();
@@ -642,7 +641,7 @@ impl Worker {
             idle.as_mut().enable();
             {
                 let core = self.core.lock().unwrap();
-                if !core.busy
+                if !core.turn.busy()
                     && (core.steering.is_empty() && core.follow_up.is_empty()
                         || self.input_pauses.paused())
                 {

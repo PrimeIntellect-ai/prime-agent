@@ -229,7 +229,10 @@ async fn compacting_window_parks_a_cleared_suspension_until_it_ends() {
     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     {
         let core = parked.lock().unwrap();
-        assert!(!core.busy, "the racing steer admitted mid-compaction");
+        assert!(
+            !core.turn.busy(),
+            "the racing steer admitted mid-compaction"
+        );
         assert_eq!(
             core.steering.len(),
             1,

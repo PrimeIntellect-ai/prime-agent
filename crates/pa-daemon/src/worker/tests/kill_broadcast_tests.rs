@@ -302,7 +302,7 @@ async fn kill_cancels_a_mid_provider_wait_turn_and_surfaces_the_aborted_row() {
     // parks on it too): no assistant message_start arrives before the kill.
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
     loop {
-        if worker.core.lock().unwrap().busy {
+        if worker.core.lock().unwrap().turn.busy() {
             break;
         }
         assert!(

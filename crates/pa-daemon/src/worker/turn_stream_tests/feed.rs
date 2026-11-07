@@ -46,7 +46,10 @@ async fn the_waiting_prompt_resolves_only_after_the_turn_settles() {
     // happened when the waiter resolved.
     {
         let core = core.lock().unwrap();
-        assert!(!core.busy, "the waiter resolved before the idle flip");
+        assert!(
+            !core.turn.busy(),
+            "the waiter resolved before the idle flip"
+        );
     }
     turn.await.expect("the turn task panicked");
 }
@@ -118,7 +121,12 @@ async fn roster_feed_publishes_live_tool_activity() {
     );
     let runner = live_feed_runner(Arc::clone(&engine), socket);
     // The pickup's busy flip (the run loop's arm before `run_turn`).
-    runner.core.lock().unwrap().busy = true;
+    runner
+        .core
+        .lock()
+        .unwrap()
+        .turn
+        .apply(crate::worker::TurnTransition::Pickup { action_label: None });
     runner
         .run_turn(
             engine,

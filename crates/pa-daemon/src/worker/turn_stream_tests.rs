@@ -25,13 +25,9 @@ fn burst_runner(engine: Arc<dyn SessionEngine>) -> TurnRunner {
         cwd: String::new(),
         steering: VecDeque::new(),
         follow_up: VecDeque::new(),
-        busy: false,
+        turn: crate::worker::turn_state::TurnState::default(),
         created: false,
         attached_client_ids: Vec::new(),
-        abort_requested: false,
-        turn_cancelled: false,
-        turn_completed: false,
-        suppress_aborted_row: false,
         shutdown_requested: false,
         compacting: false,
         auto_compaction_enabled: true,
@@ -49,10 +45,8 @@ fn burst_runner(engine: Arc<dyn SessionEngine>) -> TurnRunner {
         follow_up_mode: "one-at-a-time".to_string(),
         forced_all_steering: false,
         scoped_models: Vec::new(),
-        retry_abort_requested: false,
         queued_input_suspended: false,
         pending_next_turn: Vec::new(),
-        active_action: None,
         running_tool_calls: std::collections::HashSet::new(),
         running_admission_ids: std::collections::HashSet::new(),
         tool_use_count: 0,
@@ -198,6 +192,16 @@ impl SessionEngine for GateProbeEngine {
     }
 }
 
+/// Preset the abort a turn's gate reads: a detaching flow's cancel suppresses
+/// the aborted row; a plain abort (the shutdown shape) does not.
+fn preset_abort(core: &mut SessionCore, suppress_aborted_row: bool) {
+    core.turn.apply(if suppress_aborted_row {
+        crate::worker::TurnTransition::CancelDetached
+    } else {
+        crate::worker::TurnTransition::Abort(crate::worker::TurnAbort::Shutdown)
+    });
+}
+
 /// One gated sighting battery: the scripted frames through the worker's turn with
 /// the abort flag (and the suppressed-row class) preset.
 async fn gate_sighting_events(
@@ -212,8 +216,9 @@ async fn gate_sighting_events(
     let runner = burst_runner(Arc::clone(&engine));
     {
         let mut core = runner.core.lock().unwrap();
-        core.abort_requested = abort_requested;
-        core.suppress_aborted_row = suppress_aborted_row;
+        if abort_requested {
+            preset_abort(&mut core, suppress_aborted_row);
+        }
     }
     let mut subscription = runner.events.subscribe();
     runner
@@ -291,8 +296,7 @@ async fn a_suppressed_abort_still_ends_the_engine_turn() {
         let runner = burst_runner(Arc::clone(&dynamic));
         {
             let mut core = runner.core.lock().unwrap();
-            core.abort_requested = true;
-            core.suppress_aborted_row = true;
+            preset_abort(&mut core, true);
         }
         runner
             .run_turn(
@@ -462,8 +466,9 @@ async fn model_transitions_reach_the_worker_owned_session_file() {
         {
             let mut core = runner.core.lock().unwrap();
             core.store = Some(store);
-            core.abort_requested = abort_suppressed.is_some();
-            core.suppress_aborted_row = abort_suppressed.unwrap_or(false);
+            if let Some(suppress_aborted_row) = abort_suppressed {
+                preset_abort(&mut core, suppress_aborted_row);
+            }
         }
         runner
             .run_turn(

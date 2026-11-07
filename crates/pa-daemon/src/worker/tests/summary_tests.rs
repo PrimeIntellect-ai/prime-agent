@@ -80,7 +80,8 @@ fn summary_lifecycle_is_message_based() {
     // The busy-flip roster delta fires before the store flushes the admitted
     // prompt; a busy turn is live at that wire moment.
     let mut busy = SessionCore::test_core(None, "/tmp".to_string());
-    busy.busy = true;
+    busy.turn
+        .apply(crate::worker::TurnTransition::Pickup { action_label: None });
     busy.running_tool_calls.insert("call-1".to_string());
     // `isRunningTools` is the streaming gate over the in-flight tool
     // set.
@@ -88,7 +89,7 @@ fn summary_lifecycle_is_message_based() {
     busy.running_tool_calls.clear();
     assert!(!session_summary(&busy, inputs()).is_running_tools);
     busy.running_tool_calls.insert("call-1".to_string());
-    busy.busy = false;
+    busy.turn.apply(crate::worker::TurnTransition::Settle);
     assert!(!session_summary(&busy, inputs()).is_running_tools);
     // The user bash state rides the summary as its own flag.
     assert_eq!(
@@ -102,7 +103,8 @@ fn summary_lifecycle_is_message_based() {
         .is_bash_running,
         Some(true)
     );
-    busy.busy = true;
+    busy.turn
+        .apply(crate::worker::TurnTransition::Pickup { action_label: None });
     assert_eq!(session_summary(&busy, inputs()).lifecycle, "live");
     let dir = std::env::temp_dir().join(format!("pa-worker-lc-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(&dir).unwrap();

@@ -667,7 +667,12 @@ mod tests {
             ("steering", "followUp", "steer", "follow_up", "follow_up"),
         ] {
             let worker = created_worker().await;
-            worker.core.lock().unwrap().busy = true;
+            worker
+                .core
+                .lock()
+                .unwrap()
+                .turn
+                .apply(crate::worker::TurnTransition::Pickup { action_label: None });
             for (command, payload) in [
                 (target_command, json!({ "message": "earlier" })),
                 (

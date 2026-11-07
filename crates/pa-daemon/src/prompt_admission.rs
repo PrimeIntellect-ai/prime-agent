@@ -14,7 +14,7 @@ use crate::protocol::{response_failure, response_line, response_success, DaemonR
 use crate::supervisor::{
     client_command_payload, client_route_timeout, Supervisor, ROUTE_TIMEOUT_MS,
 };
-use crate::worker::Worker;
+use crate::worker::{TurnAbort, TurnTransition, Worker};
 
 /// The admission status vocabulary (TS `SupervisorPromptAdmission.status`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -587,8 +587,7 @@ impl Worker {
                 && status == Some(AdmissionStatus::Owned)
                 && core.running_admission_ids.contains(admission_id);
             if abort_running {
-                core.abort_requested = true;
-                core.turn_cancelled = true;
+                core.turn.apply(TurnTransition::Abort(TurnAbort::Cancelled));
             }
             (status, dropped_queued, abort_running)
         };

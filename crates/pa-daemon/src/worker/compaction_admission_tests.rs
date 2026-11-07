@@ -145,7 +145,10 @@ async fn steer_mid_compaction_defers_and_delivers_after_the_window() {
                 core.compacting,
                 "the observation outlived the compaction window"
             );
-            assert!(!core.busy, "the racing steer admitted mid-compaction");
+            assert!(
+                !core.turn.busy(),
+                "the racing steer admitted mid-compaction"
+            );
             assert_eq!(
                 core.steering.len(),
                 1,

@@ -39,7 +39,10 @@ async fn queue_withdrawals_clear_only_the_last_idle_notes() {
             {
                 let mut core = worker.core.lock().unwrap();
                 core.created = true;
-                core.busy = state == "busy";
+                if state == "busy" {
+                    core.turn
+                        .apply(crate::worker::TurnTransition::Pickup { action_label: None });
+                }
                 core.queued_input_suspended = true;
                 if command != "bash_consumed" {
                     let mut row = queued_prompt("withdraw me", TurnPolicy::Queued);

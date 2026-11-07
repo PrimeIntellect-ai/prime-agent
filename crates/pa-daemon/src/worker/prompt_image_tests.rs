@@ -55,7 +55,12 @@ async fn prompt_with_images_queues_the_images_with_the_message() {
         .await;
     assert!(created.success, "create failed: {created:?}");
     // Busy session: the prompt lands on the follow-up lane.
-    worker.core.lock().unwrap().busy = true;
+    worker
+        .core
+        .lock()
+        .unwrap()
+        .turn
+        .apply(crate::worker::TurnTransition::Pickup { action_label: None });
     let response = worker
         .dispatch(
             "prompt",

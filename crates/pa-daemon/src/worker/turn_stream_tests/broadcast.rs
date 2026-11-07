@@ -169,7 +169,12 @@ async fn a_delivered_agent_message_turn_emits_the_custom_row() {
     assert!(created.success, "create failed: {created:?}");
     // A busy session parks the delivery on the steering lane, so the queued
     // item is exactly what the served runner would pop.
-    worker.core.lock().unwrap().busy = true;
+    worker
+        .core
+        .lock()
+        .unwrap()
+        .turn
+        .apply(crate::worker::TurnTransition::Pickup { action_label: None });
     let delivered = worker
         .dispatch(
             "worker_deliver_message",

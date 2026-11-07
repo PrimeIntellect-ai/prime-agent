@@ -88,7 +88,7 @@ impl Worker {
         let store = core.store.as_ref();
 
         AgentConnectionState {
-            is_streaming: core.busy,
+            is_streaming: core.turn.busy(),
             is_compacting: core.compacting,
             active_session_id: Some(core.active_session_id.clone()),
             cwd: core.cwd.clone(),
@@ -525,7 +525,7 @@ impl ConnectionStateInputs {
 
 pub(crate) fn session_summary(core: &SessionCore, inputs: SummaryInputs) -> SessionSummary {
     let store = core.store.as_ref();
-    let streaming = core.busy;
+    let streaming = core.turn.busy();
     let compacting = core.compacting;
     let queued = core.steering.len() + core.follow_up.len();
     // `modified` is the session file mtime; `lastActivityAt` prefers the
@@ -666,7 +666,7 @@ pub(crate) fn session_snapshot(core: &SessionCore) -> SessionActionSnapshot {
             steering: injected_prompts(&core.steering),
             follow_up: injected_prompts(&core.follow_up),
         },
-        active: core.active_action.clone(),
+        active: core.turn.active_action(),
     }
 }
 

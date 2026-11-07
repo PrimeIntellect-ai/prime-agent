@@ -238,7 +238,7 @@ pub(crate) fn clear_withdrawn_progress_note(
     core: &SessionCore,
     engine: &dyn crate::engine::SessionEngine,
 ) {
-    if !core.busy && core.steering.is_empty() && core.follow_up.is_empty() {
+    if !core.turn.busy() && core.steering.is_empty() && core.follow_up.is_empty() {
         engine.clear_progress_note();
     }
 }
@@ -268,7 +268,7 @@ pub(crate) fn checkpoint_queue_recovery(
                 .as_ref()
                 .map(|s| s.path.to_string_lossy().to_string()),
             queue_lanes(&core),
-            core.busy,
+            core.turn.busy(),
             core.queued_input_suspended,
         )
     };
@@ -329,10 +329,6 @@ pub(crate) fn gather_delivery_batch(core: &mut SessionCore, lane: Lane) -> Vec<Q
     let Some(first) = items.front() else {
         return Vec::new();
     };
-    // Only a real pickup starts a new delivery. Empty or parked lanes retain
-    // the prior delivery's cancellation and successful completion facts.
-    core.turn_cancelled = false;
-    core.turn_completed = false;
     // The armed set forces "all" only when the front item is armed; an un-armed
     // front disarms the batch once no armed item remains queued.
     let forced = lane == Lane::Steering && core.forced_all_steering && first.forced_batch;
@@ -548,7 +544,7 @@ pub(crate) fn admit_kernel_notice(
     if session_is_closed() {
         return;
     }
-    let (policy, queue_visible) = if core_guard.busy {
+    let (policy, queue_visible) = if core_guard.turn.busy() {
         (TurnPolicy::Queued, true)
     } else {
         (TurnPolicy::Injected, false)

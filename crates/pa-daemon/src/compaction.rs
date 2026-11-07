@@ -9,7 +9,7 @@ use serde_json::{json, Map, Value};
 
 use crate::engine::{CompactionOutcome, CompactionRequest, SessionEngine};
 use crate::protocol::DaemonOutbound;
-use crate::worker::{EventPump, OutboundFrame, SessionCore};
+use crate::worker::{EventPump, OutboundFrame, SessionCore, TurnTransition};
 use pa_agent::abort::AbortController;
 use pa_core::session_engine::messages::{CompactionOutcomeKind, CompactionOutcomeReason};
 
@@ -153,12 +153,10 @@ impl CompactionManager {
         loop {
             let busy = {
                 let mut core = self.core.lock().unwrap();
-                if core.busy {
-                    core.abort_requested = true;
-                    core.turn_cancelled = true;
+                if core.turn.busy() {
                     // TS `compact()` detaches from agent events before the abort, so the
                     // interrupted turn's aborted row never reaches the wire or the session file.
-                    core.suppress_aborted_row = true;
+                    core.turn.apply(TurnTransition::CancelDetached);
                     true
                 } else {
                     false
@@ -178,7 +176,11 @@ impl CompactionManager {
         }
         // The interrupted turn settled (its row swallowed exactly like the
         // TS compact path); the suppression owns only that drain window.
-        self.core.lock().unwrap().suppress_aborted_row = false;
+        self.core
+            .lock()
+            .unwrap()
+            .turn
+            .apply(TurnTransition::EndRowSuppression);
     }
 
     /// Append the durable compaction entry (TS `appendCompaction`). A real

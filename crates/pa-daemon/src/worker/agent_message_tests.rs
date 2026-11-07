@@ -200,7 +200,12 @@ async fn deliver_message_follow_up_lane_and_subagent_sender() {
 #[tokio::test]
 async fn deliver_message_while_busy_queues() {
     let worker = created_worker().await;
-    worker.core.lock().unwrap().busy = true;
+    worker
+        .core
+        .lock()
+        .unwrap()
+        .turn
+        .apply(crate::worker::TurnTransition::Pickup { action_label: None });
     let response = worker
         .dispatch(
             "worker_deliver_message",
@@ -230,7 +235,12 @@ async fn user_input_jumps_parked_agent_message_deliveries() {
         ("follow_up", "follow_up", "followUp"),
     ] {
         let worker = created_worker().await;
-        worker.core.lock().unwrap().busy = true;
+        worker
+            .core
+            .lock()
+            .unwrap()
+            .turn
+            .apply(crate::worker::TurnTransition::Pickup { action_label: None });
         for (text, user) in [
             ("first agent", false),
             ("second agent", false),
@@ -476,7 +486,12 @@ async fn assert_clear_queue_bounces(restore_queue: bool) {
         .await;
     assert!(created.success, "create failed: {created:?}");
     // Busy parks both rows in their lanes.
-    worker.core.lock().unwrap().busy = true;
+    worker
+        .core
+        .lock()
+        .unwrap()
+        .turn
+        .apply(crate::worker::TurnTransition::Pickup { action_label: None });
     let delivered = worker
         .dispatch(
             "worker_deliver_message",

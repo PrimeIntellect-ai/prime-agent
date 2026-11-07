@@ -2,8 +2,8 @@
 //! and the abort family.
 use super::{
     clear_withdrawn_progress_note, json, persist_custom_row, response_failure, response_success,
-    KillCloseReason, Lane, QueueCheckpoint, QueuedItem, Result, SessionFile, TurnSettle, VecDeque,
-    Worker, PROMPT_ABORTED_BEFORE_DELIVERY, SIDE_QUESTION_SETTLE_TIMEOUT,
+    KillCloseReason, Lane, QueueCheckpoint, QueuedItem, Result, SessionFile, TurnAbort, TurnSettle,
+    TurnTransition, VecDeque, Worker, PROMPT_ABORTED_BEFORE_DELIVERY, SIDE_QUESTION_SETTLE_TIMEOUT,
 };
 
 use serde_json::Value;
@@ -236,7 +236,7 @@ impl Worker {
             .unwrap_or_default();
         // The agent cannot adopt a different MCP tool list mid-turn (TS
         // `session.isStreaming` guard).
-        if !servers.is_empty() && self.core.lock().unwrap().busy {
+        if !servers.is_empty() && self.core.lock().unwrap().turn.busy() {
             return response_failure(
                 None,
                 "replace_acp_mcp_servers",
@@ -326,8 +326,7 @@ impl Worker {
     fn request_abort(&self) {
         {
             let mut core = self.core.lock().unwrap();
-            core.abort_requested = true;
-            core.turn_cancelled = true;
+            core.turn.apply(TurnTransition::Abort(TurnAbort::Cancelled));
             // The queue parks and a plain prompt is rejected until a
             // resume site fires.
             core.queued_input_suspended = true;
@@ -686,8 +685,7 @@ impl Worker {
             return cleared;
         }
         let mut core = self.core.lock().unwrap();
-        core.abort_requested = true;
-        core.turn_cancelled = true;
+        core.turn.apply(TurnTransition::Abort(TurnAbort::Cancelled));
         // The same TS `requestAbort()` suspension as the bare `abort`.
         core.queued_input_suspended = true;
         drop(core);
@@ -780,8 +778,7 @@ impl Worker {
         // before the close clears the lanes.
         {
             let mut core = self.core.lock().unwrap();
-            core.abort_requested = true;
-            core.turn_cancelled = true;
+            core.turn.apply(TurnTransition::Abort(TurnAbort::Cancelled));
             core.steering.clear();
             core.follow_up.clear();
         }

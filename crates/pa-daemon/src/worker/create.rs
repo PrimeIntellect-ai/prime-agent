@@ -2,8 +2,8 @@
 //! construction of the live session.
 use super::{
     json, paths, response_failure, response_success, restore_queue_snapshot, session_file_name,
-    Arc, EngineModelSelection, Result, RlmSessionIdentity, SessionEngine, SessionFile, VecDeque,
-    Worker,
+    Arc, EngineModelSelection, Result, RlmSessionIdentity, SessionEngine, SessionFile,
+    TurnTransition, VecDeque, Worker,
 };
 
 use serde::Deserialize as _;
@@ -556,9 +556,7 @@ impl Worker {
                 }
             }
             core.created = true;
-            core.abort_requested = false;
-            core.turn_cancelled = false;
-            core.turn_completed = false;
+            core.turn.apply(TurnTransition::NewSession);
             // A fresh session starts live: the previous close's
             // `session_closed` marker clears with the new session.
             if let Some(agent_engine) = &self.agent_engine {
@@ -574,7 +572,6 @@ impl Worker {
             // one-turn semantics.
             core.forced_all_steering = core.steering.iter().any(|item| item.forced_batch);
             core.scoped_models.clone_from(&scoped_entries);
-            core.retry_abort_requested = false;
             // The session's depth falls back to the opened file's header: a resumed
             // subagent file carries its persisted depth, so the roster never re-nests
             // it under its original parent.
@@ -734,7 +731,7 @@ impl Worker {
             .is_some_and(|depth| depth > 0);
         let (active, session_ref) = {
             let core = self.core.lock().unwrap();
-            (core.busy, Worker::herdr_session_ref(&core))
+            (core.turn.busy(), Worker::herdr_session_ref(&core))
         };
         let reporter = match crate::herdr::HerdrConfig::from_env(&client_env) {
             Some(config) if !spawned_as_child => {

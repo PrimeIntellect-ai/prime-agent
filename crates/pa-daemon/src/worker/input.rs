@@ -51,7 +51,7 @@ impl Worker {
         // `_assertSessionActionAdmissionAvailable()` pair).
         {
             let mut core = self.core.lock().unwrap();
-            if core.queued_input_suspended && !core.busy {
+            if core.queued_input_suspended && !core.turn.busy() {
                 if streaming_behavior.is_none() {
                     drop(core);
                     return response_failure(
@@ -95,14 +95,14 @@ impl Worker {
             // An idle session runs the prompt immediately: the lane is the
             // work hand-off, not a queue, so the projection did not change
             // (TS prompt admission with queueIfBusy=false never queues).
-            let queued_behind_work = core.busy;
+            let queued_behind_work = core.turn.busy();
             let lane = match streaming_behavior {
                 Some("steer") => Lane::Steering,
                 // An idle session's prompt IS the next run, so it takes the steering
                 // lane — otherwise a steering delivery arriving in the same window would
                 // jump the prompt's turn.
                 Some(_) | None => {
-                    if core.busy {
+                    if core.turn.busy() {
                         Lane::FollowUp
                     } else {
                         Lane::Steering
@@ -266,7 +266,7 @@ impl Worker {
         // parked.
         {
             let core = self.core.lock().unwrap();
-            if core.queued_input_suspended && !core.busy && !core.compacting {
+            if core.queued_input_suspended && !core.turn.busy() && !core.compacting {
                 drop(core);
                 return response_failure(
                     None,
@@ -328,7 +328,7 @@ impl Worker {
                 return response_failure(None, "worker_deliver_message", &error.to_string(), None);
             }
             let id = pa_core::session_engine::agent_messaging::create_agent_session_message_id();
-            let queued = core.busy;
+            let queued = core.turn.busy();
             let summary = self.summary_locked(&core, inputs);
             // The receiving session's endpoint: the receipt's `target`
             // and the delivered row's `details.target` share the one

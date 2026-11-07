@@ -193,11 +193,21 @@ impl QueueLaneIndices {
     }
 }
 
+/// The running turn's phase: `preparing` at pickup, `committing` at the first
+/// accepted row, `running` at the first assistant frame.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TurnPhase {
+    Preparing,
+    Committing,
+    Running,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SessionActionActive {
     pub kind: String,
-    pub phase: String,
+    pub phase: TurnPhase,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
 }

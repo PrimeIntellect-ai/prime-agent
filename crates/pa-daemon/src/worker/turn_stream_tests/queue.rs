@@ -32,7 +32,10 @@ async fn suspended_runner_parks_a_queued_item_until_resumed() {
     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     {
         let core = parked.lock().unwrap();
-        assert!(!core.busy, "the runner started a turn while suspended");
+        assert!(
+            !core.turn.busy(),
+            "the runner started a turn while suspended"
+        );
         assert_eq!(
             core.steering.len(),
             1,
@@ -90,7 +93,8 @@ async fn drain_pump(core: &Arc<Mutex<SessionCore>>, work_notify: &Arc<Notify>) {
     loop {
         {
             let core = core.lock().unwrap();
-            let drained = core.steering.is_empty() && core.follow_up.is_empty() && !core.busy;
+            let drained =
+                core.steering.is_empty() && core.follow_up.is_empty() && !core.turn.busy();
             if drained {
                 return;
             }
@@ -458,7 +462,7 @@ async fn abort_and_send_queued_delivers_the_steering_batch_then_the_follow_ups()
     assert!(prompt.success, "prompt failed: {prompt:?}");
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
     loop {
-        if worker.core.lock().unwrap().busy {
+        if worker.core.lock().unwrap().turn.busy() {
             break;
         }
         assert!(
@@ -468,7 +472,7 @@ async fn abort_and_send_queued_delivers_the_steering_batch_then_the_follow_ups()
         tokio::time::sleep(std::time::Duration::from_millis(25)).await;
     }
     // The abort must land on the REGISTERED run (ENG-5991's `waitForToolStart`
-    // discipline): `core.busy` flips at the runner's pickup, before the
+    // discipline): `core.turn.busy()` flips at the runner's pickup, before the
     // engine's admission, so a busy-only sync races the session build. The
     // run slot is the registration signal.
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
@@ -647,7 +651,7 @@ async fn abort_and_send_queued_acks_before_the_follow_up_delivery() {
     assert!(prompt.success, "prompt failed: {prompt:?}");
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
     loop {
-        if worker.core.lock().unwrap().busy {
+        if worker.core.lock().unwrap().turn.busy() {
             break;
         }
         assert!(
@@ -679,7 +683,7 @@ async fn abort_and_send_queued_acks_before_the_follow_up_delivery() {
     loop {
         let (busy, queued) = {
             let core = worker.core.lock().unwrap();
-            (core.busy, core.follow_up.len())
+            (core.turn.busy(), core.follow_up.len())
         };
         if busy && queued == 0 {
             break;
@@ -721,7 +725,7 @@ async fn abort_and_send_queued_acks_before_the_follow_up_delivery() {
         "the bare abort failed: {aborted_again:?}"
     );
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-    while worker.core.lock().unwrap().busy {
+    while worker.core.lock().unwrap().turn.busy() {
         assert!(
             std::time::Instant::now() < deadline,
             "the follow-up's turn never settled on the bare abort"
@@ -951,7 +955,7 @@ async fn withdrawing_follow_up_after_agent_end_clears_the_note_at_settle() {
             vec![queued_prompt("review", TurnPolicy::Queued)],
         )
         .await;
-    assert!(!runner.core.lock().unwrap().busy);
+    assert!(!runner.core.lock().unwrap().turn.busy());
     assert_eq!(
         engine.progress_note(),
         None,
@@ -984,7 +988,8 @@ async fn clearing_an_idle_queue_drops_the_retained_note() {
     {
         let mut core = worker.core.lock().unwrap();
         core.created = true;
-        core.busy = true;
+        core.turn
+            .apply(crate::worker::TurnTransition::Pickup { action_label: None });
         core.follow_up
             .push_back(queued_prompt("queued", TurnPolicy::Queued));
     }
@@ -995,7 +1000,7 @@ async fn clearing_an_idle_queue_drops_the_retained_note() {
     );
     {
         let mut core = worker.core.lock().unwrap();
-        core.busy = false;
+        core.turn.apply(crate::worker::TurnTransition::Settle);
         core.queued_input_suspended = true;
         core.follow_up
             .push_back(queued_prompt("queued", TurnPolicy::Queued));
@@ -1131,7 +1136,12 @@ async fn an_aborted_run_clears_the_note_at_its_idle_settle() {
         );
         tokio::time::sleep(std::time::Duration::from_millis(5)).await;
     }
-    core.lock().unwrap().abort_requested = true;
+    core.lock()
+        .unwrap()
+        .turn
+        .apply(crate::worker::TurnTransition::Abort(
+            crate::worker::TurnAbort::Shutdown,
+        ));
     let _ = turn.await;
     assert!(
         engine.note.lock().unwrap().is_none(),
@@ -1155,7 +1165,10 @@ async fn an_aborted_run_never_exposes_an_idle_summary_with_its_old_note() {
     });
     let runner = burst_runner(engine.clone());
     let core = Arc::clone(&runner.core);
-    core.lock().unwrap().busy = true;
+    core.lock()
+        .unwrap()
+        .turn
+        .apply(crate::worker::TurnTransition::Pickup { action_label: None });
     let engine_for_turn = Arc::clone(&engine);
     let turn = tokio::spawn(async move {
         runner
@@ -1173,12 +1186,17 @@ async fn an_aborted_run_never_exposes_an_idle_summary_with_its_old_note() {
     })
     .await
     .expect("the run publishes a progress note");
-    core.lock().unwrap().abort_requested = true;
+    core.lock()
+        .unwrap()
+        .turn
+        .apply(crate::worker::TurnTransition::Abort(
+            crate::worker::TurnAbort::Shutdown,
+        ));
     tokio::time::timeout(std::time::Duration::from_secs(10), gate.entered.notified())
         .await
         .expect("the aborted run reaches its note clear");
     let exposed_stale_idle = match core.try_lock() {
-        Ok(core) => !core.busy && engine.progress_note().is_some(),
+        Ok(core) => !core.turn.busy() && engine.progress_note().is_some(),
         Err(std::sync::TryLockError::WouldBlock) => false,
         Err(error) => panic!("the summary lock is poisoned: {error}"),
     };
@@ -1188,7 +1206,7 @@ async fn an_aborted_run_never_exposes_an_idle_summary_with_its_old_note() {
         !exposed_stale_idle,
         "an idle roster snapshot could retain the aborted run's progress note"
     );
-    assert!(!core.lock().unwrap().busy);
+    assert!(!core.lock().unwrap().turn.busy());
     assert!(engine.progress_note().is_none());
 }
 

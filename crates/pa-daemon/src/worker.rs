@@ -5,6 +5,7 @@
 mod config;
 mod env;
 mod session_core;
+mod turn_state;
 
 pub(crate) use config::WorkerConfig;
 // KillCloseReason is read only by the commands module (via `use super::*`), so allow the unused
@@ -57,6 +58,7 @@ pub use env::{
 use serde_json::Map;
 pub(crate) use session_core::SessionCore;
 use std::collections::VecDeque;
+pub(crate) use turn_state::{TurnAbort, TurnTransition};
 // PathBuf is read only by this facade's in-file test modules (via `use super::*`).
 #[allow(unused_imports)]
 use std::path::PathBuf;
@@ -292,13 +294,9 @@ impl Worker {
             cwd: String::new(),
             steering: VecDeque::new(),
             follow_up: VecDeque::new(),
-            busy: false,
+            turn: turn_state::TurnState::default(),
             created: false,
             attached_client_ids: Vec::new(),
-            abort_requested: false,
-            turn_cancelled: false,
-            turn_completed: false,
-            suppress_aborted_row: false,
             shutdown_requested: false,
             last_activity_ms: 0,
             compacting: false,
@@ -318,10 +316,8 @@ impl Worker {
             follow_up_mode: "one-at-a-time".to_string(),
             forced_all_steering: false,
             scoped_models: Vec::new(),
-            retry_abort_requested: false,
             queued_input_suspended: false,
             pending_next_turn: Vec::new(),
-            active_action: None,
             running_tool_calls: std::collections::HashSet::new(),
             running_admission_ids: std::collections::HashSet::new(),
             tool_use_count: 0,

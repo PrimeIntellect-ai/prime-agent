@@ -1211,7 +1211,7 @@ mod tests {
                             .unwrap();
                         let core = worker.core.lock().unwrap();
                         assert_eq!(
-                            (core.busy, core.follow_up.len()),
+                            (core.turn.busy(), core.follow_up.len()),
                             (false, 1),
                             "restored follow-up ran before continuation admission"
                         );
