@@ -1009,6 +1009,27 @@ mod tests {
     }
 
     #[test]
+    fn single_quoted_completions_keep_their_quote() {
+        let (base, mut e) = at_editor();
+        std::fs::create_dir_all(base.path().join("dir with spaces")).unwrap();
+        std::fs::write(base.path().join("dir with spaces/child.rs"), "x").unwrap();
+        for ch in "@'dir".chars() {
+            e.handle_input(&ch.to_string());
+        }
+        assert_eq!(
+            settled_menu(&mut e),
+            Some(vec!["@'dir with spaces/'".to_string()])
+        );
+        e.handle_input("tab");
+        assert_eq!(
+            settled_menu(&mut e),
+            Some(vec!["@'dir with spaces/child.rs'".to_string()])
+        );
+        e.handle_input("enter");
+        assert_eq!(e.get_text(), "@'dir with spaces/child.rs' ");
+    }
+
+    #[test]
     fn slash_in_a_quoted_directory_refreshes_the_running_search() {
         let (base, mut e) = at_editor();
         std::fs::create_dir_all(base.path().join("dir with spaces")).unwrap();

@@ -6,6 +6,7 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::fuzzy::fuzzy_filter;
+use crate::path_token::{self, PathToken, Quoting};
 use crate::width::str_width;
 use crate::{Line, Span};
 use pa_types::slash_commands::SlashCommandRegistry;
@@ -168,62 +169,6 @@ pub fn get_slash_command_context(
     })
 }
 
-/// Delimiters that end a path token.
-const PATH_DELIMITERS: [char; 5] = [' ', '\t', '"', '\'', '='];
-
-fn is_path_delimiter(c: char) -> bool {
-    PATH_DELIMITERS.contains(&c)
-}
-
-/// The start index of the last unclosed `"` in the text.
-fn find_unclosed_quote_start(text: &[char]) -> Option<usize> {
-    let mut in_quotes = false;
-    let mut quote_start = 0usize;
-    for (index, c) in text.iter().enumerate() {
-        if *c == '"' {
-            in_quotes = !in_quotes;
-            if in_quotes {
-                quote_start = index;
-            }
-        }
-    }
-    in_quotes.then_some(quote_start)
-}
-
-/// True when the token at `index` begins at a delimiter boundary.
-fn is_token_start(text: &[char], index: usize) -> bool {
-    index == 0 || is_path_delimiter(text[index - 1])
-}
-
-/// An unterminated quoted token from its opening quote (`@"…` or `"…`).
-fn extract_quoted_prefix(text: &[char]) -> Option<String> {
-    let quote_start = find_unclosed_quote_start(text)?;
-    if quote_start > 0 && text[quote_start - 1] == '@' {
-        if !is_token_start(text, quote_start - 1) {
-            return None;
-        }
-        return Some(text[quote_start - 1..].iter().collect());
-    }
-    if !is_token_start(text, quote_start) {
-        return None;
-    }
-    Some(text[quote_start..].iter().collect())
-}
-
-/// Split a path prefix into its raw path and prefix flags (TS
-/// `parsePathPrefix`).
-fn parse_path_prefix(prefix: &str) -> (String, bool, bool) {
-    if let Some(raw) = prefix.strip_prefix("@\"") {
-        (raw.to_string(), true, true)
-    } else if let Some(raw) = prefix.strip_prefix('"') {
-        (raw.to_string(), false, true)
-    } else if let Some(raw) = prefix.strip_prefix('@') {
-        (raw.to_string(), true, false)
-    } else {
-        (prefix.to_string(), false, false)
-    }
-}
-
 /// Expand `~` and `~/…` to the home directory.
 fn expand_home_path(path: &str) -> String {
     if let Some(rest) = path.strip_prefix("~/") {
@@ -246,56 +191,23 @@ fn home_dir() -> std::path::PathBuf {
     pa_types::platform::home_dir().unwrap_or_default()
 }
 
-/// The `@`-attachment token at the cursor: the token feeds the fuzzy
-/// file search below the session cwd (or the typed scope).
-pub(crate) fn extract_at_prefix(text: &[char]) -> Option<String> {
-    if let Some(quoted) = extract_quoted_prefix(text) {
-        if quoted.starts_with("@\"") {
-            return Some(quoted);
-        }
-    }
-    let token_start = text
-        .iter()
-        .rposition(|c| is_path_delimiter(*c))
-        .map_or(0, |index| index + 1);
-    if text.get(token_start) == Some(&'@') {
-        return Some(text[token_start..].iter().collect());
-    }
-    None
-}
-
 /// The path token at the cursor. Explicit requests (`force`) take any
 /// token; natural triggers only take tokens that look like paths.
-fn extract_path_prefix(text: &[char], force_extract: bool) -> Option<String> {
-    if let Some(quoted) = extract_quoted_prefix(text) {
-        return Some(quoted);
-    }
-    let delimiter_index = text.iter().rposition(|c| is_path_delimiter(*c));
-    let path_prefix: String = match delimiter_index {
-        Some(index) => text[index + 1..].iter().collect(),
-        None => text.iter().collect(),
-    };
-    if force_extract {
-        return Some(path_prefix);
-    }
-    if path_prefix.contains('/') || path_prefix.starts_with('.') || path_prefix.starts_with("~/") {
-        return Some(path_prefix);
-    }
-    if path_prefix.is_empty() && text.last() == Some(&' ') {
-        return Some(path_prefix);
-    }
-    None
+fn extract_path_token(text: &[char], force_extract: bool) -> Option<PathToken> {
+    let token = path_token::path_token_before(text);
+    let path = &token.path;
+    let wanted = force_extract
+        || token.quoting.quote().is_some()
+        || path.contains('/')
+        || path.starts_with('.')
+        || (path.is_empty() && text.last() == Some(&' '));
+    wanted.then_some(token)
 }
 
-/// Quote a completion value when the prefix was quoted or the path has
-/// spaces (TS `buildCompletionValue`).
-fn build_completion_value(path: &str, is_at_prefix: bool, is_quoted_prefix: bool) -> String {
-    let needs_quotes = is_quoted_prefix || path.contains(' ');
+/// A completion value: the path in the typed token's quoting (TS `buildCompletionValue`).
+fn build_completion_value(path: &str, is_at_prefix: bool, quoting: Quoting) -> String {
     let prefix = if is_at_prefix { "@" } else { "" };
-    if !needs_quotes {
-        return format!("{prefix}{path}");
-    }
-    format!("{prefix}\"{path}\"")
+    format!("{prefix}{}", quoting.render(path))
 }
 
 /// Selection state for the autocomplete dropdown.
@@ -450,16 +362,16 @@ pub struct PathCompletionProvider {
 impl PathCompletionProvider {
     /// Directory entries matching the typed prefix: `~` expansion, root
     /// and `dir/` prefixes, case-insensitive matching, directories first.
-    fn file_suggestions(&self, prefix: &str) -> Vec<CompletionItem> {
-        let (raw_prefix, is_at_prefix, is_quoted_prefix) = parse_path_prefix(prefix);
-        let expanded_prefix = expand_home_path(&raw_prefix);
+    fn file_suggestions(&self, token: &PathToken) -> Vec<CompletionItem> {
+        let raw_prefix = token.path.as_str();
+        let expanded_prefix = expand_home_path(raw_prefix);
         let is_root_prefix = raw_prefix.is_empty()
             || raw_prefix == "./"
             || raw_prefix == "../"
             || raw_prefix == "~"
             || raw_prefix == "~/"
             || raw_prefix == "/"
-            || (is_at_prefix && raw_prefix.is_empty());
+            || (token.at && raw_prefix.is_empty());
         let (search_dir, search_prefix): (std::path::PathBuf, String) =
             if is_root_prefix || raw_prefix.ends_with('/') {
                 let dir = if raw_prefix.starts_with('~') || expanded_prefix.starts_with('/') {
@@ -514,13 +426,13 @@ impl PathCompletionProvider {
             }
             let full_path = entry.path();
             let is_directory = full_path.is_dir();
-            let relative_path = display_relative_path(&raw_prefix, &name);
+            let relative_path = display_relative_path(raw_prefix, &name);
             let path_value = if is_directory {
                 format!("{relative_path}/")
             } else {
                 relative_path
             };
-            let value = build_completion_value(&path_value, is_at_prefix, is_quoted_prefix);
+            let value = build_completion_value(&path_value, token.at, token.quoting);
             suggestions.push(CompletionItem {
                 value,
                 source_tag: None,
@@ -578,38 +490,29 @@ fn display_relative_path(display_prefix: &str, name: &str) -> String {
     }
 }
 
-/// Apply a file/path completion: replace the prefix token with the item value, adjusting
-/// for quoted prefixes, directories, and the `@` branch's trailing space.
+/// Apply a file/path completion: replace the typed token (it ends at the cursor) with the
+/// item value, adjusting for quoted tokens, directories, and the `@` branch's trailing space.
 fn apply_file_completion(
     lines: &[String],
     cursor_line: usize,
     cursor_col: usize,
     item: &CompletionItem,
-    prefix: &str,
+    token: &PathToken,
 ) -> CompletionResult {
     let line: Vec<char> = lines[cursor_line].chars().collect();
-    let prefix_len = prefix.chars().count();
-    let before_prefix: String = line[..cursor_col.saturating_sub(prefix_len).min(line.len())]
-        .iter()
-        .collect();
+    let before_prefix: String = line[..token.start].iter().collect();
     let after_cursor: String = line[cursor_col.min(line.len())..].iter().collect();
-    let is_quoted_prefix = prefix.starts_with('"') || prefix.starts_with("@\"");
-    let adjusted_after_cursor =
-        if is_quoted_prefix && item.value.ends_with('"') && after_cursor.starts_with('"') {
-            after_cursor.chars().skip(1).collect()
-        } else {
-            after_cursor
-        };
+    // The typed token's closing quote after the cursor belongs to the replaced token, whatever
+    // quote the item renders.
+    let adjusted_after_cursor = match token.quoting.quote() {
+        Some(quote) if after_cursor.starts_with(quote) => after_cursor.chars().skip(1).collect(),
+        _ => after_cursor,
+    };
     let is_directory = item.label.ends_with('/');
     // TS `applyCompletion`'s `@` branch: a file leaves a trailing space so the next
     // word starts clean, a directory keeps the token open for further completion.
-    let suffix = if prefix.starts_with('@') && !is_directory {
-        " "
-    } else {
-        ""
-    };
-    let has_trailing_quote = item.value.ends_with('"');
-    let cursor_offset = if is_directory && has_trailing_quote {
+    let suffix = if token.at && !is_directory { " " } else { "" };
+    let cursor_offset = if is_directory && item.value.ends_with(['"', '\'']) {
         item.value.chars().count() - 1
     } else {
         item.value.chars().count()
@@ -899,8 +802,8 @@ impl AutocompleteProvider for CombinedAutocompleteProvider {
     ) -> Option<SuggestionLookup> {
         let line: Vec<char> = lines.get(cursor_line)?.chars().collect();
         let before: Vec<char> = line[..cursor_col.min(line.len())].to_vec();
-        if let Some(at_prefix) = extract_at_prefix(&before) {
-            return fuzzy_file_search::lookup(&self.paths.base, &self.file_index, at_prefix);
+        if let Some(token) = path_token::at_token_before(&before) {
+            return fuzzy_file_search::lookup(&self.paths.base, &self.file_index, token);
         }
         if !force {
             if let Some(context) = get_slash_command_context(lines, cursor_line, cursor_col) {
@@ -940,13 +843,13 @@ impl AutocompleteProvider for CombinedAutocompleteProvider {
                 }
             }
         }
-        let prefix = extract_path_prefix(&before, force)?;
-        let items = self.paths.file_suggestions(&prefix);
+        let token = extract_path_token(&before, force)?;
+        let items = self.paths.file_suggestions(&token);
         if items.is_empty() {
             return None;
         }
         Some(SuggestionLookup::Ready(Suggestions {
-            prefix,
+            prefix: token.text,
             kind: Some(SuggestionKind::File),
             items,
         }))
@@ -964,8 +867,8 @@ impl AutocompleteProvider for CombinedAutocompleteProvider {
     ) -> CompletionResult {
         let line: Vec<char> = lines[cursor_line].chars().collect();
         let before = &line[..cursor_col.min(line.len())];
-        if let Some(at_prefix) = extract_at_prefix(before) {
-            return apply_file_completion(lines, cursor_line, cursor_col, item, &at_prefix);
+        if let Some(token) = path_token::at_token_before(before) {
+            return apply_file_completion(lines, cursor_line, cursor_col, item, &token);
         }
         // TS `applyCompletion` finds the item over its whole command list
         // (builtins and skills share one array), so a `skill:` item applies
@@ -987,8 +890,8 @@ impl AutocompleteProvider for CombinedAutocompleteProvider {
                 );
             }
         }
-        let path_prefix = extract_path_prefix(before, true).unwrap_or_default();
-        apply_file_completion(lines, cursor_line, cursor_col, item, &path_prefix)
+        let token = path_token::path_token_before(before);
+        apply_file_completion(lines, cursor_line, cursor_col, item, &token)
     }
 
     fn should_trigger_file_completion(

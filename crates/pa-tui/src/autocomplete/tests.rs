@@ -605,6 +605,23 @@ fn at_item_values(provider: &CombinedAutocompleteProvider, text: &str) -> Vec<St
         .collect()
 }
 
+/// A completion keeps the typed quote, switching to the other one for a path holding it, and
+/// the typed escape form on macOS/Linux.
+#[test]
+fn at_completion_keeps_the_typed_quoting() {
+    let base = tempfile::TempDir::new().expect("temp dir");
+    std::fs::create_dir_all(base.path().join("my target")).expect("mkdir");
+    std::fs::write(base.path().join("it's.md"), "x").expect("write");
+    let provider = provider(base.path().to_str().expect("utf8"));
+    assert_eq!(at_item_values(&provider, "@'my"), ["@'my target/'"]);
+    assert_eq!(at_item_values(&provider, "@'it"), ["@\"it's.md\""]);
+    // Accepting it before the typed closing quote replaces that quote too.
+    let result = provider.apply_completion(&["@'it'".to_string()], 0, 4, &item("@\"it's.md\""));
+    assert_eq!(result.lines[0], "@\"it's.md\" ");
+    #[cfg(not(windows))]
+    assert_eq!(at_item_values(&provider, r"@my\ ta"), [r"@my\ target/"]);
+}
+
 /// A typed directory scope with an empty query lists the directory's children.
 #[test]
 fn at_directory_scope_lists_its_children() {
@@ -859,9 +876,12 @@ fn at_index_matches_the_walk_on_random_trees() {
             let mut walks: HashMap<std::path::PathBuf, Vec<String>> = HashMap::new();
             for query in random_queries(&forms, &mut rng) {
                 let at_prefix = format!("@{query}");
+                let token =
+                    crate::path_token::at_token_before(&at_prefix.chars().collect::<Vec<_>>())
+                        .expect("token");
                 let mut matched = 0;
                 let expected =
-                    fuzzy_file_search::resolve_search(&base, &at_prefix, &cancel, |search, _| {
+                    fuzzy_file_search::resolve_search(&base, &token, &cancel, |search, _| {
                         let walk =
                             walks
                                 .entry(search.walk_base.to_path_buf())
