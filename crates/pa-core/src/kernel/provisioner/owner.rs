@@ -32,6 +32,20 @@ pub(super) enum Command {
         snapshot: bool,
         done: oneshot::Sender<()>,
     },
+    /// A boot stage; the reply carries the listeners the boot must notify.
+    Progress {
+        generation: u64,
+        message: String,
+        listeners: oneshot::Sender<Vec<KernelBootstrapProgressHandler>>,
+    },
+    Restored {
+        generation: u64,
+        restore: RestoreResult,
+    },
+    UnavailableSkills {
+        generation: u64,
+        errors: UnavailablePythonSkills,
+    },
     TeardownPolicy {
         generation: u64,
         reply: oneshot::Sender<(bool, Option<u64>)>,
@@ -249,7 +263,6 @@ pub(super) struct BootHandle {
     progress: Option<KernelBootstrapProgressHandler>,
     commands: mpsc::UnboundedSender<Command>,
     gate: Arc<Mutex<Option<oneshot::Receiver<()>>>>,
-    state: Arc<Mutex<OwnerState>>,
 }
 
 impl BootHandle {
@@ -264,40 +277,18 @@ impl BootHandle {
 
     /// Report a stage to the generation's joined callers (none once the generation
     /// is no longer armed), then to the boot's own caller.
-    pub(super) fn emit(&self, message: &str) {
-        if let Some(boot) = lock(&self.state).current_boot(self.generation) {
-            boot.last_message = Some(message.to_string());
-            for listener in &boot.listeners {
-                listener(message);
-            }
+    pub(super) async fn emit(&self, message: &str) {
+        let (listeners, rx) = oneshot::channel();
+        self.send(Command::Progress {
+            generation: self.generation,
+            message: message.to_string(),
+            listeners,
+        });
+        for listener in rx.await.unwrap_or_default() {
+            listener(message);
         }
         if let Some(progress) = &self.progress {
             progress(message);
-        }
-    }
-
-    /// Only the armed, undisposed generation may surface its restore: the check, the
-    /// write, and the callback share one lock scope, so a kill cannot slip between.
-    pub(super) fn publish_restore(&self, inner: &ProvisionerInner, restore: RestoreResult) {
-        let mut s = lock(&self.state);
-        if matches!(&s.slot, Slot::Booting(boot) if boot.generation == self.generation) {
-            if let Some(on_restore) = &inner.options.on_restore {
-                on_restore(&restore);
-            }
-            s.last_restore = Some(restore);
-        }
-    }
-
-    pub(super) fn report_unavailable_skills(
-        &self,
-        inner: &ProvisionerInner,
-        errors: &UnavailablePythonSkills,
-    ) {
-        let s = lock(&self.state);
-        if matches!(&s.slot, Slot::Booting(boot) if boot.generation == self.generation) {
-            if let Some(on_unavailable_skills) = &inner.options.on_unavailable_skills {
-                on_unavailable_skills(errors);
-            }
         }
     }
 
@@ -306,7 +297,8 @@ impl BootHandle {
         let gate = lock(&self.gate).take();
         if let Some(mut gate) = gate {
             if gate.try_recv() == Err(oneshot::error::TryRecvError::Empty) {
-                self.emit("Waiting for the previous kernel to stop...");
+                self.emit("Waiting for the previous kernel to stop...")
+                    .await;
                 let _ = gate.await;
             }
         }
@@ -484,6 +476,45 @@ fn handle(inner: &Arc<ProvisionerInner>, state: &Mutex<OwnerState>, command: Com
             inner.dispose_signal.abort();
             finish_disposes(&mut s);
         }
+        Command::Progress {
+            generation,
+            message,
+            listeners,
+        } => {
+            let mut s = lock(state);
+            let notify = s.current_boot(generation).map_or_else(Vec::new, |boot| {
+                boot.last_message = Some(message);
+                boot.listeners.clone()
+            });
+            let _ = listeners.send(notify);
+        }
+        Command::Restored {
+            generation,
+            restore,
+        } => {
+            let live = {
+                let mut s = lock(state);
+                let live = matches!(&s.slot, Slot::Booting(boot) if boot.generation == generation);
+                if live {
+                    s.last_restore = Some(restore.clone());
+                }
+                live
+            };
+            if live {
+                if let Some(on_restore) = &inner.options.on_restore {
+                    on_restore(&restore);
+                }
+            }
+        }
+        Command::UnavailableSkills { generation, errors } => {
+            let live =
+                matches!(&lock(state).slot, Slot::Booting(boot) if boot.generation == generation);
+            if live {
+                if let Some(on_unavailable_skills) = &inner.options.on_unavailable_skills {
+                    on_unavailable_skills(&errors);
+                }
+            }
+        }
         Command::TeardownPolicy { generation, reply } => {
             let _ = reply.send(lock(state).teardown_policy(generation));
         }
@@ -652,7 +683,6 @@ fn start_boot(
         progress,
         commands: inner.commands.clone(),
         gate: Arc::new(Mutex::new(gate)),
-        state: Arc::clone(&inner.state),
     };
     let inner = Arc::clone(inner);
     tokio::spawn(async move {
