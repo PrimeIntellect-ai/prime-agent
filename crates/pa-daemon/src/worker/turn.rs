@@ -399,10 +399,11 @@ impl TurnRunner {
             .collect();
         let turn_outcome = Arc::new(std::sync::Mutex::new(None::<TurnSettle>));
         let turn_outcome_slot = Arc::clone(&turn_outcome);
-        // Whether an engine `agent_end` of this run passed the abort gate
-        // (the trailing synthesized frame is only a fallback).
-        let engine_agent_end = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let engine_agent_end_seen = Arc::clone(&engine_agent_end);
+        // Whether the last `agent_start` on the wire is still unclosed: the
+        // delivery's own opens it, an engine `agent_start` that passes the
+        // abort gate re-opens it, an engine `agent_end` that passes closes it.
+        let run_open = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let run_open_seen = Arc::clone(&run_open);
         // The pane reporter's settle hold: a run that FAILED without the
         // engine's `agent_end` (a provider error before any terminal
         // assistant row) still parks its error here, so the settle's
@@ -502,8 +503,14 @@ impl TurnRunner {
                 {
                     return false;
                 }
-                if matches!(event, EngineEvent::AgentEnd { .. }) {
-                    engine_agent_end_seen.store(true, std::sync::atomic::Ordering::SeqCst);
+                match &event {
+                    EngineEvent::AgentStart => {
+                        run_open_seen.store(true, std::sync::atomic::Ordering::SeqCst);
+                    }
+                    EngineEvent::AgentEnd { .. } => {
+                        run_open_seen.store(false, std::sync::atomic::Ordering::SeqCst);
+                    }
+                    _ => {}
                 }
                 // The pane reporter's engine boundaries (the TS
                 // `agent_start` / `agent_end` hooks and the auto-retry
@@ -1053,7 +1060,6 @@ impl TurnRunner {
         coalescer.close();
         flusher.abort();
 
-        let engine_reported_run_end = engine_agent_end.load(std::sync::atomic::Ordering::SeqCst);
         let more_queued = {
             let mut core = self.core.lock().unwrap();
             // A shutdown never loses admitted input: the batch items whose
@@ -1084,14 +1090,15 @@ impl TurnRunner {
             more_queued
         };
         self.push_roster_delta();
-        // The fallback `agent_end` closes this delivery's own `agent_start`
-        // whenever no engine `agent_end` reached the wire: session commands,
-        // pre-model failures, the admission consult's pre-run abort (no run
+        // The fallback `agent_end` closes the last `agent_start` on the wire
+        // when no engine `agent_end` did: session commands, pre-model
+        // failures, the admission consult's pre-run abort (no run
         // registered), and a run a compaction or tree move detached (its
-        // frames were swallowed above). The engine's per-run frames (one per
-        // agent run, retried and continued runs included — the TS `agent_end`
-        // `messages` payload) are the real frames.
-        if !engine_reported_run_end {
+        // frames were swallowed above) — also a later retried or continued
+        // run of the same delivery. The engine's per-run frames (one per
+        // agent run — the TS `agent_end` `messages` payload) are the real
+        // frames.
+        if run_open.load(std::sync::atomic::Ordering::SeqCst) {
             self.emit_turn_event(json!({ "type": "agent_end" }));
         }
         {

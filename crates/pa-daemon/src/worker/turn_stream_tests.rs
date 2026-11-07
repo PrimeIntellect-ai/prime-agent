@@ -281,6 +281,31 @@ async fn an_aborted_settle_closes_the_run() {
     }
 }
 
+/// A later run of the same delivery (a retry or continuation) whose end never
+/// reaches the wire still gets the fallback closer, after the earlier run's own end.
+#[tokio::test]
+async fn a_later_run_without_its_end_still_gets_the_fallback_closer() {
+    let events = gate_sighting_events(
+        vec![
+            EngineEvent::AgentEnd {
+                messages: Vec::new(),
+            },
+            EngineEvent::AgentStart,
+            EngineEvent::Done(Ok(())),
+        ],
+        false,
+        false,
+    )
+    .await;
+    let starts = positions_of(&events, "agent_start");
+    let ends = positions_of(&events, "agent_end");
+    assert_eq!(ends.len(), 2, "both runs close: {events:?}");
+    assert!(
+        ends[1] > *starts.last().unwrap(),
+        "the closer follows the later run's start: {events:?}"
+    );
+}
+
 /// A turn aborted under row suppression (a manual compaction or tree move)
 /// still reaches the engine's turn boundary at its swallowed `Done`, so
 /// child prompts held for that turn are released.

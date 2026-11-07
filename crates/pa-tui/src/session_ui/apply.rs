@@ -704,6 +704,13 @@ impl SessionUi {
         view.working = None;
         view.working_since = None;
         Self::flush_pending_bash(view);
+        // A detached run's `turn_end` never arrives: its open cards settle here.
+        crate::snapshot::settle_pending_tool_cards(
+            view,
+            &mut self.pending_tools,
+            &mut self.aborted_tools,
+            "the turn ended before this call returned",
+        );
     }
 
     /// The abort ladder shared by the Ctrl+C and Escape interrupts: a compacting session aborts the
