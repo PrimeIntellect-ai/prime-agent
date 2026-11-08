@@ -807,7 +807,7 @@ impl SessionUi {
                     self.error_row("Usage: /reload", view);
                     return Ok(());
                 }
-                if self.run_state.is_busy() || self.work_in_flight() {
+                if self.run_busy() || self.work_in_flight() {
                     self.note_as(
                         "Wait for the current response to finish before reloading.",
                         StatusKind::Warning,

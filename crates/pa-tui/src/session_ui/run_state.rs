@@ -29,10 +29,6 @@ pub(crate) enum RunEvent {
 }
 
 impl RunState {
-    pub(crate) fn is_busy(self) -> bool {
-        self != RunState::Idle
-    }
-
     fn next(self, event: RunEvent) -> RunState {
         match event {
             RunEvent::Started | RunEvent::Attached { streaming: true } => RunState::Running,
@@ -47,12 +43,16 @@ impl RunState {
 }
 
 impl SessionUi {
+    pub(crate) fn run_busy(&self) -> bool {
+        self.run_state != RunState::Idle
+    }
+
     /// Every run or turn start restarts the loader; a re-attached run anchors it at the LAST
     /// HUMAN PROMPT (the operator's 2026-09-28 rule).
     pub(crate) fn apply_run_event(&mut self, event: RunEvent, view: &mut AgentView) {
         let was = self.run_state;
         self.run_state = was.next(event);
-        if !self.run_state.is_busy() {
+        if self.run_state == RunState::Idle {
             view.working = None;
             view.working_since = None;
             return;

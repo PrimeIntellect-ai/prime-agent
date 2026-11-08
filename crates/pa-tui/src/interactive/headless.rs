@@ -110,7 +110,7 @@ impl HeadlessSettle {
     ) -> Self {
         Self {
             pending_inputs,
-            turn_active: session.run_state.is_busy(),
+            turn_active: session.run_busy(),
             submits_in_flight: session.prompt_submits_in_flight(),
             queued: view.queued.steering.len() + view.queued.follow_ups.len(),
             idle_barrier,

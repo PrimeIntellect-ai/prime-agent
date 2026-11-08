@@ -708,7 +708,7 @@ impl SessionUi {
     ) {
         // The turn state at submit time gates the telemetry; an earlier submit
         // still in flight counts as active here.
-        let turn_was_active = self.run_state.is_busy() || self.prompt_in_flight > 0;
+        let turn_was_active = self.run_busy() || self.prompt_in_flight > 0;
         self.apply_run_event(RunEvent::Submitted, view);
         self.prompt_in_flight += 1;
         let _ = self.prompt_orders.send(PromptOrder {

@@ -442,7 +442,7 @@ impl SessionUi {
                 // frames — it would allocate a fresh card whose timer then
                 // reticks the settled id on this run's paints, so it lands
                 // on nothing too.
-                if !self.aborted_tools.contains(&tool_call_id) && self.run_state.is_busy() {
+                if !self.aborted_tools.contains(&tool_call_id) && self.run_busy() {
                     crate::snapshot::apply_tool_execution_start(
                         view,
                         &tool_call_id,
@@ -723,7 +723,7 @@ impl SessionUi {
             // The interrupt cancels the compaction run only — the agent is not
             // streaming, so no turn abort goes out.
             self.abort_compaction(view.compaction_generation);
-        } else if self.run_state.is_busy() {
+        } else if self.run_busy() {
             // No transient abort hint: the aborted turn's own assistant row carries
             // the interrupt, so nothing is noted here.
             self.abort_turn();

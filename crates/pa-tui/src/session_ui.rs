@@ -245,7 +245,7 @@ pub(crate) struct SessionUi {
     queue_selection: crate::queued::QueueSelection,
     context: Option<crate::chrome::ContextUsage>,
     list_rows: Vec<Value>,
-    pub(crate) run_state: RunState,
+    run_state: RunState,
     /// The session's queue delivery mode: `all` delivers the queued steering prefix as one batched
     /// turn at the boundary; `one-at-a-time` one per turn (product default `all`).
     pub(crate) steering_mode: String,
