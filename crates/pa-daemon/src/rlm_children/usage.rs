@@ -141,7 +141,7 @@ impl SupervisorChildSessionsInner {
     }
 
     /// Record a confirmed kill on the child and keep its final accounting
-    /// reachable after roster retirement; the first confirmed intent stands.
+    /// reachable after roster retirement.
     pub(super) async fn retain_retired_usage(
         &self,
         record: &Arc<Mutex<ChildRecord>>,
@@ -152,13 +152,10 @@ impl SupervisorChildSessionsInner {
             .await
             .retirement
             .apply(RetirementEvent::KillConfirmed(intent));
-        let mut retired = self
-            .retired_usage
+        self.retired_usage
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if !retired.iter().any(|held| Arc::ptr_eq(held, record)) {
-            retired.push(Arc::clone(record));
-        }
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(Arc::clone(record));
     }
 
     pub(super) fn remove_retired_usage(&self, record: &Arc<Mutex<ChildRecord>>) {

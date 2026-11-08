@@ -193,10 +193,8 @@ struct ChildRecord {
     /// The task prompt was admitted; never settle a pre-prompt child (it
     /// is idle with an empty queue by construction).
     prompt_admitted: bool,
-    /// The delete or close of this child. Kept apart from `run` so a live run
-    /// is never faked settled: during a delete's kill the watcher stays alive
-    /// and the row stays correctly reported, and a failed kill returns the
-    /// child to live.
+    /// The delete or close of this child, kept apart from `run` so a live run
+    /// is never faked settled during a delete's kill.
     retirement: Retirement,
     /// The final unregister acknowledged completion; retries must not repeat it.
     usage_registration_forgotten: bool,

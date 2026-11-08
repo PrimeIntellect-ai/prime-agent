@@ -2,7 +2,6 @@
 //! confirmed kill whose finish steps run once each across interrupted
 //! retries. [`Retirement::apply`] is its only writer.
 
-/// One child's retirement phase.
 #[derive(Debug)]
 pub(super) struct Retirement(RetirementPhase);
 
@@ -37,7 +36,6 @@ pub(super) enum FinishStep {
     Finished,
 }
 
-/// One retirement transition.
 pub(super) enum RetirementEvent {
     /// A delete of a running child sends its kill.
     BeginDelete,
@@ -78,22 +76,7 @@ impl Retirement {
                     step: claimed,
                 }
             }
-            (RetirementPhase::Live, RetirementEvent::KillRefused | RetirementEvent::Claim(_))
-            | (
-                RetirementPhase::Deleting | RetirementPhase::Closing,
-                RetirementEvent::BeginDelete
-                | RetirementEvent::BeginClose
-                | RetirementEvent::Claim(_),
-            )
-            | (RetirementPhase::Closing, RetirementEvent::KillRefused)
-            | (
-                RetirementPhase::Confirmed { .. },
-                RetirementEvent::BeginDelete
-                | RetirementEvent::BeginClose
-                | RetirementEvent::KillRefused
-                | RetirementEvent::KillConfirmed(_)
-                | RetirementEvent::Claim(_),
-            ) => return false,
+            _ => return false,
         };
         self.0 = next;
         true
