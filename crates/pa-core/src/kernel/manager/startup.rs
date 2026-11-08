@@ -285,6 +285,19 @@ impl Inner {
         }
         {
             let mut g = lock(&self.guarded);
+            // A teardown that landed during the handshake owns the kernel now.
+            let starting = g.lifecycle.generation() == generation
+                && match g.lifecycle.current() {
+                    Lifecycle::Starting(_) => true,
+                    Lifecycle::Idle
+                    | Lifecycle::Running
+                    | Lifecycle::ShuttingDown { .. }
+                    | Lifecycle::Discarding
+                    | Lifecycle::Defunct => false,
+                };
+            if !starting {
+                return Err(anyhow!("Kernel was disposed during startup"));
+            }
             g.lifecycle.transition(Lifecycle::Running);
             // The freshness memo describes the namespace of the kernel that committed it: a freshly
             // started kernel has no committed description yet.
