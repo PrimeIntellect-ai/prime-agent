@@ -205,12 +205,11 @@ impl AgentSessionEngine {
     /// since the last emission (per-session dedupe). A session without a
     /// goal seeds the baseline silently.
     pub(crate) fn goal_update_if_changed(&self, emit: &mut dyn FnMut(EngineEvent) -> bool) -> bool {
+        // No session yet, or the driver is mid-mutation: a later event re-checks.
         let Some(handles) = self.live_handles() else {
-            // No session yet: a later event re-checks.
             return true;
         };
         let Ok(driver) = handles.goal.driver.try_lock() else {
-            // The driver is mid-mutation: a later event re-checks.
             return true;
         };
         let goal = driver.state_with_creation_elapsed();

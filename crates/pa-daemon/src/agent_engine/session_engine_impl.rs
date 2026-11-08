@@ -81,7 +81,8 @@ impl SessionEngine for AgentSessionEngine {
 
     fn mint_post_compaction_goal_continuation(&self) -> Option<crate::engine::GoalContinuation> {
         // The mirrored locks are async, so the mint runs on the engine runtime.
-        let handles = self.live_handles()?.goal.clone();
+        let live = self.live_handles()?;
+        let handles = &live.goal;
         // The progress check's input, read before the driver lock. The
         // failed pair's DROP happens INSIDE the quiescence gate (an early
         // drop would remint).
@@ -123,7 +124,7 @@ impl SessionEngine for AgentSessionEngine {
                 let state = driver.state_with_creation_elapsed();
                 let wake_at = driver.backoff_wake_at();
                 drop(driver);
-                self.publish_goal_state(&state);
+                live.publish_goal(&state);
                 if let Some(wake_at) = wake_at {
                     self.schedule_goal_backoff_wake(wake_at).await;
                 }
@@ -133,7 +134,7 @@ impl SessionEngine for AgentSessionEngine {
             // This mint's own guard handle: the admission sink releases
             // exactly it, never the mirror.
             let pending_handle = Some(driver.pending_continuation_handle());
-            let goal_update = self.publish_goal_state(&driver.state_with_creation_elapsed());
+            let goal_update = live.publish_goal(&driver.state_with_creation_elapsed());
             drop(driver);
             self.cancel_goal_backoff_wake();
             Some((
@@ -817,7 +818,9 @@ impl SessionEngine for AgentSessionEngine {
             let session = engine.session.shared_persistence();
             let manager = session.lock().await;
             driver.reload_from_branch(&manager, goal_reload);
-            let announcement = self.publish_goal_state(&driver.state_with_creation_elapsed());
+            let announcement = self
+                .built_handles()
+                .and_then(|handles| handles.publish_goal(&driver.state_with_creation_elapsed()));
             *self
                 .reloaded_goal_update
                 .lock()

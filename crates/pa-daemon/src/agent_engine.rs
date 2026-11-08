@@ -173,8 +173,6 @@ pub struct AgentSessionEngine {
     /// arms clone the Arc and release this mutex before their awaits, so
     /// every read seam answers while a turn streams.
     pub(crate) session: Arc<tokio::sync::Mutex<Option<Arc<CoreSessionEngine>>>>,
-    /// Built, unbuilt, or closed, with the built session's handles (see
-    /// [`core_state::CoreSessionState`]).
     core_state: std::sync::Mutex<core_state::CoreSessionState>,
     threshold_yielded: Arc<std::sync::atomic::AtomicBool>,
     threshold_checks_enabled: Arc<std::sync::atomic::AtomicBool>,

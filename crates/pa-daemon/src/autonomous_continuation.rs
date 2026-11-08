@@ -54,8 +54,8 @@ impl AgentSessionEngine {
                     return Ok(Vec::new());
                 };
                 // An aborted run mints no continuation — a kill that lands
-                // mid-turn never rolls one more zombie turn.
-                if signal.is_aborted() || engine.session_is_closed() {
+                // mid-turn never rolls one more zombie turn (the rows check the close).
+                if signal.is_aborted() {
                     return Ok(Vec::new());
                 }
                 Ok(engine.autonomous_continuation_rows(&context.message).await)
