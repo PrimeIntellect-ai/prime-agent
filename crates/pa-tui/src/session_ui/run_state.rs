@@ -1,13 +1,11 @@
-//! The client's mirror of the daemon's agent run: one state and one writer, which also owns
-//! whether the working loader shows.
+//! The client's mirror of the daemon's agent run, and the one writer that also owns whether the
+//! working loader shows.
 use std::time::Instant;
 
 use super::{AgentView, SessionUi, WorkingState};
 
-/// Whether an agent run is live for this client.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum RunState {
-    #[default]
     Idle,
     /// A prompt was submitted on an idle session and its run has not started yet.
     Submitted,
@@ -15,21 +13,19 @@ pub(crate) enum RunState {
     Running,
 }
 
-/// The inputs that move [`RunState`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum RunEvent {
-    /// The client submitted a prompt.
     Submitted,
-    /// A submit failed or its outcome is unknown (refused, unreachable, timed out, connection
-    /// closed); a run the daemon did start still arrives as `Started`. `others_in_flight` keeps
-    /// the state while another submit can still start the run.
-    SubmitFailed { others_in_flight: bool },
-    /// `agent_start` / `turn_start`.
+    /// A submit failed or its outcome is unknown; a run the daemon did start still arrives as
+    /// `Started`. `others_in_flight` keeps the state while another submit can still start it.
+    SubmitFailed {
+        others_in_flight: bool,
+    },
     Started,
-    /// `agent_end` / `session_closed`.
     Ended,
-    /// An attach snapshot; `streaming` when it reports a live run or compaction.
-    Attached { streaming: bool },
+    Attached {
+        streaming: bool,
+    },
 }
 
 impl RunState {
@@ -51,14 +47,8 @@ impl RunState {
 }
 
 impl SessionUi {
-    /// Whether a run is submitted or live (the busy guards, barriers and the spinner read this).
-    pub(crate) fn run_busy(&self) -> bool {
-        self.run_state.is_busy()
-    }
-
-    /// The one writer of the run state and of the loader's presence (`view.working`,
-    /// `view.working_since`). Every run or turn start restarts the loader; a re-attached run
-    /// anchors it at the LAST HUMAN PROMPT (the operator's 2026-09-28 rule).
+    /// Every run or turn start restarts the loader; a re-attached run anchors it at the LAST
+    /// HUMAN PROMPT (the operator's 2026-09-28 rule).
     pub(crate) fn apply_run_event(&mut self, event: RunEvent, view: &mut AgentView) {
         let was = self.run_state;
         self.run_state = was.next(event);
@@ -73,7 +63,7 @@ impl SessionUi {
                 .loader_anchor_ms
                 .and_then(Self::loader_anchor_instant)
                 .unwrap_or_else(Instant::now),
-            RunEvent::Submitted if !was.is_busy() => Instant::now(),
+            RunEvent::Submitted if was == RunState::Idle => Instant::now(),
             _ => return,
         };
         view.working = Some(WorkingState {

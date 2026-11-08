@@ -240,16 +240,14 @@ pub(crate) struct SessionUi {
     pending_model_provider: Option<String>,
     pending_thinking_suffix: Option<String>,
     pending_queue: Option<crate::queued::QueuedMessages>,
-    /// The attach snapshot's live-run flag. Every successful `attach_session` is followed by its
-    /// `rebuild_view` in the same handler, and session events apply only in the run loop's arms,
-    /// never in between (the same order `pending_snapshot` and `pending_queue` rely on).
+    /// Like `pending_snapshot`: the rebuild that follows every attach applies it, before any event.
     pending_run_streaming: Option<bool>,
     queue_selection: crate::queued::QueueSelection,
     context: Option<crate::chrome::ContextUsage>,
     list_rows: Vec<Value>,
     /// The client's mirror of the daemon's agent run: one state whose only
     /// writer also owns the working loader.
-    run_state: RunState,
+    pub(crate) run_state: RunState,
     /// The open run's outcome so far: done, error after a failed step,
     /// idle after a cancellation.
     run_outcome: crate::program_status::Status,
@@ -491,7 +489,7 @@ impl SessionUi {
     /// run is in flight, including a pending provider retry, or while a
     /// compaction runs; else the remembered outcome or idle.
     pub(crate) fn program_status(&self, view: &AgentView) -> crate::program_status::Status {
-        if self.run_busy() || view.retry.is_some() || view.compaction.is_some() {
+        if self.run_state.is_busy() || view.retry.is_some() || view.compaction.is_some() {
             crate::program_status::Status::Working
         } else {
             self.settled.unwrap_or(crate::program_status::Status::Idle)
