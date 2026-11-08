@@ -160,9 +160,6 @@ struct ChildRecord {
     model: String,
     label: String,
     started_at_ms: u64,
-    /// The run's verdict and whether the settle funnel fired. The funnel fires
-    /// only after the terminal notice is delivered; the verdict lands earlier,
-    /// so the quiescence predicate waits out the notice window.
     run: RunState,
     answer_preview: Option<String>,
     /// The full final-answer text (bounded by

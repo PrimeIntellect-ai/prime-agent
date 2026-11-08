@@ -501,15 +501,10 @@ impl SupervisorChildSessionsInner {
             .as_deref()
             .map(|text| cap_text(text, ANSWER_TEXT_MAX_CHARS));
         let mut record = record.lock().await;
-        // The settle verdict is one-shot, the answer capture is not: a
-        // `None` first capture (the settle raced the worker's answer
-        // hand-off) froze the row empty before — the capture fill only
-        // ran while the run had no verdict, so a later refresh could
-        // never deliver the text and a re-collect answered the same empty
-        // envelope forever. The fill now runs on every refresh: it only
-        // writes when the fresh round trip produced a text AND the row has
-        // no answer yet, so a settled preview is still never overwritten
-        // with a later miss.
+        // The verdict is one-shot, the answer capture is not: a first
+        // capture can miss (the settle raced the worker's answer hand-off),
+        // so every refresh fills a row that has no answer yet, and a
+        // settled preview is never overwritten with a later miss.
         record.run.apply(RunEvent::IdleRead { final_turn_error });
         if (!record.answer_captured || record.answer_preview.is_none()) && answer.is_some() {
             record.answer_preview = answer;
@@ -742,16 +737,11 @@ impl SupervisorChildSessionsInner {
                 return;
             }
             record.notice_delivered = true;
-            let failure = match record.run.verdict() {
-                Some(RunVerdict::Error(Some(error))) => Some(error.clone()),
-                Some(RunVerdict::Done | RunVerdict::Error(None) | RunVerdict::Cancelled(_))
-                | None => None,
-            };
-            if let Some(error) = failure {
+            if let Some(RunVerdict::Error(Some(error))) = record.run.verdict() {
                 create_rlm_child_failure_message(
                     &record.rlm_child_id,
                     &record.session_name,
-                    &error,
+                    error,
                     now_ms(),
                 )
             } else {

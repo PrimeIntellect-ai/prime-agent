@@ -1,7 +1,6 @@
 //! One child's run status: running, a verdict, or settled once the settle
 //! funnel fired. [`RunState::apply`] is its only writer.
 
-/// One child's run status.
 #[derive(Debug)]
 pub(super) struct RunState(RunPhase);
 
@@ -26,7 +25,6 @@ pub(super) enum RunVerdict {
     Cancelled(Option<String>),
 }
 
-/// One run-status transition.
 pub(super) enum RunEvent {
     /// The worker read idle past the settle grace: `done`, or `error` when the
     /// run's final turn failed.
@@ -80,21 +78,12 @@ impl RunState {
                 (RunPhase::Settled(deleted_by_parent()), true)
             }
             (RunPhase::Verdict(verdict), RunEvent::Funnel) => (RunPhase::Settled(verdict), true),
-            (phase @ RunPhase::Running, RunEvent::CancelRefused | RunEvent::Funnel)
-            | (
-                phase @ (RunPhase::Verdict(_) | RunPhase::Settled(_)),
-                RunEvent::IdleRead { .. }
-                | RunEvent::Failed(_)
-                | RunEvent::Cancel { .. }
-                | RunEvent::CancelRefused,
-            )
-            | (phase @ RunPhase::Settled(_), RunEvent::Funnel) => (phase, false),
+            (phase, _) => (phase, false),
         };
         self.0 = next;
         changed
     }
 
-    /// `running` | `done` | `error` | `cancelled`.
     pub(super) fn status(&self) -> &'static str {
         match self.verdict() {
             None => "running",
