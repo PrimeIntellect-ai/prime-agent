@@ -94,7 +94,7 @@ impl SessionUi {
         }
         streaming_tray_hint(
             &self.keybindings,
-            self.run_state.is_busy(),
+            self.run_busy(),
             &view.editor.get_expanded_text(),
         )
     }

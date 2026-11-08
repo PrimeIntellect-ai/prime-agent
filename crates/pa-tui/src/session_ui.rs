@@ -247,7 +247,7 @@ pub(crate) struct SessionUi {
     list_rows: Vec<Value>,
     /// The client's mirror of the daemon's agent run: one state whose only
     /// writer also owns the working loader.
-    pub(crate) run_state: RunState,
+    run_state: RunState,
     /// The open run's outcome so far: done, error after a failed step,
     /// idle after a cancellation.
     run_outcome: crate::program_status::Status,
