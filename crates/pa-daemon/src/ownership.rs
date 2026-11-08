@@ -201,7 +201,6 @@ impl Supervisor {
         }
         // The recovery reset (TS `retryWorkerRecovery`): the persisted stop
         // flags go, the lifecycle reports recovering until the relaunch lands.
-        // A stopping worker was refused above, so no stop intent is live.
         resident
             .consecutive_failures
             .store(0, std::sync::atomic::Ordering::SeqCst);

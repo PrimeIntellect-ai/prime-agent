@@ -69,17 +69,15 @@ impl WorkerReply {
     }
 }
 
-/// How a resident's supervised life ends.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum WorkerEnd {
     /// Supervised: an exit is a crash the monitor relaunches.
     Live,
-    /// An intentional stop is under way: the exit is not a crash. An
-    /// abandoned update stop resumes the worker.
+    /// An intentional stop is under way: the exit is not a crash.
     Stopping,
-    /// The stop retired the worker: it will not come back.
+    /// Retired by the stop: it will not come back.
     Stopped,
-    /// The crash path gave up: it will not come back.
+    /// Retired by the crash path's give-up.
     GaveUp,
 }
 
@@ -119,31 +117,24 @@ impl WorkerRouteState {
             WorkerTransition::ConnectionLost => self.connected = false,
             WorkerTransition::SessionReady => self.session_ready = true,
             WorkerTransition::SessionReplaying => self.session_ready = false,
-            WorkerTransition::RequestStop => {
-                self.end = match self.end {
-                    WorkerEnd::Live | WorkerEnd::Stopping => WorkerEnd::Stopping,
-                    WorkerEnd::Stopped | WorkerEnd::GaveUp => WorkerEnd::Stopped,
-                }
+            WorkerTransition::RequestStop if self.retired() => self.end = WorkerEnd::Stopped,
+            WorkerTransition::RequestStop => self.end = WorkerEnd::Stopping,
+            // A retired worker stays retired.
+            WorkerTransition::ResumeStopped if self.end == WorkerEnd::Stopping => {
+                self.end = WorkerEnd::Live;
             }
-            WorkerTransition::ResumeStopped => {
-                if self.end == WorkerEnd::Stopping {
-                    self.end = WorkerEnd::Live;
-                }
-            }
+            WorkerTransition::ResumeStopped => {}
             WorkerTransition::RetireStopped => self.end = WorkerEnd::Stopped,
-            WorkerTransition::GiveUp => {
-                self.end = match self.end {
-                    WorkerEnd::Live | WorkerEnd::GaveUp => WorkerEnd::GaveUp,
-                    WorkerEnd::Stopping | WorkerEnd::Stopped => WorkerEnd::Stopped,
-                }
-            }
+            // A stop that raced the give-up keeps the stop's end.
+            WorkerTransition::GiveUp if self.stop_requested() => self.end = WorkerEnd::Stopped,
+            WorkerTransition::GiveUp => self.end = WorkerEnd::GaveUp,
         }
     }
 }
 
-/// The transitions of [`WorkerRouteState`]. The connection pair is written
-/// only by the channel install/loss under the channel lock and epoch fence.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// The connection pair is written only by the channel install/loss, under the
+/// channel lock and epoch fence.
+#[derive(Clone, Copy)]
 pub(crate) enum WorkerTransition {
     ConnectionInstalled,
     ConnectionLost,
@@ -152,12 +143,9 @@ pub(crate) enum WorkerTransition {
     /// A replacement's create replay is pending.
     SessionReplaying,
     RequestStop,
-    /// An abandoned update stop hands the worker back to supervision (a
-    /// retired worker stays retired).
+    /// An abandoned update stop hands the worker back to supervision.
     ResumeStopped,
-    /// The stop retired the worker for good.
     RetireStopped,
-    /// The crash path gave up (a stop in flight retires as a stop).
     GiveUp,
 }
 
