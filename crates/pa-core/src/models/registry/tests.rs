@@ -454,3 +454,85 @@ async fn scope_readiness_timeout_keeps_models_available_before_refresh() {
         vec![existing]
     );
 }
+
+#[test]
+fn a_prime_base_url_override_voids_the_live_serving_label() {
+    let dir = tempfile::tempdir().unwrap();
+    // A live snapshot over the full compiled floor with every route
+    // declared hosted (the coverage gate must accept it), scoped to one
+    // credential.
+    let auth = || {
+        auth_without_env(&serde_json::json!({
+            "prime-inference": { "type": "api_key", "key": "live-key",
+                "primeTeam": { "teamId": "team-1", "name": "Team 1" } }
+        }))
+    };
+    let compiled = pa_models::transports::prime_inference_offline_entries();
+    let entries: Vec<_> = compiled
+        .iter()
+        .map(|model| {
+            serde_json::json!({
+                "id": model.id,
+                "display_name": model.name,
+                "serving": "hosted",
+                "pricing": {
+                    "input_usd_per_mtok": model.cost.input.as_f64(),
+                    "output_usd_per_mtok": model.cost.output.as_f64(),
+                },
+                "specs": {
+                    "context_window": model.context_window,
+                    "max_output_tokens": model.max_tokens,
+                    "supports_reasoning": model.reasoning,
+                    "modalities": { "input": ["text"], "output": ["text"] },
+                },
+            })
+        })
+        .collect();
+    let scope = pa_models::prime_inference::scope_key("live-key", "team-1");
+    let snapshot = serde_json::json!({
+        "url": format!("{}/models", super::super::prime_inference::PRIME_INFERENCE_BASE_URL),
+        "scope": scope,
+        "fetchedAt": 1,
+        "payload": { "data": entries },
+    });
+    std::fs::create_dir_all(dir.path().join("models")).unwrap();
+    std::fs::write(
+        dir.path().join("models/prime-inference-models-cache.json"),
+        serde_json::to_vec(&snapshot).unwrap(),
+    )
+    .unwrap();
+    let probe_id = compiled[0].id.clone();
+    let pi_probe = |registry: &ModelRegistry| {
+        registry
+            .get_all()
+            .iter()
+            .find(|model| model.id == probe_id && model.provider == "prime-inference")
+            .cloned()
+            .expect("probe model")
+    };
+    // Without an override the live label survives the chain.
+    let plain_path = dir.path().join("models.json");
+    std::fs::write(&plain_path, "{}").unwrap();
+    let registry = ModelRegistry::create(auth(), &plain_path);
+    let probe = pi_probe(&registry);
+    assert_eq!(probe.serving, Some(pa_types::ai::ModelServing::Hosted));
+    assert_eq!(
+        probe.base_url,
+        super::super::prime_inference::PRIME_INFERENCE_BASE_URL
+    );
+    // A provider-level baseUrl override repoints the endpoint: the live
+    // catalog's serving class no longer describes the route, so the
+    // label must not claim it.
+    let overridden_path = dir.path().join("overridden-models.json");
+    std::fs::write(
+        &overridden_path,
+        r#"{ "providers": { "prime-inference": {
+            "baseUrl": "https://my-gateway.example/v1"
+        } } }"#,
+    )
+    .unwrap();
+    let registry = ModelRegistry::create(auth(), &overridden_path);
+    let probe = pi_probe(&registry);
+    assert_eq!(probe.base_url, "https://my-gateway.example/v1");
+    assert_eq!(probe.serving, None, "the override voids the label");
+}

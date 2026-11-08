@@ -700,6 +700,7 @@ mod tests {
             max_tokens: 8_000,
             max_tokens_explicit: false,
             featured: None,
+            serving: None,
             headers: None,
             compat: None,
         }

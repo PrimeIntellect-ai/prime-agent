@@ -461,6 +461,7 @@ mod tests {
             featured: None,
             headers: None,
             compat: None,
+            serving: None,
         };
         let request_id = None;
         let mut output = crate::event_stream::initial_assistant_message(
@@ -519,6 +520,7 @@ mod tests {
             featured: None,
             headers: None,
             compat: None,
+            serving: None,
         }
     }
 

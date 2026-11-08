@@ -504,6 +504,7 @@ mod prompt_caching_gate_tests {
             featured: None,
             headers: None,
             compat: None,
+            serving: None,
         }
     }
 
@@ -560,6 +561,7 @@ mod convert_messages_tests {
             featured: None,
             headers: None,
             compat: None,
+            serving: None,
         }
     }
 

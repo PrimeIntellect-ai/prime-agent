@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use hmac::{Hmac, Mac};
 use pa_types::ai::{
-    CompatKind, Model, ModelCompat, ModelCost, ModelInput, ModelThinkingLevel,
+    CompatKind, Model, ModelCompat, ModelCost, ModelInput, ModelServing, ModelThinkingLevel,
     OpenAiCompletionsCompat, ThinkingFormat, ThinkingLevelMap,
 };
 use pa_types::JsNumber;
@@ -48,6 +48,10 @@ pub struct PrimeInferenceEntry {
     /// route has no effort selector.
     pub reasoning_efforts: Option<Vec<String>>,
     pub reasoning_mandatory: Option<bool>,
+    /// How the route is served (the live `serving` field): `Some(Hosted)`
+    /// on Prime's own clusters, `Some(Gateway)` through the Prime gateway;
+    /// `None` when the route does not declare it.
+    pub serving: Option<ModelServing>,
 }
 
 /// Reasoning request controls derived from a live Prime Inference catalog
@@ -187,6 +191,11 @@ struct WireItem {
     /// The raw `reasoning` object (`supported_efforts`, `mandatory`).
     #[serde(default)]
     reasoning: Option<serde_json::Value>,
+    /// The raw `serving` field (`hosted` or `gateway`): any other value
+    /// drops to `None` instead of failing the item, so a future value
+    /// never hides the model.
+    #[serde(default)]
+    serving: Option<serde_json::Value>,
 }
 
 // Wire contract: the field names mirror the Prime Inference `/models`
@@ -339,11 +348,21 @@ pub fn parse_prime_inference_model_catalog(
             .and_then(|spec| spec.get("mandatory"))
             .and_then(serde_json::Value::as_bool)
             .filter(|mandatory| *mandatory);
+        let serving = wire
+            .serving
+            .as_ref()
+            .and_then(serde_json::Value::as_str)
+            .and_then(|serving| match serving {
+                "hosted" => Some(ModelServing::Hosted),
+                "gateway" => Some(ModelServing::Gateway),
+                _ => None,
+            });
         let mut entry = PrimeInferenceEntry {
             id: wire.id,
             name,
             input,
             output,
+            serving,
             cache_read: wire
                 .pricing
                 .cache_read_usd_per_mtok
@@ -530,6 +549,7 @@ pub fn build_prime_inference_models(
             // stay capped: only explicit configuration flips the flag.
             max_tokens_explicit: false,
             featured: template.and_then(|t| t.featured),
+            serving: entry.serving,
             headers: None,
             compat: Some(compat),
         });
@@ -752,6 +772,65 @@ mod tests {
         assert!(parse_prime_inference_model_catalog(&json!({"data": []}), false).is_err());
         assert!(parse_prime_inference_model_catalog(&json!({"data": []}), true).is_ok());
         assert!(parse_prime_inference_model_catalog(&json!({}), false).is_err());
+    }
+
+    #[test]
+    fn parse_labels_the_serving_class() {
+        let mut hosted = wire_entry("z-ai/glm-5.3", 1.0, 2.0);
+        hosted["serving"] = json!("hosted");
+        let mut gateway = wire_entry("anthropic/claude-fable-5", 1.0, 2.0);
+        gateway["serving"] = json!("gateway");
+        let mut unknown = wire_entry("qwen/qwen3.8-max", 1.0, 4.0);
+        unknown["serving"] = json!("quantum");
+        let unlabeled = wire_entry("openai/gpt-5.6", 1.0, 2.0);
+        let value = json!({"data": [hosted, gateway, unknown, unlabeled]});
+        let entries = parse_prime_inference_model_catalog(&value, false).expect("entries");
+        let serving: Vec<Option<ModelServing>> =
+            entries.iter().map(|entry| entry.serving).collect();
+        assert_eq!(
+            serving,
+            vec![
+                Some(ModelServing::Hosted),
+                Some(ModelServing::Gateway),
+                None,
+                None
+            ],
+            "declared serving classes parse; unknown and absent stay unlabeled"
+        );
+    }
+
+    #[test]
+    fn build_carries_the_serving_class() {
+        let compiled = transports::prime_inference_offline_entries();
+        let ids: Vec<&str> = compiled.iter().map(|m| m.id.as_str()).take(60).collect();
+        let mut value = payload(&ids);
+        for entry in value["data"].as_array_mut().expect("data") {
+            entry["serving"] = if entry["id"] == ids[0] {
+                json!("hosted")
+            } else {
+                json!("gateway")
+            };
+        }
+        let entries = parse_prime_inference_model_catalog(&value, false).expect("entries");
+        let built = build_prime_inference_models(&compiled, &entries, false, None).expect("built");
+        let serving: Vec<(String, Option<ModelServing>)> = built
+            .iter()
+            .map(|model| (model.id.clone(), model.serving))
+            .collect();
+        let expected: Vec<(String, Option<ModelServing>)> = ids
+            .iter()
+            .map(|id| {
+                (
+                    (*id).to_string(),
+                    if *id == ids[0] {
+                        Some(ModelServing::Hosted)
+                    } else {
+                        Some(ModelServing::Gateway)
+                    },
+                )
+            })
+            .collect();
+        assert_eq!(serving, expected);
     }
 
     #[test]
@@ -1030,6 +1109,7 @@ mod tests {
             max_tokens: 10_000,
             max_tokens_explicit: false,
             featured: Some(true),
+            serving: None,
             headers: None,
             compat: Some(ModelCompat::from_kind(CompatKind::OpenAiCompletions(
                 Box::new(OpenAiCompletionsCompat {

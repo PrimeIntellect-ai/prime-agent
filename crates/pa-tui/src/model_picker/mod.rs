@@ -8,7 +8,7 @@ mod render;
 use std::collections::{HashMap, HashSet};
 
 use pa_types::ai::{
-    clamp_thinking_level, get_supported_thinking_levels, Model, ModelThinkingLevel,
+    clamp_thinking_level, get_supported_thinking_levels, Model, ModelServing, ModelThinkingLevel,
     PRIME_INFERENCE_PROVIDER_ID,
 };
 
@@ -783,7 +783,15 @@ impl ModelPicker {
         if !self.is_configured(model) {
             segments.push("require sign in".to_string());
         }
-        segments.push(model.provider.clone());
+        // Prime Inference routes split into their serving class (the live
+        // catalog labels each route hosted or gateway); unlabeled routes and
+        // every other provider show the provider id.
+        let provider = match (model.provider.as_str(), model.serving) {
+            (PRIME_INFERENCE_PROVIDER_ID, Some(ModelServing::Hosted)) => "prime hosted",
+            (PRIME_INFERENCE_PROVIDER_ID, Some(ModelServing::Gateway)) => "prime gateway",
+            _ => model.provider.as_str(),
+        };
+        segments.push(provider.to_string());
         segments
     }
 }
