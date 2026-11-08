@@ -2,8 +2,7 @@
 
 use super::{
     json, live_kernels, lock, oneshot, orphan_journal, Arc, Duration, Inner, KernelShutdownOptions,
-    KernelState, Lifecycle, MemoSlot, Signal, HOST_REQUEST_SHUTDOWN_TIMEOUT_MS,
-    KERNEL_SHUTDOWN_TIMEOUT_MS,
+    Lifecycle, MemoSlot, Signal, HOST_REQUEST_SHUTDOWN_TIMEOUT_MS, KERNEL_SHUTDOWN_TIMEOUT_MS,
 };
 
 impl Inner {
@@ -37,7 +36,7 @@ impl Inner {
     }
 
     pub(crate) async fn perform_shutdown(self: &Arc<Self>, opts: KernelShutdownOptions) -> bool {
-        if lock(&self.guarded).lifecycle.phase() == KernelState::Shutdown {
+        if lock(&self.guarded).lifecycle.is_shut_down() {
             live_kernels::remove(self);
             let graceful_in_flight = lock(&self.guarded).lifecycle.graceful_shutdown_in_flight();
             if graceful_in_flight {
@@ -56,8 +55,7 @@ impl Inner {
         }
         // Protocol shutdown first: the runtime closes MCP servers and kills
         // live bash() process groups a bare hard-kill would leak.
-        let protocol_shutdown_available =
-            lock(&self.guarded).lifecycle.phase() == KernelState::Running;
+        let protocol_shutdown_available = lock(&self.guarded).lifecycle.is_running();
         lock(&self.guarded)
             .lifecycle
             .transition(Lifecycle::ShuttingDown { generation });
@@ -132,13 +130,7 @@ impl Inner {
         if let Some(id) = request_id {
             lock(&self.guarded).pending_done_waiters.remove(&id);
         }
-        {
-            let mut g = lock(&self.guarded);
-            if matches!(g.lifecycle.current(), Lifecycle::ShuttingDown { generation: owner } if *owner == generation)
-            {
-                g.lifecycle.transition(Lifecycle::Defunct);
-            }
-        }
+        lock(&self.guarded).lifecycle.transition(Lifecycle::Defunct);
         if !self.start_stale(generation) {
             self.cleanup_resources(Signal::Term);
             performed_cleanup = true;

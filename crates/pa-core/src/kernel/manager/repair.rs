@@ -3,8 +3,8 @@
 
 use super::{
     anyhow, live_kernels, lock, AbortSignal, Arc, AtomicBool, ExecuteOptions, ExecuteStatus, Inner,
-    KernelStartOptions, KernelState, Lifecycle, MemoSlot, Ordering, RepairHandle, RepairOwner,
-    Request, Signal, REPAIR_STEP_TIMEOUT_MS,
+    KernelStartOptions, Lifecycle, MemoSlot, Ordering, RepairHandle, RepairOwner, Request, Signal,
+    REPAIR_STEP_TIMEOUT_MS,
 };
 
 impl Inner {
@@ -23,9 +23,7 @@ impl Inner {
             }
         }
         self.reject_active_execution(&error);
-        if lock(&self.shutdown_memo).is_some()
-            || lock(&self.guarded).lifecycle.phase() != KernelState::Running
-        {
+        if lock(&self.shutdown_memo).is_some() || !lock(&self.guarded).lifecycle.is_running() {
             return;
         }
         let existing = lock(&self.guarded).protocol_repair.clone();
@@ -82,9 +80,7 @@ impl Inner {
     /// Replace the corrupted child: fresh spawn, restore the saved namespace,
     /// re-run the runtime bootstrap. Never lets a failure wedge the kernel.
     async fn repair_protocol_child(self: &Arc<Self>, generation: u64, owner: Arc<RepairOwner>) {
-        if self.start_stale(generation)
-            || lock(&self.guarded).lifecycle.phase() == KernelState::Shutdown
-        {
+        if self.start_stale(generation) || lock(&self.guarded).lifecycle.is_shut_down() {
             return;
         }
         self.kill_child_to_idle();
@@ -94,17 +90,13 @@ impl Inner {
             return;
         }
         let generation = self.current_generation();
-        if self.start_stale(generation)
-            || lock(&self.guarded).lifecycle.phase() != KernelState::Running
-        {
+        if self.start_stale(generation) || !lock(&self.guarded).lifecycle.is_running() {
             self.finish_failed_protocol_repair(&owner, None);
             return;
         }
 
         let restored = self.perform_restore(true).await;
-        if self.start_stale(generation)
-            || lock(&self.guarded).lifecycle.phase() != KernelState::Running
-        {
+        if self.start_stale(generation) || !lock(&self.guarded).lifecycle.is_running() {
             self.finish_failed_protocol_repair(&owner, None);
             return;
         }
@@ -128,9 +120,7 @@ impl Inner {
             return;
         };
         let bootstrapped = self.bootstrap_repaired_kernel(&code).await;
-        if self.start_stale(generation)
-            || lock(&self.guarded).lifecycle.phase() != KernelState::Running
-        {
+        if self.start_stale(generation) || !lock(&self.guarded).lifecycle.is_running() {
             self.finish_failed_protocol_repair(&owner, None);
             return;
         }
@@ -204,7 +194,7 @@ impl Inner {
         if (!needs_restore && !needs_bootstrap)
             || lock(&self.guarded).protocol_repair.is_some()
             || lock(&self.shutdown_memo).is_some()
-            || lock(&self.guarded).lifecycle.phase() != KernelState::Running
+            || !lock(&self.guarded).lifecycle.is_running()
         {
             return Ok(());
         }
@@ -249,7 +239,7 @@ impl Inner {
             self.perform_restore(true).await; // clears pendingRestore on success
                                               // Corrupted during the restore: the spawned repair owns the kernel now.
             if lock(&self.guarded).protocol_repair.is_some()
-                || lock(&self.guarded).lifecycle.phase() != KernelState::Running
+                || !lock(&self.guarded).lifecycle.is_running()
             {
                 return false;
             }
@@ -264,7 +254,7 @@ impl Inner {
             return true;
         }
         let ok = self.bootstrap_repaired_kernel(&code).await;
-        if !ok && lock(&self.guarded).lifecycle.phase() == KernelState::Running {
+        if !ok && lock(&self.guarded).lifecycle.is_running() {
             self.kill_child_to_idle();
         }
         ok
@@ -293,7 +283,7 @@ impl Inner {
             return;
         }
         let mut g = lock(&self.guarded);
-        if g.lifecycle.phase() == KernelState::Shutdown {
+        if g.lifecycle.is_shut_down() {
             g.lifecycle.transition(Lifecycle::Idle);
         }
     }

@@ -4,7 +4,7 @@
 use super::{
     anyhow, json, lock, merge_signals, oneshot, AbortSignal, ActiveExecution, Arc, AsyncWriteExt,
     Duration, ExecBuffers, ExecuteOptions, ExecuteResult, ExecuteStatus, Instant,
-    InternalExecuteResult, KernelStartOptions, KernelState, Mutex, ReplKernelManager, Request,
+    InternalExecuteResult, KernelStartOptions, Mutex, ReplKernelManager, Request,
     DEFAULT_MAX_OUTPUT_CHARS, KERNEL_ABORT_GRACE_MS,
 };
 
@@ -188,7 +188,7 @@ impl ReplKernelManager {
             on_bootstrap_progress: None,
         })
         .await?;
-        if self.state() == KernelState::Shutdown {
+        if lock(&self.inner.guarded).lifecycle.is_shut_down() {
             return Err(anyhow!("Kernel has been shut down"));
         }
         if lock(&self.inner.guarded).flushing_snapshot_for_dispose && !opts.internal {
@@ -229,7 +229,7 @@ impl ReplKernelManager {
                 return Ok(InternalExecuteResult::aborted(started));
             }
         }
-        if self.state() == KernelState::Shutdown {
+        if lock(&self.inner.guarded).lifecycle.is_shut_down() {
             return Err(anyhow!("Kernel has been shut down"));
         }
 
@@ -251,10 +251,6 @@ impl ReplKernelManager {
             signal.abort();
         }
         result
-    }
-
-    fn state(&self) -> KernelState {
-        lock(&self.inner.guarded).lifecycle.phase()
     }
 
     #[allow(clippy::too_many_lines)]

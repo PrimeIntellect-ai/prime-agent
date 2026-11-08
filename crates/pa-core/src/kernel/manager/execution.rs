@@ -3,7 +3,7 @@
 
 use super::{
     anyhow, json, lock, parse_sent_agent_message, AbortSignal, ActiveExecution, Arc, AsyncWriteExt,
-    Duration, ExecuteResult, ExecuteStatus, Inner, Instant, InternalExecuteResult, KernelState,
+    Duration, ExecuteResult, ExecuteStatus, Inner, Instant, InternalExecuteResult,
     LateSentAgentMessageCallback, Value, AGENT_MESSAGE_DISPLAY_MIME,
     KERNEL_BUSY_AFTER_INTERRUPT_MESSAGE, KERNEL_BUSY_INTERRUPT_INTERVAL_MS,
     KERNEL_BUSY_REUSE_WAIT_MS, MAX_BACKGROUND_OUTPUT_CHARS, MAX_LATE_SENT_AGENT_MESSAGE_HANDLERS,
@@ -65,7 +65,7 @@ impl Inner {
                 if g.active_execution.is_none() {
                     return Ok(());
                 }
-                if g.lifecycle.phase() == KernelState::Shutdown {
+                if g.lifecycle.is_shut_down() {
                     return Err(anyhow!("Kernel has been shut down"));
                 }
             }

@@ -2,18 +2,8 @@
 
 use super::{oneshot, Arc, MemoSlot};
 
-/// The coarse view of [`Lifecycle`] most readers need.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum KernelState {
-    Idle,
-    Starting,
-    Running,
-    Shutdown,
-}
-
 /// The kernel process lifecycle. Data that only exists in one phase lives in its variant.
 pub(super) enum Lifecycle {
-    /// No child; the next start spawns one.
     Idle,
     Starting(Starting),
     Running,
@@ -39,7 +29,6 @@ pub(super) struct Starting {
 }
 
 impl Lifecycle {
-    /// A start that concurrent starts join through `start`.
     pub(super) fn starting(start: Arc<MemoSlot>) -> Self {
         Self::Starting(Starting {
             start: Some(start),
@@ -85,15 +74,15 @@ impl KernelLifecycle {
         self.generation
     }
 
-    pub(super) fn phase(&self) -> KernelState {
-        match self.current {
-            Lifecycle::Idle => KernelState::Idle,
-            Lifecycle::Starting(_) => KernelState::Starting,
-            Lifecycle::Running => KernelState::Running,
-            Lifecycle::ShuttingDown { .. } | Lifecycle::Discarding | Lifecycle::Defunct => {
-                KernelState::Shutdown
-            }
-        }
+    pub(super) fn is_running(&self) -> bool {
+        matches!(self.current, Lifecycle::Running)
+    }
+
+    pub(super) fn is_shut_down(&self) -> bool {
+        matches!(
+            self.current,
+            Lifecycle::ShuttingDown { .. } | Lifecycle::Discarding | Lifecycle::Defunct
+        )
     }
 
     /// The data of the start in progress; the lifecycle itself stays unchanged.

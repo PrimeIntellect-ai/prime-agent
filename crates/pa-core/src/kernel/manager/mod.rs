@@ -403,7 +403,7 @@ mod snapshot;
 mod startup;
 mod teardown;
 
-use lifecycle::{KernelLifecycle, KernelState, Lifecycle, Starting};
+use lifecycle::{KernelLifecycle, Lifecycle, Starting};
 use requests::{append_truncated, describe_failure, HeadTailBuffer, Signal};
 
 // Public API
@@ -477,7 +477,7 @@ impl ReplKernelManager {
 
     #[must_use]
     pub fn is_running(&self) -> bool {
-        lock(&self.inner.guarded).lifecycle.phase() == KernelState::Running
+        lock(&self.inner.guarded).lifecycle.is_running()
     }
 
     /// The kernel died or was torn down (or a graceful shutdown is under way): only a

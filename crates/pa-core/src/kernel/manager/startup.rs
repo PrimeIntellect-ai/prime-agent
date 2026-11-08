@@ -4,7 +4,7 @@
 use super::{
     anyhow, live_kernels, lock, oneshot, orphan_journal, parse_event, Arc, AsyncReadExt, BufReader,
     ChildHandle, Duration, ExitInfo, HashMap, Inner, KernelShutdownOptions, KernelStartOptions,
-    KernelState, Lifecycle, MemoSlot, Mutex, Ordering, Signal, Starting, StderrLog, Write,
+    Lifecycle, MemoSlot, Mutex, Ordering, Signal, Starting, StderrLog, Write,
     KERNEL_STDERR_LOG_BUDGET_MARKER, MAX_KERNEL_STDERR_CHARS, MAX_KERNEL_STDERR_LOG_BYTES,
     MAX_PROTOCOL_LINE_BYTES, READY_TIMEOUT_MS, REPL_PROTOCOL_VERSION,
 };
@@ -179,7 +179,7 @@ impl Inner {
                 }
                 live_kernels::remove(self);
                 let mut g = lock(&self.guarded);
-                if g.lifecycle.phase() != KernelState::Shutdown {
+                if !g.lifecycle.is_shut_down() {
                     g.lifecycle.transition(Lifecycle::Idle);
                 }
                 return Err(error);
@@ -189,7 +189,7 @@ impl Inner {
         if self.start_stale(generation) {
             return Err(anyhow!("Kernel start superseded"));
         }
-        if lock(&self.guarded).lifecycle.phase() == KernelState::Shutdown {
+        if lock(&self.guarded).lifecycle.is_shut_down() {
             return Err(anyhow!("Kernel was disposed during startup"));
         }
 
@@ -243,8 +243,7 @@ impl Inner {
                 // The child died or never reached ready, so the memoized runtime-ready
                 // result is stale: drop it and let a startup retry re-probe.
                 crate::kernel::bootstrap::invalidate_runtime_probe_cache();
-                let can_retry_startup =
-                    lock(&self.guarded).lifecycle.phase() != KernelState::Shutdown;
+                let can_retry_startup = !lock(&self.guarded).lifecycle.is_shut_down();
                 // Only the call that performed the cleanup may resurrect to
                 // idle; a concurrent kill()/teardown owns the state otherwise.
                 let performed = self
@@ -472,7 +471,7 @@ impl Inner {
                 if g.lifecycle.graceful_shutdown_in_flight() {
                     (false, true)
                 } else {
-                    let was_live = g.lifecycle.phase() != KernelState::Shutdown;
+                    let was_live = !g.lifecycle.is_shut_down();
                     g.lifecycle.transition(Lifecycle::Defunct);
                     (was_live, false)
                 }
