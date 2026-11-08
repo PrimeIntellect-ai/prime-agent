@@ -1701,6 +1701,17 @@ class RunState(enum.StrEnum):
 # A done or failed run whose resident children still run is live too (callers check its children).
 LIVE_RUN_STATES = frozenset({RunState.RUNNING, RunState.STOPPING, RunState.PAUSED})
 
+#: The allowed moves of ``FactoryExecutor._transition``. A done or failed run
+#: moves to stopping when stop() tears down its still-running residents.
+_RUN_TRANSITIONS: dict[RunState, frozenset[RunState]] = {
+    RunState.RUNNING: frozenset({RunState.PAUSED, RunState.STOPPING, RunState.DONE, RunState.FAILED}),
+    RunState.PAUSED: frozenset({RunState.RUNNING, RunState.STOPPING}),
+    RunState.STOPPING: frozenset({RunState.STOPPED}),
+    RunState.DONE: frozenset({RunState.STOPPING}),
+    RunState.FAILED: frozenset({RunState.STOPPING}),
+    RunState.STOPPED: frozenset(),
+}
+
 
 @dataclass
 class FactoryRun:
@@ -1962,13 +1973,12 @@ class FactoryExecutor:
         finished = run.state in (RunState.DONE, RunState.FAILED) and self._running_instance_count(run) == 0
         if finished or run.state in (RunState.STOPPING, RunState.STOPPED):
             return {"run_id": run.run_id, "state": run.state.value, "cancelled": []}
-        run.state = RunState.STOPPING
-        run.pause_reason = None
+        self._transition(run, RunState.STOPPING)
         self._touch(run)
         stopped = await self._halt_nonterminal(run, "run stopped")
-        run.state = RunState.STOPPED
+        self._transition(run, RunState.STOPPED)
         self._event(run, "run_stopped", detail=f"stopped; {len(stopped)} state(s) cancelled")
-        return {"run_id": run.run_id, "state": "stopped", "cancelled": stopped}
+        return {"run_id": run.run_id, "state": run.state.value, "cancelled": stopped}
 
     async def resume(self, run_id: str) -> dict[str, Any]:
         """Resume a paused run (escalate, budget, or max_transitions pause).
@@ -1991,8 +2001,7 @@ class FactoryExecutor:
         # as a SECOND loop, admitting and settling the same instances
         # alongside the loop started below.
         run.loop_generation += 1
-        run.state = RunState.RUNNING
-        run.pause_reason = None
+        self._transition(run, RunState.RUNNING)
         # Re-arm the pause notice: the escalate -> resume -> fail-again
         # retry flow must tell the parent about every pause, not only the
         # first. The budget and max_* notices stay one per run.
@@ -2617,6 +2626,14 @@ class FactoryExecutor:
         self._touch(run)
         return event
 
+    def _transition(self, run: FactoryRun, new: RunState, *, pause_reason: str | None = None) -> None:
+        """The one writer of ``run.state`` and ``run.pause_reason``: moves the
+        run along ``_RUN_TRANSITIONS``; a pause carries its reason."""
+        if new not in _RUN_TRANSITIONS[run.state] or (new == RunState.PAUSED) != (pause_reason is not None):
+            raise RuntimeError(f"factory run {run.run_id}: invalid transition {run.state} -> {new}")
+        run.state = new
+        run.pause_reason = pause_reason
+
     def _touch(self, run: FactoryRun) -> None:
         """Bump the run's watch revision and wake every registered watcher."""
         run.revision += 1
@@ -2746,8 +2763,7 @@ class FactoryExecutor:
                     run.max_transitions_reported = True
                     entry.consumed = False
                     run.pending_evaluations.insert(0, (state_id, entry_index, transition_index))
-                    run.state = RunState.PAUSED
-                    run.pause_reason = "max_transitions exceeded"
+                    self._transition(run, RunState.PAUSED, pause_reason="max_transitions exceeded")
                     await self._milestone(
                         run,
                         "max_transitions_exceeded",
@@ -2843,8 +2859,7 @@ class FactoryExecutor:
         the run resumes. Resuming after the milestone is an explicit operator
         decision, so no further budget pauses fire (budget_reported)."""
         elapsed_ms = (self._now_fn() - run.started_at) * 1000
-        run.state = RunState.PAUSED
-        run.pause_reason = "run budget exceeded"
+        self._transition(run, RunState.PAUSED, pause_reason="run budget exceeded")
         run.budget_reported = True
         await self._milestone(
             run,
@@ -2868,8 +2883,7 @@ class FactoryExecutor:
         Children already in flight keep running. Resuming after the
         milestone is an explicit operator decision, so no further
         child-budget pauses fire (max_children_reported)."""
-        run.state = RunState.PAUSED
-        run.pause_reason = "max_children exceeded"
+        self._transition(run, RunState.PAUSED, pause_reason="max_children exceeded")
         run.max_children_reported = True
         await self._milestone(
             run,
@@ -3764,7 +3778,7 @@ class FactoryExecutor:
                 for i in other_entry.instances
                 if i.status == NodeStatus.CANCELLED
             )
-            run.state = RunState.FAILED
+            self._transition(run, RunState.FAILED)
             await self._milestone(
                 run,
                 "failed",
@@ -3774,8 +3788,7 @@ class FactoryExecutor:
         elif policy == "continue":
             pass  # the entry stays error; dependents see the error settle at binding
         else:  # escalate (default)
-            run.state = RunState.PAUSED
-            run.pause_reason = reason
+            self._transition(run, RunState.PAUSED, pause_reason=reason)
             await self._milestone(
                 run,
                 "paused",
@@ -3941,14 +3954,14 @@ class FactoryExecutor:
             if any(entry.status == NodeStatus.ERROR for entry in state.entries)
         ]
         if errors:
-            run.state = RunState.FAILED
+            self._transition(run, RunState.FAILED)
             await self._milestone(
                 run,
                 "failed",
                 "completed with state error(s): " + ", ".join(state.state_id for state in errors),
             )
             return
-        run.state = RunState.DONE
+        self._transition(run, RunState.DONE)
         residents = [
             state
             for state in run.states.values()
@@ -3984,7 +3997,7 @@ class FactoryExecutor:
             # that landed concurrently keeps ownership of the final state.
             self._event(run, "executor_error", error=f"{type(exc).__name__}: {exc}")
             if run.state == RunState.RUNNING:
-                run.state = RunState.FAILED
+                self._transition(run, RunState.FAILED)
                 # Child agents remain supervisor-owned; these subprocesses
                 # have no owner or deadline enforcer after this lane exits.
                 await self._cancel_python(run)
@@ -4086,7 +4099,7 @@ class FactoryExecutor:
                     "queued instances can never be admitted"
                 )
                 self._event(run, "executor_error", error=reason)
-                run.state = RunState.FAILED
+                self._transition(run, RunState.FAILED)
                 try:
                     await self._milestone(run, "failed", reason)
                 except Exception:
@@ -4123,7 +4136,7 @@ class FactoryExecutor:
                 else:
                     reason = "control loop stalled: no in-flight or pending work"
                 self._event(run, "executor_error", error=reason)
-                run.state = RunState.FAILED
+                self._transition(run, RunState.FAILED)
                 try:
                     await self._milestone(run, "failed", reason)
                 except Exception:
