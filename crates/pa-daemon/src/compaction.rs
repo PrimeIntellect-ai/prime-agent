@@ -176,11 +176,8 @@ impl CompactionManager {
         }
         // The interrupted turn settled (its row swallowed exactly like the
         // TS compact path); the suppression owns only that drain window.
-        self.core
-            .lock()
-            .unwrap()
-            .turn
-            .apply(TurnTransition::EndRowSuppression);
+        let mut core = self.core.lock().unwrap();
+        core.turn.apply(TurnTransition::EndRowSuppression);
     }
 
     /// Append the durable compaction entry (TS `appendCompaction`). A real

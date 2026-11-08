@@ -126,7 +126,7 @@ async fn roster_feed_publishes_live_tool_activity() {
         .lock()
         .unwrap()
         .turn
-        .apply(crate::worker::TurnTransition::Pickup { action_label: None });
+        .apply(crate::worker::TurnTransition::Pickup(None));
     runner
         .run_turn(
             engine,

@@ -1,40 +1,30 @@
-//! The turn runner's delivery state: one picked delivery's phase and
-//! abort facts, written only through [`TurnState::apply`].
+//! The turn runner's delivery state, written only through [`TurnState::apply`].
 
 use crate::types::{SessionActionActive, TurnPhase};
 
-/// How the current (or last picked) delivery was aborted.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum TurnAbort {
     /// A graceful shutdown stops the turn without cancelling the delivery:
     /// its unaccepted items requeue, and a daemon-wide stop continues it.
     Shutdown,
-    /// An explicit cancellation.
     Cancelled,
 }
 
-#[derive(Debug)]
 struct RunningTurn {
     phase: TurnPhase,
-    /// The queue projection's active-action label: `None` when no
-    /// queue-visible item anchors the delivery (no active action then).
+    /// `None` when no queue-visible item anchors the delivery (no active action).
     action_label: Option<String>,
 }
 
-/// The transitions of [`TurnState`].
-#[derive(Debug)]
 pub(crate) enum TurnTransition {
-    /// The runner picked a delivery: a fresh delivery's facts start here.
-    Pickup {
-        action_label: Option<String>,
-    },
+    /// Carries the anchoring item's action label.
+    Pickup(Option<String>),
     /// The first accepted row (`committing`) or assistant frame (`running`).
     Advance(TurnPhase),
-    /// A successful terminal `Done` was observed.
+    /// A successful terminal `Done`.
     Completed,
-    /// The turn settled; its facts stay readable until the next pickup.
+    /// The turn ended; its facts stay readable until the next pickup.
     Settle,
-    /// The one abort transition: a cancellation outranks a shutdown.
+    /// A cancellation outranks a shutdown.
     Abort(TurnAbort),
     /// A cancellation by a flow that detaches from the interrupted turn's
     /// events (a manual `compact`, a branch navigation): TS swallowed the
@@ -44,14 +34,13 @@ pub(crate) enum TurnTransition {
     EndRowSuppression,
     /// `abort_retry`: stops an in-flight retry without aborting the turn.
     AbortRetry,
-    /// A create opened a fresh session.
     NewSession,
 }
 
 /// The current delivery (or, once settled, the last one until the next
 /// pickup): the settle and the shutdown continuation read its facts after
 /// the turn ended.
-#[derive(Debug, Default)]
+#[derive(Default)]
 pub(crate) struct TurnState {
     running: Option<RunningTurn>,
     abort: Option<TurnAbort>,
@@ -65,7 +54,7 @@ pub(crate) struct TurnState {
 impl TurnState {
     pub(crate) fn apply(&mut self, transition: TurnTransition) {
         match transition {
-            TurnTransition::Pickup { action_label } => {
+            TurnTransition::Pickup(action_label) => {
                 self.running = Some(RunningTurn {
                     phase: TurnPhase::Preparing,
                     action_label,
@@ -101,7 +90,6 @@ impl TurnState {
         }
     }
 
-    /// A picked delivery's turn is in flight.
     pub(crate) fn busy(&self) -> bool {
         self.running.is_some()
     }
@@ -111,9 +99,8 @@ impl TurnState {
         self.abort.is_some()
     }
 
-    /// An explicit cancellation (a graceful shutdown is not one).
     pub(crate) fn cancelled(&self) -> bool {
-        self.abort == Some(TurnAbort::Cancelled)
+        matches!(self.abort, Some(TurnAbort::Cancelled))
     }
 
     pub(crate) fn suppresses_aborted_row(&self) -> bool {
@@ -128,7 +115,6 @@ impl TurnState {
         self.retry_abort
     }
 
-    /// The queue projection's active action: the anchored turn in flight.
     pub(crate) fn active_action(&self) -> Option<SessionActionActive> {
         let running = self.running.as_ref()?;
         Some(SessionActionActive {

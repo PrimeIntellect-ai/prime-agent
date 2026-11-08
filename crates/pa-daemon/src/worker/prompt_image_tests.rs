@@ -60,7 +60,7 @@ async fn prompt_with_images_queues_the_images_with_the_message() {
         .lock()
         .unwrap()
         .turn
-        .apply(crate::worker::TurnTransition::Pickup { action_label: None });
+        .apply(crate::worker::TurnTransition::Pickup(None));
     let response = worker
         .dispatch(
             "prompt",

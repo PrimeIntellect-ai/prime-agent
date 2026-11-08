@@ -125,7 +125,7 @@ impl TurnRunner {
         let action_label = items.iter().find(|item| item.queue_visible).map(|anchor| {
             compact_action_label(anchor.preview.as_deref().unwrap_or(&anchor.message))
         });
-        core.turn.apply(TurnTransition::Pickup { action_label });
+        core.turn.apply(TurnTransition::Pickup(action_label));
         core.running_tool_calls.clear();
         (lane, items)
     }

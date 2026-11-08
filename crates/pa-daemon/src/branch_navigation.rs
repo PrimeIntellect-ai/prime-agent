@@ -515,11 +515,8 @@ impl TreeNavigation {
             .await;
         }
         // The interrupted turn settled; the suppression owns only that drain window.
-        self.core
-            .lock()
-            .unwrap()
-            .turn
-            .apply(TurnTransition::EndRowSuppression);
+        let mut core = self.core.lock().unwrap();
+        core.turn.apply(TurnTransition::EndRowSuppression);
     }
 }
 

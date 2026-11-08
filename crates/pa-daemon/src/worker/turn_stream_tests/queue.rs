@@ -988,8 +988,7 @@ async fn clearing_an_idle_queue_drops_the_retained_note() {
     {
         let mut core = worker.core.lock().unwrap();
         core.created = true;
-        core.turn
-            .apply(crate::worker::TurnTransition::Pickup { action_label: None });
+        core.turn.apply(crate::worker::TurnTransition::Pickup(None));
         core.follow_up
             .push_back(queued_prompt("queued", TurnPolicy::Queued));
     }
@@ -1168,7 +1167,7 @@ async fn an_aborted_run_never_exposes_an_idle_summary_with_its_old_note() {
     core.lock()
         .unwrap()
         .turn
-        .apply(crate::worker::TurnTransition::Pickup { action_label: None });
+        .apply(crate::worker::TurnTransition::Pickup(None));
     let engine_for_turn = Arc::clone(&engine);
     let turn = tokio::spawn(async move {
         runner

@@ -174,7 +174,7 @@ async fn a_delivered_agent_message_turn_emits_the_custom_row() {
         .lock()
         .unwrap()
         .turn
-        .apply(crate::worker::TurnTransition::Pickup { action_label: None });
+        .apply(crate::worker::TurnTransition::Pickup(None));
     let delivered = worker
         .dispatch(
             "worker_deliver_message",

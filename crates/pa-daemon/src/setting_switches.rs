@@ -569,11 +569,8 @@ impl Worker {
         if let Err(response) = self.require_created("abort_retry") {
             return response;
         }
-        self.core
-            .lock()
-            .unwrap()
-            .turn
-            .apply(TurnTransition::AbortRetry);
+        let mut core = self.core.lock().unwrap();
+        core.turn.apply(TurnTransition::AbortRetry);
         response_success(None, "abort_retry", None)
     }
 }

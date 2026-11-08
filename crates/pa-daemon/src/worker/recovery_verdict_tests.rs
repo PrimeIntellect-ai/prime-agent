@@ -148,7 +148,7 @@ async fn a_bash_completion_notice_on_a_busy_session_queues_a_visible_steer_row()
         .lock()
         .unwrap()
         .turn
-        .apply(crate::worker::TurnTransition::Pickup { action_label: None });
+        .apply(crate::worker::TurnTransition::Pickup(None));
     let notify = Arc::new(Notify::new());
     admit_kernel_notice(
         &worker.recovery,
@@ -278,7 +278,7 @@ async fn mid_turn_withdrawal_keeps_the_in_flight_turn_busy() {
         .lock()
         .unwrap()
         .turn
-        .apply(crate::worker::TurnTransition::Pickup { action_label: None });
+        .apply(crate::worker::TurnTransition::Pickup(None));
     worker.dispatch("clear_queue", &json!({})).await;
     let latest = latest_record(&worker);
     assert_eq!(latest.operation, "queue_cleared");

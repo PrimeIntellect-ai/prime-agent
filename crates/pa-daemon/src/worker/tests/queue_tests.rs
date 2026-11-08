@@ -224,8 +224,7 @@ async fn waiting_rpc_prompt_overtakes_background_steer_and_settles() {
     assert!(pause.success, "pause failed: {pause:?}");
     {
         let mut core = worker.core.lock().unwrap();
-        core.turn
-            .apply(crate::worker::TurnTransition::Pickup { action_label: None }); // a prompt admitted behind work is queue-visible
+        core.turn.apply(crate::worker::TurnTransition::Pickup(None)); // a prompt admitted behind work is queue-visible
         let mut background = priority_test_item("machine steer", TurnPolicy::Injected);
         background.priority = QueuePriority::Background;
         enqueue_priority(&mut core.steering, background);

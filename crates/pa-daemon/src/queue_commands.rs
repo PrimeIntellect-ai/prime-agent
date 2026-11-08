@@ -672,7 +672,7 @@ mod tests {
                 .lock()
                 .unwrap()
                 .turn
-                .apply(crate::worker::TurnTransition::Pickup { action_label: None });
+                .apply(crate::worker::TurnTransition::Pickup(None));
             for (command, payload) in [
                 (target_command, json!({ "message": "earlier" })),
                 (

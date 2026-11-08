@@ -205,7 +205,7 @@ async fn deliver_message_while_busy_queues() {
         .lock()
         .unwrap()
         .turn
-        .apply(crate::worker::TurnTransition::Pickup { action_label: None });
+        .apply(crate::worker::TurnTransition::Pickup(None));
     let response = worker
         .dispatch(
             "worker_deliver_message",
@@ -240,7 +240,7 @@ async fn user_input_jumps_parked_agent_message_deliveries() {
             .lock()
             .unwrap()
             .turn
-            .apply(crate::worker::TurnTransition::Pickup { action_label: None });
+            .apply(crate::worker::TurnTransition::Pickup(None));
         for (text, user) in [
             ("first agent", false),
             ("second agent", false),
@@ -491,7 +491,7 @@ async fn assert_clear_queue_bounces(restore_queue: bool) {
         .lock()
         .unwrap()
         .turn
-        .apply(crate::worker::TurnTransition::Pickup { action_label: None });
+        .apply(crate::worker::TurnTransition::Pickup(None));
     let delivered = worker
         .dispatch(
             "worker_deliver_message",

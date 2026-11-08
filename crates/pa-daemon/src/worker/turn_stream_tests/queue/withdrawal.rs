@@ -40,8 +40,7 @@ async fn queue_withdrawals_clear_only_the_last_idle_notes() {
                 let mut core = worker.core.lock().unwrap();
                 core.created = true;
                 if state == "busy" {
-                    core.turn
-                        .apply(crate::worker::TurnTransition::Pickup { action_label: None });
+                    core.turn.apply(crate::worker::TurnTransition::Pickup(None));
                 }
                 core.queued_input_suspended = true;
                 if command != "bash_consumed" {
