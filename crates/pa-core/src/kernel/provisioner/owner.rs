@@ -62,7 +62,9 @@ pub(super) enum Command {
 
 /// What the provisioner owns. Doomed boots and gates span every slot, so they
 /// live beside it.
+#[derive(Default)]
 enum Slot {
+    #[default]
     Empty,
     Booting(Boot),
     Live(ReplKernelManager),
@@ -105,36 +107,131 @@ struct Gate {
     stop: Option<oneshot::Sender<()>>,
 }
 
+#[derive(Default)]
+struct Gates {
+    next: u64,
+    queue: VecDeque<Gate>,
+    /// Boots waiting for every gate up to the id to open.
+    waiters: Vec<(u64, oneshot::Sender<()>)>,
+}
+
+impl Gates {
+    fn arm(&mut self, stop: Option<oneshot::Sender<()>>) -> u64 {
+        self.next += 1;
+        self.queue.push_back(Gate {
+            id: self.next,
+            done: false,
+            stop,
+        });
+        self.next
+    }
+
+    fn open(&mut self, id: u64) {
+        if let Some(gate) = self.queue.iter_mut().find(|gate| gate.id == id) {
+            gate.done = true;
+        }
+        while self.queue.front().is_some_and(|gate| gate.done) {
+            if let Some(stop) = self.queue.pop_front().and_then(|gate| gate.stop) {
+                let _ = stop.send(());
+            }
+        }
+        let first_closed = self.queue.front().map_or(u64::MAX, |gate| gate.id);
+        let (open, waiting): (Vec<_>, Vec<_>) = std::mem::take(&mut self.waiters)
+            .into_iter()
+            .partition(|(through, _)| *through < first_closed);
+        self.waiters = waiting;
+        for (_, tx) in open {
+            let _ = tx.send(());
+        }
+    }
+
+    /// Fires once every gate armed so far is open; `None` when none is pending.
+    fn wait_for_armed(&mut self) -> Option<oneshot::Receiver<()>> {
+        if self.queue.is_empty() {
+            return None;
+        }
+        let (tx, rx) = oneshot::channel();
+        self.waiters.push((self.next, tx));
+        Some(rx)
+    }
+}
+
 struct DisposeWaiter {
     boots: Vec<u64>,
     done: oneshot::Sender<()>,
 }
 
+#[derive(Default)]
 pub(super) struct OwnerState {
     slot: Slot,
     /// Boots `kill()` invalidated that have not settled; `dispose()` waits them.
     doomed: Vec<Boot>,
     last_restore: Option<RestoreResult>,
     next_generation: u64,
-    next_gate: u64,
-    gates: VecDeque<Gate>,
-    /// Boots waiting for every gate up to the id to open.
-    gate_waiters: Vec<(u64, oneshot::Sender<()>)>,
+    gates: Gates,
 }
 
-impl OwnerState {
-    pub(super) fn new() -> Self {
-        Self {
-            slot: Slot::Empty,
-            doomed: Vec::new(),
-            last_restore: None,
-            next_generation: 0,
-            next_gate: 0,
-            gates: VecDeque::new(),
-            gate_waiters: Vec::new(),
+impl Slot {
+    /// The armed boot, disposed or not.
+    fn boot(&mut self) -> Option<&mut Boot> {
+        match self {
+            Slot::Booting(boot)
+            | Slot::Disposed {
+                pending: Pending::Boot(boot),
+                ..
+            } => Some(boot),
+            _ => None,
         }
     }
 
+    /// Take the published kernel (live, or held for a dispose).
+    fn take_published(&mut self) -> Option<ReplKernelManager> {
+        match self {
+            Slot::Disposed { pending, .. } => pending.take_kernel(),
+            slot => match std::mem::take(slot) {
+                Slot::Live(manager) => Some(manager),
+                other => {
+                    *slot = other;
+                    None
+                }
+            },
+        }
+    }
+
+    /// Take the armed boot, disposed or not.
+    fn take_boot(&mut self) -> Option<Boot> {
+        match self {
+            Slot::Disposed { pending, .. } => match std::mem::replace(pending, Pending::Nothing) {
+                Pending::Boot(boot) => Some(boot),
+                other => {
+                    *pending = other;
+                    None
+                }
+            },
+            slot => match std::mem::take(slot) {
+                Slot::Booting(boot) => Some(boot),
+                other => {
+                    *slot = other;
+                    None
+                }
+            },
+        }
+    }
+}
+
+impl Pending {
+    fn take_kernel(&mut self) -> Option<ReplKernelManager> {
+        match std::mem::replace(self, Pending::Nothing) {
+            Pending::Kernel(manager) => Some(manager),
+            other => {
+                *self = other;
+                None
+            }
+        }
+    }
+}
+
+impl OwnerState {
     pub(super) fn manager(&self) -> Option<ReplKernelManager> {
         match &self.slot {
             Slot::Live(manager)
@@ -150,83 +247,12 @@ impl OwnerState {
         self.last_restore.clone()
     }
 
-    /// The boot of the armed generation, disposed or not.
-    fn current_boot(&mut self, generation: u64) -> Option<&mut Boot> {
-        match &mut self.slot {
-            Slot::Booting(boot)
-            | Slot::Disposed {
-                pending: Pending::Boot(boot),
-                ..
-            } if boot.generation == generation => Some(boot),
-            _ => None,
-        }
-    }
-
-    /// Take the published kernel (live, or held for a dispose) out of the slot.
-    fn take_published(&mut self) -> Option<ReplKernelManager> {
-        if matches!(self.slot, Slot::Live(_)) {
-            let Slot::Live(manager) = std::mem::replace(&mut self.slot, Slot::Empty) else {
-                unreachable!();
-            };
-            return Some(manager);
-        }
-        if let Slot::Disposed { pending, .. } = &mut self.slot {
-            if matches!(pending, Pending::Kernel(_)) {
-                let Pending::Kernel(manager) = std::mem::replace(pending, Pending::Nothing) else {
-                    unreachable!();
-                };
-                return Some(manager);
-            }
-        }
-        None
-    }
-
-    /// Take the armed boot (disposed or not) out of the slot.
-    fn take_boot(&mut self) -> Option<Boot> {
-        if matches!(self.slot, Slot::Booting(_)) {
-            let Slot::Booting(boot) = std::mem::replace(&mut self.slot, Slot::Empty) else {
-                unreachable!();
-            };
-            return Some(boot);
-        }
-        if let Slot::Disposed { pending, .. } = &mut self.slot {
-            if matches!(pending, Pending::Boot(_)) {
-                let Pending::Boot(boot) = std::mem::replace(pending, Pending::Nothing) else {
-                    unreachable!();
-                };
-                return Some(boot);
-            }
-        }
-        None
-    }
-
-    fn arm_gate(&mut self, stop: Option<oneshot::Sender<()>>) -> u64 {
-        self.next_gate += 1;
-        self.gates.push_back(Gate {
-            id: self.next_gate,
-            done: false,
-            stop,
-        });
-        self.next_gate
-    }
-
-    fn open_gate(&mut self, id: u64) {
-        if let Some(gate) = self.gates.iter_mut().find(|gate| gate.id == id) {
-            gate.done = true;
-        }
-        while self.gates.front().is_some_and(|gate| gate.done) {
-            if let Some(stop) = self.gates.pop_front().and_then(|gate| gate.stop) {
-                let _ = stop.send(());
-            }
-        }
-        let first_closed = self.gates.front().map_or(u64::MAX, |gate| gate.id);
-        let (open, waiting): (Vec<_>, Vec<_>) = std::mem::take(&mut self.gate_waiters)
-            .into_iter()
-            .partition(|(through, _)| *through < first_closed);
-        self.gate_waiters = waiting;
-        for (_, tx) in open {
-            let _ = tx.send(());
-        }
+    fn take_doomed(&mut self, generation: u64) -> Option<Boot> {
+        let index = self
+            .doomed
+            .iter()
+            .position(|boot| boot.generation == generation)?;
+        Some(self.doomed.remove(index))
     }
 
     /// The snapshot policy for a failed boot's teardown: the dispose policy while
@@ -247,7 +273,7 @@ impl OwnerState {
         if !flush || covered_by_stop {
             return (flush, None);
         }
-        (flush, Some(self.arm_gate(None)))
+        (flush, Some(self.gates.arm(None)))
     }
 }
 
@@ -374,57 +400,38 @@ fn handle(inner: &Arc<ProvisionerInner>, state: &Mutex<OwnerState>, command: Com
                 return;
             }
             if matches!(s.slot, Slot::Empty) {
-                let boot = start_boot(inner, &mut s, progress.clone());
-                s.slot = Slot::Booting(boot);
+                s.slot = Slot::Booting(start_boot(inner, &mut s, progress.clone()));
             }
-            let Slot::Booting(boot) = &mut s.slot else {
-                unreachable!("ensure armed a boot");
-            };
-            boot.waiters.push(reply);
-            if let Some(progress) = progress {
-                let _ = joined.send(boot.last_message.clone());
-                boot.listeners.push(progress);
+            if let Slot::Booting(boot) = &mut s.slot {
+                boot.waiters.push(reply);
+                if let Some(progress) = progress {
+                    let _ = joined.send(boot.last_message.clone());
+                    boot.listeners.push(progress);
+                }
             }
         }
         Command::Stop { snapshot, done } => {
             let mut s = lock(state);
-            if let Some(manager) = s.take_published() {
-                let gate = s.arm_gate(Some(done));
+            let s = &mut *s;
+            if let Some(manager) = s.slot.take_published() {
+                let gate = s.gates.arm(Some(done));
                 spawn_shutdown(inner, manager, snapshot, gate);
-                return;
-            }
-            let booting = matches!(
-                &s.slot,
-                Slot::Booting(_)
-                    | Slot::Disposed {
-                        pending: Pending::Boot(_),
-                        ..
-                    }
-            );
-            if booting {
-                let gate = s.arm_gate(Some(done));
-                if let Slot::Booting(boot)
-                | Slot::Disposed {
-                    pending: Pending::Boot(boot),
-                    ..
-                } = &mut s.slot
-                {
-                    boot.stops.push((gate, snapshot));
-                }
+            } else if let Some(boot) = s.slot.boot() {
+                boot.stops.push((s.gates.arm(Some(done)), snapshot));
             } else {
                 let _ = done.send(());
             }
         }
         Command::Kill { done } => {
             let mut s = lock(state);
-            let killed = s.take_boot().map(|mut boot| {
+            let killed = s.slot.take_boot().map(|mut boot| {
                 boot.listeners.clear();
                 boot.last_message = None;
                 let killed = boot.killed.clone();
                 s.doomed.push(boot);
                 killed
             });
-            let manager = s.take_published();
+            let manager = s.slot.take_published();
             drop(s);
             if let Some(killed) = killed {
                 let _notices = lock(&inner.notices);
@@ -439,41 +446,24 @@ fn handle(inner: &Arc<ProvisionerInner>, state: &Mutex<OwnerState>, command: Com
         }
         Command::Dispose { snapshot, done } => {
             let mut s = lock(state);
-            let mut boots: Vec<u64> = s.doomed.iter().map(|boot| boot.generation).collect();
-            let slot = std::mem::replace(&mut s.slot, Slot::Empty);
-            s.slot = match slot {
+            let (pending, mut waiters) = match std::mem::take(&mut s.slot) {
                 Slot::Disposed {
                     pending, waiters, ..
-                } => Slot::Disposed {
-                    snapshot,
-                    pending,
-                    waiters,
-                },
-                Slot::Empty => Slot::Disposed {
-                    snapshot,
-                    pending: Pending::Nothing,
-                    waiters: Vec::new(),
-                },
-                Slot::Booting(boot) => Slot::Disposed {
-                    snapshot,
-                    pending: Pending::Boot(boot),
-                    waiters: Vec::new(),
-                },
-                Slot::Live(manager) => Slot::Disposed {
-                    snapshot,
-                    pending: Pending::Kernel(manager),
-                    waiters: Vec::new(),
-                },
+                } => (pending, waiters),
+                Slot::Empty => (Pending::Nothing, Vec::new()),
+                Slot::Booting(boot) => (Pending::Boot(boot), Vec::new()),
+                Slot::Live(manager) => (Pending::Kernel(manager), Vec::new()),
             };
-            if let Slot::Disposed {
-                pending, waiters, ..
-            } = &mut s.slot
-            {
-                if let Pending::Boot(boot) = pending {
-                    boots.push(boot.generation);
-                }
-                waiters.push(DisposeWaiter { boots, done });
+            let mut boots: Vec<u64> = s.doomed.iter().map(|boot| boot.generation).collect();
+            if let Pending::Boot(boot) = &pending {
+                boots.push(boot.generation);
             }
+            waiters.push(DisposeWaiter { boots, done });
+            s.slot = Slot::Disposed {
+                snapshot,
+                pending,
+                waiters,
+            };
             finish_disposes(&mut s);
             drop(s);
             let _notices = lock(&inner.notices);
@@ -485,25 +475,23 @@ fn handle(inner: &Arc<ProvisionerInner>, state: &Mutex<OwnerState>, command: Com
             listeners,
         } => {
             let mut s = lock(state);
-            let notify = s.current_boot(generation).map_or_else(Vec::new, |boot| {
-                boot.last_message = Some(message);
-                boot.listeners.clone()
-            });
+            let notify = s
+                .slot
+                .boot()
+                .filter(|boot| boot.generation == generation)
+                .map_or_else(Vec::new, |boot| {
+                    boot.last_message = Some(message);
+                    boot.listeners.clone()
+                });
             let _ = listeners.send(notify);
         }
         Command::Restored { restore } => lock(state).last_restore = Some(restore),
         Command::TeardownPolicy { generation, reply } => {
             let _ = reply.send(lock(state).teardown_policy(generation));
         }
-        Command::GateDone { gate } => lock(state).open_gate(gate),
+        Command::GateDone { gate } => lock(state).gates.open(gate),
         Command::BootSettled { generation, result } => {
-            let doomed = {
-                let mut s = lock(state);
-                s.doomed
-                    .iter()
-                    .position(|boot| boot.generation == generation)
-                    .map(|index| s.doomed.remove(index))
-            };
+            let doomed = lock(state).take_doomed(generation);
             match doomed {
                 // A boot kill() doomed tears its kernel down with kill semantics (no
                 // flush), outside the state lock: the kill runs cleanup callbacks.
@@ -531,13 +519,14 @@ fn handle(inner: &Arc<ProvisionerInner>, state: &Mutex<OwnerState>, command: Com
         } => {
             let mut s = lock(state);
             // A kill() during the teardown moved the boot to the doomed list.
-            let boot = if s.current_boot(generation).is_some() {
-                s.take_boot()
+            let boot = if s
+                .slot
+                .boot()
+                .is_some_and(|boot| boot.generation == generation)
+            {
+                s.slot.take_boot()
             } else {
-                s.doomed
-                    .iter()
-                    .position(|boot| boot.generation == generation)
-                    .map(|index| s.doomed.remove(index))
+                s.take_doomed(generation)
             };
             if let Some(boot) = boot {
                 let failure = StartupFailure {
@@ -630,9 +619,9 @@ fn deliver(
         });
     }
     for (gate, snapshot) in boot.stops {
-        match s.take_published() {
+        match s.slot.take_published() {
             Some(manager) => spawn_shutdown(inner, manager, snapshot, gate),
-            None => s.open_gate(gate),
+            None => s.gates.open(gate),
         }
     }
     if let Slot::Disposed { waiters, .. } = &mut s.slot {
@@ -650,13 +639,7 @@ fn start_boot(
 ) -> Boot {
     s.next_generation += 1;
     let generation = s.next_generation;
-    let gate = if s.gates.is_empty() {
-        None
-    } else {
-        let (tx, rx) = oneshot::channel();
-        s.gate_waiters.push((s.next_gate, tx));
-        Some(rx)
-    };
+    let gate = s.gates.wait_for_armed();
     let killed = AbortSignal::new();
     let handle = BootHandle {
         generation,
@@ -722,13 +705,7 @@ fn finish_disposes(s: &mut OwnerState) {
         .partition(|waiter| waiter.boots.is_empty());
     *waiters = waiting;
     for waiter in ready {
-        let manager = match std::mem::replace(pending, Pending::Nothing) {
-            Pending::Kernel(manager) => Some(manager),
-            other => {
-                *pending = other;
-                None
-            }
-        };
+        let manager = pending.take_kernel();
         let snapshot = *snapshot;
         tokio::spawn(async move {
             if let Some(manager) = manager {
@@ -761,8 +738,10 @@ mod tests {
 
     #[test]
     fn a_failed_boot_teardown_flushes_only_for_the_armed_generation() {
-        let mut state = OwnerState::new();
-        state.slot = Slot::Booting(boot(1));
+        let mut state = OwnerState {
+            slot: Slot::Booting(boot(1)),
+            ..OwnerState::default()
+        };
         // The armed boot's failed teardown flushes and gates the revival on that flush.
         let (flush, gate) = state.teardown_policy(1);
         assert!(flush);
@@ -775,11 +754,13 @@ mod tests {
 
     #[test]
     fn a_disposed_boot_teardown_follows_the_dispose_policy() {
-        let mut state = OwnerState::new();
-        state.slot = Slot::Disposed {
-            snapshot: false,
-            pending: Pending::Boot(boot(1)),
-            waiters: Vec::new(),
+        let mut state = OwnerState {
+            slot: Slot::Disposed {
+                snapshot: false,
+                pending: Pending::Boot(boot(1)),
+                waiters: Vec::new(),
+            },
+            ..OwnerState::default()
         };
         assert_eq!(state.teardown_policy(1), (false, None));
         if let Slot::Disposed { snapshot, .. } = &mut state.slot {
@@ -792,9 +773,9 @@ mod tests {
 
     #[test]
     fn a_stop_armed_for_the_boot_covers_its_teardown_flush() {
-        let mut state = OwnerState::new();
+        let mut state = OwnerState::default();
         let (stop, _stopped) = tokio::sync::oneshot::channel();
-        let gate = state.arm_gate(Some(stop));
+        let gate = state.gates.arm(Some(stop));
         let mut armed = boot(1);
         armed.stops.push((gate, true));
         state.slot = Slot::Booting(armed);

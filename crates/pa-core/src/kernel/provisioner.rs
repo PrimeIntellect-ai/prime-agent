@@ -181,7 +181,7 @@ impl IpythonKernelProvisioner {
             inner: Arc::new(ProvisionerInner {
                 cwd: cwd.into(),
                 options,
-                state: Arc::new(Mutex::new(owner::OwnerState::new())),
+                state: Arc::new(Mutex::new(owner::OwnerState::default())),
                 commands,
                 inbox: Mutex::new(Some(inbox)),
                 dispose_signal: AbortSignal::new(),
