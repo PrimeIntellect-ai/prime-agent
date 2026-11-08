@@ -79,7 +79,23 @@ impl Retirement {
                     step: claimed,
                 }
             }
-            _ => return false,
+            (RetirementPhase::Live, RetirementEvent::KillRefused | RetirementEvent::Claim(_))
+            | (
+                RetirementPhase::Deleting | RetirementPhase::Closing,
+                RetirementEvent::BeginDelete | RetirementEvent::Claim(_),
+            )
+            | (
+                RetirementPhase::Closing,
+                RetirementEvent::BeginClose | RetirementEvent::KillRefused,
+            )
+            | (
+                RetirementPhase::Confirmed { .. },
+                RetirementEvent::BeginDelete
+                | RetirementEvent::BeginClose
+                | RetirementEvent::KillRefused
+                | RetirementEvent::KillConfirmed(_)
+                | RetirementEvent::Claim(_),
+            ) => return false,
         };
         self.0 = next;
         true
