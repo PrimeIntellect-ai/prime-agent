@@ -134,40 +134,50 @@ impl AgentSessionEngine {
     }
 
     pub fn session_is_closed(&self) -> bool {
-        matches!(*self.core_state(), CoreSessionState::Closed(_))
+        match *self.core_state() {
+            CoreSessionState::Closed(_) => true,
+            CoreSessionState::Unbuilt | CoreSessionState::Built(_) => false,
+        }
     }
 
     /// A session closed while it built stays closed.
     pub(super) fn adopt_handles(&self, handles: Arc<BuiltHandles>) {
         let mut state = self.core_state();
-        *state = if matches!(*state, CoreSessionState::Closed(_)) {
-            CoreSessionState::Closed(Some(handles))
-        } else {
-            CoreSessionState::Built(handles)
+        *state = match &*state {
+            CoreSessionState::Closed(_) => CoreSessionState::Closed(Some(handles)),
+            CoreSessionState::Unbuilt | CoreSessionState::Built(_) => {
+                CoreSessionState::Built(handles)
+            }
         };
     }
 
     /// A closed session stays closed.
     pub(super) fn retire_handles(&self) {
         let mut state = self.core_state();
-        *state = if matches!(*state, CoreSessionState::Closed(_)) {
-            CoreSessionState::Closed(None)
-        } else {
-            CoreSessionState::Unbuilt
+        *state = match &*state {
+            CoreSessionState::Closed(_) => CoreSessionState::Closed(None),
+            CoreSessionState::Unbuilt | CoreSessionState::Built(_) => CoreSessionState::Unbuilt,
         };
     }
 
     pub fn mark_session_closed(&self) {
         let mut state = self.core_state();
-        *state = CoreSessionState::Closed(state.built());
+        *state = match std::mem::replace(&mut *state, CoreSessionState::Unbuilt) {
+            CoreSessionState::Built(handles) => CoreSessionState::Closed(Some(handles)),
+            CoreSessionState::Unbuilt => CoreSessionState::Closed(None),
+            closed @ CoreSessionState::Closed(_) => closed,
+        };
     }
 
     /// A created or replacement session starts live.
     pub fn clear_session_closed(&self) {
         let mut state = self.core_state();
-        *state = state
-            .built()
-            .map_or(CoreSessionState::Unbuilt, CoreSessionState::Built);
+        *state = match std::mem::replace(&mut *state, CoreSessionState::Unbuilt) {
+            CoreSessionState::Closed(Some(handles)) | CoreSessionState::Built(handles) => {
+                CoreSessionState::Built(handles)
+            }
+            CoreSessionState::Closed(None) | CoreSessionState::Unbuilt => CoreSessionState::Unbuilt,
+        };
     }
 
     /// Swap one probe into the built session's handles (tests stand in for a
