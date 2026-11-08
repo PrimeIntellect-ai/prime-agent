@@ -714,7 +714,7 @@ impl SessionUi {
     /// The abort ladder shared by the Ctrl+C and Escape interrupts: a compacting session aborts the
     /// compaction run, a streaming turn aborts through `abort_and_send_queued`, and a running user
     /// bash aborts alongside. The side-question abort stays at the call sites.
-    pub(super) fn interrupt_running_work(&self, view: &AgentView) {
+    pub(super) fn interrupt_running_work(&mut self, view: &mut AgentView) {
         // Abort the trace upload sweep first.
         if let Some(run) = &self.trace_upload {
             run.cancel.cancel();
@@ -727,6 +727,7 @@ impl SessionUi {
             // No transient abort hint: the aborted turn's own assistant row carries
             // the interrupt, so nothing is noted here.
             self.abort_turn();
+            self.apply_run_event(RunEvent::Interrupted, view);
         }
         // A running user-bash command aborts the same way; the settled run
         // reports cancelled through its bash_end.

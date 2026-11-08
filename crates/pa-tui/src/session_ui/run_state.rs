@@ -21,6 +21,9 @@ pub(crate) enum RunEvent {
     SubmitFailed {
         others_in_flight: bool,
     },
+    /// An abort withdraws a not-yet-started prompt without any frame; a started run still ends
+    /// with its `agent_end`.
+    Interrupted,
     Started,
     Ended,
     Attached {
@@ -34,10 +37,11 @@ impl RunState {
             RunEvent::Started | RunEvent::Attached { streaming: true } => RunState::Running,
             RunEvent::Ended | RunEvent::Attached { streaming: false } => RunState::Idle,
             RunEvent::Submitted if self == RunState::Idle => RunState::Submitted,
-            RunEvent::SubmitFailed {
+            RunEvent::Interrupted
+            | RunEvent::SubmitFailed {
                 others_in_flight: false,
             } if self == RunState::Submitted => RunState::Idle,
-            RunEvent::Submitted | RunEvent::SubmitFailed { .. } => self,
+            RunEvent::Submitted | RunEvent::SubmitFailed { .. } | RunEvent::Interrupted => self,
         }
     }
 }
@@ -116,6 +120,25 @@ mod tests {
             after(&[RunEvent::Submitted, RunEvent::Submitted, other_pending]),
             RunState::Submitted,
             "a failed submit keeps the state while another submit is still in flight"
+        );
+        assert_eq!(
+            after(&[RunEvent::Submitted, RunEvent::Interrupted]),
+            RunState::Idle,
+            "an abort before the run starts clears the loader"
+        );
+        assert_eq!(
+            after(&[
+                RunEvent::Submitted,
+                RunEvent::Interrupted,
+                RunEvent::Started
+            ]),
+            RunState::Running,
+            "a prompt the daemon had already picked up still shows its run"
+        );
+        assert_eq!(
+            after(&[RunEvent::Started, RunEvent::Interrupted]),
+            RunState::Running,
+            "a started run waits for its agent_end"
         );
     }
 }
