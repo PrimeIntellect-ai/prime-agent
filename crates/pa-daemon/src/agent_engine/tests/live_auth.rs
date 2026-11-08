@@ -53,7 +53,20 @@ fn live_auth_engine(
     provider: &str,
     model_id: &str,
 ) -> std::sync::Arc<AgentSessionEngine> {
-    let engine = AgentSessionEngine::new(AgentEngineConfig {
+    live_auth_engine_with_oauth(dir, api_key, provider, model_id, None)
+}
+
+/// [`live_auth_engine`] with a scripted request-auth OAuth integration,
+/// swapped in before the engine is shared (production sets it once at
+/// construction; the per-call resolution reads it).
+fn live_auth_engine_with_oauth(
+    dir: &std::path::Path,
+    api_key: Option<&str>,
+    provider: &str,
+    model_id: &str,
+    request_auth_oauth: Option<std::sync::Arc<dyn pa_core::auth::OAuthIntegration>>,
+) -> std::sync::Arc<AgentSessionEngine> {
+    let mut engine = AgentSessionEngine::new(AgentEngineConfig {
         cwd: dir.to_path_buf(),
         agent_dir: dir.join("agent"),
         provider: Some(provider.to_string()),
@@ -69,6 +82,9 @@ fn live_auth_engine(
         queued_steering_probe: None,
     })
     .expect("engine");
+    if let Some(oauth) = request_auth_oauth {
+        engine.request_auth_oauth = oauth;
+    }
     let engine = Arc::new(engine);
     // The worker registers the engine's own arc: the live-auth resolver
     // upgrades it per provider call.
@@ -325,18 +341,6 @@ impl pa_core::auth::OAuthIntegration for CountingRefresh {
     }
 }
 
-/// Replace the engine's request-auth OAuth integration with a scripted one
-/// (the seam the refresh pins inject through).
-fn inject_request_auth_oauth(
-    engine: &std::sync::Arc<AgentSessionEngine>,
-    integration: std::sync::Arc<dyn pa_core::auth::OAuthIntegration>,
-) {
-    *engine
-        .request_auth_oauth
-        .write()
-        .expect("request auth oauth lock") = integration;
-}
-
 /// An expired credential refreshes through the engine's request-auth
 /// resolution and the refreshed token serves the LIVE session's next
 /// provider call (no restart): the resolution's OAuth integration is the
@@ -352,14 +356,16 @@ fn an_expired_credential_refreshes_and_serves_the_live_session() {
     write_credential_backed_faux_provider(&agent_dir);
     write_oauth_credential(&agent_dir, "live-access");
     let registration = register_recording_faux();
-    let engine = live_auth_engine(dir.path(), None, "battery", "mock-1");
     let attempts = Arc::new(std::sync::Mutex::new(0));
-    inject_request_auth_oauth(
-        &engine,
-        Arc::new(CountingRefresh {
+    let engine = live_auth_engine_with_oauth(
+        dir.path(),
+        None,
+        "battery",
+        "mock-1",
+        Some(Arc::new(CountingRefresh {
             attempts: Arc::clone(&attempts),
             succeeds: true,
-        }),
+        })),
     );
     let model = engine.resolve_model().expect("the custom model resolves");
     let agent = engine.session_agent(&model).expect("the session builds");
@@ -373,7 +379,11 @@ fn an_expired_credential_refreshes_and_serves_the_live_session() {
         Some(&Some("live-access".to_string())),
         "the build-time credential serves the first call"
     );
-    assert_eq!(*attempts.lock().unwrap(), 0, "a live credential refreshes");
+    assert_eq!(
+        *attempts.lock().unwrap(),
+        0,
+        "a live credential does not refresh"
+    );
 
     // The credential expires: the next provider call refreshes it at the
     // token endpoint and serves the fresh token, live.
@@ -413,14 +423,16 @@ fn a_failed_refresh_makes_one_attempt_per_resolution() {
     write_credential_backed_faux_provider(&agent_dir);
     write_oauth_credential(&agent_dir, "live-access");
     let registration = register_recording_faux();
-    let engine = live_auth_engine(dir.path(), None, "battery", "mock-1");
     let attempts = Arc::new(std::sync::Mutex::new(0));
-    inject_request_auth_oauth(
-        &engine,
-        Arc::new(CountingRefresh {
+    let engine = live_auth_engine_with_oauth(
+        dir.path(),
+        None,
+        "battery",
+        "mock-1",
+        Some(Arc::new(CountingRefresh {
             attempts: Arc::clone(&attempts),
             succeeds: false,
-        }),
+        })),
     );
     let model = engine.resolve_model().expect("the custom model resolves");
     let agent = engine.session_agent(&model).expect("the session builds");
@@ -452,8 +464,12 @@ fn command_runs(counter: &std::path::Path) -> usize {
 
 /// A stored `!command` api key for the serving provider resolves once at
 /// build and never per provider call: candidate building defers the
-/// command (TS's lazy value material) and the per-call lookup hits the
-/// process cache.
+/// command (TS's lazy value material), the per-call request-auth registry
+/// never resolves the unrelated Prime Inference credential, and the
+/// per-call lookup hits the process cache. The counter key is a
+/// POSIX-shell pipeline (the ambient shell on Windows resolves it
+/// differently), so the test runs on Unix only.
+#[cfg(unix)]
 #[test]
 fn a_stored_command_key_resolves_once_at_build_and_never_per_call() {
     let _faux = FAUX_TEST_LOCK
@@ -496,8 +512,12 @@ fn a_stored_command_key_resolves_once_at_build_and_never_per_call() {
 }
 
 /// A stored Prime Inference `!command` key never runs for ANOTHER
-/// provider's provider call: the per-call registry construction defers
-/// command-backed fingerprints.
+/// provider's provider call: the per-call request-auth registry
+/// construction skips the unrelated Prime credential entirely, and its
+/// candidate building defers command-backed fingerprints. The counter key
+/// is a POSIX-shell pipeline (the ambient shell on Windows resolves it
+/// differently), so the test runs on Unix only.
+#[cfg(unix)]
 #[test]
 fn a_prime_command_key_never_runs_for_another_providers_call() {
     let _faux = FAUX_TEST_LOCK
@@ -537,6 +557,106 @@ fn a_prime_command_key_never_runs_for_another_providers_call() {
         assert_eq!(
             served_keys(&registration).last(),
             Some(&Some("battery-access".to_string()))
+        );
+    }
+    registration.unregister();
+}
+
+/// A stored Prime Inference `!command` key whose command FAILS never runs
+/// for another provider's provider call: a failed command is retried on
+/// every lookup (never cached), so the per-call request-auth resolution
+/// must not resolve the unrelated Prime credential at all. The counter
+/// key is a POSIX-shell pipeline (the ambient shell on Windows resolves
+/// it differently), so the test runs on Unix only.
+#[cfg(unix)]
+#[test]
+fn a_failed_prime_command_key_never_runs_for_another_providers_call() {
+    let _faux = FAUX_TEST_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let dir = tempfile::TempDir::new().unwrap();
+    let agent_dir = dir.path().join("agent");
+    write_credential_backed_faux_provider(&agent_dir);
+    let counter = dir.path().join("failed-prime-command-runs");
+    let key = format!("!echo run >> {} ; exit 1", counter.display());
+    std::fs::write(
+        agent_dir.join("auth.json"),
+        json!({
+            "battery": { "type": "oauth", "access": "battery-access", "refresh": "r",
+                "expires": 4_102_444_800_000i64 },
+            "prime-inference": { "type": "api_key", "key": key }
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let registration = register_recording_faux();
+    let engine = live_auth_engine(dir.path(), None, "battery", "mock-1");
+    let model = engine.resolve_model().expect("the custom model resolves");
+    let agent = engine.session_agent(&model).expect("the session builds");
+    let stream_fn = agent
+        .stream_fn()
+        .expect("the built session streams")
+        .clone();
+    for _ in 0..3 {
+        let before = command_runs(&counter);
+        call_stream_once(&engine, &stream_fn);
+        assert_eq!(
+            command_runs(&counter) - before,
+            0,
+            "a battery provider call must not run the failed Prime Inference credential command"
+        );
+        assert_eq!(
+            served_keys(&registration).last(),
+            Some(&Some("battery-access".to_string()))
+        );
+    }
+    registration.unregister();
+}
+
+/// A stored `!command` api key for the serving provider whose command
+/// FAILS resolves EXACTLY ONCE per provider call — the resolution
+/// attempt — and never again through the candidate's deferred
+/// fingerprint for a source token it cannot produce: a failed command
+/// retries per lookup (TS #2497), not twice per lookup. The resolution
+/// serves no live credential, so the captured pair stands. The counter
+/// key is a POSIX-shell pipeline (the ambient shell on Windows resolves
+/// it differently), so the test runs on Unix only.
+#[cfg(unix)]
+#[test]
+fn a_failed_serving_command_key_resolves_once_per_call() {
+    let _faux = FAUX_TEST_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let dir = tempfile::TempDir::new().unwrap();
+    let agent_dir = dir.path().join("agent");
+    write_credential_backed_faux_provider(&agent_dir);
+    let counter = dir.path().join("failed-serving-command-runs");
+    let key = format!("!echo run >> {} ; exit 1", counter.display());
+    std::fs::write(
+        agent_dir.join("auth.json"),
+        json!({ "battery": { "type": "api_key", "key": key } }).to_string(),
+    )
+    .unwrap();
+    let registration = register_recording_faux();
+    let engine = live_auth_engine(dir.path(), None, "battery", "mock-1");
+    let model = engine.resolve_model().expect("the custom model resolves");
+    let agent = engine.session_agent(&model).expect("the session builds");
+    let stream_fn = agent
+        .stream_fn()
+        .expect("the built session streams")
+        .clone();
+    for _ in 0..3 {
+        let before = command_runs(&counter);
+        call_stream_once(&engine, &stream_fn);
+        assert_eq!(
+            command_runs(&counter) - before,
+            1,
+            "a failed serving command resolves exactly once per provider call (the attempt, never a second source-token run)"
+        );
+        assert_eq!(
+            served_keys(&registration).last(),
+            Some(&Some("sk-config-fallback".to_string())),
+            "the resolution serves no live credential; the captured pair stands"
         );
     }
     registration.unregister();

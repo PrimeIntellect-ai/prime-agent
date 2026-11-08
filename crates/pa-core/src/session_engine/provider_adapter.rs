@@ -674,16 +674,16 @@ mod tests {
     /// one keeps the target's model.
     #[tokio::test]
     async fn live_auth_adopts_a_serving_request_model() {
-        // The adapted request model rides the openai-responses API: a
-        // shadow faux registration records its calls without any network,
-        // exactly like the daemon's xai-shape test. The built-ins register
-        // first (a shadow registered before the process's first dispatch
-        // would be replaced by `resolve_provider`'s one-time
-        // `ensure_builtins`).
-        pa_ai::registry::ensure_builtins();
+        // The adapted request model rides a test-only api registered for
+        // this test alone: a unique registration is never replaced by
+        // `resolve_provider`'s one-time `ensure_builtins` (which
+        // re-registers the built-in api names) and no other test's
+        // dispatch shares it; the faux records its calls without any
+        // network, exactly like the daemon's xai-shape test.
+        let adapted_api = "live-auth-adapted-request-model-test".to_string();
         let adapted_registration =
             pa_ai::faux::register_faux_provider(pa_ai::faux::RegisterFauxProviderOptions {
-                api: Some("openai-responses".to_owned()),
+                api: Some(adapted_api.clone()),
                 ..Default::default()
             });
         let received: Arc<std::sync::Mutex<Vec<(String, String)>>> =
@@ -724,7 +724,7 @@ mod tests {
         let slot_model = registration.get_model();
         let mut adapted_model = slot_model.clone();
         adapted_model.id = "adapted-grok".to_string();
-        adapted_model.api = "openai-responses".to_string();
+        adapted_model.api = adapted_api.clone();
         let target = Arc::new(std::sync::RwLock::new(Some(ProviderTarget {
             api_key: Some("stale-access".to_string()),
             model: slot_model.clone(),
@@ -771,14 +771,12 @@ mod tests {
         assert_eq!(
             *received.lock().unwrap(),
             vec![
-                ("adapted-grok".to_string(), "openai-responses".to_string()),
+                ("adapted-grok".to_string(), adapted_api.clone()),
                 (slot_model.id.clone(), slot_model.api.clone()),
             ]
         );
         registration.unregister();
         adapted_registration.unregister();
-        // Restore the built-in the shadowed registration replaced.
-        pa_ai::registry::register_builtin_api_providers();
     }
 
     /// A turn abort during a held OAuth refresh settles the stream
@@ -897,17 +895,19 @@ mod tests {
         let stream_fn = switchable_stream_fn_with_live_auth(target, live_auth);
         let controller = pa_agent::abort::AbortController::new();
         let signal = controller.signal();
+        let (ack_tx, ack_rx) = std::sync::mpsc::channel::<()>();
         let aborter = std::thread::spawn(move || {
             entered_rx
                 .recv()
                 .expect("the held refresh entered the token endpoint");
             controller.abort();
-            // Release the held refresh on a grace timer, not on the
-            // stream's settle: a synchronous resolution (the mutant this
-            // test pins) can only settle after this release — completing
-            // the refresh first — so the assertion below rejects it
-            // instead of hanging on a hold nothing would release.
-            std::thread::sleep(std::time::Duration::from_secs(1));
+            // The test thread releases the held refresh right after its
+            // still-held assertion, so nothing races the assertion. This
+            // escape is only for the synchronous mutant (a resolution on
+            // the stream's own thread never settles the race before the
+            // release): the timeout releases instead, and the mutant
+            // fails the assertions below, never the suite on a hang.
+            let _ = ack_rx.recv_timeout(std::time::Duration::from_secs(30));
             release_tx.send(()).expect("the release channel is open");
         });
         let outcome = pa_agent::abort::race_with_abort(
@@ -923,11 +923,17 @@ mod tests {
         )
         .await;
         // The refresh is STILL HELD here: the abort settled the stream
-        // without waiting for it.
+        // without waiting for it. The release follows this assertion in
+        // causal order — the observer releases on the ack below, or on
+        // its timeout escape — so a slow runner can never flip the flag
+        // underneath the assertion.
         assert!(
             !*completed.lock().expect("completed flag"),
             "the abort settled the stream before the refresh completed"
         );
+        ack_tx
+            .send(())
+            .expect("the ack channel is open; the assertion above ran first");
         aborter.join().expect("the abort observer");
         // Flatten the double Result like the production loop's race
         // (`agent_loop::abort::race_with_abort`): the seam's abort error
@@ -964,6 +970,196 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
         registration.unregister();
+    }
+
+    /// The abort/resurrection probe: a Stop during an OAuth refresh
+    /// settles the stream immediately, but the offloaded resolution keeps
+    /// running to completion. When a credential change lands meanwhile,
+    /// the detached refresh's commit must keep it — the current entry,
+    /// including deletion, stays authoritative and the fetched grant is
+    /// discarded. Returns the agent dir (its tempdir kept alive) for the
+    /// caller's store assertions.
+    async fn an_aborted_refresh_keeps_a_concurrent_store_change(
+        store_change: impl FnOnce(&std::path::Path) + Send + 'static,
+    ) -> (tempfile::TempDir, std::path::PathBuf) {
+        struct HeldRefresh {
+            entered: std::sync::mpsc::Sender<()>,
+            release: std::sync::Mutex<std::sync::mpsc::Receiver<()>>,
+        }
+        impl pa_ai::oauth::ProviderHttp for HeldRefresh {
+            fn request(
+                &self,
+                request: pa_ai::oauth::ProviderHttpRequest,
+                _timeout_ms: u64,
+            ) -> std::pin::Pin<
+                Box<
+                    dyn std::future::Future<
+                            Output = Result<pa_ai::oauth::ProviderHttpResponse, String>,
+                        > + Send
+                        + '_,
+                >,
+            > {
+                assert_eq!(
+                    request.url, "https://platform.claude.com/v1/oauth/token",
+                    "the held transport serves the Anthropic token endpoint"
+                );
+                Box::pin(async move {
+                    self.entered.send(()).expect("the abort observer lives");
+                    self.release
+                        .lock()
+                        .expect("release channel")
+                        .recv()
+                        .expect("the test releases the refresh");
+                    Ok(pa_ai::oauth::ProviderHttpResponse {
+                        status: 200,
+                        body: r#"{"access_token":"refreshed-access","refresh_token":"rotated-refresh","expires_in":3600}"#
+                            .to_owned(),
+                    })
+                })
+            }
+        }
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let (finished_tx, finished_rx) = std::sync::mpsc::channel();
+        let integration: std::sync::Arc<dyn crate::auth::OAuthIntegration> =
+            std::sync::Arc::new(crate::auth::ProviderOAuth::with_transports(
+                std::sync::Arc::new(pa_ai::oauth::ReqwestCodexHttp::new()),
+                std::sync::Arc::new(HeldRefresh {
+                    entered: entered_tx,
+                    release: std::sync::Mutex::new(release_rx),
+                }),
+            ));
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("auth.json"),
+            r#"{"anthropic":{"type":"oauth","access":"expired-access","refresh":"old-refresh","expires":1}}"#,
+        )
+        .unwrap();
+        let agent_dir = dir.path().to_path_buf();
+        // The production resolution shape: a fresh store and request-auth
+        // registry per provider call, over the file the test mutates.
+        let resolver_dir = agent_dir.clone();
+        let resolver_integration = std::sync::Arc::clone(&integration);
+        let live_auth: LiveAuthResolver = Arc::new(move |model: &Model| {
+            let auth = crate::auth::AuthStorage::create_with_oauth(
+                &resolver_dir,
+                std::sync::Arc::clone(&resolver_integration),
+            );
+            let mut registry = crate::models::ModelRegistry::create_for_request_auth(
+                auth,
+                resolver_dir.join("models.json"),
+            );
+            let resolved = registry.get_api_key_and_headers(model, model.headers.as_ref());
+            finished_tx.send(()).expect("the finished observer lives");
+            LiveRequestAuth {
+                api_key: resolved.api_key,
+                headers: resolved.headers,
+                store_auth: resolved.store_auth,
+                request_model: resolved.request_model,
+            }
+        });
+        let registration =
+            pa_ai::faux::register_faux_provider(pa_ai::faux::RegisterFauxProviderOptions {
+                api: Some("live-auth-resurrection-test".to_owned()),
+                ..Default::default()
+            });
+        registration.set_repeat_last_response(true);
+        registration.set_responses(vec![pa_ai::faux::FauxResponseStep::Message(
+            pa_ai::faux::faux_assistant_text_message(
+                "ok",
+                pa_ai::faux::FauxAssistantMessageOptions::default(),
+            ),
+        )]);
+        let mut model = registration.get_model();
+        model.provider = crate::auth::ANTHROPIC_PROVIDER_ID.to_string();
+        let target = Arc::new(std::sync::RwLock::new(Some(ProviderTarget {
+            model,
+            api_key: Some("expired-access".to_string()),
+            service_tier: None,
+            headers: None,
+        })));
+        let stream_fn = switchable_stream_fn_with_live_auth(target, live_auth);
+        let controller = pa_agent::abort::AbortController::new();
+        let signal = controller.signal();
+        let aborter_dir = agent_dir.clone();
+        let aborter = std::thread::spawn(move || {
+            entered_rx
+                .recv()
+                .expect("the held refresh entered the token endpoint");
+            controller.abort();
+            // The credential change lands while the detached fetch is
+            // held: the store is authoritative when it completes.
+            store_change(&aborter_dir);
+            release_tx.send(()).expect("the release channel is open");
+        });
+        let outcome = pa_agent::abort::race_with_abort(
+            stream_fn(
+                AgentModel::unknown(),
+                LlmContext::default(),
+                StreamRequestOptions {
+                    signal: signal.clone(),
+                    ..Default::default()
+                },
+            ),
+            &signal,
+        )
+        .await;
+        aborter.join().expect("the abort observer");
+        let Err(error) = outcome.and_then(std::convert::identity) else {
+            panic!("the turn abort must win over the held refresh")
+        };
+        assert!(pa_agent::abort::is_abort_error(&error));
+        assert!(
+            registration.received_api_keys().is_empty(),
+            "no provider request is admitted after the abort"
+        );
+        // The detached resolution completed: its commit either kept the
+        // store change (the guard) or overwrote it (the defect).
+        finished_rx
+            .recv()
+            .expect("the detached resolution completes");
+        registration.unregister();
+        (dir, agent_dir)
+    }
+
+    /// A completed logout survives an aborted refresh that completes
+    /// detached: the logged-out grant is never resurrected by the fetched
+    /// token's commit.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_aborted_refresh_never_resurrects_a_logout() {
+        let (_dir, agent_dir) = an_aborted_refresh_keeps_a_concurrent_store_change(|agent_dir| {
+            crate::auth::AuthStorage::create(agent_dir).logout(crate::auth::ANTHROPIC_PROVIDER_ID);
+        })
+        .await;
+        assert!(
+            !crate::auth::AuthStorage::create(&agent_dir).has(crate::auth::ANTHROPIC_PROVIDER_ID),
+            "logout must stay logged out after the aborted refresh completes: {}",
+            std::fs::read_to_string(agent_dir.join("auth.json")).unwrap()
+        );
+    }
+
+    /// A new API-key login survives an aborted refresh that completes
+    /// detached: the stored key is never overwritten with the old grant.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_aborted_refresh_never_overwrites_a_new_api_key_login() {
+        let (_dir, agent_dir) = an_aborted_refresh_keeps_a_concurrent_store_change(|agent_dir| {
+            crate::auth::AuthStorage::create(agent_dir).set(
+                crate::auth::ANTHROPIC_PROVIDER_ID,
+                crate::auth::AuthCredential::ApiKey {
+                    key: "new-login-key".to_string(),
+                    prime_team: None,
+                },
+            );
+        })
+        .await;
+        assert_eq!(
+            crate::auth::AuthStorage::create(&agent_dir)
+                .get_api_key(crate::auth::ANTHROPIC_PROVIDER_ID)
+                .as_deref(),
+            Some("new-login-key"),
+            "the new API-key login must survive the aborted refresh: {}",
+            std::fs::read_to_string(agent_dir.join("auth.json")).unwrap()
+        );
     }
 
     #[tokio::test]

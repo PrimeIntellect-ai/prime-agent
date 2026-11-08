@@ -168,6 +168,9 @@ fn command_keys_resolve() {
 /// actually needed (TS's deferred value material): building the
 /// candidates for a status probe never spawns the command; the serving
 /// lookup resolves it once and the process cache holds it afterwards.
+/// The counter key is a POSIX-shell pipeline (the ambient shell on
+/// Windows resolves it differently), so the test runs on Unix only.
+#[cfg(unix)]
 #[test]
 fn a_command_keys_status_probe_never_runs_the_command() {
     let counter = std::env::temp_dir().join(format!(
@@ -773,5 +776,196 @@ fn a_second_refresh_joins_the_first_flight_instead_of_fetching_again() {
         oauth.calls.load(std::sync::atomic::Ordering::SeqCst),
         1,
         "one flight per provider: the second caller served the first's fresh credential"
+    );
+}
+
+/// A scripted backend for the refresh catch paths: the in-memory document
+/// core plus two scripted failure points. `peer_on_lock_error` lands a
+/// peer's completed refresh at the `refresh_lock` call and reports the
+/// lock unavailable (a waiting peer's world: the peer's fresh credential
+/// is in the store, the lock cannot be taken); `fail_writes` fails the
+/// credential write, so the document keeps the expired credential.
+struct CatchBackend {
+    content: std::sync::Mutex<Option<String>>,
+    peer_on_lock_error: Option<String>,
+    fail_writes: bool,
+}
+
+impl AuthStorageBackend for CatchBackend {
+    fn read(&self) -> anyhow::Result<Option<String>> {
+        Ok(self.content.lock().expect("catch backend content").clone())
+    }
+
+    fn with_lock(
+        &self,
+        update: &mut dyn FnMut(Option<String>) -> anyhow::Result<((), Option<String>)>,
+    ) -> anyhow::Result<()> {
+        let mut content = self.content.lock().expect("catch backend content");
+        let ((), next) = update(content.clone())?;
+        if let Some(next) = next {
+            anyhow::ensure!(!self.fail_writes, "the scripted credential write fails");
+            *content = Some(next);
+        }
+        Ok(())
+    }
+
+    fn refresh_lock(&self) -> anyhow::Result<Option<crate::platform::lock_dir::LockDir>> {
+        match &self.peer_on_lock_error {
+            Some(peer) => {
+                // The peer refreshed while this flight waited for the
+                // lock; the lock stays unavailable.
+                *self.content.lock().expect("catch backend content") = Some(peer.clone());
+                anyhow::bail!("the scripted refresh lock is unavailable")
+            }
+            // A single-process backend: the process-local flight gate
+            // serializes the refresh.
+            None => Ok(None),
+        }
+    }
+}
+
+/// One stored OAuth credential for `provider`, serialized like the file
+/// document.
+fn catch_document(provider: &str, credential: &AuthCredential) -> String {
+    let mut data = AuthStorageData::default();
+    data.insert(provider, credential);
+    serde_json::to_string_pretty(&data.0).unwrap()
+}
+
+/// The refresh-lock catch path: a lock that cannot be taken serves the
+/// stored unexpired credential (a peer's completed refresh, landed while
+/// this flight waited) and never fetches a token — fetching without the
+/// lock would spend the single-use refresh token a second time.
+#[test]
+fn an_unavailable_refresh_lock_serves_the_peer_credential_and_never_fetches() {
+    let provider = "x-lock-unavailable";
+    let mut peer = AuthStorageData::default();
+    peer.insert(
+        provider,
+        &oauth_credential("peer-access", now_epoch_ms() + 3_600_000),
+    );
+    let backend = Arc::new(CatchBackend {
+        content: std::sync::Mutex::new(Some(catch_document(
+            provider,
+            &expired_oauth("old-access"),
+        ))),
+        peer_on_lock_error: Some(serde_json::to_string_pretty(&peer.0).unwrap()),
+        fail_writes: false,
+    });
+    let counting = Arc::new(CountingOAuth {
+        calls: std::sync::atomic::AtomicUsize::new(0),
+        delay_ms: 0,
+    });
+    let oauth: Arc<dyn OAuthIntegration> = counting.clone();
+    let mut auth =
+        AuthStorage::from_storage(Arc::clone(&backend) as Arc<dyn AuthStorageBackend>, oauth);
+    assert_eq!(
+        auth.get_api_key(provider).as_deref(),
+        Some("peer-access"),
+        "the catch path serves the peer's landed credential"
+    );
+    assert_eq!(
+        counting.calls.load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "an unavailable refresh lock never fetches a token"
+    );
+}
+
+/// A scripted OAuth integration whose refresh lands a concurrent
+/// `/login`'s fresh credential in the backend and then fails its token
+/// call: the failed-fetch catch path must serve the landed credential.
+struct LoginLandingRefresh {
+    backend: Arc<CatchBackend>,
+    login: String,
+}
+
+impl OAuthIntegration for LoginLandingRefresh {
+    fn api_key_for(&self, _provider: &str, credential: &AuthCredential) -> Option<String> {
+        match credential {
+            AuthCredential::Oauth { access, .. } => Some(access.clone()),
+            _ => None,
+        }
+    }
+
+    fn refresh(&self, _provider: &str, _credentials: &AuthStorageData) -> Option<AuthCredential> {
+        // The concurrent `/login` lands while this fetch runs; the token
+        // call itself fails.
+        *self.backend.content.lock().expect("catch backend content") = Some(self.login.clone());
+        None
+    }
+}
+
+/// The failed-fetch catch path: a refresh whose token call fails serves a
+/// credential that landed meanwhile (a peer's refresh or a concurrent
+/// `/login`) instead of nothing.
+#[test]
+fn a_failed_fetch_serves_a_credential_that_landed_meanwhile() {
+    let provider = "x-fetch-failed";
+    let mut login = AuthStorageData::default();
+    login.insert(
+        provider,
+        &oauth_credential("login-access", now_epoch_ms() + 3_600_000),
+    );
+    let backend = Arc::new(CatchBackend {
+        content: std::sync::Mutex::new(Some(catch_document(
+            provider,
+            &expired_oauth("old-access"),
+        ))),
+        peer_on_lock_error: None,
+        fail_writes: false,
+    });
+    let oauth: Arc<dyn OAuthIntegration> = Arc::new(LoginLandingRefresh {
+        backend: Arc::clone(&backend),
+        login: serde_json::to_string_pretty(&login.0).unwrap(),
+    });
+    let mut auth =
+        AuthStorage::from_storage(Arc::clone(&backend) as Arc<dyn AuthStorageBackend>, oauth);
+    assert_eq!(
+        auth.get_api_key(provider).as_deref(),
+        Some("login-access"),
+        "the failed fetch serves the credential that landed meanwhile"
+    );
+}
+
+/// The failed-write catch path: a refresh whose credential write fails
+/// serves only an unexpired credential — the expired stored credential is
+/// not a refresh outcome (serving it would adopt an expired token as a
+/// live pair at the stream seam).
+#[test]
+fn a_failed_write_serves_no_expired_credential() {
+    let provider = "x-write-failed";
+    let backend = Arc::new(CatchBackend {
+        content: std::sync::Mutex::new(Some(catch_document(
+            provider,
+            &expired_oauth("old-access"),
+        ))),
+        peer_on_lock_error: None,
+        fail_writes: true,
+    });
+    let counting = Arc::new(CountingOAuth {
+        calls: std::sync::atomic::AtomicUsize::new(0),
+        delay_ms: 0,
+    });
+    let oauth: Arc<dyn OAuthIntegration> = counting.clone();
+    let mut auth =
+        AuthStorage::from_storage(Arc::clone(&backend) as Arc<dyn AuthStorageBackend>, oauth);
+    assert_eq!(
+        auth.get_api_key(provider),
+        None,
+        "the expired stored credential is not a refresh outcome"
+    );
+    assert_eq!(
+        counting.calls.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "the fetch ran once before the scripted write failed"
+    );
+    assert_eq!(
+        backend
+            .content
+            .lock()
+            .expect("catch backend content")
+            .as_deref(),
+        Some(catch_document(provider, &expired_oauth("old-access")).as_str()),
+        "the failed write left the expired credential in the document"
     );
 }

@@ -265,13 +265,20 @@ impl AuthStorageBackend for FileAuthStorageBackend {
     /// document lock would stall every same-process auth read and write
     /// for the fetch's whole span. The path pairs with
     /// [`LockDir::path_for`]: the lock directory is
-    /// `auth.json.refresh.lock`. A waiting peer covers one holder's
-    /// whole fetch (the providers' refresh timeout is 8s, inside the
-    /// lock's 10s stale window) plus the write: 150 attempts at 100ms.
+    /// `auth.json.refresh.lock`. The lock is owner-recorded
+    /// ([`LockDir::acquire_owned_retrying`]): a stale lock is reclaimed
+    /// only from a provably dead holder (a crashed worker — crash
+    /// recovery), never from a live one paused past the staleness
+    /// window; reclaiming a live holder's lock would spend the same
+    /// single-use refresh token twice. A waiting peer covers one
+    /// holder's whole fetch (the providers' refresh timeout is 8s,
+    /// inside the lock's 10s stale window) plus the write: 150 attempts
+    /// at 100ms; a peer that cannot take the lock serves the stored
+    /// credential or keeps the captured pair instead.
     fn refresh_lock(&self) -> Result<Option<LockGuard>> {
         let mut refresh_file = self.auth_path.as_os_str().to_os_string();
         refresh_file.push(".refresh");
-        let guard = LockGuard::acquire_retrying(
+        let guard = LockGuard::acquire_owned_retrying(
             std::path::Path::new(&refresh_file),
             STALE_AFTER,
             150,

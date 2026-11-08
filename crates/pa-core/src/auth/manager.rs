@@ -451,13 +451,20 @@ impl AuthStorage {
         ))
     }
 
-    fn stored_candidate(&self, provider: &str) -> Option<AuthSourceCandidate> {
+    /// The stored candidate (TS `getStoredAuthCandidate`): a `!command`
+    /// key's value material is deferred (`resolveValueMaterial`), so
+    /// building the candidate — every lookup, every status probe — never
+    /// runs the command; only staleness matching against recorded marks
+    /// and stale-marking pay the resolution. The lookup that just
+    /// resolved the command passes its value through (TS's
+    /// `resolvedCommandValue` option): the candidate then carries the
+    /// resolved material and no deferred fingerprint.
+    fn stored_candidate(
+        &self,
+        provider: &str,
+        resolved_command_value: Option<&str>,
+    ) -> Option<AuthSourceCandidate> {
         let credential = self.data.credential(provider)?;
-        // TS `getStoredAuthCandidate`: a `!command` key's value material is
-        // deferred (`resolveValueMaterial`), so building the candidate —
-        // every lookup, every status probe — never runs the command; only
-        // staleness matching against recorded marks and stale-marking pay
-        // the resolution.
         let command_key = match &credential {
             AuthCredential::ApiKey { key, .. } if key.starts_with('!') => Some(key.clone()),
             _ => None,
@@ -465,28 +472,37 @@ impl AuthStorage {
         let command_identity = command_key
             .as_ref()
             .map(|key| format!("api_key:command:{key}"));
+        let resolved_material = command_identity
+            .as_ref()
+            .zip(resolved_command_value)
+            .map(|(identity, resolved)| format!("{identity} {resolved}"));
         let value_material = if command_identity.is_some() {
-            None
+            resolved_material
         } else {
             self.stored_value_material(&credential)
         };
         let identity_half = value_material
-            .as_deref()
-            .map(str::to_string)
+            .clone()
             .or(command_identity)
             .unwrap_or_else(|| Self::auth_source_lazy_value_key().to_string());
         let key = format!("identity:auth.json {identity_half}");
-        let lazy_value_fingerprint: Option<ValueFingerprintResolver> = command_key.map(|key| {
-            let resolver: ValueFingerprintResolver = Arc::new(move || {
-                resolve_config_value_uncached(&key).map(|resolved| {
-                    fingerprint(
-                        AuthSource::Stored,
-                        &format!("value:auth.json api_key:command:{key} {resolved}"),
-                    )
-                })
-            });
-            resolver
-        });
+        // The deferred fingerprint exists only for a command key the caller
+        // did not already resolve.
+        let lazy_value_fingerprint: Option<ValueFingerprintResolver> =
+            match (command_key, resolved_command_value) {
+                (Some(key), None) => {
+                    let resolver: ValueFingerprintResolver = Arc::new(move || {
+                        resolve_config_value_uncached(&key).map(|resolved| {
+                            fingerprint(
+                                AuthSource::Stored,
+                                &format!("value:auth.json api_key:command:{key} {resolved}"),
+                            )
+                        })
+                    });
+                    Some(resolver)
+                }
+                _ => None,
+            };
         Some(
             self.reuse_auth_source_candidate(AuthSource::Stored, provider, key, || {
                 AuthSourceCandidate {
@@ -498,40 +514,6 @@ impl AuthStorage {
                         fingerprint(AuthSource::Stored, &format!("value:auth.json {material}"))
                     }),
                     resolve_value_fingerprint: lazy_value_fingerprint.clone(),
-                }
-            }),
-        )
-    }
-
-    /// The stored candidate with a pre-resolved command value (TS's
-    /// `resolvedCommandValue` option): the lookup that just resolved a
-    /// `!command` key reuses the value for its source token instead of
-    /// paying the candidate's lazy fingerprint resolution again.
-    fn stored_candidate_with_resolved_value(
-        &self,
-        provider: &str,
-        resolved: &str,
-    ) -> Option<AuthSourceCandidate> {
-        let AuthCredential::ApiKey { key, .. } = self.data.credential(provider)? else {
-            return None;
-        };
-        if !key.starts_with('!') {
-            return None;
-        }
-        let value_material = format!("api_key:command:{key} {resolved}");
-        let key = format!("identity:auth.json {value_material}");
-        Some(
-            self.reuse_auth_source_candidate(AuthSource::Stored, provider, key, || {
-                AuthSourceCandidate {
-                    source: AuthSource::Stored,
-                    configured: true,
-                    label: None,
-                    identity_fingerprint: fingerprint(AuthSource::Stored, "identity:auth.json"),
-                    value_fingerprint: Some(fingerprint(
-                        AuthSource::Stored,
-                        &format!("value:auth.json {value_material}"),
-                    )),
-                    resolve_value_fingerprint: None,
                 }
             }),
         )
@@ -606,13 +588,13 @@ impl AuthStorage {
             vec![
                 self.runtime_candidate(provider),
                 self.environment_candidate(provider),
-                self.stored_candidate(provider),
+                self.stored_candidate(provider, None),
                 fallback,
             ]
         } else {
             vec![
                 self.runtime_candidate(provider),
-                self.stored_candidate(provider),
+                self.stored_candidate(provider, None),
                 self.environment_candidate(provider),
                 fallback,
             ]

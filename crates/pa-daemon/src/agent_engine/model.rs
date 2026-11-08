@@ -458,14 +458,17 @@ impl AgentSessionEngine {
     ) -> pa_core::models::ResolvedRequestAuth {
         let auth = pa_core::auth::AuthStorage::create_with_oauth(
             &self.config.agent_dir,
-            self.request_auth_oauth
-                .read()
-                .expect("request auth oauth lock")
-                .clone(),
+            std::sync::Arc::clone(&self.request_auth_oauth),
         );
         let store_healthy = auth.load_error().is_none();
-        let mut registry =
-            pa_core::models::ModelRegistry::create(auth, self.config.agent_dir.join("models.json"));
+        // The request-auth registry resolves auth only for the serving
+        // provider: its construction never resolves the unrelated Prime
+        // Inference credential (a stored `!command` helper must not run
+        // on every provider call).
+        let mut registry = pa_core::models::ModelRegistry::create_for_request_auth(
+            auth,
+            self.config.agent_dir.join("models.json"),
+        );
         let mut resolved = registry.get_api_key_and_headers(model, model.headers.as_ref());
         // The registry's single possibly-refreshing lookup answers the key,
         // the headers, the request model, and whether a live source served
@@ -490,8 +493,10 @@ impl AgentSessionEngine {
             return Some(api_key.clone());
         }
         let auth = pa_core::auth::AuthStorage::create(&self.config.agent_dir);
-        let mut registry =
-            pa_core::models::ModelRegistry::create(auth, self.config.agent_dir.join("models.json"));
+        let mut registry = pa_core::models::ModelRegistry::create_for_request_auth(
+            auth,
+            self.config.agent_dir.join("models.json"),
+        );
         registry
             .get_api_key_and_headers(model, model.headers.as_ref())
             .api_key
