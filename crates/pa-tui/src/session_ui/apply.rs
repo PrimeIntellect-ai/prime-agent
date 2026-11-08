@@ -551,8 +551,8 @@ impl SessionUi {
                 reason,
                 custom_instructions,
             } => {
-                // The compaction loader renders over the working loader; the generation bump
-                // retires every in-flight abort outcome from an earlier run's loader.
+                // The compaction loader replaces the working loader; the generation bump retires
+                // every in-flight abort outcome from an earlier run's loader.
                 view.compaction_generation += 1;
                 view.compaction = Some(CompactionState {
                     reason: CompactionReason::parse(&reason),

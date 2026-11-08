@@ -81,7 +81,7 @@ pub enum HeadlessStep {
 #[derive(Debug, Default)]
 pub(super) struct HeadlessSettle {
     pub(super) pending_inputs: usize,
-    pub(super) run_busy: bool,
+    pub(super) turn_active: bool,
     pub(super) submits_in_flight: usize,
     pub(super) queued: usize,
     pub(super) idle_barrier: bool,
@@ -110,7 +110,7 @@ impl HeadlessSettle {
     ) -> Self {
         Self {
             pending_inputs,
-            run_busy: session.run_busy(),
+            turn_active: session.run_state.is_busy(),
             submits_in_flight: session.prompt_submits_in_flight(),
             queued: view.queued.steering.len() + view.queued.follow_ups.len(),
             idle_barrier,
@@ -139,7 +139,7 @@ impl HeadlessSettle {
                 self.pending_inputs
             ));
         }
-        if self.run_busy {
+        if self.turn_active {
             blockers.push("a turn still active".to_string());
         }
         if self.submits_in_flight > 0 {

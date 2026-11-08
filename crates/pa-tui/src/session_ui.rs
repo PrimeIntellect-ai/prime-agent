@@ -240,14 +240,12 @@ pub(crate) struct SessionUi {
     pending_model_provider: Option<String>,
     pending_thinking_suffix: Option<String>,
     pending_queue: Option<crate::queued::QueuedMessages>,
-    /// The attach snapshot's live-run flag. Every successful `attach_session` is followed by its
-    /// `rebuild_view` in the same handler, and session events apply only in the run loop's arms,
-    /// never in between (the same order `pending_snapshot` and `pending_queue` rely on).
+    /// Like `pending_snapshot`: the rebuild that follows every attach applies it, before any event.
     pending_run_streaming: Option<bool>,
     queue_selection: crate::queued::QueueSelection,
     context: Option<crate::chrome::ContextUsage>,
     list_rows: Vec<Value>,
-    run_state: RunState,
+    pub(crate) run_state: RunState,
     /// The session's queue delivery mode: `all` delivers the queued steering prefix as one batched
     /// turn at the boundary; `one-at-a-time` one per turn (product default `all`).
     pub(crate) steering_mode: String,

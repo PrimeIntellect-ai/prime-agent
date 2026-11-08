@@ -706,7 +706,7 @@ impl SessionUi {
         generation: u64,
         view: &mut AgentView,
     ) {
-        // The run state at submit time gates the telemetry; an earlier submit
+        // The turn state at submit time gates the telemetry; an earlier submit
         // still in flight counts as active here.
         let turn_was_active = self.run_state.is_busy() || self.prompt_in_flight > 0;
         self.apply_run_event(RunEvent::Submitted, view);
@@ -915,7 +915,6 @@ impl SessionUi {
                         return Ok(());
                     }
                 }
-                // No retry follows: a run the daemon did start still arrives as `agent_start`.
                 self.apply_run_event(
                     RunEvent::SubmitFailed {
                         others_in_flight: self.work_in_flight(),

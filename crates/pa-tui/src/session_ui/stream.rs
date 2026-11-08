@@ -159,10 +159,10 @@ impl SessionUi {
 /// exit hint outranks it at the call site).
 pub(super) fn streaming_tray_hint(
     keybindings: &crate::keybindings::KeybindingsManager,
-    busy: bool,
+    turn_active: bool,
     draft: &str,
 ) -> Option<String> {
-    if !busy || draft.trim().is_empty() {
+    if !turn_active || draft.trim().is_empty() {
         return None;
     }
     let follow_up = keybindings

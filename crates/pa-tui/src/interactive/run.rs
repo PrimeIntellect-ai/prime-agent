@@ -887,7 +887,7 @@ async fn run_interactive_surface(
                 // A parked follow-up/steering message keeps the barrier waiting until the session
                 // delivers it; a submit whose round trip is still armed holds the barrier too
                 // (the async submit resolves off the render path).
-                if session.run_busy()
+                if session.run_state.is_busy()
                     || !view.queued.is_empty()
                     || session.prompt_submits_in_flight() > 0
                 {
@@ -1318,7 +1318,7 @@ async fn run_interactive_surface(
                 render_deadline = Some(next);
             }
         }
-        let was_active = session.run_busy();
+        let was_active = session.run_state.is_busy();
         // The quiet tick's arming state, snapshotted before the select: the arm future reads these
         // locals instead of borrowing the surface.
         let autocomplete_pending = view.editor.has_pending_autocomplete();
@@ -1368,7 +1368,7 @@ async fn run_interactive_surface(
                     }
                     // A settled turn or compaction refreshes the tray's context usage.
                     let compaction_settled = std::mem::take(&mut session.compaction_settled);
-                    if compaction_settled || (was_active && !session.run_busy()) {
+                    if compaction_settled || (was_active && !session.run_state.is_busy()) {
                         session.refresh_stats().await;
                         session.rebuild_tray(&mut view);
                     }
@@ -1710,7 +1710,7 @@ async fn run_interactive_surface(
 
         // Spinner animation: the wall clock drives the phase, not the render rate — the frame gate
         // below caps renders, and only a phase change dirties the frame.
-        let animating = session.run_busy()
+        let animating = session.run_state.is_busy()
             || view.retry.is_some()
             || view.compaction.is_some()
             || view.share_loader.is_some();
@@ -1858,7 +1858,7 @@ async fn run_interactive_surface(
     // must never hold the exit path open. The handoff still emits the event but does not wait for
     // the flush.
     let exit_reason = session.exit_reason();
-    let turn_active_at_exit = session.run_busy();
+    let turn_active_at_exit = session.run_state.is_busy();
     if let Some(telemetry) = session.telemetry.clone() {
         let exit_event = async move {
             let () = telemetry

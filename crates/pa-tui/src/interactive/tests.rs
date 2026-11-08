@@ -252,7 +252,7 @@ fn the_headless_settle_names_every_stuck_member() {
             ..Default::default()
         },
         HeadlessSettle {
-            run_busy: true,
+            turn_active: true,
             ..Default::default()
         },
         HeadlessSettle {
@@ -309,7 +309,7 @@ fn the_headless_settle_names_every_stuck_member() {
     }
     // The wedge family's member: a latched turn names the turn.
     let wedge = HeadlessSettle {
-        run_busy: true,
+        turn_active: true,
         ..Default::default()
     };
     assert_eq!(
@@ -320,7 +320,7 @@ fn the_headless_settle_names_every_stuck_member() {
     // Everything stuck at once: every member is reported.
     let all = HeadlessSettle {
         pending_inputs: 1,
-        run_busy: true,
+        turn_active: true,
         submits_in_flight: 1,
         queued: 1,
         idle_barrier: true,
