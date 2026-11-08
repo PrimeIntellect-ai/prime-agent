@@ -484,10 +484,13 @@ impl ReplKernelManager {
     /// fresh manager can serve again.
     #[must_use]
     pub fn is_defunct(&self) -> bool {
-        matches!(
-            lock(&self.inner.guarded).lifecycle.current(),
-            Lifecycle::ShuttingDown { .. } | Lifecycle::Defunct
-        )
+        match lock(&self.inner.guarded).lifecycle.current() {
+            Lifecycle::ShuttingDown { .. } | Lifecycle::Defunct => true,
+            Lifecycle::Idle
+            | Lifecycle::Starting(_)
+            | Lifecycle::Running
+            | Lifecycle::Discarding => false,
+        }
     }
 
     /// Diagnostics tail (kernel stderr, at most the last 8 KiB).
@@ -521,7 +524,11 @@ impl ReplKernelManager {
                     g.lifecycle.transition(Lifecycle::starting(slot.clone()));
                     (slot, true)
                 }
-                _ => return Ok(()),
+                Lifecycle::Starting(Starting { start: None, .. })
+                | Lifecycle::Running
+                | Lifecycle::ShuttingDown { .. }
+                | Lifecycle::Discarding
+                | Lifecycle::Defunct => return Ok(()),
             }
         };
         if !owner {

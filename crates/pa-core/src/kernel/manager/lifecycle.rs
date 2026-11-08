@@ -55,8 +55,13 @@ impl KernelLifecycle {
 
     /// The only lifecycle writer. Entering `Starting` allocates the next generation.
     pub(super) fn transition(&mut self, to: Lifecycle) {
-        if matches!(to, Lifecycle::Starting(_)) {
-            self.generation += 1;
+        match to {
+            Lifecycle::Starting(_) => self.generation += 1,
+            Lifecycle::Idle
+            | Lifecycle::Running
+            | Lifecycle::ShuttingDown { .. }
+            | Lifecycle::Discarding
+            | Lifecycle::Defunct => {}
         }
         self.current = to;
     }
@@ -75,26 +80,44 @@ impl KernelLifecycle {
     }
 
     pub(super) fn is_running(&self) -> bool {
-        matches!(self.current, Lifecycle::Running)
+        match self.current {
+            Lifecycle::Running => true,
+            Lifecycle::Idle
+            | Lifecycle::Starting(_)
+            | Lifecycle::ShuttingDown { .. }
+            | Lifecycle::Discarding
+            | Lifecycle::Defunct => false,
+        }
     }
 
     pub(super) fn is_shut_down(&self) -> bool {
-        matches!(
-            self.current,
-            Lifecycle::ShuttingDown { .. } | Lifecycle::Discarding | Lifecycle::Defunct
-        )
+        match self.current {
+            Lifecycle::ShuttingDown { .. } | Lifecycle::Discarding | Lifecycle::Defunct => true,
+            Lifecycle::Idle | Lifecycle::Starting(_) | Lifecycle::Running => false,
+        }
     }
 
     /// The data of the start in progress; the lifecycle itself stays unchanged.
     pub(super) fn starting_mut(&mut self) -> Option<&mut Starting> {
         match &mut self.current {
             Lifecycle::Starting(starting) => Some(starting),
-            _ => None,
+            Lifecycle::Idle
+            | Lifecycle::Running
+            | Lifecycle::ShuttingDown { .. }
+            | Lifecycle::Discarding
+            | Lifecycle::Defunct => None,
         }
     }
 
     /// A graceful shutdown owns the current generation's teardown.
     pub(super) fn graceful_shutdown_in_flight(&self) -> bool {
-        matches!(self.current, Lifecycle::ShuttingDown { generation } if generation == self.generation)
+        match self.current {
+            Lifecycle::ShuttingDown { generation } => generation == self.generation,
+            Lifecycle::Idle
+            | Lifecycle::Starting(_)
+            | Lifecycle::Running
+            | Lifecycle::Discarding
+            | Lifecycle::Defunct => false,
+        }
     }
 }

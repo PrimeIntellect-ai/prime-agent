@@ -130,7 +130,20 @@ impl Inner {
         if let Some(id) = request_id {
             lock(&self.guarded).pending_done_waiters.remove(&id);
         }
-        lock(&self.guarded).lifecycle.transition(Lifecycle::Defunct);
+        {
+            let mut g = lock(&self.guarded);
+            let owns_grace = match g.lifecycle.current() {
+                Lifecycle::ShuttingDown { generation: owner } => *owner == generation,
+                Lifecycle::Idle
+                | Lifecycle::Starting(_)
+                | Lifecycle::Running
+                | Lifecycle::Discarding
+                | Lifecycle::Defunct => false,
+            };
+            if owns_grace {
+                g.lifecycle.transition(Lifecycle::Defunct);
+            }
+        }
         if !self.start_stale(generation) {
             self.cleanup_resources(Signal::Term);
             performed_cleanup = true;

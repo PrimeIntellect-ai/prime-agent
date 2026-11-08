@@ -129,8 +129,13 @@ impl Inner {
     ) -> anyhow::Result<()> {
         let slot = {
             let mut g = lock(&self.guarded);
-            if !matches!(g.lifecycle.current(), Lifecycle::Idle) {
-                return Ok(());
+            match g.lifecycle.current() {
+                Lifecycle::Idle => {}
+                Lifecycle::Starting(_)
+                | Lifecycle::Running
+                | Lifecycle::ShuttingDown { .. }
+                | Lifecycle::Discarding
+                | Lifecycle::Defunct => return Ok(()),
             }
             let slot = MemoSlot::new();
             g.lifecycle.transition(Lifecycle::starting(slot.clone()));
@@ -260,7 +265,11 @@ impl Inner {
         }
         let startup_error = match lock(&self.guarded).lifecycle.current() {
             Lifecycle::Starting(starting) => starting.protocol_error.clone(),
-            _ => None,
+            Lifecycle::Idle
+            | Lifecycle::Running
+            | Lifecycle::ShuttingDown { .. }
+            | Lifecycle::Discarding
+            | Lifecycle::Defunct => None,
         };
         if let Some(startup_error) = startup_error {
             return Err(anyhow!("{startup_error}"));
