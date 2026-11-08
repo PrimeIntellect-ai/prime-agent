@@ -115,14 +115,16 @@ impl SessionEngine {
             work_unsettled,
         )
         .await;
-        if let GoalContinuationDecision::NotMinted {
-            drop_failed_pair: true,
-        }
-        | GoalContinuationDecision::Minted {
-            drop_failed_pair: true,
-            ..
-        } = decision
-        {
+        let drop_failed_pair = match &decision {
+            GoalContinuationDecision::NotMinted { drop_failed_pair }
+            | GoalContinuationDecision::Minted {
+                drop_failed_pair, ..
+            } => *drop_failed_pair,
+            GoalContinuationDecision::NotOwned
+            | GoalContinuationDecision::NothingOwed
+            | GoalContinuationDecision::Owed => false,
+        };
+        if drop_failed_pair {
             self.session.drop_failed_goal_continuation().await;
         }
         decision

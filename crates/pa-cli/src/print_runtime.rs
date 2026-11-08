@@ -1685,31 +1685,31 @@ async fn run_prompts_and_emit(
             continue;
         }
         // Quiescence settled every descendant: only an owed continuation delivers.
-        let decision = engine
+        match engine
             .consult_goal_continuation(ContinuationTrigger::OwedRetry, false)
-            .await;
-        // A refused or failed mint can still move the goal (a failed persist fails it).
-        if matches!(
-            decision,
-            GoalContinuationDecision::NotMinted { .. } | GoalContinuationDecision::Minted { .. }
-        ) {
-            goal.publish_goal_update(engine).await;
-        }
-        if let GoalContinuationDecision::Minted {
-            message: continuation,
-            ..
-        } = decision
+            .await
         {
-            goal.run_queued_turn(
-                engine,
-                &mut boundary,
-                model,
-                api_key.clone(),
-                global_harness_dir.clone(),
-                &continuation,
-            )
-            .await?;
-            continue;
+            GoalContinuationDecision::Minted {
+                message: continuation,
+                ..
+            } => {
+                goal.publish_goal_update(engine).await;
+                goal.run_queued_turn(
+                    engine,
+                    &mut boundary,
+                    model,
+                    api_key.clone(),
+                    global_harness_dir.clone(),
+                    &continuation,
+                )
+                .await?;
+                continue;
+            }
+            // A refused or failed mint can still move the goal (a failed persist fails it).
+            GoalContinuationDecision::NotMinted { .. } => goal.publish_goal_update(engine).await,
+            GoalContinuationDecision::NotOwned
+            | GoalContinuationDecision::NothingOwed
+            | GoalContinuationDecision::Owed => {}
         }
         if autonomous
             .deliver_rlm_continuation(
