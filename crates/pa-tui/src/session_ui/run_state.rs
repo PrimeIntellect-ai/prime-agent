@@ -33,22 +33,46 @@ pub(crate) enum RunEvent {
 
 impl RunState {
     fn next(self, event: RunEvent) -> RunState {
-        match event {
-            RunEvent::Started | RunEvent::Attached { streaming: true } => RunState::Running,
-            RunEvent::Ended | RunEvent::Attached { streaming: false } => RunState::Idle,
-            RunEvent::Submitted if self == RunState::Idle => RunState::Submitted,
-            RunEvent::Interrupted
-            | RunEvent::SubmitFailed {
-                others_in_flight: false,
-            } if self == RunState::Submitted => RunState::Idle,
-            RunEvent::Submitted | RunEvent::SubmitFailed { .. } | RunEvent::Interrupted => self,
+        use RunState::{Idle, Running, Submitted};
+        match (self, event) {
+            (
+                Idle | Submitted | Running,
+                RunEvent::Started | RunEvent::Attached { streaming: true },
+            ) => Running,
+            (
+                Idle | Submitted | Running,
+                RunEvent::Ended | RunEvent::Attached { streaming: false },
+            ) => Idle,
+            (Idle, RunEvent::Submitted) => Submitted,
+            (
+                Submitted,
+                RunEvent::Interrupted
+                | RunEvent::SubmitFailed {
+                    others_in_flight: false,
+                },
+            ) => Idle,
+            (Idle, RunEvent::Interrupted | RunEvent::SubmitFailed { .. })
+            | (
+                Submitted,
+                RunEvent::Submitted
+                | RunEvent::SubmitFailed {
+                    others_in_flight: true,
+                },
+            )
+            | (
+                Running,
+                RunEvent::Submitted | RunEvent::Interrupted | RunEvent::SubmitFailed { .. },
+            ) => self,
         }
     }
 }
 
 impl SessionUi {
     pub(crate) fn run_busy(&self) -> bool {
-        self.run_state != RunState::Idle
+        match self.run_state {
+            RunState::Idle => false,
+            RunState::Submitted | RunState::Running => true,
+        }
     }
 
     /// Every run or turn start restarts the loader; a re-attached run anchors it at the LAST
@@ -56,10 +80,13 @@ impl SessionUi {
     pub(crate) fn apply_run_event(&mut self, event: RunEvent, view: &mut AgentView) {
         let was = self.run_state;
         self.run_state = was.next(event);
-        if self.run_state == RunState::Idle {
-            view.working = None;
-            view.working_since = None;
-            return;
+        match self.run_state {
+            RunState::Idle => {
+                view.working = None;
+                view.working_since = None;
+                return;
+            }
+            RunState::Submitted | RunState::Running => {}
         }
         let since = match event {
             RunEvent::Started => Instant::now(),
@@ -67,8 +94,11 @@ impl SessionUi {
                 .loader_anchor_ms
                 .and_then(Self::loader_anchor_instant)
                 .unwrap_or_else(Instant::now),
-            RunEvent::Submitted if was == RunState::Idle => Instant::now(),
-            _ => return,
+            RunEvent::Submitted => match was {
+                RunState::Idle => Instant::now(),
+                RunState::Submitted | RunState::Running => return,
+            },
+            RunEvent::SubmitFailed { .. } | RunEvent::Interrupted | RunEvent::Ended => return,
         };
         view.working = Some(WorkingState {
             activity: "Waiting",
