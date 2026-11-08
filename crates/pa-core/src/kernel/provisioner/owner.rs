@@ -180,53 +180,66 @@ impl Slot {
                 pending: Pending::Boot(boot),
                 ..
             } => Some(boot),
-            _ => None,
+            Slot::Empty
+            | Slot::Live(_)
+            | Slot::Disposed {
+                pending: Pending::Nothing | Pending::Kernel(_),
+                ..
+            } => None,
         }
     }
 
     /// Take the published kernel (live, or held for a dispose).
     fn take_published(&mut self) -> Option<ReplKernelManager> {
         match self {
-            Slot::Disposed { pending, .. } => pending.take_kernel(),
-            slot => match std::mem::take(slot) {
+            Slot::Live(_) => match std::mem::take(self) {
                 Slot::Live(manager) => Some(manager),
-                other => {
-                    *slot = other;
-                    None
+                Slot::Empty | Slot::Booting(_) | Slot::Disposed { .. } => {
+                    unreachable!("the slot was just matched as Live")
                 }
             },
+            Slot::Disposed { pending, .. } => pending.take_kernel(),
+            Slot::Empty | Slot::Booting(_) => None,
         }
     }
 
     /// Take the armed boot, disposed or not.
     fn take_boot(&mut self) -> Option<Boot> {
         match self {
-            Slot::Disposed { pending, .. } => match std::mem::replace(pending, Pending::Nothing) {
-                Pending::Boot(boot) => Some(boot),
-                other => {
-                    *pending = other;
-                    None
-                }
-            },
-            slot => match std::mem::take(slot) {
+            Slot::Booting(_) => match std::mem::take(self) {
                 Slot::Booting(boot) => Some(boot),
-                other => {
-                    *slot = other;
-                    None
+                Slot::Empty | Slot::Live(_) | Slot::Disposed { .. } => {
+                    unreachable!("the slot was just matched as Booting")
                 }
             },
+            Slot::Disposed { pending, .. } => pending.take_boot(),
+            Slot::Empty | Slot::Live(_) => None,
         }
     }
 }
 
 impl Pending {
     fn take_kernel(&mut self) -> Option<ReplKernelManager> {
-        match std::mem::replace(self, Pending::Nothing) {
-            Pending::Kernel(manager) => Some(manager),
-            other => {
-                *self = other;
-                None
-            }
+        match self {
+            Pending::Kernel(_) => match std::mem::replace(self, Pending::Nothing) {
+                Pending::Kernel(manager) => Some(manager),
+                Pending::Nothing | Pending::Boot(_) => {
+                    unreachable!("pending was just matched as Kernel")
+                }
+            },
+            Pending::Nothing | Pending::Boot(_) => None,
+        }
+    }
+
+    fn take_boot(&mut self) -> Option<Boot> {
+        match self {
+            Pending::Boot(_) => match std::mem::replace(self, Pending::Nothing) {
+                Pending::Boot(boot) => Some(boot),
+                Pending::Nothing | Pending::Kernel(_) => {
+                    unreachable!("pending was just matched as Boot")
+                }
+            },
+            Pending::Nothing | Pending::Kernel(_) => None,
         }
     }
 }
@@ -239,7 +252,12 @@ impl OwnerState {
                 pending: Pending::Kernel(manager),
                 ..
             } => Some(manager.clone()),
-            _ => None,
+            Slot::Empty
+            | Slot::Booting(_)
+            | Slot::Disposed {
+                pending: Pending::Nothing | Pending::Boot(_),
+                ..
+            } => None,
         }
     }
 
@@ -268,7 +286,9 @@ impl OwnerState {
                 pending: Pending::Boot(boot),
                 ..
             } if boot.generation == generation => (*snapshot, !boot.stops.is_empty()),
-            _ => (false, false),
+            Slot::Empty | Slot::Booting(_) | Slot::Live(_) | Slot::Disposed { .. } => {
+                (false, false)
+            }
         };
         if !flush || covered_by_stop {
             return (flush, None);
@@ -388,28 +408,32 @@ fn handle(inner: &Arc<ProvisionerInner>, state: &Mutex<OwnerState>, command: Com
             reply,
         } => {
             let mut s = lock(state);
-            if matches!(&s.slot, Slot::Disposed { .. }) {
-                let _ = reply.send(Err(anyhow::anyhow!("Kernel provisioner disposed")));
-                return;
-            }
-            if matches!(&s.slot, Slot::Live(manager) if manager.is_defunct()) {
-                s.slot = Slot::Empty;
-            }
-            if let Slot::Live(manager) = &s.slot {
-                let _ = reply.send(Ok(manager.clone()));
-                return;
-            }
-            if matches!(s.slot, Slot::Empty) {
+            let reboot = match &s.slot {
+                Slot::Empty => true,
+                Slot::Live(manager) => manager.is_defunct(),
+                Slot::Booting(_) | Slot::Disposed { .. } => false,
+            };
+            if reboot {
                 s.slot = Slot::Booting(start_boot(inner, &mut s, progress.clone()));
             }
-            if let Slot::Booting(boot) = &mut s.slot {
-                boot.waiters.push(reply);
-                if let Some(progress) = progress {
-                    let _ = joined.send(boot.last_message.clone());
-                    boot.listeners.push(progress);
+            match &mut s.slot {
+                Slot::Disposed { .. } => {
+                    let _ = reply.send(Err(anyhow::anyhow!("Kernel provisioner disposed")));
                 }
+                Slot::Live(manager) => {
+                    let _ = reply.send(Ok(manager.clone()));
+                }
+                Slot::Booting(boot) => {
+                    boot.waiters.push(reply);
+                    if let Some(progress) = progress {
+                        let _ = joined.send(boot.last_message.clone());
+                        boot.listeners.push(progress);
+                    }
+                }
+                Slot::Empty => unreachable!("an empty slot was just armed"),
             }
         }
+
         Command::Stop { snapshot, done } => {
             let mut s = lock(state);
             let s = &mut *s;
@@ -455,8 +479,9 @@ fn handle(inner: &Arc<ProvisionerInner>, state: &Mutex<OwnerState>, command: Com
                 Slot::Live(manager) => (Pending::Kernel(manager), Vec::new()),
             };
             let mut boots: Vec<u64> = s.doomed.iter().map(|boot| boot.generation).collect();
-            if let Pending::Boot(boot) = &pending {
-                boots.push(boot.generation);
+            match &pending {
+                Pending::Boot(boot) => boots.push(boot.generation),
+                Pending::Nothing | Pending::Kernel(_) => {}
             }
             waiters.push(DisposeWaiter { boots, done });
             s.slot = Slot::Disposed {
@@ -595,7 +620,9 @@ fn boot_settled(
                 deliver(inner, s, boot, &Err(failure));
             }
         },
-        other => s.slot = other,
+        slot @ (Slot::Empty | Slot::Booting(_) | Slot::Live(_) | Slot::Disposed { .. }) => {
+            s.slot = slot;
+        }
     }
 }
 
@@ -624,10 +651,13 @@ fn deliver(
             None => s.gates.open(gate),
         }
     }
-    if let Slot::Disposed { waiters, .. } = &mut s.slot {
-        for waiter in waiters.iter_mut() {
-            waiter.boots.retain(|settled| *settled != boot.generation);
+    match &mut s.slot {
+        Slot::Disposed { waiters, .. } => {
+            for waiter in waiters.iter_mut() {
+                waiter.boots.retain(|settled| *settled != boot.generation);
+            }
         }
+        Slot::Empty | Slot::Booting(_) | Slot::Live(_) => {}
     }
     finish_disposes(s);
 }
@@ -692,13 +722,13 @@ fn spawn_shutdown(
 /// A dispose returns once the boots it found have settled and the published
 /// kernel is shut down with the dispose's own policy.
 fn finish_disposes(s: &mut OwnerState) {
-    let Slot::Disposed {
-        snapshot,
-        pending,
-        waiters,
-    } = &mut s.slot
-    else {
-        return;
+    let (snapshot, pending, waiters) = match &mut s.slot {
+        Slot::Disposed {
+            snapshot,
+            pending,
+            waiters,
+        } => (snapshot, pending, waiters),
+        Slot::Empty | Slot::Booting(_) | Slot::Live(_) => return,
     };
     let (ready, waiting): (Vec<_>, Vec<_>) = std::mem::take(waiters)
         .into_iter()
@@ -763,9 +793,11 @@ mod tests {
             ..OwnerState::default()
         };
         assert_eq!(state.teardown_policy(1), (false, None));
-        if let Slot::Disposed { snapshot, .. } = &mut state.slot {
-            *snapshot = true;
-        }
+        state.slot = Slot::Disposed {
+            snapshot: true,
+            pending: Pending::Boot(boot(1)),
+            waiters: Vec::new(),
+        };
         let (flush, gate) = state.teardown_policy(1);
         assert!(flush);
         assert!(gate.is_some());
