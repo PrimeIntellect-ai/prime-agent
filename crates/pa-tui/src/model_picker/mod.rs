@@ -787,8 +787,8 @@ impl ModelPicker {
         // catalog labels each route hosted or gateway); unlabeled routes and
         // every other provider show the provider id.
         let provider = match (model.provider.as_str(), model.serving) {
-            (PRIME_INFERENCE_PROVIDER_ID, Some(ModelServing::Hosted)) => "prime hosted",
-            (PRIME_INFERENCE_PROVIDER_ID, Some(ModelServing::Gateway)) => "prime gateway",
+            (PRIME_INFERENCE_PROVIDER_ID, Some(ModelServing::Hosted)) => "prime-hosted",
+            (PRIME_INFERENCE_PROVIDER_ID, Some(ModelServing::Gateway)) => "prime-gateway",
             _ => model.provider.as_str(),
         };
         segments.push(provider.to_string());

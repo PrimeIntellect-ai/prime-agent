@@ -957,8 +957,8 @@ fn prime_inference_rows_name_the_serving_class() {
         viewport_rows: 19,
     };
     let picker = ModelPicker::new(options);
-    assert_eq!(picker.trailing_segments(&catalog[0]), vec!["prime hosted"]);
-    assert_eq!(picker.trailing_segments(&catalog[1]), vec!["prime gateway"]);
+    assert_eq!(picker.trailing_segments(&catalog[0]), vec!["prime-hosted"]);
+    assert_eq!(picker.trailing_segments(&catalog[1]), vec!["prime-gateway"]);
     assert_eq!(
         picker.trailing_segments(&catalog[2]),
         vec!["prime-inference"]
@@ -1022,8 +1022,8 @@ fn serving_labels_change_only_the_prime_rows_layout() {
     };
     let served_hosted = row_with(&served_rows, "GLM 5.3");
     let served_gateway = row_with(&served_rows, "Claude Fable 5");
-    assert!(served_hosted.contains("prime hosted"), "{served_hosted}");
-    assert!(served_gateway.contains("prime gateway"), "{served_gateway}");
+    assert!(served_hosted.contains("prime-hosted"), "{served_hosted}");
+    assert!(served_gateway.contains("prime-gateway"), "{served_gateway}");
     let unserved_hosted = row_with(&unserved_rows, "GLM 5.3");
     assert!(
         unserved_hosted.contains("prime-inference"),
