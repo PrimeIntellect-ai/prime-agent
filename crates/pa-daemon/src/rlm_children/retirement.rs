@@ -39,7 +39,8 @@ pub(super) enum FinishStep {
 pub(super) enum RetirementEvent {
     /// A delete of a running child sends its kill.
     BeginDelete,
-    /// The close walk sends its kill.
+    /// The close walk sends its kill; it also takes over a delete whose caller
+    /// was interrupted before the kill outcome.
     BeginClose,
     /// The delete's kill was refused: the child stays live and watched.
     KillRefused,
@@ -59,7 +60,9 @@ impl Retirement {
     pub(super) fn apply(&mut self, event: RetirementEvent) -> bool {
         let next = match (&self.0, event) {
             (RetirementPhase::Live, RetirementEvent::BeginDelete) => RetirementPhase::Deleting,
-            (RetirementPhase::Live, RetirementEvent::BeginClose) => RetirementPhase::Closing,
+            (RetirementPhase::Live | RetirementPhase::Deleting, RetirementEvent::BeginClose) => {
+                RetirementPhase::Closing
+            }
             (RetirementPhase::Deleting, RetirementEvent::KillRefused) => RetirementPhase::Live,
             (
                 RetirementPhase::Live | RetirementPhase::Deleting | RetirementPhase::Closing,

@@ -3007,3 +3007,12 @@ async fn the_unreachable_give_up_skips_the_exit_capture_when_a_capture_stands() 
     assert_eq!(record.answer_text.as_deref(), Some("the captured say"));
     assert!(record.answer_captured);
 }
+
+#[test]
+fn a_close_takes_over_a_delete_interrupted_before_its_kill_outcome() {
+    use super::retirement::RetirementEvent;
+    let mut retirement = Retirement::live();
+    retirement.apply(RetirementEvent::BeginDelete);
+    assert!(retirement.apply(RetirementEvent::BeginClose));
+    assert!(retirement.closed_by_parent());
+}
