@@ -164,6 +164,41 @@ fn command_keys_resolve() {
     assert_eq!(auth.get_api_key("anthropic").as_deref(), Some("cmd-key"));
 }
 
+/// A `!command` credential key runs the command only when its value is
+/// actually needed (TS's deferred value material): building the
+/// candidates for a status probe never spawns the command; the serving
+/// lookup resolves it once and the process cache holds it afterwards.
+#[test]
+fn a_command_keys_status_probe_never_runs_the_command() {
+    let counter = std::env::temp_dir().join(format!(
+        "pa-command-probe-{}-{}",
+        std::process::id(),
+        line!()
+    ));
+    let _ = std::fs::remove_file(&counter);
+    let key = format!("!echo run >> {} ; echo cmd-key", counter.display());
+    let mut auth = storage_with(&serde_json::json!({
+        "anthropic": { "type": "api_key", "key": key }
+    }));
+    let runs = || std::fs::read_to_string(&counter).map_or(0, |text| text.lines().count());
+    let status = auth.get_auth_status("anthropic");
+    assert_eq!(status.source, Some(AuthSource::Stored));
+    assert_eq!(
+        runs(),
+        0,
+        "building the candidates for a status probe never runs the command"
+    );
+    assert_eq!(auth.get_api_key("anthropic").as_deref(), Some("cmd-key"));
+    assert_eq!(runs(), 1, "the serving lookup resolves the command once");
+    assert_eq!(auth.get_api_key("anthropic").as_deref(), Some("cmd-key"));
+    assert_eq!(
+        runs(),
+        1,
+        "the source token reuses the resolved value; the process cache holds it"
+    );
+    let _ = std::fs::remove_file(&counter);
+}
+
 #[test]
 fn env_key_priority_for_prime_inference() {
     let mut auth = storage_with_env(

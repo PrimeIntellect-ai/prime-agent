@@ -56,6 +56,16 @@ impl AuthStorage {
                             } else {
                                 resolve_config_value(key)
                             };
+                            // The source token reuses the value this lookup
+                            // just resolved (TS's `resolvedCommandValue`):
+                            // a command key resolves once per lookup, never
+                            // again through the candidate's lazy fingerprint.
+                            let candidate = api_key
+                                .as_deref()
+                                .and_then(|resolved| {
+                                    self.stored_candidate_with_resolved_value(provider_id, resolved)
+                                })
+                                .unwrap_or(candidate);
                             return AuthApiKeyResult {
                                 api_key,
                                 source_token: Self::token_for(provider_id, &candidate),
@@ -138,6 +148,18 @@ impl AuthStorage {
             .api_key
     }
 
+    /// The stored OAuth credential when it is fresh — a peer's completed
+    /// refresh or a concurrent `/login` — else `None` (the expired
+    /// credential stays stored for a later retry).
+    fn stored_unexpired_credential(&self, provider_id: &str) -> Option<AuthCredential> {
+        self.data.credential(provider_id).filter(|credential| {
+            matches!(
+                credential,
+                AuthCredential::Oauth { expires, .. } if now_epoch_ms() < *expires
+            )
+        })
+    }
+
     /// Refresh an expired OAuth credential, returning the new credential on success.
     ///
     /// Load-then-lock shape: the token fetch never runs under the document lock
@@ -147,11 +169,13 @@ impl AuthStorage {
     ///
     /// 1. LOAD: the document through the read arm (no document lock).
     /// 2. FETCH: the token call outside the document lock, behind [`refresh_flight`]'s
-    ///    single-flight gate, held through WRITE and reload; expiry is re-checked so a second
-    ///    fetch never wastes a single-use refresh token.
-    /// 3. WRITE: the locked read-modify-write, holding the lock only for the re-read,
-    ///    insert, and atomic write. A peer that refreshed meanwhile keeps its fresher
-    ///    credential.
+    ///    process-local single-flight gate AND the backend's cross-process refresh lock
+    ///    (a dedicated lock file beside the document), held through WRITE and reload;
+    ///    expiry is re-checked under the lock so a concurrent process that refreshed
+    ///    first is served instead of spending a second single-use refresh token.
+    /// 3. WRITE: the locked read-modify-write, holding the document lock only for the
+    ///    re-read, insert, and atomic write. A peer that refreshed meanwhile keeps its
+    ///    fresher credential.
     fn refresh_oauth(&mut self, provider_id: &str) -> Option<AuthCredential> {
         // LOAD: no document lock.
         let Ok(content) = self.storage.read() else {
@@ -181,8 +205,26 @@ impl AuthStorage {
             self.reload();
             return Some(credential);
         }
-        // FETCH: outside the document lock, one flight through commit and reload.
+        // FETCH: outside the document lock, one flight through commit and
+        // reload. The re-check, fetch, and write hold the backend's
+        // cross-process refresh lock (single-process backends report no
+        // lock; the flight gate above serializes them), so concurrent
+        // daemon workers resolving the same expiry never spend the same
+        // single-use refresh token: a peer that refreshed first is served
+        // by the re-check instead of re-fetching.
         let _flight = refresh_flight(provider_id);
+        let _cross_process_refresh = match self.storage.refresh_lock() {
+            Ok(lock) => lock,
+            Err(error) => {
+                // The refresh lock could not be taken: a peer may be
+                // mid-refresh or the lock is unhealthy. Reload and serve
+                // a fresh stored credential when one exists (the TS
+                // catch path) instead of racing a second token spend.
+                tracing::debug!(%error, provider = provider_id, "auth refresh lock unavailable");
+                self.reload();
+                return self.stored_unexpired_credential(provider_id);
+            }
+        };
         // The gate may have just released a flight that wrote a fresh
         // credential; re-check before spending a refresh token.
         let content = self.storage.read().unwrap_or_default();
@@ -202,9 +244,10 @@ impl AuthStorage {
         let fetched = self.oauth.refresh(provider_id, &data);
         let Some(new_credential) = fetched else {
             // Refresh failed: keep credentials for a later retry; a peer
-            // may have refreshed meanwhile, so reload before failing.
+            // or a concurrent `/login` may have landed a fresh credential,
+            // so reload and serve it before failing (the TS catch path).
             self.reload();
-            return None;
+            return self.stored_unexpired_credential(provider_id);
         };
         // WRITE: the locked read-modify-write.
         let mut refreshed: Option<AuthCredential> = Some(new_credential.clone());
@@ -226,12 +269,11 @@ impl AuthStorage {
             Ok(((), Some(content)))
         });
         if result.is_err() {
-            // A peer may have refreshed successfully; reload before failing.
+            // A peer may have refreshed successfully; reload and serve a
+            // fresh stored credential before failing (an expired stored
+            // credential is not a refresh outcome).
             self.reload();
-            return self
-                .data
-                .credential(provider_id)
-                .filter(|c| matches!(c, AuthCredential::Oauth { .. }));
+            return self.stored_unexpired_credential(provider_id);
         }
         // Reload from what we wrote: the in-memory snapshot must not serve the
         // pre-refresh credential (a rotated refresh token is single-use).

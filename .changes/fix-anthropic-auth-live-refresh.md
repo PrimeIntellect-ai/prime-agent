@@ -1,0 +1,1 @@
+- The running daemon now serves re-authenticated provider credentials on the live session's next request without a restart: a rotated credential (a fresh `/login`) or an expired OAuth token (refreshed in place) is picked up per request, instead of pinning the session to the credential captured at startup and failing with 401s until the daemon restarts.

@@ -20,12 +20,11 @@ impl AgentSessionEngine {
     /// clears the previous credential's `X-Prime-Team-ID` instead of
     /// serving it on the new key.
     fn refresh_request_auth(&self, target: &mut ProviderTarget) {
-        let (api_key, headers, store_auth) =
-            self.resolve_request_key_and_headers_and_store_health(&target.model);
-        if store_auth {
-            if let Some(api_key) = api_key {
+        let resolved = self.resolve_request_key_and_headers_and_store_health(&target.model);
+        if resolved.store_auth {
+            if let Some(api_key) = resolved.api_key {
                 target.api_key = Some(api_key);
-                target.headers = headers;
+                target.headers = resolved.headers;
             }
         }
     }
@@ -84,9 +83,8 @@ impl AgentSessionEngine {
             .as_ref()
             .map(|target| target.model.clone());
         if let Some(model) = live_model {
-            let (api_key, headers, store_auth) =
-                self.resolve_request_key_and_headers_and_store_health(&model);
-            if store_auth {
+            let resolved = self.resolve_request_key_and_headers_and_store_health(&model);
+            if resolved.store_auth {
                 let mut slot = self
                     .provider_target
                     .write()
@@ -97,14 +95,17 @@ impl AgentSessionEngine {
                     // auth then re-resolves for whatever is live NOW,
                     // under the same gate; a cleared slot stays cleared.
                     let (api_key, headers) = if target.model == model {
-                        (api_key, headers)
+                        (resolved.api_key, resolved.headers)
                     } else {
-                        match self.resolve_request_key_and_headers_and_store_health(&target.model) {
-                            (Some(key), headers, true) => (Some(key), headers),
+                        let moved =
+                            self.resolve_request_key_and_headers_and_store_health(&target.model);
+                        if moved.store_auth {
+                            (moved.api_key, moved.headers)
+                        } else {
                             // The moved-to model's provider has no live
                             // stored credential: the target keeps its
                             // last-good pair.
-                            _ => (None, None),
+                            (None, None)
                         }
                     };
                     // A resolved credential replaces the pair: headers

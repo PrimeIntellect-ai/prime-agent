@@ -1,10 +1,11 @@
 //! Live credential pickup e2e: a daemon worker session whose stored OAuth
 //! credential is rotated by ANOTHER process (the `/login` flow's writer)
 //! must serve the fresh token on the very next provider request — no
-//! daemon restart, no `/reload`. This pins the reported symptom class
-//! (a re-authenticated credential needs a daemon restart to be picked up;
-//! token expiry kickouts): the live session's request auth follows the
-//! credential store.
+//! daemon restart, no `/reload`. This pins the reported symptom class (a
+//! re-authenticated credential needs a daemon restart to be picked up):
+//! the live session's request auth follows the credential store. The
+//! rotation here is an unexpired replacement written to disk; the OAuth
+//! expiry-refresh path is pinned separately by the engine battery.
 // Fn length is a style gate, not correctness.
 #![allow(clippy::too_many_lines)]
 #![cfg(unix)]

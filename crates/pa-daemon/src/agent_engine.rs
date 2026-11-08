@@ -219,6 +219,13 @@ pub struct AgentSessionEngine {
     pub(crate) provider_target: std::sync::Arc<
         std::sync::RwLock<Option<pa_core::session_engine::provider_adapter::ProviderTarget>>,
     >,
+    /// The OAuth integration the request-auth resolution refreshes expired
+    /// credentials through: production uses the built-in
+    /// [`pa_core::auth::ProviderOAuth`] (TS delegates to the oauth
+    /// registry on every auth-storage instance); tests inject a scripted
+    /// integration to pin the refresh behavior. Read once per resolution.
+    pub(crate) request_auth_oauth:
+        std::sync::RwLock<std::sync::Arc<dyn pa_core::auth::OAuthIntegration>>,
     /// One shared supervisor-link client: agent messaging and RLM children
     /// multiplex the same connection.
     link: Arc<crate::supervisor_link::SupervisorLink>,

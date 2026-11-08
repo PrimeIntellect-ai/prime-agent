@@ -453,13 +453,40 @@ impl AuthStorage {
 
     fn stored_candidate(&self, provider: &str) -> Option<AuthSourceCandidate> {
         let credential = self.data.credential(provider)?;
-        let value_material = self.stored_value_material(&credential);
-        let key = format!(
-            "identity:auth.json {}",
-            value_material
-                .as_deref()
-                .unwrap_or(Self::auth_source_lazy_value_key()),
-        );
+        // TS `getStoredAuthCandidate`: a `!command` key's value material is
+        // deferred (`resolveValueMaterial`), so building the candidate —
+        // every lookup, every status probe — never runs the command; only
+        // staleness matching against recorded marks and stale-marking pay
+        // the resolution.
+        let command_key = match &credential {
+            AuthCredential::ApiKey { key, .. } if key.starts_with('!') => Some(key.clone()),
+            _ => None,
+        };
+        let command_identity = command_key
+            .as_ref()
+            .map(|key| format!("api_key:command:{key}"));
+        let value_material = if command_identity.is_some() {
+            None
+        } else {
+            self.stored_value_material(&credential)
+        };
+        let identity_half = value_material
+            .as_deref()
+            .map(str::to_string)
+            .or(command_identity)
+            .unwrap_or_else(|| Self::auth_source_lazy_value_key().to_string());
+        let key = format!("identity:auth.json {identity_half}");
+        let lazy_value_fingerprint: Option<ValueFingerprintResolver> = command_key.map(|key| {
+            let resolver: ValueFingerprintResolver = Arc::new(move || {
+                resolve_config_value_uncached(&key).map(|resolved| {
+                    fingerprint(
+                        AuthSource::Stored,
+                        &format!("value:auth.json api_key:command:{key} {resolved}"),
+                    )
+                })
+            });
+            resolver
+        });
         Some(
             self.reuse_auth_source_candidate(AuthSource::Stored, provider, key, || {
                 AuthSourceCandidate {
@@ -467,9 +494,43 @@ impl AuthStorage {
                     configured: true,
                     label: None,
                     identity_fingerprint: fingerprint(AuthSource::Stored, "identity:auth.json"),
-                    value_fingerprint: value_material.map(|material| {
+                    value_fingerprint: value_material.clone().map(|material| {
                         fingerprint(AuthSource::Stored, &format!("value:auth.json {material}"))
                     }),
+                    resolve_value_fingerprint: lazy_value_fingerprint.clone(),
+                }
+            }),
+        )
+    }
+
+    /// The stored candidate with a pre-resolved command value (TS's
+    /// `resolvedCommandValue` option): the lookup that just resolved a
+    /// `!command` key reuses the value for its source token instead of
+    /// paying the candidate's lazy fingerprint resolution again.
+    fn stored_candidate_with_resolved_value(
+        &self,
+        provider: &str,
+        resolved: &str,
+    ) -> Option<AuthSourceCandidate> {
+        let AuthCredential::ApiKey { key, .. } = self.data.credential(provider)? else {
+            return None;
+        };
+        if !key.starts_with('!') {
+            return None;
+        }
+        let value_material = format!("api_key:command:{key} {resolved}");
+        let key = format!("identity:auth.json {value_material}");
+        Some(
+            self.reuse_auth_source_candidate(AuthSource::Stored, provider, key, || {
+                AuthSourceCandidate {
+                    source: AuthSource::Stored,
+                    configured: true,
+                    label: None,
+                    identity_fingerprint: fingerprint(AuthSource::Stored, "identity:auth.json"),
+                    value_fingerprint: Some(fingerprint(
+                        AuthSource::Stored,
+                        &format!("value:auth.json {value_material}"),
+                    )),
                     resolve_value_fingerprint: None,
                 }
             }),

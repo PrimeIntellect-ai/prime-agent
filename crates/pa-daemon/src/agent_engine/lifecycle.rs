@@ -164,6 +164,9 @@ impl AgentSessionEngine {
             pending_branch: std::sync::Mutex::new(None),
             prompt_context_boundary: std::sync::Mutex::new(None),
             provider_target: std::sync::Arc::new(std::sync::RwLock::new(None)),
+            request_auth_oauth: std::sync::RwLock::new(std::sync::Arc::new(
+                pa_core::auth::ProviderOAuth::new(),
+            )),
             image_route: std::sync::Mutex::new(None),
             reload_lock: std::sync::Mutex::new(()),
             own_summary: std::sync::Arc::new(std::sync::Mutex::new(None)),
@@ -1010,10 +1013,30 @@ impl AgentSessionEngine {
         // from the credential store on every provider call (the TS
         // streamFn's per-call `getApiKeyAndHeaders`): a `/login` from
         // another process or an OAuth refresh at expiry serves the next
-        // request without a restart.
+        // request without a restart. A resolution for a dead engine (the
+        // session torn down) serves nothing, so the captured pair stands.
+        let live_auth = {
+            let weak = self
+                .self_weak
+                .lock()
+                .expect("engine self-weak lock")
+                .clone();
+            std::sync::Arc::new(move |model: &Model| {
+                let Some(engine) = weak.as_ref().and_then(std::sync::Weak::upgrade) else {
+                    return pa_core::session_engine::provider_adapter::LiveRequestAuth::default();
+                };
+                let resolved = engine.resolve_request_key_and_headers_and_store_health(model);
+                pa_core::session_engine::provider_adapter::LiveRequestAuth {
+                    api_key: resolved.api_key,
+                    headers: resolved.headers,
+                    store_auth: resolved.store_auth,
+                    request_model: resolved.request_model,
+                }
+            })
+        };
         let stream_fn = switchable_stream_fn_with_live_auth(
             std::sync::Arc::clone(&self.provider_target),
-            self.live_request_auth_resolver(),
+            live_auth,
         );
         {
             // The build's resolve-and-install serializes with `/reload`'s

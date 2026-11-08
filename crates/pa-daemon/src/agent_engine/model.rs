@@ -3,8 +3,6 @@
 //! session's live-model and thinking-level surfaces, and the request
 //! API-key seam.
 
-use std::sync::Arc;
-
 use super::{
     AgentSessionEngine, EngineModelSelection, Model, RestoredSessionModel, SessionEngine,
     StartupScope,
@@ -433,84 +431,58 @@ impl AgentSessionEngine {
         Option<String>,
         Option<std::collections::BTreeMap<String, String>>,
     ) {
-        let (api_key, headers, _store_healthy) =
-            self.resolve_request_key_and_headers_and_store_health(model);
-        (api_key, headers)
+        let resolved = self.resolve_request_key_and_headers_and_store_health(model);
+        (resolved.api_key, resolved.headers)
     }
 
-    /// [`Self::resolve_request_key_and_headers`] plus whether the
-    /// resolution serves a live credential for the model's provider on a
-    /// healthy read — stored, or the ambient environment/runtime override
-    /// (a logout that empties the store leaves the session on the env
-    /// key, exactly like a fresh resolution). `false` means the resolved
-    /// key is the configured `models.json` fallback — served when the
-    /// store is unreadable OR resolves no credential from any live
-    /// source — which is not a credential and must never replace a
-    /// serving pair (the create-config override is source-independent;
-    /// callers apply it themselves).
+    /// [`Self::resolve_request_key_and_headers`]'s full resolution: the
+    /// registry's single lookup — possibly refreshing an expired OAuth
+    /// token through the engine's OAuth integration — with the
+    /// store-read health folded into `store_auth`. `false` means the
+    /// resolved key is the configured `models.json` fallback — served
+    /// when the store is unreadable OR resolves no credential from any
+    /// live source — which is not a credential and must never replace a
+    /// serving pair. `request_model` carries the per-call xAI request
+    /// model the lookup serves (TS `requestModel`); other providers
+    /// leave it unset.
     ///
     /// The live session's stream consults this per provider call through
-    /// [`Self::live_request_auth_resolver`], so a credential rotated by
+    /// the resolver `build_session` wires, so a credential rotated by
     /// another process (`/login`) or an OAuth token refreshed at expiry
-    /// serves the next request without a restart.
+    /// serves the next request without a restart. The resolution is
+    /// blocking I/O; the stream seam runs it off the executor under the
+    /// turn's abort signal.
     pub(crate) fn resolve_request_key_and_headers_and_store_health(
         &self,
         model: &Model,
-    ) -> (
-        Option<String>,
-        Option<std::collections::BTreeMap<String, String>>,
-        bool,
-    ) {
-        let auth = pa_core::auth::AuthStorage::create(&self.config.agent_dir);
+    ) -> pa_core::models::ResolvedRequestAuth {
+        let auth = pa_core::auth::AuthStorage::create_with_oauth(
+            &self.config.agent_dir,
+            self.request_auth_oauth
+                .read()
+                .expect("request auth oauth lock")
+                .clone(),
+        );
         let store_healthy = auth.load_error().is_none();
         let mut registry =
             pa_core::models::ModelRegistry::create(auth, self.config.agent_dir.join("models.json"));
-        let resolved = registry.get_api_key_and_headers(model, model.headers.as_ref());
-        // The registry's single possibly-refreshing lookup answers both the
-        // key and whether the store served a live credential (the lookup may
-        // OAuth-refresh and store a fresh token); a second refreshing lookup
-        // here would re-fetch a token the first just failed to refresh.
-        let store_auth = store_healthy && resolved.store_auth;
+        let mut resolved = registry.get_api_key_and_headers(model, model.headers.as_ref());
+        // The registry's single possibly-refreshing lookup answers the key,
+        // the headers, the request model, and whether a live source served
+        // (the lookup may OAuth-refresh and store a fresh token); a second
+        // refreshing lookup here would re-fetch a token the first just
+        // failed to refresh.
+        resolved.store_auth &= store_healthy;
         if let Some(api_key) = &self.current_selection().api_key {
-            // The create-config key override pins the key, never the headers:
-            // the registry's merged headers still ship, exactly like the TS
-            // `getApiKeyAndHeaders` override path. The flag stays the
-            // store's: a caller pairing the override key with headers
-            // keeps its last-good headers when the store cannot serve.
-            return (Some(api_key.clone()), resolved.headers, store_auth);
+            // The create-config key override pins the key, never the
+            // headers or the request model: the registry's merged pair
+            // still ships, exactly like the TS `getApiKeyAndHeaders`
+            // override path. The flag stays the store's: a caller pairing
+            // the override key with headers keeps its last-good headers
+            // when the store cannot serve.
+            resolved.api_key = Some(api_key.clone());
         }
-        (resolved.api_key, resolved.headers, store_auth)
-    }
-
-    /// The stream-time auth resolver the built session consults on every
-    /// provider call (the TS session streamFn's per-call
-    /// `getApiKeyAndHeaders`): the slot keeps the serving model and the
-    /// last-good pair, and this resolver overlays fresh request auth from
-    /// the credential store — a credential rotated by another process
-    /// (`/login`) or an OAuth token refreshed at its expiry serves the
-    /// live session's next request without a restart. A resolution for a
-    /// dead engine (the session torn down) serves nothing, so the
-    /// captured pair stands.
-    pub(crate) fn live_request_auth_resolver(
-        &self,
-    ) -> pa_core::session_engine::provider_adapter::LiveAuthResolver {
-        let weak = self
-            .self_weak
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone();
-        Arc::new(move |model: &Model| {
-            let Some(engine) = weak.as_ref().and_then(std::sync::Weak::upgrade) else {
-                return pa_core::session_engine::provider_adapter::LiveRequestAuth::default();
-            };
-            let (api_key, headers, store_auth) =
-                engine.resolve_request_key_and_headers_and_store_health(model);
-            pa_core::session_engine::provider_adapter::LiveRequestAuth {
-                api_key,
-                headers,
-                store_auth,
-            }
-        })
+        resolved
     }
 
     pub(crate) fn resolve_request_api_key(&self, model: &Model) -> Option<String> {
@@ -537,8 +509,9 @@ impl AgentSessionEngine {
         captured_headers: Option<std::collections::BTreeMap<String, String>>,
     ) -> pa_core::session_engine::provider_adapter::ProviderTarget {
         let override_key = self.current_selection().api_key;
+        let resolved = self.resolve_request_key_and_headers_and_store_health(primary);
         let (api_key, headers, store_auth) =
-            self.resolve_request_key_and_headers_and_store_health(primary);
+            (resolved.api_key, resolved.headers, resolved.store_auth);
         // The capture backs the restore whenever the store cannot serve a
         // live credential (a failed read, or a healthy store with nothing
         // stored — both resolve the configured `models.json` fallback key,

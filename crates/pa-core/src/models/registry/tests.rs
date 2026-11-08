@@ -496,6 +496,64 @@ fn a_subscription_model_keeps_its_own_thinking_level_map() {
     );
 }
 
+/// TS `getApiKeyAndHeaders`'s per-call request model for xAI: the stored
+/// subscription serves the adapted (openai-responses) shape, an API-key
+/// credential serves the configured shape — even for a model captured
+/// under the subscription (the slot's shape re-resolves onto the
+/// current credential's).
+#[test]
+fn the_request_model_follows_the_xai_credential_shape_per_call() {
+    let auth = auth_without_env(&serde_json::json!({
+        "xai": {
+            "type": "oauth",
+            "access": "grok",
+            "refresh": "r",
+            "expires": 4_102_444_800_000i64,
+        }
+    }));
+    let mut registry = ModelRegistry::in_memory(auth);
+    let configured = registry
+        .get_all()
+        .iter()
+        .find(|model| model.provider == "xai")
+        .expect("the xai model renders")
+        .clone();
+    assert_eq!(
+        configured.api, "openai-responses",
+        "the subscription adapted the registry model at load"
+    );
+    let resolved = registry.get_api_key_and_headers(&configured, None);
+    assert_eq!(resolved.api_key.as_deref(), Some("grok"));
+    let request_model = resolved
+        .request_model
+        .expect("the xAI resolution serves a request model");
+    assert_eq!(request_model.api, "openai-responses");
+    assert_eq!(request_model.base_url, "https://api.x.ai/v1");
+
+    // An API-key credential: the registry stays on the configured shape,
+    // and a model captured under the subscription (the slot's shape)
+    // re-resolves onto the configured shape.
+    let auth = auth_without_env(&serde_json::json!({
+        "xai": { "type": "api_key", "key": "sk-xai" }
+    }));
+    let mut registry = ModelRegistry::in_memory(auth);
+    let configured = registry
+        .get_all()
+        .iter()
+        .find(|model| model.provider == "xai")
+        .expect("the xai model renders")
+        .clone();
+    assert_eq!(configured.api, "openai-completions");
+    let captured = xai_subscription_model(&configured);
+    let resolved = registry.get_api_key_and_headers(&captured, None);
+    assert_eq!(resolved.api_key.as_deref(), Some("sk-xai"));
+    let request_model = resolved
+        .request_model
+        .expect("the xAI resolution serves a request model");
+    assert_eq!(request_model.api, "openai-completions");
+    assert_eq!(request_model, configured);
+}
+
 #[test]
 fn without_a_stored_xai_subscription_the_models_stay_on_completions() {
     let registry = ModelRegistry::in_memory(auth_without_env(&serde_json::json!({})));

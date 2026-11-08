@@ -37,6 +37,20 @@ pub trait AuthStorageBackend: Send + Sync {
         &self,
         update: &mut dyn FnMut(Option<String>) -> Result<((), Option<String>)>,
     ) -> Result<()>;
+
+    /// The cross-process refresh single-flight: a lock held across an
+    /// OAuth re-check, token fetch, and credential write so concurrent
+    /// processes (the daemon runs one worker per session) never spend the
+    /// same single-use refresh token — TS holds its document lock across
+    /// the same span. `Ok(None)` on single-process backends; the
+    /// process-local flight gate serializes those.
+    ///
+    /// # Errors
+    ///
+    /// Returns the lock-acquisition error when the lock cannot be taken.
+    fn refresh_lock(&self) -> Result<Option<LockGuard>> {
+        Ok(None)
+    }
 }
 
 use crate::platform::lock_dir::LockDir as LockGuard;
@@ -244,6 +258,26 @@ impl AuthStorageBackend for FileAuthStorageBackend {
         }
         drop(guard);
         Ok(())
+    }
+
+    /// The refresh single-flight's lock: a dedicated lock beside the
+    /// document, not the document lock itself — a fetch under the
+    /// document lock would stall every same-process auth read and write
+    /// for the fetch's whole span. The path pairs with
+    /// [`LockDir::path_for`]: the lock directory is
+    /// `auth.json.refresh.lock`. A waiting peer covers one holder's
+    /// whole fetch (the providers' refresh timeout is 8s, inside the
+    /// lock's 10s stale window) plus the write: 150 attempts at 100ms.
+    fn refresh_lock(&self) -> Result<Option<LockGuard>> {
+        let mut refresh_file = self.auth_path.as_os_str().to_os_string();
+        refresh_file.push(".refresh");
+        let guard = LockGuard::acquire_retrying(
+            std::path::Path::new(&refresh_file),
+            STALE_AFTER,
+            150,
+            std::time::Duration::from_millis(100),
+        )?;
+        Ok(Some(guard))
     }
 }
 

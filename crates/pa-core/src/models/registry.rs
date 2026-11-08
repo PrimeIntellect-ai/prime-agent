@@ -40,11 +40,17 @@ pub struct ResolvedRequestAuth {
     /// composed request headers randomly.
     pub headers: Option<BTreeMap<String, String>>,
     pub error: Option<String>,
-    /// Whether the credential store served a live credential for the
-    /// provider (the possibly-refreshing lookup's own outcome — one lookup
-    /// per resolution; a configured `models.json` fallback key is not a
-    /// credential and reports `false`).
+    /// Whether the resolution's single possibly-refreshing lookup
+    /// (fallback excluded) resolved a key from a live source — stored
+    /// credential, runtime override, or environment. `false` means the
+    /// resolved key is the configured `models.json` fallback, which is
+    /// not a credential.
     pub store_auth: bool,
+    /// The per-call request model (TS `requestModel`): for xAI, the model
+    /// shaped for the credential the lookup serves — the stored
+    /// subscription's openai-responses shape or the configured API-key
+    /// shape. `None` keeps the caller's model.
+    pub request_model: Option<Model>,
 }
 
 /// Why a `set_model` selection failed to resolve: the provider is not
@@ -824,6 +830,20 @@ impl ModelRegistry {
             .auth
             .get_api_key_with_source_token(&model.provider, false);
         let store_auth = stored.api_key.is_some();
+        // TS `getApiKeyAndHeaders` resolves the request model per call for
+        // xAI: the subscription shape when a stored OAuth credential
+        // serves, the configured API-key shape otherwise. The registry's
+        // load-time adaptation encodes exactly that shape for the current
+        // credential, so the registry's own model for the id is the
+        // request model (other providers keep the caller's model).
+        let request_model = if model.provider == crate::auth::XAI_PROVIDER_ID {
+            self.models
+                .iter()
+                .find(|candidate| candidate.provider == model.provider && candidate.id == model.id)
+                .cloned()
+        } else {
+            None
+        };
         let mut api_key = stored.api_key;
         let provider_config = self.provider_request_configs.get(&model.provider).cloned();
         if api_key.is_none() {
@@ -880,6 +900,7 @@ impl ModelRegistry {
             headers: (!headers.is_empty()).then_some(headers),
             error: None,
             store_auth,
+            request_model,
         }
     }
 }
