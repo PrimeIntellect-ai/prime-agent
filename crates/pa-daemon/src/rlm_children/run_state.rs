@@ -78,7 +78,15 @@ impl RunState {
                 (RunPhase::Settled(deleted_by_parent()), true)
             }
             (RunPhase::Verdict(verdict), RunEvent::Funnel) => (RunPhase::Settled(verdict), true),
-            (phase, _) => (phase, false),
+            (phase @ RunPhase::Running, RunEvent::CancelRefused | RunEvent::Funnel)
+            | (
+                phase @ (RunPhase::Verdict(_) | RunPhase::Settled(_)),
+                RunEvent::IdleRead { .. }
+                | RunEvent::Failed(_)
+                | RunEvent::Cancel { .. }
+                | RunEvent::CancelRefused,
+            )
+            | (phase @ RunPhase::Settled(_), RunEvent::Funnel) => (phase, false),
         };
         self.0 = next;
         changed
