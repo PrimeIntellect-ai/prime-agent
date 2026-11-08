@@ -1576,8 +1576,7 @@ def _validate_spawn_settings(model: Any, thinking: Any) -> str | None:
 
 
 class NodeStatus(enum.StrEnum):
-    """The status of a state entry or one of its instances. The values are
-    the wire strings."""
+    """A state entry's or instance's status. The values are the wire strings."""
 
     PENDING = "pending"
     RUNNING = "running"
@@ -1587,26 +1586,6 @@ class NodeStatus(enum.StrEnum):
 
 
 TERMINAL_NODE_STATUSES = frozenset({NodeStatus.DONE, NodeStatus.ERROR, NodeStatus.CANCELLED})
-
-#: The allowed moves of ``_NodeInstance.set_status``.
-_INSTANCE_MOVES: dict[NodeStatus, frozenset[NodeStatus]] = {
-    NodeStatus.PENDING: frozenset({NodeStatus.RUNNING, NodeStatus.ERROR, NodeStatus.CANCELLED}),
-    NodeStatus.RUNNING: frozenset({NodeStatus.DONE, NodeStatus.ERROR, NodeStatus.PENDING, NodeStatus.CANCELLED}),
-    NodeStatus.DONE: frozenset({NodeStatus.ERROR}),
-    NodeStatus.ERROR: frozenset({NodeStatus.PENDING}),
-    # cancelled -> cancelled: a spawn that returns after stop() already
-    # cancelled its pending instance is retracted (_retract_admission).
-    NodeStatus.CANCELLED: frozenset({NodeStatus.PENDING, NodeStatus.CANCELLED}),
-}
-
-#: The allowed moves of ``_StateEntry.set_status``.
-_ENTRY_MOVES: dict[NodeStatus, frozenset[NodeStatus]] = {
-    NodeStatus.PENDING: frozenset({NodeStatus.RUNNING, NodeStatus.DONE, NodeStatus.ERROR, NodeStatus.CANCELLED}),
-    NodeStatus.RUNNING: frozenset({NodeStatus.DONE, NodeStatus.ERROR, NodeStatus.CANCELLED}),
-    NodeStatus.DONE: frozenset(),
-    NodeStatus.ERROR: frozenset({NodeStatus.PENDING, NodeStatus.RUNNING}),
-    NodeStatus.CANCELLED: frozenset(),
-}
 
 
 @dataclass
@@ -1647,12 +1626,6 @@ class _NodeInstance:
     process: "_PythonProcess | None" = None  # a python state's running call
     deadline: float | None = None  # a python call's time limit (seconds on the injected clock)
 
-    def set_status(self, new: NodeStatus) -> None:
-        """The one writer of ``status``; raises on a move outside ``_INSTANCE_MOVES``."""
-        if new not in _INSTANCE_MOVES[self.status]:
-            raise RuntimeError(f"factory instance {self.index}: invalid status move {self.status} -> {new}")
-        self.status = new
-
 
 @dataclass
 class _StateEntry:
@@ -1677,12 +1650,6 @@ class _StateEntry:
     # (the M4 oversight mark): the entry failed, but the child's last
     # assistant text is preserved as a provisional answer and the run
     # surfaces the state in status()["needs_verify"].
-
-    def set_status(self, new: NodeStatus) -> None:
-        """The one writer of ``status``; raises on a move outside ``_ENTRY_MOVES``."""
-        if new not in _ENTRY_MOVES[self.status]:
-            raise RuntimeError(f"factory entry {self.index}: invalid status move {self.status} -> {new}")
-        self.status = new
 
 
 @dataclass
@@ -2073,14 +2040,14 @@ class FactoryExecutor:
             for entry in state.entries:
                 if entry.status != NodeStatus.ERROR or entry.is_settle:
                     continue
-                entry.set_status(NodeStatus.RUNNING if entry.instances else NodeStatus.PENDING)
+                entry.status = NodeStatus.RUNNING if entry.instances else NodeStatus.PENDING
                 entry.error = None
                 entry.needs_verify = False
                 state.error = None
                 for instance in entry.instances:
                     if instance.status not in (NodeStatus.ERROR, NodeStatus.CANCELLED):
                         continue  # running and done siblings keep their state
-                    instance.set_status(NodeStatus.PENDING)
+                    instance.status = NodeStatus.PENDING
                     instance.error = None
                     instance.answer = None
                     instance.provisional = False
@@ -2929,13 +2896,13 @@ class FactoryExecutor:
                     continue  # an input source has not settled yet; stay pending
                 entry.instances = instances
                 if instances:
-                    entry.set_status(NodeStatus.RUNNING)
+                    entry.status = NodeStatus.RUNNING
                     self._event(
                         run, "node_ready", node=state_id, entry=entry.index,
                         detail=f"{len(instances)} instance(s) prepared",
                     )
                 else:
-                    entry.set_status(NodeStatus.DONE)
+                    entry.status = NodeStatus.DONE
                     self._event(
                         run, "node_ready", node=state_id, entry=entry.index,
                         detail="foreach expanded to zero items; nothing to run",
@@ -3168,7 +3135,7 @@ class FactoryExecutor:
             return "stopped"
         instance.child_id = handle.rlm_child_id
         instance.spawned_at = self._now_fn()
-        instance.set_status(NodeStatus.RUNNING)
+        instance.status = NodeStatus.RUNNING
         instance.rate_limit_streak = 0
         run.spawn_count += 1
         self._event(
@@ -3200,13 +3167,13 @@ class FactoryExecutor:
         if run.state != RunState.RUNNING:
             # stop() ran while the process was starting; its pass could not see it.
             await process.stop()
-            instance.set_status(NodeStatus.CANCELLED)
+            instance.status = NodeStatus.CANCELLED
             self._event(run, "cancelled", node=state.state_id, entry=entry.index, instance=instance.index)
             return "stopped"
         instance.process = process
         instance.spawned_at = self._now_fn()
         instance.deadline = instance.spawned_at + self._python_limit_ms(run, state) / 1000
-        instance.set_status(NodeStatus.RUNNING)
+        instance.status = NodeStatus.RUNNING
         self._event(
             run,
             "started",
@@ -3268,7 +3235,7 @@ class FactoryExecutor:
         if isinstance(outputs, str):
             await self._apply_instance_failure(run, state, entry, instance, outputs, retry=True)
             return
-        instance.set_status(NodeStatus.DONE)
+        instance.status = NodeStatus.DONE
         instance.answer = json.dumps(outputs, separators=(",", ":"))[:ANSWER_BINDING_CAP]
         self._event(
             run,
@@ -3291,7 +3258,7 @@ class FactoryExecutor:
         entry.answer = instance.answer
         entry.outputs = outputs
         entry.output_errors = {}
-        entry.set_status(NodeStatus.DONE)
+        entry.status = NodeStatus.DONE
         self._queue_settle(run, state, entry)
 
     # -- settlement, retries, policies ---------------------------------------
@@ -3365,7 +3332,7 @@ class FactoryExecutor:
                     retry=False,
                 )
                 return
-        instance.set_status(NodeStatus.DONE)
+        instance.status = NodeStatus.DONE
         # The binding lane first: the collect envelope's full final answer
         # keeps the whole fenced JSON; the 160-character roster preview is
         # the fallback (older hosts, a capture that raced a worker
@@ -3416,7 +3383,7 @@ class FactoryExecutor:
                     run, state, entry, instance, capture_failure, retry=True
                 )
                 return
-            entry.set_status(NodeStatus.DONE)
+            entry.status = NodeStatus.DONE
             self._queue_settle(run, state, entry)
 
     async def _recheck_infra_death(self, instance: _NodeInstance, result: Any) -> Any:
@@ -3487,7 +3454,7 @@ class FactoryExecutor:
         run.tool_use_total += instance.tool_uses
         instance.infra_respawned = True
         instance.retry_base += 1
-        instance.set_status(NodeStatus.PENDING)
+        instance.status = NodeStatus.PENDING
         instance.error = None
         instance.answer = None
         instance.provisional = False
@@ -3662,7 +3629,7 @@ class FactoryExecutor:
     ) -> None:
         if instance.status == NodeStatus.CANCELLED:
             return  # a stop()/halt claimed the instance while its spawn was in flight
-        instance.set_status(NodeStatus.ERROR)
+        instance.status = NodeStatus.ERROR
         instance.error = reason
         self._event(
             run,
@@ -3692,7 +3659,7 @@ class FactoryExecutor:
             and instance.attempt - instance.retry_base <= retries
             and entry.status == NodeStatus.RUNNING
         ):
-            instance.set_status(NodeStatus.PENDING)
+            instance.status = NodeStatus.PENDING
             instance.error = None
             self._event(
                 run,
@@ -3754,7 +3721,7 @@ class FactoryExecutor:
         if entry.status in TERMINAL_NODE_STATUSES:
             return  # the policy already ran for this entry
         policy = state.spec.get("failure_policy", RUN_FAILURE_POLICY_DEFAULT)
-        entry.set_status(NodeStatus.ERROR)
+        entry.status = NodeStatus.ERROR
         entry.error = reason
         state.error = reason
         run.last_error = f"state {state.state_id!r} failed: {reason}"
@@ -3765,7 +3732,7 @@ class FactoryExecutor:
         # event instead of leaving them pending forever.
         for instance in entry.instances:
             if instance.status == NodeStatus.PENDING:
-                instance.set_status(NodeStatus.CANCELLED)
+                instance.status = NodeStatus.CANCELLED
                 self._event(
                     run,
                     "cancelled",
@@ -3839,7 +3806,7 @@ class FactoryExecutor:
                 state.cancelled = True
                 for entry in state.entries:
                     if entry.status not in TERMINAL_NODE_STATUSES:
-                        entry.set_status(NodeStatus.CANCELLED)
+                        entry.status = NodeStatus.CANCELLED
                         self._event(run, "node_cancelled", node=state_id, entry=entry.index, detail=reason)
                         for instance in entry.instances:
                             if instance.status == NodeStatus.PENDING:
@@ -3847,7 +3814,7 @@ class FactoryExecutor:
                                 # flight inside _admit): the cancelled entry
                                 # owns it, so it reads cancelled, not pending,
                                 # in the stopped/failed ledger.
-                                instance.set_status(NodeStatus.CANCELLED)
+                                instance.status = NodeStatus.CANCELLED
                                 self._event(
                                     run,
                                     "cancelled",
@@ -3884,7 +3851,7 @@ class FactoryExecutor:
             self._event(run, "cancelled", node=state.state_id, entry=entry.index, instance=instance.index, child=child_id)
         # The child is supervisor-owned; a failed delete leaves it running
         # there, but the executor treats its slot as released.
-        instance.set_status(NodeStatus.CANCELLED)
+        instance.status = NodeStatus.CANCELLED
 
     async def _cancel_python(self, run: FactoryRun) -> None:
         """Stop executor-owned calls when the run stops or its control lane fails."""
@@ -3894,9 +3861,9 @@ class FactoryExecutor:
                 for instance in entry.instances:
                     if instance.status == NodeStatus.RUNNING and instance.process is not None:
                         process, instance.process = instance.process, None
-                        instance.set_status(NodeStatus.CANCELLED)
+                        instance.status = NodeStatus.CANCELLED
                         if entry.status == NodeStatus.RUNNING:
-                            entry.set_status(NodeStatus.CANCELLED)
+                            entry.status = NodeStatus.CANCELLED
                         await process.stop()
                         self._event(run, "cancelled", node=state_id, entry=entry.index, instance=instance.index)
 
@@ -3918,7 +3885,7 @@ class FactoryExecutor:
                     # releases the slot, so the terminal status is the same
                     # either way, and a settle landing inside the delete window
                     # is dropped instead of applying to a child being torn down.
-                    instance.set_status(NodeStatus.CANCELLED)
+                    instance.status = NodeStatus.CANCELLED
                     try:
                         await delete_subagent(child_id)
                     except Exception as exc:
