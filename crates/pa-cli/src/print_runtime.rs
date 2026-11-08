@@ -1685,14 +1685,21 @@ async fn run_prompts_and_emit(
             continue;
         }
         // Quiescence settled every descendant: only an owed continuation delivers.
+        let decision = engine
+            .consult_goal_continuation(ContinuationTrigger::OwedRetry, false)
+            .await;
+        // A refused or failed mint can still move the goal (a failed persist fails it).
+        if matches!(
+            decision,
+            GoalContinuationDecision::NotMinted { .. } | GoalContinuationDecision::Minted { .. }
+        ) {
+            goal.publish_goal_update(engine).await;
+        }
         if let GoalContinuationDecision::Minted {
             message: continuation,
             ..
-        } = engine
-            .consult_goal_continuation(ContinuationTrigger::OwedRetry, false)
-            .await
+        } = decision
         {
-            goal.publish_goal_update(engine).await;
             goal.run_queued_turn(
                 engine,
                 &mut boundary,
