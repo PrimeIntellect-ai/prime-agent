@@ -103,12 +103,18 @@ impl WorkerRouteState {
 
     /// The worker will not come back: routes fail fast instead of parking.
     pub(crate) fn retired(self) -> bool {
-        matches!(self.end, WorkerEnd::Stopped | WorkerEnd::GaveUp)
+        match self.end {
+            WorkerEnd::Stopped | WorkerEnd::GaveUp => true,
+            WorkerEnd::Live | WorkerEnd::Stopping => false,
+        }
     }
 
     /// An intentional stop owns the worker's exit.
     pub(crate) fn stop_requested(self) -> bool {
-        matches!(self.end, WorkerEnd::Stopping | WorkerEnd::Stopped)
+        match self.end {
+            WorkerEnd::Stopping | WorkerEnd::Stopped => true,
+            WorkerEnd::Live | WorkerEnd::GaveUp => false,
+        }
     }
 
     fn apply(&mut self, transition: WorkerTransition) {
@@ -117,17 +123,27 @@ impl WorkerRouteState {
             WorkerTransition::ConnectionLost => self.connected = false,
             WorkerTransition::SessionReady => self.session_ready = true,
             WorkerTransition::SessionReplaying => self.session_ready = false,
-            WorkerTransition::RequestStop if self.retired() => self.end = WorkerEnd::Stopped,
-            WorkerTransition::RequestStop => self.end = WorkerEnd::Stopping,
-            // A retired worker stays retired.
-            WorkerTransition::ResumeStopped if self.end == WorkerEnd::Stopping => {
-                self.end = WorkerEnd::Live;
+            WorkerTransition::RequestStop => {
+                self.end = match self.end {
+                    WorkerEnd::Live | WorkerEnd::Stopping => WorkerEnd::Stopping,
+                    WorkerEnd::Stopped | WorkerEnd::GaveUp => WorkerEnd::Stopped,
+                }
             }
-            WorkerTransition::ResumeStopped => {}
+            // A retired worker stays retired.
+            WorkerTransition::ResumeStopped => {
+                self.end = match self.end {
+                    WorkerEnd::Stopping => WorkerEnd::Live,
+                    end @ (WorkerEnd::Live | WorkerEnd::Stopped | WorkerEnd::GaveUp) => end,
+                }
+            }
             WorkerTransition::RetireStopped => self.end = WorkerEnd::Stopped,
             // A stop that raced the give-up keeps the stop's end.
-            WorkerTransition::GiveUp if self.stop_requested() => self.end = WorkerEnd::Stopped,
-            WorkerTransition::GiveUp => self.end = WorkerEnd::GaveUp,
+            WorkerTransition::GiveUp => {
+                self.end = match self.end {
+                    WorkerEnd::Live | WorkerEnd::GaveUp => WorkerEnd::GaveUp,
+                    WorkerEnd::Stopping | WorkerEnd::Stopped => WorkerEnd::Stopped,
+                }
+            }
         }
     }
 }
