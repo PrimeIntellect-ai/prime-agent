@@ -9,9 +9,7 @@ use pa_agent::agent::Agent;
 use pa_agent::types::{AgentEvent, AgentMessage, Message};
 use pa_core::session_engine::engine::SessionEngine;
 use pa_core::session_engine::goal_boundary::custom_message_to_loop_row;
-use pa_core::session_engine::goal_continuation::{
-    ContinuationGates, ContinuationTrigger, GoalContinuationDecision,
-};
+use pa_core::session_engine::goal_continuation::{ContinuationTrigger, GoalContinuationDecision};
 use pa_core::session_engine::goal_driver::UsageOutcome;
 use pa_core::session_engine::provider_adapter::json_round_trip;
 use pa_types::session::CustomMessage;
@@ -484,16 +482,10 @@ impl PrintGoalSurface {
         // mints BEFORE the loop stops; the boundary compacts, and the driver runs
         // the held turn post-compaction.
         let threshold_due = engine.session.auto_compaction_due(model).await;
-        let gates = ContinuationGates {
-            // Queued input returned above.
-            input_queued: false,
-            work_unsettled: unsettled_rlm_work,
-        };
         match engine
-            .consult_goal_continuation(ContinuationTrigger::TurnEnd, gates)
+            .consult_goal_continuation(ContinuationTrigger::TurnEnd, unsettled_rlm_work)
             .await
         {
-            GoalContinuationDecision::QueuedInput => NaturalContinuation::QueuedInput,
             GoalContinuationDecision::Owed => NaturalContinuation::HeldForRlmWork,
             GoalContinuationDecision::Minted { message, .. } => {
                 self.publish_goal_update(engine).await;

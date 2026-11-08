@@ -13,6 +13,7 @@ use tokio::sync::Notify;
 use crate::headless_autonomous::{autonomous_runtime_config, HeadlessAutonomous};
 use crate::mode::{AppMode, MissingSubsystem, RunOptions};
 use pa_agent::stream::{LlmContext, StreamFn, StreamRequestOptions};
+use pa_core::session_engine::goal_continuation::{ContinuationTrigger, GoalContinuationDecision};
 use pa_core::session_engine::provider_adapter::{
     json_round_trip, map_thinking_level, stream_once, switchable_stream_fn, ProviderTarget,
 };
@@ -1684,14 +1685,11 @@ async fn run_prompts_and_emit(
             continue;
         }
         // Quiescence settled every descendant: only an owed continuation delivers.
-        if let pa_core::session_engine::goal_continuation::GoalContinuationDecision::Minted {
+        if let GoalContinuationDecision::Minted {
             message: continuation,
             ..
         } = engine
-            .consult_goal_continuation(
-                pa_core::session_engine::goal_continuation::ContinuationTrigger::OwedRetry,
-                pa_core::session_engine::goal_continuation::ContinuationGates::default(),
-            )
+            .consult_goal_continuation(ContinuationTrigger::OwedRetry, false)
             .await
         {
             goal.publish_goal_update(engine).await;

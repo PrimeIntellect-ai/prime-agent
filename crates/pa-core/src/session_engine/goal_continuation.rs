@@ -1,6 +1,6 @@
 //! The goal continuation consult: the one decision every surface (the
 //! daemon's boundary and settle sites, the print drive loop) runs before a
-//! goal continuation turn. The surface answers the gates and acts on the
+//! goal continuation turn. The surface reads the gates and acts on the
 //! decision; the consult owns the gate order and the mint.
 
 use pa_types::session::CustomMessage;
@@ -17,16 +17,6 @@ pub enum ContinuationTrigger {
     OwedRetry,
 }
 
-/// The surface's gate answers, read just before the consult.
-#[derive(Debug, Clone, Copy, Default)]
-pub struct ContinuationGates {
-    /// Queued session input owns the boundary.
-    pub input_queued: bool,
-    /// Unsettled descendant work (RLM children, background `bash()` handles)
-    /// holds the continuation.
-    pub work_unsettled: bool,
-}
-
 /// The consult's outcome.
 #[derive(Debug)]
 pub enum GoalContinuationDecision {
@@ -34,13 +24,14 @@ pub enum GoalContinuationDecision {
     NotOwned,
     /// A retry found nothing owed; the active goal still owns the boundary.
     NothingOwed,
-    /// Queued input owns the boundary; its own turn end consults again.
-    QueuedInput,
     /// The continuation is owed behind unsettled work, not consumed.
     Owed,
     /// The goal owns the boundary but minted nothing: the progress gate
     /// refused, a minted continuation is still pending, or the persist
-    /// failed (which fails the goal).
+    /// failed (which fails the goal). `drop_failed_pair`: the surface drops
+    /// the failed continuation pair from the live loop; only a consult past
+    /// the gates sets it, so a deferred one leaves the no-progress turn for
+    /// the later consult to read.
     NotMinted { drop_failed_pair: bool },
     /// One continuation slot is spent; the surface admits the row.
     Minted {
@@ -49,33 +40,15 @@ pub enum GoalContinuationDecision {
     },
 }
 
-impl GoalContinuationDecision {
-    /// Whether the surface drops the failed continuation pair from the live
-    /// loop. Only a consult that passed the gates drops it: a deferred one
-    /// must leave the no-progress turn for the later consult to read.
-    #[must_use]
-    pub fn drops_failed_pair(&self) -> bool {
-        matches!(
-            self,
-            Self::NotMinted {
-                drop_failed_pair: true
-            } | Self::Minted {
-                drop_failed_pair: true,
-                ..
-            }
-        )
-    }
-}
-
-/// Run the consult: ownership, then queued input, then unsettled work, then
-/// the mint. `last_turn` is the just-settled assistant turn, read before the
-/// driver lock (the session mutex never nests under it).
+/// Run the consult: ownership, then unsettled work (RLM children, background
+/// `bash()` handles), then the mint. `last_turn` is the just-settled assistant
+/// turn, read before the driver lock (the session mutex never nests under it).
 pub async fn consult_goal_continuation(
     driver: &tokio::sync::Mutex<GoalDriver>,
     persistence: &tokio::sync::Mutex<SessionManager>,
     last_turn: Option<&pa_agent::types::AssistantMessage>,
     trigger: ContinuationTrigger,
-    gates: ContinuationGates,
+    work_unsettled: bool,
 ) -> GoalContinuationDecision {
     let mut driver = driver.lock().await;
     if !driver.owns_continuation_wakeup() {
@@ -89,10 +62,7 @@ pub async fn consult_goal_continuation(
     if trigger == ContinuationTrigger::OwedRetry && !driver.owes_continuation() {
         return GoalContinuationDecision::NothingOwed;
     }
-    if gates.input_queued {
-        return GoalContinuationDecision::QueuedInput;
-    }
-    if gates.work_unsettled {
+    if work_unsettled {
         driver.mark_continuation_owed();
         return GoalContinuationDecision::Owed;
     }
@@ -169,23 +139,27 @@ mod tests {
             &session,
             Some(&no_output),
             ContinuationTrigger::TurnEnd,
-            ContinuationGates {
-                input_queued: false,
-                work_unsettled: true,
-            },
+            true,
         )
         .await;
         assert!(matches!(held, GoalContinuationDecision::Owed), "{held:?}");
-        assert!(!held.drops_failed_pair());
 
         let settled = consult_goal_continuation(
             &driver,
             &session,
             Some(&no_output),
             ContinuationTrigger::OwedRetry,
-            ContinuationGates::default(),
+            false,
         )
         .await;
-        assert!(settled.drops_failed_pair(), "{settled:?}");
+        assert!(
+            matches!(
+                settled,
+                GoalContinuationDecision::NotMinted {
+                    drop_failed_pair: true
+                }
+            ),
+            "{settled:?}"
+        );
     }
 }

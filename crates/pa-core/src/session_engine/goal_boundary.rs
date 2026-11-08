@@ -6,7 +6,7 @@
 use pa_types::session::CustomMessage;
 
 use super::engine::SessionEngine;
-use super::goal_continuation::{ContinuationGates, ContinuationTrigger, GoalContinuationDecision};
+use super::goal_continuation::{ContinuationTrigger, GoalContinuationDecision};
 use super::goal_driver::UsageOutcome;
 use crate::goals::{create_goal_context_message, GoalContextKind, GoalStatus};
 
@@ -100,12 +100,11 @@ impl SessionEngine {
     }
 
     /// Consult the goal continuation over the just-settled turn (see
-    /// [`super::goal_continuation`]); a consult that passed the gates drops
-    /// the failed continuation pair from the live loop.
+    /// [`super::goal_continuation`]), dropping the failed pair when told to.
     pub async fn consult_goal_continuation(
         &self,
         trigger: ContinuationTrigger,
-        gates: ContinuationGates,
+        work_unsettled: bool,
     ) -> GoalContinuationDecision {
         let last_turn = self.latest_settled_assistant().await;
         let decision = super::goal_continuation::consult_goal_continuation(
@@ -113,10 +112,17 @@ impl SessionEngine {
             &self.session.shared_persistence(),
             last_turn.as_ref(),
             trigger,
-            gates,
+            work_unsettled,
         )
         .await;
-        if decision.drops_failed_pair() {
+        if let GoalContinuationDecision::NotMinted {
+            drop_failed_pair: true,
+        }
+        | GoalContinuationDecision::Minted {
+            drop_failed_pair: true,
+            ..
+        } = decision
+        {
             self.session.drop_failed_goal_continuation().await;
         }
         decision
