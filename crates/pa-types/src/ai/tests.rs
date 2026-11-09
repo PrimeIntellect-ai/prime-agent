@@ -149,17 +149,9 @@ fn model_with_compat_roundtrip() {
 
 #[test]
 fn model_serving_roundtrip() {
-    // The live Prime Inference catalog labels each route's serving class;
-    // the wire keeps the field absent for every other provider.
     assert_roundtrip::<Model>(
         r#"{"id":"m","name":"M","api":"openai-completions","provider":"prime-inference","baseUrl":"https://x","reasoning":false,"input":["text"],"cost":{"input":1,"output":1,"cacheRead":0,"cacheWrite":0},"contextWindow":1000,"maxTokens":100,"serving":"hosted"}"#,
     );
-    let served = rt::<Model>(
-        r#"{"id":"m","name":"M","api":"openai-completions","provider":"prime-inference","baseUrl":"https://x","reasoning":false,"input":["text"],"cost":{"input":1,"output":1,"cacheRead":0,"cacheWrite":0},"contextWindow":1000,"maxTokens":100,"serving":"hosted"}"#,
-    );
-    assert!(served.contains(r#""serving":"hosted""#), "{served}");
-    // `None` serializes to no field: the shape stays byte-identical to the
-    // pre-`serving` catalog.
     let unserved = serde_json::to_string(&tier_model("p", "api", "id")).expect("serializes");
     assert!(!unserved.contains("serving"), "{unserved}");
 }

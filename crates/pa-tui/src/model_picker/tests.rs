@@ -905,136 +905,42 @@ fn search_preserves_overlong_version_runs() {
     );
 }
 
-/// A reasoning Prime Inference catalog model with an optional live serving
-/// class: the serving-carrying twin of [`model`].
-fn model_with_serving(id: &str, name: &str, serving: &str) -> Model {
-    serde_json::from_value(serde_json::json!({
-        "id": id, "name": name, "api": "openai-completions", "provider": "prime-inference",
-        "baseUrl": "https://example.invalid/v1", "reasoning": true,
-        "thinkingLevelMap": serde_json::from_str::<serde_json::Value>(opus_map()).unwrap(),
-        "serving": serving,
-        "input": ["text"],
-        "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0 },
-        "contextWindow": 128_000, "maxTokens": 4096,
-    }))
-    .expect("mock model deserializes")
-}
-
+/// Prime Inference rows name their serving class (unlabeled ones keep the provider id), and the
+/// non-Prime row renders byte-identical: the effort layout sizes against the widest trailing.
 #[test]
-fn prime_inference_rows_name_the_serving_class() {
-    // The live catalog labels each Prime Inference route hosted or gateway;
-    // the trailing splits those two apart, unlabeled routes and every other
-    // provider keep the provider id.
-    let pi_model = |id: &str, serving: Option<&str>| {
-        let mut value = serde_json::json!({
-            "id": id, "name": id, "api": "openai-completions",
-            "provider": "prime-inference",
-            "baseUrl": "https://example.invalid/v1", "reasoning": false,
-            "input": ["text"],
-            "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0 },
-            "contextWindow": 128_000, "maxTokens": 4096,
-        });
-        if let Some(serving) = serving {
-            value["serving"] = serde_json::Value::String(serving.to_string());
-        }
-        serde_json::from_value::<Model>(value).expect("mock model deserializes")
-    };
-    let catalog = vec![
-        pi_model("z-ai/glm-5.3", Some("hosted")),
-        pi_model("anthropic/claude-fable-5", Some("gateway")),
-        pi_model("qwen/qwen3.8-max", None),
-        model("openrouter", "x/other", "Other", false, None),
-    ];
-    let options = ModelPickerOptions {
-        models: catalog.clone(),
-        current: None,
-        configured_providers: ["prime-inference".to_string(), "openrouter".to_string()]
-            .into_iter()
-            .collect(),
-        recent_models: Vec::new(),
-        scoped_models: Vec::new(),
-        thinking_level: None,
-        viewport_rows: 19,
-    };
-    let picker = ModelPicker::new(options);
-    assert_eq!(picker.trailing_segments(&catalog[0]), vec!["prime-hosted"]);
-    assert_eq!(picker.trailing_segments(&catalog[1]), vec!["prime-gateway"]);
-    assert_eq!(
-        picker.trailing_segments(&catalog[2]),
-        vec!["prime-inference"]
-    );
-    assert_eq!(picker.trailing_segments(&catalog[3]), vec!["openrouter"]);
-}
-
-#[test]
-fn serving_labels_change_only_the_prime_rows_layout() {
-    // The effort layout sizes itself against the widest trailing in the
-    // window, so the label change must be verified on a rendered mixed
-    // frame, not only on the trailing helper: the non-Prime row has to
-    // keep its layout across the served/unserved catalog pair.
+fn prime_rows_name_the_serving_class_without_moving_other_rows() {
     let catalog = |served: bool| {
+        let pi = |id: &str, name: &str, serving: ModelServing| {
+            let mut model = model("prime-inference", id, name, true, Some(opus_map()));
+            model.serving = served.then_some(serving);
+            model
+        };
         vec![
-            if served {
-                model_with_serving("z-ai/glm-5.3", "GLM 5.3", "hosted")
-            } else {
-                model(
-                    "prime-inference",
-                    "z-ai/glm-5.3",
-                    "GLM 5.3",
-                    true,
-                    Some(opus_map()),
-                )
-            },
-            if served {
-                model_with_serving("anthropic/claude-fable-5", "Claude Fable 5", "gateway")
-            } else {
-                model(
-                    "prime-inference",
-                    "anthropic/claude-fable-5",
-                    "Claude Fable 5",
-                    true,
-                    Some(opus_map()),
-                )
-            },
+            pi("z-ai/glm-5.3", "GLM 5.3", ModelServing::Hosted),
+            pi(
+                "anthropic/claude-fable-5",
+                "Claude Fable 5",
+                ModelServing::Gateway,
+            ),
             model("openrouter", "x/other", "Other", true, Some(opus_map())),
         ]
     };
-    let options = |models: Vec<Model>| ModelPickerOptions {
-        models,
-        current: None,
-        configured_providers: ["prime-inference".to_string(), "openrouter".to_string()]
-            .into_iter()
-            .collect(),
-        recent_models: Vec::new(),
-        scoped_models: Vec::new(),
-        thinking_level: Some(ModelThinkingLevel::Medium),
-        viewport_rows: 19,
+    let rows = |served: bool| {
+        let mut options = picker_options(catalog(served));
+        options
+            .configured_providers
+            .insert("openrouter".to_string());
+        frame_text(&mut ModelPicker::new(options))
     };
-    let mut served = ModelPicker::new(options(catalog(true)));
-    let mut unserved = ModelPicker::new(options(catalog(false)));
-    let served_rows = frame_text(&mut served);
-    let unserved_rows = frame_text(&mut unserved);
-    let row_with = |rows: &[String], needle: &str| {
+    let row = |rows: &[String], name: &str| {
         rows.iter()
-            .find(|row| row.contains(needle))
+            .find(|row| row.contains(name))
             .cloned()
-            .unwrap_or_else(|| panic!("no row with {needle}"))
+            .expect(name)
     };
-    let served_hosted = row_with(&served_rows, "GLM 5.3");
-    let served_gateway = row_with(&served_rows, "Claude Fable 5");
-    assert!(served_hosted.contains("prime-hosted"), "{served_hosted}");
-    assert!(served_gateway.contains("prime-gateway"), "{served_gateway}");
-    let unserved_hosted = row_with(&unserved_rows, "GLM 5.3");
-    assert!(
-        unserved_hosted.contains("prime-inference"),
-        "{unserved_hosted}"
-    );
-    // The non-Prime row is byte-identical across the served/unserved pair:
-    // the shared trailing-width budget did not shift its effort layout.
-    let served_other = row_with(&served_rows, "Other");
-    let unserved_other = row_with(&unserved_rows, "Other");
-    assert_eq!(
-        served_other, unserved_other,
-        "the non-Prime row must not move"
-    );
+    let (served, unserved) = (rows(true), rows(false));
+    assert!(row(&served, "GLM 5.3").contains("prime-hosted"));
+    assert!(row(&served, "Claude Fable 5").contains("prime-gateway"));
+    assert!(row(&unserved, "GLM 5.3").contains("prime-inference"));
+    assert_eq!(row(&served, "Other"), row(&unserved, "Other"));
 }

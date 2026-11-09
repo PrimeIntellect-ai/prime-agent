@@ -775,7 +775,7 @@ mod tests {
     }
 
     #[test]
-    fn parse_labels_the_serving_class() {
+    fn serving_class_parses_and_carries_into_the_built_model() {
         let mut hosted = wire_entry("z-ai/glm-5.3", 1.0, 2.0);
         hosted["serving"] = json!("hosted");
         let mut gateway = wire_entry("anthropic/claude-fable-5", 1.0, 2.0);
@@ -785,52 +785,17 @@ mod tests {
         let unlabeled = wire_entry("openai/gpt-5.6", 1.0, 2.0);
         let value = json!({"data": [hosted, gateway, unknown, unlabeled]});
         let entries = parse_prime_inference_model_catalog(&value, false).expect("entries");
-        let serving: Vec<Option<ModelServing>> =
-            entries.iter().map(|entry| entry.serving).collect();
+        let built = build_prime_inference_models(&[], &entries, false, Some(0)).expect("built");
+        let serving: Vec<Option<ModelServing>> = built.iter().map(|model| model.serving).collect();
         assert_eq!(
             serving,
-            vec![
+            [
                 Some(ModelServing::Hosted),
                 Some(ModelServing::Gateway),
                 None,
                 None
-            ],
-            "declared serving classes parse; unknown and absent stay unlabeled"
+            ]
         );
-    }
-
-    #[test]
-    fn build_carries_the_serving_class() {
-        let compiled = transports::prime_inference_offline_entries();
-        let ids: Vec<&str> = compiled.iter().map(|m| m.id.as_str()).take(60).collect();
-        let mut value = payload(&ids);
-        for entry in value["data"].as_array_mut().expect("data") {
-            entry["serving"] = if entry["id"] == ids[0] {
-                json!("hosted")
-            } else {
-                json!("gateway")
-            };
-        }
-        let entries = parse_prime_inference_model_catalog(&value, false).expect("entries");
-        let built = build_prime_inference_models(&compiled, &entries, false, None).expect("built");
-        let serving: Vec<(String, Option<ModelServing>)> = built
-            .iter()
-            .map(|model| (model.id.clone(), model.serving))
-            .collect();
-        let expected: Vec<(String, Option<ModelServing>)> = ids
-            .iter()
-            .map(|id| {
-                (
-                    (*id).to_string(),
-                    if *id == ids[0] {
-                        Some(ModelServing::Hosted)
-                    } else {
-                        Some(ModelServing::Gateway)
-                    },
-                )
-            })
-            .collect();
-        assert_eq!(serving, expected);
     }
 
     #[test]
