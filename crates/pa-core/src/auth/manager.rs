@@ -588,13 +588,13 @@ impl AuthStorage {
             vec![
                 self.runtime_candidate(provider),
                 self.environment_candidate(provider),
-                self.stored_candidate(provider, None),
+                self.stored_candidate(provider, /*resolved_command_value*/ None),
                 fallback,
             ]
         } else {
             vec![
                 self.runtime_candidate(provider),
-                self.stored_candidate(provider, None),
+                self.stored_candidate(provider, /*resolved_command_value*/ None),
                 self.environment_candidate(provider),
                 fallback,
             ]

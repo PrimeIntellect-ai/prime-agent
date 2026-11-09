@@ -45,7 +45,9 @@ impl AuthStorage {
 
         // 3. Stored credential.
         if let Some(credential) = self.data.credential(provider_id) {
-            if let Some(candidate) = self.stored_candidate(provider_id, None) {
+            if let Some(candidate) =
+                self.stored_candidate(provider_id, /*resolved_command_value*/ None)
+            {
                 if !self.is_stale(provider_id, &candidate) {
                     match &credential {
                         AuthCredential::ApiKey { key, .. } => {
@@ -86,7 +88,10 @@ impl AuthStorage {
                                 .map_or(i64::MAX, |d| d.as_millis() as i64);
                             if now_ms >= *expires {
                                 if let Some(refreshed) = self.refresh_oauth(provider_id) {
-                                    let candidate = self.stored_candidate(provider_id, None);
+                                    let candidate = self.stored_candidate(
+                                        provider_id,
+                                        /*resolved_command_value*/ None,
+                                    );
                                     return AuthApiKeyResult {
                                         api_key: self.oauth.api_key_for(provider_id, &refreshed),
                                         source_token: candidate
@@ -233,7 +238,7 @@ impl AuthStorage {
         // single-use refresh token: a peer that refreshed first is served
         // by the re-check instead of re-fetching.
         let _flight = refresh_flight(provider_id);
-        let _cross_process_refresh = match self.storage.refresh_lock() {
+        let _cross_process_refresh = match self.storage.refresh_lock(provider_id) {
             Ok(lock) => lock,
             Err(error) => {
                 // The refresh lock could not be taken: a peer may be
@@ -250,26 +255,31 @@ impl AuthStorage {
         // re-read is also the guard: a credential that changed while
         // this flight waited (a logout removed it, a new login replaced
         // it) is authoritative — the refresh stops without spending a
-        // fetch on a grant the store no longer holds. An unreadable
-        // re-read falls through to the fetch with the LOAD-time data.
-        if let Ok(content) = self.storage.read() {
-            let current = parse_storage_data(content.as_deref())
-                .ok()
-                .and_then(|data| data.credential(provider_id));
-            let still_original = current.as_ref() == Some(&original_credential);
-            if let Some(credential) = current.filter(|credential| {
-                matches!(
-                    credential,
-                    AuthCredential::Oauth { expires, .. } if now_epoch_ms() < *expires
-                )
-            }) {
-                self.reload();
-                return Some(credential);
-            }
-            if !still_original {
-                self.reload();
-                return None;
-            }
+        // fetch on a grant the store no longer holds. A FAILED re-read
+        // fails the refresh closed the same way: the LOAD-time snapshot
+        // may be stale — a peer can have rotated the single-use token
+        // while this caller waited for the lock — so no fetch ever runs
+        // on it; only a current unexpired stored credential serves.
+        let Ok(content) = self.storage.read() else {
+            self.reload();
+            return self.stored_unexpired_credential(provider_id);
+        };
+        let current = parse_storage_data(content.as_deref())
+            .ok()
+            .and_then(|data| data.credential(provider_id));
+        let still_original = current.as_ref() == Some(&original_credential);
+        if let Some(credential) = current.filter(|credential| {
+            matches!(
+                credential,
+                AuthCredential::Oauth { expires, .. } if now_epoch_ms() < *expires
+            )
+        }) {
+            self.reload();
+            return Some(credential);
+        }
+        if !still_original {
+            self.reload();
+            return None;
         }
         let fetched = self.oauth.refresh(provider_id, &data);
         let Some(new_credential) = fetched else {

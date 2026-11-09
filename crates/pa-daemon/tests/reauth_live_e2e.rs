@@ -1,9 +1,10 @@
 //! Live credential pickup e2e: a daemon worker session whose stored OAuth
 //! credential is rotated by ANOTHER process (the `/login` flow's writer)
 //! must serve the fresh token on the very next provider request — no
-//! daemon restart, no `/reload`. This pins the reported symptom class (a
-//! re-authenticated credential needs a daemon restart to be picked up):
-//! the live session's request auth follows the credential store. The
+//! daemon restart, no `/reload`. This pins the symptom class (a
+//! re-authenticated credential needing a daemon restart to be picked
+//! up): the live session's request auth follows the credential store.
+//! The
 //! rotation here is an unexpired replacement written to disk; the OAuth
 //! expiry-refresh path is pinned separately by the engine battery.
 // Fn length is a style gate, not correctness.
@@ -326,7 +327,7 @@ fn write_oauth_credential(agent_dir: &Path, access: &str) {
     std::fs::rename(&temp, &path).expect("land the credential");
 }
 
-/// The reported seam, end to end: the daemon serves the credential another
+/// The seam, end to end: the daemon serves the credential another
 /// process wrote, on the live session's next request. The daemon process
 /// outlives both prompts; nothing restarts it.
 #[test]
@@ -394,8 +395,8 @@ fn a_live_daemon_serves_a_reauthenticated_credential_without_restart() {
     let attached = client.request("a1");
     assert_eq!(attached["success"], true, "attach failed: {attached}");
 
-    // Prompt 1: the stale credential is rejected — the kickout the report
-    // describes.
+    // Prompt 1: the stale credential is rejected — the 401-kickout
+    // symptom class.
     client.send_command(
         "p1",
         &json!({ "type": "prompt_and_wait", "activeSessionId": session_id, "message": "hi" }),

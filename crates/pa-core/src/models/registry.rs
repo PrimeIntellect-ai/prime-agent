@@ -45,7 +45,7 @@ pub struct ResolvedRequestAuth {
     /// credential, runtime override, or environment. `false` means the
     /// resolved key is the configured `models.json` fallback, which is
     /// not a credential.
-    pub store_auth: bool,
+    pub live_credential: bool,
     /// The per-call request model (TS `requestModel`): for xAI, the model
     /// shaped for the credential the lookup serves — the stored
     /// subscription's openai-responses shape or the configured API-key
@@ -883,7 +883,7 @@ impl ModelRegistry {
         let stored = self
             .auth
             .get_api_key_with_source_token(&model.provider, false);
-        let store_auth = stored.api_key.is_some();
+        let live_credential = stored.api_key.is_some();
         // TS `getApiKeyAndHeaders` resolves the request model per call for
         // xAI: the subscription shape when a stored OAuth credential
         // serves, the configured API-key shape otherwise. The registry's
@@ -953,7 +953,7 @@ impl ModelRegistry {
             api_key,
             headers: (!headers.is_empty()).then_some(headers),
             error: None,
-            store_auth,
+            live_credential,
             request_model,
         }
     }

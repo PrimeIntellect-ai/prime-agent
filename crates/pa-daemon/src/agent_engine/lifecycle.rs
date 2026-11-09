@@ -1012,7 +1012,8 @@ impl AgentSessionEngine {
         // streamFn's per-call `getApiKeyAndHeaders`): a `/login` from
         // another process or an OAuth refresh at expiry serves the next
         // request without a restart. A resolution for a dead engine (the
-        // session torn down) serves nothing, so the captured pair stands.
+        // session torn down) fails the call with the resolution error —
+        // no stale captured pair ever streams.
         let live_auth = {
             let weak = self
                 .self_weak

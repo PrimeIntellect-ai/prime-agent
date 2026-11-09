@@ -809,7 +809,7 @@ impl AuthStorageBackend for CatchBackend {
         Ok(())
     }
 
-    fn refresh_lock(&self) -> anyhow::Result<Option<crate::platform::lock_dir::LockDir>> {
+    fn refresh_lock(&self, _provider: &str) -> anyhow::Result<Option<crate::auth::RefreshLock>> {
         match &self.peer_on_lock_error {
             Some(peer) => {
                 // The peer refreshed while this flight waited for the
@@ -997,7 +997,7 @@ impl AuthStorageBackend for LockWaitChangeBackend {
         Ok(())
     }
 
-    fn refresh_lock(&self) -> anyhow::Result<Option<crate::platform::lock_dir::LockDir>> {
+    fn refresh_lock(&self, _provider: &str) -> anyhow::Result<Option<crate::auth::RefreshLock>> {
         if let Some(change) = &self.change_on_lock {
             *self.content.lock().expect("lock-wait content") = Some(change.clone());
         }
@@ -1096,5 +1096,89 @@ fn a_login_during_the_lock_wait_spends_no_refresh_token() {
         stored.as_deref(),
         Some(login_doc.as_str()),
         "the login stays"
+    );
+}
+
+/// A scripted backend for the failed protected re-read: `refresh_lock`
+/// lands a completed peer rotation (the world a caller that waited for
+/// the lock sees), the protected re-read then fails exactly once (an
+/// independent credential writer holding the document lock through the
+/// whole read budget), and reads after that serve the current document.
+struct RereadFailingBackend {
+    content: std::sync::Mutex<Option<String>>,
+    reads: std::sync::atomic::AtomicUsize,
+}
+
+impl AuthStorageBackend for RereadFailingBackend {
+    fn read(&self) -> anyhow::Result<Option<String>> {
+        let reads = self.reads.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        if reads == 2 {
+            // The protected re-read: the document lock is held by an
+            // independent writer through the read budget.
+            anyhow::bail!("Failed to acquire auth storage lock");
+        }
+        Ok(self.content.lock().expect("reread content").clone())
+    }
+
+    fn with_lock(
+        &self,
+        update: &mut dyn FnMut(Option<String>) -> anyhow::Result<((), Option<String>)>,
+    ) -> anyhow::Result<()> {
+        let mut content = self.content.lock().expect("reread content");
+        let ((), next) = update(content.clone())?;
+        if let Some(next) = next {
+            *content = Some(next);
+        }
+        Ok(())
+    }
+
+    fn refresh_lock(&self, provider: &str) -> anyhow::Result<Option<crate::auth::RefreshLock>> {
+        // The peer finished its rotation while this caller waited for
+        // the lock: its fresh credential is in the document. The lock
+        // itself is granted (single-process shape: the flight gate
+        // serializes the callers).
+        let mut peer = AuthStorageData::default();
+        peer.insert(
+            provider,
+            &oauth_credential("peer-access", now_epoch_ms() + 3_600_000),
+        );
+        *self.content.lock().expect("reread content") =
+            Some(serde_json::to_string_pretty(&peer.0)?);
+        Ok(None)
+    }
+}
+
+/// A failed protected re-read fails the refresh closed: a peer rotated
+/// the single-use refresh token while this caller waited for the refresh
+/// lock, and an independent writer then holds the document lock through
+/// the re-read's budget. The LOAD-time grant may already be spent, so
+/// no fetch ever runs on it — the refresh serves only a current
+/// unexpired stored credential (the peer's).
+#[test]
+fn a_failed_reread_serves_the_stored_credential_and_never_fetches() {
+    let provider = "x-reread-failed";
+    let backend = Arc::new(RereadFailingBackend {
+        content: std::sync::Mutex::new(Some(catch_document(
+            provider,
+            &expired_oauth("old-access"),
+        ))),
+        reads: std::sync::atomic::AtomicUsize::new(0),
+    });
+    let counting = Arc::new(CountingOAuth {
+        calls: std::sync::atomic::AtomicUsize::new(0),
+        delay_ms: 0,
+    });
+    let oauth: Arc<dyn OAuthIntegration> = counting.clone();
+    let mut auth =
+        AuthStorage::from_storage(Arc::clone(&backend) as Arc<dyn AuthStorageBackend>, oauth);
+    assert_eq!(
+        auth.get_api_key(provider).as_deref(),
+        Some("peer-access"),
+        "the peer's landed credential serves; the LOAD-time grant is never fetched"
+    );
+    assert_eq!(
+        counting.calls.load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "a failed protected re-read never spends the possibly-rotated LOAD-time token"
     );
 }

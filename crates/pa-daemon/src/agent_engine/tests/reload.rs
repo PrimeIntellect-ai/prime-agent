@@ -376,7 +376,7 @@ fn reload_refreshes_the_armed_image_route_target_auth() {
 /// from the store, never the pre-failover capture; the capture only backs
 /// a resolution that yields nothing.
 #[test]
-fn restored_primary_target_serves_the_store_auth() {
+fn restored_primary_target_serves_the_live_credential() {
     let dir = tempfile::TempDir::new().unwrap();
     let agent_dir = dir.path().join("agent");
     write_credential_backed_provider(&agent_dir);

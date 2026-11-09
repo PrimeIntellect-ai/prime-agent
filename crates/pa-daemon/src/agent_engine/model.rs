@@ -437,14 +437,21 @@ impl AgentSessionEngine {
 
     /// [`Self::resolve_request_key_and_headers`]'s full resolution: the
     /// registry's single lookup — possibly refreshing an expired OAuth
-    /// token through the engine's OAuth integration — with the
-    /// store-read health folded into `store_auth`. `false` means the
-    /// resolved key is the configured `models.json` fallback — served
-    /// when the store is unreadable OR resolves no credential from any
-    /// live source — which is not a credential and must never replace a
-    /// serving pair. `request_model` carries the per-call xAI request
-    /// model the lookup serves (TS `requestModel`); other providers
-    /// leave it unset.
+    /// token through the engine's OAuth integration. `live_credential`
+    /// carries whether a live source served (stored credential, runtime
+    /// override, or environment); `false` means the resolved key is the
+    /// configured `models.json` fallback, which is not a credential and
+    /// never replaces a serving pair in `/reload`'s rebind.
+    /// `request_model` carries the per-call xAI request model the lookup
+    /// serves (TS `requestModel`); other providers leave it unset.
+    ///
+    /// The create-config key rides the store's runtime-override arm (TS
+    /// installs `--api-key` with `setRuntimeApiKey` before lookup, v0.9.8
+    /// main.ts:862), so the registry's resolution — the key, the headers,
+    /// and the xAI request model — follows one winning source: a stored
+    /// subscription never re-shapes a session the config keys
+    /// explicitly, and a mid-session `/login` never switches the request
+    /// model under the override.
     ///
     /// The live session's stream consults this per provider call through
     /// the resolver `build_session` wires, so a credential rotated by
@@ -456,11 +463,14 @@ impl AgentSessionEngine {
         &self,
         model: &Model,
     ) -> pa_core::models::ResolvedRequestAuth {
-        let auth = pa_core::auth::AuthStorage::create_with_oauth(
+        let mut auth = pa_core::auth::AuthStorage::create_with_oauth(
             &self.config.agent_dir,
             std::sync::Arc::clone(&self.request_auth_oauth),
         );
-        let store_healthy = auth.load_error().is_none();
+        let store_error = auth.load_error().map(str::to_string);
+        if let Some(api_key) = &self.current_selection().api_key {
+            auth.set_runtime_api_key(&model.provider, api_key.clone());
+        }
         // The request-auth registry resolves auth only for the serving
         // provider: its construction never resolves the unrelated Prime
         // Inference credential (a stored `!command` helper must not run
@@ -475,15 +485,18 @@ impl AgentSessionEngine {
         // (the lookup may OAuth-refresh and store a fresh token); a second
         // refreshing lookup here would re-fetch a token the first just
         // failed to refresh.
-        resolved.store_auth &= store_healthy;
-        if let Some(api_key) = &self.current_selection().api_key {
-            // The create-config key override pins the key, never the
-            // headers or the request model: the registry's merged pair
-            // still ships, exactly like the TS `getApiKeyAndHeaders`
-            // override path. The flag stays the store's: a caller pairing
-            // the override key with headers keeps its last-good headers
-            // when the store cannot serve.
-            resolved.api_key = Some(api_key.clone());
+        if let Some(error) = store_error {
+            // An unreadable credential store fails the resolution with
+            // its load error (the TS catch path: the auth-storage read
+            // failure reaches `getApiKeyAndHeaders` as `ok: false`), so
+            // the live seam fails the call instead of serving the
+            // fallback key from a store it could not read.
+            resolved.live_credential = false;
+            resolved.api_key = None;
+            resolved.headers = None;
+            resolved.request_model = None;
+            resolved.ok = false;
+            resolved.error = Some(format!("Failed to load credentials: {error}"));
         }
         resolved
     }
@@ -515,22 +528,22 @@ impl AgentSessionEngine {
     ) -> pa_core::session_engine::provider_adapter::ProviderTarget {
         let override_key = self.current_selection().api_key;
         let resolved = self.resolve_request_key_and_headers_and_store_health(primary);
-        let (api_key, headers, store_auth) =
-            (resolved.api_key, resolved.headers, resolved.store_auth);
+        let (api_key, headers, live_credential) =
+            (resolved.api_key, resolved.headers, resolved.live_credential);
         // The capture backs the restore whenever the store cannot serve a
         // live credential (a failed read, or a healthy store with nothing
         // stored — both resolve the configured `models.json` fallback key,
         // which is not a credential); a live stored credential REPLACES
         // the pair, headers included.
         let (api_key, headers) = if let Some(override_key) = override_key {
-            if store_auth {
+            if live_credential {
                 (Some(override_key), headers)
             } else {
                 (Some(override_key), captured_headers.or(headers))
             }
         } else {
             match api_key {
-                Some(api_key) if store_auth => (Some(api_key), headers),
+                Some(api_key) if live_credential => (Some(api_key), headers),
                 _ => (captured_api_key, captured_headers),
             }
         };

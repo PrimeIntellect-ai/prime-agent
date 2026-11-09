@@ -128,19 +128,21 @@ pub fn switchable_stream_fn(target: Arc<std::sync::RwLock<Option<ProviderTarget>
 /// the stream runs it off the executor and under the turn's abort signal.
 ///
 /// The resolution is the registry's own [`crate::models::ResolvedRequestAuth`]:
-/// `store_auth` carries whether a live source served (a configured fallback
-/// key is not a credential and never replaces a serving pair) and
-/// `request_model` the per-call request model (TS `requestModel`), adopted
-/// together with a serving pair.
+/// `live_credential` carries whether a live source served (a configured
+/// fallback key is not a credential — the `/reload` rebind reads the flag)
+/// and `request_model` the per-call request model (TS `requestModel`).
 pub type LiveAuthResolver = Arc<dyn Fn(&Model) -> crate::models::ResolvedRequestAuth + Send + Sync>;
 
 /// [`switchable_stream_fn`] plus the per-request auth re-resolution the TS
 /// session stream performs on every call (`getApiKeyAndHeaders` inside its
-/// `streamFn`): the slot stays the model/service-tier/last-good seam and the
-/// resolver overlays fresh request auth per provider call. A resolution that
-/// cannot serve a live credential keeps the captured pair (the `/reload`
-/// discipline: the configured `models.json` fallback key is not a credential
-/// and never replaces a serving pair).
+/// `streamFn`, v0.9.8 sdk.ts:301-313): the slot keeps the model and the
+/// service tier, and the resolution is the call's whole request auth. A
+/// resolution that cannot serve fails the call with its auth error; a
+/// resolution that serves sends its own answer — the live credential, or
+/// the configured `models.json` fallback key when no credential serves,
+/// exactly the TS resolution's own fallback arm. A captured pair never
+/// resends: re-serving the credential pinned at session start is the
+/// stale-token loop this seam exists to end.
 ///
 /// The resolution runs inside the returned future on a blocking thread, so
 /// auth-file reads, `!command` spawns, and an OAuth refresh never block the
@@ -184,15 +186,23 @@ pub fn switchable_stream_fn_with_live_auth(
                 if signal.is_aborted() {
                     return Err(pa_agent::abort::aborted_error());
                 }
-                if resolved.store_auth {
-                    if let Some(api_key) = resolved.api_key {
-                        target_value.api_key = Some(api_key);
-                        target_value.headers = resolved.headers;
-                    }
-                    if let Some(model) = resolved.request_model {
-                        target_value.model = model;
-                    }
+                if !resolved.ok {
+                    // The TS streamFn throws the resolution's auth error
+                    // (v0.9.8 sdk.ts:303-305): the call fails, the next
+                    // call re-resolves — a captured pair never rescues it.
+                    return Err(anyhow::anyhow!(resolved
+                        .error
+                        .unwrap_or_else(|| "request auth resolution failed".to_string())));
                 }
+                // The resolution's own answer serves: its api key (a live
+                // credential or the configured fallback key — never a
+                // captured pair), its headers, and the per-call request
+                // model when it carries one.
+                if let Some(model) = resolved.request_model {
+                    target_value.model = model;
+                }
+                target_value.api_key = resolved.api_key;
+                target_value.headers = resolved.headers;
                 let ProviderTarget {
                     api_key,
                     model,
@@ -523,7 +533,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn live_auth_adopts_a_serving_resolution_and_keeps_last_good() {
+    async fn live_auth_serves_the_resolution_per_call_and_never_resends_a_captured_pair() {
         // One served (api key, headers) pair per provider call.
         type ServedAuth = (
             Option<String>,
@@ -563,14 +573,14 @@ mod tests {
                 "team-old".to_string(),
             )])),
         })));
-        // The scripted resolutions, served one per provider call: a store
-        // that cannot serve, a fresh rotated credential (with a team
-        // header), a fresh credential carrying NO header (the captured
-        // header must clear, not linger on the new key), and the
-        // `models.json` fallback key (a key that is not a credential — it
-        // must never replace the captured serving pair). Each entry is a
-        // shape the registry produces: a serving resolution always carries
-        // its key.
+        // The scripted resolutions, served one per provider call: a
+        // resolution that serves no key (a logout with no configured
+        // fallback), a fresh rotated credential (with a team header), a
+        // fresh credential carrying NO header (the captured header must
+        // clear, not linger on the new key), and the `models.json`
+        // fallback key (a key that is not a credential, but it IS the
+        // resolution's answer — TS serves it when no credential serves).
+        // Each entry is a shape the registry produces.
         let queue: Arc<std::sync::Mutex<std::collections::VecDeque<ResolvedRequestAuth>>> =
             Arc::new(std::sync::Mutex::new(std::collections::VecDeque::from(
                 vec![
@@ -579,7 +589,7 @@ mod tests {
                         api_key: None,
                         headers: None,
                         error: None,
-                        store_auth: false,
+                        live_credential: false,
                         request_model: None,
                     },
                     ResolvedRequestAuth {
@@ -590,7 +600,7 @@ mod tests {
                             "team-1".to_string(),
                         )])),
                         error: None,
-                        store_auth: true,
+                        live_credential: true,
                         request_model: None,
                     },
                     ResolvedRequestAuth {
@@ -598,7 +608,7 @@ mod tests {
                         api_key: Some("fresh-access-2".to_string()),
                         headers: None,
                         error: None,
-                        store_auth: true,
+                        live_credential: true,
                         request_model: None,
                     },
                     ResolvedRequestAuth {
@@ -606,7 +616,7 @@ mod tests {
                         api_key: Some("sk-config-fallback".to_string()),
                         headers: None,
                         error: None,
-                        store_auth: false,
+                        live_credential: false,
                         request_model: None,
                     },
                 ],
@@ -625,15 +635,17 @@ mod tests {
         });
         let stream_fn = switchable_stream_fn_with_live_auth(target, live_auth);
         for (expected_key, expected_header) in [
-            (Some("stale-access"), Some("team-old")),
+            // No key resolves: the call streams keyless — the captured
+            // pair (its key and its team header) never resends.
+            (None, None),
             (Some("fresh-access"), Some("team-1")),
             // The fresh credential carries no header: the captured team
             // header clears — it must not linger on the new key.
             (Some("fresh-access-2"), None),
-            // The configured `models.json` fallback key is not a
-            // credential: it never replaces a serving pair — last-good is
-            // the slot's captured pair, never the newest stream overlay.
-            (Some("stale-access"), Some("team-old")),
+            // The configured `models.json` fallback key is the
+            // resolution's answer: it serves per call, never the
+            // captured pair.
+            (Some("sk-config-fallback"), None),
         ] {
             let mut stream = stream_fn(
                 AgentModel::unknown(),
@@ -658,15 +670,45 @@ mod tests {
                 "the served headers: {headers:?}"
             );
         }
+        // A resolution that fails (no usable credential, an unreadable
+        // store) fails the call with its auth error — the TS streamFn
+        // throws it (v0.9.8 sdk.ts:303-305) — and the captured pair never
+        // rescues the call.
+        queue.lock().unwrap().push_back(ResolvedRequestAuth {
+            ok: false,
+            api_key: None,
+            headers: None,
+            error: Some("No API key found for \"battery\"".to_string()),
+            live_credential: false,
+            request_model: None,
+        });
+        let Err(error) = stream_fn(
+            AgentModel::unknown(),
+            LlmContext::default(),
+            StreamRequestOptions::default(),
+        )
+        .await
+        else {
+            panic!("a failed resolution fails the call")
+        };
+        assert!(
+            error.to_string().contains("No API key found"),
+            "the call carries the resolution's auth error: {error}"
+        );
+        assert_eq!(
+            received.lock().unwrap().len(),
+            4,
+            "the failed call admits no provider request"
+        );
         // Every consultation was for the slot's serving model.
-        assert_eq!(*consulted.lock().unwrap(), vec![model.id.clone(); 4]);
+        assert_eq!(*consulted.lock().unwrap(), vec![model.id.clone(); 5]);
         registration.unregister();
     }
 
-    /// A serving resolution that carries a request model (TS
-    /// `requestModel`: the xAI subscription shape follows the current
-    /// credential) adopts it on the provider call; a resolution without
-    /// one keeps the target's model.
+    /// A resolution that carries a request model (TS `requestModel`: the
+    /// xAI request shape follows the credential the resolution serves)
+    /// adopts it on the provider call — a live credential or the fallback
+    /// key alike; a resolution without one keeps the target's model.
     #[tokio::test]
     async fn live_auth_adopts_a_serving_request_model() {
         // The adapted request model rides a test-only api registered for
@@ -734,7 +776,7 @@ mod tests {
                         api_key: Some("fresh-access".to_string()),
                         headers: None,
                         error: None,
-                        store_auth: true,
+                        live_credential: true,
                         request_model: Some(adapted_model.clone()),
                     },
                     ResolvedRequestAuth {
@@ -742,20 +784,21 @@ mod tests {
                         api_key: Some("fresh-access".to_string()),
                         headers: None,
                         error: None,
-                        store_auth: true,
+                        live_credential: true,
                         request_model: None,
                     },
-                    // A logged-out xAI store resolves `store_auth: false` WITH
-                    // an API-key-shaped request model (the registry computes
-                    // it regardless of the lookup): the gate must keep it off
-                    // the captured pair — the captured subscription token
-                    // never rides the API-key shape.
+                    // A logged-out xAI store resolves no live credential
+                    // WITH an API-key-shaped request model (the registry
+                    // computes it regardless of the lookup): the resolution's
+                    // answer serves per call — the fallback key rides the
+                    // API-key shape, and a captured subscription token never
+                    // does.
                     ResolvedRequestAuth {
                         ok: true,
                         api_key: Some("sk-config-fallback".to_string()),
                         headers: None,
                         error: None,
-                        store_auth: false,
+                        live_credential: false,
                         request_model: Some(adapted_model.clone()),
                     },
                 ],
@@ -780,15 +823,16 @@ mod tests {
             stream.result().await.expect("the stream settles");
         }
         // Call 1 adopted the served request model; call 2 (no request
-        // model) kept the target's model; call 3's non-serving resolution
-        // carried a request model, and the gate kept it off the captured
-        // pair anyway.
+        // model) kept the target's model; call 3's resolution carried no
+        // live credential but a request model, and the resolution's
+        // answer served — the fallback key on the API-key shape, never a
+        // captured subscription token.
         assert_eq!(
             *received.lock().unwrap(),
             vec![
                 ("adapted-grok".to_string(), adapted_api.clone()),
                 (slot_model.id.clone(), slot_model.api.clone()),
-                (slot_model.id.clone(), slot_model.api.clone()),
+                ("adapted-grok".to_string(), adapted_api.clone()),
             ]
         );
         registration.unregister();
@@ -912,11 +956,12 @@ mod tests {
                 .expect("the held refresh entered the token endpoint");
             controller.abort();
             // The test thread releases the held refresh right after its
-            // still-held assertion, so nothing races the assertion. This
-            // escape is only for the synchronous mutant (a resolution on
-            // the stream's own thread never settles the race before the
-            // release): the timeout releases instead, and the mutant
-            // fails the assertions below, never the suite on a hang.
+            // still-held assertion, so nothing races the assertion. The
+            // timeout covers a resolution that runs on the stream's own
+            // thread (the abort cannot settle the call there before the
+            // refresh completes): the release lands anyway, so the
+            // assertions below fail instead of the suite hanging on the
+            // held fetch.
             let _ = ack_rx.recv_timeout(std::time::Duration::from_secs(30));
             release_tx.send(()).expect("the release channel is open");
         });
@@ -988,9 +1033,10 @@ mod tests {
     /// sees both arms ready. Whichever arm wins, the seam must settle the
     /// call with the abort error and admit no provider request; the
     /// re-check is the only guard when the resolution arm wins. The loop
-    /// runs the race until the resolution arm wins (a single fair poll can
-    /// hand either arm the win); a seam without the re-check admits the
-    /// request on that run.
+    /// runs the race a fixed 40 times (a single fair poll can hand either
+    /// arm the win on each run), so the resolution arm gets many chances
+    /// to win; the empty received-keys assertion fails a seam that admits
+    /// the request on any resolution-arm win.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn an_abort_landing_with_the_resolution_never_admits_the_request() {
         const RUNS: usize = 40;
@@ -1019,7 +1065,7 @@ mod tests {
                     api_key: Some("fresh-after-abort".to_string()),
                     headers: None,
                     error: None,
-                    store_auth: true,
+                    live_credential: true,
                     request_model: None,
                 }
             });
@@ -1051,8 +1097,9 @@ mod tests {
         registration.unregister();
     }
 
-    /// The abort/resurrection probe: a Stop during an OAuth refresh
-    /// settles the stream immediately, but the offloaded resolution keeps
+    /// The shared schedule for the detached-refresh store-change pins: a
+    /// Stop during an OAuth refresh settles the stream immediately, but
+    /// the offloaded resolution keeps
     /// running to completion. When a credential change lands meanwhile,
     /// the detached refresh's commit must keep it — the current entry,
     /// including deletion, stays authoritative and the fetched grant is

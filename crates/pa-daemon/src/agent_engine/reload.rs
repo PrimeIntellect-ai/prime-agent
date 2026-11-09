@@ -21,7 +21,7 @@ impl AgentSessionEngine {
     /// serving it on the new key.
     fn refresh_request_auth(&self, target: &mut ProviderTarget) {
         let resolved = self.resolve_request_key_and_headers_and_store_health(&target.model);
-        if resolved.store_auth {
+        if resolved.live_credential {
             if let Some(api_key) = resolved.api_key {
                 target.api_key = Some(api_key);
                 target.headers = resolved.headers;
@@ -84,7 +84,7 @@ impl AgentSessionEngine {
             .map(|target| target.model.clone());
         if let Some(model) = live_model {
             let resolved = self.resolve_request_key_and_headers_and_store_health(&model);
-            if resolved.store_auth {
+            if resolved.live_credential {
                 let mut slot = self
                     .provider_target
                     .write()
@@ -99,7 +99,7 @@ impl AgentSessionEngine {
                     } else {
                         let moved =
                             self.resolve_request_key_and_headers_and_store_health(&target.model);
-                        if moved.store_auth {
+                        if moved.live_credential {
                             (moved.api_key, moved.headers)
                         } else {
                             // The moved-to model's provider has no live

@@ -129,8 +129,8 @@ fn served_keys(registration: &pa_ai::faux::FauxProviderRegistration) -> Vec<Opti
     registration.received_api_keys()
 }
 
-/// The reported scenario at the seam: a fresh credential another process
-/// wrote (`/login`) reaches the LIVE session's next provider call — no
+/// The seam's pickup scenario: a fresh credential another process wrote
+/// (`/login`) reaches the LIVE session's next provider call — no
 /// restart, no `/reload`, no rebuild.
 #[test]
 fn the_built_sessions_stream_picks_up_an_external_reauth_per_call() {
@@ -204,11 +204,12 @@ fn the_create_config_key_override_never_store_swaps() {
     registration.unregister();
 }
 
-/// A store that stops serving (a logout empties the credential) keeps the
-/// captured pair: the configured `models.json` fallback key is not a
-/// credential and never replaces a serving pair.
+/// A logout (another process empties the store) changes the very next
+/// call: the resolution's own answer — the configured `models.json`
+/// fallback key — streams per call, and the captured pair never resends
+/// (a captured credential is the stale-token loop this seam ends).
 #[test]
-fn a_logout_keeps_the_captured_pair_off_the_fallback_key() {
+fn a_logout_serves_the_fallback_key_never_the_captured_pair() {
     let _faux = FAUX_TEST_LOCK
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -233,19 +234,20 @@ fn a_logout_keeps_the_captured_pair_off_the_fallback_key() {
         served_keys(&registration),
         vec![
             Some("stale-access".to_string()),
-            Some("stale-access".to_string())
+            Some("sk-config-fallback".to_string())
         ],
-        "the captured pair stands; the models.json fallback key never serves"
+        "the fallback key serves after the logout; the captured pair never resends"
     );
     registration.unregister();
 }
 
 /// An expired OAuth credential whose refresh cannot serve (the dispatch for
-/// a non-subscription provider has no token endpoint) falls to the captured
-/// pair, never the configured fallback key — the resolution reports no
-/// live credential and the stream keeps last-good.
+/// a non-subscription provider has no token endpoint) never keeps the
+/// captured pair serving: the resolution reports no live credential and
+/// falls to the configured fallback key, which streams per call — the
+/// expired captured token never resends.
 #[test]
-fn an_expired_credential_keeps_the_captured_pair() {
+fn an_expired_credential_without_a_refresh_path_serves_the_fallback_key() {
     let _faux = FAUX_TEST_LOCK
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -280,8 +282,8 @@ fn an_expired_credential_keeps_the_captured_pair() {
     call_stream_once(&engine, &stream_fn);
     assert_eq!(
         served_keys(&registration).last(),
-        Some(&Some("live-access".to_string())),
-        "the captured pair stands when the store's credential expires without a refresh path"
+        Some(&Some("sk-config-fallback".to_string())),
+        "the fallback key serves when the store's credential expires without a refresh path; the captured token never resends"
     );
     registration.unregister();
 }
@@ -412,7 +414,8 @@ fn an_expired_credential_refreshes_and_serves_the_live_session() {
 
 /// A failed refresh makes exactly ONE attempt per resolution: the
 /// resolution's single possibly-refreshing lookup never re-fetches a
-/// token it just failed to refresh, and the captured pair stands.
+/// token it just failed to refresh, and its own answer — the configured
+/// fallback key — streams per call, never the captured pair.
 #[test]
 fn a_failed_refresh_makes_one_attempt_per_resolution() {
     let _faux = FAUX_TEST_LOCK
@@ -445,8 +448,8 @@ fn a_failed_refresh_makes_one_attempt_per_resolution() {
         call_stream_once(&engine, &stream_fn);
         assert_eq!(
             served_keys(&registration).last(),
-            Some(&Some("live-access".to_string())),
-            "the captured pair stands while the refresh fails"
+            Some(&Some("sk-config-fallback".to_string())),
+            "the fallback key serves while the refresh fails; the captured pair never resends"
         );
         assert_eq!(
             *attempts.lock().unwrap(),
@@ -618,7 +621,8 @@ fn a_failed_prime_command_key_never_runs_for_another_providers_call() {
 /// attempt — and never again through the candidate's deferred
 /// fingerprint for a source token it cannot produce: a failed command
 /// retries per lookup (TS #2497), not twice per lookup. The resolution
-/// serves no live credential, so the captured pair stands. The counter
+/// serves no live credential, so its own answer — the configured
+/// fallback key — streams per call, never the captured pair. The counter
 /// key is a POSIX-shell pipeline (the ambient shell on Windows resolves
 /// it differently), so the test runs on Unix only.
 #[cfg(unix)]
@@ -656,7 +660,7 @@ fn a_failed_serving_command_key_resolves_once_per_call() {
         assert_eq!(
             served_keys(&registration).last(),
             Some(&Some("sk-config-fallback".to_string())),
-            "the resolution serves no live credential; the captured pair stands"
+            "the resolution serves no live credential; its fallback key streams per call"
         );
     }
     registration.unregister();
@@ -767,9 +771,10 @@ fn a_mid_session_xai_login_switches_the_request_model_live() {
         "the live session's next call carried the adapted request model and credential"
     );
 
-    // A logout (from another process) empties the store: the captured key
-    // and request model stay — the session keeps serving on the shape it
-    // was built with, never the configured fallback shape.
+    // A logout (from another process) empties the store: the next call
+    // serves the resolution's own answer — the fallback key on the
+    // API-key request shape — and the captured subscription pair (its
+    // token and its shape) never resends.
     std::fs::write(agent_dir.join("auth.json"), "{}").unwrap();
     call_stream_once(&engine, &stream_fn);
     assert_eq!(
@@ -778,9 +783,12 @@ fn a_mid_session_xai_login_switches_the_request_model_live() {
         "no further call rides the adapted registration"
     );
     assert_eq!(
-        pre_login.received_api_keys().last(),
-        Some(&Some("sk-config-fallback".to_string())),
-        "the captured request model keeps serving the build-time shape"
+        pre_login.received_api_keys(),
+        vec![
+            Some("sk-config-fallback".to_string()),
+            Some("sk-config-fallback".to_string())
+        ],
+        "the logout returns the session to the API-key shape with the fallback key"
     );
     pre_login.unregister();
     adapted_registration.unregister();
@@ -788,15 +796,13 @@ fn a_mid_session_xai_login_switches_the_request_model_live() {
     pa_ai::registry::register_builtin_api_providers();
 }
 
-/// A logout after a subscription build keeps the captured pair AND the
-/// captured request model: the session built on the stored xAI
-/// subscription keeps streaming the subscription shape with the
-/// subscription token when the store stops serving — the resolution's
-/// API-key-shaped request model (the registry computes it for xAI even
-/// when no credential serves) never reaches the captured pair, and the
-/// captured subscription token never rides the API-key shape.
+/// A logout after a subscription build changes the very next call: the
+/// resolution serves the configured fallback key on the API-key request
+/// shape (the registry computes it for xAI even when no credential
+/// serves), and the captured subscription pair — its token AND its
+/// openai-responses shape — never resends.
 #[test]
-fn a_mid_session_xai_logout_keeps_the_captured_request_model() {
+fn a_mid_session_xai_logout_serves_the_api_key_shape_never_the_captured_token() {
     let _faux = FAUX_TEST_LOCK
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -877,19 +883,126 @@ fn a_mid_session_xai_logout_keeps_the_captured_request_model() {
     adapted_registration.unregister();
     // Restore the built-in the shadowed registration replaced.
     pa_ai::registry::register_builtin_api_providers();
-    assert!(
-        api_key_shape_calls.is_empty(),
-        "a store that stops serving keeps the captured request model: {api_key_shape_calls:?}"
+    assert_eq!(
+        subscription_calls,
+        vec![(
+            "grok-test".to_string(),
+            "openai-responses".to_string(),
+            "https://api.x.ai/v1".to_string(),
+            Some("grok-access".to_string()),
+        )],
+        "only the build-time call rides the subscription shape: {subscription_calls:?}"
     );
     assert_eq!(
-        subscription_calls.len(),
-        2,
-        "both calls ride the captured subscription shape: {subscription_calls:?}"
+        api_key_shape_calls,
+        vec![Some("sk-config-fallback".to_string())],
+        "the logout lands the next call on the API-key shape with the fallback key: {api_key_shape_calls:?}"
     );
+}
+
+/// A mid-session xAI subscription login never switches a session the
+/// create config keys explicitly: the create-config key rides the
+/// resolution's runtime-override arm (TS installs `--api-key` with
+/// `setRuntimeApiKey` before lookup), so the registry's request model
+/// and the key follow the same winning source — the configured API-key
+/// shape with the explicit key, never the stored subscription's
+/// `openai-responses` shape.
+#[test]
+fn a_mid_session_xai_login_never_switches_a_create_config_key_session() {
+    let _faux = FAUX_TEST_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let dir = tempfile::TempDir::new().unwrap();
+    let agent_dir = dir.path().join("agent");
+    std::fs::create_dir_all(&agent_dir).unwrap();
+    std::fs::write(
+        agent_dir.join("models.json"),
+        json!({
+            "providers": {
+                "xai": {
+                    "api": "faux", "baseUrl": "http://localhost:0",
+                    "apiKey": "sk-config-fallback",
+                    "models": [{
+                        "id": "grok-test", "name": "Grok Test",
+                        "contextWindow": 128_000, "maxTokens": 16384,
+                    }],
+                }
+            }
+        })
+        .to_string(),
+    )
+    .unwrap();
+    // The explicit key wins over the provider's configured fallback, and
+    // the subscription shape dispatches to a separate registration so a
+    // re-shaped call is observable without any network.
+    pa_ai::registry::ensure_builtins();
+    let explicit_shape = register_recording_faux();
+    let adapted: Arc<std::sync::Mutex<Vec<ServedAdapted>>> =
+        Arc::new(std::sync::Mutex::new(Vec::new()));
+    let captured = Arc::clone(&adapted);
+    let adapted_registration =
+        pa_ai::faux::register_faux_provider(pa_ai::faux::RegisterFauxProviderOptions {
+            api: Some("openai-responses".to_string()),
+            ..Default::default()
+        });
+    adapted_registration.set_repeat_last_response(true);
+    adapted_registration.set_responses(vec![pa_ai::faux::FauxResponseStep::Factory(Arc::new(
+        move |_, options, _, model| {
+            captured.lock().unwrap().push((
+                model.id.clone(),
+                model.api.clone(),
+                model.base_url.clone(),
+                options.and_then(|options| options.api_key.clone()),
+            ));
+            Ok(pa_ai::faux::faux_assistant_text_message(
+                "ok",
+                pa_ai::faux::FauxAssistantMessageOptions::default(),
+            ))
+        },
+    ))]);
+    let engine = live_auth_engine(dir.path(), Some("sk-create-config"), "xai", "grok-test");
+    let model = engine.resolve_model().expect("the custom model resolves");
+    assert_eq!(model.api, "faux", "the session builds on the API-key shape");
+    let agent = engine.session_agent(&model).expect("the session builds");
+    let stream_fn = agent
+        .stream_fn()
+        .expect("the built session streams")
+        .clone();
+    call_stream_once(&engine, &stream_fn);
+    assert_eq!(
+        explicit_shape.received_api_keys(),
+        vec![Some("sk-create-config".to_string())],
+        "the create-config key serves on the configured API-key shape"
+    );
+
+    // A subscription login (from another process) lands a stored xAI
+    // OAuth credential: the explicit key still wins and the registry
+    // keeps the API-key request shape — one winning source for the model
+    // and the key.
+    std::fs::write(
+        agent_dir.join("auth.json"),
+        json!({
+            "xai": { "type": "oauth", "access": "grok-access", "refresh": "r",
+                "expires": 4_102_444_800_000i64 }
+        })
+        .to_string(),
+    )
+    .unwrap();
+    call_stream_once(&engine, &stream_fn);
     assert!(
-        subscription_calls
-            .iter()
-            .all(|(_, _, _, key)| key.as_deref() == Some("grok-access")),
-        "the captured subscription token stays on the subscription shape: {subscription_calls:?}"
+        adapted.lock().unwrap().is_empty(),
+        "the stored subscription never re-shapes the explicitly keyed session"
     );
+    assert_eq!(
+        explicit_shape.received_api_keys(),
+        vec![
+            Some("sk-create-config".to_string()),
+            Some("sk-create-config".to_string())
+        ],
+        "the create-config key keeps serving across the login, never the subscription token"
+    );
+    explicit_shape.unregister();
+    adapted_registration.unregister();
+    // Restore the built-in the shadowed registration replaced.
+    pa_ai::registry::register_builtin_api_providers();
 }
