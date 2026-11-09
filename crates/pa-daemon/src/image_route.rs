@@ -337,7 +337,7 @@ mod tests {
     fn image_route_engine(
         dir: &std::path::Path,
         settings: &serde_json::Value,
-    ) -> AgentSessionEngine {
+    ) -> std::sync::Arc<AgentSessionEngine> {
         let agent_dir = dir.join("agent");
         write_image_pair_models_json(&agent_dir);
         write_image_settings(dir, settings);
@@ -357,6 +357,10 @@ mod tests {
             queued_steering_probe: None,
         })
         .unwrap();
+        let engine = std::sync::Arc::new(engine);
+        // The worker registers the engine's own arc: the live-auth
+        // resolver upgrades it per provider call.
+        engine.register_arc();
         engine.configure_model(EngineModelSelection {
             provider: Some("battery".to_string()),
             model: Some("mock-1".to_string()),
