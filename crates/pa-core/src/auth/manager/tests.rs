@@ -969,3 +969,132 @@ fn a_failed_write_serves_no_expired_credential() {
         "the failed write left the expired credential in the document"
     );
 }
+
+/// A scripted backend for the refresh-lock wait: `refresh_lock` first
+/// lands a scripted store change — the world a waiting flight sees when
+/// it finally gets past the lock — then either reports the lock
+/// unavailable or grants it (`Ok(None)`, the single-process shape).
+struct LockWaitChangeBackend {
+    content: std::sync::Mutex<Option<String>>,
+    change_on_lock: Option<String>,
+    lock_error: bool,
+}
+
+impl AuthStorageBackend for LockWaitChangeBackend {
+    fn read(&self) -> anyhow::Result<Option<String>> {
+        Ok(self.content.lock().expect("lock-wait content").clone())
+    }
+
+    fn with_lock(
+        &self,
+        update: &mut dyn FnMut(Option<String>) -> anyhow::Result<((), Option<String>)>,
+    ) -> anyhow::Result<()> {
+        let mut content = self.content.lock().expect("lock-wait content");
+        let ((), next) = update(content.clone())?;
+        if let Some(next) = next {
+            *content = Some(next);
+        }
+        Ok(())
+    }
+
+    fn refresh_lock(&self) -> anyhow::Result<Option<crate::platform::lock_dir::LockDir>> {
+        if let Some(change) = &self.change_on_lock {
+            *self.content.lock().expect("lock-wait content") = Some(change.clone());
+        }
+        if self.lock_error {
+            anyhow::bail!("the scripted refresh lock is unavailable")
+        }
+        Ok(None)
+    }
+}
+
+/// One resolution over an expired stored grant whose `refresh_lock` first
+/// lands `change_on_lock`, then grants or refuses the lock. Returns the
+/// served key, the token fetches, and the stored document.
+fn resolve_over_lock_wait(
+    provider: &str,
+    change_on_lock: Option<String>,
+    lock_error: bool,
+) -> (Option<String>, usize, Option<String>) {
+    let backend = Arc::new(LockWaitChangeBackend {
+        content: std::sync::Mutex::new(Some(catch_document(
+            provider,
+            &expired_oauth("old-access"),
+        ))),
+        change_on_lock,
+        lock_error,
+    });
+    let counting = Arc::new(CountingOAuth {
+        calls: std::sync::atomic::AtomicUsize::new(0),
+        delay_ms: 0,
+    });
+    let oauth: Arc<dyn OAuthIntegration> = counting.clone();
+    let mut auth =
+        AuthStorage::from_storage(Arc::clone(&backend) as Arc<dyn AuthStorageBackend>, oauth);
+    let key = auth.get_api_key(provider);
+    let fetches = counting.calls.load(std::sync::atomic::Ordering::SeqCst);
+    let stored = backend.content.lock().expect("lock-wait content").clone();
+    (key, fetches, stored)
+}
+
+/// The lock-error catch path over a store that still holds the EXPIRED
+/// original: nothing unexpired is served, and the refresh never fetches —
+/// a fetch without the lock is the double spend the lock exists to stop.
+#[test]
+fn an_unavailable_refresh_lock_over_a_still_expired_store_never_fetches() {
+    let (key, fetches, _stored) = resolve_over_lock_wait("x-lock-unavailable-expired", None, true);
+    assert_eq!(
+        fetches, 0,
+        "an unavailable refresh lock never fetches a token"
+    );
+    assert_eq!(
+        key, None,
+        "the expired stored credential is not a refresh outcome"
+    );
+}
+
+/// The re-read identity guard (logout): a logout that lands while this
+/// flight waits for the refresh lock stops the refresh before it spends
+/// the logged-out grant's refresh token; the deletion stays authoritative.
+#[test]
+fn a_logout_during_the_lock_wait_spends_no_refresh_token() {
+    let (key, fetches, stored) =
+        resolve_over_lock_wait("x-logout-during-lock-wait", Some("{}".to_string()), false);
+    assert_eq!(
+        fetches, 0,
+        "the refresh never spends a token for a grant the store no longer holds"
+    );
+    assert_eq!(key, None);
+    assert_eq!(stored.as_deref(), Some("{}"), "the logout stays");
+}
+
+/// The re-read identity guard (replacement): a new API-key login that
+/// lands while this flight waits for the refresh lock stops the refresh
+/// the same way; the replaced credential stays authoritative.
+#[test]
+fn a_login_during_the_lock_wait_spends_no_refresh_token() {
+    let provider = "x-login-during-lock-wait";
+    let mut login = AuthStorageData::default();
+    login.insert(
+        provider,
+        &AuthCredential::ApiKey {
+            key: "new-login-key".to_string(),
+            prime_team: None,
+        },
+    );
+    let login_doc = serde_json::to_string_pretty(&login.0).unwrap();
+    let (key, fetches, stored) = resolve_over_lock_wait(provider, Some(login_doc.clone()), false);
+    assert_eq!(
+        fetches, 0,
+        "the refresh never spends the replaced grant's refresh token"
+    );
+    assert_eq!(
+        key, None,
+        "the re-read stops this attempt; the next resolution's fresh load serves the login"
+    );
+    assert_eq!(
+        stored.as_deref(),
+        Some(login_doc.as_str()),
+        "the login stays"
+    );
+}

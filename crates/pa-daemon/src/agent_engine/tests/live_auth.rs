@@ -766,8 +766,130 @@ fn a_mid_session_xai_login_switches_the_request_model_live() {
         )],
         "the live session's next call carried the adapted request model and credential"
     );
+
+    // A logout (from another process) empties the store: the captured key
+    // and request model stay — the session keeps serving on the shape it
+    // was built with, never the configured fallback shape.
+    std::fs::write(agent_dir.join("auth.json"), "{}").unwrap();
+    call_stream_once(&engine, &stream_fn);
+    assert_eq!(
+        adapted.lock().unwrap().len(),
+        1,
+        "no further call rides the adapted registration"
+    );
+    assert_eq!(
+        pre_login.received_api_keys().last(),
+        Some(&Some("sk-config-fallback".to_string())),
+        "the captured request model keeps serving the build-time shape"
+    );
     pre_login.unregister();
     adapted_registration.unregister();
     // Restore the built-in the shadowed registration replaced.
     pa_ai::registry::register_builtin_api_providers();
+}
+
+/// A logout after a subscription build keeps the captured pair AND the
+/// captured request model: the session built on the stored xAI
+/// subscription keeps streaming the subscription shape with the
+/// subscription token when the store stops serving — the resolution's
+/// API-key-shaped request model (the registry computes it for xAI even
+/// when no credential serves) never reaches the captured pair, and the
+/// captured subscription token never rides the API-key shape.
+#[test]
+fn a_mid_session_xai_logout_keeps_the_captured_request_model() {
+    let _faux = FAUX_TEST_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let dir = tempfile::TempDir::new().unwrap();
+    let agent_dir = dir.path().join("agent");
+    std::fs::create_dir_all(&agent_dir).unwrap();
+    std::fs::write(
+        agent_dir.join("models.json"),
+        json!({
+            "providers": {
+                "xai": {
+                    "api": "faux", "baseUrl": "http://localhost:0",
+                    "apiKey": "sk-config-fallback",
+                    "models": [{
+                        "id": "grok-test", "name": "Grok Test",
+                        "contextWindow": 128_000, "maxTokens": 16384,
+                    }],
+                }
+            }
+        })
+        .to_string(),
+    )
+    .unwrap();
+    // The subscription is in the store at build time, so the session
+    // builds on the subscription shape with the subscription token.
+    std::fs::write(
+        agent_dir.join("auth.json"),
+        json!({
+            "xai": { "type": "oauth", "access": "grok-access", "refresh": "r",
+                "expires": 4_102_444_800_000i64 }
+        })
+        .to_string(),
+    )
+    .unwrap();
+    pa_ai::registry::ensure_builtins();
+    let api_key_shape = register_recording_faux();
+    let adapted: Arc<std::sync::Mutex<Vec<ServedAdapted>>> =
+        Arc::new(std::sync::Mutex::new(Vec::new()));
+    let captured = Arc::clone(&adapted);
+    let adapted_registration =
+        pa_ai::faux::register_faux_provider(pa_ai::faux::RegisterFauxProviderOptions {
+            api: Some("openai-responses".to_string()),
+            ..Default::default()
+        });
+    adapted_registration.set_repeat_last_response(true);
+    adapted_registration.set_responses(vec![pa_ai::faux::FauxResponseStep::Factory(Arc::new(
+        move |_, options, _, model| {
+            captured.lock().unwrap().push((
+                model.id.clone(),
+                model.api.clone(),
+                model.base_url.clone(),
+                options.and_then(|options| options.api_key.clone()),
+            ));
+            Ok(pa_ai::faux::faux_assistant_text_message(
+                "ok",
+                pa_ai::faux::FauxAssistantMessageOptions::default(),
+            ))
+        },
+    ))]);
+    let engine = live_auth_engine(dir.path(), None, "xai", "grok-test");
+    let model = engine.resolve_model().expect("the custom model resolves");
+    assert_eq!(
+        model.api, "openai-responses",
+        "the session builds on the subscription shape"
+    );
+    let agent = engine.session_agent(&model).expect("the session builds");
+    let stream_fn = agent
+        .stream_fn()
+        .expect("the built session streams")
+        .clone();
+    call_stream_once(&engine, &stream_fn);
+    // A logout from another process empties the store.
+    std::fs::write(agent_dir.join("auth.json"), "{}").unwrap();
+    call_stream_once(&engine, &stream_fn);
+    let subscription_calls = adapted.lock().unwrap().clone();
+    let api_key_shape_calls = api_key_shape.received_api_keys();
+    api_key_shape.unregister();
+    adapted_registration.unregister();
+    // Restore the built-in the shadowed registration replaced.
+    pa_ai::registry::register_builtin_api_providers();
+    assert!(
+        api_key_shape_calls.is_empty(),
+        "a store that stops serving keeps the captured request model: {api_key_shape_calls:?}"
+    );
+    assert_eq!(
+        subscription_calls.len(),
+        2,
+        "both calls ride the captured subscription shape: {subscription_calls:?}"
+    );
+    assert!(
+        subscription_calls
+            .iter()
+            .all(|(_, _, _, key)| key.as_deref() == Some("grok-access")),
+        "the captured subscription token stays on the subscription shape: {subscription_calls:?}"
+    );
 }

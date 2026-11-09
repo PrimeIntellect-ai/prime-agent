@@ -1021,15 +1021,9 @@ impl AgentSessionEngine {
                 .clone();
             std::sync::Arc::new(move |model: &Model| {
                 let Some(engine) = weak.as_ref().and_then(std::sync::Weak::upgrade) else {
-                    return pa_core::session_engine::provider_adapter::LiveRequestAuth::default();
+                    return pa_core::models::ResolvedRequestAuth::default();
                 };
-                let resolved = engine.resolve_request_key_and_headers_and_store_health(model);
-                pa_core::session_engine::provider_adapter::LiveRequestAuth {
-                    api_key: resolved.api_key,
-                    headers: resolved.headers,
-                    store_auth: resolved.store_auth,
-                    request_model: resolved.request_model,
-                }
+                engine.resolve_request_key_and_headers_and_store_health(model)
             })
         };
         let stream_fn = switchable_stream_fn_with_live_auth(

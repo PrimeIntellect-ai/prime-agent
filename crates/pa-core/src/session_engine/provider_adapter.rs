@@ -118,19 +118,6 @@ pub fn switchable_stream_fn(target: Arc<std::sync::RwLock<Option<ProviderTarget>
     )
 }
 
-/// One stream-time request-auth resolution for a serving model.
-#[derive(Debug, Clone, Default, PartialEq)]
-pub struct LiveRequestAuth {
-    pub api_key: Option<String>,
-    pub headers: Option<std::collections::BTreeMap<String, String>>,
-    /// Whether the resolution serves a live credential for the model's
-    /// provider; `false` keeps the target's captured pair (last-good).
-    pub store_auth: bool,
-    /// The per-call request model (TS `requestModel`): adopted together
-    /// with a serving pair. `None` keeps the target's model.
-    pub request_model: Option<Model>,
-}
-
 /// Resolves request auth at stream time, per provider call. The daemon wires
 /// this to the credential store's refreshing lookup so a rotated credential
 /// (a `/login` from another process) or an expired OAuth token (refreshed in
@@ -139,7 +126,13 @@ pub struct LiveRequestAuth {
 /// The resolver is synchronous by contract: it reads auth.json, may run a
 /// `!command` credential, and may refresh an expired token at its endpoint —
 /// the stream runs it off the executor and under the turn's abort signal.
-pub type LiveAuthResolver = Arc<dyn Fn(&Model) -> LiveRequestAuth + Send + Sync>;
+///
+/// The resolution is the registry's own [`crate::models::ResolvedRequestAuth`]:
+/// `store_auth` carries whether a live source served (a configured fallback
+/// key is not a credential and never replaces a serving pair) and
+/// `request_model` the per-call request model (TS `requestModel`), adopted
+/// together with a serving pair.
+pub type LiveAuthResolver = Arc<dyn Fn(&Model) -> crate::models::ResolvedRequestAuth + Send + Sync>;
 
 /// [`switchable_stream_fn`] plus the per-request auth re-resolution the TS
 /// session stream performs on every call (`getApiKeyAndHeaders` inside its
@@ -477,6 +470,7 @@ mod tests {
     //! provider with a system prompt only.
 
     use super::*;
+    use crate::models::ResolvedRequestAuth;
 
     #[tokio::test]
     async fn live_target_service_tier_reaches_provider_and_reset() {
@@ -572,47 +566,51 @@ mod tests {
         // The scripted resolutions, served one per provider call: a store
         // that cannot serve, a fresh rotated credential (with a team
         // header), a fresh credential carrying NO header (the captured
-        // header must clear, not linger on the new key), a serving flag
-        // without a key (the store healthy but empty-handed), and the
+        // header must clear, not linger on the new key), and the
         // `models.json` fallback key (a key that is not a credential — it
-        // must never replace the captured serving pair).
-        let queue: Arc<std::sync::Mutex<std::collections::VecDeque<LiveRequestAuth>>> = Arc::new(
-            std::sync::Mutex::new(std::collections::VecDeque::from(vec![
-                LiveRequestAuth {
-                    api_key: None,
-                    headers: None,
-                    store_auth: false,
-                    request_model: None,
-                },
-                LiveRequestAuth {
-                    api_key: Some("fresh-access".to_string()),
-                    headers: Some(std::collections::BTreeMap::from([(
-                        "X-Prime-Team-ID".to_string(),
-                        "team-1".to_string(),
-                    )])),
-                    store_auth: true,
-                    request_model: None,
-                },
-                LiveRequestAuth {
-                    api_key: Some("fresh-access-2".to_string()),
-                    headers: None,
-                    store_auth: true,
-                    request_model: None,
-                },
-                LiveRequestAuth {
-                    api_key: None,
-                    headers: None,
-                    store_auth: true,
-                    request_model: None,
-                },
-                LiveRequestAuth {
-                    api_key: Some("sk-config-fallback".to_string()),
-                    headers: None,
-                    store_auth: false,
-                    request_model: None,
-                },
-            ])),
-        );
+        // must never replace the captured serving pair). Each entry is a
+        // shape the registry produces: a serving resolution always carries
+        // its key.
+        let queue: Arc<std::sync::Mutex<std::collections::VecDeque<ResolvedRequestAuth>>> =
+            Arc::new(std::sync::Mutex::new(std::collections::VecDeque::from(
+                vec![
+                    ResolvedRequestAuth {
+                        ok: true,
+                        api_key: None,
+                        headers: None,
+                        error: None,
+                        store_auth: false,
+                        request_model: None,
+                    },
+                    ResolvedRequestAuth {
+                        ok: true,
+                        api_key: Some("fresh-access".to_string()),
+                        headers: Some(std::collections::BTreeMap::from([(
+                            "X-Prime-Team-ID".to_string(),
+                            "team-1".to_string(),
+                        )])),
+                        error: None,
+                        store_auth: true,
+                        request_model: None,
+                    },
+                    ResolvedRequestAuth {
+                        ok: true,
+                        api_key: Some("fresh-access-2".to_string()),
+                        headers: None,
+                        error: None,
+                        store_auth: true,
+                        request_model: None,
+                    },
+                    ResolvedRequestAuth {
+                        ok: true,
+                        api_key: Some("sk-config-fallback".to_string()),
+                        headers: None,
+                        error: None,
+                        store_auth: false,
+                        request_model: None,
+                    },
+                ],
+            )));
         let consulted: Arc<std::sync::Mutex<Vec<String>>> =
             Arc::new(std::sync::Mutex::new(Vec::new()));
         let resolver_queue = Arc::clone(&queue);
@@ -632,12 +630,9 @@ mod tests {
             // The fresh credential carries no header: the captured team
             // header clears — it must not linger on the new key.
             (Some("fresh-access-2"), None),
-            // The store healthy but empty-handed: the clone keeps the
-            // SLOT's captured pair — last-good is the slot's pair, never
-            // the newest stream overlay.
-            (Some("stale-access"), Some("team-old")),
             // The configured `models.json` fallback key is not a
-            // credential: it never replaces a serving pair.
+            // credential: it never replaces a serving pair — last-good is
+            // the slot's captured pair, never the newest stream overlay.
             (Some("stale-access"), Some("team-old")),
         ] {
             let mut stream = stream_fn(
@@ -664,7 +659,7 @@ mod tests {
             );
         }
         // Every consultation was for the slot's serving model.
-        assert_eq!(*consulted.lock().unwrap(), vec![model.id.clone(); 5]);
+        assert_eq!(*consulted.lock().unwrap(), vec![model.id.clone(); 4]);
         registration.unregister();
     }
 
@@ -731,22 +726,40 @@ mod tests {
             service_tier: None,
             headers: None,
         })));
-        let queue: Arc<std::sync::Mutex<std::collections::VecDeque<LiveRequestAuth>>> = Arc::new(
-            std::sync::Mutex::new(std::collections::VecDeque::from(vec![
-                LiveRequestAuth {
-                    api_key: Some("fresh-access".to_string()),
-                    headers: None,
-                    store_auth: true,
-                    request_model: Some(adapted_model.clone()),
-                },
-                LiveRequestAuth {
-                    api_key: Some("fresh-access".to_string()),
-                    headers: None,
-                    store_auth: true,
-                    request_model: None,
-                },
-            ])),
-        );
+        let queue: Arc<std::sync::Mutex<std::collections::VecDeque<ResolvedRequestAuth>>> =
+            Arc::new(std::sync::Mutex::new(std::collections::VecDeque::from(
+                vec![
+                    ResolvedRequestAuth {
+                        ok: true,
+                        api_key: Some("fresh-access".to_string()),
+                        headers: None,
+                        error: None,
+                        store_auth: true,
+                        request_model: Some(adapted_model.clone()),
+                    },
+                    ResolvedRequestAuth {
+                        ok: true,
+                        api_key: Some("fresh-access".to_string()),
+                        headers: None,
+                        error: None,
+                        store_auth: true,
+                        request_model: None,
+                    },
+                    // A logged-out xAI store resolves `store_auth: false` WITH
+                    // an API-key-shaped request model (the registry computes
+                    // it regardless of the lookup): the gate must keep it off
+                    // the captured pair — the captured subscription token
+                    // never rides the API-key shape.
+                    ResolvedRequestAuth {
+                        ok: true,
+                        api_key: Some("sk-config-fallback".to_string()),
+                        headers: None,
+                        error: None,
+                        store_auth: false,
+                        request_model: Some(adapted_model.clone()),
+                    },
+                ],
+            )));
         let resolver_queue = Arc::clone(&queue);
         let live_auth: LiveAuthResolver = Arc::new(move |_model: &Model| {
             resolver_queue
@@ -756,7 +769,7 @@ mod tests {
                 .unwrap_or_default()
         });
         let stream_fn = switchable_stream_fn_with_live_auth(target, live_auth);
-        for _ in 0..2 {
+        for _ in 0..3 {
             let mut stream = stream_fn(
                 AgentModel::unknown(),
                 LlmContext::default(),
@@ -767,11 +780,14 @@ mod tests {
             stream.result().await.expect("the stream settles");
         }
         // Call 1 adopted the served request model; call 2 (no request
-        // model) kept the target's model.
+        // model) kept the target's model; call 3's non-serving resolution
+        // carried a request model, and the gate kept it off the captured
+        // pair anyway.
         assert_eq!(
             *received.lock().unwrap(),
             vec![
                 ("adapted-grok".to_string(), adapted_api.clone()),
+                (slot_model.id.clone(), slot_model.api.clone()),
                 (slot_model.id.clone(), slot_model.api.clone()),
             ]
         );
@@ -875,16 +891,10 @@ mod tests {
         model.api = "live-auth-abort-test".to_string();
         let resolver_registry = std::sync::Arc::clone(&registry);
         let live_auth: LiveAuthResolver = Arc::new(move |model: &Model| {
-            let resolved = resolver_registry
+            resolver_registry
                 .lock()
                 .expect("registry")
-                .get_api_key_and_headers(model, model.headers.as_ref());
-            LiveRequestAuth {
-                api_key: resolved.api_key,
-                headers: resolved.headers,
-                store_auth: resolved.store_auth,
-                request_model: resolved.request_model,
-            }
+                .get_api_key_and_headers(model, model.headers.as_ref())
         });
         let target = Arc::new(std::sync::RwLock::new(Some(ProviderTarget {
             model,
@@ -972,6 +982,75 @@ mod tests {
         registration.unregister();
     }
 
+    /// The post-resolution abort re-check: the abort can land in the same
+    /// instant the resolution completes — here the resolver itself fires
+    /// the abort, then returns a serving pair — so the unbiased select
+    /// sees both arms ready. Whichever arm wins, the seam must settle the
+    /// call with the abort error and admit no provider request; the
+    /// re-check is the only guard when the resolution arm wins. The loop
+    /// runs the race until the resolution arm wins (a single fair poll can
+    /// hand either arm the win); a seam without the re-check admits the
+    /// request on that run.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_abort_landing_with_the_resolution_never_admits_the_request() {
+        const RUNS: usize = 40;
+        let registration =
+            pa_ai::faux::register_faux_provider(pa_ai::faux::RegisterFauxProviderOptions {
+                api: Some("live-auth-recheck-test".to_owned()),
+                ..Default::default()
+            });
+        registration.set_repeat_last_response(true);
+        registration.set_responses(vec![pa_ai::faux::FauxResponseStep::Message(
+            pa_ai::faux::faux_assistant_text_message(
+                "ok",
+                pa_ai::faux::FauxAssistantMessageOptions::default(),
+            ),
+        )]);
+        for _ in 0..RUNS {
+            let controller = Arc::new(std::sync::Mutex::new(
+                pa_agent::abort::AbortController::new(),
+            ));
+            let signal = controller.lock().unwrap().signal();
+            let resolver_controller = Arc::clone(&controller);
+            let resolver: LiveAuthResolver = Arc::new(move |_model| {
+                resolver_controller.lock().unwrap().abort();
+                ResolvedRequestAuth {
+                    ok: true,
+                    api_key: Some("fresh-after-abort".to_string()),
+                    headers: None,
+                    error: None,
+                    store_auth: true,
+                    request_model: None,
+                }
+            });
+            let target = Arc::new(std::sync::RwLock::new(Some(ProviderTarget {
+                api_key: Some("captured-key".to_string()),
+                model: registration.get_model(),
+                service_tier: None,
+                headers: None,
+            })));
+            let stream_fn = switchable_stream_fn_with_live_auth(target, resolver);
+            let outcome = stream_fn(
+                AgentModel::unknown(),
+                LlmContext::default(),
+                StreamRequestOptions {
+                    signal: signal.clone(),
+                    ..Default::default()
+                },
+            )
+            .await;
+            assert!(
+                pa_agent::abort::is_abort_error(&outcome.err().expect("the abort error")),
+                "the abort landing with the resolution settles the call"
+            );
+        }
+        assert!(
+            registration.received_api_keys().is_empty(),
+            "no provider request is admitted after the abort"
+        );
+        registration.unregister();
+    }
+
     /// The abort/resurrection probe: a Stop during an OAuth refresh
     /// settles the stream immediately, but the offloaded resolution keeps
     /// running to completion. When a credential change lands meanwhile,
@@ -1051,12 +1130,7 @@ mod tests {
             );
             let resolved = registry.get_api_key_and_headers(model, model.headers.as_ref());
             finished_tx.send(()).expect("the finished observer lives");
-            LiveRequestAuth {
-                api_key: resolved.api_key,
-                headers: resolved.headers,
-                store_auth: resolved.store_auth,
-                request_model: resolved.request_model,
-            }
+            resolved
         });
         let registration =
             pa_ai::faux::register_faux_provider(pa_ai::faux::RegisterFauxProviderOptions {
