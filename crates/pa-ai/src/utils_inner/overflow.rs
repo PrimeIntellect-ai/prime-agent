@@ -33,6 +33,16 @@ fn overflow_patterns() -> &'static Vec<Regex> {
             r"(?i)too many tokens",                                   // Generic fallback
             r"(?i)token limit exceeded",                              // Generic fallback
             r"(?i)^4(?:00|13)\s*(?:status code)?\s*\(no body\)", // Cerebras: 400/413 with no body
+            // Any HTTP 413 is a request-size overflow regardless of provider or body
+            // wording: an oversized request body can never succeed on retry, so
+            // it belongs with the compact-and-retry arm, not the error ladder.
+            // The status-prefix arm covers the SDK-composed `"413 <body>"` and
+            // the `"X API error (413): ..."` shapes; the wording arms cover
+            // in-stream error frames that never carry the status prefix.
+            r"(?i)^(?:[\w -]+ API error \(413\):|413(?:\s|:|$))",
+            r"(?i)request[_ ]body[_ ](is[_ ])?too[_ ]large", // nginx/express 413 wording
+            r"(?i)exceeds the body size limit",              // Prime Inference 413 wording
+            r"(?i)payload too large",                        // the HTTP 413 reason phrase
         ]
         .iter()
         .map(|pattern| Regex::new(pattern).expect("static regex"))
@@ -227,5 +237,65 @@ mod tests {
     fn normal_success_is_not_overflow() {
         let m = message(StopReason::Stop, None, usage(100, 10, 0));
         assert!(!is_context_overflow(&m, Some(100_000)));
+    }
+
+    /// The live Prime Inference 413 (captured against the gateway, 2026-11):
+    /// `{"error":{"message":"Hosted decision request exceeds the body size
+    /// limit.","type":"invalid_request_error",...}}` on a >=16 MiB request body,
+    /// SDK-composed to `"413 <message>"`. The `invalid_request_error` body type
+    /// makes the retry classifier settle it as a permanent invalid request; the
+    /// overflow table must claim it first so the compact-and-retry arm runs.
+    #[test]
+    fn four13_status_prefix_classifies() {
+        let live = message(
+            StopReason::Error,
+            Some("413 Hosted decision request exceeds the body size limit."),
+            usage(0, 0, 0),
+        );
+        assert!(is_context_overflow(&live, Some(1_048_576)));
+        assert!(error_message_has_overflow(
+            live.error_message.as_deref().unwrap()
+        ));
+
+        // The same status arm covers the bodyless 413 and providers whose
+        // message carries the status inside a prefix instead of at the start.
+        for text in [
+            "413 status code (no body)",
+            "413 Payload Too Large",
+            "Mistral API error (413): request entity too large",
+        ] {
+            let m = message(StopReason::Error, Some(text), usage(0, 0, 0));
+            assert!(is_context_overflow(&m, None), "unrecognized: {text}");
+        }
+    }
+
+    /// The byte-oversize wording family without any status prefix: in-stream
+    /// error frames and proxies that quote the 413 wording alone.
+    #[test]
+    fn byte_oversize_wordings_classify() {
+        for text in [
+            "Request body too large",
+            "Request body is too large",
+            "payload too large",
+            r"Provider rejected request (request_body_too_large, 413)",
+            r#"{"code":"request_body_too_large","message":"request body too large"}"#,
+        ] {
+            let m = message(StopReason::Error, Some(text), usage(0, 0, 0));
+            assert!(is_context_overflow(&m, None), "unrecognized: {text}");
+        }
+    }
+
+    /// The byte-oversize class must not swallow other failures: rate-limit
+    /// wording stays with the retry ladder, and a 413 that is only the leading
+    /// digits of a larger number is not a status.
+    #[test]
+    fn byte_oversize_negatives_stay_out() {
+        for text in [
+            "429 Rate limit: too many requests, retry later",
+            "4131 tokens remaining in the window",
+        ] {
+            let m = message(StopReason::Error, Some(text), usage(0, 0, 0));
+            assert!(!is_context_overflow(&m, None), "false positive: {text}");
+        }
     }
 }
