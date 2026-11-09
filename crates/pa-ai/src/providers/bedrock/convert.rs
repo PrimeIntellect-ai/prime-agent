@@ -250,7 +250,20 @@ pub fn convert_messages(
                             }));
                         }
                         AssistantContent::Thinking(thinking) => {
-                            if thinking.thinking.trim().is_empty() {
+                            let signature = thinking
+                                .thinking_signature
+                                .as_deref()
+                                .filter(|signature| !signature.trim().is_empty());
+                            if thinking.redacted.unwrap_or(false) {
+                                if let Some(data) = signature {
+                                    content_blocks.push(json!({
+                                        "reasoningContent": { "redactedContent": data }
+                                    }));
+                                }
+                                continue;
+                            }
+                            // Omitted thinking has no text, but its signature must be replayed.
+                            if thinking.thinking.trim().is_empty() && signature.is_none() {
                                 continue;
                             }
                             // Only Anthropic models support the signature field in reasoningText.
@@ -261,10 +274,6 @@ pub fn convert_messages(
                                 // externally persisted message lacks a signature, Bedrock rejects
                                 // the replayed reasoning block. Fall back to plain text, matching
                                 // Anthropic.
-                                let signature = thinking
-                                    .thinking_signature
-                                    .as_deref()
-                                    .filter(|signature| !signature.trim().is_empty());
                                 match signature {
                                     None => {
                                         content_blocks.push(json!({

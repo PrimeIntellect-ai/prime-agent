@@ -2,6 +2,7 @@
 
 use std::collections::HashMap;
 
+use base64::Engine;
 use serde_json::{Map, Value};
 
 use crate::event_stream::{AssistantMessageEvent, AssistantMessageEventWriter};
@@ -136,8 +137,7 @@ pub(crate) fn handle_event(
     }
 
     if let Some(content_block_delta) = parsed.get("contentBlockDelta") {
-        handle_content_block_delta(content_block_delta, model, output, writer, state);
-        return Ok(());
+        return handle_content_block_delta(content_block_delta, model, output, writer, state);
     }
 
     if let Some(content_block_stop) = parsed.get("contentBlockStop") {
@@ -213,7 +213,7 @@ fn handle_content_block_delta(
     output: &mut AssistantMessage,
     writer: &AssistantMessageEventWriter,
     state: &mut BedrockStreamState,
-) {
+) -> Result<(), ProviderError> {
     let content_block_index = event
         .get("contentBlockIndex")
         .and_then(Value::as_u64)
@@ -254,7 +254,7 @@ fn handle_content_block_delta(
         };
         let index = match slot {
             BlockSlot::Text { index } => *index,
-            _ => return,
+            BlockSlot::Thinking { .. } | BlockSlot::ToolUse { .. } => return Ok(()),
         };
         if let AssistantContent::Text(block) = &mut output.content[index] {
             block.text.push_str(text);
@@ -264,7 +264,7 @@ fn handle_content_block_delta(
             delta: text.to_string(),
             partial: output.clone(),
         });
-        return;
+        return Ok(());
     }
 
     if let Some(tool_input) = tool_input {
@@ -287,7 +287,7 @@ fn handle_content_block_delta(
                 partial,
             });
         }
-        return;
+        return Ok(());
     }
 
     if let Some(reasoning) = reasoning {
@@ -317,17 +317,27 @@ fn handle_content_block_delta(
         };
         let index = match slot {
             BlockSlot::Thinking { index } => *index,
-            _ => return,
+            BlockSlot::Text { .. } | BlockSlot::ToolUse { .. } => return Ok(()),
         };
-        let mut signature_delta = None;
         if let AssistantContent::Thinking(block) = &mut output.content[index] {
             if let Some(text) = reasoning.get("text").and_then(Value::as_str) {
                 block.thinking.push_str(text);
             }
             if let Some(signature) = reasoning.get("signature").and_then(Value::as_str) {
-                signature_delta = Some(signature.to_string());
                 block.thinking_signature =
                     Some(block.thinking_signature.take().unwrap_or_default() + signature);
+            }
+            if let Some(data) = reasoning.get("redactedContent").and_then(Value::as_str) {
+                // Binary deltas are independently base64-encoded; join bytes, not encoded strings.
+                let base64 = base64::engine::general_purpose::STANDARD;
+                let mut bytes = base64
+                    .decode(block.thinking_signature.as_deref().unwrap_or_default())
+                    .map_err(|error| ProviderError::Message(error.to_string()))?;
+                base64
+                    .decode_vec(data, &mut bytes)
+                    .map_err(|error| ProviderError::Message(error.to_string()))?;
+                block.thinking_signature = Some(base64.encode(bytes));
+                block.redacted = Some(true);
             }
         }
         if let Some(text) = reasoning.get("text").and_then(Value::as_str) {
@@ -337,8 +347,8 @@ fn handle_content_block_delta(
                 partial: output.clone(),
             });
         }
-        let _ = signature_delta;
     }
+    Ok(())
 }
 
 fn handle_content_block_stop(
@@ -544,6 +554,76 @@ mod tests {
                 .expect("event handled");
         }
         output
+    }
+
+    #[test]
+    fn signed_thinking_without_text_survives_replay() {
+        let output = run_wire_events(&[
+            (
+                "contentBlockDelta",
+                json!({"contentBlockIndex": 0, "delta": {"reasoningContent": {"signature": "sig-"}}}),
+            ),
+            (
+                "contentBlockDelta",
+                json!({"contentBlockIndex": 0, "delta": {"reasoningContent": {"signature": "A"}}}),
+            ),
+            ("contentBlockStop", json!({"contentBlockIndex": 0})),
+        ]);
+        let replay = crate::providers::bedrock::convert::convert_messages(
+            &crate::types::Context {
+                system_prompt: None,
+                messages: vec![crate::types::Message::Assistant(output)],
+                tools: None,
+            },
+            &wire_model(),
+            crate::types::CacheRetention::None,
+        );
+        assert_eq!(
+            replay,
+            vec![json!({"role": "assistant", "content": [
+                {"reasoningContent": {"reasoningText": {"text": "", "signature": "sig-A"}}}
+            ]})]
+        );
+    }
+
+    #[test]
+    fn redacted_reasoning_survives_replay() {
+        // Each binary delta is base64-encoded independently, including its padding.
+        let output = run_wire_events(&[
+            (
+                "contentBlockDelta",
+                json!({"contentBlockIndex": 0, "delta": {"reasoningContent": {"redactedContent": "AQIDBA=="}}}),
+            ),
+            (
+                "contentBlockDelta",
+                json!({"contentBlockIndex": 0, "delta": {"reasoningContent": {"redactedContent": "/wA="}}}),
+            ),
+            ("contentBlockStop", json!({"contentBlockIndex": 0})),
+        ]);
+        assert_eq!(
+            output.content,
+            vec![AssistantContent::Thinking(ThinkingContent {
+                thinking: String::new(),
+                thinking_signature: Some("AQIDBP8A".into()),
+                redacted: Some(true),
+                rest: Map::default(),
+            })]
+        );
+        let replay = crate::providers::bedrock::convert::convert_messages(
+            &crate::types::Context {
+                system_prompt: None,
+                messages: vec![crate::types::Message::Assistant(output)],
+                tools: None,
+            },
+            &wire_model(),
+            crate::types::CacheRetention::None,
+        );
+        assert_eq!(
+            replay,
+            vec![json!({"role": "assistant", "content": [
+                {"reasoningContent": {"redactedContent": "AQIDBP8A"}}
+            ]})]
+        );
     }
 
     #[test]
