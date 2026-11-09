@@ -495,9 +495,13 @@ impl<'a> ResponsesStreamProcessor<'a> {
                 }
             }
             "response.output_item.done" => {
-                let content_index = self
-                    .current_slot(output_index)
-                    .map(|slot| slot.content_index);
+                let (content_index, accumulated_arguments) = match self.current_slot(output_index) {
+                    Some(slot) => (
+                        Some(slot.content_index),
+                        slot.partial_json.text().to_string(),
+                    ),
+                    None => (None, String::new()),
+                };
                 if let Some(index) = output_index {
                     self.slots.remove(&index);
                 }
@@ -616,23 +620,13 @@ impl<'a> ResponsesStreamProcessor<'a> {
                         }
                     }
                     "function_call" => {
-                        let content_index = content_index.or_else(|| {
-                            output_index
-                                .and_then(|index| self.slots.get(&index))
-                                .map(|slot| slot.content_index)
-                        });
                         if let Some(content_index) = content_index {
                             if self.block_kind(content_index) == Some("toolCall") {
-                                let slot_json =
-                                    match self.slots.get(&output_index.unwrap_or_default()) {
-                                        Some(slot) => slot.partial_json.text().to_string(),
-                                        None => String::new(),
-                                    };
                                 let arguments_text = item
                                     .get("arguments")
                                     .and_then(|value| value.as_str())
                                     .filter(|text| !text.is_empty())
-                                    .unwrap_or(&slot_json);
+                                    .unwrap_or(&accumulated_arguments);
                                 let arguments = if arguments_text.is_empty() {
                                     json!({})
                                 } else {
@@ -994,5 +988,50 @@ mod tests {
             ConvertResponsesMessagesOptions::default(),
         );
         assert_eq!(replay, vec![reasoning]);
+    }
+
+    #[test]
+    fn function_call_done_keeps_accumulated_arguments() {
+        let model: Model = serde_json::from_value(json!({
+            "id": "gpt-5", "name": "GPT-5", "provider": "openai", "api": "openai-responses",
+            "baseUrl": "https://unused.invalid", "reasoning": true, "input": ["text"],
+            "contextWindow": 10000, "maxTokens": 100,
+            "cost": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0}
+        }))
+        .unwrap();
+        let mut output = initial_assistant_message(&model.api, &model.provider, &model.id);
+        let (writer, _stream) = create_assistant_message_event_stream();
+        {
+            let mut processor = ResponsesStreamProcessor::new(
+                &model,
+                &mut output,
+                &writer,
+                ResponsesStreamHooks::default(),
+            );
+            for event in [
+                json!({"type": "response.output_item.added", "output_index": 0,
+                    "item": {"id": "fc_test", "type": "function_call", "call_id": "call_test",
+                        "name": "get_weather", "arguments": ""}}),
+                json!({"type": "response.function_call_arguments.delta", "output_index": 0,
+                    "delta": "{\"city\":\"Par"}),
+                json!({"type": "response.function_call_arguments.delta", "output_index": 0,
+                    "delta": "is\"}"}),
+                json!({"type": "response.output_item.done", "output_index": 0,
+                    "item": {"id": "fc_test", "type": "function_call", "call_id": "call_test",
+                        "name": "get_weather", "arguments": ""}}),
+            ] {
+                processor.handle_event(&event).unwrap();
+            }
+        }
+        match &output.content[0] {
+            AssistantContent::ToolCall(tool_call) => {
+                assert_eq!(tool_call.name, "get_weather");
+                assert_eq!(
+                    tool_call.arguments,
+                    json!({"city": "Paris"}).as_object().cloned().unwrap()
+                );
+            }
+            other => panic!("expected tool call, got {other:?}"),
+        }
     }
 }
