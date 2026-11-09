@@ -88,7 +88,7 @@ async fn run_async(command: &str, args: &[String], project: Option<&Path>) -> an
         // uv otherwise discovers uv.toml/pyproject.toml from the process cwd,
         // which may be the repository opened before the first prompt.
         child.arg("--no-config").args(&args).stdin(Stdio::null());
-        let mut env = crate::kernel::python_env::inherited_python_env(project.as_deref());
+        let mut env = crate::kernel::python_env::inherited_python_env();
         crate::kernel::python_env::sanitize_uv_path(&mut env, project.as_deref());
         child.env_clear().envs(env);
         // Hidden window on Windows (TS `spawnHidden`).
@@ -281,12 +281,7 @@ pub(crate) async fn sync_python_skills(
     write_bootstrap_version(venv, runtime_identity, &merged)
 }
 
-pub(crate) fn kernel_base_ready(
-    python: &str,
-    venv: &Path,
-    runtime_identity: &str,
-    project: Option<&Path>,
-) -> bool {
+pub(crate) fn kernel_base_ready(python: &str, venv: &Path, runtime_identity: &str) -> bool {
     let (version, raw) = read_bootstrap_version_raw(venv);
     bootstrap_base_version_current(version, runtime_identity)
         && has_prime_agent_runtime_memoized(
@@ -295,7 +290,6 @@ pub(crate) fn kernel_base_ready(
             &raw,
             &installed_runtime_identity(Path::new(python), venv),
             venv,
-            project,
         )
 }
 
@@ -304,7 +298,6 @@ pub(crate) fn kernel_ready(
     venv: &Path,
     runtime_identity: &str,
     python_skills: &[BootstrapPythonSkill],
-    project: Option<&Path>,
 ) -> bool {
     let (version, raw) = read_bootstrap_version_raw(venv);
     bootstrap_version_current(version.as_ref(), runtime_identity, python_skills)
@@ -314,7 +307,6 @@ pub(crate) fn kernel_ready(
             &raw,
             &installed_runtime_identity(Path::new(python), venv),
             venv,
-            project,
         )
 }
 

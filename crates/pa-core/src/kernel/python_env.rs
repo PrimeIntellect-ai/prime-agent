@@ -153,7 +153,7 @@ pub(crate) fn sanitize_python_env(env: &mut HashMap<OsString, OsString>) {
     env.insert(OsString::from("PYTHONNOUSERSITE"), OsString::from("1"));
 }
 
-pub(crate) fn inherited_python_env(_project: Option<&Path>) -> HashMap<OsString, OsString> {
+pub(crate) fn inherited_python_env() -> HashMap<OsString, OsString> {
     let mut env = std::env::vars_os().collect();
     sanitize_python_env(&mut env);
     env

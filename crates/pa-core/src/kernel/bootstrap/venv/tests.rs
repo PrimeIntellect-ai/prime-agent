@@ -50,7 +50,7 @@ fn kernel_ready(
     runtime_identity: &str,
     python_skills: &[BootstrapPythonSkill],
 ) -> bool {
-    super::kernel_ready(python, venv, runtime_identity, python_skills, None)
+    super::kernel_ready(python, venv, runtime_identity, python_skills)
 }
 
 #[test]

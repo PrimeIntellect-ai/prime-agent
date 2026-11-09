@@ -196,13 +196,13 @@ async fn ensure_kernel_python_uncached(
             let python = expand_home(&override_python);
             let python_str = python.to_string_lossy().to_string();
             let mut missing = Vec::new();
-            if !has_prime_agent_runtime(&python_str, project) {
+            if !has_prime_agent_runtime(&python_str) {
                 missing.push(
                     "a current prime-agent-runtime with callable rlm.spawn, rlm.create_session, rlm.host_request, rlm.progress_note, rlm.rename, rlm._set_completion_notices_wired, and explicit harness CRUD methods".to_string(),
                 );
             }
             if missing.is_empty() {
-                let missing_extras = missing_rlm_extra_import_labels(&python_str, project);
+                let missing_extras = missing_rlm_extra_import_labels(&python_str);
                 if !missing_extras.is_empty() {
                     missing.push(format!(
                         "default Python packages ({})",
@@ -211,11 +211,8 @@ async fn ensure_kernel_python_uncached(
                 }
             }
             if missing.is_empty() && !options.python_skills.is_empty() {
-                let missing_skills = missing_python_skill_import_labels(
-                    &python_str,
-                    &options.python_skills,
-                    project,
-                );
+                let missing_skills =
+                    missing_python_skill_import_labels(&python_str, &options.python_skills);
                 if !missing_skills.is_empty() {
                     options.report(&format!(
                         "Warning: Python skills unavailable in PRIME_AGENT_KERNEL_PYTHON and will be disabled: {}",
@@ -252,34 +249,22 @@ async fn ensure_kernel_venv(
         venv::require_runtime_source_dir().map_err(|error| format_bootstrap_failure(&error))?;
     let runtime_identity =
         venv::hash_runtime_source(&source_dir).map_err(|error| format_bootstrap_failure(&error))?;
-    if kernel_ready(
-        &python_str,
-        &venv,
-        &runtime_identity,
-        python_skills,
-        project,
-    ) {
+    if kernel_ready(&python_str, &venv, &runtime_identity, python_skills) {
         return Ok(python);
     }
 
     let release_lock = match acquire_bootstrap_lock(&venv).await {
         Ok(release_lock) => release_lock,
         Err(error) if dir_lock::lock_creation_denied(&error) => {
-            return unwritable_venv(options, &python, &venv, &runtime_identity, &error, project);
+            return unwritable_venv(options, &python, &venv, &runtime_identity, &error);
         }
         Err(error) => return Err(error),
     };
     let result = async {
-        if kernel_ready(
-            &python_str,
-            &venv,
-            &runtime_identity,
-            python_skills,
-            project,
-        ) {
+        if kernel_ready(&python_str, &venv, &runtime_identity, python_skills) {
             return Ok(python);
         }
-        if kernel_base_ready(&python_str, &venv, &runtime_identity, project) {
+        if kernel_base_ready(&python_str, &venv, &runtime_identity) {
             let uv = ensure_uv(project)?;
             let uv_command = UvCommand {
                 executable: &uv,
@@ -331,10 +316,9 @@ fn unwritable_venv(
     venv: &std::path::Path,
     runtime_identity: &str,
     lock_error: &anyhow::Error,
-    project: Option<&std::path::Path>,
 ) -> anyhow::Result<PathBuf> {
     let python_str = python.to_string_lossy().to_string();
-    if !kernel_base_ready(&python_str, venv, runtime_identity, project) {
+    if !kernel_base_ready(&python_str, venv, runtime_identity) {
         return Err(anyhow!(
             "cannot set up the Python kernel runtime: the kernel venv at {} is not writable by \
              this user and does not hold a current runtime. Set PRIME_AGENT_KERNEL_VENV to a \
@@ -343,7 +327,7 @@ fn unwritable_venv(
             venv.display()
         ));
     }
-    let missing = missing_python_skill_import_labels(&python_str, &options.python_skills, project);
+    let missing = missing_python_skill_import_labels(&python_str, &options.python_skills);
     if !missing.is_empty() {
         options.report(&format!(
             "Warning: Python skills unavailable in {} and will be disabled: {}",

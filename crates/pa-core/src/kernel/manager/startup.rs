@@ -168,8 +168,7 @@ impl Inner {
         }
 
         let cwd = self.options.cwd.clone();
-        let project = cwd.clone().or_else(|| std::env::current_dir().ok());
-        let env = kernel_spawn_env(&self.options.env, project.as_deref());
+        let env = kernel_spawn_env(&self.options.env);
         let mut command = tokio::process::Command::new(&python);
         command
             // `-m` otherwise prepends the project cwd to sys.path, allowing
@@ -538,7 +537,6 @@ impl Inner {
 /// its process groups under.
 fn kernel_spawn_env(
     options_env: &HashMap<String, String>,
-    _project: Option<&std::path::Path>,
 ) -> HashMap<std::ffi::OsString, std::ffi::OsString> {
     let mut env: HashMap<std::ffi::OsString, std::ffi::OsString> = std::env::vars_os().collect();
     for (key, value) in options_env {
@@ -599,7 +597,7 @@ mod tests {
             ),
         ]);
 
-        let env = kernel_spawn_env(&options, Some(&project));
+        let env = kernel_spawn_env(&options);
         assert!(!env.contains_key(std::ffi::OsStr::new("PYTHONPATH")));
         assert!(!env.contains_key(std::ffi::OsStr::new("PYTHONHOME")));
         assert!(!env.contains_key(std::ffi::OsStr::new("PYTHONUSERBASE")));
@@ -617,7 +615,7 @@ mod tests {
     fn kernel_spawn_env_forces_utf8_mode() {
         let mut options_env = HashMap::new();
         options_env.insert("pythonutf8".to_string(), "0".to_string());
-        let env = kernel_spawn_env(&options_env, None);
+        let env = kernel_spawn_env(&options_env);
         assert_eq!(
             env.get(std::ffi::OsStr::new("PYTHONUTF8"))
                 .and_then(|value| value.to_str()),

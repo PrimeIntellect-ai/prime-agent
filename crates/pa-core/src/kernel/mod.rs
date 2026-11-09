@@ -37,12 +37,10 @@ pub use shared::{
 };
 pub use state_snapshot::{manifest_path_in, snapshot_path_in, RestoreResult, SnapshotResult};
 
-/// Environment for a Python process launched from `project`: ambient Python
-/// import roots and the default user site are disabled before interpreter
-/// initialization.
+/// Environment for a Python process: ambient Python import roots and the
+/// default user site are disabled before interpreter initialization.
 #[must_use]
 pub fn python_process_environment(
-    project: &std::path::Path,
 ) -> std::collections::HashMap<std::ffi::OsString, std::ffi::OsString> {
-    python_env::inherited_python_env(Some(project))
+    python_env::inherited_python_env()
 }
