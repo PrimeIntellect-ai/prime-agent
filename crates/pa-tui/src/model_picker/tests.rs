@@ -904,3 +904,50 @@ fn search_preserves_overlong_version_runs() {
         vec!["model-18446744073709551616", "model-2"]
     );
 }
+
+/// Prime Inference rows name their serving class (unlabeled ones keep the provider id), and the
+/// non-Prime row renders byte-identical: the effort layout sizes against the widest trailing.
+#[test]
+fn prime_rows_name_the_serving_class_without_moving_other_rows() {
+    let catalog = |served: bool| {
+        let pi = |id: &str, name: &str, serving: ModelServing| {
+            let mut model = model("prime-inference", id, name, true, Some(opus_map()));
+            model.serving = served.then_some(serving);
+            model
+        };
+        vec![
+            pi("z-ai/glm-5.3", "GLM 5.3", ModelServing::Hosted),
+            pi(
+                "anthropic/claude-fable-5",
+                "Claude Fable 5",
+                ModelServing::Gateway,
+            ),
+            model("openrouter", "x/other", "Other", true, Some(opus_map())),
+        ]
+    };
+    let rows = |served: bool| {
+        let mut options = picker_options(catalog(served));
+        options
+            .configured_providers
+            .insert("openrouter".to_string());
+        frame_text(&mut ModelPicker::new(options))
+    };
+    let row = |rows: &[String], name: &str| {
+        rows.iter()
+            .find(|row| row.contains(name))
+            .cloned()
+            .expect(name)
+    };
+    let (served, unserved) = (rows(true), rows(false));
+    assert!(row(&served, "GLM 5.3").contains("prime-hosted"));
+    assert!(row(&served, "Claude Fable 5").contains("prime-gateway"));
+    assert!(row(&unserved, "GLM 5.3").contains("prime-inference"));
+    assert_eq!(row(&served, "Other"), row(&unserved, "Other"));
+
+    // Search matches the displayed serving label.
+    let mut picker = ModelPicker::new(picker_options(catalog(true)));
+    picker.set_query("gateway");
+    assert_eq!(filtered_ids(&picker), vec!["anthropic/claude-fable-5"]);
+    picker.set_query("hosted");
+    assert_eq!(filtered_ids(&picker), vec!["z-ai/glm-5.3"]);
+}
