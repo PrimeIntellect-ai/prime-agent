@@ -943,4 +943,11 @@ fn prime_rows_name_the_serving_class_without_moving_other_rows() {
     assert!(row(&served, "Claude Fable 5").contains("prime-gateway"));
     assert!(row(&unserved, "GLM 5.3").contains("prime-inference"));
     assert_eq!(row(&served, "Other"), row(&unserved, "Other"));
+
+    // Search matches the displayed serving label.
+    let mut picker = ModelPicker::new(picker_options(catalog(true)));
+    picker.set_query("gateway");
+    assert_eq!(filtered_ids(&picker), vec!["anthropic/claude-fable-5"]);
+    picker.set_query("hosted");
+    assert_eq!(filtered_ids(&picker), vec!["z-ai/glm-5.3"]);
 }
