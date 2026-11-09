@@ -111,6 +111,12 @@ fn safe_home_uv_with_home(path: &Path, project: Option<&Path>, home: Option<&Pat
     let nearest_checkout = project
         .ancestors()
         .find(|ancestor| ancestor.join(".git").exists());
+    // An unmarked filesystem root is not a repository boundary. Mirrors
+    // safe_path_with_mode: a first-time setup launched from `/` must still
+    // find the home uv.
+    if nearest_checkout.is_none() && project.parent().is_none() {
+        return true;
+    }
     let active_boundary = nearest_checkout.unwrap_or(&project);
     !path_starts_with(&canonical_uv, active_boundary)
 }
@@ -430,6 +436,28 @@ mod tests {
         )]);
         sanitize_uv_path(&mut unresolved, None);
         assert!(!unresolved.contains_key(OsStr::new("PATH")));
+    }
+
+    #[test]
+    fn filesystem_root_without_git_allows_the_home_uv() {
+        // A first-time setup launched from `/` (no Git marker anywhere) must
+        // still find the home uv: the unmarked root is not a boundary.
+        let root = tempfile::tempdir().unwrap();
+        let filesystem_root = root.path().ancestors().last().unwrap();
+        if filesystem_root.join(".git").exists() {
+            return;
+        }
+        let home = root.path().join("home");
+        let tool_dir = home.join(".local/bin");
+        let uv_name = if cfg!(windows) { "uv.exe" } else { "uv" };
+        let uv = tool_dir.join(uv_name);
+        std::fs::create_dir_all(&tool_dir).unwrap();
+        std::fs::write(&uv, "uv").unwrap();
+        assert!(safe_home_uv_with_home(
+            &uv,
+            Some(filesystem_root),
+            Some(&home)
+        ));
     }
 
     #[test]
