@@ -437,21 +437,21 @@ impl SessionEngine for AgentSessionEngine {
             return false;
         };
         {
-            // The switch's resolve-and-install serializes with `/reload`'s
-            // live-input refresh (the failover callbacks' fence): a reload
-            // landing between this resolution and the slot write must not
-            // be clobbered by the switch's older pair.
+            // The switch's slot install serializes with the other slot
+            // writers' fence (the failover callbacks take the same lock),
+            // so a mid-switch turn never sees a half-swapped target.
             let _reload_serialized = self
                 .reload_lock
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            let (api_key, headers) = self.resolve_request_key_and_headers(&model);
             let mut target = self.provider_target.write().expect("provider target lock");
+            // The daemon's stream re-resolves request auth per provider
+            // call; the slot's auth half is write-only here.
             *target = Some(ProviderTarget {
                 service_tier: *self.service_tier.read().expect("service tier lock"),
-                api_key,
+                api_key: None,
                 model: model.clone(),
-                headers,
+                headers: None,
             });
         }
         let session = self.session.blocking_lock();

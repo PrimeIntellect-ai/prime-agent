@@ -128,9 +128,7 @@ pub fn switchable_stream_fn(target: Arc<std::sync::RwLock<Option<ProviderTarget>
 /// the stream runs it off the executor and under the turn's abort signal.
 ///
 /// The resolution is the registry's own [`crate::models::ResolvedRequestAuth`]:
-/// `live_credential` carries whether a live source served (a configured
-/// fallback key is not a credential — the `/reload` rebind reads the flag)
-/// and `request_model` the per-call request model (TS `requestModel`).
+/// `request_model` carries the per-call request model (TS `requestModel`).
 pub type LiveAuthResolver = Arc<dyn Fn(&Model) -> crate::models::ResolvedRequestAuth + Send + Sync>;
 
 /// [`switchable_stream_fn`] plus the per-request auth re-resolution the TS
@@ -589,7 +587,6 @@ mod tests {
                         api_key: None,
                         headers: None,
                         error: None,
-                        live_credential: false,
                         request_model: None,
                     },
                     ResolvedRequestAuth {
@@ -600,7 +597,6 @@ mod tests {
                             "team-1".to_string(),
                         )])),
                         error: None,
-                        live_credential: true,
                         request_model: None,
                     },
                     ResolvedRequestAuth {
@@ -608,7 +604,6 @@ mod tests {
                         api_key: Some("fresh-access-2".to_string()),
                         headers: None,
                         error: None,
-                        live_credential: true,
                         request_model: None,
                     },
                     ResolvedRequestAuth {
@@ -616,7 +611,6 @@ mod tests {
                         api_key: Some("sk-config-fallback".to_string()),
                         headers: None,
                         error: None,
-                        live_credential: false,
                         request_model: None,
                     },
                 ],
@@ -679,7 +673,6 @@ mod tests {
             api_key: None,
             headers: None,
             error: Some("No API key found for \"battery\"".to_string()),
-            live_credential: false,
             request_model: None,
         });
         let Err(error) = stream_fn(
@@ -776,7 +769,6 @@ mod tests {
                         api_key: Some("fresh-access".to_string()),
                         headers: None,
                         error: None,
-                        live_credential: true,
                         request_model: Some(adapted_model.clone()),
                     },
                     ResolvedRequestAuth {
@@ -784,7 +776,6 @@ mod tests {
                         api_key: Some("fresh-access".to_string()),
                         headers: None,
                         error: None,
-                        live_credential: true,
                         request_model: None,
                     },
                     // A logged-out xAI store resolves no live credential
@@ -798,7 +789,6 @@ mod tests {
                         api_key: Some("sk-config-fallback".to_string()),
                         headers: None,
                         error: None,
-                        live_credential: false,
                         request_model: Some(adapted_model.clone()),
                     },
                 ],
@@ -1065,7 +1055,6 @@ mod tests {
                     api_key: Some("fresh-after-abort".to_string()),
                     headers: None,
                     error: None,
-                    live_credential: true,
                     request_model: None,
                 }
             });

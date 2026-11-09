@@ -312,11 +312,9 @@ pub struct AgentSessionEngine {
     /// every model-turn attempt so retries keep serving it; cleared when the
     /// episode settles.
     pub(crate) image_route: std::sync::Mutex<Option<ImageRoute>>,
-    /// Serializes `/reload`'s whole live-input refresh: overlapping reloads
-    /// resolve the store at their own read times, so an earlier reload's
-    /// already-resolved key/header pair must never land over a later
-    /// reload's fresher pair (the last reload to run leaves the target
-    /// serving the newest store).
+    /// The provider-slot writers' fence (`set_model`, the build, the
+    /// failover switch and restore, the image-route apply/clear): the
+    /// last writer leaves the newest target standing.
     pub(crate) reload_lock: std::sync::Mutex<()>,
 
     /// Turn-boundary runs register their controller here;

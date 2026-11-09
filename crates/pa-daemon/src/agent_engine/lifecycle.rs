@@ -1033,14 +1033,12 @@ impl AgentSessionEngine {
             live_auth,
         );
         {
-            // The build's resolve-and-install serializes with `/reload`'s
-            // live-input refresh (the other slot writers' fence): a reload
-            // landing between this resolution and the slot write must not
-            // be clobbered by the build's older pair. The lock is
-            // acquired by yielding, never by blocking this worker: a
-            // reload holds the lock across auth-file I/O and a possible
-            // OAuth refresh, so a blocking acquire on an async path
-            // would stall the executor for that span.
+            // The build's slot install serializes with the other slot
+            // writers' fence (`set_model`, the failover switch and
+            // restore, the image-route apply/clear): the lock is
+            // acquired by yielding, never by blocking this worker: the
+            // holders run synchronous store I/O, so a blocking acquire
+            // on an async path would stall the executor for that span.
             let _reload_serialized = loop {
                 match self.reload_lock.try_lock() {
                     Ok(guard) => break guard,
@@ -1051,19 +1049,21 @@ impl AgentSessionEngine {
                     // this match's scrutinee still holds.
                     Err(std::sync::TryLockError::Poisoned(poison)) => break poison.into_inner(),
                 }
-                // Park, never hot-spin: a reload holds the lock across
-                // auth-file I/O and a possible OAuth refresh, and
-                // yield_now would leave this task immediately runnable
-                // through all of it.
+                // Park, never hot-spin: the lock's holders run
+                // synchronous store I/O, and yield_now would leave this
+                // task immediately runnable through all of it.
                 tokio::time::sleep(std::time::Duration::from_millis(10)).await;
             };
-            let (api_key, headers) = self.resolve_request_key_and_headers(model);
             let mut target = self.provider_target.write().expect("provider target lock");
+            // The daemon's only stream is the live-auth seam, which
+            // re-resolves request auth on every provider call; the
+            // slot's auth half is write-only here, so the build
+            // installs the model and the service tier only.
             *target = Some(ProviderTarget {
                 service_tier: *self.service_tier.read().expect("service tier lock"),
-                api_key,
+                api_key: None,
                 model: model.clone(),
-                headers,
+                headers: None,
             });
         }
         if let Some(session_dir) = &self.config.session_dir {

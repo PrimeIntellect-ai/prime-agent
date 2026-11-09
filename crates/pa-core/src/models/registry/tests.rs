@@ -130,13 +130,12 @@ fn models_json_custom_models_and_auth_header() {
 }
 
 /// One refreshing lookup per `get_api_key_and_headers` call: an expired
-/// OAuth credential with a failing refresh reports `live_credential:
-/// false` (the configured `models.json` fallback key is not a
-/// credential) after exactly one refresh attempt — the live seam's
-/// per-request re-resolution must never re-fetch a token the same
-/// resolution just failed to refresh.
+/// OAuth credential with a failing refresh serves the configured
+/// `models.json` fallback key after exactly one refresh attempt — the
+/// live seam's per-request re-resolution must never re-fetch a token
+/// the same resolution just failed to refresh.
 #[test]
-fn get_api_key_and_headers_reports_live_credential_after_one_refresh_attempt() {
+fn get_api_key_and_headers_attempts_one_refresh_per_call() {
     struct CountingFailingRefresh(std::sync::Mutex<usize>);
     impl crate::auth::manager::OAuthIntegration for CountingFailingRefresh {
         fn api_key_for(
@@ -194,18 +193,14 @@ fn get_api_key_and_headers_reports_live_credential_after_one_refresh_attempt() {
         Some("sk-config-fallback"),
         "the failed refresh falls back to the configured key"
     );
-    assert!(
-        !resolved.live_credential,
-        "a failed refresh serves no live credential"
-    );
     assert_eq!(
         *refreshes.0.lock().unwrap(),
         1,
         "one lookup, one refresh attempt"
     );
 
-    // An unexpired stored credential serves with `live_credential: true`
-    // and no refresh attempt at all.
+    // An unexpired stored credential serves with no refresh attempt
+    // at all.
     let fresh = AuthStorageData(
         serde_json::json!({
             "battery": {
@@ -222,7 +217,6 @@ fn get_api_key_and_headers_reports_live_credential_after_one_refresh_attempt() {
     let mut registry = ModelRegistry::create(auth, &models_path);
     let resolved = registry.get_api_key_and_headers(&battery, None);
     assert_eq!(resolved.api_key.as_deref(), Some("live-access"));
-    assert!(resolved.live_credential, "the stored credential is live");
     assert_eq!(*refreshes.0.lock().unwrap(), 0, "no refresh fires");
 }
 

@@ -611,16 +611,18 @@ fn command_runs(counter: &std::path::Path) -> usize {
     std::fs::read_to_string(counter).map_or(0, |text| text.lines().count())
 }
 
-/// A stored `!command` api key for the serving provider resolves once at
-/// build and never per provider call: candidate building defers the
-/// command (TS's lazy value material), the per-call request-auth registry
-/// never resolves the unrelated Prime Inference credential, and the
-/// per-call lookup hits the process cache. The counter key is a
-/// POSIX-shell pipeline (the ambient shell on Windows resolves it
-/// differently), so the test runs on Unix only.
+/// A stored `!command` api key for the serving provider resolves ONCE —
+/// the first provider call runs it (the build resolves no request auth;
+/// the live seam owns it, the TS streamFn shape) — and never re-runs per
+/// call: candidate building defers the command (TS's lazy value
+/// material), the per-call request-auth registry never resolves the
+/// unrelated Prime Inference credential, and the per-call lookup hits
+/// the process cache. The counter key is a POSIX-shell pipeline (the
+/// ambient shell on Windows resolves it differently), so the test runs
+/// on Unix only.
 #[cfg(unix)]
 #[test]
-fn a_stored_command_key_resolves_once_at_build_and_never_per_call() {
+fn a_stored_command_key_resolves_once_and_never_re_runs_per_call() {
     let _faux = FAUX_TEST_LOCK
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -642,8 +644,19 @@ fn a_stored_command_key_resolves_once_at_build_and_never_per_call() {
         .stream_fn()
         .expect("the built session streams")
         .clone();
-    let after_build = command_runs(&counter);
-    for _ in 0..5 {
+    // The first provider call resolves the command exactly once.
+    let before_first = command_runs(&counter);
+    call_stream_once(&engine, &stream_fn);
+    assert_eq!(
+        command_runs(&counter) - before_first,
+        1,
+        "the first provider call resolves the command once"
+    );
+    assert_eq!(
+        served_keys(&registration).last(),
+        Some(&Some("cmd-key".to_string()))
+    );
+    for _ in 0..4 {
         let before = command_runs(&counter);
         call_stream_once(&engine, &stream_fn);
         assert_eq!(
@@ -656,7 +669,6 @@ fn a_stored_command_key_resolves_once_at_build_and_never_per_call() {
             Some(&Some("cmd-key".to_string()))
         );
     }
-    assert!(after_build >= 1, "the build resolved the command once");
     registration.unregister();
 }
 

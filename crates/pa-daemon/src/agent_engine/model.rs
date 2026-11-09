@@ -420,30 +420,11 @@ impl AgentSessionEngine {
         resolved
     }
 
-    /// The request-time api key AND its resolved provider headers (the
-    /// selection's own headers lead; the registry resolves the model's
-    /// otherwise): models needing custom or auth headers send them on every
-    /// request.
-    pub(crate) fn resolve_request_key_and_headers(
-        &self,
-        model: &Model,
-    ) -> (
-        Option<String>,
-        Option<std::collections::BTreeMap<String, String>>,
-    ) {
-        let resolved = self.resolve_request_key_and_headers_and_store_health(model);
-        (resolved.api_key, resolved.headers)
-    }
-
-    /// [`Self::resolve_request_key_and_headers`]'s full resolution: the
-    /// registry's single lookup — possibly refreshing an expired OAuth
-    /// token through the engine's OAuth integration. `live_credential`
-    /// carries whether a live source served (stored credential, runtime
-    /// override, or environment); `false` means the resolved key is the
-    /// configured `models.json` fallback, which is not a credential and
-    /// never replaces a serving pair in `/reload`'s rebind.
-    /// `request_model` carries the per-call xAI request model the lookup
-    /// serves (TS `requestModel`); other providers leave it unset.
+    /// The full request-auth resolution: the registry's single lookup —
+    /// possibly refreshing an expired OAuth token through the engine's
+    /// OAuth integration. `request_model` carries the per-call xAI
+    /// request model the lookup serves (TS `requestModel`); other
+    /// providers leave it unset.
     ///
     /// The create-config key rides the store's runtime-override arm (TS
     /// installs `--api-key` with `setRuntimeApiKey` before lookup, v0.9.8
@@ -530,46 +511,20 @@ impl AgentSessionEngine {
             .api_key
     }
 
-    /// The primary target a failover episode restores: the captured model
-    /// with the request auth RE-RESOLVED from the store. The captured
-    /// pair only backs the restore when the resolution yields nothing (a
-    /// healthy store with nothing stored resolves the configured
-    /// `models.json` fallback key, which is not a credential); a failed
-    /// read is not a logout — the engine's store keeps serving the last
-    /// read's data.
+    /// The primary target a failover episode restores: the captured
+    /// model with the serving service tier. Request auth needs no
+    /// restore — the live session's stream re-resolves it from the
+    /// credential store on every provider call, so the slot's auth half
+    /// is write-only for the daemon's stream.
     pub(crate) fn restored_primary_target(
         &self,
         primary: &Model,
-        captured_api_key: Option<String>,
-        captured_headers: Option<std::collections::BTreeMap<String, String>>,
     ) -> pa_core::session_engine::provider_adapter::ProviderTarget {
-        let override_key = self.current_selection().api_key;
-        let resolved = self.resolve_request_key_and_headers_and_store_health(primary);
-        let (api_key, headers, live_credential) =
-            (resolved.api_key, resolved.headers, resolved.live_credential);
-        // The capture backs the restore whenever the resolution yields
-        // nothing (a healthy store with nothing stored resolves the
-        // configured `models.json` fallback key, which is not a
-        // credential); a live credential REPLACES the pair, headers
-        // included — including one the store's memory serves off a
-        // failed read.
-        let (api_key, headers) = if let Some(override_key) = override_key {
-            if live_credential {
-                (Some(override_key), headers)
-            } else {
-                (Some(override_key), captured_headers.or(headers))
-            }
-        } else {
-            match api_key {
-                Some(api_key) if live_credential => (Some(api_key), headers),
-                _ => (captured_api_key, captured_headers),
-            }
-        };
         pa_core::session_engine::provider_adapter::ProviderTarget {
             service_tier: *self.service_tier.read().expect("service tier lock"),
-            api_key,
+            api_key: None,
             model: primary.clone(),
-            headers,
+            headers: None,
         }
     }
 }
