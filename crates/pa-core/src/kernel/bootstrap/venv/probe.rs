@@ -13,16 +13,62 @@ fn python_imports(python: &str, module_name: &str) -> bool {
 fn run_quiet(command: &str, args: &[&str]) -> bool {
     let mut child = std::process::Command::new(command);
     child
+        // Never let the repository cwd shadow the installed runtime during a
+        // readiness probe.
+        .arg("-P")
+        .arg("-s")
         .args(args)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
+    child
+        .env_clear()
+        .envs(crate::kernel::python_env::inherited_python_env());
     // Hidden window on Windows (TS `spawnHidden`).
     crate::platform::process::set_no_window(&mut child);
     if cfg!(windows) {
         child.env("PYTHONUTF8", "1");
     }
     matches!(child.status(), Ok(status) if status.success())
+}
+
+#[cfg(all(test, unix))]
+mod safe_path_tests {
+    use super::python_imports;
+    use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn readiness_probe_does_not_import_a_module_from_the_project_cwd() {
+        let Some(python) = ["python3.11", "python3"].into_iter().find(|python| {
+            std::process::Command::new(python)
+                .args(["-P", "-c", "pass"])
+                .status()
+                .is_ok_and(|status| status.success())
+        }) else {
+            return;
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let marker = dir.path().join("repository-module-ran");
+        std::fs::write(
+            dir.path().join("rlm.py"),
+            format!("open({marker:?}, 'w').close()\n"),
+        )
+        .unwrap();
+        let interpreter = dir.path().join("project-python");
+        let project = dir.path();
+        std::fs::write(
+            &interpreter,
+            format!("#!/bin/sh\ncd {project:?}\nexec {python:?} \"$@\"\n"),
+        )
+        .unwrap();
+        std::fs::set_permissions(&interpreter, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let _ = python_imports(interpreter.to_str().unwrap(), "rlm");
+        assert!(
+            !marker.exists(),
+            "repository module ran during readiness probe"
+        );
+    }
 }
 
 /// The runtime-ready assertion from the TS product: a current
