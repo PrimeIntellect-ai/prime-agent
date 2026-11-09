@@ -288,6 +288,152 @@ fn an_expired_credential_without_a_refresh_path_serves_the_fallback_key() {
     registration.unregister();
 }
 
+/// A transiently unreadable store is not a logout: the engine keeps one
+/// `AuthStorage` for its life (TS's single instance, whose `reload()`
+/// keeps the last read's data on a read error — v0.9.8
+/// auth-storage.ts:674-687), so while another writer holds the auth
+/// document's lock the call keeps serving the last-read credential —
+/// never an error, never the fallback key — and the pickup resumes the
+/// moment the read succeeds again.
+#[test]
+fn a_held_document_lock_keeps_serving_the_last_read_credential() {
+    let _faux = FAUX_TEST_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let dir = tempfile::TempDir::new().unwrap();
+    let agent_dir = dir.path().join("agent");
+    write_credential_backed_faux_provider(&agent_dir);
+    write_oauth_credential(&agent_dir, "stale-access");
+    let registration = register_recording_faux();
+    let engine = live_auth_engine(dir.path(), None, "battery", "mock-1");
+    let model = engine.resolve_model().expect("the custom model resolves");
+    let agent = engine.session_agent(&model).expect("the session builds");
+    let stream_fn = agent
+        .stream_fn()
+        .expect("the built session streams")
+        .clone();
+
+    call_stream_once(&engine, &stream_fn);
+    assert_eq!(
+        served_keys(&registration).last(),
+        Some(&Some("stale-access".to_string())),
+        "the stored credential serves the first call"
+    );
+    // A `/login` lands, and an independent writer holds the auth
+    // document's lock through the read budget: the engine's reload fails
+    // and the last-read credential keeps serving.
+    write_oauth_credential(&agent_dir, "fresh-access");
+    let held = pa_core::platform::lock_dir::LockDir::acquire(
+        &agent_dir.join("auth.json"),
+        std::time::Duration::from_secs(10),
+    )
+    .expect("the test holds the auth document lock");
+    call_stream_once(&engine, &stream_fn);
+    assert_eq!(
+        served_keys(&registration).last(),
+        Some(&Some("stale-access".to_string())),
+        "the last-read credential serves while the document lock is held; a failed read is not a logout"
+    );
+    drop(held);
+    call_stream_once(&engine, &stream_fn);
+    assert_eq!(
+        served_keys(&registration).last(),
+        Some(&Some("fresh-access".to_string())),
+        "the fresh credential serves the moment the read succeeds again"
+    );
+    registration.unregister();
+}
+
+/// A corrupt auth store is the same not-a-logout shape: the last-read
+/// credential keeps serving while the file does not parse, and a fresh
+/// credential is picked up as soon as the store parses again.
+#[test]
+fn a_corrupt_auth_store_keeps_serving_the_last_read_credential() {
+    let _faux = FAUX_TEST_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let dir = tempfile::TempDir::new().unwrap();
+    let agent_dir = dir.path().join("agent");
+    write_credential_backed_faux_provider(&agent_dir);
+    write_oauth_credential(&agent_dir, "stale-access");
+    let registration = register_recording_faux();
+    let engine = live_auth_engine(dir.path(), None, "battery", "mock-1");
+    let model = engine.resolve_model().expect("the custom model resolves");
+    let agent = engine.session_agent(&model).expect("the session builds");
+    let stream_fn = agent
+        .stream_fn()
+        .expect("the built session streams")
+        .clone();
+
+    call_stream_once(&engine, &stream_fn);
+    assert_eq!(
+        served_keys(&registration).last(),
+        Some(&Some("stale-access".to_string())),
+        "the stored credential serves the first call"
+    );
+    // The store turns unreadable mid-session (a torn write): the
+    // last-read credential keeps serving.
+    std::fs::write(agent_dir.join("auth.json"), "{ not json").unwrap();
+    call_stream_once(&engine, &stream_fn);
+    assert_eq!(
+        served_keys(&registration).last(),
+        Some(&Some("stale-access".to_string())),
+        "the last-read credential serves while the store does not parse; a corrupt file is not a logout"
+    );
+    write_oauth_credential(&agent_dir, "fresh-access");
+    call_stream_once(&engine, &stream_fn);
+    assert_eq!(
+        served_keys(&registration).last(),
+        Some(&Some("fresh-access".to_string())),
+        "the fresh credential serves once the store parses again"
+    );
+    registration.unregister();
+}
+
+/// The create-config key survives a failed store read: the runtime
+/// override lives in memory on the engine's long-lived store, so a
+/// transiently-held document lock never fails the call and never swaps
+/// the key.
+#[test]
+fn a_create_config_key_keeps_serving_while_the_store_read_fails() {
+    let _faux = FAUX_TEST_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let dir = tempfile::TempDir::new().unwrap();
+    let agent_dir = dir.path().join("agent");
+    write_credential_backed_faux_provider(&agent_dir);
+    write_oauth_credential(&agent_dir, "stored-access");
+    let registration = register_recording_faux();
+    let engine = live_auth_engine(dir.path(), Some("sk-override"), "battery", "mock-1");
+    let model = engine.resolve_model().expect("the custom model resolves");
+    let agent = engine.session_agent(&model).expect("the session builds");
+    let stream_fn = agent
+        .stream_fn()
+        .expect("the built session streams")
+        .clone();
+
+    call_stream_once(&engine, &stream_fn);
+    write_oauth_credential(&agent_dir, "fresh-access");
+    let held = pa_core::platform::lock_dir::LockDir::acquire(
+        &agent_dir.join("auth.json"),
+        std::time::Duration::from_secs(10),
+    )
+    .expect("the test holds the auth document lock");
+    call_stream_once(&engine, &stream_fn);
+    drop(held);
+    call_stream_once(&engine, &stream_fn);
+    assert_eq!(
+        served_keys(&registration),
+        vec![
+            Some("sk-override".to_string()),
+            Some("sk-override".to_string()),
+            Some("sk-override".to_string())
+        ],
+        "the create-config key keeps serving across a failed store read; the override never fails the call"
+    );
+    registration.unregister();
+}
+
 /// An expired stored OAuth credential, the shape an expiring token leaves
 /// in the store: the refresh machinery's input.
 fn write_expired_oauth_credential(agent_dir: &std::path::Path, access: &str) {

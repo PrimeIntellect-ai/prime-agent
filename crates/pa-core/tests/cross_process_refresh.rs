@@ -324,12 +324,12 @@ fn a_stale_refresh_lock_is_not_stolen_from_a_live_paused_holder() {
     let parent = std::thread::spawn(move || {
         resolve_with_pausing_refresh(&parent_dir, /*pause*/ false)
     });
-    // Hold the pause past the lock protocol's staleness window (10s)
-    // plus a margin: a time-based release would have handed the lock to
-    // the waiting peer by then; a process-released lock cannot. The
-    // resume stays inside the peer's 150x100ms acquisition budget, so
-    // the peer is still waiting when the holder finishes.
-    std::thread::sleep(Duration::from_secs(11));
+    // Hold the pause through a stretch of the peer's acquisition wait:
+    // the refresh lock is process-released with no staleness window, so
+    // the pause only has to prove the LIVE holder keeps it while paused
+    // and hands it to the still-waiting peer on resume. The resume stays
+    // well inside the peer's 150x100ms acquisition budget.
+    std::thread::sleep(Duration::from_secs(4));
     assert_eq!(
         unsafe { libc::kill(child.id().cast_signed(), libc::SIGCONT) },
         0,

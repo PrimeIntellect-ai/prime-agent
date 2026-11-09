@@ -198,19 +198,21 @@ impl AuthStorage {
     fn refresh_oauth(&mut self, provider_id: &str) -> Option<AuthCredential> {
         // LOAD: no document lock.
         let Ok(content) = self.storage.read() else {
-            // A failed read: reload, then serve the stored credential.
+            // A failed read: reload, then serve only a CURRENT credential.
+            // A reload that fails too keeps the last read's data (TS
+            // `reload` catches the error and leaves `this.data`), and that
+            // in-memory copy may be the very credential this refresh set
+            // out to rotate — expired. Serving it would stream a known
+            // stale token; TS's catch path returns nothing and lets the
+            // environment/fallback arms serve instead.
             self.reload();
-            return self
-                .data
-                .credential(provider_id)
-                .filter(|c| matches!(c, AuthCredential::Oauth { .. }));
+            return self.stored_unexpired_credential(provider_id);
         };
         let Ok(data) = parse_storage_data(content.as_deref()) else {
+            // A document that does not parse is the same shape: only a
+            // current credential serves, never the expired in-memory copy.
             self.reload();
-            return self
-                .data
-                .credential(provider_id)
-                .filter(|c| matches!(c, AuthCredential::Oauth { .. }));
+            return self.stored_unexpired_credential(provider_id);
         };
         let Some(credential) = data.credential(provider_id) else {
             self.reload();

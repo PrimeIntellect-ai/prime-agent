@@ -1182,3 +1182,67 @@ fn a_failed_reread_serves_the_stored_credential_and_never_fetches() {
         "a failed protected re-read never spends the possibly-rotated LOAD-time token"
     );
 }
+
+/// A scripted backend for the failed LOAD read: the first read (the
+/// construction reload) serves the expired credential, the refresh's
+/// LOAD read fails (an independent writer holds the document lock
+/// through the read budget), and reads after that serve the same
+/// document again — the reload inside the catch parses it and the
+/// in-memory copy stays the expired credential this refresh set out to
+/// rotate.
+struct LoadFailingBackend {
+    content: String,
+    reads: std::sync::atomic::AtomicUsize,
+}
+
+impl AuthStorageBackend for LoadFailingBackend {
+    fn read(&self) -> anyhow::Result<Option<String>> {
+        let reads = self.reads.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        if reads == 1 {
+            anyhow::bail!("Failed to acquire auth storage lock");
+        }
+        Ok(Some(self.content.clone()))
+    }
+
+    fn with_lock(
+        &self,
+        update: &mut dyn FnMut(Option<String>) -> anyhow::Result<((), Option<String>)>,
+    ) -> anyhow::Result<()> {
+        // Never reached in this scenario: the failed LOAD read stops the
+        // refresh before the write phase.
+        let ((), _next) = update(Some(self.content.clone()))?;
+        Ok(())
+    }
+}
+
+/// The refresh's LOAD read failing serves only a CURRENT credential: the
+/// in-memory copy may be the expired credential this refresh set out to
+/// rotate, and serving it would stream a known-stale token. TS's catch
+/// path returns nothing and lets the environment/fallback arms serve
+/// instead (auth-storage.ts reload keeps `this.data`; the lookup's
+/// expired-oauth catch returns `{}`).
+#[test]
+fn a_failed_load_read_never_serves_the_expired_in_memory_credential() {
+    let provider = "x-load-failed";
+    let backend = Arc::new(LoadFailingBackend {
+        content: catch_document(provider, &expired_oauth("expired-access")),
+        reads: std::sync::atomic::AtomicUsize::new(0),
+    });
+    let counting = Arc::new(CountingOAuth {
+        calls: std::sync::atomic::AtomicUsize::new(0),
+        delay_ms: 0,
+    });
+    let oauth: Arc<dyn OAuthIntegration> = counting.clone();
+    let mut auth =
+        AuthStorage::from_storage(Arc::clone(&backend) as Arc<dyn AuthStorageBackend>, oauth);
+    assert_eq!(
+        auth.get_api_key(provider),
+        None,
+        "the expired in-memory credential never serves on a failed read"
+    );
+    assert_eq!(
+        counting.calls.load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "the failed LOAD read never reaches a token fetch"
+    );
+}

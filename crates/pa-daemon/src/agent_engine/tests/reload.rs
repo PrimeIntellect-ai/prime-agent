@@ -418,9 +418,10 @@ fn restored_primary_target_serves_the_live_credential() {
         "a resolution that yields nothing falls back to the capture"
     );
 
-    // An unreadable store keeps the captured pair: the fresh resolution
-    // would serve the configured fallback key, which is not a credential
-    // — the same overwrite /reload's gate avoids.
+    // An unreadable store is not a logout: the engine's store keeps the
+    // last read's data, so the last-read credential keeps serving — the
+    // capture never backs a restore the store's memory can answer, and
+    // the live credential's own (empty) headers replace the capture's.
     std::fs::write(agent_dir.join("auth.json"), "not json").unwrap();
     let restored = engine.restored_primary_target(
         &primary,
@@ -428,12 +429,12 @@ fn restored_primary_target_serves_the_live_credential() {
         Some(team_headers("captured-team")),
     );
     assert!(
-        restored.api_key.as_deref() == Some("captured-key"),
-        "a failed store read keeps the last-good captured key"
+        restored.api_key.as_deref() == Some("fresh-access"),
+        "a failed store read keeps serving the last-read credential"
     );
     assert!(
-        restored.headers.as_ref() == Some(&team_headers("captured-team")),
-        "a failed store read keeps the last-good captured headers"
+        restored.headers.is_none(),
+        "the last-read credential's own headers replace the captured pair's"
     );
 }
 
@@ -639,11 +640,11 @@ fn reload_reports_the_auth_store_failure() {
 }
 
 /// A create-config key override stands in memory regardless of the store:
-/// when the store read fails, the restore keeps the override key and the
-/// captured headers (the last-good team context), never the header-less
-/// resolution the broken store produced.
+/// a store that never read successfully still serves the override key —
+/// with the resolution's own headers, never the captured pair's — and a
+/// healthy store resolves the override pair fresh.
 #[test]
-fn restored_primary_target_keeps_the_override_key_and_captured_headers_off_a_failed_store() {
+fn restored_primary_target_serves_the_override_key_off_a_failed_store() {
     let dir = tempfile::TempDir::new().unwrap();
     let agent_dir = dir.path().join("agent");
     write_credential_backed_provider(&agent_dir);
@@ -662,8 +663,8 @@ fn restored_primary_target_keeps_the_override_key_and_captured_headers_off_a_fai
         "the override key stands in memory off a failed store"
     );
     assert!(
-        restored.headers.as_ref() == Some(&team_headers("team-1")),
-        "a failed store read keeps the captured headers"
+        restored.headers.is_none(),
+        "the resolution's own headers serve off a failed store; the captured pair never re-pairs with the override"
     );
     // A healthy store still resolves the override pair fresh.
     write_oauth_credential(&agent_dir, "stored-key");

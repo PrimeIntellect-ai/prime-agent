@@ -453,6 +453,16 @@ impl AgentSessionEngine {
     /// explicitly, and a mid-session `/login` never switches the request
     /// model under the override.
     ///
+    /// The engine keeps one `AuthStorage` for its life — TS's single
+    /// auth-storage instance, whose `reload()` keeps the last read's data
+    /// on a read error (v0.9.8 auth-storage.ts:674-687): a failed store
+    /// read is NOT a logout. While another writer holds the auth document's
+    /// lock, or while auth.json does not parse, the runtime override and
+    /// the last-read credential keep serving, and the lookup's own arms
+    /// still answer environment keys and the configured `models.json`
+    /// fallback — exactly what a healthy store that holds nothing for the
+    /// provider would serve.
+    ///
     /// The live session's stream consults this per provider call through
     /// the resolver `build_session` wires, so a credential rotated by
     /// another process (`/login`) or an OAuth token refreshed at expiry
@@ -463,13 +473,28 @@ impl AgentSessionEngine {
         &self,
         model: &Model,
     ) -> pa_core::models::ResolvedRequestAuth {
-        let mut auth = pa_core::auth::AuthStorage::create_with_oauth(
-            &self.config.agent_dir,
-            std::sync::Arc::clone(&self.request_auth_oauth),
-        );
-        let store_error = auth.load_error().map(str::to_string);
+        let mut store = self
+            .request_auth_store
+            .lock()
+            .expect("request auth store lock");
+        let mut auth = store.take().unwrap_or_else(|| {
+            pa_core::auth::AuthStorage::create_with_oauth(
+                &self.config.agent_dir,
+                std::sync::Arc::clone(&self.request_auth_oauth),
+            )
+        });
+        // The per-call reload keeps the resolution live: a credential
+        // another process wrote serves the next call, and a failed read
+        // keeps the last read's data (the store is engine-lived, so the
+        // previous read's credential is still in memory — TS `this.data`).
+        auth.reload();
         if let Some(api_key) = &self.current_selection().api_key {
             auth.set_runtime_api_key(&model.provider, api_key.clone());
+        } else {
+            // A selection without the create-config key must not keep
+            // serving the override an earlier selection installed on the
+            // engine-lived store.
+            auth.remove_runtime_api_key(&model.provider);
         }
         // The request-auth registry resolves auth only for the serving
         // provider: its construction never resolves the unrelated Prime
@@ -479,25 +504,15 @@ impl AgentSessionEngine {
             auth,
             self.config.agent_dir.join("models.json"),
         );
-        let mut resolved = registry.get_api_key_and_headers(model, model.headers.as_ref());
         // The registry's single possibly-refreshing lookup answers the key,
         // the headers, the request model, and whether a live source served
         // (the lookup may OAuth-refresh and store a fresh token); a second
         // refreshing lookup here would re-fetch a token the first just
         // failed to refresh.
-        if let Some(error) = store_error {
-            // An unreadable credential store fails the resolution with
-            // its load error (the TS catch path: the auth-storage read
-            // failure reaches `getApiKeyAndHeaders` as `ok: false`), so
-            // the live seam fails the call instead of serving the
-            // fallback key from a store it could not read.
-            resolved.live_credential = false;
-            resolved.api_key = None;
-            resolved.headers = None;
-            resolved.request_model = None;
-            resolved.ok = false;
-            resolved.error = Some(format!("Failed to load credentials: {error}"));
-        }
+        let resolved = registry.get_api_key_and_headers(model, model.headers.as_ref());
+        // The store returns to the engine carrying whatever the lookup
+        // refreshed: the next call's last-read data is the freshest.
+        *store = Some(registry.auth);
         resolved
     }
 
@@ -517,9 +532,11 @@ impl AgentSessionEngine {
 
     /// The primary target a failover episode restores: the captured model
     /// with the request auth RE-RESOLVED from the store. The captured
-    /// pair only backs the restore when the store cannot serve a live
-    /// credential; the create-config key override stands in memory
-    /// regardless, keeping the captured headers off a failed read.
+    /// pair only backs the restore when the resolution yields nothing (a
+    /// healthy store with nothing stored resolves the configured
+    /// `models.json` fallback key, which is not a credential); a failed
+    /// read is not a logout — the engine's store keeps serving the last
+    /// read's data.
     pub(crate) fn restored_primary_target(
         &self,
         primary: &Model,
@@ -530,11 +547,12 @@ impl AgentSessionEngine {
         let resolved = self.resolve_request_key_and_headers_and_store_health(primary);
         let (api_key, headers, live_credential) =
             (resolved.api_key, resolved.headers, resolved.live_credential);
-        // The capture backs the restore whenever the store cannot serve a
-        // live credential (a failed read, or a healthy store with nothing
-        // stored — both resolve the configured `models.json` fallback key,
-        // which is not a credential); a live stored credential REPLACES
-        // the pair, headers included.
+        // The capture backs the restore whenever the resolution yields
+        // nothing (a healthy store with nothing stored resolves the
+        // configured `models.json` fallback key, which is not a
+        // credential); a live credential REPLACES the pair, headers
+        // included — including one the store's memory serves off a
+        // failed read.
         let (api_key, headers) = if let Some(override_key) = override_key {
             if live_credential {
                 (Some(override_key), headers)
