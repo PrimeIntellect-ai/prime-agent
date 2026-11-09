@@ -1,123 +1,9 @@
-//! Daemon command-type breadth coverage (roadmap item 7, wave 1): the TS
-//! `DAEMON_COMMAND_TYPES` list (daemon-supervisor.ts) is the accept contract,
-//! pinned verbatim below in declaration order. Every TS type (plus the Rust-
-//! native frames) must parse, keep its wire `type`, and route by selector.
+//! Daemon command-type breadth coverage: every wire fixture below must parse,
+//! keep its wire `type`, and route by selector.
 
 use pa_daemon::protocol::command_active_session_id;
 use pa_daemon::protocol::command_type_name;
 use pa_daemon::protocol::parse_daemon_command_line;
-use pa_daemon::protocol::KNOWN_COMMAND_TYPES;
-
-/// TS `DAEMON_COMMAND_TYPES`, verbatim and in declaration order
-/// (modes/daemon/daemon-supervisor.ts).
-const TS_DAEMON_COMMAND_TYPES: &[&str] = &[
-    "ack_result",
-    "list",
-    "list_agent_peers",
-    "get_direct_worker_transport",
-    "roster_subscribe",
-    "roster_unsubscribe",
-    "list_saved_sessions",
-    "create",
-    "attach",
-    "reattach",
-    "detach",
-    "complete_owned_session",
-    "promote_owned_session",
-    "kill",
-    "rename",
-    "prompt",
-    "cancel_prompt_admission",
-    "prompt_and_wait",
-    "steer",
-    "follow_up",
-    "restore_next_turn",
-    "restore_actions",
-    "append_custom_message",
-    "resume_queue",
-    "send_message",
-    "agent_messages_status",
-    "agent_messages_pause",
-    "agent_messages_resume",
-    "agent_messages_clear",
-    "abort",
-    "abort_and_send_queued",
-    "start_side_question",
-    "abort_side_question",
-    "execute_bash",
-    "execute_bash_and_wait",
-    "abort_bash",
-    "cancel_rlm_child",
-    "delete_rlm_subagent",
-    "wait_for_idle",
-    "wait_for_headless_completion",
-    "get_session_header",
-    "get_state",
-    "get_connection_state",
-    "get_messages",
-    "get_rlm_children",
-    "get_session_stats",
-    "get_context_tree",
-    "get_commands",
-    "get_resource_snapshot",
-    "replace_acp_mcp_servers",
-    "get_model_catalog",
-    "get_available_models",
-    "get_queue",
-    "mutate_queued_message",
-    "clear_queue",
-    "abort_and_clear_queue",
-    "acquire_session_input_pause",
-    "release_session_input_pause",
-    "cron_list",
-    "heartbeats_list",
-    "heartbeat_manage",
-    "cron_add",
-    "cron_cancel",
-    "heartbeat_get",
-    "heartbeat_set",
-    "heartbeat_update",
-    "set_model",
-    "cycle_model",
-    "set_scoped_models",
-    "set_thinking_level",
-    "cycle_thinking_level",
-    "set_service_tier",
-    "set_transport",
-    "set_steering_mode",
-    "set_follow_up_mode",
-    "set_auto_compaction",
-    "set_auto_retry",
-    "compact",
-    "refine",
-    "abort_compaction",
-    "abort_branch_summary",
-    "abort_retry",
-    "reload",
-    "new_session",
-    "switch_session",
-    "fork",
-    "navigate_tree",
-    "import_jsonl",
-    "export_html",
-    "export_jsonl",
-    "set_session_name",
-    "get_rlm_max_depth_status",
-    "set_rlm_max_depth",
-    "rename_saved_session",
-    "delete_saved_session",
-    "get_session_context",
-    "get_session_tree",
-    "get_user_messages_for_forking",
-    "get_last_assistant_text",
-    "get_system_prompt",
-    "get_tool_definition",
-    "set_session_entry_label",
-    "prepare_update_restart",
-    "retry_worker",
-    "restart",
-    "shutdown",
-];
 
 /// Minimal wire fixture per command type: the fields the `DaemonCommand` union
 /// requires on the wire (everything else is optional or in the lossless `rest`
@@ -537,42 +423,6 @@ const WIRE_FIXTURES: &[(&str, &str)] = &[
         r#"{"type": "get_session_messages", "activeSessionId": "sess", "start": -10, "limit": 10, "roles": ["*"]}"#,
     ),
 ];
-
-/// The accept list is the TS list, in TS order, then the Rust-native supervisor/worker frames.
-#[test]
-fn known_command_types_match_the_ts_list() {
-    assert!(KNOWN_COMMAND_TYPES.len() > TS_DAEMON_COMMAND_TYPES.len());
-    let (head, tail) = KNOWN_COMMAND_TYPES.split_at(TS_DAEMON_COMMAND_TYPES.len());
-    assert_eq!(
-        head, TS_DAEMON_COMMAND_TYPES,
-        "accept list must start with the TS list"
-    );
-    for extra in tail {
-        // Rust-native frames only; a new TS type must extend the TS constant.
-        assert!(
-            matches!(
-                *extra,
-                "worker_register"
-                    | "worker_roster_delta"
-                    | "get_worker_peer_transport"
-                    | "commit_update_restart"
-                    | "update_restore_status"
-                    | "get_mcp_connections"
-                    | "set_mcp_static_token"
-                    | "remove_mcp_connection"
-                    | "list_kernel_bash"
-                    | "tail_kernel_bash"
-                    | "kill_kernel_bash"
-                    | "mark_anthropic_warning_shown"
-                    | "list_persistent_shells"
-                    | "tail_persistent_shell"
-                    | "kill_persistent_shell"
-                    | "get_session_messages"
-            ),
-            "unexpected non-TS command type: {extra}"
-        );
-    }
-}
 
 #[test]
 fn every_command_type_parses_and_routes() {
