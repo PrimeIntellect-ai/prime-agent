@@ -233,6 +233,14 @@ pub struct WorkerQueueItemRecord {
     /// one-turn batch semantics.
     #[serde(default)]
     pub forced_batch: bool,
+    /// The daemon's kernel-notice provenance: a restored busy notice
+    /// keeps the session-own class its producer flagged.
+    #[serde(default)]
+    pub kernel_notice: bool,
+    /// The delivery-scoped batch isolation: a restored scoped row
+    /// keeps its no-co-delivery rule.
+    #[serde(default)]
+    pub delivery_scoped: bool,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub images: Vec<pa_agent::types::ImageContent>,
 }
@@ -625,6 +633,8 @@ fn parse_snapshot_lane(value: Option<&Value>) -> Vec<WorkerQueueItemRecord> {
                         queue_visible: true,
                         policy: queue_policy_default(),
                         forced_batch: false,
+                        kernel_notice: false,
+                        delivery_scoped: false,
                         images: Vec::new(),
                     }),
                     Value::Object(_) => serde_json::from_value(entry.clone()).ok(),
@@ -712,6 +722,8 @@ mod tests {
             queue_visible: true,
             policy: queue_policy_default(),
             forced_batch: false,
+            kernel_notice: false,
+            delivery_scoped: false,
             images: Vec::new(),
         };
         sequential
@@ -879,6 +891,8 @@ mod tests {
             queue_visible: true,
             policy: queue_policy_default(),
             forced_batch: false,
+            kernel_notice: false,
+            delivery_scoped: false,
             images: Vec::new(),
         };
         let mut journal = WorkerRecoveryJournal::open(&path).unwrap();
@@ -1007,6 +1021,8 @@ mod tests {
             queue_visible: true,
             policy: queue_policy_default(),
             forced_batch: false,
+            kernel_notice: false,
+            delivery_scoped: false,
             images: Vec::new(),
         };
         let mut journal = WorkerRecoveryJournal::open(&path).unwrap();
@@ -1101,6 +1117,8 @@ mod tests {
                 queue_visible: true,
                 policy: queue_policy_default(),
                 forced_batch: false,
+                kernel_notice: false,
+                delivery_scoped: false,
                 images: Vec::new(),
             };
             journal

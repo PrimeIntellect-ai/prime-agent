@@ -112,6 +112,14 @@ pub struct SessionEngineConfig {
     /// request ids on the wire).
     pub semantic_edges: Option<super::semantic_edges::SemanticEdgeIdentity>,
     pub on_late_sent_agent_message: Option<crate::tools::ipython::LateSentAgentMessageHandler>,
+    /// Fires at each kernel `bash()` launch that reports its pid: the
+    /// daemon binds the pid to the delivery whose turn runs, so the
+    /// much-later completion notice carries its creator's identity.
+    pub on_kernel_bash_launch: Option<crate::kernel::shared::KernelBashLaunchCallback>,
+    /// Fires at each kernel `bash()` handle's activity end: the daemon
+    /// drops the launch-time pid binding — a handle whose result the
+    /// kernel consumed in-cell never sends a completion notice.
+    pub on_kernel_bash_activity_end: Option<crate::kernel::shared::KernelBashActivityEndCallback>,
 }
 
 pub struct SessionEngine {
@@ -513,6 +521,8 @@ pub async fn create_session(mut config: SessionEngineConfig) -> anyhow::Result<S
         cell_timeout_ms,
         on_restore,
         config.on_background_work_settled.clone(),
+        config.on_kernel_bash_launch.clone(),
+        config.on_kernel_bash_activity_end.clone(),
         on_unavailable_skills,
         on_bootstrap_result,
         config.kernel_ready_gate.clone(),

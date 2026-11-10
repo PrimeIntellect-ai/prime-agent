@@ -939,6 +939,12 @@ pub fn command_active_session_id(command: &DaemonCommand) -> Option<&str> {
         | DaemonCommand::KillPersistentShell { .. }
         | DaemonCommand::Restart { .. }
         | DaemonCommand::Shutdown { .. } => None,
+        DaemonCommand::WithdrawAdmission {
+            active_session_id, ..
+        }
+        | DaemonCommand::KillIfIdle {
+            active_session_id, ..
+        } => Some(active_session_id.as_str()),
     }
 }
 
@@ -1068,6 +1074,8 @@ pub fn command_type_name(command: &DaemonCommand) -> &'static str {
         DaemonCommand::UpdateRestoreStatus { .. } => "update_restore_status",
         DaemonCommand::Restart { .. } => "restart",
         DaemonCommand::Shutdown { .. } => "shutdown",
+        DaemonCommand::WithdrawAdmission { .. } => "withdraw_admission",
+        DaemonCommand::KillIfIdle { .. } => "kill_if_idle",
         DaemonCommand::WorkerRegister { .. } => "worker_register",
     }
 }

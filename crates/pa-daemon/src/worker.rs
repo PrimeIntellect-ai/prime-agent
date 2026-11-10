@@ -26,11 +26,14 @@ pub use queue::QueuePriority;
 pub(crate) use queue::{
     admit_autonomous_follow_up, admit_goal_follow_up, admit_kernel_notice,
     checkpoint_queue_recovery, clear_withdrawn_progress_note, enqueue_priority,
-    gather_delivery_batch, parse_custom_message, parse_prompt_images, queue_lanes,
-    restore_queue_snapshot, restored_turn_policy, withdraw_bash_completion_notice, QueueCheckpoint,
-    QueueLanes, QueuedItem, TurnPolicy, TurnSettle, ABORTED_TURN_SETTLE_ERROR,
-    PROMPT_ABORTED_BEFORE_DELIVERY, QUEUED_INPUT_SUSPENDED, QUEUED_PROMPT_DELETED,
-    SIDE_QUESTION_SETTLE_TIMEOUT,
+    gather_delivery_batch, kill_refused_by_worker, parse_custom_message, parse_prompt_images,
+    queue_lanes, restore_queue_snapshot, restored_turn_policy, running_admission_ids,
+    running_client_admissions, running_wire_admissions, sweep_named_deliveries,
+    withdraw_bash_completion_notice, QueueCheckpoint, QueueLanes, QueuedItem, SweptDeliveries,
+    TurnPolicy, TurnSettle, ABORTED_TURN_SETTLE_ERROR, KILL_IF_IDLE_HAS_CLIENT,
+    KILL_IF_IDLE_HOLDS_WORK, PROMPT_ABORTED_BEFORE_DELIVERY, PROMPT_ADMISSION_CANCELLED,
+    PROMPT_CANCELLED_BEFORE_START, QUEUED_INPUT_SUSPENDED, QUEUED_PROMPT_CLEARED,
+    QUEUED_PROMPT_DELETED, SIDE_QUESTION_SETTLE_TIMEOUT,
 };
 
 mod create;
@@ -328,6 +331,10 @@ impl Worker {
             active_action: None,
             running_tool_calls: std::collections::HashSet::new(),
             running_admission_ids: std::collections::HashSet::new(),
+            kernel_bash_creators: std::collections::VecDeque::new(),
+            kernel_bash_activity: Arc::new(tokio::sync::Notify::new()),
+            running_client_admissions: Vec::new(),
+            running_wire_admissions: Vec::new(),
             tool_use_count: 0,
         };
         let active_session_id = config.active_session_id.clone();
@@ -563,6 +570,60 @@ impl Worker {
                     );
                 });
                 concrete.set_goal_admission(probe, sink, queue_purge);
+                // The children registry stamps the running delivery's
+                // identity on every child it admits: the terminal
+                // notice turn then carries the waiting delivery's own
+                // id, so its frames credit to the task that spawned it,
+                // and the delivery's scoped completion wait holds for
+                // the child's run.
+                let identity_core = Arc::clone(&core);
+                let running_delivery_probe: crate::rlm_children::DeliveryIdentityProbe =
+                    std::sync::Arc::new(move || {
+                        let core = identity_core.lock().unwrap();
+                        core.running_client_admissions
+                            .first()
+                            .cloned()
+                            .or_else(|| core.running_wire_admissions.first().cloned())
+                    });
+                concrete
+                    .set_child_delivery_identity(std::sync::Arc::clone(&running_delivery_probe));
+                // The engine's ownership stamps read the same running
+                // delivery: the goal's Active transition and the
+                // autonomous deferral record it, so the identity-scoped
+                // withdrawal's stops match the delivery they name
+                // instead of pausing or clearing another client's work
+                // on the shared session.
+                concrete.set_running_delivery_probe(running_delivery_probe);
+                // The kernel `bash()` launch observer: the pid the
+                // runtime reports at the launch binds to the delivery
+                // whose turn runs (the completion notice arrives long
+                // after the turn, and its own payload names only the
+                // pid — without the binding, every kernel notice is
+                // session-owned and the awaiting A2A head credits a
+                // FOREIGN client's bash to the task).
+                let launch_core = Arc::clone(&core);
+                concrete.set_kernel_bash_launch_observer(std::sync::Arc::new(move |pid| {
+                    let mut core = launch_core.lock().unwrap();
+                    let creator = core
+                        .running_client_admissions
+                        .first()
+                        .cloned()
+                        .or_else(|| core.running_wire_admissions.first().cloned());
+                    if let Some(creator) = creator {
+                        record_kernel_bash_creator(&mut core, pid, creator);
+                    }
+                }));
+                // The binding's other half: a handle whose activity
+                // ended (its result consumed in-cell, its notice already
+                // admitted) never names a creator again, and a dead
+                // binding left behind would evict a live launch's stamp
+                // at the table's bound.
+                let end_core = Arc::clone(&core);
+                concrete.set_kernel_bash_activity_end_observer(std::sync::Arc::new(move |pid| {
+                    let mut core = end_core.lock().unwrap();
+                    core.kernel_bash_creators.retain(|binding| binding.0 != pid);
+                    core.kernel_bash_activity.notify_waiters();
+                }));
                 let late_core = Arc::clone(&core);
                 let late_events = Arc::clone(&events);
                 concrete.set_late_agent_message_sink(std::sync::Arc::new(
@@ -1123,8 +1184,136 @@ fn is_rlm_child_status_item(item: &QueuedItem) -> bool {
 
 /// One parked item's engine-minted internal-prompt provenance: the turn
 /// policy marks the admission class and `queue_visible` the invisible shape.
-fn is_injected_prompt_item(item: &QueuedItem) -> bool {
+pub(crate) fn is_injected_prompt_item(item: &QueuedItem) -> bool {
     item.policy == TurnPolicy::Injected && !item.queue_visible && !is_rlm_child_status_item(item)
+}
+
+/// One parked item's kernel-notice provenance: the producer
+/// (`admit_kernel_notice`) flags its own row — a `[bash-done]`
+/// completion, a factory run milestone — whatever busy-dependent
+/// policy it landed under. The flag is producer-set (a client can
+/// claim the notice's custom kind on its own row; it can never set
+/// this flag), so the class follows the producer, never the policy.
+pub(crate) fn is_kernel_notice_item(item: &QueuedItem) -> bool {
+    item.kernel_notice
+}
+
+/// The launch table's bound: past it the OLDEST launch's binding leaves
+/// (insertion order, never pid order — a small pid is not an old
+/// launch, and evicting by pid would keep dead bindings while killing
+/// a long-running background job's stamp). A completion notice that
+/// outlives the table names a bash so old its creator is the residual
+/// — the unstamped, session-owned class.
+pub(crate) const MAX_KERNEL_BASH_CREATORS: usize = 256;
+
+/// Bind one kernel `bash()` launch to the delivery whose turn ran: the
+/// completion notice names only the pid, and it arrives long after the
+/// creating turn. The activity-end observation below drops the binding
+/// of a handle whose result the kernel consumed in-cell (no notice
+/// will ever name it), so the table tracks live launches, not every
+/// launch ever made.
+fn record_kernel_bash_creator(core: &mut SessionCore, pid: u32, creator: String) {
+    core.kernel_bash_creators.retain(|binding| binding.0 != pid);
+    if core.kernel_bash_creators.len() >= MAX_KERNEL_BASH_CREATORS {
+        core.kernel_bash_creators.pop_front();
+    }
+    core.kernel_bash_creators.push_back((pid, creator));
+}
+
+/// Whether one parked item is a CLIENT'S OWN delivery — a plain prompt,
+/// a custom row, another session's message — against the session's
+/// internal rows: the engine's own continuations
+/// ([`is_injected_prompt_item`]), the daemon-provenance
+/// child-status notices ([`is_rlm_child_status_item`]), and the
+/// kernel notices ([`is_kernel_notice_item`]). The runner's
+/// pickup mints a worker-admission wire id for a client's own delivery
+/// that names none (see [`running_wire_admissions`]); an internal row
+/// never mints, so its continuation chain stays session-owned.
+pub(crate) fn is_clients_own_delivery(item: &QueuedItem) -> bool {
+    !is_injected_prompt_item(item)
+        && !is_rlm_child_status_item(item)
+        && !is_kernel_notice_item(item)
+        && !is_child_reply_item(item)
+}
+
+/// One parked item's child-reply provenance: an agent-message row the
+/// worker's own delivery intake stamped with the child's spawning
+/// delivery (the registry's `parent_delivery_admission` — a child of
+/// this session's `agent_message` reply, the delegated work's result).
+/// The stamp is daemon-set at the intake (a client's delivery payload
+/// names no credit: `handle_worker_deliver_message` reads the record,
+/// never the payload), and the id it names is a server-minted delivery
+/// identity no client wire exposes — the same trust the anchor tags
+/// rely on. The row runs as the delivery's own continuation like the
+/// stamped child-status notice: its answer is the delivery's output.
+fn is_child_reply_item(item: &QueuedItem) -> bool {
+    item.agent_message.is_some() && item.client_admission_id.is_some()
+}
+
+/// Whether one turn's anchoring row runs as the session's OWN
+/// continuation: the engine-minted internal prompt, a kernel notice
+/// (the producer's flag, whatever busy-dependent policy it queued
+/// under — the same notice admitted on an idle session already runs
+/// as one), or a daemon-provenance child-status notice stamped with
+/// the identity of the delivery whose turn spawned the children —
+/// that notice continues the delivery's work (the children's summary
+/// is its output), so its run resolves and credits like the goal
+/// continuation. An unstamped notice (children spawned outside any
+/// delivery) is no waiting task's continuation.
+pub(crate) fn is_session_own_continuation_item(item: &QueuedItem) -> bool {
+    is_injected_prompt_item(item)
+        || is_kernel_notice_item(item)
+        || (is_rlm_child_status_item(item) && item.client_admission_id.is_some())
+        || is_child_reply_item(item)
+}
+
+/// The `agent_start` frame's run-anchor members (the worker's delivery
+/// identity tags, stamped by `worker::turn`): consumed only by the
+/// supervisor relay, whose A2A connection alone receives the tagged
+/// copy (the delivery attribution the A2A pump credits runs by). Every
+/// other delivery strips them — the supervisor's shared broadcast and
+/// the worker's own direct session-client fan-out — so the frame every
+/// non-A2A client reads on every socket stays byte-identical to the TS
+/// wire.
+pub(crate) const RUN_ANCHOR_MEMBERS: [&str; 3] =
+    ["admissionId", "clientAdmissionId", "engineContinuation"];
+
+/// Whether an `agent_start` event carries the run-anchor attribution.
+pub(crate) fn agent_start_carries_run_anchor(event: &Value) -> bool {
+    event.get("type").and_then(Value::as_str) == Some("agent_start")
+        && RUN_ANCHOR_MEMBERS
+            .iter()
+            .any(|member| event.get(*member).is_some())
+}
+
+/// One serialized `session_event` payload with the run-anchor members
+/// stripped from its `agent_start` event — the bare TS frame every
+/// non-A2A client reads. `None` when the payload is not a tagged
+/// `agent_start` (the caller delivers the original bytes): the strip
+/// owns only the frames the worker tags.
+pub(crate) fn bare_agent_start_payload(payload: &[u8]) -> Option<Vec<u8>> {
+    // The cheap pre-check: only a tagged `agent_start` holds the
+    // member names, so an ordinary streamed frame stops at a substring
+    // pass and never pays the JSON parse.
+    let text = std::str::from_utf8(payload).ok()?;
+    if !text.contains("agent_start")
+        || !RUN_ANCHOR_MEMBERS
+            .iter()
+            .any(|member| text.contains(member))
+    {
+        return None;
+    }
+    let mut value: Value = serde_json::from_slice(payload).ok()?;
+    let event = value.get_mut("event")?;
+    if !agent_start_carries_run_anchor(event) {
+        return None;
+    }
+    if let Some(event) = event.as_object_mut() {
+        for member in RUN_ANCHOR_MEMBERS {
+            event.remove(member);
+        }
+    }
+    serde_json::to_vec(&value).ok()
 }
 
 #[cfg(test)]
@@ -1133,6 +1322,8 @@ mod worker_resume_settings_tests;
 
 #[cfg(test)]
 mod agent_message_tests;
+#[cfg(test)]
+mod idle_kill_tests;
 
 #[cfg(test)]
 mod prompt_image_tests;

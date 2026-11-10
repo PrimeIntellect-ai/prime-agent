@@ -321,13 +321,21 @@ const TOP_LEVEL_OPTION_GROUPS: &[OptionGroup] = &[
         options: &[
             ("-p, --print", "Print a response and exit"),
             (
-                "--mode <text|json|rpc|acp|daemon>",
+                "--mode <text|json|rpc|acp|a2a|daemon>",
                 "Select the output mode (default: text)",
             ),
             ("--cwd <dir>", "Use a specific working directory"),
             ("--offline", "Disable startup network operations"),
             ("--verbose", "Force verbose startup"),
             ("--daemon-socket <path>", "Use a specific daemon socket"),
+            (
+                "--a2a-host <host>",
+                "Bind the A2A server mode (default: 127.0.0.1)",
+            ),
+            (
+                "--a2a-port <port>",
+                "Port for the A2A server mode (0 binds an ephemeral port)",
+            ),
         ],
     },
     OptionGroup {

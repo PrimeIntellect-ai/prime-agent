@@ -288,6 +288,34 @@ pub struct TelemetrySettings {
 /// The default time limit for user `python_repl` cells: 60 seconds.
 pub const DEFAULT_PYTHON_CELL_TIMEOUT_MS: u64 = 60_000;
 
+/// The A2A server mode's configuration (settings `a2a`: host, port,
+/// token, the agent card's name/description, the public base URL a
+/// TLS-terminating front serves the card at, and the live-context
+/// bound). The members are camelCase like the rest of the settings
+/// document (`publicBaseUrl`, `maxContexts`) — the documented keys.
+/// One wrong-typed member loads as unset alone (the lenient loader
+/// re-parses the object member by member), never taking its siblings
+/// with it: a quoted port must not drop the configured token, whose
+/// holders would be left answering 401 to the minted replacement.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct A2aSettings {
+    pub host: Option<String>,
+    pub port: Option<u32>,
+    pub token: Option<String>,
+    pub name: Option<String>,
+    pub description: Option<String>,
+    /// The public base URL of the JSON-RPC binding (the Agent Card's
+    /// interface URL and the accepted `Host` authority behind a
+    /// front): unset serves the bound endpoint.
+    pub public_base_url: Option<String>,
+    /// The live-context bound (the default: at most 64 conversation
+    /// contexts; the least recently used idle one is evicted beyond
+    /// it): the server's worker count stays bounded by its
+    /// conversation table, not by the request rate.
+    pub max_contexts: Option<u32>,
+}
+
 /// The settings document: every known field optional; unknown keys preserved.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
@@ -323,6 +351,9 @@ pub struct Settings {
     /// session model does not accept image input. Default: none - image turns on a text-only model
     /// fail with a configuration hint instead of silently dropping the images.
     pub image_model: Option<String>,
+    /// The A2A server mode's bind, auth, and card defaults (the
+    /// `--mode a2a` launch; CLI flags override).
+    pub a2a: Option<A2aSettings>,
     /// Default time limit for user `python_repl` cells, in milliseconds
     /// (default [`DEFAULT_PYTHON_CELL_TIMEOUT_MS`]; `0` disables). A cell
     /// running longer is interrupted; the model can pass a per-call

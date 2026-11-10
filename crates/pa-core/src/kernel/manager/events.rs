@@ -39,6 +39,9 @@ impl Inner {
                                 // The last live handle settled: the completion notice for it is
                                 // already admitted, so owed continuations may resume.
                                 settled = g.background_bash_handles.is_empty();
+                                if let Some(on_end) = &self.options.on_kernel_bash_activity_end {
+                                    on_end(pid as u32);
+                                }
                             }
                         }
                         if settled {
@@ -224,6 +227,18 @@ impl Inner {
             buffers.transcript_reads.push(read.clone());
         }
         if let Some(payload) = data.get(BASH_COMMAND_DISPLAY_MIME) {
+            // The launch observation (the runtime reports the pid at
+            // the launch itself): the completion notice arrives long
+            // after this cell, and its own payload names only the pid.
+            if let Some(pid) = payload
+                .get("pid")
+                .and_then(Value::as_u64)
+                .and_then(|pid| u32::try_from(pid).ok())
+            {
+                if let Some(on_launch) = &self.options.on_kernel_bash_launch {
+                    on_launch(pid);
+                }
+            }
             if let (Some(command), Some(lines)) = (
                 payload.get("command").and_then(Value::as_str),
                 payload
@@ -386,6 +401,41 @@ mod tests {
         );
         manager.inner.cleanup_resources(Signal::Term);
         assert_eq!(fired.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn a_released_activity_fires_the_end_observer_with_its_pid() {
+        let fired = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let seen = Arc::clone(&fired);
+        let manager = ReplKernelManager::new(KernelManagerOptions {
+            on_kernel_bash_activity_end: Some(Arc::new(move |pid| {
+                seen.lock().unwrap().push(pid);
+            })),
+            ..Default::default()
+        });
+        deliver_activity(
+            &manager,
+            json!({ "id": "a".repeat(32), "pid": 42, "active": true }),
+        );
+        // A mismatched or malformed release never fires the observer
+        // (the handle stays live, exactly like the settlement track).
+        deliver_activity(
+            &manager,
+            json!({ "id": "b".repeat(32), "pid": 42, "active": false }),
+        );
+        assert!(manager.has_background_work());
+        assert!(
+            fired.lock().unwrap().is_empty(),
+            "the unmatched release fired no end observer: {:?}",
+            fired.lock().unwrap()
+        );
+        // The matching release fires exactly once, with the handle's pid
+        // (the binding drop the daemon wires reads).
+        deliver_activity(
+            &manager,
+            json!({ "id": "a".repeat(32), "pid": 42, "active": false }),
+        );
+        assert_eq!(fired.lock().unwrap().as_slice(), &[42]);
     }
 
     #[test]

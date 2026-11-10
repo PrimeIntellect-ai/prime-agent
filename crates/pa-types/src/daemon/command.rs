@@ -630,6 +630,14 @@ pub enum DaemonCommand {
         active_session_id: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         wait_for_rlm_quiescence: Option<bool>,
+        /// The requesting delivery's admission id: with it, the
+        /// quiescence barrier holds only the children that delivery
+        /// spawned (the A2A completion wait — a shared session's
+        /// foreign child never keeps the task's own answer waiting).
+        /// Absent on the TS-era wire; the barrier then holds the whole
+        /// registry.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        admission_id: Option<String>,
         #[serde(flatten)]
         rest: JsonMap,
     },
@@ -794,6 +802,34 @@ pub enum DaemonCommand {
         rest: JsonMap,
     },
     AbortAndClearQueue {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
+        active_session_id: String,
+        #[serde(flatten)]
+        rest: JsonMap,
+    },
+    /// `withdraw_admission` (a Rust-only daemon extension; no TS
+    /// client sends it): withdraw every queued delivery naming the
+    /// admission id and abort the turn running it — the
+    /// identity-scoped withdraw the A2A cancel sweep uses instead of
+    /// clearing the whole queue. The aborted turn suspends the
+    /// session's queued input until a resume site: other clients'
+    /// queued rows survive the sweep but stay parked behind that
+    /// suspension.
+    WithdrawAdmission {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
+        active_session_id: String,
+        admission_id: String,
+        #[serde(flatten)]
+        rest: JsonMap,
+    },
+    /// `kill_if_idle` (a Rust-only daemon extension; no TS client
+    /// sends it): stop the session only when it holds no work — the
+    /// idle check and the destructive stop are one worker-owned
+    /// decision, never an earlier snapshot a concurrent client can
+    /// invalidate.
+    KillIfIdle {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         id: Option<String>,
         active_session_id: String,

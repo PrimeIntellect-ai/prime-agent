@@ -131,6 +131,8 @@ impl AgentSessionEngine {
             config,
             mcp,
             late_agent_message_sink: std::sync::Mutex::new(None),
+            kernel_bash_launch_observer: std::sync::Mutex::new(None),
+            kernel_bash_activity_end_observer: std::sync::Mutex::new(None),
             goal_budget_crossed: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             goal_input_probe: std::sync::Mutex::new(None),
             goal_admission_sink: std::sync::Mutex::new(None),
@@ -178,6 +180,11 @@ impl AgentSessionEngine {
             held_autonomous_continuation: std::sync::Mutex::new(None),
             autonomous_admission: std::sync::Mutex::new(None),
             autonomous_awaits_rlm_work: std::sync::atomic::AtomicBool::new(false),
+            autonomous_awaits_rlm_work_owner: std::sync::Mutex::new(None),
+            goal_owner_delivery: std::sync::Mutex::new(None),
+            goal_withdrawn_deliveries: std::sync::Mutex::new(Vec::new()),
+            autonomous_withdrawn_deliveries: std::sync::Mutex::new(Vec::new()),
+            running_delivery_probe: std::sync::Mutex::new(None),
             self_weak: std::sync::Mutex::new(None),
             autonomous_queue_purge: std::sync::Mutex::new(None),
             cwd,
@@ -1064,8 +1071,20 @@ impl AgentSessionEngine {
             .lock()
             .expect("late agent message sink lock")
             .clone();
+        let on_kernel_bash_launch = self
+            .kernel_bash_launch_observer
+            .lock()
+            .expect("kernel bash launch observer lock")
+            .clone();
+        let on_kernel_bash_activity_end = self
+            .kernel_bash_activity_end_observer
+            .lock()
+            .expect("kernel bash activity end observer lock")
+            .clone();
         pa_core::session_engine::engine::create_session(SessionEngineConfig {
             on_late_sent_agent_message,
+            on_kernel_bash_launch,
+            on_kernel_bash_activity_end,
             semantic_edges,
             telemetry,
             cwd,

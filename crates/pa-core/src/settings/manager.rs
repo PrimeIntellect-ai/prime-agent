@@ -609,6 +609,86 @@ impl SettingsManager {
             .filter(|m| !m.is_empty())
     }
 
+    /// The A2A mode's bind host (settings `a2a.host`; global scope
+    /// only — a project settings file must not move a server bind).
+    #[must_use]
+    pub fn get_a2a_host(&self) -> Option<String> {
+        self.global
+            .a2a
+            .as_ref()
+            .and_then(|a2a| a2a.host.clone())
+            .map(|h| h.trim().to_string())
+            .filter(|h| !h.is_empty())
+    }
+
+    /// The A2A mode's port (settings `a2a.port`; global scope only).
+    #[must_use]
+    pub fn get_a2a_port(&self) -> Option<u32> {
+        self.global.a2a.as_ref().and_then(|a2a| a2a.port)
+    }
+
+    /// The A2A mode's public base URL (settings `a2a.publicBaseUrl`; the
+    /// agent card's interface URL and the accepted `Host` authority
+    /// behind a TLS-terminating front; global scope only — a project
+    /// settings file must not move the advertised endpoint).
+    #[must_use]
+    pub fn get_a2a_public_base_url(&self) -> Option<String> {
+        self.global
+            .a2a
+            .as_ref()
+            .and_then(|a2a| a2a.public_base_url.clone())
+            .map(|url| url.trim().to_string())
+            .filter(|url| !url.is_empty())
+    }
+
+    /// The A2A mode's bearer token (settings `a2a.token`; global scope
+    /// only — a project settings file must not change the auth).
+    #[must_use]
+    pub fn get_a2a_token(&self) -> Option<String> {
+        self.global
+            .a2a
+            .as_ref()
+            .and_then(|a2a| a2a.token.clone())
+            .map(|t| t.trim().to_string())
+            .filter(|t| !t.is_empty())
+    }
+
+    /// The served agent card's name (settings `a2a.name`).
+    #[must_use]
+    pub fn get_a2a_name(&self) -> Option<String> {
+        self.merged
+            .a2a
+            .as_ref()
+            .and_then(|a2a| a2a.name.clone())
+            .map(|n| n.trim().to_string())
+            .filter(|n| !n.is_empty())
+    }
+
+    /// The A2A mode's live-context bound (settings `a2a.maxContexts`,
+    /// global scope only): the server keeps at most this many
+    /// conversation contexts; a value below 1 stays unset (the default
+    /// bound applies).
+    #[must_use]
+    pub fn get_a2a_max_contexts(&self) -> Option<usize> {
+        self.global
+            .a2a
+            .as_ref()
+            .and_then(|a2a| a2a.max_contexts)
+            .filter(|max| *max >= 1)
+            .map(|max| max as usize)
+    }
+
+    /// The served agent card's description (settings `a2a.description`).
+    #[must_use]
+    pub fn get_a2a_description(&self) -> Option<String> {
+        self.merged
+            .a2a
+            .as_ref()
+            .and_then(|a2a| a2a.description.clone())
+            .map(|d| d.trim().to_string())
+            .filter(|d| !d.is_empty())
+    }
+
     /// The daemon-level model allowlist (settings `allowedModels`), enforced at every
     /// daemon model resolution — a model outside fails loudly, never a fallback.
     /// Rust-only guardrail; `None` is unrestricted; global scope only, so a project
@@ -1152,6 +1232,62 @@ mod tests {
             .set_factory_enabled(false)
             .expect("set factory disabled");
         assert!(!manager.get_factory_enabled());
+    }
+
+    /// The A2A server's own settings read the GLOBAL scope only: the
+    /// bind host, the port, the bearer token, the public base URL, and
+    /// the live-context bound must never move for a project
+    /// `.prime/agent/settings.json` (a cloned repository must not set
+    /// `a2a.token` or `a2a.host` for anyone who runs `--mode a2a`
+    /// inside it), while the card's name and description keep the
+    /// merged read.
+    #[test]
+    fn a2a_bind_auth_and_bound_settings_read_the_global_scope_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let cwd = dir.path().join("cwd");
+        let agent_dir = dir.path().join("agent");
+        std::fs::create_dir_all(cwd.join(".prime/agent")).unwrap();
+        std::fs::create_dir_all(&agent_dir).unwrap();
+        std::fs::write(
+            cwd.join(".prime/agent/settings.json"),
+            r#"{
+                "a2a": {
+                    "host": "10.0.0.5",
+                    "port": 9999,
+                    "token": "project-scope-token",
+                    "publicBaseUrl": "https://front.example.com/",
+                    "maxContexts": 1,
+                    "name": "Project Card Name",
+                    "description": "Project card description"
+                }
+            }"#,
+        )
+        .unwrap();
+
+        let manager = SettingsManager::create(&cwd, &agent_dir);
+        assert_eq!(
+            manager.get_a2a_host(),
+            None,
+            "a project settings file never moves the bind"
+        );
+        assert_eq!(manager.get_a2a_port(), None);
+        assert_eq!(
+            manager.get_a2a_token(),
+            None,
+            "a project settings file never replaces the auth"
+        );
+        assert_eq!(manager.get_a2a_public_base_url(), None);
+        assert_eq!(manager.get_a2a_max_contexts(), None);
+        assert_eq!(
+            manager.get_a2a_name(),
+            Some("Project Card Name".to_string()),
+            "the card's name keeps the merged read"
+        );
+        assert_eq!(
+            manager.get_a2a_description(),
+            Some("Project card description".to_string()),
+            "the card's description keeps the merged read"
+        );
     }
 
     #[test]

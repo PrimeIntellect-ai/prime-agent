@@ -195,6 +195,7 @@ mod sidecar_exit_tests;
 mod summary_tests;
 mod warning_marker_tests;
 mod windowed_attach_tests;
+mod withdraw_tests;
 #[tokio::test]
 async fn background_refinement_event_is_fenced_to_its_review_session() {
     let dir = std::env::temp_dir().join(format!("pa-refine-event-{}", uuid::Uuid::new_v4()));
@@ -301,4 +302,125 @@ async fn a_bill_made_before_a_session_replace_never_lands_in_the_replacement() {
     worker.core.lock().unwrap().store = Some(session_at("replacement.jsonl"));
     assert!(store.append_model_usage(original_id, bill()).await.is_err());
     assert_eq!(billed_rows(&worker), 0);
+}
+
+/// The launch table's bound is insertion-ordered FIFO: past
+/// [`MAX_KERNEL_BASH_CREATORS`] the OLDEST launch's binding leaves —
+/// never the smallest pid (a small pid is not an old launch; a
+/// pid-ordered eviction would keep dead bindings while dropping a
+/// long-running background job's stamp), and a re-launch of a live pid
+/// re-binds it at the table's back (the upsert), so the completion
+/// notice of a relaunched handle finds its creator.
+#[tokio::test]
+async fn the_launch_table_evicts_its_oldest_binding_not_the_smallest_pid() {
+    let worker = created_dispatch_worker().await;
+    let mut core = worker.core.lock().unwrap();
+    core.kernel_bash_creators.clear();
+    // The oldest launch carries the LARGEST pid (a long-running job):
+    // 256 bindings reach the table's bound exactly.
+    record_kernel_bash_creator(&mut core, 9000, "oldest-long-job".into());
+    for pid in 1..MAX_KERNEL_BASH_CREATORS as u32 {
+        record_kernel_bash_creator(&mut core, pid, format!("launch-{pid}"));
+    }
+    assert_eq!(
+        core.kernel_bash_creators.len(),
+        MAX_KERNEL_BASH_CREATORS,
+        "the table holds its bound"
+    );
+    // One more launch: the OLDEST binding (the largest pid) leaves.
+    record_kernel_bash_creator(&mut core, 5000, "newest".into());
+    let pids: Vec<u32> = core
+        .kernel_bash_creators
+        .iter()
+        .map(|binding| binding.0)
+        .collect();
+    assert_eq!(core.kernel_bash_creators.len(), MAX_KERNEL_BASH_CREATORS);
+    assert_eq!(pids.first(), Some(&1), "the second-oldest is now the front");
+    assert!(
+        !pids.contains(&9000),
+        "the oldest launch's binding leaves, whatever its pid: {pids:?}"
+    );
+    assert_eq!(pids.last(), Some(&5000), "the newest launch stays bound");
+    // A re-launch of a bound pid re-binds it at the back under its new
+    // creator, evicting nothing past the bound.
+    record_kernel_bash_creator(&mut core, 3, "relaunch-3".into());
+    let bindings: Vec<(u32, String)> = core
+        .kernel_bash_creators
+        .iter()
+        .map(|binding| (binding.0, binding.1.clone()))
+        .collect();
+    assert_eq!(
+        bindings.last(),
+        Some(&(3, "relaunch-3".to_string())),
+        "the re-launch upserts its binding at the back: {bindings:?}"
+    );
+    assert_eq!(
+        bindings.iter().filter(|(pid, _)| *pid == 3).count(),
+        1,
+        "the re-launch leaves no dead duplicate: {bindings:?}"
+    );
+    assert_eq!(
+        bindings.first(),
+        Some(&(1, "launch-1".to_string())),
+        "the upsert evicts nothing: {bindings:?}"
+    );
+}
+
+/// The activity-end observer the worker wires drops its pid's binding:
+/// a handle whose result the kernel consumed in-cell (its notice never
+/// arrives) must not hold a dead binding past its own end — at the
+/// table's bound a dead binding would evict a live launch's stamp and
+/// the foreign-bash notice would credit the wrong delivery. Driven
+/// through the engine's WIRED observer (the real construction's
+/// closure), never a test-local re-implementation of the retain.
+#[tokio::test]
+async fn the_wired_activity_end_observer_drops_the_launch_binding() {
+    let dir = tempfile::tempdir().unwrap();
+    let worker = Worker::new(
+        WorkerConfig {
+            socket_path: dir.path().join("worker.sock"),
+            supervisor_socket_path: std::path::PathBuf::new(),
+            token: "token".to_string(),
+            worker_instance_id: String::new(),
+            active_session_id: "kernel-binding-session".to_string(),
+            agent_dir: dir.path().join("agent"),
+            recovery_journal_path: dir.path().join("recovery.jsonl"),
+            telemetry_disabled: Some(true),
+            script: Some(json!({ "engine": "faux", "responses": [] })),
+        },
+        None,
+    );
+    {
+        let mut core = worker.core.lock().unwrap();
+        core.kernel_bash_creators
+            .push_back((4321, "delivery-a".to_string()));
+        core.kernel_bash_creators
+            .push_back((4322, "delivery-b".to_string()));
+    }
+    let engine = worker
+        .agent_engine
+        .as_ref()
+        .expect("the faux worker runs the real agent engine");
+    let observer = engine
+        .kernel_bash_activity_end_observer
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("the worker wires the activity-end observer at construction");
+    // The fired wired observer: the kernel's own call shape (the pid
+    // of the handle whose activity ended).
+    observer(4321);
+    let pids: Vec<u32> = worker
+        .core
+        .lock()
+        .unwrap()
+        .kernel_bash_creators
+        .iter()
+        .map(|binding| binding.0)
+        .collect();
+    assert_eq!(
+        pids,
+        vec![4322],
+        "the wired activity-end observer drops its pid's binding"
+    );
 }

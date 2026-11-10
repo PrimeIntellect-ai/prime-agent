@@ -150,6 +150,13 @@ struct ChildObservation {
     source: ChildObservationSource,
 }
 
+/// The parent worker's running delivery identity at spawn time (the
+/// running client admission id, falling back to the wire id — the same
+/// stamp the goal mint carries): `spawn` stamps it on the child record
+/// so the terminal notice's row names the delivery whose turn spawned
+/// the children.
+pub(crate) type DeliveryIdentityProbe = std::sync::Arc<dyn Fn() -> Option<String> + Send + Sync>;
+
 /// One tracked child session.
 #[derive(Debug)]
 struct ChildRecord {
@@ -219,6 +226,15 @@ struct ChildRecord {
     last_emitted_status: Option<&'static str>,
     /// Serializes parent-directed rename and delete for this child.
     rename_lock: std::sync::Arc<tokio::sync::Mutex<()>>,
+    /// The delivery identity of the parent turn that spawned this child
+    /// (the running client/wire admission at the spawn — the same stamp
+    /// the goal mint carries): the terminal notice's row carries it, so
+    /// the notice turn runs as the delivery's own continuation (its
+    /// frames credit to the task the delivery owns) and a withdrawal of
+    /// that id sweeps the post-children loop. `None` when no delivery
+    /// ran (a spawn outside a turn) or the record was rebuilt after a
+    /// restart.
+    parent_delivery_admission: Option<String>,
 }
 
 impl ChildRecord {
@@ -375,6 +391,15 @@ struct SupervisorChildSessionsInner {
     parent_turn: tokio::sync::watch::Sender<ParentTurn>,
     /// The parent engine's child-settle hook (goal continuation resume).
     settle_hook: std::sync::Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
+    /// The parent worker's running-delivery probe: `spawn` stamps its
+    /// answer on the child records (the terminal notices' row identity).
+    delivery_identity: std::sync::Mutex<Option<DeliveryIdentityProbe>>,
+    /// Spawn admissions open but not yet registered, keyed by their
+    /// spawning delivery (the create response still in flight): the
+    /// scoped completion wait counts them, so a barrier that answered
+    /// over one would settle its task while the child the admission
+    /// registers starts work behind the terminal stream.
+    pending_spawns: std::sync::Mutex<std::collections::HashMap<String, usize>>,
     /// Whether any tracked child run is unsettled (the `any_running`
     /// verdict, re-read at every registry change): a sync read for the
     /// worker's session summary, and a change feed the worker turns into
@@ -441,6 +466,8 @@ impl SupervisorChildSessions {
                 deleted_children: std::sync::Mutex::new(std::collections::HashMap::new()),
                 parent_turn: tokio::sync::watch::Sender::new(ParentTurn::default()),
                 settle_hook: std::sync::Mutex::new(None),
+                delivery_identity: std::sync::Mutex::new(None),
+                pending_spawns: std::sync::Mutex::new(std::collections::HashMap::new()),
                 running: tokio::sync::watch::Sender::new(false),
                 settle_notify: tokio::sync::Notify::new(),
                 model_refusal_telemetry,
@@ -471,6 +498,21 @@ impl SupervisorChildSessions {
             .child_update_sink
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(sink);
+    }
+
+    /// Wire the parent worker's running-delivery probe: `spawn` stamps
+    /// its answer on the child records, so each terminal notice's row
+    /// names the delivery whose turn spawned the children.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the delivery-identity mutex is poisoned.
+    pub(crate) fn set_delivery_identity_probe(&self, probe: DeliveryIdentityProbe) {
+        *self
+            .inner
+            .delivery_identity
+            .lock()
+            .expect("delivery identity lock") = Some(probe);
     }
 
     /// The worker started a parent turn: spawns admitted from here on hold
@@ -550,6 +592,50 @@ impl SupervisorChildSessions {
     /// not fired).
     pub async fn any_running(&self) -> bool {
         self.inner.any_running().await
+    }
+
+    /// The quiescence barrier's scoped read: the named delivery's own
+    /// children when the request named it, the whole registry when it
+    /// did not (the TS-era callers send no admission). A shared session
+    /// hosts other clients' children too, and a delivery's completion
+    /// wait holds only the children that delivery's turns spawned —
+    /// never a foreign held child.
+    pub(crate) async fn any_running_scoped(&self, admission: Option<&str>) -> bool {
+        let children = self.inner.children.lock().await;
+        match admission {
+            None => any_unsettled(&children).await,
+            Some(admission) => {
+                // The delivery's spawn admissions still in flight are
+                // unsettled work too: the count opens before the create
+                // and closes after it, and the child it registers (or the
+                // failure it answers) has not landed yet — a completion
+                // barrier that answered over it would settle its task
+                // while the child starts work behind the terminal stream.
+                if *self
+                    .inner
+                    .pending_spawns
+                    .lock()
+                    .expect("pending spawns lock")
+                    .get(admission)
+                    .unwrap_or(&0)
+                    > 0
+                {
+                    return true;
+                }
+                for record in children.iter() {
+                    let child = record.lock().await;
+                    if !child.run.funnel_fired()
+                        && child
+                            .parent_delivery_admission
+                            .as_deref()
+                            .is_some_and(|owner| owner == admission)
+                    {
+                        return true;
+                    }
+                }
+                false
+            }
+        }
     }
 
     /// The last [`Self::any_running`] verdict, without awaiting the
@@ -688,6 +774,28 @@ impl SupervisorChildSessions {
         }
     }
 
+    /// The spawning delivery's stamp for one child of this session, by
+    /// the child's active session id: an `agent_message` reply from
+    /// that child carries the identity its terminal notice carries, so
+    /// the reply turn runs as the delivery's own continuation (its
+    /// answer is the delegated work's result the waiting task owes).
+    /// `None` when the id names no child of this session, or the
+    /// record carries no stamp (a spawn outside any delivery, or a
+    /// record rebuilt after a restart).
+    pub async fn child_reply_delivery_admission(
+        &self,
+        child_active_session_id: &str,
+    ) -> Option<String> {
+        let children = self.inner.children.lock().await;
+        for record in children.iter() {
+            let record = record.lock().await;
+            if record.active_session_id == child_active_session_id {
+                return record.parent_delivery_admission.clone();
+            }
+        }
+        None
+    }
+
     /// Test seam: settle a pushed child record (the gate tests need a settled-only
     /// registry).
     #[cfg(test)]
@@ -716,11 +824,24 @@ impl SupervisorChildSessions {
     /// (the controller tests exercise the family join on registry state).
     #[cfg(test)]
     pub(crate) async fn push_test_child(&self, identity: RlmChildIdentity) {
+        self.push_test_child_of_delivery(identity, None).await;
+    }
+
+    /// The same seam with the spawning delivery's stamp: the record
+    /// names the delivery whose turn spawned it (the quiescence
+    /// barrier's delivery-scoped read).
+    #[cfg(test)]
+    pub(crate) async fn push_test_child_of_delivery(
+        &self,
+        identity: RlmChildIdentity,
+        parent_delivery_admission: Option<String>,
+    ) {
         self.inner
             .children
             .lock()
             .await
             .push(Arc::new(Mutex::new(ChildRecord {
+                parent_delivery_admission,
                 rlm_child_id: identity.rlm_child_id,
                 session_name: identity.session_name,
                 active_session_id: identity.active_session_id,
@@ -856,6 +977,62 @@ impl SupervisorChildSessions {
 }
 
 impl SupervisorChildSessionsInner {
+    /// The spawning turn's delivery, captured before the create's first
+    /// await together with its pending admission: the create can
+    /// outlive the turn that called spawn (the host request survives
+    /// the cell as an independent task), and a registry read after the
+    /// awaited create would stamp whatever delivery runs THEN — none,
+    /// or another client's. The stamp is the spawn's own identity: the
+    /// record it registers under and the scoped quiescence its
+    /// admission counts in. The probe read and the count take their
+    /// locks one at a time, never nested: the probe may lock the
+    /// worker's session core, so the pending-admission count must never
+    /// hold its lock across it. A delivery that answers between the
+    /// probe read and the count costs at most one uncredited child (the
+    /// barrier may answer over a spawn that registers a beat later),
+    /// never canceled work that runs on. `None` (no delivery runs, no
+    /// probe wired) opens no count.
+    pub(super) fn delivery_identity_opening_admission(&self) -> Option<String> {
+        let delivery = self
+            .delivery_identity
+            .lock()
+            .expect("delivery identity lock")
+            .as_ref()
+            .and_then(|probe| probe());
+        if let Some(delivery) = delivery.as_deref() {
+            *self
+                .pending_spawns
+                .lock()
+                .expect("pending spawns lock")
+                .entry(delivery.to_string())
+                .or_insert(0) += 1;
+        }
+        delivery
+    }
+
+    /// Close one pending spawn admission (its registration or its
+    /// failure): the count's decrement and the barrier's wake are one
+    /// step, so a scoped completion wait that counted the admission
+    /// re-reads and answers once the create it held resolves.
+    pub(super) fn spawn_admission_closed(&self, delivery: Option<&str>) {
+        let Some(delivery) = delivery else {
+            return;
+        };
+        let last = {
+            let mut pending = self.pending_spawns.lock().expect("pending spawns lock");
+            let entry = pending.entry(delivery.to_string()).or_insert(0);
+            *entry = entry.saturating_sub(1);
+            let last = *entry == 0;
+            if last {
+                pending.remove(delivery);
+            }
+            last
+        };
+        if last {
+            self.settle_notify.notify_waiters();
+        }
+    }
+
     /// Fire the settle hook off-thread (the settle sites run inside
     /// watcher tasks; the hook owns its own scheduling). The funnel marks
     /// the record settled and wakes the barrier only after the terminal

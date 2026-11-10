@@ -3,7 +3,36 @@
 
 use serde_json::Value;
 
-use super::types::Settings;
+use super::types::{A2aSettings, Settings};
+
+/// One `a2a` object with only the members that parse: a wrong-typed
+/// member (a quoted port, a negative bound) drops ALONE, never its
+/// siblings — the settings contract says a wrong-typed value loads as
+/// unset, and a configured token must not disappear because a different
+/// member failed (AUTO-MINT would then mint a replacement, leaving every
+/// holder of the configured token answering 401). Every member parses on
+/// its own — no separate name list to keep in step with the struct (an
+/// unknown member parses `Ok` and survives, the same as the outer loop's
+/// unknown keys).
+fn lenient_a2a(value: &Value) -> Value {
+    if serde_json::from_value::<A2aSettings>(value.clone()).is_ok() {
+        return value.clone();
+    }
+    let mut cleaned = serde_json::Map::new();
+    let Some(object) = value.as_object() else {
+        return value.clone();
+    };
+    for (member, field) in object {
+        let mut single = serde_json::Map::new();
+        single.insert(member.clone(), field.clone());
+        if serde_json::from_value::<A2aSettings>(Value::Object(single)).is_err() {
+            // The wrong-typed member loads as unset.
+            continue;
+        }
+        cleaned.insert(member.clone(), field.clone());
+    }
+    Value::Object(cleaned)
+}
 
 /// Known settings keys (the TS Settings interface, camelCase wire form).
 /// Wrong-typed values for these load as unset; unknown keys are preserved.
@@ -78,6 +107,13 @@ pub fn from_value_lenient(value: &Value) -> Settings {
     };
     let mut map = serde_json::Map::new();
     for (key, field) in obj {
+        // The nested `a2a` object re-parses member by member first (see
+        // `lenient_a2a`): its own bad members drop alone.
+        let field = if key == "a2a" {
+            lenient_a2a(field)
+        } else {
+            field.clone()
+        };
         // Re-parse per field: a bad-typed field drops out instead of failing the document.
         let mut single = serde_json::Map::new();
         single.insert(key.clone(), field.clone());
@@ -128,6 +164,68 @@ mod tests {
             settings.extra.get("unknownKey"),
             Some(&serde_json::json!({ "kept": true }))
         );
+    }
+
+    #[test]
+    fn one_wrong_typed_a2a_member_drops_alone() {
+        // The token contract: a wrong-typed sibling (a quoted port, a
+        // negative bound) loads as unset alone — never dropping the
+        // configured token with it (AUTO-MINT would mint a replacement
+        // and leave this token's holders answering 401).
+        let value: Value = serde_json::json!({
+            "defaultModel": "test-model",
+            "a2a": {
+                "token": "secret-token",
+                "port": "7800",
+                "maxContexts": -1,
+                "publicBaseUrl": "https://agent.example.com/"
+            }
+        });
+        let settings = from_value_lenient(&value);
+        let a2a = settings
+            .a2a
+            .expect("the a2a object survives its bad members");
+        assert_eq!(a2a.token.as_deref(), Some("secret-token"));
+        assert_eq!(a2a.port, None);
+        assert_eq!(a2a.max_contexts, None);
+        assert_eq!(
+            a2a.public_base_url.as_deref(),
+            Some("https://agent.example.com/")
+        );
+        assert_eq!(
+            settings.default_model.as_deref(),
+            Some("test-model"),
+            "the sibling top-level field stays loaded too"
+        );
+    }
+
+    /// The member-by-member clean parses every member on its own, with
+    /// no name list to drift behind the struct: an unknown sibling (a
+    /// member a future struct gain would carry) survives beside a
+    /// wrong-typed one while the token stays loaded and the wrong
+    /// member drops alone.
+    #[test]
+    fn an_unknown_a2a_member_survives_beside_a_wrong_typed_one() {
+        let value: Value = serde_json::json!({
+            "a2a": {
+                "token": "secret-token",
+                "port": "7800",
+                "futureKnob": {"tuned": true}
+            }
+        });
+        let settings = from_value_lenient(&value);
+        let a2a = settings
+            .a2a
+            .expect("the a2a object survives its bad members");
+        assert_eq!(a2a.token.as_deref(), Some("secret-token"));
+        assert_eq!(a2a.port, None);
+    }
+
+    #[test]
+    fn a_wrong_typed_whole_a2a_object_loads_as_unset() {
+        let value: Value = serde_json::json!({ "a2a": "not-an-object" });
+        let settings = from_value_lenient(&value);
+        assert_eq!(settings.a2a, None);
     }
 
     #[test]

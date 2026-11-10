@@ -122,6 +122,16 @@ prime-agent update [--force]         # Update Prime Agent
 prime-agent shutdown [--force]       # Stop every agent, worker, and background service
 ```
 
+Prime Agent also speaks the Agent2Agent (A2A) protocol, so any A2A client or framework can drive it:
+
+```bash
+prime-agent --mode a2a               # Serve the A2A v1.0 JSON-RPC binding
+PRIME_AGENT_A2A_TOKEN=<secret> prime-agent --mode a2a --a2a-port 7800
+curl http://127.0.0.1:7800/.well-known/agent-card.json
+```
+
+Each A2A conversation hosts one Prime Agent session, every task is one prompt turn, and replies stream over SSE; `--a2a-host` and `--a2a-port` set the bind (defaults `127.0.0.1:7800`), and the `PRIME_AGENT_A2A_TOKEN` environment variable or the `a2a.token` setting sets the bearer token (there is no token flag, so the secret never lands on the command line). With neither configured, the mode mints a fresh token per run, writes it to an owner-only file named for the bound address in the agent dir (`~/.prime/agent/a2a-token-<port>-<address>`, the IP in filename-safe form), and prints the path at startup — present it as `Authorization: Bearer <token>`. The Agent Card at the well-known URI stays public so clients can discover the auth scheme; every task route requires the token. The `a2a` settings section also carries `publicBaseUrl` (advertise the front's address behind a TLS-terminating proxy) and `maxContexts` (at most 64 conversations live by default; the least recently used idle one is evicted beyond it, and a task runs to completion with its agent's autonomous continuation included in its artifact). Finished tasks are kept for the most recent 256 — `GetTask`/`ListTasks` serve that terminal window (oldest beyond it is dropped), the same memory ceiling `maxContexts` sets for live conversations. `CancelTask` keeps the daemon's abort contract — it aborts the task's running turn and withdraws its queued rows, and the task settles `CANCELED` immediately. Work the task already delegated keeps running the way a TUI Esc leaves it: an unsettled subagent's terminal notice queues and its notice turn runs afterward, but it resolves foreign to the settled task and never reaches the canceled task's artifact.
+
 ## Built for Long-Running Work
 Prime Agent is built for long-running work, especially for evaluations in research. These features are available in the TUI, and when run autonomously.
 

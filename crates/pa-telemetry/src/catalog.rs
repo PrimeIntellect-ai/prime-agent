@@ -1235,6 +1235,39 @@ const UPDATE_EVENTS: &[EventRule] = &[
     },
 ];
 
+/// `a2a request served` (v2): the A2A server mode's adoption event, one
+/// per served JSON-RPC request. The method vocabulary is the served
+/// A2A surface; the outcome is the wire verdict.
+const A2A_REQUEST_SERVED: EventRule = EventRule {
+    name: "a2a request served",
+    since: 2,
+    properties: &[
+        (
+            "method",
+            required(enum_rule(
+                &[
+                    "SendMessage",
+                    "SendStreamingMessage",
+                    "GetTask",
+                    "ListTasks",
+                    "CancelTask",
+                    "SubscribeToTask",
+                    "CreateTaskPushNotificationConfig",
+                    "GetTaskPushNotificationConfig",
+                    "ListTaskPushNotificationConfigs",
+                    "DeleteTaskPushNotificationConfig",
+                    "GetExtendedAgentCard",
+                ],
+                "unknown",
+            )),
+        ),
+        (
+            "outcome",
+            required(enum_rule(&["ok", "error", "stream"], "error")),
+        ),
+    ],
+};
+
 const HARNESS_REFINEMENTS_CHANGED: EventRule = EventRule {
     name: "harness refinements changed",
     since: 2,
@@ -1272,6 +1305,7 @@ pub fn catalog() -> Vec<&'static EventRule> {
         &SESSION_ARCHIVED,
         &TUI_EXIT,
         &TUI_IPYTHON_BASH_RENDERED,
+        &A2A_REQUEST_SERVED,
     ];
     all.extend(UPDATE_EVENTS.iter());
     all

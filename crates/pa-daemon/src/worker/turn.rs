@@ -3,10 +3,10 @@
 use super::{
     checkpoint_queue_recovery, compact_action_label, create_daemon_event_meta,
     emit_refinement_event_for_session, emit_refinement_row, gather_delivery_batch, json, oneshot,
-    session_snapshot, AssistantSnapshot, DaemonOutbound, EngineEvent, EventPump, Lane, Map, Notify,
-    OutboundFrame, PromptRequest, QueueCheckpoint, QueuedItem, Result, SessionActionSnapshot,
-    SessionCore, SessionEngine, TurnSettle, Value, WorkerRecoveryJournal,
-    ABORTED_TURN_SETTLE_ERROR,
+    running_admission_ids, running_client_admissions, running_wire_admissions, session_snapshot,
+    AssistantSnapshot, DaemonOutbound, EngineEvent, EventPump, Lane, Map, Notify, OutboundFrame,
+    PromptRequest, QueueCheckpoint, QueuedItem, Result, SessionActionSnapshot, SessionCore,
+    SessionEngine, TurnSettle, Value, WorkerRecoveryJournal, ABORTED_TURN_SETTLE_ERROR,
 };
 
 use std::sync::{Arc, Mutex};
@@ -61,10 +61,9 @@ impl TurnRunner {
                     None
                 } else if core.steering.front().is_some() {
                     let items = gather_delivery_batch(&mut core, Lane::Steering);
-                    core.running_admission_ids = items
-                        .iter()
-                        .filter_map(|item| item.admission_id.clone())
-                        .collect();
+                    core.running_admission_ids = running_admission_ids(&items);
+                    core.running_client_admissions = running_client_admissions(&items);
+                    core.running_wire_admissions = running_wire_admissions(&items);
                     core.busy = true;
                     core.abort_requested = false;
                     core.retry_abort_requested = false;
@@ -72,10 +71,9 @@ impl TurnRunner {
                     Some((Lane::Steering, items))
                 } else if core.follow_up.front().is_some() {
                     let items = gather_delivery_batch(&mut core, Lane::FollowUp);
-                    core.running_admission_ids = items
-                        .iter()
-                        .filter_map(|item| item.admission_id.clone())
-                        .collect();
+                    core.running_admission_ids = running_admission_ids(&items);
+                    core.running_client_admissions = running_client_admissions(&items);
+                    core.running_wire_admissions = running_wire_admissions(&items);
                     core.busy = true;
                     core.abort_requested = false;
                     core.retry_abort_requested = false;
@@ -318,11 +316,50 @@ impl TurnRunner {
         let Some((first, batched)) = items.split_first() else {
             return;
         };
-        self.emit_turn_event(json!({ "type": "agent_start" }));
+        // The run's delivery identity rides `agent_start` (the A2A
+        // pump's attribution source): the anchoring item's admission
+        // ids, so a consumer can tell the conversation's own delivery
+        // (an admission-named prompt or steer) and the session's own
+        // injected continuation from another client's delivery on the
+        // same session. Additive members; consumers read the `type`
+        // first. The tags reach the A2A link alone: the supervisor
+        // relay strips them from the shared broadcast and the worker's
+        // direct session-client fan-out strips them at its own socket
+        // (see `worker::RUN_ANCHOR_MEMBERS`).
+        let mut agent_start = json!({
+            "type": "agent_start",
+        });
+        if let Some(admission_id) = &first.admission_id {
+            agent_start["admissionId"] = json!(admission_id);
+        }
+        if let Some(client_admission_id) = &first.client_admission_id {
+            agent_start["clientAdmissionId"] = json!(client_admission_id);
+        }
+
+        // The session's own continuation (the engine-minted prompt: a
+        // goal driver, a post-compaction run; or a daemon-provenance
+        // child-status notice stamped with the spawning delivery's
+        // identity — the children's summary is that delivery's output)
+        // carries its source — an event consumer can tell it from
+        // another client's injected delivery (an agent message, a
+        // scheduled job), which shares the `injected` policy and
+        // carries no admission.
+        if crate::worker::is_session_own_continuation_item(first) {
+            agent_start["engineContinuation"] = json!(true);
+        }
+        self.emit_turn_event(agent_start);
         self.emit_turn_event(json!({ "type": "turn_start" }));
         // The pane reporter's run boundary (TS `agent_start`): working.
         self.herdr.lock().unwrap().run_started();
         engine.on_turn_start();
+        // The engine re-emits `agent_start` for a later run of the SAME
+        // delivery (the auto-retry, a continuation): those frames carry
+        // the anchoring item's identity too, or a consumer reading the
+        // tags would class the retry as another client's delivery and
+        // drop its reply from the turn it belongs to.
+        let anchor_admission = first.admission_id.clone();
+        let anchor_client_admission = first.client_admission_id.clone();
+        let anchor_engine_continuation = crate::worker::is_session_own_continuation_item(first);
 
         let prompt_index = {
             let core = self.core.lock().unwrap();
@@ -476,6 +513,15 @@ impl TurnRunner {
                         | EngineEvent::Done(_)
                         | EngineEvent::DoneAborted
                 );
+                // The turn boundary releases RLM child prompt tasks waiting
+                // on it, also when the abort gate below swallows the frame.
+                // It runs BEFORE the worker core lock, not under it: the
+                // boundary only advances the spawn-admission watch channel,
+                // but keeping it outside the core guard leaves the turn
+                // end free of any lock the spawn path may hold.
+                if matches!(event, EngineEvent::Done(_) | EngineEvent::DoneAborted) {
+                    engine.on_turn_done();
+                }
                 let mut core = core.lock().unwrap();
                 // The run's TRUE end — an `agent_end` with no queued work
                 // taking the next turn — keys both the note clear here and
@@ -489,11 +535,6 @@ impl TurnRunner {
                     agent_end && (!core.steering.is_empty() || !core.follow_up.is_empty());
                 if agent_end && !more_queued {
                     engine.clear_progress_note();
-                }
-                // The turn boundary releases RLM child prompt tasks waiting on
-                // it, also when the abort gate below swallows the frame.
-                if matches!(event, EngineEvent::Done(_) | EngineEvent::DoneAborted) {
-                    engine.on_turn_done();
                 }
                 // Durable model cleanup is independent of visual abort-row
                 // suppression and emits no client-facing frame.
@@ -848,7 +889,21 @@ impl TurnRunner {
                     // continued runs included); the rows themselves
                     // already went out through their own events, so no
                     // persist here.
-                    EngineEvent::AgentStart => vec![json!({ "type": "agent_start" })],
+                    EngineEvent::AgentStart => {
+                        let mut retry_start = json!({
+                            "type": "agent_start",
+                        });
+                        if let Some(admission_id) = &anchor_admission {
+                            retry_start["admissionId"] = json!(admission_id);
+                        }
+                        if let Some(client_admission_id) = &anchor_client_admission {
+                            retry_start["clientAdmissionId"] = json!(client_admission_id);
+                        }
+                        if anchor_engine_continuation {
+                            retry_start["engineContinuation"] = json!(true);
+                        }
+                        vec![retry_start]
+                    }
                     EngineEvent::AgentEnd { messages } => vec![json!({
                         "type": "agent_end",
                         "messages": messages,
@@ -1059,7 +1114,27 @@ impl TurnRunner {
         // surface after the settle events.
         coalescer.close();
         flusher.abort();
-
+        // The settle classification, read once for the unwind tail: the
+        // outcome cell stopped moving at the join above, and a settle
+        // frame the abort gate swallowed leaves it unset with the abort
+        // already requested (the waiters still learn the honest
+        // classification, never a dropped channel).
+        let settled_outcome = turn_outcome.lock().unwrap().take().or_else(|| {
+            self.core
+                .lock()
+                .unwrap()
+                .abort_requested
+                .then_some(TurnSettle::Aborted)
+        });
+        // A turn that ended unsuccessfully — FAILED, ABORTED, or
+        // WITHDRAWN — removes none of its admission's queued rows: a
+        // failed or aborted turn mints no continuation (the error
+        // return precedes the goal mint and the goal boundary is
+        // abort-gated), an A2A taskId continuation answers -32004
+        // before it ever queues, and the notice rows the delivery
+        // spawned are results the conversation still owes. The
+        // shutdown's returned batch items are not in the lanes yet;
+        // they return below.
         let more_queued = {
             let mut core = self.core.lock().unwrap();
             // A shutdown never loses admitted input: the batch items whose
@@ -1087,6 +1162,8 @@ impl TurnRunner {
             core.busy = false;
             core.active_action = None;
             core.running_admission_ids.clear();
+            core.running_client_admissions.clear();
+            core.running_wire_admissions.clear();
             more_queued
         };
         self.push_roster_delta();
@@ -1150,11 +1227,15 @@ impl TurnRunner {
         let _ = self.emit_action_update(&snapshot);
         self.idle_notify.notify_waiters();
         for admission_id in settled_admissions {
+            // Every continuation the settled delivery owed clears here:
+            // an A2A taskId continuation answers -32004 before it ever
+            // reaches this worker, so no queued row can still name the
+            // settled admission (a prompt's own unique wire id is the
+            // only producer, and its row ran as this turn).
             self.prompt_admissions.clear(&admission_id);
         }
         // The turn is fully unwound: the waiting prompt now resolves, so
         // a client's next request always observes the idle session.
-        let settled_outcome = turn_outcome.lock().unwrap().take();
         if let Some(result) = settled_outcome {
             for done in items_done {
                 let _ = done.send(result.clone());

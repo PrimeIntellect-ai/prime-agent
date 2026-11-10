@@ -37,6 +37,7 @@ pub enum Mode {
     Json,
     Rpc,
     Acp,
+    A2a,
     Daemon,
 }
 
@@ -47,6 +48,7 @@ impl Mode {
             "json" => Some(Mode::Json),
             "rpc" => Some(Mode::Rpc),
             "acp" => Some(Mode::Acp),
+            "a2a" => Some(Mode::A2a),
             "daemon" => Some(Mode::Daemon),
             _ => None,
         }
@@ -58,6 +60,7 @@ impl Mode {
             Mode::Json => "json",
             Mode::Rpc => "rpc",
             Mode::Acp => "acp",
+            Mode::A2a => "a2a",
             Mode::Daemon => "daemon",
         }
     }
@@ -146,6 +149,12 @@ pub struct Args {
     pub version: bool,
     pub mode: Option<Mode>,
     pub daemon_socket: Option<String>,
+    /// The A2A server mode's bind flags (`--a2a-host`, `--a2a-port`).
+    /// The bearer token is never a flag: `PRIME_AGENT_A2A_TOKEN` or the
+    /// `a2a.token` setting supply it, so the secret stays off the
+    /// command line (visible to every process listing).
+    pub a2a_host: Option<String>,
+    pub a2a_port: Option<u16>,
     pub no_session: bool,
     pub fork: Option<String>,
     pub session_dir: Option<String>,
@@ -263,13 +272,23 @@ pub fn parse_args(args: &[String]) -> Args {
                     result.mode = Some(mode);
                 } else {
                     result.diagnostics.push(Diagnostic::error(format!(
-                        "Invalid --mode \"{mode}\". Valid values: text, json, rpc, acp, daemon"
+                        "Invalid --mode \"{mode}\". Valid values: text, json, rpc, acp, a2a, daemon"
                     )));
                 }
             }
             "--daemon-socket" => {
                 result.daemon_socket = Some(require_value!(arg));
             }
+            "--a2a-host" => {
+                result.a2a_host = Some(require_value!(arg));
+            }
+            "--a2a-port" => match require_value!(arg).parse::<u16>() {
+                Ok(port) => result.a2a_port = Some(port),
+                Err(_) => result.diagnostics.push(Diagnostic::error(
+                    "--a2a-port must be a port number (0 binds an ephemeral port)",
+                )),
+            },
+
             "--continue" | "-c" => result.continue_ = true,
             "--resume" | "-r" => match args.get(i + 1) {
                 Some(next)

@@ -271,7 +271,11 @@ impl SessionEngine for ScriptedEngine {
         aborted: &dyn Fn() -> bool,
         emit: &mut dyn FnMut(EngineEvent) -> bool,
     ) {
-        let cancelled = || EngineEvent::Done(Err("prompt cancelled".to_string()));
+        // The scripted abort settles exactly like the real engine's run
+        // loop (#2617): the structural `DoneAborted`, so a cancelled
+        // prompt's classification rides the typed settle kind, never a
+        // fixture-only error text.
+        let cancelled = EngineEvent::DoneAborted;
         let scripted = self.responses.get(prompt_index).cloned();
         let text = match &scripted {
             Some(response) => {
@@ -279,7 +283,7 @@ impl SessionEngine for ScriptedEngine {
                 // settles at the abort, not at the hold's end.
                 let delay = std::time::Duration::from_millis(Self::response_delay_ms(response));
                 if !abortable_sleep(delay, aborted) {
-                    emit(cancelled());
+                    emit(cancelled);
                     return;
                 }
                 Self::response_text(response)
@@ -301,7 +305,7 @@ impl SessionEngine for ScriptedEngine {
             None => EngineEvent::UserMessage(accepted_row.clone()),
         };
         if !emit(accepted) {
-            emit(cancelled());
+            emit(cancelled);
             return;
         }
         // The batched co-delivery rows: one accepted user row per batched
@@ -326,7 +330,7 @@ impl SessionEngine for ScriptedEngine {
             });
             batch_rows.push(accepted_row.clone());
             if !emit(EngineEvent::UserMessage(accepted_row)) {
-                emit(cancelled());
+                emit(cancelled);
                 return;
             }
         }
@@ -336,7 +340,7 @@ impl SessionEngine for ScriptedEngine {
             if !emit(EngineEvent::GoalUpdate {
                 goal: goal.state.clone(),
             }) {
-                emit(cancelled());
+                emit(cancelled);
                 return;
             }
         }
@@ -347,7 +351,7 @@ impl SessionEngine for ScriptedEngine {
             ),
             stream_event: None,
         }) {
-            emit(cancelled());
+            emit(cancelled);
             return;
         }
         let scripted_tools = scripted
@@ -375,7 +379,7 @@ impl SessionEngine for ScriptedEngine {
             json!({"role": "assistant", "content": content, "provider": "scripted", "model": "faux-1", "usage": usage, "timestamp": crate::util::now_ms()})
         };
         if !emit(EngineEvent::AssistantMessage(final_message.clone())) {
-            emit(cancelled());
+            emit(cancelled);
             return;
         }
         // The scripted tool calls, in the real loop's event order.
@@ -400,7 +404,7 @@ impl SessionEngine for ScriptedEngine {
                 tool_name: tool_name.clone(),
                 args: call.get("args").cloned().unwrap_or(Value::Null),
             }) {
-                emit(cancelled());
+                emit(cancelled);
                 return;
             }
             // A running tool holds the turn for its scripted duration (the
@@ -420,7 +424,7 @@ impl SessionEngine for ScriptedEngine {
                 }),
                 is_error,
             }) {
-                emit(cancelled());
+                emit(cancelled);
                 return;
             }
             let result_message = json!({
@@ -432,7 +436,7 @@ impl SessionEngine for ScriptedEngine {
                 "timestamp": crate::util::now_ms(),
             });
             if !emit(EngineEvent::ToolResultMessage(result_message.clone())) {
-                emit(cancelled());
+                emit(cancelled);
                 return;
             }
             tool_results.push(result_message);
@@ -442,7 +446,7 @@ impl SessionEngine for ScriptedEngine {
             message: final_message.clone(),
             tool_results: tool_results.clone(),
         }) {
-            emit(cancelled());
+            emit(cancelled);
             return;
         }
         // The loop's run-end frame (`agent_end`).
@@ -453,7 +457,7 @@ impl SessionEngine for ScriptedEngine {
         if !emit(EngineEvent::AgentEnd {
             messages: run_messages,
         }) {
-            emit(cancelled());
+            emit(cancelled);
             return;
         }
         emit(EngineEvent::Done(Ok(())));

@@ -871,6 +871,17 @@ impl SupervisorChildSessionsInner {
         let wire = serde_json::to_value(pa_types::session::AgentMessage::Custom(message))
             .unwrap_or(Value::Null);
         let nonce = crate::child_status_notices::mint();
+        // The notice row carries the spawning delivery's identity (the
+        // same stamp the goal mint carries): the parent worker's intake
+        // reads `clientAdmissionId` into the row, the notice turn runs
+        // as the delivery's own continuation (see the runner's
+        // `is_session_own_continuation_item`), and a withdrawal of the
+        // id sweeps the post-children loop.
+        let parent_delivery_admission = record.lock().await.parent_delivery_admission.clone();
+        let mut rest = Map::default();
+        if let Some(admission) = parent_delivery_admission {
+            rest.insert("clientAdmissionId".to_string(), json!(admission));
+        }
         let command = DaemonCommand::FollowUp {
             id: None,
             active_session_id: self.parent_active_session_id.clone(),
@@ -889,7 +900,7 @@ impl SupervisorChildSessionsInner {
                 admission_id: None,
                 rlm_notice_nonce: Some(nonce),
             },
-            rest: Map::default(),
+            rest,
         };
         if let Err(error) = self.command(&command, NOTICE_DELIVERY_TIMEOUT_MS).await {
             eprintln!(

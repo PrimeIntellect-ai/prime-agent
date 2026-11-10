@@ -19,11 +19,14 @@ async fn suspended_runner_parks_a_queued_item_until_resumed() {
             agent_message: None,
             queue_key: None,
             admission_id: None,
+            client_admission_id: None,
             images: Vec::new(),
             done: Some(done_tx),
             queue_visible: true,
             policy: TurnPolicy::Queued,
             forced_batch: false,
+            kernel_notice: false,
+            delivery_scoped: false,
         });
     }
     let parked = std::sync::Arc::clone(&runner.core);
@@ -74,11 +77,14 @@ fn queued_prompt(message: &str, policy: TurnPolicy) -> QueuedItem {
         agent_message: None,
         queue_key: None,
         admission_id: None,
+        client_admission_id: None,
         images: Vec::new(),
         done: None,
         queue_visible: true,
         policy,
         forced_batch: false,
+        kernel_notice: false,
+        delivery_scoped: false,
     }
 }
 

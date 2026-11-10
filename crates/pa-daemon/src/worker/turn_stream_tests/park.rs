@@ -213,11 +213,14 @@ async fn compacting_window_parks_a_cleared_suspension_until_it_ends() {
             agent_message: None,
             queue_key: None,
             admission_id: None,
+            client_admission_id: None,
             images: Vec::new(),
             done: Some(done_tx),
             queue_visible: true,
             policy: TurnPolicy::Queued,
             forced_batch: false,
+            kernel_notice: false,
+            delivery_scoped: false,
         });
     }
     let parked = std::sync::Arc::clone(&runner.core);
@@ -349,11 +352,14 @@ async fn idle_passivation_refuses_while_the_lanes_hold_undelivered_input() {
             agent_message: None,
             queue_key: None,
             admission_id: None,
+            client_admission_id: None,
             images: Vec::new(),
             done: None,
             queue_visible: true,
             policy: TurnPolicy::Queued,
             forced_batch: false,
+            kernel_notice: false,
+            delivery_scoped: false,
         });
     }
     assert!(
@@ -382,11 +388,14 @@ async fn idle_passivation_refuses_while_the_lanes_hold_undelivered_input() {
         agent_message: None,
         queue_key: None,
         admission_id: None,
+        client_admission_id: None,
         images: Vec::new(),
         done: None,
         queue_visible: true,
         policy: TurnPolicy::Queued,
         forced_batch: false,
+        kernel_notice: false,
+        delivery_scoped: false,
     });
     assert!(
         runner.idle_passivation_window().is_none(),

@@ -83,6 +83,11 @@ pub enum DaemonErrorInfo {
     /// The supervisor refused a request-shaped client command because the target worker is at its
     /// in-flight bound: the request never left the supervisor, so a retry cannot duplicate it.
     WorkerOverloaded,
+    /// A prompt's turn was aborted or withdrawn before it produced a response: the waiting
+    /// `prompt_and_wait` fails with the settle's wire text and this kind. The kind, not the
+    /// text, is the cancellation's authority — the engine's no-response failure carries the
+    /// same string as an abort, so the text alone cannot classify the settle.
+    PromptSettleCancelled,
     /// A `code` this build does not know (a newer daemon's typed refusal):
     /// degrade to the plain refusal message riding the same response, never
     /// fail the deserialization (that would drop the refusal).
@@ -434,6 +439,10 @@ mod tests {
         // message.
         rt::<DaemonOutbound>(
             r#"{"type":"response","command":"create","success":false,"error":"Daemon is preparing an update restart","errorInfo":{"code":"update_restarting"}}"#,
+        );
+        // `prompt_settle_cancelled`: the aborted/withdrawn settle's typed kind.
+        rt::<DaemonOutbound>(
+            r#"{"type":"response","command":"prompt_and_wait","success":false,"error":"No response produced.","errorInfo":{"code":"prompt_settle_cancelled"}}"#,
         );
     }
 

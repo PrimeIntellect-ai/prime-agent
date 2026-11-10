@@ -132,6 +132,10 @@ pub struct IpythonKernelProvisionerOptions {
     /// Fires when the kernel's last live background `bash()` handle
     /// settles, so owed continuations can resume.
     pub on_background_work_settled: Option<crate::kernel::shared::BackgroundWorkSettledCallback>,
+    /// Fires at each kernel `bash()` launch that reports its pid.
+    pub on_kernel_bash_launch: Option<crate::kernel::shared::KernelBashLaunchCallback>,
+    /// Fires at each kernel `bash()` handle's activity end.
+    pub on_kernel_bash_activity_end: Option<crate::kernel::shared::KernelBashActivityEndCallback>,
     /// Fires once per kernel start when installed Python skills failed to import into the kernel,
     /// so the session can tell the model before it wastes turns calling them.
     pub on_unavailable_skills: Option<UnavailableSkillsCallback>,
@@ -1098,6 +1102,8 @@ async fn start_kernel_impl(
         host_handlers: options.host_handlers.clone(),
         python_skills: options.python_skills.clone(),
         on_background_work_settled: options.on_background_work_settled.clone(),
+        on_kernel_bash_launch: options.on_kernel_bash_launch.clone(),
+        on_kernel_bash_activity_end: options.on_kernel_bash_activity_end.clone(),
         snapshot,
         bootstrap_code: Some(bootstrap_code.clone()),
         stderr_log_path,

@@ -28,6 +28,32 @@ pub(crate) const SIDE_QUESTION_SETTLE_TIMEOUT: Duration = Duration::from_secs(3)
 pub(crate) const QUEUED_INPUT_SUSPENDED: &str =
     "Cannot admit a session action while queued session input is suspended.";
 
+/// The `kill_if_idle` refusal (a Rust-only daemon extension, no TS
+/// client sends it): the session holds a turn or queued work, so the
+/// reclamation moves on — the ONE failure that means "do not stop",
+/// every other failure leaves the stop's contract to the caller.
+pub(crate) const KILL_IF_IDLE_HOLDS_WORK: &str = "the session holds work; refusing the idle kill";
+/// The idle kill's other refusal: a live observer's connection (the
+/// A2A link detaches before it asks, so any attached client left is a
+/// foreign observer) never drops under a reclamation.
+pub(crate) const KILL_IF_IDLE_HAS_CLIENT: &str =
+    "the session holds an attached client; refusing the idle kill";
+
+/// Whether a `kill_if_idle` answer is the worker's (or the saturated
+/// route's) refusal — the ONE answer that keeps the candidate: the
+/// worker's own texts (it holds a turn, queued work, or an attached
+/// client) and the backpressured route's typed `worker_overloaded`
+/// (the request never left the supervisor, and a worker at its
+/// in-flight bound is by definition a busy one). Every other failure
+/// leaves the stop's contract to the caller exactly like the
+/// unconditional kill it replaces.
+pub(crate) fn kill_refused_by_worker(response: &pa_types::daemon::DaemonResponse) -> bool {
+    response.error_info == Some(pa_types::daemon::DaemonErrorInfo::WorkerOverloaded)
+        || response.error.as_deref().is_some_and(|error| {
+            error.contains(KILL_IF_IDLE_HOLDS_WORK) || error.contains(KILL_IF_IDLE_HAS_CLIENT)
+        })
+}
+
 /// The item's turn-execution class: items co-deliver as one batched turn only
 /// within the same class; the direct-prompt hand-off never joins a batch.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -73,6 +99,26 @@ pub(crate) const PROMPT_ABORTED_BEFORE_DELIVERY: &str = "Prompt aborted before d
 /// The wire text of a queued prompt deleted through a queue mutation (TS
 /// `QueuedMessageError` verbatim).
 pub(crate) const QUEUED_PROMPT_DELETED: &str = "Queued prompt was deleted before delivery.";
+
+/// The wire text of a queued prompt withdrawn by `clear_queue` (TS
+/// `clearQueue`'s `promptError` verbatim): a clear is an operator
+/// action on the whole queue, not the delete of one row — the texts
+/// stay distinct the way TS keeps them.
+pub(crate) const QUEUED_PROMPT_CLEARED: &str = "Queued prompt was cleared before delivery.";
+
+/// The wire text of a prompt refused because its admission was already
+/// cancelled (the supervisor's cancellation ladder and the worker's
+/// commit check answer with it verbatim; an A2A task settles CANCELED
+/// on it).
+pub(crate) const PROMPT_ADMISSION_CANCELLED: &str = "Prompt admission was cancelled.";
+
+/// The wire text of a queued prompt withdrawn by its OWN admission's
+/// cancel (TS `promptAndWait`'s abort-controller settle,
+/// agent-session.ts's `Prompt was cancelled before it started.`
+/// verbatim): the cancel-withdraw contract, distinct from a queue
+/// mutation's delete (`QUEUED_PROMPT_DELETED`, which stays the
+/// queue-delete text) and carrying the same typed cancellation kind.
+pub(crate) const PROMPT_CANCELLED_BEFORE_START: &str = "Prompt was cancelled before it started.";
 
 /// The typed settle of one queued prompt: the variants classify the
 /// settle without reading the (provider-controllable) error text.
@@ -150,6 +196,13 @@ pub(crate) struct QueuedItem {
     /// The prompt-admission id (the `cancel_prompt_admission`
     /// bookkeeping); `None` when it carried none.
     pub(crate) admission_id: Option<String>,
+    /// The client's own admission id the delivery named, before the
+    /// supervisor's rewrite (the `clientAdmissionId` wire member): the
+    /// delivery's identity for event consumers — the rewritten
+    /// `admission_id` is the daemon's own. `None` when the delivery
+    /// named none. Never journaled (the admission's lifecycle: it does
+    /// not survive a recovery).
+    pub(crate) client_admission_id: Option<String>,
     /// Images attached to the prompt (wire `images`: base64 plus mime
     /// type).
     pub(crate) images: Vec<pa_agent::types::ImageContent>,
@@ -163,6 +216,21 @@ pub(crate) struct QueuedItem {
     /// Membership of the one-shot forced steering batch: armed items co-deliver as
     /// one batched turn even under "one-at-a-time". Never journaled.
     pub(crate) forced_batch: bool,
+    /// The daemon's own kernel-notice provenance: `admit_kernel_notice`
+    /// sets it at the producer, never the busy-dependent policy — a
+    /// busy notice queues visibly like a client's steer, but it is the
+    /// session's own work (the pickup mints no wire id for it and its
+    /// run tags the engine-continuation source). A client can claim the
+    /// notice's custom kind; it can never set this flag. Journaled with
+    /// the row, so a revived worker keeps the class.
+    pub(crate) kernel_notice: bool,
+    /// The delivery-scoped batch isolation (the A2A prompt's
+    /// `deliveryScoped` member, read at the prompt intake): the row's
+    /// batch identity governs its co-delivery — a scoped row joins no
+    /// batch and admits no other row, where the legacy rule (TS's) joins
+    /// every compatible neighbor whatever their admissions name.
+    /// Journaled with the row, so a revived worker keeps the class.
+    pub(crate) delivery_scoped: bool,
 }
 
 /// Parse the wire `images` array: entries without payload data or a
@@ -308,6 +376,8 @@ pub(crate) fn queue_lanes(core: &SessionCore) -> QueueLanes {
                 queue_visible: item.queue_visible,
                 policy: item.policy.journal_value().to_string(),
                 forced_batch: item.forced_batch,
+                kernel_notice: item.kernel_notice,
+                delivery_scoped: item.delivery_scoped,
                 images: item.images.clone(),
             })
             .collect()
@@ -316,6 +386,133 @@ pub(crate) fn queue_lanes(core: &SessionCore) -> QueueLanes {
         steering: items(&core.steering),
         follow_up: items(&core.follow_up),
     }
+}
+
+/// The running turn's admission identities: every anchoring item's
+/// wire admission id (the supervisor's rewrite) AND its client
+/// admission id (the delivery's own identity, `clientAdmissionId`): a
+/// consumer — the identity-scoped withdraw, the turn's own unwind
+/// sweep — can match the running turn by either half without the
+/// daemon's rewrite table.
+pub(crate) fn running_admission_ids(items: &[QueuedItem]) -> std::collections::HashSet<String> {
+    items
+        .iter()
+        .flat_map(|item| {
+            item.admission_id
+                .clone()
+                .into_iter()
+                .chain(item.client_admission_id.clone())
+        })
+        .collect()
+}
+
+/// The running turn's client admission ids (the delivery's own
+/// identity, `clientAdmissionId` — one id per uniform batch): the
+/// engine's continuation mints stamp their rows with the owning
+/// delivery's client id, so an identity-scoped withdrawal of that id
+/// stops the session's own continuation work with the turn that drove
+/// it.
+pub(crate) fn running_client_admissions(items: &[QueuedItem]) -> Vec<String> {
+    items
+        .iter()
+        .filter_map(|item| item.client_admission_id.clone())
+        .collect()
+}
+
+/// The running turn's wire admission ids (the supervisor-assigned
+/// halves, or a WORKER-MINTED id when a CLIENT'S OWN delivery names
+/// none): the continuation mint's identity FALLBACK — a plain daemon
+/// prompt (the TUI's, any plain client's) carries no client id AND the
+/// supervisor assigns plain prompts no wire id, so the pickup mints
+/// one here and the minted rows still carry a discriminating identity
+/// instead of none at all. The mint is a CLIENT-delivery tool only:
+/// the session's own internal rows — the engine's continuations, the
+/// daemon-provenance child-status notices — never mint. Their chains
+/// stay session-owned (unstamped, credited as the session's own
+/// continuation by the consumer), where a fresh worker-admission stamp
+/// would name a delivery no waiting task owns and the consumer would
+/// refuse every later turn of the loop as FOREIGN (the truncated
+/// answer that reports success).
+pub(crate) fn running_wire_admissions(items: &[QueuedItem]) -> Vec<String> {
+    let mut ids: Vec<String> = items
+        .iter()
+        .filter_map(|item| item.admission_id.clone())
+        .collect();
+    if ids.is_empty()
+        && items
+            .first()
+            .is_some_and(crate::worker::is_clients_own_delivery)
+    {
+        ids.push(format!("worker-admission:{}", uuid::Uuid::new_v4()));
+    }
+    ids
+}
+
+/// The rows an identity-scoped lane sweep dropped: each lane's
+/// withdrawn messages for the caller's answer, the agent rows their
+/// bounce notice, and the waiters their withdrawn settle (see
+/// [`sweep_named_deliveries`]).
+#[derive(Default)]
+pub(crate) struct SweptDeliveries {
+    pub(crate) steering: Vec<String>,
+    pub(crate) follow_up: Vec<String>,
+    pub(crate) agent_rows: Vec<Value>,
+    pub(crate) done: Vec<oneshot::Sender<TurnSettle>>,
+}
+
+/// Remove every queued row naming one of `ids` — either identity half:
+/// the wire admission id the supervisor assigned, or the client's own
+/// admission id the delivery carried — from both lanes, in order: the
+/// removal `withdraw_admission` answers its sweep with. A turn's own
+/// unwind runs no such removal: a failed or aborted turn mints no
+/// continuation (the error return precedes the goal mint and the goal
+/// boundary is abort-gated), an A2A `taskId` continuation answers
+/// -32004 before it ever queues, and the sibling child-status and
+/// kernel notice rows are terminal results of work the delivery
+/// spawned — a queued `[bash-done]` and a sibling child's notice are
+/// queue-visible work `requestAbort` never cancels (the TS abort
+/// demotes RLM terminal notices into the next turn's messages).
+pub(crate) fn sweep_named_deliveries(
+    core: &mut SessionCore,
+    admissions: &crate::prompt_admission::WorkerAdmissions,
+    ids: &[String],
+) -> SweptDeliveries {
+    let owns_admission = |item: &QueuedItem| {
+        ids.iter().any(|id| {
+            item.admission_id.as_deref() == Some(id.as_str())
+                || item.client_admission_id.as_deref() == Some(id.as_str())
+        })
+    };
+    let mut swept = SweptDeliveries {
+        steering: Vec::new(),
+        follow_up: Vec::new(),
+        agent_rows: Vec::new(),
+        done: Vec::new(),
+    };
+    for (lane, withdrawn) in [
+        (&mut core.steering, &mut swept.steering),
+        (&mut core.follow_up, &mut swept.follow_up),
+    ] {
+        let mut retained = VecDeque::with_capacity(lane.len());
+        while let Some(mut item) = lane.pop_front() {
+            if owns_admission(&item) {
+                if let Some(id) = item.admission_id.as_deref() {
+                    admissions.clear(id);
+                }
+                if item.agent_message.is_some() {
+                    swept.agent_rows.extend(item.custom_message);
+                }
+                if let Some(done) = item.done.take() {
+                    swept.done.push(done);
+                }
+                withdrawn.push(item.message);
+            } else {
+                retained.push_back(item);
+            }
+        }
+        *lane = retained;
+    }
+    swept
 }
 
 /// The lane's front item anchors the delivery; under queue mode "all" — or
@@ -352,12 +549,33 @@ pub(crate) fn gather_delivery_batch(core: &mut SessionCore, lane: Lane) -> Vec<Q
         return batch;
     }
     let first_policy = first.policy;
+    // The batch's delivery identity (the admission pair the anchor
+    // names): the split is the DELIVERY-SCOPED rows' rule alone (the
+    // A2A prompt's `deliveryScoped` flag) — a scoped row joins no batch
+    // and admits no other row (an A2A taskId continuation never queues
+    // at all: it answers -32004 before it reaches this worker), so the
+    // match keeps one delivery's rows together without ever mixing a
+    // foreign row in (a foreign-front batch would anchor the run on the
+    // foreign delivery, and an admission-first batch would leak the
+    // foreign row's reply into the conversation's run and mint a
+    // spurious credit). Two UNSCOPED rows batch whatever their
+    // admissions name — the TS-era rule: a legacy client's
+    // admission-named prompts co-deliver as one turn, and their runs
+    // anchor on the front row's identity exactly as TS's do.
+    let first_scoped = first.delivery_scoped;
+    let first_admission = (
+        first.admission_id.clone(),
+        first.client_admission_id.clone(),
+    );
     batch.push(items.pop_front().expect("front checked"));
     if forced || mode == "all" {
         while let Some(next) = items.front() {
             if next.policy != first_policy
                 || next.custom_message.is_some()
                 || (forced && !next.forced_batch)
+                || (first_scoped || next.delivery_scoped)
+                    && (next.admission_id.clone(), next.client_admission_id.clone())
+                        != first_admission
                 || crate::session_commands::parse_prompt_session_command(&next.message).is_some()
             {
                 break;
@@ -405,11 +623,14 @@ pub(crate) fn restore_queue_snapshot(
                     agent_message,
                     queue_key: record.queue_key,
                     admission_id: None,
+                    client_admission_id: None,
                     images: record.images,
                     done: None,
                     queue_visible: record.queue_visible,
                     policy,
                     forced_batch: record.forced_batch,
+                    kernel_notice: record.kernel_notice,
+                    delivery_scoped: record.delivery_scoped,
                 }
             })
             .collect()
@@ -433,6 +654,22 @@ pub(crate) fn admit_autonomous_follow_up(
 ) {
     {
         let mut core = core.lock().unwrap();
+        // The minted continuation carries the running delivery's own
+        // identity: the session's autonomous work is the delivery's
+        // work, and a withdrawal naming that id (the A2A cancel of
+        // the task the delivery named) sweeps the queued row and
+        // aborts its running turn like any owned row. A delivery
+        // without a client id (a plain daemon prompt) still names its
+        // work through its wire id — the supervisor's rewrite, or the
+        // worker's pickup mint for a plain delivery — the mint's
+        // identity FALLBACK — so an event consumer can always tell one
+        // delivery's minted rows from another's, never an unstamped
+        // row every consumer would have to guess about.
+        let owner = core
+            .running_client_admissions
+            .first()
+            .or_else(|| core.running_wire_admissions.first())
+            .cloned();
         core.follow_up.push_back(QueuedItem {
             priority: QueuePriority::Background,
             preview: None,
@@ -441,11 +678,14 @@ pub(crate) fn admit_autonomous_follow_up(
             agent_message: None,
             queue_key: Some(AUTONOMOUS_QUEUE_KEY.to_string()),
             admission_id: None,
+            client_admission_id: owner,
             images: Vec::new(),
             done: None,
             queue_visible: false,
             policy: TurnPolicy::Injected,
             forced_batch: false,
+            kernel_notice: false,
+            delivery_scoped: false,
         });
     }
     // The admission checkpoint: a continuation admitted while idle is undelivered
@@ -488,6 +728,23 @@ pub(crate) fn admit_goal_follow_up(
     }
     {
         let mut core = core.lock().unwrap();
+        // The goal continuation carries the running delivery's own
+        // identity (the loop the delivery's prompt started is the
+        // delivery's work): a withdrawal naming that id sweeps the
+        // queued continuation and aborts its running turn, and its loop
+        // stop pauses the goal — an owed continuation the sweep cannot
+        // reach (deferred behind unsettled children) retires with the
+        // pause instead of minting behind the canceled task. A
+        // delivery without a client id (a plain daemon prompt) still
+        // names its work through its wire id — the supervisor's
+        // rewrite, or the worker's pickup mint for a plain delivery
+        // — the mint's identity FALLBACK (see
+        // [`admit_autonomous_follow_up`]).
+        let owner = core
+            .running_client_admissions
+            .first()
+            .or_else(|| core.running_wire_admissions.first())
+            .cloned();
         let item = QueuedItem {
             priority: QueuePriority::Background,
             preview: None,
@@ -496,11 +753,14 @@ pub(crate) fn admit_goal_follow_up(
             agent_message: None,
             queue_key: None,
             admission_id: None,
+            client_admission_id: owner,
             images: follow_up.request.images,
             done: None,
             queue_visible: false,
             policy: TurnPolicy::Injected,
             forced_batch: false,
+            kernel_notice: false,
+            delivery_scoped: false,
         };
         match lane {
             Lane::Steering => enqueue_priority(&mut core.steering, item),
@@ -527,7 +787,12 @@ pub(crate) fn admit_goal_follow_up(
 /// Admit one kernel notice (a detached bash completion or a factory run
 /// milestone): the row queues on the steering lane (busy sessions keep a
 /// visible steer row, idle sessions wake into it); a crash before the
-/// delivery revives with the row replaying.
+/// delivery revives with the row replaying. A bash completion row carries
+/// the CREATING delivery's client admission id (the launch-time binding
+/// the worker's bash-launch observer recorded): the notice turn then
+/// runs as that delivery's own continuation — its frames credit to the
+/// delivery's task, an identity-scoped withdrawal aborts it, and a
+/// FOREIGN client's bash never credits to the awaiting A2A head.
 pub(crate) fn admit_kernel_notice(
     recovery: &std::sync::Mutex<Option<WorkerRecoveryJournal>>,
     core: &Arc<Mutex<SessionCore>>,
@@ -548,6 +813,27 @@ pub(crate) fn admit_kernel_notice(
     if session_is_closed() {
         return;
     }
+    // The creator binding: the completion row's pid resolves against the
+    // launch table (the launch-time observation), and the binding leaves
+    // with its use — one entry per launch, consumed by its own notice.
+    let creator = row
+        .details
+        .as_ref()
+        .and_then(|details| details.get("pid"))
+        .and_then(Value::as_u64)
+        .and_then(|pid| u32::try_from(pid).ok())
+        .and_then(|pid| {
+            let creator = core_guard
+                .kernel_bash_creators
+                .iter()
+                .position(|binding| binding.0 == pid)
+                .and_then(|index| core_guard.kernel_bash_creators.remove(index))
+                .map(|(_pid, creator)| creator);
+            if creator.is_some() {
+                core_guard.kernel_bash_activity.notify_waiters();
+            }
+            creator
+        });
     let (policy, queue_visible) = if core_guard.busy {
         (TurnPolicy::Queued, true)
     } else {
@@ -563,11 +849,16 @@ pub(crate) fn admit_kernel_notice(
             agent_message: None,
             queue_key: None,
             admission_id: None,
+            client_admission_id: creator,
             images: Vec::new(),
             done: None,
             queue_visible,
             policy,
             forced_batch: false,
+            // The producer's own provenance flag: busy or idle, the
+            // row stays the session's kernel notice.
+            kernel_notice: true,
+            delivery_scoped: false,
         });
     }
     // The checkpoint re-locks the core (documented order: recovery lock

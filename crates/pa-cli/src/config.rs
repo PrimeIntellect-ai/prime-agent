@@ -46,6 +46,159 @@ pub const ENV_LEGACY_SESSION_DIR: &str = "PRIME_AGENT_CODING_AGENT_SESSION_DIR";
 /// overrides it.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
+/// `PRIME_AGENT_A2A_TOKEN`: the A2A server mode's bearer token,
+/// preferred over the `a2a.token` setting (never a CLI flag, so the
+/// secret stays off the command line).
+pub const ENV_A2A_TOKEN: &str = "PRIME_AGENT_A2A_TOKEN";
+
+/// The A2A server mode's public base URL (settings `a2a.publicBaseUrl`):
+/// the agent card's interface URL and the accepted `Host` authority
+/// when a TLS-terminating front serves the mode (the bound endpoint is
+/// otherwise the honest URL — the server is local-only without it).
+pub fn a2a_public_base_url(cwd: &std::path::Path) -> Option<String> {
+    pa_core::settings::SettingsManager::create(cwd, get_agent_dir()).get_a2a_public_base_url()
+}
+
+/// The A2A server mode's live-context bound (settings `a2a.maxContexts`;
+/// the default 64): the server keeps at most this many conversation
+/// contexts, evicting the least recently used idle one (its worker
+/// stops) when the table is full.
+pub fn a2a_max_contexts(cwd: &std::path::Path) -> Option<usize> {
+    pa_core::settings::SettingsManager::create(cwd, get_agent_dir()).get_a2a_max_contexts()
+}
+
+/// Resolve the A2A server mode's bind options — flag > settings >
+/// default for the host and port, environment > settings for the
+/// bearer token (the token is deliberately not a flag — a flag lands
+/// in every process listing and the shell history), with the loud
+/// warning the spec's enterprise section asks for on every
+/// non-loopback bind — and scrub the token's
+/// environment variable: the A2A process spawns its supervisor from
+/// this environment and forwards it into every context's worker
+/// (`launch_env`), so the secret must leave the process env before
+/// either runs — the resolved token is already in hand. Call while
+/// the process is still single-threaded (the A2A mode's entry, before
+/// the tokio runtime builds).
+///
+/// With no token configured anywhere (neither the environment nor the
+/// `a2a.token` setting), the mode MINTS one per run: a fresh random
+/// token handed to the serving mode in memory, written by the server
+/// — after its listener binds — to an owner-only file in the agent
+/// dir, named per bound port (a second server on another port never
+/// overwrites the first's token), whose path it prints — every task
+/// route requires a token (the
+/// daemon's control socket is owner-only, and the TCP listener must
+/// not be the weaker surface: any local account could otherwise drive
+/// the agent's bash and python tools as the operator), while the
+/// well-known Agent Card stays public.
+/// # Errors
+///
+/// Returns the startup error string when the configured `a2a.port`
+/// sits outside the TCP port range (the server refuses to start
+/// rather than bind a port the settings do not name).
+pub fn a2a_bind_options_scrubbed(
+    host_flag: Option<&str>,
+    port_flag: Option<u16>,
+    cwd: &std::path::Path,
+) -> Result<(String, u16, String, Option<std::path::PathBuf>), String> {
+    let settings = pa_core::settings::SettingsManager::create(cwd, get_agent_dir());
+    let host = host_flag
+        .map(|h| h.trim().to_string())
+        .filter(|h| !h.is_empty())
+        .or_else(|| settings.get_a2a_host())
+        .unwrap_or_else(|| "127.0.0.1".to_string());
+    // A configured port outside the TCP range is a startup error, not
+    // a silent default-port bind: the settings document would name a
+    // port the server never listens on (the flag path cannot carry one
+    // — `--a2a-port` parses as u16).
+    let port = match port_flag {
+        Some(port) => port,
+        None => match settings.get_a2a_port() {
+            Some(port) => u16::try_from(port).map_err(|_| {
+                format!(
+                    "the a2a.port setting is {port}, outside the TCP port range \
+                     0-65535; fix the setting before starting the A2A server"
+                )
+            })?,
+            None => crate::config::A2A_DEFAULT_PORT,
+        },
+    };
+    let token = std::env::var(ENV_A2A_TOKEN)
+        .ok()
+        .filter(|t| !t.trim().is_empty())
+        .map(|t| t.trim().to_string())
+        .or_else(|| settings.get_a2a_token());
+    if !host_is_loopback(&host) {
+        // The real posture, never the false one: a bearer token gates
+        // every task route (minted when none is configured), so a
+        // non-loopback bind is authenticated but not encrypted — name
+        // the TLS front and the token the remote peers must present
+        // (a per-run minted token is written to a local owner-only
+        // file they cannot read; configure one they know).
+        eprintln!(
+            "Warning: the A2A server is binding {host} on a non-loopback interface. \
+A bearer token gates every task route; set the {ENV_A2A_TOKEN} environment \
+variable or the a2a.token setting so remote peers can present it, and front \
+the bind with TLS — the token authenticates, it does not encrypt."
+        );
+    }
+    // The mint stays in memory here: the token FILE is written only
+    // after the listener binds, named per bound port (a second start
+    // against the same agent dir — another port, a port-0 run — must
+    // never overwrite the token file of the server that is still
+    // running, which would leave every client reading the documented
+    // path with a 401 and nothing explaining it). The fresh
+    // experience never serves unauthenticated: the value reaches the
+    // caller in memory, and the file's agent dir is the server that
+    // actually binds (see the a2a module's write site).
+    let (token, minted) = match token {
+        Some(token) => (token, None),
+        None => (
+            format!(
+                "{}{}",
+                uuid::Uuid::new_v4().simple(),
+                uuid::Uuid::new_v4().simple()
+            ),
+            Some(get_agent_dir()),
+        ),
+    };
+    std::env::remove_var(ENV_A2A_TOKEN);
+    Ok((host, port, token, minted))
+}
+
+pub const A2A_DEFAULT_PORT: u16 = 7800;
+
+/// Whether a bind host is loopback (`127.0.0.0/8`, `::1`, or
+/// `localhost` — case-insensitively, the name a resolver reads the
+/// same way).
+fn host_is_loopback(host: &str) -> bool {
+    let host = host.trim_matches(|c| c == '[' || c == ']');
+    host.eq_ignore_ascii_case("localhost")
+        || host
+            .parse::<std::net::Ipv4Addr>()
+            .is_ok_and(|ip| ip.is_loopback())
+        || host
+            .parse::<std::net::Ipv6Addr>()
+            .is_ok_and(|ip| ip.is_loopback())
+}
+
+/// The A2A card's agent name (settings `a2a.name`, default "Prime Agent").
+pub fn a2a_agent_name(cwd: &std::path::Path) -> String {
+    pa_core::settings::SettingsManager::create(cwd, get_agent_dir())
+        .get_a2a_name()
+        .unwrap_or_else(|| "Prime Agent".to_string())
+}
+
+/// The A2A card's agent description (settings `a2a.description`, the
+/// one-line default otherwise).
+pub fn a2a_agent_description(cwd: &std::path::Path) -> String {
+    pa_core::settings::SettingsManager::create(cwd, get_agent_dir()).get_a2a_description()
+    .unwrap_or_else(|| {
+        "A general-purpose coding and research agent driven over the Agent2Agent (A2A) protocol."
+            .to_string()
+    })
+}
+
 /// The product version: the packaged `package.json` manifest next to the
 /// executable wins, falling back to the compiled-in version.
 pub fn version() -> &'static str {
@@ -173,6 +326,66 @@ mod tests {
         );
         std::env::remove_var(ENV_DAEMON_SOCKET);
         assert_eq!(resolve_daemon_socket_path(None), default);
+    }
+
+    /// The A2A token's env var scrubs at the bind-options resolution:
+    /// the resolved options carry the token while the variable leaves
+    /// the process env, so the supervisor spawn and every context's
+    /// `launch_env` collect cannot forward the secret.
+    #[test]
+    fn resolving_the_bind_options_scrubs_the_token_env() {
+        let _env = env_lock();
+        std::env::set_var(ENV_A2A_TOKEN, "probe-secret-a2a");
+        let (host, port, token, minted) = a2a_bind_options_scrubbed(
+            Some("127.0.0.1"),
+            Some(7800),
+            std::path::Path::new("/nonexistent-a2a-cwd"),
+        )
+        .expect("the bind options resolve");
+        assert_eq!(host, "127.0.0.1");
+        assert_eq!(port, 7800);
+        assert_eq!(token, "probe-secret-a2a");
+        assert_eq!(minted, None, "a configured token is never minted");
+        assert!(
+            std::env::var(ENV_A2A_TOKEN).is_err(),
+            "the scrub removed the token's environment variable"
+        );
+    }
+
+    /// An out-of-range `a2a.port` is a startup error, never a silent
+    /// default-port bind: the settings document would otherwise name a
+    /// port the server never listens on.
+    #[test]
+    fn an_out_of_range_a2a_port_errors_instead_of_the_default() {
+        let _env = env_lock();
+        let agent_dir = tempfile::tempdir().expect("temp agent dir");
+        std::env::set_var(ENV_AGENT_DIR, agent_dir.path());
+        std::fs::write(
+            agent_dir.path().join("settings.json"),
+            r#"{"a2a":{"port":70000}}"#,
+        )
+        .expect("settings write");
+        let refused =
+            a2a_bind_options_scrubbed(None, None, std::path::Path::new("/nonexistent-a2a-cwd"));
+        // The same document with an in-range port resolves the
+        // configured value (the error path never widened into a
+        // default-for-everything).
+        std::fs::write(
+            agent_dir.path().join("settings.json"),
+            r#"{"a2a":{"port":443}}"#,
+        )
+        .expect("settings write");
+        let resolved =
+            a2a_bind_options_scrubbed(None, None, std::path::Path::new("/nonexistent-a2a-cwd"));
+        // The env window closes before any assertion can panic.
+        std::env::remove_var(ENV_AGENT_DIR);
+        let error = refused.expect_err("the out-of-range port must error");
+        assert!(
+            error.contains("a2a.port") && error.contains("70000"),
+            "the error names the setting and its value: {error}"
+        );
+        let (_, port, _, _) = resolved.expect("the in-range port resolves");
+        assert_eq!(port, 443);
     }
 
     #[test]

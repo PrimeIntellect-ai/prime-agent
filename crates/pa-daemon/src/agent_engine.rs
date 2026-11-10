@@ -108,6 +108,11 @@ enum PromptContextBoundary {
     Leaf(String),
 }
 
+/// The bound of [`AgentSessionEngine::autonomous_withdrawn_deliveries`]:
+/// the oldest withdrawn chain leaves first (a long-lived session's
+/// cancels are bounded by the conversations it served).
+pub(crate) const MAX_WITHDRAWN_AUTONOMOUS_CHAINS: usize = 64;
+
 /// A [`SessionEngine`] running real agent turns.
 pub struct AgentSessionEngine {
     pub(crate) runtime: crate::async_safe_runtime::AsyncSafeRuntime,
@@ -116,6 +121,14 @@ pub struct AgentSessionEngine {
     pub(crate) mcp: std::sync::Arc<std::sync::Mutex<pa_core::mcp::McpManager>>,
     pub(crate) late_agent_message_sink:
         std::sync::Mutex<Option<pa_core::LateSentAgentMessageHandler>>,
+    /// The kernel `bash()` launch observer (the pid→delivery binding
+    /// the kernel-notice stamping reads; see [`crate::engine::KernelNotice`]).
+    pub(crate) kernel_bash_launch_observer:
+        std::sync::Mutex<Option<pa_core::kernel::shared::KernelBashLaunchCallback>>,
+    /// The kernel `bash()` activity-end observer (the in-cell-consumed
+    /// handle's binding leaves; see [`crate::worker::admit_kernel_notice`]).
+    pub(crate) kernel_bash_activity_end_observer:
+        std::sync::Mutex<Option<pa_core::kernel::shared::KernelBashActivityEndCallback>>,
     /// Whether this run's usage crossed the goal's token budget: the boundary
     /// mints the budget-limit wrap-up steer. Shared with the agent-loop
     /// subscription (a plain field cannot cross the 'static handler).
@@ -248,6 +261,47 @@ pub struct AgentSessionEngine {
     /// Whether the in-run hook deferred the continuation behind unsettled
     /// RLM descendant work: the settle hook delivers it.
     pub(crate) autonomous_awaits_rlm_work: std::sync::atomic::AtomicBool,
+    /// The delivery whose in-run hook set
+    /// [`AgentSessionEngine::autonomous_awaits_rlm_work`] (the running
+    /// delivery at the deferral — the same stamp the child registry and
+    /// the goal mint carry): an identity-scoped withdrawal retires the
+    /// deferral only on this match, so one client's cancel never drops
+    /// another delivery's owed continuation on the shared session.
+    pub(crate) autonomous_awaits_rlm_work_owner: std::sync::Mutex<Option<String>>,
+    /// The delivery whose turn started the session's active goal (the
+    /// running delivery at the Active transition, read through the
+    /// worker's probe — the same identity source the child stamp and
+    /// the continuation mint carry): the withdrawal's goal pause stops
+    /// the goal the withdrawn delivery started, never another client's
+    /// goal on the shared session.
+    pub(crate) goal_owner_delivery: std::sync::Mutex<Option<String>>,
+    /// The withdrawn delivery chains the goal loop must not mint for (a
+    /// withdrawal records its admission id here, synchronously before the
+    /// cancel answers): the goal mint consults read it before any mint, so
+    /// a canceled task's loop spends no turn even when the durable pause's
+    /// own task is still waiting on the engine runtime — the pause lands
+    /// after the mint window it must precede only under runtime starvation,
+    /// and this record is the stop that does not depend on scheduling. The
+    /// set is in-memory like the goal's ownership stamp; a worker rebuild
+    /// loses it (the withdrawal is long past then), and a resumed goal
+    /// re-stamps its owner at the Active transition, so a stale entry never
+    /// blocks a legitimately resumed loop. Bounded: the oldest id leaves at
+    /// the bound.
+    pub(crate) goal_withdrawn_deliveries: std::sync::Mutex<Vec<String>>,
+    /// The withdrawn delivery chains the autonomous loop must not mint
+    /// for (a withdrawal records its admission id here): a boundary
+    /// whose running delivery names a withdrawn chain mints nothing, so
+    /// a canceled task's run-on continuation turns (its terminal
+    /// notice, a delivered deferral) spend no further model turn. The
+    /// set is in-memory like the goal's ownership stamp; a worker
+    /// rebuild loses it (the withdrawal is long past then). Bounded:
+    /// the oldest id leaves at the bound.
+    pub(crate) autonomous_withdrawn_deliveries: std::sync::Mutex<Vec<String>>,
+    /// The worker's running-delivery probe (the parent worker wires its
+    /// core's running admission ids here): answers the delivery whose
+    /// turn runs, for the goal-start and autonomous-deferral stamps.
+    pub(crate) running_delivery_probe:
+        std::sync::Mutex<Option<crate::rlm_children::DeliveryIdentityProbe>>,
     /// The engine's own arc: the in-run continuation hook upgrades the weak so the agent's loop
     /// never pins the engine.
     pub(crate) self_weak: std::sync::Mutex<Option<std::sync::Weak<AgentSessionEngine>>>,

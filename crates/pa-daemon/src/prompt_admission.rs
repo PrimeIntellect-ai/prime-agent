@@ -211,7 +211,7 @@ impl Supervisor {
             return Self::admission_failure(
                 &command_id,
                 &type_name,
-                "Prompt admission was cancelled.",
+                crate::worker::PROMPT_ADMISSION_CANCELLED,
             );
         }
         let Some(worker_admission_id) = connection
@@ -275,7 +275,7 @@ impl Supervisor {
             return Self::admission_failure(
                 &command_id,
                 &type_name,
-                "Prompt admission was cancelled.",
+                crate::worker::PROMPT_ADMISSION_CANCELLED,
             );
         }
         connection.prompt_admissions.update(&key, |admission| {
@@ -289,6 +289,14 @@ impl Supervisor {
             }
         };
         payload["admissionId"] = json!(worker_admission_id);
+        // The client's own admission id rides beside the rewrite: the
+        // worker tags the run's `agent_start` with it, so an event
+        // consumer can tell THIS client's delivery from another
+        // client's (the rewrite's fresh uuid is the daemon's own
+        // identity, unknowable at the client).
+        if let Some(client_admission_id) = input_admission_id(command) {
+            payload["clientAdmissionId"] = json!(client_admission_id);
+        }
         if let Some(current) = &rebound_to {
             payload["activeSessionId"] = json!(current);
         }
@@ -562,12 +570,15 @@ impl Worker {
             .and_then(Value::as_str)
             .unwrap_or_default();
         let cancel_owned = payload.get("cancelOwned").and_then(Value::as_bool) == Some(true);
-        let (status, dropped_queued, abort_running) = {
+        let (status, dropped_done, dropped_queued, abort_running) = {
             // The enqueue/commit transition holds this same lock. Decide
             // whether the owned admission is still queued atomically with
             // removing it; never abort a different in-flight turn.
             let mut core = self.core.lock().unwrap();
             let status = self.prompt_admissions.cancel(admission_id);
+            let abort_running = cancel_owned
+                && status == Some(AdmissionStatus::Owned)
+                && core.running_admission_ids.contains(admission_id);
             let queued = core
                 .steering
                 .iter()
@@ -575,23 +586,53 @@ impl Worker {
                 .any(|item| item.admission_id.as_deref() == Some(admission_id));
             let dropped_queued = matches!(status, Some(AdmissionStatus::Cancelled))
                 || (cancel_owned && status == Some(AdmissionStatus::Owned) && queued);
+            // The cancelled admission's queued items go with it: the
+            // waiting prompt settles through the explicit withdrawn
+            // contract (the queue-mutation delete contract, never a
+            // broken completion channel). Only the QUEUED cancel walks
+            // the lanes here: the running anchor's own row left the
+            // lane when its turn started, and an A2A taskId
+            // continuation answers -32004 before it ever queues, so a
+            // running-admission cancel finds no row to drop — the
+            // abort below stops the turn itself.
+            let mut dropped_done = Vec::new();
             if dropped_queued {
-                core.steering
-                    .retain(|item| item.admission_id.as_deref() != Some(admission_id));
-                core.follow_up
-                    .retain(|item| item.admission_id.as_deref() != Some(admission_id));
+                let mut withdraw =
+                    |lane: &mut std::collections::VecDeque<crate::worker::QueuedItem>| {
+                        let mut keep = std::collections::VecDeque::new();
+                        for mut item in lane.drain(..) {
+                            if item.admission_id.as_deref() == Some(admission_id) {
+                                if let Some(done) = item.done.take() {
+                                    dropped_done.push(done);
+                                }
+                            } else {
+                                keep.push_back(item);
+                            }
+                        }
+                        *lane = keep;
+                    };
+                withdraw(&mut core.steering);
+                withdraw(&mut core.follow_up);
+            }
+            if dropped_queued {
                 self.prompt_admissions.clear(admission_id);
                 crate::worker::clear_withdrawn_progress_note(&core, self.engine.as_ref());
             }
-            let abort_running = cancel_owned
-                && status == Some(AdmissionStatus::Owned)
-                && core.running_admission_ids.contains(admission_id);
             if abort_running {
                 core.abort_requested = true;
                 core.turn_cancelled = true;
             }
-            (status, dropped_queued, abort_running)
+            (status, dropped_done, dropped_queued, abort_running)
         };
+        // The queued prompt's waiter settles on the withdrawn contract,
+        // after the lock: the settle is a channel write, never a core
+        // mutation (a queued prompt with no waiter — a plain `prompt` —
+        // dropped its rows with the same bookkeeping the boolean keeps).
+        for done in dropped_done {
+            let _ = done.send(crate::worker::TurnSettle::Withdrawn(
+                crate::worker::PROMPT_CANCELLED_BEFORE_START.to_string(),
+            ));
+        }
         if dropped_queued {
             self.checkpoint_queue(crate::worker::QueueCheckpoint::Settle {
                 operation: "queue_dropped",

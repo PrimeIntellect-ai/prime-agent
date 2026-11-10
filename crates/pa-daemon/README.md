@@ -8,7 +8,14 @@ Client Protocol clients, served over a daemon session (initialize, session/new, 
 session/cancel, and the outgoing session/update notification with
 namespaced `_meta` correlation), owned by this crate because
 wire-protocol serving is its area; the worker turn loop owns compaction
-arms, auto-refine, and goal continuation. The compact-trigger
+arms, auto-refine, and goal continuation.
+A2A v1.0 server mode (`a2a`): the Agent2Agent protocol serve surface —
+the Agent Card at the well-known URI, the JSON-RPC task lifecycle
+(SendMessage/SendStreamingMessage/GetTask/ListTasks/CancelTask/
+SubscribeToTask) mapped onto per-`contextId` daemon sessions and prompt
+turns, SSE streaming, bearer auth, and the HTTP gates
+(version/content-type/loopback-Host); same ownership rationale as the
+ACP surface: wire-protocol serving is this crate's area. The compact-trigger
 auto-refine scheduling owns its surface here (`compact_autorefine.rs`
 for the daemon worker: every compaction arm plus the manual `compact`
 command arm the pa-core trigger, and the quiescent turn boundaries /
@@ -247,7 +254,7 @@ attached UIs daemon-wide).
 No agent behavior inside workers beyond hosting a pa-core engine; no UI.
 
 ## Public API
-Supervisor entrypoint, worker entrypoint, `mcp_login::{WorkerMcpLoginUi, wire_worker_mcp_login}` (the worker's browser+callback login behind `mcp.begin_login`; wired by the agent engine before sessions register host handlers), client connection API for pa-tui/pa-cli, `acp::daemon::{run_daemon_attached_acp_mode, DaemonAcpOptions}` (pa-cli dispatches `--mode acp` through it), `agent_messaging::LinkAgentMessageController` + `rlm_children::{SupervisorChildSessions, ParentIdentity, RlmChildIdentity}` (e2e verifiers construct the worker-side family controller and the children registry; the engine wires the same types), `agent_engine::AgentSessionEngine::dispose_kernel` (the session-end kernel teardown the worker invokes at kill/shutdown/orphan exit — the engine outlives the session, so the pa-core engine-drop teardown cannot run there), the worker's `get_mcp_connections` command (`mcp_connections.rs`: the `/mcp` view's roster from the session's MCP manager overlaid with the session kernel's per-server tool listing, plus the api-key credential rows the same response serves — Rust-native session-plane extension; the TS daemon has no counterpart). Supervision internals `pub(crate)`.
+Supervisor entrypoint, worker entrypoint, `mcp_login::{WorkerMcpLoginUi, wire_worker_mcp_login}` (the worker's browser+callback login behind `mcp.begin_login`; wired by the agent engine before sessions register host handlers), client connection API for pa-tui/pa-cli, `acp::daemon::{run_daemon_attached_acp_mode, DaemonAcpOptions}` (pa-cli dispatches `--mode acp` through it), `a2a::{run_daemon_attached_a2a_mode, A2aOptions}` (pa-cli dispatches `--mode a2a` through it; the A2A v1.0 JSON-RPC server over daemon sessions — the Agent Card, the task lifecycle on prompt turns, SSE streaming, the bearer gate, the A2A-Version/content-type/loopback-Host surface in `a2a/http.rs`), `agent_messaging::LinkAgentMessageController` + `rlm_children::{SupervisorChildSessions, ParentIdentity, RlmChildIdentity}` (e2e verifiers construct the worker-side family controller and the children registry; the engine wires the same types), `agent_engine::AgentSessionEngine::dispose_kernel` (the session-end kernel teardown the worker invokes at kill/shutdown/orphan exit — the engine outlives the session, so the pa-core engine-drop teardown cannot run there), the worker's `get_mcp_connections` command (`mcp_connections.rs`: the `/mcp` view's roster from the session's MCP manager overlaid with the session kernel's per-server tool listing, plus the api-key credential rows the same response serves — Rust-native session-plane extension; the TS daemon has no counterpart). Supervision internals `pub(crate)`.
 
 
 ## Depends on

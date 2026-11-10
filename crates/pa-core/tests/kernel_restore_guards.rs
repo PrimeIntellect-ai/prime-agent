@@ -73,6 +73,8 @@ fn test_options(
         bootstrap_code: Some(build_rlm_bootstrap_code(&[], false)),
         stderr_log_path: None,
         on_background_work_settled: None,
+        on_kernel_bash_launch: None,
+        on_kernel_bash_activity_end: None,
     })
 }
 

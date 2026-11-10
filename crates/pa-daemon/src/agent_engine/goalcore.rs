@@ -228,6 +228,25 @@ impl AgentSessionEngine {
             let replaced = published
                 .as_ref()
                 .is_some_and(|last| last.goal_id != goal.goal_id);
+            // The Active transition stamps the goal's owning delivery
+            // (a first-ever start, a replacement, or a resume — the
+            // delivery whose turn runs the transition): the
+            // identity-scoped withdrawal's pause then stops only the
+            // goal the withdrawn delivery started. Later goal updates
+            // while the goal stays active never re-stamp — a foreign
+            // delivery's turn on the shared session cannot steal the
+            // goal's ownership.
+            if goal.status == pa_core::goals::GoalStatus::Active
+                && published.as_ref().is_none_or(|last| {
+                    replaced || last.status != pa_core::goals::GoalStatus::Active
+                })
+            {
+                let owner = self.running_delivery_identity();
+                *self
+                    .goal_owner_delivery
+                    .lock()
+                    .expect("goal owner delivery lock") = owner;
+            }
             *published = Some(goal.clone());
             if baseline_only {
                 return true;

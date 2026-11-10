@@ -348,6 +348,20 @@ pub struct KernelSnapshotConfig {
     pub debounce_ms: Option<u64>,
 }
 
+/// Reports one kernel `bash()` launch: the pid the completion notice
+/// will name, observed at the launch itself (the display MIME the
+/// runtime emits per `bash()` call) so the host can bind it to the
+/// delivery whose turn runs — the completion notice arrives long after
+/// that turn, and the notice's own payload names only the pid.
+pub type KernelBashLaunchCallback = Arc<dyn Fn(u32) + Send + Sync>;
+
+/// Reports one kernel `bash()` handle's activity end (the activity
+/// frame the runtime emits at its completion fence, whatever consumed
+/// the result): the host can drop the launch-time pid binding — no
+/// completion notice can name the handle after the kernel consumed its
+/// result in-cell.
+pub type KernelBashActivityEndCallback = Arc<dyn Fn(u32) + Send + Sync>;
+
 /// Options for constructing a [`ReplKernelManager`].
 #[derive(Clone, Default)]
 pub struct KernelManagerOptions {
@@ -361,6 +375,15 @@ pub struct KernelManagerOptions {
     /// Fires when the last live background `bash()` handle settles (its activity
     /// track empties or the kernel tears down), so owed continuations can resume.
     pub on_background_work_settled: Option<BackgroundWorkSettledCallback>,
+    /// Fires at each kernel `bash()` launch that reports its pid (the
+    /// runtime's bash-command display payload): the launch-time anchor
+    /// the completion notice's `pid` resolves against.
+    pub on_kernel_bash_launch: Option<KernelBashLaunchCallback>,
+    /// Fires at each kernel `bash()` handle's activity end (the
+    /// runtime's activity display payload): the launch-time binding the
+    /// pid anchored can leave — an in-cell-consumed handle never sends
+    /// a completion notice.
+    pub on_kernel_bash_activity_end: Option<KernelBashActivityEndCallback>,
     /// Persist/revive the user namespace across kernel restarts and session resume.
     pub snapshot: Option<KernelSnapshotConfig>,
     /// Runtime bootstrap re-run on a protocol-repaired kernel so live handles (rlm, bash, skills) exist again.

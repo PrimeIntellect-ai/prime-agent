@@ -46,11 +46,14 @@ async fn queue_action_rows_serve_the_labeled_preview() {
             agent_message: None,
             queue_key: None,
             admission_id: None,
+            client_admission_id: None,
             images: Vec::new(),
             done: None,
             queue_visible: true,
             policy: TurnPolicy::Injected,
             forced_batch: false,
+            kernel_notice: false,
+            delivery_scoped: false,
         });
         core.steering.push_back(QueuedItem {
             priority: QueuePriority::Human,
@@ -60,11 +63,14 @@ async fn queue_action_rows_serve_the_labeled_preview() {
             agent_message: None,
             queue_key: None,
             admission_id: None,
+            client_admission_id: None,
             images: Vec::new(),
             done: None,
             queue_visible: true,
             policy: TurnPolicy::Queued,
             forced_batch: false,
+            kernel_notice: false,
+            delivery_scoped: false,
         });
     }
     let response = worker.dispatch("update_snapshot", &json!({})).await;
@@ -155,11 +161,14 @@ fn queued_user_item(message: &str) -> QueuedItem {
         agent_message: None,
         queue_key: None,
         admission_id: None,
+        client_admission_id: None,
         images: Vec::new(),
         done: None,
         queue_visible: true,
         policy: TurnPolicy::Queued,
         forced_batch: false,
+        kernel_notice: false,
+        delivery_scoped: false,
     }
 }
 
@@ -436,11 +445,14 @@ async fn injected_continuations_mark_their_own_rider_only() {
             agent_message: None,
             queue_key: None,
             admission_id: None,
+            client_admission_id: None,
             images: Vec::new(),
             done: None,
             queue_visible: true,
             policy: TurnPolicy::Queued,
             forced_batch: false,
+            kernel_notice: false,
+            delivery_scoped: false,
         });
         // The engine-minted continuation: injected and queue-invisible.
         core.follow_up.push_back(QueuedItem {
@@ -451,11 +463,14 @@ async fn injected_continuations_mark_their_own_rider_only() {
             agent_message: None,
             queue_key: None,
             admission_id: None,
+            client_admission_id: None,
             images: Vec::new(),
             done: None,
             queue_visible: false,
             policy: TurnPolicy::Injected,
             forced_batch: false,
+            kernel_notice: false,
+            delivery_scoped: false,
         });
         // A visible injected row (the busy agent message shape) folds
         // by its TS label — the injected rider never flags it.
@@ -467,11 +482,14 @@ async fn injected_continuations_mark_their_own_rider_only() {
             agent_message: Some("from the research child".to_string()),
             queue_key: None,
             admission_id: None,
+            client_admission_id: None,
             images: Vec::new(),
             done: None,
             queue_visible: true,
             policy: TurnPolicy::Injected,
             forced_batch: false,
+            kernel_notice: false,
+            delivery_scoped: false,
         });
     }
     let snapshot = {
@@ -499,11 +517,14 @@ async fn injected_continuations_mark_their_own_rider_only() {
             agent_message: None,
             queue_key: None,
             admission_id: None,
+            client_admission_id: None,
             images: Vec::new(),
             done: None,
             queue_visible: false,
             policy: TurnPolicy::Injected,
             forced_batch: false,
+            kernel_notice: false,
+            delivery_scoped: false,
         });
     }
     let snapshot = {
@@ -536,11 +557,14 @@ async fn injected_continuations_still_project_their_lane_text() {
             agent_message: None,
             queue_key: None,
             admission_id: None,
+            client_admission_id: None,
             images: Vec::new(),
             done: None,
             queue_visible: false,
             policy: TurnPolicy::Injected,
             forced_batch: false,
+            kernel_notice: false,
+            delivery_scoped: false,
         });
     }
     let snapshot = {
@@ -573,6 +597,8 @@ async fn restored_lane_rows_keep_the_child_status_provenance() {
                 queue_visible: true,
                 policy: "queued".to_string(),
                 forced_batch: false,
+                kernel_notice: false,
+                delivery_scoped: false,
                 images: Vec::new(),
             }],
             follow_up: Vec::new(),

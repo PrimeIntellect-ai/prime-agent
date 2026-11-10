@@ -269,11 +269,14 @@ mod tests {
                 agent_message: None,
                 queue_key: None,
                 admission_id: None,
+                client_admission_id: None,
                 images: Vec::new(),
                 done: None,
                 queue_visible: true,
                 policy: crate::worker::TurnPolicy::Injected,
                 forced_batch: false,
+                kernel_notice: false,
+                delivery_scoped: false,
             });
         }
         let queue = worker.dispatch("get_queue", &json!({})).await;
@@ -329,11 +332,14 @@ mod tests {
                 agent_message: None,
                 queue_key: Some("heartbeat:hb-1".to_string()),
                 admission_id: None,
+                client_admission_id: None,
                 images: Vec::new(),
                 done: None,
                 queue_visible: true,
                 policy: crate::worker::TurnPolicy::Injected,
                 forced_batch: false,
+                kernel_notice: false,
+                delivery_scoped: false,
             });
         }
         let expected = "Heartbeat prompt: [heartbeat: every 10m run#0]\n\nnudge the mission";
@@ -534,11 +540,14 @@ mod tests {
                 agent_message: None,
                 queue_key: None,
                 admission_id: None,
+                client_admission_id: None,
                 images: Vec::new(),
                 done: Some(done_tx),
                 queue_visible: true,
                 policy: crate::worker::TurnPolicy::Queued,
                 forced_batch: false,
+                kernel_notice: false,
+                delivery_scoped: false,
             });
         }
         let response = worker
@@ -600,11 +609,14 @@ mod tests {
                 agent_message: None,
                 queue_key: None,
                 admission_id: None,
+                client_admission_id: None,
                 images: Vec::new(),
                 done: None,
                 queue_visible: true,
                 policy: crate::worker::TurnPolicy::Queued,
                 forced_batch: false,
+                kernel_notice: false,
+                delivery_scoped: false,
             });
 
         let replaced = worker
