@@ -466,8 +466,6 @@ fn a_record_hands_off_without_waiting_for_the_write() {
     );
 }
 
-/// The slot reserve precedes the clone; the self-calibrating bound compares the probe's
-/// handoff against the same body's measured clone cost.
 /// Fill an undrained writer's queue to capacity with `fill-*` bodies.
 fn fill_to_capacity(writer: &CaptureWriter, capture: &RequestPayloadCapture) {
     for fill in 0..WRITE_QUEUE_CAPACITY {
