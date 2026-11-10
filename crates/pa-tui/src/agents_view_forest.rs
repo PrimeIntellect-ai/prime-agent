@@ -68,7 +68,7 @@ pub enum RowKind {
     /// The node's own shells line: its kernel's running shells, or without a live kernel its live
     /// persistent shells from the daemon's list.
     Shells,
-    /// The node's own live factory runs line.
+    /// The node's own factory line: its stored specs and live runs.
     FactoryRuns,
     /// One machine-wide persistent shell with its assigned session.
     PersistentShell,
@@ -123,11 +123,11 @@ pub struct SelectionKey {
 }
 
 /// One session's own activity counts (a live one's keyed by its `activeSessionId`): the shells and
-/// factory-run lines render them.
+/// factory lines render them.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct SessionActivity {
     pub shells: crate::bash_view::ShellCounts,
-    pub factory_runs: crate::factory_view::FactoryRunCounts,
+    pub factory: crate::factory_view::FactoryCounts,
 }
 
 /// The activity poll's counts: each live session's by its `activeSessionId`, and the live

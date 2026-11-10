@@ -169,6 +169,7 @@ fn prompt_token_for_host_request(request: &str) -> Option<String> {
             "agent_observe.list" | "agent_message.list_agents" => "agent_observe.list_agents",
             "agent_observe.get" => "agent_observe.get_agent",
             "agent_observe.recent" => "agent_observe.recent_messages",
+            "agent_observe.session_messages" => "rlm.session.messages",
             other => other,
         }
         .to_string(),
@@ -184,9 +185,11 @@ const KERNEL_LOCAL_TOKENS: &[&str] = &[
     "mcp.describe_tool",
 ];
 
-/// The harness-state API of the vendored runtime (`rlm.harness` CRUD and
-/// `rlm.get_harness_state`). Update together with the runtime sidecar.
+/// The vendored runtime's harness-state API (`rlm.harness` CRUD and
+/// `rlm.get_harness_state`) plus its sanctioned terminal turn call
+/// (`rlm.end_turn`). Update together with the runtime sidecar.
 const HARNESS_TOKENS: &[&str] = &[
+    "rlm.end_turn",
     "rlm.harness.create_memory",
     "rlm.harness.update_memory",
     "rlm.harness.delete_memory",

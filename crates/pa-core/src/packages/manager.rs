@@ -355,7 +355,10 @@ impl PackageManager {
 
     /// Drop a source from settings; true when a matching entry was removed.
     pub fn remove_source_from_settings(&mut self, source: &str, scope: UserOrProject) -> bool {
-        let current: Vec<serde_json::Value> = self.packages_for_scope(scope).unwrap_or_default();
+        let current: Vec<serde_json::Value> = match scope {
+            UserOrProject::User => self.packages_for_scope(scope).unwrap_or_default(),
+            UserOrProject::Project => self.settings.project_packages_for_removal(),
+        };
         let next: Vec<serde_json::Value> = current
             .iter()
             .filter(|existing| !self.package_sources_match(existing, source, scope))
@@ -808,7 +811,7 @@ mod tests {
     }
 
     #[test]
-    fn project_scope_persists_against_project_settings_base() {
+    fn project_packages_stay_inert_until_explicit_removal() {
         let (dir, mut manager) = setup();
         make_pkg(&dir, "project-pkg");
         manager
@@ -831,9 +834,19 @@ mod tests {
         // Global settings are never created by a project-scoped install.
         assert!(!dir.path().join("agent").join("settings.json").exists());
 
-        let configured = manager.list_configured_packages();
-        assert_eq!(configured.len(), 1);
-        assert_eq!(configured[0].scope, UserOrProject::Project);
+        assert!(manager.list_configured_packages().is_empty());
+        assert!(manager.remove_source_from_settings("./project-pkg", UserOrProject::Project));
+        let updated: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(
+                dir.path()
+                    .join("cwd")
+                    .join(crate::settings::CONFIG_DIR_NAME)
+                    .join("settings.json"),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(updated["packages"], serde_json::json!([]));
     }
 
     #[test]

@@ -281,6 +281,32 @@ mod tests {
         // Round one: the review declines.
         let consumed = engine.consume_compact_auto_refine().expect("the round ran");
         assert!(consumed.is_none(), "the decline surfaced nothing");
+        // The declined review still billed the session: one usage row records it.
+        let built = engine
+            .session
+            .blocking_lock()
+            .clone()
+            .expect("session built");
+        let rows = engine.runtime.block_on(async {
+            built
+                .session
+                .shared_persistence()
+                .lock()
+                .await
+                .get_entries()
+        });
+        let review_rows = serde_json::to_value(rows)
+            .unwrap()
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|row| row["type"] == "custom" && row["data"]["source"] == "refine_review")
+            .map(|row| row["data"]["usage"]["totalTokens"].as_u64().unwrap_or(0))
+            .collect::<Vec<_>>();
+        assert!(
+            matches!(review_rows.as_slice(), [tokens] if *tokens > 0),
+            "one billed review row, got {review_rows:?}"
+        );
         assert!(
             !engine.compact_auto_refine_pending(),
             "the trigger consumed"

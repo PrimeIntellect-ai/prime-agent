@@ -128,6 +128,7 @@ impl SessionManager {
             leaf_id: None,
             admitted_user_rows: std::collections::VecDeque::new(),
             persist_listeners: Vec::new(),
+            billed_row_sink: None,
         };
         match session_file {
             Some(file) => manager.set_session_file(file, None),

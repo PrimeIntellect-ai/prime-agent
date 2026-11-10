@@ -1302,6 +1302,183 @@ async fn parent_renames_a_child_end_to_end() {
     assert_eq!(edge.name, "bench-runner", "the ledger rename landed");
 }
 
+/// The cell that reads its own transcript (the count, the newest user rows, the
+/// head, then everything) and records what `rlm.session.messages` returned.
+fn transcript_cell(receipts_dir: &Path) -> String {
+    let receipt_path = receipts_dir.join("transcript.json").display().to_string();
+    let error_path = receipts_dir.join("transcript.error").display().to_string();
+    format!(
+        "import json, traceback\ntry:\n    total = await rlm.session.count()\n    users = await rlm.session.messages(-3, 3, role=\"user\")\n    head = await rlm.session.messages(0, 4)\n    rows = await rlm.session.messages(0, total)\n    open({receipt_path:?}, \"w\").write(json.dumps({{\"total\": total, \"users\": [[m.index, m.text] for m in users], \"head\": [[m.index, m.id, m.role, m.text] for m in head], \"roles\": [m.role for m in rows]}}))\nexcept Exception:\n    open({error_path:?}, \"w\").write(traceback.format_exc())\n    raise",
+    )
+}
+
+/// `rlm.session.messages` end to end: a kernel cell in a windowed daemon
+/// session reads its own transcript via the real host handler and supervisor
+/// route, into the rows its compaction summarized away (the summary in place),
+/// without the in-flight step, and the cell's tool result carries each read.
+#[tokio::test]
+async fn session_messages_reads_the_transcript_end_to_end() {
+    let Some(kernel_python) = kernel_python() else {
+        return;
+    };
+    let dir = tempfile::TempDir::new().expect("temp dir");
+    let socket = dir.path().join("daemon.sock");
+    let agent_dir = dir.path().join("agent");
+    let sessions_dir = agent_dir.join("sessions");
+    std::fs::create_dir_all(&sessions_dir).expect("sessions dir");
+    let receipts_dir = dir.path().join("receipts");
+    std::fs::create_dir_all(&receipts_dir).expect("receipts dir");
+
+    let time = "2026-01-01T00:00:00.000Z";
+    let user = |id: &str, parent: Option<&str>, text: &str| {
+        json!({
+            "type": "message",
+            "id": id,
+            "parentId": parent,
+            "timestamp": time,
+            "message": { "role": "user", "content": text, "timestamp": 1000 },
+        })
+    };
+    let rows = [
+        json!({ "type": "session", "version": 3, "id": "transcript-e2e", "timestamp": time, "cwd": dir.path().to_string_lossy() }),
+        user("m1", None, "the first prompt"),
+        user("m2", Some("m1"), "compacted away"),
+        user("m3", Some("m2"), "kept"),
+        json!({
+            "type": "compaction",
+            "id": "m4",
+            "parentId": "m3",
+            "timestamp": time,
+            "summary": "the story",
+            "firstKeptEntryId": "m3",
+            "tokensBefore": 4000,
+        }),
+        user("m5", Some("m4"), "after compaction"),
+    ];
+    let session_path = sessions_dir.join("transcript-e2e.jsonl");
+    std::fs::write(
+        &session_path,
+        format!(
+            "{}\n",
+            rows.iter()
+                .map(Value::to_string)
+                .collect::<Vec<_>>()
+                .join("\n")
+        ),
+    )
+    .expect("write session");
+    let script = write_faux_script(
+        dir.path(),
+        "reader",
+        &cell_turn(&transcript_cell(&receipts_dir)),
+    );
+
+    let _daemon = spawn_supervisor(&socket, &agent_dir, &kernel_python);
+    wait_socket_ready(&socket);
+    let (mut client, hello) = Client::connect(&socket);
+    assert_eq!(hello["type"], "daemon_hello");
+    client.send_command(
+        "create-reader",
+        &json!({
+            "type": "create",
+            "sessionPath": session_path.to_string_lossy(),
+            "config": {
+                "cwd": dir.path().to_string_lossy(),
+                "sessionDir": sessions_dir.to_string_lossy(),
+                "script": script.to_string_lossy(),
+            },
+        }),
+    );
+    let created = client.read_response("create-reader");
+    assert_eq!(created["success"], true, "create failed: {created}");
+    let active_session_id = created["data"]["activeSessionId"]
+        .as_str()
+        .or_else(|| created["data"]["id"].as_str())
+        .expect("active session id")
+        .to_string();
+
+    client.send_command(
+        "prompt-reader",
+        &json!({
+            "type": "prompt_and_wait",
+            "activeSessionId": active_session_id,
+            "message": "read the transcript",
+        }),
+    );
+    let turn = client.read_response("prompt-reader");
+    assert_eq!(turn["success"], true, "turn failed: {turn}");
+    if let Ok(error) = std::fs::read_to_string(receipts_dir.join("transcript.error")) {
+        panic!("transcript cell failed: {error}");
+    }
+    let read = read_recorded(&receipts_dir, "transcript.json");
+    assert_eq!(
+        read["total"], 6,
+        "the in-flight step is not counted: {read}"
+    );
+    assert_eq!(
+        read["users"],
+        json!([
+            [2, "kept"],
+            [3, "after compaction"],
+            [4, "read the transcript"]
+        ])
+    );
+    assert_eq!(
+        read["head"],
+        json!([
+            [0, "m1", "user", "the first prompt"],
+            [1, "m2", "user", "compacted away"],
+            [2, "m3", "user", "kept"],
+            [3, "m4", "compactionSummary", "the story"],
+        ]),
+        "the compacted rows read in place: {read}"
+    );
+    assert_eq!(
+        read["roles"],
+        json!(["user", "user", "user", "compactionSummary", "user", "user"])
+    );
+
+    client.send_command(
+        "messages-reader",
+        &json!({ "type": "get_messages", "activeSessionId": active_session_id }),
+    );
+    let messages = client.read_response("messages-reader");
+    let cell_result = messages["data"]["messages"]
+        .as_array()
+        .expect("messages")
+        .iter()
+        .find(|message| message["role"] == "toolResult")
+        .expect("the cell's tool result")
+        .clone();
+    assert_eq!(
+        cell_result["details"]["transcriptReads"],
+        json!([
+            { "returned": 3, "first": 2, "total": 5, "roles": ["user"] },
+            { "returned": 4, "first": 0, "total": 6, "roles": ["*"] },
+            { "returned": 6, "first": 0, "total": 6, "roles": ["*"] },
+        ]),
+        "the cell's reads ride the tool result: {cell_result}"
+    );
+}
+
+/// One family read through the real `agent_observe.session_messages` handler
+/// (what `rlm.session.messages(agent=...)` sends).
+async fn read_member(
+    handlers: &HostRequestHandlers,
+    target: &str,
+    start: i64,
+    limit: u64,
+) -> anyhow::Result<Value> {
+    let read = handlers
+        .get("agent_observe.session_messages")
+        .expect("the family read handler")
+        .clone();
+    read(HostRequestPayload {
+        data: json!({ "target": target, "start": start, "limit": limit, "roles": ["*"] }),
+    })
+    .await
+}
+
 /// `agent_observe.recent_messages` on a family member through the real handler.
 async fn recent_member(
     handlers: &HostRequestHandlers,
@@ -1508,6 +1685,216 @@ async fn passivated_child_recent_messages_reads_its_file_end_to_end() {
         assert_eq!(saved["messages"], resident["messages"], "{saved}");
         assert_eq!(saved["truncated"], resident["truncated"], "{saved}");
     }
+    assert!(
+        !resident_session_ids(&mut client, "list-after").contains(&kid_a_session),
+        "the read never revives kid-a"
+    );
+}
+
+/// `rlm.session.messages(agent=...)` end to end: a parent reads its child by
+/// name, persisted session id, and RLM child id; a child reads its parent and
+/// its sibling; members of another family stay unreachable; and a passivated
+/// child reads from its file without a worker coming back.
+#[tokio::test]
+async fn family_members_read_each_others_transcripts_end_to_end() {
+    let Some(kernel_python) = kernel_python() else {
+        return;
+    };
+    let dir = tempfile::TempDir::new().expect("temp dir");
+    let socket = dir.path().join("daemon.sock");
+    let agent_dir = dir.path().join("agent");
+    let sessions_dir = agent_dir.join("sessions");
+    std::fs::create_dir_all(&sessions_dir).expect("sessions dir");
+    // Idle passivation is on, so the test can passivate kid-a.
+    std::fs::write(
+        agent_dir.join("settings.json"),
+        json!({ "idleEvictionMinutes": 1 }).to_string(),
+    )
+    .expect("write settings");
+    let root_script = write_faux_script(dir.path(), "root", &json!([{ "text": "root turn done" }]));
+    let kid_script = write_faux_script(dir.path(), "kid", &json!([{ "text": "kid spawned" }]));
+
+    let _daemon = spawn_supervisor(&socket, &agent_dir, &kernel_python);
+    wait_socket_ready(&socket);
+    let (mut client, hello) = Client::connect(&socket);
+    assert_eq!(hello["type"], "daemon_hello");
+    let link = Arc::new(SupervisorLink::new(socket.clone()));
+
+    // Two roots: "parent" with kids kid-a and kid-b, "other" with its kid "outsider".
+    let mut families = Vec::new();
+    for (root, kids) in [
+        ("parent", &["kid-a", "kid-b"][..]),
+        ("other", &["outsider"][..]),
+    ] {
+        client.send_command(
+            &format!("create-{root}"),
+            &json!({
+                "type": "create",
+                "name": root,
+                "config": {
+                    "cwd": dir.path().to_string_lossy(),
+                    "sessionDir": sessions_dir.to_string_lossy(),
+                    "script": root_script.to_string_lossy(),
+                },
+            }),
+        );
+        let created = client.read_response(&format!("create-{root}"));
+        assert_eq!(created["success"], true, "create {root} failed: {created}");
+        let data = &created["data"];
+        let summary = json!({
+            "activeSessionId": data["activeSessionId"].as_str().or_else(|| data["id"].as_str()),
+            "sessionId": data["sessionId"],
+            "sessionFile": data["sessionFile"],
+            "sessionName": root,
+            "runtimeKind": "top-level",
+        });
+        let children = Arc::new(SupervisorChildSessions::new(
+            Arc::clone(&link),
+            agent_dir.clone(),
+            summary["activeSessionId"]
+                .as_str()
+                .expect("active id")
+                .to_string(),
+            std::sync::Arc::new(pa_daemon::model_allowlist::ModelRefusalTelemetry::new(
+                agent_dir.clone(),
+                /*telemetry_disabled*/ true,
+            )),
+            String::new(),
+        ));
+        children.set_identity(ParentIdentity {
+            rlm_depth: 0,
+            rlm_max_depth: 2,
+            model: Some("faux/faux-1".to_string()),
+            cwd: Some(dir.path().to_string_lossy().to_string()),
+            session_id: summary["sessionId"].as_str().map(str::to_string),
+            session_file: summary["sessionFile"].as_str().map(str::to_string),
+            thinking: None,
+            child_script: Some(kid_script.to_string_lossy().to_string()),
+        });
+        let mut handles = Vec::new();
+        for kid in kids {
+            let handle = children
+                .spawn(RlmSpawnRequest {
+                    prompt: format!("{kid} work"),
+                    name: Some((*kid).to_string()),
+                    model: None,
+                    thinking: None,
+                    cwd: None,
+                    spawned_by_request_id: None,
+                    factory: None,
+                })
+                .await
+                .expect("spawn a kid");
+            handles.push(handle);
+        }
+        children.notify_turn_done();
+        let deadline = Instant::now() + Duration::from_secs(60);
+        let rows = loop {
+            let rows = children.list_subagents().await.expect("child roster");
+            if rows.len() == kids.len() && rows.iter().all(|row| row.status == "completed") {
+                break rows;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "{root}'s kids never settled: {rows:?}; daemon log tail: {}",
+                daemon_log_tail(&dir.path().join("receipts"))
+            );
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        };
+        families.push((summary, children, handles, rows));
+    }
+    let (parent_summary, parent_children, parent_handles, parent_kids) = &families[0];
+    let kid_a = parent_kids
+        .iter()
+        .find(|row| row.session_name == "kid-a")
+        .expect("kid-a row");
+    let kid_a_active = kid_a.active_session_id.clone().expect("kid-a active id");
+    let kid_a_session = kid_a.session_id.clone().expect("kid-a session id");
+    let kid_a_child_id = &parent_handles[0].rlm_child_id;
+    let parent_reads = observe_handlers(
+        &link,
+        parent_summary.clone(),
+        Some(Arc::clone(parent_children)),
+    );
+
+    // The parent reads kid-a by name, persisted session id, and RLM child id alike.
+    let full = read_member(&parent_reads, "kid-a", 0, 100)
+        .await
+        .expect("read kid-a by name");
+    assert_eq!(full["agent"], "kid-a", "{full}");
+    for target in [kid_a_session.as_str(), kid_a_child_id.as_str()] {
+        let read = read_member(&parent_reads, target, 0, 100)
+            .await
+            .unwrap_or_else(|error| panic!("read kid-a by {target}: {error:#}"));
+        assert_eq!(read, full, "every selector reads the same transcript");
+    }
+    let total = full["total"].as_u64().expect("total");
+    let indexes: Vec<u64> = full["messages"]
+        .as_array()
+        .expect("messages")
+        .iter()
+        .map(|row| row["index"].as_u64().expect("index"))
+        .collect();
+    assert!(total > 0, "kid-a has a transcript: {full}");
+    assert_eq!(indexes, (0..total).collect::<Vec<_>>(), "{full}");
+    let count = read_member(&parent_reads, "kid-a", 0, 0)
+        .await
+        .expect("count kid-a");
+    assert_eq!(count["total"], total);
+    let tail = read_member(&parent_reads, "kid-a", -1, 1)
+        .await
+        .expect("kid-a tail");
+    assert_eq!(tail["messages"][0], full["messages"][total as usize - 1]);
+
+    // kid-a reads its parent and its sibling; the other family stays out of reach.
+    let kid_a_reads = observe_handlers(
+        &link,
+        json!({
+            "activeSessionId": kid_a_active,
+            "sessionId": kid_a_session,
+            "sessionName": "kid-a",
+            "runtimeKind": "subagent",
+            "parentActiveSessionId": parent_summary["activeSessionId"],
+            "parentSessionId": parent_summary["sessionId"],
+            "rlmDepth": 1,
+        }),
+        None,
+    );
+    for member in ["parent", "kid-b"] {
+        let read = read_member(&kid_a_reads, member, -10, 10)
+            .await
+            .unwrap_or_else(|error| panic!("kid-a reads {member}: {error:#}"));
+        assert_eq!(read["agent"], member, "{read}");
+    }
+    for (reader, handlers) in [("kid-a", &kid_a_reads), ("parent", &parent_reads)] {
+        let refused = read_member(handlers, "outsider", -10, 10)
+            .await
+            .expect_err("another family's kid is out of reach");
+        assert!(
+            refused.to_string().contains("not reachable"),
+            "{reader}: {refused:#}"
+        );
+    }
+
+    // A passivated kid reads from its file, and no worker comes back for it.
+    client.send_command(
+        "passivate-kid-a",
+        &json!({
+            "type": "worker_idle_passivation",
+            "workerToken": parent_worker_token(&agent_dir, &kid_a_active),
+            "idleMinutes": 1,
+        }),
+    );
+    let passivated = client.read_response("passivate-kid-a");
+    assert_eq!(passivated["success"], true, "passivation: {passivated}");
+    assert!(
+        !resident_session_ids(&mut client, "list-before").contains(&kid_a_session),
+        "the passivation stopped kid-a's worker"
+    );
+    let saved = read_member(&parent_reads, "kid-a", 0, 100)
+        .await
+        .expect("read the passivated kid-a");
+    assert_eq!(saved, full, "the file read matches the resident read");
     assert!(
         !resident_session_ids(&mut client, "list-after").contains(&kid_a_session),
         "the read never revives kid-a"

@@ -105,10 +105,90 @@ pub(crate) fn fake_supervisor(
     (recorded, server)
 }
 
+/// The daemon route of the billed-row report: the worker store tells the
+/// observed sink about each billed row it appends (a `model_usage` call and a
+/// compaction), once each, and nothing about a plain message.
+#[tokio::test]
+async fn the_worker_store_reports_each_billed_row_once() {
+    use pa_core::session_engine::rlm_usage::RlmChildUsageStore;
+    let dir = tempfile::tempdir().unwrap();
+    let session_dir = dir.path().join("sessions");
+    std::fs::create_dir_all(&session_dir).unwrap();
+    let worker = Worker::new(
+        WorkerConfig {
+            socket_path: dir.path().join("worker.sock"),
+            supervisor_socket_path: std::path::PathBuf::new(),
+            token: "token".to_string(),
+            worker_instance_id: String::new(),
+            active_session_id: "billed-session".to_string(),
+            agent_dir: dir.path().join("agent"),
+            recovery_journal_path: dir.path().join("recovery.jsonl"),
+            telemetry_disabled: Some(true),
+            script: Some(json!({ "responses": [] })),
+        },
+        None,
+    );
+    let created = worker
+        .dispatch(
+            "create",
+            &json!({ "cwd": dir.path(), "sessionDir": session_dir, "name": "billed" }),
+        )
+        .await;
+    assert!(created.success, "create failed: {created:?}");
+    let store = CoreUsageStore(Arc::clone(&worker.core));
+    let session_id = {
+        let core = worker.core.lock().unwrap();
+        core.store.as_ref().unwrap().session_id().to_string()
+    };
+    let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let sink_seen = Arc::clone(&seen);
+    store
+        .observe_billed_rows(Arc::new(
+            move |row: &pa_core::session::billed_row::BilledRow| {
+                sink_seen.lock().unwrap().push(row.usage.total_tokens);
+            },
+        ))
+        .await;
+    let usage = |tokens: u64| pa_types::ai::Usage {
+        input: tokens,
+        total_tokens: tokens,
+        ..Default::default()
+    };
+    store
+        .append_model_usage(
+            session_id,
+            pa_core::session_engine::model_usage::ModelUsage::new(
+                "side_question",
+                "p",
+                "m",
+                usage(30),
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    {
+        let mut core = worker.core.lock().unwrap();
+        let file = core.store.as_mut().unwrap();
+        file.persist_entry(
+            "message",
+            json!({ "message": { "role": "user", "content": "hi", "timestamp": 0 } }),
+        )
+        .unwrap();
+        file.persist_entry(
+            "compaction",
+            json!({ "summary": "s", "firstKeptEntryId": "x", "tokensBefore": 1, "usage": usage(50) }),
+        )
+        .unwrap();
+    }
+    assert_eq!(*seen.lock().unwrap(), vec![30, 50]);
+}
+
 mod abort_boundary_tests;
 mod connection_state_tests;
 mod goal_tests;
 mod kill_broadcast_tests;
+mod last_answer_tests;
 mod navigation_pause_tests;
 mod queue_tests;
 mod sidecar_exit_tests;
@@ -158,4 +238,67 @@ async fn background_refinement_event_is_fenced_to_its_review_session() {
         json!({ "type": "refine_failed", "error": "old session" }),
     ));
     assert!(session_events_since(&mut subscription).is_empty());
+}
+
+/// A bill made in one session never lands in the session the worker moved
+/// to: once `core.store` holds the replacement, the store refuses it.
+#[tokio::test]
+async fn a_bill_made_before_a_session_replace_never_lands_in_the_replacement() {
+    use pa_core::session_engine::rlm_usage::RlmChildUsageStore as _;
+    let dir = std::env::temp_dir().join(format!("pa-bill-fence-{}", uuid::Uuid::new_v4()));
+    let worker = Worker::new(
+        WorkerConfig {
+            socket_path: dir.join("worker.sock"),
+            supervisor_socket_path: std::path::PathBuf::new(),
+            token: "token".to_string(),
+            worker_instance_id: String::new(),
+            active_session_id: "bill-session".to_string(),
+            agent_dir: dir.join("agent"),
+            recovery_journal_path: dir.join("recovery.jsonl"),
+            telemetry_disabled: None,
+            script: Some(json!({ "responses": [] })),
+        },
+        None,
+    );
+    let bill = || {
+        pa_core::session_engine::model_usage::ModelUsage::new(
+            "compaction_discarded",
+            "p",
+            "m",
+            pa_types::ai::Usage {
+                input: 5,
+                total_tokens: 5,
+                ..Default::default()
+            },
+        )
+        .unwrap()
+    };
+    let billed_rows = |worker: &Worker| {
+        let core = worker.core.lock().unwrap();
+        core.store
+            .as_ref()
+            .unwrap()
+            .entries()
+            .iter()
+            .filter(|entry| entry.type_ == "custom")
+            .count()
+    };
+    let session_at = |name: &str| {
+        let mut file = SessionFile::create("/tmp", None, 0);
+        file.set_path(dir.join(name));
+        file
+    };
+    let store = CoreUsageStore(Arc::clone(&worker.core));
+    let original = session_at("original.jsonl");
+    let original_id = original.session_id().to_string();
+    worker.core.lock().unwrap().store = Some(original);
+    store
+        .append_model_usage(original_id.clone(), bill())
+        .await
+        .unwrap();
+    assert_eq!(billed_rows(&worker), 1);
+
+    worker.core.lock().unwrap().store = Some(session_at("replacement.jsonl"));
+    assert!(store.append_model_usage(original_id, bill()).await.is_err());
+    assert_eq!(billed_rows(&worker), 0);
 }

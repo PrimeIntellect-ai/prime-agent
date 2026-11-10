@@ -28,6 +28,11 @@ impl SessionManager {
             return Err(error);
         }
         let entry = self.file_entries[index].clone();
+        if let Some(sink) = &self.billed_row_sink {
+            if let Some(row) = crate::session::billed_row::billed_file_entry(&entry) {
+                sink(&row);
+            }
+        }
         if let Some(window) = &mut self.window {
             window.append_entry(entry.clone());
         }

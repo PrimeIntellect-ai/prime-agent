@@ -475,7 +475,7 @@ impl Worker {
             Some(_) => {
                 return response_failure(None, "get_messages", "History branch changed", None);
             }
-            None => store.leaf_id.clone().unwrap_or_default(),
+            None => store.leaf_id().unwrap_or_default().to_string(),
         };
         let Some(mut rows) = store.transcript_page(&page) else {
             return response_failure(None, "get_messages", "History branch changed", None);
@@ -520,10 +520,11 @@ impl Worker {
             Err(error) => return response_failure(None, NAME, &error.to_string(), None),
         };
         let read = || {
-            let core = self.core.lock().unwrap();
+            let mut core = self.core.lock().unwrap();
+            let core = &mut *core;
             let slice = core
                 .store
-                .as_ref()
+                .as_mut()
                 .and_then(|store| query.read(store, &core.running_tool_calls));
             slice
         };
@@ -700,13 +701,17 @@ impl Worker {
             return response;
         }
         let core = self.core.lock().unwrap();
+        // The newest non-empty assistant text: an ended turn's final
+        // assistant row may hold only the tool call, so the answer sits in
+        // the last assistant row with text (the file fallback's rule).
         let text = core.store.as_ref().and_then(|store| {
             store
                 .messages()
                 .into_iter()
                 .rev()
-                .find(|message| crate::types::message_role(message) == Some("assistant"))
+                .filter(|message| crate::types::message_role(message) == Some("assistant"))
                 .map(|message| crate::types::message_text(&message))
+                .find(|text| !text.is_empty())
         });
         response_success(
             None,

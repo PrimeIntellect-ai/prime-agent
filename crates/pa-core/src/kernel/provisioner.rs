@@ -104,10 +104,11 @@ pub type KernelBootstrapResultHandler = Arc<dyn Fn(KernelBootstrapStats) + Send 
 pub struct IpythonKernelProvisionerOptions {
     /// Python override. Must have prime-agent-runtime installed.
     pub python: Option<PathBuf>,
-    /// Per-cell watchdog budget for user `python_repl` cells, in milliseconds
-    /// (`None`: the watchdog never arms). The daemon engine resolves it from
-    /// settings and disarms it for daemonless sessions; the runtime bootstrap
-    /// and internal state ops never arm it.
+    /// Default time limit for user `python_repl` cells, in milliseconds
+    /// (`None`: never armed; `0`: disabled). The daemon engine resolves it
+    /// from settings and disarms it for daemonless sessions; a cell's own
+    /// `timeout` argument replaces it. The runtime bootstrap and internal
+    /// state ops never arm it.
     pub cell_timeout_ms: Option<u64>,
     pub env: HashMap<String, String>,
     /// Command prefix prepended to every kernel `bash()` invocation.
@@ -283,8 +284,8 @@ impl IpythonKernelProvisioner {
         self.lock_state().manager.clone()
     }
 
-    /// The per-cell watchdog budget the kernel executor arms for user cells
-    /// (`None`: the watchdog never arms).
+    /// The default time limit the kernel executor arms for user cells
+    /// (`None`: never armed).
     #[must_use]
     pub fn cell_timeout_ms(&self) -> Option<u64> {
         self.inner.options.cell_timeout_ms
@@ -1364,13 +1365,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn session_settings_reach_the_kernel_shell() {
+    async fn project_settings_cannot_replace_the_kernel_shell() {
         let dir = tempfile::tempdir().unwrap();
         let agent_dir = dir.path().join("agent");
         let cwd = dir.path().join("project");
         std::fs::create_dir_all(&agent_dir).unwrap();
         std::fs::create_dir_all(cwd.join(".prime/agent")).unwrap();
-        // Project settings override the global setting before the session captures it.
+        // A repository cannot choose the executable that wraps every shell command.
         let global = executable_shell(dir.path(), "global-bash");
         let project = executable_shell(dir.path(), "project-bash");
         std::fs::write(
@@ -1385,7 +1386,7 @@ mod tests {
         )
         .unwrap();
         let engine = shell_test_session(cwd, agent_dir).await.unwrap();
-        assert_eq!(engine.provisioner.inner.options.shell_path, Some(project));
+        assert_eq!(engine.provisioner.inner.options.shell_path, Some(global));
     }
 
     #[tokio::test]
@@ -1398,6 +1399,11 @@ mod tests {
         std::fs::write(
             agent_dir.join("settings.json"),
             serde_json::json!({ "shellCommandPrefix": "shopt -s expand_aliases" }).to_string(),
+        )
+        .unwrap();
+        std::fs::write(
+            cwd.join(".prime/agent/settings.json"),
+            serde_json::json!({ "shellCommandPrefix": "attacker-command" }).to_string(),
         )
         .unwrap();
         let engine = shell_test_session(cwd, agent_dir).await.unwrap();
@@ -1495,7 +1501,7 @@ mod tests {
         std::fs::create_dir_all(cwd.join(".prime/agent")).unwrap();
         let missing = cwd.join("no-such-shell");
         std::fs::write(
-            cwd.join(".prime/agent/settings.json"),
+            agent_dir.join("settings.json"),
             serde_json::json!({ "shellPath": missing.to_string_lossy() }).to_string(),
         )
         .unwrap();

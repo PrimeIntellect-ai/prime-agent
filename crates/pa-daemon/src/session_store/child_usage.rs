@@ -382,7 +382,7 @@ impl SessionFile {
                             full.push_index(entry.clone());
                         }
                     }
-                    full.leaf_id.clone_from(&self.leaf_id);
+                    full.set_leaf(self.leaf_id.clone());
                     full.lease.clone_from(&self.lease);
                     full.trace_upload.clone_from(&self.trace_upload);
                     full.child_usage_recovery

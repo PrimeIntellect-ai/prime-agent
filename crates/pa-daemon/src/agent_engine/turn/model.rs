@@ -173,6 +173,20 @@ impl AgentSessionEngine {
             Some(route) => route.target.model.context_window,
             None => model.context_window,
         };
+        // A final reply that cannot end the turn (cut off at the output
+        // limit, or no visible text where an answer is owed) becomes a
+        // retryable failure for the retry driver. Custom-row turns (harness
+        // notices, agent messages) owe no answer: silence acknowledges them.
+        let owes_answer = matches!(prompt, TurnPrompt::User { .. });
+        let settle = move |assistant: pa_agent::types::AssistantMessage| {
+            use pa_core::session_engine::provider_retry::{
+                incomplete_reply_failure, incomplete_reply_reason,
+            };
+            match incomplete_reply_reason(&assistant, owes_answer, overflow_window) {
+                Some(reason) => incomplete_reply_failure(assistant, reason),
+                None => assistant,
+            }
+        };
         let restore_subscription = self.runtime.block_on(async {
             // Awaited before tool execution. The agent loop has already
             // captured its serving model, so restoring session state here
@@ -391,7 +405,7 @@ impl AgentSessionEngine {
                                 .threshold_yielded
                                 .swap(false, std::sync::atomic::Ordering::SeqCst)
                             {
-                                return Ok(assistant);
+                                return Ok(settle(assistant));
                             }
                             // Requested boundaries stay owned by run_turns; consuming one here
                             // would lose its explicit stop and goal-continuation semantics.
@@ -413,7 +427,7 @@ impl AgentSessionEngine {
                                     .as_ref()
                                     .is_some_and(|probe| probe())
                             {
-                                return Ok(assistant);
+                                return Ok(settle(assistant));
                             }
                             if aborted() {
                                 return Ok(aborted_message(&model));
@@ -439,7 +453,7 @@ impl AgentSessionEngine {
                                 .as_ref()
                                 .is_some_and(|probe| probe())
                             {
-                                return Ok(assistant);
+                                return Ok(settle(assistant));
                             }
                             // Continue the tool run without dropping its successful assistant
                             // or inserting another copy of the admitted user prompt.

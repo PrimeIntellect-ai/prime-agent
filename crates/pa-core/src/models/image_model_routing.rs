@@ -126,6 +126,7 @@ mod tests {
             max_tokens: 8192,
             max_tokens_explicit: false,
             featured: None,
+            serving: None,
             headers: None,
             compat: None,
         }

@@ -3,8 +3,9 @@
 
 use super::view::is_warning_shown_row;
 use super::{
-    anyhow, fold_child_usage_attributions, fs, message_text, BufRead, Context, HashMap, Map, Path,
-    PathBuf, Read, Result, SessionEntry, SessionFile, SessionHeader, SessionWindow, Value,
+    anyhow, fold_child_usage_attributions, fs, message_text, BilledRowSinkSlot, BufRead, Context,
+    HashMap, Map, Path, PathBuf, Read, Result, SessionEntry, SessionFile, SessionHeader,
+    SessionWindow, Value,
 };
 
 const CURRENT_SESSION_VERSION: u32 = 3;
@@ -155,12 +156,14 @@ impl SessionFile {
             by_id: HashMap::new(),
             chain: Vec::new(),
             leaf_id: None,
+            branch_roles: Some(HashMap::new()),
             window: None,
             lease: None,
             child_usage_recovery: super::child_usage::ChildUsageRecovery::default(),
             trace_upload: None,
             anthropic_warning_shown: false,
             skipped_lines: 0,
+            billed_row_sink: BilledRowSinkSlot::default(),
         };
         for line in lines {
             let line = line.with_context(read_context)?;
@@ -216,12 +219,15 @@ impl SessionFile {
             by_id: HashMap::new(),
             chain: Vec::new(),
             leaf_id: None,
+            // Stale until the first read: the recount adds the unloaded prefix's counts.
+            branch_roles: None,
             window: None,
             lease: None,
             child_usage_recovery: super::child_usage::ChildUsageRecovery::default(),
             trace_upload: None,
             anthropic_warning_shown,
             skipped_lines: 0,
+            billed_row_sink: BilledRowSinkSlot::default(),
         };
         // The raw rows are consumed in place: each line String drops as soon as its
         // parsed entry joins the store.
@@ -239,7 +245,7 @@ impl SessionFile {
         // The window parses the retained-target attributions BEFORE the raw
         // retained rows, so the fold runs once every row is in.
         fold_child_usage_attributions(&mut file.entries);
-        file.leaf_id = Some(window.leaf_id().to_owned());
+        file.set_leaf(Some(window.leaf_id().to_owned()));
         let settings = window.settings();
         file.window = Some(SessionWindow {
             message_count: window.message_count(),
@@ -285,9 +291,12 @@ impl SessionFile {
                 full.push_index(entry.clone());
             }
         }
-        full.leaf_id.clone_from(&self.leaf_id);
+        full.set_leaf(self.leaf_id.clone());
+        // Same leaf, same branch: the window's counts already hold the unloaded prefix.
+        full.branch_roles = self.branch_roles.take();
         full.lease.clone_from(&self.lease);
         full.trace_upload.clone_from(&self.trace_upload);
+        full.billed_row_sink.clone_from(&self.billed_row_sink);
         full.child_usage_recovery
             .clone_from(&self.child_usage_recovery);
         // The merged store's leaf is the window's leaf: re-derive the gate
@@ -317,12 +326,14 @@ impl SessionFile {
             by_id: HashMap::new(),
             chain: Vec::new(),
             leaf_id: None,
+            branch_roles: Some(HashMap::new()),
             window: None,
             lease: None,
             child_usage_recovery: super::child_usage::ChildUsageRecovery::default(),
             trace_upload: None,
             anthropic_warning_shown: false,
             skipped_lines: 0,
+            billed_row_sink: BilledRowSinkSlot::default(),
         }
     }
 }

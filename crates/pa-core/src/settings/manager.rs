@@ -27,6 +27,7 @@ pub struct SettingsManager {
     global: Settings,
     pending_global_fields: BTreeSet<&'static str>,
     project: Settings,
+    project_raw: Option<serde_json::Value>,
     merged: Settings,
     runtime_overrides: Settings,
     errors: Vec<SettingsError>,
@@ -44,7 +45,7 @@ impl SettingsManager {
         let mut errors = Vec::new();
         let (global, global_raw, global_load_error) =
             load_scope(storage.as_ref(), SettingsScope::Global, &mut errors);
-        let (project, _, project_load_error) =
+        let (project, project_raw, project_load_error) =
             load_scope(storage.as_ref(), SettingsScope::Project, &mut errors);
         let merged = deep_merge(&global, &project);
         Self {
@@ -52,6 +53,7 @@ impl SettingsManager {
             global,
             pending_global_fields: BTreeSet::new(),
             project,
+            project_raw,
             merged,
             runtime_overrides: Settings::default(),
             global_raw,
@@ -119,6 +121,18 @@ impl SettingsManager {
         &self.project
     }
 
+    /// Project package entries remain available for an explicit removal, but
+    /// never participate in session resource resolution or update checks.
+    #[must_use]
+    pub(crate) fn project_packages_for_removal(&self) -> Vec<serde_json::Value> {
+        self.project_raw
+            .as_ref()
+            .and_then(|value| value.get("packages"))
+            .and_then(serde_json::Value::as_array)
+            .cloned()
+            .unwrap_or_default()
+    }
+
     #[must_use]
     pub fn errors(&self) -> &[SettingsError] {
         &self.errors
@@ -138,11 +152,12 @@ impl SettingsManager {
         let mut errors = std::mem::take(&mut self.errors);
         let (global, global_raw, global_load_error) =
             load_scope(self.storage.as_ref(), SettingsScope::Global, &mut errors);
-        let (project, _, project_load_error) =
+        let (project, project_raw, project_load_error) =
             load_scope(self.storage.as_ref(), SettingsScope::Project, &mut errors);
         self.global = global;
         self.pending_global_fields.clear();
         self.project = project;
+        self.project_raw = project_raw;
         self.global_raw = global_raw;
         self.global_load_error = global_load_error;
         self.project_load_error = project_load_error;
@@ -457,12 +472,16 @@ impl SettingsManager {
     }
 
     pub fn set_project_packages(&mut self, packages: Vec<serde_json::Value>) {
-        self.project.packages = Some(packages.clone());
-        self.persist_scope_field(
-            SettingsScope::Project,
-            "packages",
-            &serde_json::Value::Array(packages),
-        );
+        // Preserve project package entries for explicit removal. They never
+        // become active, including in this manager.
+        let value = serde_json::Value::Array(packages);
+        self.persist_scope_field(SettingsScope::Project, "packages", &value);
+        if let serde_json::Value::Object(project_raw) = self
+            .project_raw
+            .get_or_insert_with(|| serde_json::json!({}))
+        {
+            project_raw.insert("packages".into(), value);
+        }
         self.merged = deep_merge(&self.global, &self.project);
     }
 
@@ -648,9 +667,9 @@ impl SettingsManager {
         self.merged.recent_models.clone().unwrap_or_default()
     }
 
-    /// The per-cell watchdog budget for user `python_repl` cells, in
+    /// The default time limit for user `python_repl` cells, in
     /// milliseconds (`0` disables; the default is 60s). Daemonless
-    /// sessions never arm the watchdog.
+    /// sessions never arm it.
     #[must_use]
     pub fn get_python_cell_timeout_ms(&self) -> u64 {
         self.merged
@@ -1017,7 +1036,19 @@ fn load_scope(
         }
         other => other,
     };
-    (from_value_lenient(&migrated), Some(migrated), None)
+    let mut settings = from_value_lenient(&migrated);
+    if scope == SettingsScope::Project {
+        // A repository can supply this file before the user opens it. Keep its
+        // document on disk, but never let it select a process, command prefix,
+        // package installer, or MCP server through an effective settings read.
+        settings.shell_path = None;
+        settings.shell_command_prefix = None;
+        settings.npm_command = None;
+        settings.packages = None;
+        settings.mcp_servers = None;
+        settings.mcp_catalog_sources = None;
+    }
+    (settings, Some(migrated), None)
 }
 
 #[cfg(test)]
