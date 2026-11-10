@@ -161,6 +161,39 @@ fn process_alive(pid: u32) -> bool {
     !state.starts_with('Z') && !state.starts_with('X')
 }
 
+/// SIGSTOP the worker and wait until every one of its threads is parked:
+/// `kill` returns once the stop is queued, and a runtime thread still running
+/// serves the next command before it stops.
+fn freeze(pid: u32) {
+    let status = Command::new("kill")
+        .arg("-STOP")
+        .arg(pid.to_string())
+        .status()
+        .expect("SIGSTOP the worker");
+    assert!(status.success(), "SIGSTOP must reach the worker");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !all_threads_stopped(pid) {
+        assert!(Instant::now() < deadline, "the worker never stopped");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+/// Whether every `/proc/<pid>/task/<tid>/stat` reads `T` (stopped).
+fn all_threads_stopped(pid: u32) -> bool {
+    let Ok(tasks) = std::fs::read_dir(format!("/proc/{pid}/task")) else {
+        return false;
+    };
+    let states: Vec<Option<char>> = tasks
+        .flatten()
+        .map(|task| {
+            let stat = std::fs::read_to_string(task.path().join("stat")).ok()?;
+            let (_, rest) = stat.rsplit_once(')')?;
+            rest.split_whitespace().next()?.chars().next()
+        })
+        .collect();
+    !states.is_empty() && states.iter().all(|state| *state == Some('T'))
+}
+
 /// Pids whose parent is `ppid` (the supervisor's worker children).
 fn child_pids_of(ppid: u32) -> Vec<u32> {
     let mut pids = Vec::new();
@@ -473,12 +506,7 @@ fn an_owned_stop_kills_a_worker_that_missed_the_shutdown() {
 
     // The worker freezes mid-flight: it cannot process the routed shutdown (the route times
     // out), survives SIGTERM, and only SIGKILL ends it.
-    let stop = Command::new("kill")
-        .arg("-STOP")
-        .arg(worker_process_id.to_string())
-        .status()
-        .expect("SIGSTOP the worker");
-    assert!(stop.success(), "SIGSTOP the session worker");
+    freeze(worker_process_id);
 
     // The owner stops its session: the stop must confirm the worker's process death
     // (escalating to SIGKILL) before retiring its descriptor; the response waits it out.
