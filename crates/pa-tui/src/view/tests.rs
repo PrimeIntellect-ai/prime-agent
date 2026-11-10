@@ -723,6 +723,32 @@ fn flush_bytes(v: &mut AgentView, width: usize, screen_height: usize) -> Vec<u8>
     sink
 }
 
+/// The suspend flush (`stream_flush_to`) runs an exact layout pass; the following window must
+/// keep tracking the tail afterwards, so rows pushed after a ^Z/fg cycle reach the frame.
+#[test]
+fn a_following_window_tracks_the_tail_after_the_suspend_flush() {
+    let mut v = view();
+    for index in 0..60 {
+        v.push_entry(ChatEntry::Status {
+            text: format!("row {index}"),
+            kind: crate::chat::StatusKind::Info,
+        });
+    }
+    v.render_frame(80, 24);
+    flush_bytes(&mut v, 80, 24);
+    v.push_entry(ChatEntry::Status {
+        text: "after resume".to_string(),
+        kind: crate::chat::StatusKind::Info,
+    });
+    let frame = v.render_frame(80, 24);
+    assert!(
+        frame
+            .iter()
+            .any(|row| row_text(row).contains("after resume")),
+        "the following window stopped at the pre-suspend tail"
+    );
+}
+
 #[test]
 fn flush_streams_append_then_repaints_the_changed_tail() {
     let mut v = view();

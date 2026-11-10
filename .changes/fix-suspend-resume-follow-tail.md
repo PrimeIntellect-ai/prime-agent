@@ -1,0 +1,1 @@
+- Fixed the transcript stopping at the pre-suspend end after Ctrl+Z and `fg`: new output now shows again without switching views.

@@ -26,7 +26,11 @@ impl AgentView {
         width: usize,
         screen_height: usize,
     ) -> std::io::Result<()> {
+        // The exact pass must not leave the fullscreen window's walk disabled: a suspend flush
+        // resumes into the same view, whose following window must keep tracking the tail.
+        let sparse = self.sparse_enabled;
         let layout = self.layout_pass(width);
+        self.sparse_enabled = sparse;
         let mut sink = FlushSink {
             flushed: std::mem::take(&mut self.flushed_frame),
             texts: Vec::new(),
