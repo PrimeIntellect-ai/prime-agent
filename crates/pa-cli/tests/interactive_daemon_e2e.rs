@@ -5658,7 +5658,7 @@ async fn tui_accepted_then_killed_turn_renders_closed_error() {
             // it first so the error assertion covers the end state after
             // the status that used to overwrite `session closed (killed)`.
             pa_tui::interactive::HeadlessStep::WaitRender {
-                needle: "turn failed: prompt cancelled".to_string(),
+                needle: "turn failed: No response produced.".to_string(),
                 timeout_ms: 30_000,
             },
             pa_tui::interactive::HeadlessStep::WaitRender {
@@ -5687,7 +5687,7 @@ async fn tui_accepted_then_killed_turn_renders_closed_error() {
     );
     let last = outcome.frames.last().expect("final frame");
     assert!(
-        last.contains("turn failed: prompt cancelled"),
+        last.contains("turn failed: No response produced."),
         "the post-close cancellation must reach the frame:\n{last}"
     );
     assert!(
@@ -5811,7 +5811,7 @@ async fn assert_close_reason_survives_late_turn_status(reason: &str, explanation
             // it first so the error assertion covers the end state after
             // the status that used to overwrite `session closed (killed)`.
             pa_tui::interactive::HeadlessStep::WaitRender {
-                needle: "turn failed: prompt cancelled".to_string(),
+                needle: "turn failed: No response produced.".to_string(),
                 timeout_ms: 30_000,
             },
             pa_tui::interactive::HeadlessStep::WaitRender {
@@ -5847,7 +5847,9 @@ async fn assert_close_reason_survives_late_turn_status(reason: &str, explanation
     let checkpoint = outcome
         .frames
         .iter()
-        .find(|frame| frame.contains("turn failed: prompt cancelled") && frame.contains(&error_row))
+        .find(|frame| {
+            frame.contains("turn failed: No response produced.") && frame.contains(&error_row)
+        })
         .unwrap_or_else(|| {
             panic!("the close error and cancellation must share a frame:\n{rendered}")
         });

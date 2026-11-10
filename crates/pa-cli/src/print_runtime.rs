@@ -74,6 +74,16 @@ impl crate::mode::Runtime for PrintRuntime {
                     Ok(1)
                 }
             },
+            // The A2A server mode: Prime Agent reachable as an
+            // Agent2Agent agent over its JSON-RPC binding (see
+            // `pa_daemon::a2a`).
+            AppMode::A2a => match run_a2a_mode(options) {
+                Ok(code) => Ok(code),
+                Err(error) => {
+                    eprintln!("Error: {error:#}");
+                    Ok(1)
+                }
+            },
         }
     }
 }
@@ -105,7 +115,7 @@ async fn acp_mode_main(options: &RunOptions) -> Result<i32, String> {
     crate::interactive_mode::ensure_daemon_running(&socket_path, &options.config.cwd)
         .await
         .map_err(|error| format!("{error:#}"))?;
-    let (actual_cwd, create) = daemon_acp_create(options)?;
+    let (actual_cwd, create) = daemon_headless_create(options, "acp")?;
     pa_daemon::acp::daemon::run_daemon_attached_acp_mode(pa_daemon::acp::daemon::DaemonAcpOptions {
         socket_path,
         actual_cwd,
@@ -116,12 +126,101 @@ async fn acp_mode_main(options: &RunOptions) -> Result<i32, String> {
     .map_err(|error| format!("{error:#}"))
 }
 
-/// The ACP daemon session's create (TS main.ts `defaultSessionConfig` +
-/// the startup create): the session the flags select, client-owned only
-/// for `--no-session`, plus the session's cwd. The worker opens and
-/// leases the selected file itself.
-fn daemon_acp_create(
+/// The A2A server headless mode: ensure a supervisor is listening
+/// (spawning one detached), serve the A2A JSON-RPC binding over daemon
+/// sessions until shutdown. Any startup failure is an `Error:` exit 1
+/// before the listener binds.
+fn run_a2a_mode(options: &RunOptions) -> Result<i32, String> {
+    // The bind options resolve and the token's env var scrubs BEFORE
+    // the runtime builds: the process spawns its supervisor from this
+    // environment (`ensure_daemon_running`) and forwards it into every
+    // context's worker (`launch_env`) — workers and their python
+    // kernels must never inherit the auth secret, and the resolved
+    // token is already in hand.
+    let bind = crate::config::a2a_bind_options_scrubbed(
+        options.a2a_host.as_deref(),
+        options.a2a_port,
+        &options.config.cwd,
+    )?;
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .map_err(|error| error.to_string())?;
+    rt.block_on(a2a_mode_main(options, bind))
+}
+
+async fn a2a_mode_main(
     options: &RunOptions,
+    bind: (String, u16, String, Option<std::path::PathBuf>),
+) -> Result<i32, String> {
+    crate::telemetry_notice::print_if_due(&options.config);
+    // Flag > env > default: the same `PRIME_AGENT_DAEMON_SOCKET` contract
+    // as every other daemon-attached mode.
+    let socket_path = crate::config::resolve_daemon_socket_path(options.daemon_socket.as_deref());
+    crate::interactive_mode::ensure_daemon_running(&socket_path, &options.config.cwd)
+        .await
+        .map_err(|error| format!("{error:#}"))?;
+    let (bind_host, bind_port, bearer_token, minted_token_dir) = bind;
+    // A saved-session selection (`--resume`, `--fork`, `--continue`)
+    // names ONE session, but every A2A context hosts its own: reusing
+    // the selected file would alias every context to that one session
+    // (the daemon reuses the worker already hosting the file). The
+    // refusal precedes `daemon_headless_create` — the selection's fork
+    // arm materializes a session copy as its side effect, so refusing
+    // after the helper would leave the copy behind on the rejected
+    // path. A `--no-session` run keeps the fresh client-owned contexts
+    // (its selection is void: no context can alias a file the create
+    // does not carry).
+    if !options.session.no_session {
+        if let HeadlessSession::Fork(source) | HeadlessSession::Open(source) =
+            select_headless_session(options)?
+        {
+            return Err(format!(
+                "--mode a2a gives every conversation context its own daemon session and cannot \
+reuse the selected session file {}; run the A2A server without --resume, --fork, or --continue",
+                source.display()
+            ));
+        }
+    }
+    let (_cwd, create) = daemon_headless_create(options, "a2a")?;
+    // The served-request adoption events fire from this process: the
+    // client is the session engine's seam (inert when disabled).
+    let telemetry = if crate::mode::create_telemetry_disabled(&options.config).unwrap_or(false) {
+        None
+    } else {
+        Some(pa_core::session_engine::telemetry::build_client(
+            &pa_core::settings::SettingsManager::create(
+                &options.config.cwd,
+                &options.config.agent_dir,
+            ),
+            &options.config.agent_dir,
+        ))
+    };
+    pa_daemon::a2a::run_daemon_attached_a2a_mode(pa_daemon::a2a::A2aOptions {
+        socket_path,
+        bind_host,
+        bind_port,
+        bearer_token,
+        minted_token_dir,
+        public_base_url: crate::config::a2a_public_base_url(&options.config.cwd),
+        max_contexts: crate::config::a2a_max_contexts(&options.config.cwd),
+        telemetry,
+        card_name: crate::config::a2a_agent_name(&options.config.cwd),
+        card_description: crate::config::a2a_agent_description(&options.config.cwd),
+        product_version: crate::config::version().to_string(),
+        create,
+    })
+    .await
+    .map_err(|error| format!("{error:#}"))
+}
+
+/// The daemon session create (TS main.ts `defaultSessionConfig` + the
+/// startup create): the session the flags select, client-owned only for
+/// `--no-session`, plus the session's cwd. The worker opens and leases
+/// the selected file itself.
+fn daemon_headless_create(
+    options: &RunOptions,
+    execution_mode: &str,
 ) -> Result<(std::path::PathBuf, pa_types::daemon::DaemonCommand), String> {
     use pa_types::daemon::DaemonSessionLifecycle;
     let config = &options.config;
@@ -159,7 +258,7 @@ fn daemon_acp_create(
         "cwd": cwd.display().to_string(),
         "sessionDir": session_dir.display().to_string(),
         // The telemetry execution mode (TS main.ts `executionMode: appMode`).
-        "executionMode": "acp",
+        "executionMode": execution_mode,
     });
     if let Some(provider) = &config.provider {
         create_config["provider"] = serde_json::json!(provider);
@@ -831,6 +930,8 @@ pub(crate) async fn build_headless_engine_with(
     let engine = pa_core::session_engine::engine::create_session(
         pa_core::session_engine::engine::SessionEngineConfig {
             on_late_sent_agent_message,
+            on_kernel_bash_launch: None,
+            on_kernel_bash_activity_end: None,
             cron_store: None,
             semantic_edges,
             telemetry,

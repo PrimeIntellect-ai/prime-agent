@@ -24,11 +24,14 @@ async fn the_waiting_prompt_resolves_only_after_the_turn_settles() {
                     agent_message: None,
                     queue_key: None,
                     admission_id: None,
+                    client_admission_id: None,
                     images: Vec::new(),
                     done: Some(done_tx),
                     queue_visible: true,
                     policy: TurnPolicy::Queued,
                     forced_batch: false,
+                    kernel_notice: false,
+                    delivery_scoped: false,
                 }],
             )
             .await;
@@ -131,11 +134,14 @@ async fn roster_feed_publishes_live_tool_activity() {
                 agent_message: None,
                 queue_key: None,
                 admission_id: None,
+                client_admission_id: None,
                 images: Vec::new(),
                 done: None,
                 queue_visible: true,
                 policy: TurnPolicy::Queued,
                 forced_batch: false,
+                kernel_notice: false,
+                delivery_scoped: false,
             }],
         )
         .await;
