@@ -1,0 +1,1 @@
+- Stopped repository-controlled git configuration from running commands while the autonomous gates snapshot the workspace.

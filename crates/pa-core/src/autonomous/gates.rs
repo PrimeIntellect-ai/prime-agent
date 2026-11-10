@@ -1,5 +1,9 @@
 //! Autonomous quality gates: shell-command gates evaluated after each turn, with workspace
 //! snapshots that suppress re-running a failing gate over an unchanged workspace.
+//!
+//! The snapshot's git probes run inside the session worktree, so their fixed argument sets
+//! carry overrides that keep the project's own git configuration and attributes from
+//! starting programs during capture (see `SNAPSHOT_STATUS_ARGS` and `SNAPSHOT_DIFF_ARGS`).
 
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
@@ -272,6 +276,37 @@ const SNAPSHOT_EXCLUDES: [&str; 6] = [
     "runner_args.log",
 ];
 
+/// Fixed arguments of the worktree-snapshot `status` probe. The
+/// `-c core.fsmonitor=false` override outranks repository configuration: a
+/// `.git/config` `core.fsmonitor` names a program git would otherwise start
+/// whenever it refreshes the index, which `status` does.
+const SNAPSHOT_STATUS_ARGS: [&str; 8] = [
+    "-c",
+    "core.fsmonitor=false",
+    "--no-optional-locks",
+    "status",
+    "--porcelain=v1",
+    "-z",
+    "-uall",
+    "--no-renames",
+];
+
+/// Fixed arguments of the worktree-snapshot `diff` probe. It carries the
+/// same `core.fsmonitor` override (`diff` also refreshes the index) plus
+/// `--no-textconv`, which keeps a `diff.<driver>.textconv` program declared
+/// through repository `.gitattributes`/`.git/config` from starting during
+/// the diff (`--no-ext-diff` already refuses external diff commands).
+const SNAPSHOT_DIFF_ARGS: [&str; 8] = [
+    "-c",
+    "core.fsmonitor=false",
+    "--no-optional-locks",
+    "diff",
+    "--no-ext-diff",
+    "--no-textconv",
+    "--binary",
+    "HEAD",
+];
+
 /// Snapshot the git worktree state: porcelain status, the HEAD diff, and a content
 /// hash of untracked files. `None` when any capture step fails.
 pub async fn capture_git_worktree_snapshot(cwd: &Path) -> Option<GitWorktreeSnapshot> {
@@ -282,31 +317,8 @@ pub async fn capture_git_worktree_snapshot(cwd: &Path) -> Option<GitWorktreeSnap
     for exclude in SNAPSHOT_EXCLUDES {
         pathspec.push(format!(":(exclude){exclude}"));
     }
-    let status = run_git(
-        &[
-            "--no-optional-locks",
-            "status",
-            "--porcelain=v1",
-            "-z",
-            "-uall",
-            "--no-renames",
-        ],
-        &pathspec,
-        cwd,
-    )
-    .await?;
-    let diff = run_git(
-        &[
-            "--no-optional-locks",
-            "diff",
-            "--no-ext-diff",
-            "--binary",
-            "HEAD",
-        ],
-        &pathspec,
-        cwd,
-    )
-    .await?;
+    let status = run_git(&SNAPSHOT_STATUS_ARGS, &pathspec, cwd).await?;
+    let diff = run_git(&SNAPSHOT_DIFF_ARGS, &pathspec, cwd).await?;
     let untracked_hash = hash_untracked_files(cwd, &status);
     Some(GitWorktreeSnapshot {
         status,
@@ -711,6 +723,40 @@ mod tests {
         );
         let digest = hash_untracked_path(&dir.path().join("untracked.txt"));
         assert!(digest.starts_with("file:"));
+    }
+
+    #[tokio::test]
+    async fn snapshot_git_probes_carry_the_repo_command_guards() {
+        assert!(SNAPSHOT_STATUS_ARGS.starts_with(&["-c", "core.fsmonitor=false"]));
+        assert!(SNAPSHOT_DIFF_ARGS.starts_with(&["-c", "core.fsmonitor=false"]));
+        assert!(SNAPSHOT_DIFF_ARGS.contains(&"--no-textconv"));
+        #[cfg(unix)]
+        repo_program_capture_probe().await;
+    }
+
+    /// The capture runs against a repository whose own config names a program;
+    /// the control shows the program runs unguarded.
+    #[cfg(unix)]
+    async fn repo_program_capture_probe() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::TempDir::new().unwrap();
+        let marker = dir.path().join("fsmonitor-ran");
+        let hook = dir.path().join("fsmonitor.sh");
+        let body = format!("#!/bin/sh\ntouch {}\nexit 0\n", marker.display());
+        std::fs::write(&hook, body).unwrap();
+        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let run = |args: &[&str]| {
+            let mut command = std::process::Command::new("git");
+            command.args(args).current_dir(dir.path());
+            command.output().unwrap().status.success()
+        };
+        assert!(run(&["init", "-q"]));
+        assert!(run(&["config", "core.fsmonitor", hook.to_str().unwrap()]));
+        assert!(run(&["status"]));
+        assert!(marker.exists(), "control: the hook runs unguarded");
+        std::fs::remove_file(&marker).unwrap();
+        let _ = ShellGateRunner::new(dir.path()).capture_snapshot().await;
+        assert!(!marker.exists(), "the capture starts no program");
     }
 
     #[tokio::test]
