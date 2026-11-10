@@ -258,6 +258,7 @@ pub fn kernel_provisioner(
     on_background_work_settled: Option<crate::kernel::shared::BackgroundWorkSettledCallback>,
     on_unavailable_skills: Option<crate::kernel::provisioner::UnavailableSkillsCallback>,
     on_bootstrap_result: Option<crate::kernel::provisioner::KernelBootstrapResultHandler>,
+    ready_gate: Option<crate::kernel::provisioner::KernelReadyGate>,
 ) -> Arc<KernelProvisioner> {
     let mut env = HashMap::with_capacity(3);
     env.insert(
@@ -302,7 +303,7 @@ pub fn kernel_provisioner(
             // The engine-resolved default cell time limit (`None`: daemonless;
             // the runtime bootstrap and state ops never arm it).
             cell_timeout_ms,
-            ready_gate: None,
+            ready_gate,
             on_restore,
             on_background_work_settled,
             on_unavailable_skills,

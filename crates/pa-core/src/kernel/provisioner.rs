@@ -69,6 +69,9 @@ where
     boot().await
 }
 
+/// Resolves once another kernel sharing the snapshot dir has flushed its final snapshot.
+pub type KernelReadyGate = Arc<dyn Fn() -> futures::future::BoxFuture<'static, ()> + Send + Sync>;
+
 /// Publishes the restore outcome once the kernel is usable.
 pub type RestoreCallback = Arc<dyn Fn(&RestoreResult) + Send + Sync>;
 
@@ -123,7 +126,7 @@ pub struct IpythonKernelProvisionerOptions {
     /// the stderr log live there. `None` for ephemeral sessions.
     pub snapshot_dir: Option<PathBuf>,
     /// Await (e.g. a previous provisioner's dispose) before reading the snapshot.
-    pub ready_gate: Option<Arc<dyn Fn() -> futures::future::BoxFuture<'static, ()> + Send + Sync>>,
+    pub ready_gate: Option<KernelReadyGate>,
     /// Publishes the restore outcome once the kernel is usable.
     pub on_restore: Option<RestoreCallback>,
     /// Fires when the kernel's last live background `bash()` handle
