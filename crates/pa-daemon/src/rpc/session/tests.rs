@@ -65,7 +65,6 @@ async fn engine_handle(
             max_tokens: 100,
             max_tokens_explicit: false,
             featured: None,
-            serving: None,
             headers: None,
             compat: None,
         },
@@ -92,6 +91,7 @@ fn mkfifo(path: &Path) {
     assert!(status.success());
 }
 
+#[allow(clippy::await_holding_lock)] // the env override is process-global: the guard must span the async flow
 #[tokio::test(flavor = "multi_thread")]
 async fn a_same_path_reopen_revives_the_replaced_kernels_final_namespace() {
     let Some(python) = live_kernel_python() else {
@@ -101,6 +101,9 @@ async fn a_same_path_reopen_revives_the_replaced_kernels_final_namespace() {
         "PRIME_AGENT_KERNEL_PYTHON",
         Some(python.display().to_string()),
     )]);
+    let _faux = crate::agent_engine::tests::FAUX_TEST_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let dir = tempfile::tempdir().expect("tempdir");
     let cwd = dir.path().join("project");
     let agent_dir = dir.path().join("agent");
