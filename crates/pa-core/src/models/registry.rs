@@ -934,7 +934,7 @@ impl ModelRegistry {
                 .get(&model.id)
                 .cloned()
                 .unwrap_or_else(|| model.clone());
-            xai_subscription_serving = stored.credential_type.as_deref() == Some("oauth")
+            xai_subscription_serving = stored.credential_type == Some("oauth")
                 && matches!(
                     &stored.source_token,
                     Some(token) if token.source == crate::auth::types::AuthSource::Stored

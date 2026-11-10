@@ -1025,7 +1025,7 @@ impl AgentSessionEngine {
                 let Some(engine) = weak.as_ref().and_then(std::sync::Weak::upgrade) else {
                     return pa_core::models::ResolvedRequestAuth::default();
                 };
-                engine.resolve_request_key_and_headers_and_store_health(model)
+                engine.resolve_request_auth(model)
             })
         };
         let stream_fn = switchable_stream_fn_with_live_auth(
