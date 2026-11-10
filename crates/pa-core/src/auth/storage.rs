@@ -31,8 +31,9 @@ pub trait AuthStorageBackend: Send + Sync {
 
     /// # Errors
     ///
-    /// Returns an error when the backend fails to lock, the `update` callback fails, or writing the
-    /// document fails; an unreadable file reaches the callback as `None`.
+    /// Returns an error when the backend fails to lock, the document read
+    /// fails, the `update` callback fails, or writing the document fails; a
+    /// file that is genuinely absent reaches the callback as `None`.
     fn with_lock(
         &self,
         update: &mut dyn FnMut(Option<String>) -> Result<((), Option<String>)>,
@@ -54,7 +55,8 @@ pub trait AuthStorageBackend: Send + Sync {
     /// # Errors
     ///
     /// Returns the lock-acquisition error when the lock cannot be taken
-    /// within the caller's budget.
+    /// within the backend's fixed acquisition budget (150 attempts at
+    /// 100 ms).
     fn refresh_lock(&self, provider: &str) -> Result<Option<RefreshLock>> {
         let _ = provider;
         Ok(None)
@@ -248,7 +250,15 @@ impl AuthStorageBackend for FileAuthStorageBackend {
             .ok()
             .and_then(|metadata| stat_identity(&metadata));
         let guard = self.acquire_lock()?;
-        let content = fs::read_to_string(&self.auth_path).ok();
+        // TS `withLock` reads through `readFileSync` and propagates its
+        // failures (auth-storage.ts:203): an unreadable document is an
+        // ERROR, never an empty store — a failed read is not a logout.
+        // Only a file that is genuinely absent reads as `None`.
+        let content = if self.auth_path.exists() {
+            Some(fs::read_to_string(&self.auth_path)?)
+        } else {
+            None
+        };
         drop(guard);
         if let (Some(identity), Some(content)) = (now_identity, content.as_deref()) {
             read_cache()
@@ -273,7 +283,14 @@ impl AuthStorageBackend for FileAuthStorageBackend {
         self.ensure_parent_dir()?;
         self.ensure_file_exists()?;
         let guard = self.acquire_lock()?;
-        let current = fs::read_to_string(&self.auth_path).ok();
+        // The TS read arm: `readFileSync` failures propagate
+        // (auth-storage.ts:246), only a genuinely absent file reads as
+        // `None`.
+        let current = if self.auth_path.exists() {
+            Some(fs::read_to_string(&self.auth_path)?)
+        } else {
+            None
+        };
         let ((), next) = update(current)?;
         if let Some(next) = next {
             super::super::settings::storage::atomic_write_with(
@@ -302,7 +319,15 @@ impl AuthStorageBackend for FileAuthStorageBackend {
     fn refresh_lock(&self, provider: &str) -> Result<Option<RefreshLock>> {
         let mut refresh_file = self.auth_path.as_os_str().to_os_string();
         refresh_file.push(".refresh.");
-        refresh_file.push(provider_lock_key(provider));
+        // The per-provider lock-file key: a short FNV-1a hash, stable and
+        // dependency-free, keeping one lock file per provider id
+        // (`mcp:*` ids carry path-hostile characters).
+        let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+        for byte in provider.as_bytes() {
+            hash ^= u64::from(*byte);
+            hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+        refresh_file.push(format!("{hash:016x}"));
         refresh_file.push(".lock");
         let file = std::fs::OpenOptions::new()
             .create(true)
@@ -314,10 +339,10 @@ impl AuthStorageBackend for FileAuthStorageBackend {
         // Contention (WouldBlock) waits out the budget below; any other
         // error surfaces immediately as the lock-acquisition failure.
         for attempt in 1..=150 {
-            match file.try_lock() {
+            match crate::platform::try_lock_exclusive(&file) {
                 Ok(()) => return Ok(Some(RefreshLock(file))),
-                Err(std::fs::TryLockError::WouldBlock) => {}
-                Err(std::fs::TryLockError::Error(error)) => return Err(error.into()),
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
+                Err(error) => return Err(error.into()),
             }
             if attempt < 150 {
                 std::thread::sleep(std::time::Duration::from_millis(100));
@@ -327,17 +352,6 @@ impl AuthStorageBackend for FileAuthStorageBackend {
             "Failed to acquire the {provider} refresh lock: locked by a live holder"
         ))
     }
-}
-
-/// The per-provider lock-file key: a short FNV-1a hash, stable and
-/// dependency-free, keeping one lock file per provider id.
-fn provider_lock_key(provider: &str) -> String {
-    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
-    for byte in provider.as_bytes() {
-        hash ^= u64::from(*byte);
-        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
-    }
-    format!("{hash:016x}")
 }
 
 #[derive(Default)]

@@ -228,11 +228,21 @@ pub struct AuthStorage {
     stale_auth_sources: HashMap<String, Vec<AuthSourceToken>>,
     fallback_resolver: Option<FallbackResolver>,
     load_error: Option<String>,
+    /// The retained load/parse/persist diagnostics, bounded to the most
+    /// recent [`MAX_RETAINED_ERRORS`] entries: TS's `recordError` is
+    /// unbounded, but its CLI process is short-lived — the daemon's
+    /// engine-lived store reloads per provider call, so a persistently
+    /// failing auth file would otherwise grow the list for the session
+    /// lifetime.
     errors: Vec<String>,
     /// Memoized candidates (TS `authCandidateMemos`), keyed by `source:provider`,
     /// superseded when the hashed material changes.
     candidate_memos: std::sync::Mutex<HashMap<String, (String, AuthSourceCandidate)>>,
 }
+
+/// The retained diagnostic cap: the newest [`AuthStorage::errors`] entries
+/// stay, the oldest drop.
+const MAX_RETAINED_ERRORS: usize = 32;
 
 impl AuthStorage {
     pub fn from_storage(
@@ -346,9 +356,17 @@ impl AuthStorage {
             }
             Err(error) => {
                 self.load_error = Some(error.to_string());
-                self.errors.push(error.to_string());
+                self.record_error(&error);
             }
         }
+    }
+
+    /// Retain one diagnostic, dropping the oldest past the cap.
+    fn record_error(&mut self, error: &anyhow::Error) {
+        if self.errors.len() >= MAX_RETAINED_ERRORS {
+            self.errors.remove(0);
+        }
+        self.errors.push(error.to_string());
     }
 
     /// Runtime API-key override (CLI `--api-key`); not persisted.
@@ -762,7 +780,7 @@ impl AuthStorage {
             Ok(((), Some(content)))
         });
         if let Err(error) = result {
-            self.errors.push(error.to_string());
+            self.record_error(&error);
             return;
         }
         // Reload from what we wrote.

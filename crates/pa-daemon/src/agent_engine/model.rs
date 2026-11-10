@@ -450,14 +450,18 @@ impl AgentSessionEngine {
     /// serves the next request without a restart. The resolution is
     /// blocking I/O; the stream seam runs it off the executor under the
     /// turn's abort signal.
-    pub(crate) fn resolve_request_key_and_headers_and_store_health(
+    pub(crate) fn resolve_request_auth(
         &self,
         model: &Model,
     ) -> pa_core::models::ResolvedRequestAuth {
+        // Poison recovery (the repo's pattern): a panic inside one
+        // resolution must not break every later provider call — the
+        // poisoned store is already `None` (the panicked call took it and
+        // never returned it), so the next call rebuilds it from the store.
         let mut store = self
             .request_auth_store
             .lock()
-            .expect("request auth store lock");
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let mut auth = store.take().unwrap_or_else(|| {
             pa_core::auth::AuthStorage::create_with_oauth(
                 &self.config.agent_dir,
@@ -471,11 +475,6 @@ impl AgentSessionEngine {
         auth.reload();
         if let Some(api_key) = &self.current_selection().api_key {
             auth.set_runtime_api_key(&model.provider, api_key.clone());
-        } else {
-            // A selection without the create-config key must not keep
-            // serving the override an earlier selection installed on the
-            // engine-lived store.
-            auth.remove_runtime_api_key(&model.provider);
         }
         // The request-auth registry resolves auth only for the serving
         // provider: its construction never resolves the unrelated Prime
