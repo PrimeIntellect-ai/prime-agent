@@ -342,8 +342,7 @@ fn enrich_uptimes(mut daemons: Vec<DiscoveredDaemonProcess>) -> Vec<DiscoveredDa
 /// Every listening product daemon the OS reports inside the given state root:
 /// `ss -lxp` on Linux, `lsof` on macOS. The root filter runs here — before
 /// the uptime enrichment and before any caller sees a result — so a daemon
-/// outside the root is never enumerated, probed, or signaled. Never-touch
-/// paths are excluded even when the root itself points at them.
+/// outside the root is never enumerated, probed, or signaled.
 pub(crate) fn scan_all_listening_daemons(
     app_name: &str,
     root: &DaemonStateRoot,
