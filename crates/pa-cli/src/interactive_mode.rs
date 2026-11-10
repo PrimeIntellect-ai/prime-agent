@@ -22,6 +22,8 @@ mod daemon;
 
 pub use daemon::{ensure_daemon_running, ensure_daemon_running_with};
 
+mod project_trust;
+
 mod onboarding;
 
 use onboarding::onboarding_task;
@@ -37,6 +39,10 @@ mod tests;
 
 /// Run the interactive TUI attached to the daemon. Returns the exit code.
 pub fn run_interactive_mode(options: &RunOptions) -> Result<i32> {
+    // The CWE-426 first-load trust prompt comes before every settings read:
+    // an untrusted project settings document stays entirely inert, and the
+    // session only ever sees a registry the user answered for explicitly.
+    project_trust::prompt_first_load(options)?;
     let socket_path = resolve_socket_path(options.daemon_socket.as_deref());
     let configuration_load_started = std::time::Instant::now();
     let (tui_options, pending_onboarding_stages) = build_tui_options(

@@ -1050,7 +1050,7 @@ async fn startup_flush_never_blocks_the_first_frame() {
 }
 
 #[test]
-fn interactive_resume_restores_saved_cwd_and_project_settings_unless_overridden() {
+fn interactive_resume_restores_saved_cwd_and_leaves_untrusted_project_settings_inert() {
     let dir = tempfile::tempdir().unwrap();
     let project = dir.path().join("saved-project");
     std::fs::create_dir_all(project.join(".prime/agent")).unwrap();
@@ -1087,6 +1087,8 @@ fn interactive_resume_restores_saved_cwd_and_project_settings_unless_overridden(
                 SessionSelection::Resume(saved.clone())
             )
         );
-        assert_eq!(tui.code_block_indent, if explicit { "  " } else { "    " });
+        // The CWE-426 gate: the saved project's settings stay inert until
+        // trusted, so both branches keep the default indent.
+        assert_eq!(tui.code_block_indent, "  ");
     }
 }

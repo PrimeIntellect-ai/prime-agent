@@ -8,6 +8,7 @@ use anyhow::{anyhow, Context, Result};
 
 use super::load::from_value_lenient;
 use super::merge::{deep_merge, migrate};
+use super::project_trust::{fingerprint, ProjectTrustGate};
 use super::storage::{SettingsScope, SettingsStorage};
 use super::types::{
     QueueModeSetting, Settings, ThinkingLevelSetting, TransportSetting, UpdateChannel,
@@ -38,15 +39,32 @@ pub struct SettingsManager {
     /// Load failures per scope; a scope whose file failed to load is never written back.
     global_load_error: Option<String>,
     project_load_error: Option<String>,
+    /// The CWE-426 gate over the project scope (user registry + project
+    /// settings file); `None` for storages without a real project file
+    /// (in-memory tests, embedded hosts).
+    trust_gate: Option<ProjectTrustGate>,
 }
 
 impl SettingsManager {
     pub fn from_storage(storage: Arc<dyn SettingsStorage>) -> Self {
+        Self::from_storage_gated(storage, None)
+    }
+
+    /// The gated loader: the project scope loads inert unless
+    /// [`ProjectTrustGate::admits`] pins the file's exact bytes.
+    fn from_storage_gated(
+        storage: Arc<dyn SettingsStorage>,
+        trust_gate: Option<ProjectTrustGate>,
+    ) -> Self {
         let mut errors = Vec::new();
         let (global, global_raw, global_load_error) =
-            load_scope(storage.as_ref(), SettingsScope::Global, &mut errors);
-        let (project, project_raw, project_load_error) =
-            load_scope(storage.as_ref(), SettingsScope::Project, &mut errors);
+            load_scope(storage.as_ref(), SettingsScope::Global, None, &mut errors);
+        let (project, project_raw, project_load_error) = load_scope(
+            storage.as_ref(),
+            SettingsScope::Project,
+            trust_gate.as_ref(),
+            &mut errors,
+        );
         let merged = deep_merge(&global, &project);
         Self {
             storage,
@@ -60,6 +78,7 @@ impl SettingsManager {
             errors,
             global_load_error,
             project_load_error,
+            trust_gate,
         }
     }
 
@@ -69,9 +88,10 @@ impl SettingsManager {
     ) -> Self {
         let cwd = std::path::PathBuf::from(cwd.as_ref());
         let agent_dir = std::path::PathBuf::from(agent_dir.as_ref());
+        let trust_gate = Some(ProjectTrustGate::new(&cwd, &agent_dir));
         let storage: Arc<dyn SettingsStorage> =
             Arc::new(super::storage::FileSettingsStorage::new(cwd, agent_dir));
-        Self::from_storage(storage)
+        Self::from_storage_gated(storage, trust_gate)
     }
 
     /// A new manager over the same settings store (a fresh read; the
@@ -79,7 +99,8 @@ impl SettingsManager {
     /// telemetry switch.
     #[must_use]
     pub fn reopen(&self) -> Self {
-        let mut fresh = Self::from_storage(Arc::clone(&self.storage));
+        let mut fresh =
+            Self::from_storage_gated(Arc::clone(&self.storage), self.trust_gate.clone());
         fresh.apply_overrides(&self.runtime_overrides);
         fresh
     }
@@ -150,10 +171,18 @@ impl SettingsManager {
     /// the manager instead.
     pub fn reload(&mut self) -> Result<()> {
         let mut errors = std::mem::take(&mut self.errors);
-        let (global, global_raw, global_load_error) =
-            load_scope(self.storage.as_ref(), SettingsScope::Global, &mut errors);
-        let (project, project_raw, project_load_error) =
-            load_scope(self.storage.as_ref(), SettingsScope::Project, &mut errors);
+        let (global, global_raw, global_load_error) = load_scope(
+            self.storage.as_ref(),
+            SettingsScope::Global,
+            None,
+            &mut errors,
+        );
+        let (project, project_raw, project_load_error) = load_scope(
+            self.storage.as_ref(),
+            SettingsScope::Project,
+            self.trust_gate.as_ref(),
+            &mut errors,
+        );
         self.global = global;
         self.pending_global_fields.clear();
         self.project = project;
@@ -996,6 +1025,7 @@ fn strings(array: &[serde_json::Value]) -> Vec<String> {
 fn load_scope(
     storage: &dyn SettingsStorage,
     scope: SettingsScope,
+    trust_gate: Option<&ProjectTrustGate>,
     errors: &mut Vec<SettingsError>,
 ) -> (Settings, Option<serde_json::Value>, Option<String>) {
     let mut load_error: Option<String> = None;
@@ -1015,6 +1045,16 @@ fn load_scope(
     let Some(content) = content else {
         return (Settings::default(), None, None);
     };
+    // The CWE-426 gate: an untrusted project document is ENTIRELY inert —
+    // no deep-merge, no raw document, no load error — until the registry
+    // pins the trust to these exact bytes (a changed file re-prompts).
+    if scope == SettingsScope::Project {
+        if let Some(gate) = trust_gate {
+            if !gate.admits(&fingerprint(&content)) {
+                return (Settings::default(), None, None);
+            }
+        }
+    }
     let value: serde_json::Value = match serde_json::from_str(&content) {
         Ok(value) => value,
         Err(error) => {

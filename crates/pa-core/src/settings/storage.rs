@@ -96,7 +96,7 @@ impl FileSettingsStorage {
         Ok(target)
     }
 
-    fn acquire_lock(path: &Path) -> Result<LockGuard> {
+    pub(super) fn acquire_lock(path: &Path) -> Result<LockGuard> {
         let max_attempts = 10;
         let mut last_error: Option<std::io::Error> = None;
         for _ in 1..=max_attempts {
@@ -169,7 +169,7 @@ fn read_document(scope: SettingsScope, path: &Path) -> Result<String> {
 /// single-threaded; the Rust engine is threaded, and two racing worker threads
 /// would pay the full retry sleep against each other. The mutex is a leaf; a
 /// poisoned mutex is recovered — the file protocol is the correctness mechanism.
-fn process_lock(path: &Path) -> MutexGuard<'static, ()> {
+pub(super) fn process_lock(path: &Path) -> MutexGuard<'static, ()> {
     static LOCKS: OnceLock<Mutex<HashMap<PathBuf, &'static Mutex<()>>>> = OnceLock::new();
     let registry = LOCKS.get_or_init(|| Mutex::new(HashMap::new()));
     let lock = {

@@ -1,0 +1,1 @@
+- A repository's own Prime Agent settings (`.prime/agent/settings.json`) now stay ignored until you explicitly trust them once in an interactive session; a changed file asks again.
