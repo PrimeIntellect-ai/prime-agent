@@ -43,6 +43,7 @@ impl pa_core::session_engine::rlm_usage::RlmChildUsageSink for CapturingSink {
 /// A child record aimed at a real temp child session file.
 fn record_with_file(child_id: &str, session_file: &Path) -> Arc<Mutex<ChildRecord>> {
     Arc::new(Mutex::new(ChildRecord {
+        parent_delivery_admission: None,
         rlm_child_id: child_id.to_string(),
         session_name: "child".to_string(),
         active_session_id: "child-live".to_string(),

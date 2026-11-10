@@ -244,6 +244,9 @@ impl SupervisorChildSessionsInner {
             {
                 continue;
             }
+            // One child's close steps: pre-kill settle, the kill
+            // itself, the killed-run cancel line, and the retirement
+            // bookkeeping.
             if record.lock().await.retirement.intent().is_none() {
                 {
                     let mut record = record.lock().await;
@@ -264,10 +267,16 @@ impl SupervisorChildSessionsInner {
                 };
                 if let Err(error) = self.kill_child(&active_session_id, reason).await {
                     if unknown_session(&error).is_none() {
-                        // The kill never landed: undo the pre-kill settle so
-                        // the still-live child is not reported cancelled, and
-                        // a later successful stop can still record its cancel
-                        // edge (the recorder's dedup never saw this attempt).
+                        // The kill never landed: undo the pre-kill settle
+                        // so the still-live child is not reported
+                        // cancelled, and a later successful stop can
+                        // still record its cancel edge (the recorder's
+                        // dedup never saw this attempt). The close flags
+                        // stay set: this walk ends the parent session, so
+                        // the child's deferred kickoff never fires for
+                        // the dead parent, and its close stays a plain
+                        // stop while the quiescence count keeps its
+                        // unsettled run.
                         if was_running {
                             record.lock().await.run.apply(RunEvent::CancelRefused);
                         }
@@ -297,9 +306,9 @@ impl SupervisorChildSessionsInner {
             if usage_persisted {
                 self.remove_retired_usage(record);
             } else {
-                close_error.get_or_insert_with(|| {
-                    anyhow::anyhow!("RLM child usage remains owed after retirement; retry close")
-                });
+                close_error.get_or_insert(anyhow::anyhow!(
+                    "RLM child usage remains owed after retirement; retry close"
+                ));
             }
         }
         // The walk changed the registry: wake a parked barrier (a closed
@@ -554,6 +563,7 @@ fn ledger_child_records(
             .and_then(crate::rlm_ledger::read_rlm_subagent_display)
             .filter(|display| display.child_id == edge.child_id);
         records.push(ChildRecord {
+            parent_delivery_admission: None,
             rlm_child_id: edge.child_id,
             session_name: edge.name,
             active_session_id: session_id.clone().unwrap_or_default(),

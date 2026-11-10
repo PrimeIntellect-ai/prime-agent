@@ -511,6 +511,11 @@ impl Supervisor {
         if let Some(client_id) = envelope.client_id.clone() {
             *effective_client_id.lock().unwrap() = client_id;
         }
+        // The connection's client kind latches at the first envelope
+        // that carries a `clientId` ("a2a:<pid>", "acp:<pid>"): the
+        // session-event routing reads it (the A2A link alone receives
+        // the run-anchor attribution beside the bare shared broadcast).
+        attached.note_client_kind(request_client_id.as_str());
         // A prompt carrying an admissionId reserves it before dispatch (TS parse-time);
         // duplicates and empty ids answer the TS parse errors with `command: "parse"`.
         if let Some(admission_id) = crate::prompt_admission::input_admission_id(&envelope.command) {

@@ -107,11 +107,14 @@ async fn compact_with_active_goal_and_parked_work_skips_the_mint() {
             agent_message: None,
             queue_key: None,
             admission_id: None,
+            client_admission_id: None,
             images: Vec::new(),
             done: None,
             queue_visible: true,
             policy: TurnPolicy::Queued,
             forced_batch: false,
+            kernel_notice: false,
+            delivery_scoped: false,
         });
     }
     let compact = worker

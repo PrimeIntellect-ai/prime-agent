@@ -79,11 +79,14 @@ async fn turn_session_events_with_custom_message(
                 agent_message: None,
                 queue_key: None,
                 admission_id: None,
+                client_admission_id: None,
                 images: Vec::new(),
                 done: None,
                 queue_visible: true,
                 policy: TurnPolicy::Injected,
                 forced_batch: false,
+                kernel_notice: false,
+                delivery_scoped: false,
             }],
         )
         .await;

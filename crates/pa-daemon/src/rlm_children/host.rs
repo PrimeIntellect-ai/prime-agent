@@ -171,6 +171,14 @@ impl RlmSubagentHost for SupervisorChildSessions {
                     })
                 })
                 .transpose()?;
+            // The spawning turn's delivery, captured before the first
+            // await together with its pending admission (see
+            // [`delivery_identity_opening_admission`]): the create can
+            // outlive the turn that called spawn (the host request
+            // survives the cell as an independent task), and a registry
+            // read after the awaited create would stamp whatever
+            // delivery runs THEN — none, or another client's.
+            let spawning_delivery = this.delivery_identity_opening_admission();
             let admission = async {
                 this.assert_name_available(&name, identity.rlm_depth + 1)
                     .await?;
@@ -262,6 +270,7 @@ impl RlmSubagentHost for SupervisorChildSessions {
                     )
                     .await?;
                 let record = ChildRecord {
+                    parent_delivery_admission: spawning_delivery.clone(),
                     rlm_child_id: child_id.clone(),
                     session_name: created.session_name.clone().unwrap_or_else(|| name.clone()),
                     active_session_id: created.active_session_id.clone(),
@@ -301,7 +310,18 @@ impl RlmSubagentHost for SupervisorChildSessions {
                 anyhow::Ok((record, created, model))
             }
             .await;
-            let (record, created, model) = admission?;
+            let (record, created, model) = match admission {
+                Ok(admitted) => admitted,
+                Err(error) => {
+                    this.spawn_admission_closed(spawning_delivery.as_deref());
+                    return Err(error);
+                }
+            };
+            // The pending admission closes at its registration: the
+            // scoped completion wait that counted it re-reads and
+            // answers once the registered child's own settle funnel
+            // takes the hold over.
+            this.spawn_admission_closed(spawning_delivery.as_deref());
             // The handle returns at registration. A positive collect can
             // release this child before the parent turn boundary.
             let watcher_this = Arc::clone(&this);
