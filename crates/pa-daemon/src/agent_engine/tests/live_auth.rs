@@ -607,6 +607,7 @@ fn a_failed_refresh_makes_one_attempt_per_resolution() {
 }
 
 /// Runs of a counting `!command` (one line appended per execution).
+#[cfg(unix)]
 fn command_runs(counter: &std::path::Path) -> usize {
     std::fs::read_to_string(counter).map_or(0, |text| text.lines().count())
 }
