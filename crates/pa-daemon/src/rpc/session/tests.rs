@@ -98,13 +98,15 @@ async fn a_same_path_reopen_revives_the_replaced_kernels_final_namespace() {
     let Some(python) = live_kernel_python() else {
         return;
     };
+    // The lock guards the env override: acquired first, dropped last, so the
+    // restore never races another test's kernel boot inside the critical section.
+    let _faux = crate::agent_engine::tests::FAUX_TEST_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let _env = KernelEnvOverride::apply(&[(
         "PRIME_AGENT_KERNEL_PYTHON",
         Some(python.display().to_string()),
     )]);
-    let _faux = crate::agent_engine::tests::FAUX_TEST_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let dir = tempfile::tempdir().expect("tempdir");
     let cwd = dir.path().join("project");
     let agent_dir = dir.path().join("agent");
