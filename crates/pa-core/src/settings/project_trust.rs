@@ -254,15 +254,22 @@ pub fn ignored_project_dir(cwd: &Path, agent_dir: &Path, trusted: bool) -> Optio
 #[must_use]
 pub fn ignored_project_notice(dir: &Path) -> String {
     format!(
-        "This project's Prime Agent config is ignored until you trust it: run `prime-agent trust {}`. Sessions started after that load it.",
-        escaped_path(dir)
+        "This project's Prime Agent config is ignored until you trust it: run `{}`. Sessions started after that load it.",
+        trust_command(dir)
     )
 }
 
-/// A path with control bytes replaced by `?` (the interactive prompt's
-/// escaping rule, for the headless notice).
-fn escaped_path(path: &Path) -> std::borrow::Cow<'_, str> {
-    let text = path.display().to_string();
+/// The command that trusts `dir`, its path single-quoted so a path with
+/// spaces pastes as one argument.
+pub(crate) fn trust_command(dir: &Path) -> String {
+    let path = escape_control(&dir.display().to_string()).replace('\'', "'\\''");
+    format!("prime-agent trust '{path}'")
+}
+
+/// `text` with control characters replaced by `?`: a directory name from
+/// an archive can carry terminal control sequences.
+#[must_use]
+pub fn escape_control(text: &str) -> std::borrow::Cow<'_, str> {
     if text.chars().any(char::is_control) {
         text.chars()
             .map(|char| if char.is_control() { '?' } else { char })

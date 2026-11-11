@@ -9,19 +9,7 @@ use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 
 use anyhow::Result;
-
-/// Escape control bytes (a directory name from an archive can carry
-/// terminal control sequences).
-fn escaped(text: &str) -> std::borrow::Cow<'_, str> {
-    if text.chars().any(char::is_control) {
-        text.chars()
-            .map(|char| if char.is_control() { '?' } else { char })
-            .collect::<String>()
-            .into()
-    } else {
-        text.into()
-    }
-}
+use pa_core::settings::escape_control;
 
 /// The settings keys the prompt lists: the ones that visibly change the
 /// session. Keys only, never values: the file may link to content outside
@@ -115,14 +103,14 @@ pub(crate) fn run_trust_command(args: &[String]) -> i32 {
     };
     let result = dir.map_err(anyhow::Error::from).and_then(|dir| {
         if !dir.is_dir() {
-            anyhow::bail!("{} is not a directory", escaped(&dir.display().to_string()));
+            anyhow::bail!("{} is not a directory", escape_control(&dir.display().to_string()));
         }
         let agent_dir = crate::config::get_agent_dir();
         let entries = pa_core::settings::gated_project_entries(&dir, &agent_dir);
         if entries.is_empty() {
             println!(
                 "{} has no Prime Agent project config to trust.",
-                escaped(&dir.display().to_string())
+                escape_control(&dir.display().to_string())
             );
             return Ok(());
         }
@@ -156,7 +144,7 @@ fn confirm_and_trust(
     let registry_path = agent_dir.join(pa_core::settings::TRUSTED_PROJECTS_FILE);
     println!("This project carries its own Prime Agent config, which can change how Prime Agent behaves here:");
     for entry in entries {
-        println!("  {}", escaped(&entry.display().to_string()));
+        println!("  {}", escape_control(&entry.display().to_string()));
     }
     for row in settings_summary(&settings_path) {
         println!("  {row}");
@@ -176,7 +164,7 @@ fn confirm_and_trust(
     }
     println!(
         "Trust is recorded in {} and can be revoked by deleting the project's entry.",
-        escaped(&registry_path.display().to_string())
+        escape_control(&registry_path.display().to_string())
     );
     Ok(())
 }

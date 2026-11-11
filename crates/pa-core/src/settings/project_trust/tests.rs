@@ -764,3 +764,13 @@ fn the_repin_stores_the_pin_the_check_validated() {
         "the re-pin admits the written state"
     );
 }
+
+/// The notice's command pastes as one shell argument, with control bytes
+/// escaped like the trust prompt's paths.
+#[test]
+fn the_trust_command_quotes_the_path_and_escapes_control_bytes() {
+    assert_eq!(
+        trust_command(Path::new("/tmp/My Project/it's\u{1b}[2J")),
+        "prime-agent trust '/tmp/My Project/it'\\''s?[2J'"
+    );
+}
