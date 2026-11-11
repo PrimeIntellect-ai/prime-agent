@@ -141,7 +141,7 @@ fn confirm_and_trust(
     for entry in entries {
         println!("  {}", escape_control(&entry.display().to_string()));
     }
-    // The same storage read that fed the pin (its link and size rules).
+    // Read through the project storage, like the pin (its link and size rules).
     let settings = FileSettingsStorage::new(cwd, agent_dir)
         .read(SettingsScope::Project)
         .ok()
