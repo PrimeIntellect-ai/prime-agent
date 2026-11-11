@@ -178,6 +178,36 @@ pub fn trust_project(registry_path: &Path, settings_path: &Path, fingerprint: &s
 #[cfg(test)]
 mod tests;
 
+/// The existing gated project-config entries for `cwd`: the
+/// `.prime/agent` files and directories plus the `.agents/skills`
+/// directories the auto-discovery loads. Empty when the project's config
+/// dir is the agent dir itself: that is the user's own global config.
+#[must_use]
+pub fn gated_project_entries(cwd: &Path, agent_dir: &Path) -> Vec<PathBuf> {
+    let config_dir = cwd.join(super::storage::CONFIG_DIR_NAME);
+    if config_dir == agent_dir {
+        return Vec::new();
+    }
+    let mut entries = [
+        "settings.json",
+        "SYSTEM.md",
+        "APPEND_SYSTEM.md",
+        "skills",
+        "prompts",
+        "themes",
+    ]
+    .iter()
+    .map(|name| config_dir.join(name))
+    .filter(|path| path.exists())
+    .collect::<Vec<PathBuf>>();
+    entries.extend(
+        gated_agents_skill_dirs(cwd)
+            .into_iter()
+            .filter(|dir| dir.is_dir()),
+    );
+    entries
+}
+
 /// The `.agents/skills` directories the auto-discovery would load for this
 /// cwd (its own first, up to and including the git repo root), with the
 /// user's global directory excluded: the loader and the trust prompt share

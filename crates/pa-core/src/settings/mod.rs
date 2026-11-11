@@ -14,7 +14,7 @@ mod persistence_tests;
 
 pub use manager::{IdleEviction, SettingsError, SettingsManager, DEFAULT_IDLE_EVICTION_MINUTES};
 pub use project_trust::{
-    gated_agents_skill_dirs, project_fingerprint, project_trusted, trust_project,
+    gated_project_entries, project_fingerprint, project_trusted, trust_project,
     TRUSTED_PROJECTS_FILE,
 };
 pub use storage::{

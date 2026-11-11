@@ -6,13 +6,9 @@
 //! prompt; for them the gate stays deny-by-default in `pa-core`.
 
 use std::io::IsTerminal;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use anyhow::Result;
-
-/// The project-side files and directories the trust decision gates.
-const GATED_FILES: [&str; 3] = ["settings.json", "SYSTEM.md", "APPEND_SYSTEM.md"];
-const GATED_DIRS: [&str; 3] = ["skills", "prompts", "themes"];
 
 /// Escape control bytes (a directory name from an archive can carry
 /// terminal control sequences).
@@ -25,27 +21,6 @@ fn escaped(text: &str) -> std::borrow::Cow<'_, str> {
     } else {
         text.into()
     }
-}
-
-/// The existing gated project-config entries: the `.prime/agent` files and
-/// directories plus the `.agents/skills` directories auto-discovery loads —
-/// through the one shared walk (`gated_agents_skill_dirs`), so the listing
-/// cannot drift from what the discovery actually loads; the user's global
-/// `~/.agents/skills` stays excluded (it is trusted user config).
-fn existing_gated_entries(cwd: &Path) -> Vec<PathBuf> {
-    let config_dir = cwd.join(pa_core::settings::CONFIG_DIR_NAME);
-    let mut entries = GATED_FILES
-        .iter()
-        .map(|name| config_dir.join(name))
-        .chain(GATED_DIRS.iter().map(|name| config_dir.join(name)))
-        .filter(|path| path.exists())
-        .collect::<Vec<PathBuf>>();
-    for dir in pa_core::settings::gated_agents_skill_dirs(cwd) {
-        if dir.is_dir() {
-            entries.push(dir);
-        }
-    }
-    entries
 }
 
 /// The settings keys the prompt lists: the ones that visibly change the

@@ -535,6 +535,26 @@ impl SessionUi {
             .map(str::to_string)
     }
 
+    /// The project dir whose untrusted config the session's resource load
+    /// ignored (the resource snapshot's `ignoredProjectDir`).
+    pub(crate) async fn ignored_project_dir(&self) -> Option<String> {
+        let snapshot = self
+            .bounded_request(
+                Duration::from_millis(UI_REQUEST_TIMEOUT_MS),
+                DaemonCommand::GetResourceSnapshot {
+                    id: None,
+                    active_session_id: self.active_session_id.clone(),
+                    rest: Map::default(),
+                },
+            )
+            .await
+            .ok()?;
+        snapshot
+            .get("ignoredProjectDir")?
+            .as_str()
+            .map(str::to_string)
+    }
+
     async fn bounded_request(&self, timeout: Duration, command: DaemonCommand) -> Result<Value> {
         tokio::time::timeout(timeout, self.client.request_ok(command))
             .await

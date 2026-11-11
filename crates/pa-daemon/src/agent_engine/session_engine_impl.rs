@@ -1192,6 +1192,7 @@ impl SessionEngine for AgentSessionEngine {
                 "skills": skills,
                 "prompts": prompts,
                 "themes": [],
+                "ignoredProjectDir": engine.ignored_project_dir,
                 "diagnostics": {
                     "skills": engine.skill_diagnostics,
                     "prompts": [],

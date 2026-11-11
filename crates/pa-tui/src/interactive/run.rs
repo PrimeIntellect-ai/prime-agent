@@ -704,6 +704,15 @@ async fn run_interactive_surface(
         });
         session.dirty = true;
     }
+    if let Some(dir) = session.ignored_project_dir().await {
+        view.push_entry(crate::chat::ChatEntry::Status {
+            text: format!(
+                "\u{26a0} This project's Prime Agent config is ignored until you trust it: run `prime-agent trust {dir}`, then /reload."
+            ),
+            kind: crate::chat::StatusKind::Warning,
+        });
+        session.dirty = true;
+    }
     // An open that waited through the update restart says so in the session's first status row.
     if waited_for_update_restart {
         let notice = crate::update_restart_wait::DAEMON_UPDATE_RESTART_WAIT_NOTICE;

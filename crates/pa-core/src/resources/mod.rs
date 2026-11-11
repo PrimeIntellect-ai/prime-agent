@@ -82,6 +82,9 @@ pub struct LoadedResources {
     pub agents_files: Vec<ContextFile>,
     pub system_prompt: Option<String>,
     pub append_system_prompt: Vec<String>,
+    /// The project dir whose gated config is present but untrusted, so it
+    /// stays ignored (the CWE-426 notice).
+    pub ignored_project_dir: Option<PathBuf>,
 }
 
 /// Resource loading options (the TS `DefaultResourceLoaderOptions` surface, minus the theme
@@ -248,6 +251,20 @@ pub fn load_resources(mut options: ResourceLoaderOptions) -> Result<LoadedResour
         .filter_map(|source| resolve_prompt_input(source))
         .collect();
 
+    // The CWE-426 notice: present but untrusted project config is ignored.
+    if !project_config_trusted
+        && !crate::settings::gated_project_entries(&options.cwd, &options.agent_dir).is_empty()
+    {
+        resources.skill_diagnostics.push(ResourceDiagnostic::Warning {
+            message: format!(
+                "This project's Prime Agent config is ignored until you trust it: run `prime-agent trust {}`, then /reload.",
+                options.cwd.display()
+            ),
+            path: Some(options.cwd.display().to_string()),
+        });
+        resources.ignored_project_dir = Some(options.cwd.clone());
+    }
+
     Ok(resources)
 }
 
@@ -349,6 +366,39 @@ mod tests {
             &crate::settings::project_fingerprint(&settings_path).unwrap(),
         )
         .unwrap();
+    }
+
+    /// Present but untrusted project config yields one warning and the
+    /// snapshot's ignored dir; trusting the project clears both.
+    #[test]
+    fn untrusted_project_config_is_reported_as_ignored() {
+        let tmp = tempfile::tempdir().unwrap();
+        let agent_dir = tmp.path().join("agent");
+        let cwd = tmp.path().join("proj");
+        fs::create_dir_all(cwd.join(".prime/agent")).unwrap();
+        fs::write(cwd.join(".prime/agent/SYSTEM.md"), "project prompt").unwrap();
+        let ignored_warnings = |resources: &LoadedResources| {
+            resources
+                .skill_diagnostics
+                .iter()
+                .filter(|diagnostic| {
+                    matches!(diagnostic, ResourceDiagnostic::Warning { path, .. }
+                        if path.as_deref() == Some(&*cwd.display().to_string()))
+                })
+                .count()
+        };
+
+        let resources = load_resources(ResourceLoaderOptions::new(&cwd, &agent_dir)).unwrap();
+        assert_eq!(
+            resources.ignored_project_dir.as_deref(),
+            Some(cwd.as_path())
+        );
+        assert_eq!(ignored_warnings(&resources), 1);
+
+        trust_fixture_project(&cwd, &agent_dir);
+        let resources = load_resources(ResourceLoaderOptions::new(&cwd, &agent_dir)).unwrap();
+        assert_eq!(resources.ignored_project_dir, None);
+        assert_eq!(ignored_warnings(&resources), 0);
     }
 
     #[test]
