@@ -640,16 +640,12 @@ fn a_project_write_in_the_home_dir_lands() {
     );
 }
 
-/// Trust recorded at a repository's root covers its subdirectories (a
-/// session in `pkg` loads the root's `.agents/skills`) and a worktree the
-/// user's git registered, while that worktree's own settings change still
-/// re-gates it. Red against a cwd-keyed registry.
-#[test]
-fn repository_trust_covers_subdirectories_and_registered_worktrees() {
-    let dir = tempfile::tempdir().unwrap();
-    let agent_dir = dir.path().join("agent");
-    let main = dir.path().join("main");
-    let worktree = dir.path().join("worktree");
+/// A main checkout under `root` with a worktree its git registered (the
+/// layout `git worktree add` writes), the same settings in both; returns
+/// (main, worktree).
+fn registered_worktree(root: &Path) -> (PathBuf, PathBuf) {
+    let main = root.join("main");
+    let worktree = root.join("worktree");
     let registration = main.join(".git/worktrees/worktree");
     std::fs::create_dir_all(&registration).unwrap();
     std::fs::write(registration.join("commondir"), "../..\n").unwrap();
@@ -667,6 +663,18 @@ fn repository_trust_covers_subdirectories_and_registered_worktrees() {
         format!("gitdir: {}\n", registration.display()),
     )
     .unwrap();
+    (main, worktree)
+}
+
+/// Trust recorded at a repository's root covers its subdirectories (a
+/// session in `pkg` loads the root's `.agents/skills`) and a worktree the
+/// user's git registered, while that worktree's own settings change still
+/// re-gates it. Red against a cwd-keyed registry.
+#[test]
+fn repository_trust_covers_subdirectories_and_registered_worktrees() {
+    let dir = tempfile::tempdir().unwrap();
+    let agent_dir = dir.path().join("agent");
+    let (main, worktree) = registered_worktree(dir.path());
     let skill = main.join(".agents/skills/repo-skill");
     std::fs::create_dir_all(&skill).unwrap();
     std::fs::write(
@@ -713,37 +721,27 @@ fn an_unregistered_git_file_does_not_inherit_another_repositorys_trust() {
     assert!(!SettingsManager::create(&imposter, &agent_dir).project_config_trusted());
 }
 
-/// An oversized git metadata pointer (a checkout-controlled `.git` file)
-/// never feeds the trust keying unbounded: the read is bounded and
-/// regular-file-validated, so the keying falls back to the checkout root
-/// instead of exhausting the process. Red against the plain
-/// `read_to_string` keying (which would read the whole file).
+/// A `.git` pointer file past the git-metadata cap is never followed: a
+/// registered worktree whose valid pointer is padded with trailing
+/// newlines (which `trim` would strip) keys as its own root instead of
+/// inheriting the main checkout's trust. Red against an unbounded read.
 #[test]
-fn an_oversized_git_pointer_file_falls_back_to_the_checkout_root() {
+fn an_oversized_git_pointer_file_is_not_followed() {
     let dir = tempfile::tempdir().unwrap();
     let agent_dir = dir.path().join("agent");
-    let cwd = dir.path().join("repo");
-    let dot_git = cwd.join(".git");
-    std::fs::create_dir_all(&agent_dir).unwrap();
-    std::fs::create_dir_all(&cwd).unwrap();
-    // One line "gitdir: ..." but padded far past the 64 KiB metadata cap:
-    // bounded read hits the cap and refuses; the keying must not read it all.
-    let cap = super::super::storage::MAX_GIT_METADATA_BYTES_FOR_TEST;
-    let blob = format!("gitdir: {}\n{}", dir.path().display(), "x".repeat(cap + 1));
-    std::fs::write(&dot_git, blob).unwrap();
-    let settings_path = project_settings(&cwd);
-    std::fs::create_dir_all(settings_path.parent().unwrap()).unwrap();
-    std::fs::write(&settings_path, r#"{"theme":"x"}"#).unwrap();
-    let fingerprint = super::project_fingerprint(&settings_path).unwrap();
-    let registry = agent_dir.join(TRUSTED_PROJECTS_FILE);
-    // Trusting via the fingerprint still works (the settings file is fine),
-    // and the registry key falls back to the checkout root: trust recorded
-    // under the root key, not an attacker-influenced common dir.
-    trust_project(&registry, &settings_path, &fingerprint).unwrap();
-    let manager = SettingsManager::create(&cwd, &agent_dir);
+    let (main, worktree) = registered_worktree(dir.path());
+    trust_as_on_disk(&main, &agent_dir);
     assert!(
-        manager.project_config_trusted(),
-        "the bounded refusal falls back, not crashes"
+        SettingsManager::create(&worktree, &agent_dir).project_config_trusted(),
+        "the unpadded pointer is followed"
+    );
+
+    let pointer = std::fs::read_to_string(worktree.join(".git")).unwrap();
+    let cap = super::super::storage::MAX_GIT_METADATA_BYTES_FOR_TEST;
+    std::fs::write(worktree.join(".git"), pointer + &"\n".repeat(cap)).unwrap();
+    assert!(
+        !SettingsManager::create(&worktree, &agent_dir).project_config_trusted(),
+        "the oversized pointer is refused, so the worktree keys as its own root"
     );
 }
 
