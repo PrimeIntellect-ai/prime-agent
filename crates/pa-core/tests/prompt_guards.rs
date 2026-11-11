@@ -366,8 +366,8 @@ fn auth_gated_bundled_skills() -> BTreeSet<String> {
 }
 
 /// Conditionally-available bundled skills: the websearch skill rides with its
-/// credential (an unset `bundledSkills.websearch` resolves with the stored or
-/// ambient Serper key), so keyless installs exclude it — it must never be
+/// credential (an unset `bundledSkills.websearch` resolves with the selected
+/// provider's stored or ambient key), so keyless installs exclude it — it must never be
 /// documented as static core-tool surface; the dynamic skills inventory
 /// renders it only on installs where it resolves enabled.
 fn settings_gated_bundled_skills() -> BTreeSet<String> {
