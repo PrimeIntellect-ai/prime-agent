@@ -308,6 +308,17 @@ fn setup_messaging() -> Option<Messaging> {
     let agent_dir = dir.path().join("agent");
     let sessions_dir = agent_dir.join("sessions");
     std::fs::create_dir_all(&sessions_dir).expect("sessions dir");
+    // The deliveries below render as the full `[agent-message from ...]`
+    // rows and cards the transcript assertions read: the default route
+    // sends deliveries through the session inbox (a short notice plus a
+    // durable record), so this wire suite pins the kill switch and keeps
+    // covering the direct rendering. The inbox route is covered
+    // end-to-end by `agent_inbox_e2e`.
+    std::fs::write(
+        agent_dir.join("settings.json"),
+        json!({ "agentInbox": { "enabled": false } }).to_string(),
+    )
+    .expect("write the inbox kill switch");
 
     let receipts_dir = dir.path().join("receipts");
     std::fs::create_dir_all(&receipts_dir).expect("receipts dir");
