@@ -279,113 +279,37 @@ const SNAPSHOT_EXCLUDES: [&str; 6] = [
     "runner_args.log",
 ];
 
-/// The `-c` override that keeps repository hooks out of reach: the hooks path points at
-/// the platform's null device, an object no hook can exist under. On unix `/dev/null` is
-/// a character device; on Windows the analogue is `NUL`, a reserved device name no file
-/// or directory can carry. The split matters in both directions - a literal `/dev/null`
-/// on Windows is an ordinary path some child process can materialize as a directory, and
-/// a bare `NUL` on unix is a plain relative name a repository can turn into a hook
-/// location inside the worktree.
-#[cfg(unix)]
-const HOOKS_PATH_OVERRIDE: &str = "core.hooksPath=/dev/null";
-#[cfg(windows)]
-const HOOKS_PATH_OVERRIDE: &str = "core.hooksPath=NUL";
-
-/// Fixed arguments of the worktree-snapshot `status` probe. The `-c` overrides are
-/// command-line configuration: they outrank repository, worktree and included config, and
-/// reach git's own child processes through `GIT_CONFIG_PARAMETERS`. Each closes one way the
-/// project's git configuration can start a program while the probe reads the worktree:
+/// Overrides every snapshot probe starts with. The `-c` keys are command-line configuration:
+/// they outrank repository, worktree and included config, and reach git's own child
+/// processes (submodule probes included) through `GIT_CONFIG_PARAMETERS`.
 ///
-/// - `core.fsmonitor=false` - the fsmonitor hook would otherwise run on the index refresh
-///   this probe performs;
-/// - `core.hooksPath` pointed at the platform's null device (`HOOKS_PATH_OVERRIDE`) and
-///   `diff.autoRefreshIndex=false` - a diff refresh can still write the index (and fire a
-///   repository post-index-change hook) even under `--no-optional-locks`; either override
-///   alone prevents it, and both keep the probe from running the hook and from rewriting
-///   the user's index;
-/// - `protocol.allow=never` plus `protocol.<name>.allow=never` for the transport family
-///   (`file`, `ext`, `git`, `ssh`, `http`, `https`, `ftp`, `ftps`, `rsync`) - a promisor
-///   lazy fetch would otherwise run the repository's uploadpack, ssh or ext command; the
-///   per-protocol keys are required because a repository can re-allow one protocol with
-///   `protocol.<name>.allow=always`, which outranks the plain default;
-/// - `--ignore-submodules=all` - submodule children (their diffs, statuses and filter
-///   programs) stay out of reach; submodule-only changes no longer count as changes.
+/// - `core.fsmonitor=false` - the fsmonitor hook would otherwise run on the index refresh;
+/// - `diff.autoRefreshIndex=false` and `--no-optional-locks` - the probes never write the
+///   index, so no index-write hook runs, whether `core.hooksPath` or a config-based
+///   `hook.<name>` names it, and the user's index stays untouched.
 ///
-/// `.gitattributes` clean/process filters still run on modified tracked files; no flag
-/// disables them.
-const SNAPSHOT_STATUS_ARGS: [&str; 33] = [
+/// `.gitattributes` clean/process filters still run on modified tracked files, in the
+/// repository and inside its submodules; no flag disables them.
+const SNAPSHOT_GIT_OVERRIDES: [&str; 5] = [
     "-c",
     "core.fsmonitor=false",
     "-c",
-    HOOKS_PATH_OVERRIDE,
-    "-c",
     "diff.autoRefreshIndex=false",
-    "-c",
-    "protocol.allow=never",
-    "-c",
-    "protocol.file.allow=never",
-    "-c",
-    "protocol.ext.allow=never",
-    "-c",
-    "protocol.git.allow=never",
-    "-c",
-    "protocol.ssh.allow=never",
-    "-c",
-    "protocol.http.allow=never",
-    "-c",
-    "protocol.https.allow=never",
-    "-c",
-    "protocol.ftp.allow=never",
-    "-c",
-    "protocol.ftps.allow=never",
-    "-c",
-    "protocol.rsync.allow=never",
     "--no-optional-locks",
-    "status",
-    "--porcelain=v1",
-    "-z",
-    "-uall",
-    "--no-renames",
-    "--ignore-submodules=all",
 ];
 
-/// Fixed arguments of the worktree-snapshot `diff` probe: the same overrides, plus
-/// `--no-ext-diff` and `--no-textconv` (neither a text conversion driver nor an external
-/// diff program may start) over the `HEAD` revision.
-const SNAPSHOT_DIFF_ARGS: [&str; 33] = [
-    "-c",
-    "core.fsmonitor=false",
-    "-c",
-    HOOKS_PATH_OVERRIDE,
-    "-c",
-    "diff.autoRefreshIndex=false",
-    "-c",
-    "protocol.allow=never",
-    "-c",
-    "protocol.file.allow=never",
-    "-c",
-    "protocol.ext.allow=never",
-    "-c",
-    "protocol.git.allow=never",
-    "-c",
-    "protocol.ssh.allow=never",
-    "-c",
-    "protocol.http.allow=never",
-    "-c",
-    "protocol.https.allow=never",
-    "-c",
-    "protocol.ftp.allow=never",
-    "-c",
-    "protocol.ftps.allow=never",
-    "-c",
-    "protocol.rsync.allow=never",
-    "--no-optional-locks",
+const SNAPSHOT_STATUS_ARGS: [&str; 5] = ["status", "--porcelain=v1", "-z", "-uall", "--no-renames"];
+
+/// Neither a text conversion driver nor an external diff program may start;
+/// `--submodule=short` reports submodule changes as commit ids, so no submodule
+/// diff (or its textconv) runs while edits and gitlink bumps stay visible.
+const SNAPSHOT_DIFF_ARGS: [&str; 6] = [
     "diff",
     "--no-ext-diff",
     "--no-textconv",
+    "--submodule=short",
     "--binary",
     "HEAD",
-    "--ignore-submodules=all",
 ];
 
 /// Snapshot the git worktree state: porcelain status, the HEAD diff, and a content
@@ -409,21 +333,23 @@ pub async fn capture_git_worktree_snapshot(cwd: &Path) -> Option<GitWorktreeSnap
 }
 
 /// One git invocation: `None` on any non-zero exit, timeout, or truncation.
-async fn run_git(prefix: &[&str], pathspec: &[String], cwd: &Path) -> Option<String> {
-    let mut args: Vec<String> = prefix
+async fn run_git(command: &[&str], pathspec: &[String], cwd: &Path) -> Option<String> {
+    let mut args: Vec<String> = SNAPSHOT_GIT_OVERRIDES
         .iter()
+        .chain(command)
         .map(std::string::ToString::to_string)
         .collect();
     args.extend(pathspec.iter().cloned());
-    // GIT_NO_LAZY_FETCH is the environment half of the lazy-fetch guard; the
-    // `-c protocol.allow=never` override is the other, and either alone stops
-    // the fetch.
+    // A promisor lazy fetch would run a repository-chosen transport (uploadpack,
+    // ssh or ext command, remote helper). GIT_ALLOW_PROTOCOL is an allowlist that
+    // overrides every `protocol.*` key, so `none` permits no transport on any git;
+    // GIT_NO_LAZY_FETCH (git >= 2.44) skips the fetch attempt.
     let result = run_child_process(
         "git",
         &args,
         cwd,
         SNAPSHOT_TIMEOUT_MS,
-        &[("GIT_NO_LAZY_FETCH", "1")],
+        &[("GIT_ALLOW_PROTOCOL", "none"), ("GIT_NO_LAZY_FETCH", "1")],
     )
     .await
     .ok()?;
@@ -818,30 +744,23 @@ mod tests {
         assert!(digest.starts_with("file:"));
     }
 
-    /// The hooks override must name the platform object no hook can exist
-    /// under - the unix character device, or the Windows reserved device
-    /// name - and both probe argument lists must carry it. No cfg gate: the
-    /// platform value is pinned wherever the crate's tests are compiled.
-    #[test]
-    fn the_hooks_path_override_is_the_platform_null_device() {
-        assert!(SNAPSHOT_STATUS_ARGS.contains(&HOOKS_PATH_OVERRIDE));
-        assert!(SNAPSHOT_DIFF_ARGS.contains(&HOOKS_PATH_OVERRIDE));
-        #[cfg(unix)]
-        assert_eq!(HOOKS_PATH_OVERRIDE, "core.hooksPath=/dev/null");
-        #[cfg(windows)]
-        assert_eq!(HOOKS_PATH_OVERRIDE, "core.hooksPath=NUL");
-    }
-
     /// The probes run inside a repository whose own configuration names
     /// programs - an fsmonitor hook, a textconv driver, an index-write
-    /// hook, a submodule's textconv driver and clean filter, and a
-    /// lazy-fetch uploadpack. The pre-PR probes start them all on a stale
-    /// copy of the repository; a capture must start none of them.
+    /// hook, a submodule's textconv driver and fsmonitor hook, and lazy-fetch
+    /// transports (an uploadpack and a remote helper). A plain `git diff HEAD`
+    /// starts them all on a stale copy of the repository; a capture must
+    /// start none of them.
     #[cfg(unix)]
     #[tokio::test]
     async fn snapshot_capture_never_starts_repo_configured_commands() {
         use std::os::unix::fs::PermissionsExt;
-        const PROGRAMS: [&str; 5] = ["fsmonitor", "textconv", "hook", "subtextconv", "subfilter"];
+        const PROGRAMS: [&str; 5] = [
+            "fsmonitor",
+            "textconv",
+            "hook",
+            "subtextconv",
+            "subfsmonitor",
+        ];
         fn at(path: &Path) -> &str {
             path.to_str().unwrap()
         }
@@ -888,7 +807,7 @@ mod tests {
         let sub = fresh("sub");
         let sub_tc = sub.join("tc.sh");
         std::fs::write(sub.join("a.txt"), "x\n").unwrap();
-        std::fs::write(sub.join(".gitattributes"), "*.txt diff=evil filter=evil\n").unwrap();
+        std::fs::write(sub.join(".gitattributes"), "*.txt diff=evil\n").unwrap();
         script(&sub_tc, "subtextconv", "cat \"$1\"");
         assert!(ok(&sub, &["add", "."]));
         assert!(ok(&sub, &["commit", "-qm", "init"]));
@@ -902,8 +821,8 @@ mod tests {
         assert!(ok(&main, &add));
         assert!(ok(&main, &["commit", "-qm", "sub"]));
         let sub_config = main.join(".git/modules/sub/config");
-        let sub_clean = main.join("clean.sh");
-        script(&sub_clean, "subfilter", "cat");
+        let sub_fsm = main.join("subfsm.sh");
+        script(&sub_fsm, "subfsmonitor", "exit 0");
         in_main(&[
             "config",
             "-f",
@@ -915,8 +834,8 @@ mod tests {
             "config",
             "-f",
             at(&sub_config),
-            "filter.evil.clean",
-            at(&sub_clean),
+            "core.fsmonitor",
+            at(&sub_fsm),
         ]);
         let fsm = main.join("fsm.sh");
         let main_tc = main.join("tc.sh");
@@ -933,8 +852,8 @@ mod tests {
         std::fs::write(main.join("top.txt"), "two\n").unwrap();
         std::fs::write(main.join("sub/a.txt"), "z\n").unwrap();
 
-        // The pre-PR diff probe on a stale copy starts every program; the
-        // capture on a fresh stale copy must start none of them.
+        // A plain diff on a stale copy starts every program; the capture on
+        // a fresh stale copy must start none of them.
         let old = ["diff", "HEAD"];
         clear(&PROGRAMS);
         let control = copy(&main, "control");
@@ -976,6 +895,62 @@ mod tests {
         let guarded = copy(&main, "fetch-guarded");
         let _ = ShellGateRunner::new(&guarded).capture_snapshot().await;
         assert!(!marker("fetch").exists(), "the capture fetched");
+
+        // The same fetch through a remote helper the repository allows; the
+        // helper resolves to a repository alias, so nothing is put on PATH.
+        let helper = main.join("helper.sh");
+        script(&helper, "helper", "exit 1");
+        in_main(&["config", "remote.origin.url", "foo::x"]);
+        in_main(&["config", "protocol.foo.allow", "always"]);
+        in_main(&[
+            "config",
+            "alias.remote-foo",
+            &format!("!{}", helper.display()),
+        ]);
+        let control = copy(&main, "helper-control");
+        let _ = ok(&control, &old);
+        assert!(marker("helper").exists(), "control: no remote helper");
+        clear(&["helper"]);
+        let guarded = copy(&main, "helper-guarded");
+        let _ = ShellGateRunner::new(&guarded).capture_snapshot().await;
+        assert!(
+            !marker("helper").exists(),
+            "the capture ran the remote helper"
+        );
+    }
+
+    /// Edits inside a submodule count as workspace changes.
+    #[tokio::test]
+    async fn snapshot_tracks_edits_inside_a_submodule() {
+        let root = tempfile::TempDir::new().unwrap();
+        let git = |dir: &Path, args: &[&str]| {
+            let status = std::process::Command::new("git")
+                .args(["-c", "user.name=t", "-c", "user.email=t@e"])
+                .args(["-c", "protocol.file.allow=always"])
+                .args(args)
+                .current_dir(dir)
+                .status()
+                .unwrap();
+            assert!(status.success(), "git {args:?}");
+        };
+        let sub = root.path().join("sub");
+        let main = root.path().join("main");
+        for dir in [&sub, &main] {
+            std::fs::create_dir(dir).unwrap();
+            git(dir, &["init", "-q"]);
+            std::fs::write(dir.join("a.txt"), "x\n").unwrap();
+            git(dir, &["add", "."]);
+            git(dir, &["commit", "-qm", "init"]);
+        }
+        git(
+            &main,
+            &["submodule", "add", "-q", sub.to_str().unwrap(), "sub"],
+        );
+        git(&main, &["commit", "-qm", "sub"]);
+        let runner = ShellGateRunner::new(&main);
+        let clean = runner.capture_snapshot().await.unwrap();
+        std::fs::write(main.join("sub/a.txt"), "y\n").unwrap();
+        assert_ne!(runner.capture_snapshot().await.unwrap(), clean);
     }
 
     #[tokio::test]
