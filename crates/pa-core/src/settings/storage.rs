@@ -7,7 +7,7 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard, OnceLock};
 
-use anyhow::{anyhow, bail, Result};
+use anyhow::{anyhow, bail, Context, Result};
 
 pub const CONFIG_DIR_NAME: &str = ".prime/agent";
 
@@ -84,16 +84,45 @@ impl FileSettingsStorage {
         if scope == SettingsScope::Global {
             return Ok(self.global_path.clone());
         }
+        self.confined(&self.project_path)
+    }
+
+    /// `path` with links resolved, refused when it resolves outside the
+    /// project root.
+    fn confined(&self, path: &Path) -> Result<PathBuf> {
         let root = resolve_with_missing(&self.project_root)?;
-        let target = resolve_with_missing(&self.project_path)?;
+        let target = resolve_with_missing(path)?;
         if !target.starts_with(&root) {
             bail!(
                 "Project settings path {} resolves outside the project root {}",
-                self.project_path.display(),
+                path.display(),
                 root.display()
             );
         }
         Ok(target)
+    }
+
+    /// One named file beside the project `settings.json` (`SYSTEM.md`,
+    /// `APPEND_SYSTEM.md`), read under the project settings rules: confined
+    /// to the project, bounded, and only from a regular file, so a FIFO or
+    /// device never blocks the read. `Ok(None)` when it does not exist.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error naming the file when it is refused or unreadable.
+    pub(super) fn read_project_file(&self, name: &str) -> Result<Option<String>> {
+        let path = self.project_path.with_file_name(name);
+        let read = || {
+            let target = self.confined(&path)?;
+            match fs::symlink_metadata(&target) {
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+                Err(error) => return Err(error.into()),
+                Ok(metadata) if !metadata.file_type().is_file() => bail!("not a regular file"),
+                Ok(_) => {}
+            }
+            read_document(SettingsScope::Project, &target).map(Some)
+        };
+        read().with_context(|| format!("cannot read {}", path.display()))
     }
 
     pub(super) fn acquire_lock(path: &Path) -> Result<LockGuard> {
@@ -121,7 +150,7 @@ impl FileSettingsStorage {
 
 /// `path` made absolute with links resolved; a missing tail (no settings file
 /// or directory yet, or a deleted working directory) is kept as written.
-pub(super) fn resolve_with_missing(path: &Path) -> std::io::Result<PathBuf> {
+fn resolve_with_missing(path: &Path) -> std::io::Result<PathBuf> {
     let mut missing = Vec::new();
     let mut existing = path;
     loop {
@@ -153,7 +182,7 @@ fn check_project_document_size(len: usize) -> Result<()> {
     Ok(())
 }
 
-pub(super) fn read_document(scope: SettingsScope, path: &Path) -> Result<String> {
+fn read_document(scope: SettingsScope, path: &Path) -> Result<String> {
     if scope == SettingsScope::Global {
         return Ok(fs::read_to_string(path)?);
     }

@@ -29,36 +29,6 @@ fn hex(digest: &[u8]) -> String {
         })
 }
 
-/// Read one pinned prompt file: `Ok(None)` when it does not exist. The
-/// read follows the loader's project-settings rules — confined to the
-/// project (a link may resolve within it, never outside, where a save
-/// would copy the outside file's content into the pin), regular files
-/// only (a FIFO or device never blocks or floods the read), and bounded
-/// by the project-settings cap — so a checkout cannot hang or exhaust the
-/// process before any trust decision.
-fn read_pinned(settings_path: &Path, name: &str) -> anyhow::Result<Option<String>> {
-    let path = settings_path.with_file_name(name);
-    let resolved = super::storage::resolve_with_missing(&path)?;
-    // The root is resolved the same way, so a symlinked prefix (macOS
-    // /tmp -> /private/tmp) stays consistent for both sides.
-    let root = super::storage::resolve_with_missing(&project_root(settings_path))?;
-    if !resolved.starts_with(&root) {
-        anyhow::bail!(
-            "pinned file {} resolves outside the project",
-            path.display()
-        );
-    }
-    match std::fs::symlink_metadata(&resolved) {
-        Ok(metadata) if !metadata.file_type().is_file() => {
-            anyhow::bail!("pinned file {} is not a regular file", path.display());
-        }
-        Ok(_) => {}
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(error) => return Err(error.into()),
-    }
-    super::storage::read_document(super::storage::SettingsScope::Project, &resolved).map(Some)
-}
-
 /// The project root a settings file belongs to (`<project>/.prime/agent/`s
 /// parent's parent).
 fn project_root(settings_path: &Path) -> PathBuf {
@@ -77,9 +47,19 @@ fn project_root(settings_path: &Path) -> PathBuf {
 /// beside `settings_path`. `None` when a prompt file exists but cannot be
 /// read (permissions, invalid UTF-8): an unreadable file never rides a pin.
 fn pin(settings_path: &Path, settings: Option<&str>) -> Option<String> {
-    let system = read_pinned(settings_path, "SYSTEM.md").ok()?;
-    let append = read_pinned(settings_path, "APPEND_SYSTEM.md").ok()?;
+    let (system, append) = prompt_files(settings_path)?;
     Some(pin_over(settings, system.as_deref(), append.as_deref()))
+}
+
+/// The pinned prompt files beside `settings_path`, ONE read of each through
+/// the project storage (its link, size, and regular-file rules), so a
+/// checkout cannot hang or exhaust the process before any trust decision.
+/// `None` when either is refused or unreadable.
+fn prompt_files(settings_path: &Path) -> Option<(Option<String>, Option<String>)> {
+    let storage = FileSettingsStorage::new(project_root(settings_path), PathBuf::new());
+    let system = storage.read_project_file("SYSTEM.md").ok()?;
+    let append = storage.read_project_file("APPEND_SYSTEM.md").ok()?;
+    Some((system, append))
 }
 
 /// The pin over given settings and prompt-file contents (already read by
@@ -337,9 +317,7 @@ impl ProjectTrustGate {
     /// cannot be trusted.
     #[must_use]
     pub(crate) fn prompt_files(&self) -> Option<(Option<String>, Option<String>)> {
-        let system = read_pinned(&self.settings_path, "SYSTEM.md").ok()?;
-        let append = read_pinned(&self.settings_path, "APPEND_SYSTEM.md").ok()?;
-        Some((system, append))
+        prompt_files(&self.settings_path)
     }
 
     /// Whether the registry pins this project with the given pin.

@@ -6,8 +6,8 @@ use std::path::{Path, PathBuf};
 
 use super::super::PackageManager;
 use super::discovery::{
-    collect_ancestor_agents_skill_dirs, collect_auto_prompt_entries, collect_auto_theme_entries,
-    collect_skill_entries, SkillDiscoveryMode,
+    collect_auto_prompt_entries, collect_auto_theme_entries, collect_skill_entries,
+    SkillDiscoveryMode,
 };
 use super::patterns::is_enabled_by_overrides;
 use super::{
@@ -19,6 +19,24 @@ use crate::skills::diagnostics::ResourceDiagnostic;
 
 fn home_dir() -> PathBuf {
     pa_types::platform::home_dir().unwrap_or_else(|| PathBuf::from("."))
+}
+
+/// Add discovered `paths` of one resource type, each enabled per the
+/// scope's override patterns.
+fn add_resources(
+    accumulator: &mut ResourceAccumulator,
+    resource_type: ResourceType,
+    paths: Vec<PathBuf>,
+    metadata: &PathMetadata,
+    overrides: &[String],
+    base_dir: &Path,
+) {
+    for path in paths {
+        let enabled = is_enabled_by_overrides(&path, overrides, base_dir);
+        accumulator
+            .map(resource_type)
+            .add(&path, metadata.clone(), enabled);
+    }
 }
 
 impl PackageManager {
@@ -50,25 +68,8 @@ impl PackageManager {
             RESOURCE_TYPES.map(|resource_type| settings_array(project, resource_type));
         let project_dirs = RESOURCE_TYPES
             .map(|resource_type| project_base_dir.join(resource_type_dir_name(resource_type)));
-        let user_agents_skills_dir = home_dir().join(".agents").join("skills");
-        let project_agents_skill_dirs = collect_ancestor_agents_skill_dirs(self.cwd())
-            .into_iter()
-            .filter(|dir| *dir != user_agents_skills_dir)
-            .collect::<Vec<PathBuf>>();
-
-        let add_resources = |accumulator: &mut ResourceAccumulator,
-                             resource_type: ResourceType,
-                             paths: Vec<PathBuf>,
-                             metadata: &PathMetadata,
-                             overrides: &[String],
-                             base_dir: &Path| {
-            for path in paths {
-                let enabled = is_enabled_by_overrides(&path, overrides, base_dir);
-                accumulator
-                    .map(resource_type)
-                    .add(&path, metadata.clone(), enabled);
-            }
-        };
+        let project_agents_skill_dirs =
+            crate::settings::project_trust::gated_agents_skill_dirs(self.cwd());
 
         add_resources(
             accumulator,
@@ -124,20 +125,6 @@ impl PackageManager {
         let user_dirs = RESOURCE_TYPES
             .map(|resource_type| global_base_dir.join(resource_type_dir_name(resource_type)));
         let user_agents_skills_dir = home_dir().join(".agents").join("skills");
-
-        let add_resources = |accumulator: &mut ResourceAccumulator,
-                             resource_type: ResourceType,
-                             paths: Vec<PathBuf>,
-                             metadata: &PathMetadata,
-                             overrides: &[String],
-                             base_dir: &Path| {
-            for path in paths {
-                let enabled = is_enabled_by_overrides(&path, overrides, base_dir);
-                accumulator
-                    .map(resource_type)
-                    .add(&path, metadata.clone(), enabled);
-            }
-        };
 
         add_resources(
             accumulator,

@@ -41,7 +41,8 @@ pub fn run_interactive_mode(options: &RunOptions) -> Result<i32> {
     // root, before its earliest settings reads; `build_tui_options` below
     // covers a resumed session's saved cwd when it differs. Sessions opened
     // later from the agents view never prompt (the handoff keeps raw mode
-    // and the alternate screen up); their resource load warns instead.
+    // and the alternate screen up); the attach state's
+    // `ignoredProjectNotice` warns instead.
     let socket_path = resolve_socket_path(options.daemon_socket.as_deref());
     let configuration_load_started = std::time::Instant::now();
     let (tui_options, pending_onboarding_stages) = build_tui_options(
