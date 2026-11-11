@@ -126,13 +126,16 @@ pub fn render_tool_card(
     width: usize,
     show_images: bool,
 ) -> Vec<Line> {
-    match card.name.as_str() {
+    let mut rows = match card.name.as_str() {
         name if pa_types::ai::is_python_tool_name(name) => {
             ipython::render(card, frame, detail, level, theme, width, show_images)
         }
         "bash" => bash::render(card, frame, detail, theme, width, show_images),
         _ => generic::render(card, frame, detail, theme, width, show_images),
-    }
+    };
+    // Cards show model-written arguments and file contents and add no links of their own.
+    rows.iter_mut().for_each(crate::hyperlinks::strip_osc8);
+    rows
 }
 
 /// The generic panel status: error wins even while streaming; `running`

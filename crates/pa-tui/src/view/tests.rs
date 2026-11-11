@@ -48,6 +48,48 @@ fn markdown_link_targets_use_the_owning_view_cwd() {
     assert!(targets(&mut first).iter().all(|link| link.url != first_url));
 }
 
+/// A raw OSC 8 sequence in model, tool, or file text renders as plain text: only the links the
+/// renderer adds (here the markdown link) are clickable.
+#[test]
+fn injected_terminal_links_are_not_clickable() {
+    let injected = "\x1b]8;;https://evil.example/\x1b\\safe\x1b]8;;\x1b\\";
+    let mut v = view_with(vec![
+        ChatEntry::Assistant(Box::new(AssistantMessage {
+            blocks: vec![MessageBlock::Text(format!(
+                "{injected} and [docs](https://docs.example/)"
+            ))],
+            has_tool_calls: true,
+            streaming: false,
+            error: None,
+            aborted: false,
+        })),
+        ChatEntry::Tool(Box::new(ToolCallCard {
+            id: "t1".to_string(),
+            name: "python".to_string(),
+            args: serde_json::json!({ "code": format!("x = 1  # {injected}") }),
+            started: true,
+            ..Default::default()
+        })),
+        ChatEntry::AgentMessage(Box::new(crate::custom_message::AgentMessageRow {
+            direction: crate::custom_message::AgentMessageDirection::Received,
+            counterpart: "lane".to_string(),
+            message: injected.to_string(),
+        })),
+        ChatEntry::ShellCompletion(Box::new(crate::custom_message::ShellCompletionRow {
+            pid: Some(1),
+            exit_code: Some(0),
+            content: format!("[bash-done] {injected}"),
+        })),
+    ]);
+    v.detail = Detail::All;
+    let links = crate::hyperlinks::frame_link_ranges(&v.render_transcript(80));
+    assert!(!links.is_empty(), "the markdown link stays clickable");
+    assert!(
+        links.iter().all(|link| link.url == "https://docs.example/"),
+        "{links:?}"
+    );
+}
+
 /// The hardware caret never sits over the factory page: the page is an
 /// input-less replacement view, so `frame_cursor` suppresses the stale
 /// editor dock position while it is open (the settings menu's guard
