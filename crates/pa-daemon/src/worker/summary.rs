@@ -671,9 +671,12 @@ pub(crate) fn emit_action_update_raw(
     if core_guard.last_action_snapshot.as_ref() == Some(snapshot) {
         return Ok(());
     }
+    // The send stays under the guard: broadcast ORDER must follow the
+    // projection order (a release before the send lets a concurrent
+    // emission overtake this one and suppress the corrective update).
     let payload = build_action_snapshot_payload_locked(&mut core_guard, snapshot)?;
-    drop(core_guard);
     events.send(OutboundFrame::session_event(payload));
+    drop(core_guard);
     Ok(())
 }
 
@@ -691,8 +694,8 @@ pub(crate) fn emit_action_update_fresh(
         return Ok(());
     }
     let payload = build_action_snapshot_payload_locked(&mut core_guard, &snapshot)?;
-    drop(core_guard);
     events.send(OutboundFrame::session_event(payload));
+    drop(core_guard);
     Ok(())
 }
 
