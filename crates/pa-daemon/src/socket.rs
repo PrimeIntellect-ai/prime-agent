@@ -66,12 +66,17 @@ async fn acquire_cleanup_lock(path: &Path) -> Result<pa_core::platform::LockDir>
 ///
 /// # Errors
 ///
-/// Returns an error when the parent directory cannot be created, a live listener
+/// Returns an error when the parent directory cannot be created or is an
+/// owned socket directory that fails the owner check, a live listener
 /// answers, the cleanup lock cannot be acquired, or the cleanup fails.
 #[cfg(unix)]
 pub async fn prepare_socket_path(path: &Path) -> Result<()> {
     if let Some(parent) = path.parent() {
-        crate::paths::ensure_dir(parent)?;
+        if parent == socket_dir() || !parent.exists() {
+            prepare_owned_socket_dir(parent)?;
+        } else {
+            crate::paths::ensure_dir(parent)?;
+        }
     }
     // lstat, not `Path::exists()`: a dangling symlink still blocks `bind`
     // while `exists()` (which follows links) denies it.
@@ -87,6 +92,33 @@ pub async fn prepare_socket_path(path: &Path) -> Result<()> {
     }
     let _lock = acquire_cleanup_lock(path).await?;
     prepare_locked_socket_path(path).await
+}
+
+/// Create a socket directory prime-agent owns (the default one, or one it
+/// creates for a custom socket) and refuse it unless it is a real directory
+/// owned by the current user: another user who pre-created or symlinked it
+/// could swap the socket. Then restrict it to the owner.
+#[cfg(unix)]
+fn prepare_owned_socket_dir(dir: &Path) -> Result<()> {
+    use std::os::unix::fs::MetadataExt;
+    std::fs::create_dir_all(dir)?;
+    let metadata = std::fs::symlink_metadata(dir)?;
+    if !metadata.is_dir() {
+        return Err(anyhow!(
+            "Daemon socket directory is a symlink or not a directory: {}",
+            dir.display()
+        ));
+    }
+    let uid = pa_core::platform::process::current_user_id();
+    if metadata.uid() != uid {
+        return Err(anyhow!(
+            "Daemon socket directory {} is owned by uid {}, not the current user (uid {uid}); remove it or set TMPDIR",
+            dir.display(),
+            metadata.uid()
+        ));
+    }
+    pa_core::platform::perms::restrict_dir(dir)?;
+    Ok(())
 }
 
 /// Probe + grace wait + unlink for a probed-stale socket file; the caller owns the cleanup lock.
@@ -265,6 +297,17 @@ mod tests {
         let socket = dir.path().join("daemon.sock");
         prepare_socket_path(&socket).await.unwrap();
         assert!(!socket.exists());
+    }
+
+    #[test]
+    fn a_symlinked_socket_dir_is_refused() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let real = dir.path().join("real");
+        std::fs::create_dir(&real).unwrap();
+        let link = dir.path().join("prime-agent");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let error = prepare_owned_socket_dir(&link).unwrap_err();
+        assert!(error.to_string().contains("symlink"), "{error}");
     }
 
     #[tokio::test]
