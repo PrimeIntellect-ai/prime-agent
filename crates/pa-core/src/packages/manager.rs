@@ -843,7 +843,7 @@ mod tests {
                 .join("agent")
                 .join(crate::settings::TRUSTED_PROJECTS_FILE),
             &settings_path,
-            &crate::settings::fingerprint(&std::fs::read_to_string(&settings_path).unwrap()),
+            &crate::settings::project_fingerprint(&settings_path).unwrap(),
         )
         .unwrap();
         assert!(manager.remove_source_from_settings("./project-pkg", UserOrProject::Project));

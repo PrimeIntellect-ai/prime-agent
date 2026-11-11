@@ -30,10 +30,11 @@ async fn assert_prompt_case(case: PromptCase) {
             std::fs::write(cwd.join(".prime/agent/APPEND_SYSTEM.md"), content).unwrap();
             // The append cases exercise the trusted project file; the
             // gate's own tests pin the untrusted path.
-            crate::settings::project_trust::trust_project(
+            let settings_path = cwd.join(".prime/agent/settings.json");
+            crate::settings::trust_project(
                 &agent_dir.join(crate::settings::TRUSTED_PROJECTS_FILE),
-                &cwd.join(".prime/agent/settings.json"),
-                "",
+                &settings_path,
+                &crate::settings::project_fingerprint(&settings_path).unwrap(),
             )
             .unwrap();
         }

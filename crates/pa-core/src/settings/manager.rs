@@ -8,7 +8,7 @@ use anyhow::{anyhow, Context, Result};
 
 use super::load::from_value_lenient;
 use super::merge::{deep_merge, migrate};
-use super::project_trust::{fingerprint, restrictive_projection, ProjectTrustGate};
+use super::project_trust::{restrictive_projection, ProjectTrustGate};
 use super::storage::{SettingsScope, SettingsStorage};
 use super::types::{
     QueueModeSetting, Settings, ThinkingLevelSetting, TransportSetting, UpdateChannel,
@@ -630,7 +630,7 @@ impl SettingsManager {
                 if let Some(gate) = gate.as_ref() {
                     match current
                         .as_deref()
-                        .map(|content| gate.admits(&fingerprint(content)))
+                        .map(|content| gate.admits(Some(content)))
                     {
                         Some(false) => {
                             untrusted = true;
@@ -676,7 +676,7 @@ impl SettingsManager {
         // A failed or skipped write never pins bytes that are not on disk.
         if scope == SettingsScope::Project && result.is_ok() && extend_trust {
             if let (Some(gate), Some(content)) = (self.trust_gate.as_ref(), written.as_deref()) {
-                if let Err(error) = gate.trust(&fingerprint(content)) {
+                if let Err(error) = gate.trust(content) {
                     self.errors.push(SettingsError {
                         scope,
                         message: format!("Project settings saved but the trust pin was not refreshed: {error}. The next interactive launch re-prompts."),
@@ -1145,7 +1145,7 @@ fn load_scope(
     // file re-prompts).
     if scope == SettingsScope::Project {
         if let Some(gate) = trust_gate {
-            if !gate.admits(&fingerprint(&content)) {
+            if !gate.admits(Some(&content)) {
                 // Parse like the trusted path so a malformed document still
                 // records its load error (the trace upload's fail-closed
                 // `errors().is_empty()` rule keeps working).

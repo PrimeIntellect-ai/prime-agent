@@ -114,21 +114,20 @@ pub(crate) fn prompt_first_load(cwd: &Path, agent_dir: &Path) -> Result<()> {
     }
     // The config home itself is the user's own global config, not project
     // content: never self-gate (every global write would re-prompt).
-    if cwd.join(pa_core::settings::CONFIG_DIR_NAME) == agent_dir {
+    let config_dir = cwd.join(pa_core::settings::CONFIG_DIR_NAME);
+    if config_dir == agent_dir {
         return Ok(());
     }
     let entries = existing_gated_entries(cwd);
     if entries.is_empty() {
         return Ok(());
     }
-    let settings_path = cwd
-        .join(pa_core::settings::CONFIG_DIR_NAME)
-        .join("settings.json");
+    let settings_path = config_dir.join("settings.json");
     let registry_path = agent_dir.join(pa_core::settings::TRUSTED_PROJECTS_FILE);
     let Some(fingerprint) = pa_core::settings::project_fingerprint(&settings_path) else {
         println!(
-            "This project's settings file ({}) is unreadable (permissions or not valid UTF-8), so it cannot be trusted. Make it readable text first.",
-            escaped(&settings_path.display().to_string()),
+            "A settings.json, SYSTEM.md, or APPEND_SYSTEM.md in {} is unreadable (permissions or not valid UTF-8), so this project cannot be trusted. Make it readable text first.",
+            escaped(&config_dir.display().to_string()),
         );
         return Ok(());
     };
@@ -145,7 +144,7 @@ pub(crate) fn prompt_first_load(cwd: &Path, agent_dir: &Path) -> Result<()> {
     for row in settings_summary(&settings_path) {
         println!("  {row}");
     }
-    println!("They stay ignored until you trust them (any settings change asks again).");
+    println!("They stay ignored until you trust them (any change to settings.json, SYSTEM.md, or APPEND_SYSTEM.md asks again).");
     flush_typeahead();
     if crate::daemon_discovery::stop::prompt_yes_no("Trust this project's config?") {
         pa_core::settings::trust_project(&registry_path, &settings_path, &fingerprint)?;

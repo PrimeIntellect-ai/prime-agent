@@ -121,11 +121,10 @@ fn trusted_fingerprint_applies_the_deep_merge_and_keeps_stdio_execution_user_onl
     let cwd = dir.path().join("repo");
     let marker = dir.path().join("spawned-marker");
     malicious_project(&cwd, &marker);
-    let content = std::fs::read_to_string(project_settings(&cwd)).unwrap();
     trust_project(
         &agent_dir.join(TRUSTED_PROJECTS_FILE),
         &project_settings(&cwd),
-        &fingerprint(&content),
+        &project_fingerprint(&project_settings(&cwd)).unwrap(),
     )
     .unwrap();
 
@@ -162,7 +161,7 @@ fn a_changed_settings_file_re_gates_until_trusted_again() {
     trust_project(
         &registry_path,
         &settings_path,
-        &fingerprint(&std::fs::read_to_string(&settings_path).unwrap()),
+        &project_fingerprint(&settings_path).unwrap(),
     )
     .unwrap();
 
@@ -173,11 +172,46 @@ fn a_changed_settings_file_re_gates_until_trusted_again() {
     trust_project(
         &registry_path,
         &settings_path,
-        &fingerprint(&std::fs::read_to_string(&settings_path).unwrap()),
+        &project_fingerprint(&settings_path).unwrap(),
     )
     .unwrap();
     let manager = SettingsManager::create(&cwd, &agent_dir);
     assert_eq!(manager.settings().theme.as_deref(), Some("changed-theme"));
+}
+
+/// The pin covers `SYSTEM.md` and `APPEND_SYSTEM.md` beside the settings
+/// file: a changed prompt file, or one that appears after trust, re-gates
+/// the whole project. Red against a settings-only pin.
+#[test]
+fn a_changed_or_new_system_prompt_file_re_gates_the_project() {
+    let dir = tempfile::tempdir().unwrap();
+    let agent_dir = dir.path().join("agent");
+    let cwd = dir.path().join("repo");
+    let settings_path = malicious_project(&cwd, &dir.path().join("marker"));
+    let system = settings_path.with_file_name("SYSTEM.md");
+    std::fs::write(&system, "trusted prompt").unwrap();
+    let trust = || {
+        trust_project(
+            &agent_dir.join(TRUSTED_PROJECTS_FILE),
+            &settings_path,
+            &project_fingerprint(&settings_path).unwrap(),
+        )
+        .unwrap();
+    };
+    trust();
+    assert!(SettingsManager::create(&cwd, &agent_dir).project_config_trusted());
+
+    std::fs::write(&system, "pulled prompt").unwrap();
+    let manager = SettingsManager::create(&cwd, &agent_dir);
+    assert!(!manager.project_config_trusted(), "a changed SYSTEM.md re-gates");
+    assert_eq!(manager.settings().theme, None, "the settings re-gate with it");
+
+    trust();
+    std::fs::write(settings_path.with_file_name("APPEND_SYSTEM.md"), "appended").unwrap();
+    assert!(
+        !SettingsManager::create(&cwd, &agent_dir).project_config_trusted(),
+        "a new APPEND_SYSTEM.md re-gates"
+    );
 }
 
 /// The registry fails closed: malformed or unreadable registry bytes deny.
@@ -189,11 +223,10 @@ fn a_malformed_registry_denies() {
     std::fs::create_dir_all(&agent_dir).unwrap();
     malicious_project(&cwd, &dir.path().join("marker"));
     std::fs::write(agent_dir.join(TRUSTED_PROJECTS_FILE), "{not json").unwrap();
-    let content = std::fs::read_to_string(project_settings(&cwd)).unwrap();
     assert!(!project_trusted(
         &agent_dir.join(TRUSTED_PROJECTS_FILE),
         &project_settings(&cwd),
-        &fingerprint(&content)
+        &project_fingerprint(&project_settings(&cwd)).unwrap()
     ));
 }
 
@@ -211,11 +244,10 @@ fn a_symlinked_settings_file_does_not_reuse_another_projects_trust() {
     let imposter = dir.path().join("imposter-project");
     malicious_project(&trusted_project, &dir.path().join("trusted-marker"));
     let settings_path = project_settings(&trusted_project);
-    let content = std::fs::read_to_string(&settings_path).unwrap();
     trust_project(
         &agent_dir.join(TRUSTED_PROJECTS_FILE),
         &settings_path,
-        &fingerprint(&content),
+        &project_fingerprint(&settings_path).unwrap(),
     )
     .unwrap();
 
@@ -238,11 +270,10 @@ fn trust_project_creates_a_missing_agent_dir() {
     let agent_dir = dir.path().join("agent").join("nested");
     let cwd = dir.path().join("repo");
     let settings_path = malicious_project(&cwd, &dir.path().join("marker"));
-    let content = std::fs::read_to_string(&settings_path).unwrap();
     trust_project(
         &agent_dir.join(TRUSTED_PROJECTS_FILE),
         &settings_path,
-        &fingerprint(&content),
+        &project_fingerprint(&settings_path).unwrap(),
     )
     .unwrap();
     assert!(agent_dir.join(TRUSTED_PROJECTS_FILE).exists());
@@ -259,11 +290,10 @@ fn a_trusted_project_write_re_pins_the_new_bytes() {
     let cwd = dir.path().join("repo");
     malicious_project(&cwd, &dir.path().join("marker"));
     let settings_path = project_settings(&cwd);
-    let content = std::fs::read_to_string(&settings_path).unwrap();
     trust_project(
         &agent_dir.join(TRUSTED_PROJECTS_FILE),
         &settings_path,
-        &fingerprint(&content),
+        &project_fingerprint(&settings_path).unwrap(),
     )
     .unwrap();
 
@@ -295,11 +325,10 @@ fn a_write_against_diverged_project_bytes_fails_closed() {
     let cwd = dir.path().join("repo");
     malicious_project(&cwd, &dir.path().join("marker"));
     let settings_path = project_settings(&cwd);
-    let content = std::fs::read_to_string(&settings_path).unwrap();
     trust_project(
         &agent_dir.join(TRUSTED_PROJECTS_FILE),
         &settings_path,
-        &fingerprint(&content),
+        &project_fingerprint(&settings_path).unwrap(),
     )
     .unwrap();
     std::fs::write(&settings_path, r#"{ "theme": "pulled-theme" }"#).unwrap();
@@ -443,7 +472,7 @@ fn discovered_project_config_loads_only_when_trusted() {
     trust_project(
         &agent_dir.join(TRUSTED_PROJECTS_FILE),
         &settings_path,
-        &fingerprint(&std::fs::read_to_string(&settings_path).unwrap()),
+        &project_fingerprint(&settings_path).unwrap(),
     )
     .unwrap();
     let resources = load_resources_cold(&cwd, &agent_dir);
@@ -526,7 +555,12 @@ fn an_unreadable_settings_file_never_rides_the_absence_pin() {
     let cwd = dir.path().join("repo");
     let settings_path = project_settings(&cwd);
     std::fs::create_dir_all(settings_path.parent().unwrap()).unwrap();
-    trust_project(&agent_dir.join(TRUSTED_PROJECTS_FILE), &settings_path, "").unwrap();
+    trust_project(
+        &agent_dir.join(TRUSTED_PROJECTS_FILE),
+        &settings_path,
+        &project_fingerprint(&settings_path).unwrap(),
+    )
+    .unwrap();
     std::fs::write(&settings_path, b"{\"theme\": \xff invalid}").unwrap();
     let manager = SettingsManager::create(&cwd, &agent_dir);
     assert!(

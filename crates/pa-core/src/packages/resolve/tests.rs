@@ -21,20 +21,16 @@ struct Fixture {
     manager: PackageManager,
 }
 
-/// Seed the fixture project's trust (the pin is the absent-settings
-/// sentinel until a project write appears): the fixture tests exercise the
-/// trusted path; the gate's own tests pin the untrusted one.
+/// Seed the fixture project's trust as it is on disk: the fixture tests
+/// exercise the trusted path; the gate's own tests pin the untrusted one.
 fn seed_project_trust(cwd: &Path, agent_dir: &Path) {
     let settings_path = cwd
         .join(crate::settings::CONFIG_DIR_NAME)
         .join("settings.json");
-    let fingerprint = std::fs::read_to_string(&settings_path)
-        .map(|content| crate::settings::project_trust::fingerprint(&content))
-        .unwrap_or_default();
-    crate::settings::project_trust::trust_project(
-        &agent_dir.join(crate::settings::project_trust::TRUSTED_PROJECTS_FILE),
+    crate::settings::trust_project(
+        &agent_dir.join(crate::settings::TRUSTED_PROJECTS_FILE),
         &settings_path,
-        &fingerprint,
+        &crate::settings::project_fingerprint(&settings_path).unwrap(),
     )
     .unwrap();
 }

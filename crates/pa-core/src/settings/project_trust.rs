@@ -1,13 +1,14 @@
 //! Project-settings trust (the CWE-426 gate): a repository's
 //! `<project>/.prime/agent/settings.json` loads ENTIRELY INERT until the
 //! user has explicitly trusted it. Trust is per project, recorded in the
-//! user-level registry (`<agent dir>/trusted-projects.json`), and keyed by
-//! the settings file's fingerprint, so any change to the file re-prompts.
+//! user-level registry (`<agent dir>/trusted-projects.json`), and pinned to
+//! one fingerprint over `settings.json`, `SYSTEM.md`, and `APPEND_SYSTEM.md`,
+//! so any change to those files re-prompts.
 //! Headless and API paths never prompt: no registry entry means denied.
 
 use std::path::{Path, PathBuf};
 
-use anyhow::Result;
+use anyhow::{Context as _, Result};
 use sha2::{Digest, Sha256};
 use std::fmt::Write as _;
 
@@ -18,16 +19,8 @@ use super::storage::{atomic_write_with, AtomicWriteOptions, FileSettingsStorage}
 /// The user-level registry file name, beside `settings.json` in the agent dir.
 pub const TRUSTED_PROJECTS_FILE: &str = "trusted-projects.json";
 
-/// The SHA-256 fingerprint of a project settings document, hex-encoded over
-/// the file's exact bytes: any change (whitespace included) re-prompts.
-#[must_use]
-pub fn fingerprint(content: &str) -> String {
-    fingerprint_hex(content.as_bytes())
-}
-
-/// The same digest over raw bytes (registry keys encode OS paths losslessly).
-fn fingerprint_hex(bytes: &[u8]) -> String {
-    let digest = Sha256::digest(bytes);
+/// Hex-encode a SHA-256 digest.
+fn hex(digest: &[u8]) -> String {
     digest
         .iter()
         .fold(String::with_capacity(digest.len() * 2), |mut hex, byte| {
@@ -36,21 +29,44 @@ fn fingerprint_hex(bytes: &[u8]) -> String {
         })
 }
 
-/// The pinned fingerprint for a project's config surface: the settings
-/// file's exact bytes when present (any change re-prompts), the empty
-/// sentinel when absent (its later appearance re-prompts). `None` for an
-/// unreadable settings file: it is refused outright.
+/// Read one pinned file: `Ok(None)` when it does not exist.
+fn read_pinned(path: &Path) -> std::io::Result<Option<String>> {
+    match std::fs::read_to_string(path) {
+        Ok(content) => Ok(Some(content)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
+/// The trust pin: one SHA-256 over the project's `settings.json`,
+/// `SYSTEM.md`, and `APPEND_SYSTEM.md`, each framed as name, presence,
+/// length, bytes, so any change to any of them (a file appearing or
+/// disappearing included) re-prompts. `settings` is the settings document
+/// as the caller read it (`None` when absent); the prompt files are read
+/// beside `settings_path`. `None` when a prompt file exists but cannot be
+/// read (permissions, invalid UTF-8): an unreadable file never rides a pin.
+fn pin(settings_path: &Path, settings: Option<&str>) -> Option<String> {
+    let mut hasher = Sha256::new();
+    let mut frame = |name: &str, content: Option<&str>| {
+        let bytes = content.unwrap_or_default().as_bytes();
+        hasher.update(name.as_bytes());
+        hasher.update([u8::from(content.is_some())]);
+        hasher.update((bytes.len() as u64).to_le_bytes());
+        hasher.update(bytes);
+    };
+    frame("settings.json", settings);
+    for name in ["SYSTEM.md", "APPEND_SYSTEM.md"] {
+        let content = read_pinned(&settings_path.with_file_name(name)).ok()?;
+        frame(name, content.as_deref());
+    }
+    Some(hex(&hasher.finalize()))
+}
+
+/// The trust pin for a project as it is on disk now (see [`pin`]); `None`
+/// when a pinned file is unreadable: such a project cannot be trusted.
 #[must_use]
 pub fn project_fingerprint(settings_path: &Path) -> Option<String> {
-    Some(match std::fs::read_to_string(settings_path) {
-        Ok(content) => fingerprint(&content),
-        // The absence sentinel pins the not-yet-existing file: its later
-        // appearance re-prompts. Any other read failure (permissions,
-        // invalid UTF-8) refuses outright — an unreadable file must
-        // never ride an absence pin.
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
-        Err(_) => return None,
-    })
+    pin(settings_path, read_pinned(settings_path).ok()?.as_deref())
 }
 
 /// The restrictive-key projection of an untrusted project document: the
@@ -95,7 +111,7 @@ fn registry_key(settings_path: &Path) -> String {
     let key = project_dir
         .and_then(|dir| std::fs::canonicalize(dir).ok())
         .unwrap_or_else(|| settings_path.to_path_buf());
-    fingerprint_hex(key.as_os_str().as_encoded_bytes())
+    hex(&Sha256::digest(key.as_os_str().as_encoded_bytes()))
 }
 
 /// Read the registry's fingerprint entry for `settings_path`; `None` on any
@@ -195,28 +211,33 @@ impl ProjectTrustGate {
         }
     }
 
-    /// Whether the settings-file fingerprint the loader observed is trusted.
+    /// Whether the registry pins this project with `settings` as its
+    /// settings document (as the loader read it; `None` when absent).
     #[must_use]
-    pub(crate) fn admits(&self, fingerprint: &str) -> bool {
-        project_trusted(&self.registry_path, &self.settings_path, fingerprint)
+    pub(crate) fn admits(&self, settings: Option<&str>) -> bool {
+        pin(&self.settings_path, settings)
+            .is_some_and(|pin| project_trusted(&self.registry_path, &self.settings_path, &pin))
     }
 
-    /// Record trust for a fingerprint through this gate's registry entry.
+    /// Re-pin this project's trust with `settings` as its settings document.
     ///
     /// # Errors
     ///
-    /// Returns an error when the registry cannot be read or written.
-    pub(crate) fn trust(&self, fingerprint: &str) -> Result<()> {
-        trust_project(&self.registry_path, &self.settings_path, fingerprint)
+    /// Returns an error when a pinned file is unreadable or the registry
+    /// cannot be read or written.
+    pub(crate) fn trust(&self, settings: &str) -> Result<()> {
+        let pin = pin(&self.settings_path, Some(settings))
+            .context("a project system-prompt file is unreadable")?;
+        trust_project(&self.registry_path, &self.settings_path, &pin)
     }
 
     /// The whole-project decision: this project directory's registry entry
-    /// pinned to the settings fingerprint (the empty sentinel while the
-    /// file is absent), so one trust covers every gated project file.
+    /// pinned to the project's current files, so one trust covers every
+    /// gated project file.
     #[must_use]
     pub(crate) fn admits_project(&self) -> bool {
-        project_fingerprint(&self.settings_path).is_some_and(|fingerprint| {
-            project_trusted(&self.registry_path, &self.settings_path, &fingerprint)
+        project_fingerprint(&self.settings_path).is_some_and(|pin| {
+            project_trusted(&self.registry_path, &self.settings_path, &pin)
         })
     }
 }

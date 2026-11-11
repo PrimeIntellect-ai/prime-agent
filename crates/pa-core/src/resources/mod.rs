@@ -337,15 +337,16 @@ mod tests {
     use super::*;
     use std::fs;
 
-    /// Trust the fixture project (the pin is the absent-settings sentinel):
-    /// these tests exercise the trusted path; the gate's own tests pin the
-    /// untrusted one.
+    /// Trust the fixture project as it is on disk: these tests exercise
+    /// the trusted path; the gate's own tests pin the untrusted one.
     fn trust_fixture_project(cwd: &Path, agent_dir: &Path) {
-        crate::settings::project_trust::trust_project(
+        let settings_path = cwd
+            .join(crate::settings::CONFIG_DIR_NAME)
+            .join("settings.json");
+        crate::settings::trust_project(
             &agent_dir.join(crate::settings::TRUSTED_PROJECTS_FILE),
-            &cwd.join(crate::settings::CONFIG_DIR_NAME)
-                .join("settings.json"),
-            "",
+            &settings_path,
+            &crate::settings::project_fingerprint(&settings_path).unwrap(),
         )
         .unwrap();
     }
@@ -411,13 +412,13 @@ mod tests {
             "Fix $1",
         )
         .unwrap();
-        trust_fixture_project(&cwd, &agent_dir);
         fs::write(cwd.join("AGENTS.md"), "Project rules").unwrap();
         fs::write(
             cwd.join(".prime").join("agent").join("SYSTEM.md"),
             "custom system",
         )
         .unwrap();
+        trust_fixture_project(&cwd, &agent_dir);
         let resources = load_resources(ResourceLoaderOptions {
             cwd,
             agent_dir,
@@ -522,7 +523,7 @@ mod tests {
         crate::settings::trust_project(
             &agent_dir.join(crate::settings::TRUSTED_PROJECTS_FILE),
             &settings_path,
-            &crate::settings::fingerprint(&fs::read_to_string(&settings_path).unwrap()),
+            &crate::settings::project_fingerprint(&settings_path).unwrap(),
         )
         .unwrap();
         let resources = load_resources(ResourceLoaderOptions::new(&cwd, &agent_dir)).unwrap();

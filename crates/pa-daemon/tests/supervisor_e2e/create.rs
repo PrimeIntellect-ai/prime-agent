@@ -254,10 +254,11 @@ fn cold_reopen_uses_saved_cwd_unless_explicitly_overridden() {
     // decision. Seed it — the alias arm resolves to the same canonical key,
     // and the explicit-override arm runs in its own trusted directory.
     for trusted_dir in [&project, &override_dir] {
+        let settings_path = trusted_dir.join(".prime/agent/settings.json");
         pa_core::settings::trust_project(
             &agent_dir.join(pa_core::settings::TRUSTED_PROJECTS_FILE),
-            &trusted_dir.join(".prime/agent/settings.json"),
-            "",
+            &settings_path,
+            &pa_core::settings::project_fingerprint(&settings_path).unwrap(),
         )
         .unwrap();
     }
