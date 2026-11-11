@@ -290,14 +290,17 @@ const SNAPSHOT_EXCLUDES: [&str; 6] = [
 ///   still write the index (and fire a repository post-index-change hook) even under
 ///   `--no-optional-locks`; either override alone prevents it, and both keep the probe
 ///   from running the hook and from rewriting the user's index;
-/// - `protocol.allow=never` - a promisor lazy fetch would otherwise run the repository's
-///   uploadpack or ssh command;
+/// - `protocol.allow=never` plus `protocol.<name>.allow=never` for the transport family
+///   (`file`, `ext`, `git`, `ssh`, `http`, `https`, `ftp`, `ftps`, `rsync`) - a promisor
+///   lazy fetch would otherwise run the repository's uploadpack, ssh or ext command; the
+///   per-protocol keys are required because a repository can re-allow one protocol with
+///   `protocol.<name>.allow=always`, which outranks the plain default;
 /// - `--ignore-submodules=all` - submodule children (their diffs, statuses and filter
 ///   programs) stay out of reach; submodule-only changes no longer count as changes.
 ///
 /// `.gitattributes` clean/process filters still run on modified tracked files; no flag
 /// disables them.
-const SNAPSHOT_STATUS_ARGS: [&str; 15] = [
+const SNAPSHOT_STATUS_ARGS: [&str; 33] = [
     "-c",
     "core.fsmonitor=false",
     "-c",
@@ -306,6 +309,24 @@ const SNAPSHOT_STATUS_ARGS: [&str; 15] = [
     "diff.autoRefreshIndex=false",
     "-c",
     "protocol.allow=never",
+    "-c",
+    "protocol.file.allow=never",
+    "-c",
+    "protocol.ext.allow=never",
+    "-c",
+    "protocol.git.allow=never",
+    "-c",
+    "protocol.ssh.allow=never",
+    "-c",
+    "protocol.http.allow=never",
+    "-c",
+    "protocol.https.allow=never",
+    "-c",
+    "protocol.ftp.allow=never",
+    "-c",
+    "protocol.ftps.allow=never",
+    "-c",
+    "protocol.rsync.allow=never",
     "--no-optional-locks",
     "status",
     "--porcelain=v1",
@@ -318,7 +339,7 @@ const SNAPSHOT_STATUS_ARGS: [&str; 15] = [
 /// Fixed arguments of the worktree-snapshot `diff` probe: the same overrides, plus
 /// `--no-ext-diff` and `--no-textconv` (neither a text conversion driver nor an external
 /// diff program may start) over the `HEAD` revision.
-const SNAPSHOT_DIFF_ARGS: [&str; 15] = [
+const SNAPSHOT_DIFF_ARGS: [&str; 33] = [
     "-c",
     "core.fsmonitor=false",
     "-c",
@@ -327,6 +348,24 @@ const SNAPSHOT_DIFF_ARGS: [&str; 15] = [
     "diff.autoRefreshIndex=false",
     "-c",
     "protocol.allow=never",
+    "-c",
+    "protocol.file.allow=never",
+    "-c",
+    "protocol.ext.allow=never",
+    "-c",
+    "protocol.git.allow=never",
+    "-c",
+    "protocol.ssh.allow=never",
+    "-c",
+    "protocol.http.allow=never",
+    "-c",
+    "protocol.https.allow=never",
+    "-c",
+    "protocol.ftp.allow=never",
+    "-c",
+    "protocol.ftps.allow=never",
+    "-c",
+    "protocol.rsync.allow=never",
     "--no-optional-locks",
     "diff",
     "--no-ext-diff",
@@ -884,12 +923,13 @@ mod tests {
             assert!(!marker(name).exists(), "the capture ran {name}");
         }
 
-        // With a promisor remote and a missing blob, the diff probe would
-        // fetch through a repository-chosen uploadpack command.
+        // With a promisor remote, a missing blob and the repository re-allowing the file
+        // protocol, the diff probe would fetch through a repository-chosen uploadpack.
         let uploadpack = main.join("uploadpack.sh");
         script(&uploadpack, "fetch", "exit 0");
         in_main(&["config", "core.repositoryformatversion", "1"]);
         in_main(&["config", "extensions.partialClone", "origin"]);
+        in_main(&["config", "protocol.file.allow", "always"]);
         let server = fresh("server");
         std::fs::write(server.join("top.txt"), "t\n").unwrap();
         assert!(ok(&server, &["add", "."]));
