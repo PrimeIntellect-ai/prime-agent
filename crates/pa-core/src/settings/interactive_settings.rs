@@ -5,6 +5,7 @@
 use anyhow::{anyhow, Result};
 
 use super::manager::SettingsManager;
+use super::types::WebSearchProvider;
 
 impl SettingsManager {
     /// Global preference controlling refinement creation and context loading (default on).
@@ -21,6 +22,24 @@ impl SettingsManager {
     pub fn set_harness_refinements(&mut self, enabled: bool) -> Result<()> {
         self.global_mut().harness_refinements = Some(enabled);
         self.save_global_scope(&["harnessRefinements"])
+    }
+
+    /// The service the bundled websearch skill queries (default Serper). Global only, like the
+    /// stored keys it selects between: project settings cannot switch it.
+    #[must_use]
+    pub fn get_web_search_provider(&self) -> WebSearchProvider {
+        self.global_settings()
+            .web_search_provider
+            .unwrap_or_default()
+    }
+
+    /// Persist the web search provider to the global settings scope.
+    ///
+    /// # Errors
+    /// Returns an error when the global scope cannot be saved.
+    pub fn set_web_search_provider(&mut self, provider: WebSearchProvider) -> Result<()> {
+        self.global_mut().web_search_provider = Some(provider);
+        self.save_global_scope(&["webSearchProvider"])
     }
 
     /// The percentage ceiling for automatic compaction (default 95%).

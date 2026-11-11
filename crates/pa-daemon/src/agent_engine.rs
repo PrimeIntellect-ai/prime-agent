@@ -18,7 +18,7 @@ use pa_core::session_engine::agent_messaging::{
 };
 use pa_core::session_engine::engine::{SessionEngine as CoreSessionEngine, SessionEngineConfig};
 use pa_core::session_engine::provider_adapter::{
-    json_round_trip, map_thinking_level, switchable_stream_fn, ProviderTarget,
+    json_round_trip, map_thinking_level, switchable_stream_fn_with_live_auth, ProviderTarget,
 };
 use pa_core::session_engine::session_commands::{
     execute_session_command, SessionCommandExecution, SessionCommandParams,
@@ -224,6 +224,20 @@ pub struct AgentSessionEngine {
     pub(crate) provider_target: std::sync::Arc<
         std::sync::RwLock<Option<pa_core::session_engine::provider_adapter::ProviderTarget>>,
     >,
+    /// The OAuth integration the request-auth resolution refreshes expired
+    /// credentials through: production uses the built-in
+    /// [`pa_core::auth::ProviderOAuth`] (TS delegates to the oauth
+    /// registry on every auth-storage instance), set once at
+    /// construction; tests swap a scripted integration in before the
+    /// engine is shared. Read once per resolution.
+    pub(crate) request_auth_oauth: std::sync::Arc<dyn pa_core::auth::OAuthIntegration>,
+    /// The engine's long-lived request-auth registry and the store it owns
+    /// (TS's single `ModelRegistry`/`AuthStorage` instance): built over a
+    /// store from `request_auth_oauth`, rebuilt at the session build and a
+    /// model switch, and reused for every provider call in between, so a
+    /// failed `reload()` keeps the last read's data — a transiently-held
+    /// document lock or a corrupt auth.json is not a logout.
+    pub(crate) request_auth_registry: std::sync::Mutex<Option<pa_core::models::ModelRegistry>>,
     /// One shared supervisor-link client: agent messaging and RLM children
     /// multiplex the same connection.
     link: Arc<crate::supervisor_link::SupervisorLink>,
@@ -304,11 +318,9 @@ pub struct AgentSessionEngine {
     /// every model-turn attempt so retries keep serving it; cleared when the
     /// episode settles.
     pub(crate) image_route: std::sync::Mutex<Option<ImageRoute>>,
-    /// Serializes `/reload`'s whole live-input refresh: overlapping reloads
-    /// resolve the store at their own read times, so an earlier reload's
-    /// already-resolved key/header pair must never land over a later
-    /// reload's fresher pair (the last reload to run leaves the target
-    /// serving the newest store).
+    /// The provider-slot writers' fence (`set_model`, the build, the
+    /// failover switch and restore, the image-route apply/clear): the
+    /// last writer leaves the newest target standing.
     pub(crate) reload_lock: std::sync::Mutex<()>,
 
     /// Turn-boundary runs register their controller here;

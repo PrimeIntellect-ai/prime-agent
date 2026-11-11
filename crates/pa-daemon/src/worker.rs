@@ -29,8 +29,8 @@ pub(crate) use queue::{
     enqueue_priority, gather_delivery_batch, parse_custom_message, parse_prompt_images,
     queue_lanes, restore_queue_snapshot, restored_turn_policy, withdraw_bash_completion_notice,
     QueueCheckpoint, QueueLanes, QueuedItem, TurnPolicy, TurnSettle, ABORTED_TURN_SETTLE_ERROR,
-    PROMPT_ABORTED_BEFORE_DELIVERY, QUEUED_INPUT_SUSPENDED, QUEUED_PROMPT_DELETED,
-    SIDE_QUESTION_SETTLE_TIMEOUT,
+    INBOX_ARRIVAL_QUEUE_KEY, INBOX_REMINDER_QUEUE_KEY, PROMPT_ABORTED_BEFORE_DELIVERY,
+    QUEUED_INPUT_SUSPENDED, QUEUED_PROMPT_DELETED, SIDE_QUESTION_SETTLE_TIMEOUT,
 };
 
 mod create;
@@ -652,7 +652,7 @@ impl Worker {
                             engine.inbox(),
                             pa_core::session_engine::inbox::inbox_notice_fields(&notice),
                         ) {
-                            admit_inbox_notice(
+                            let _ = admit_inbox_notice(
                                 &notice_recovery,
                                 &notice_core,
                                 &notice_notify,
@@ -661,6 +661,7 @@ impl Worker {
                                 fields,
                                 Lane::Steering,
                                 closed,
+                                |_, _| None,
                             );
                             return;
                         }

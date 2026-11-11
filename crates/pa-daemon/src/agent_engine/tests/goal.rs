@@ -48,6 +48,9 @@ fn recovery_rebuild_rehydrates_the_goal_from_the_session_file() {
         })
         .unwrap(),
     );
+    // The worker registers the engine's own arc: the live-auth resolver
+    // upgrades it per provider call.
+    engine.register_arc();
     // The turn-end seam: the engine has no worker, so a collector
     // stands in for the queue-lane admission sink.
     let goal_work = goal_admission_collector(&engine);
@@ -122,6 +125,9 @@ fn goal_start_keeps_the_prompt_images_on_the_context_row() {
         })
         .unwrap(),
     );
+    // The worker registers the engine's own arc: the live-auth resolver
+    // upgrades it per provider call.
+    engine.register_arc();
     let mut events: Vec<EngineEvent> = Vec::new();
     engine.run_prompt(
         0,
@@ -246,6 +252,10 @@ fn recovered_engine_compaction_walk_sees_the_durable_history() {
         queued_steering_probe: None,
     })
     .unwrap();
+    let engine = std::sync::Arc::new(engine);
+    // The worker registers the engine's own arc: the live-auth resolver
+    // upgrades it per provider call.
+    engine.register_arc();
     let mut events: Vec<EngineEvent> = Vec::new();
     admit(
         &engine,
@@ -496,6 +506,9 @@ fn goal_turn_end_mints_the_loop_until_the_goal_completes() {
         })
         .unwrap(),
     );
+    // The worker registers the engine's own arc: the live-auth resolver
+    // upgrades it per provider call.
+    engine.register_arc();
     let goal_work = goal_admission_collector(&engine);
     let mut events: Vec<EngineEvent> = Vec::new();
     admit(&engine, "/goal ship the goal loop".to_string(), &mut events);
@@ -744,6 +757,9 @@ fn running_children_owe_the_continuation_and_settle_delivers_it() {
         })
         .unwrap(),
     );
+    // The worker registers the engine's own arc: the live-auth resolver
+    // upgrades it per provider call.
+    engine.register_arc();
     let goal_work = goal_admission_collector(&engine);
     let children = engine.children.clone().expect("children registry");
     // A running child (the test seam): the quiescence gate holds.
@@ -1012,6 +1028,9 @@ fn active_goal_aborted_turn_row_broadcasts_and_goal_accounting_skips_it() {
     })
     .unwrap();
     let engine = std::sync::Arc::new(engine);
+    // The worker registers the engine's own arc: the live-auth resolver
+    // upgrades it per provider call.
+    engine.register_arc();
     // No worker owns the queue here: minted continuation work collects
     // instead of running, so the held turn below is the only live one.
     let _goal_work = goal_admission_collector(&engine);

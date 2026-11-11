@@ -22,7 +22,7 @@ pub use runtime_code::{
 use venv::{
     bootstrap_venv, ensure_uv, expand_home, has_prime_agent_runtime,
     missing_python_skill_import_labels, missing_rlm_extra_import_labels, normalize_python_skills,
-    resolve_writable_kernel_venv_dir, sync_python_skills, BootstrapPythonSkill,
+    resolve_writable_kernel_venv_dir, sync_python_skills, BootstrapPythonSkill, UvCommand,
 };
 pub use venv::{invalidate_runtime_probe_cache, kernel_venv_dir, kernel_venv_python};
 use venv::{kernel_base_ready, kernel_ready};
@@ -134,8 +134,20 @@ static IN_FLIGHT: Mutex<InFlightBootstrap> = Mutex::new(None);
 ///
 /// The in-flight promise stores its outcome under the same lock, so the `expect` is unreachable.
 pub async fn ensure_kernel_python(options: EnsureKernelPythonOptions) -> anyhow::Result<PathBuf> {
+    ensure_kernel_python_for_project(options, std::env::current_dir().ok()).await
+}
+
+/// The kernel manager knows its session directory even when the host process
+/// was launched elsewhere. Keep that directory through probes and uv setup.
+pub(crate) async fn ensure_kernel_python_for_project(
+    options: EnsureKernelPythonOptions,
+    project: Option<PathBuf>,
+) -> anyhow::Result<PathBuf> {
     let python_skills = normalize_python_skills(&options.python_skills);
     let key = [
+        project
+            .as_ref()
+            .map_or_else(String::new, |path| path.to_string_lossy().into_owned()),
         std::env::var("PRIME_AGENT_KERNEL_PYTHON").unwrap_or_default(),
         std::env::var("PRIME_AGENT_KERNEL_VENV").unwrap_or_default(),
         std::env::var("HOME").unwrap_or_default(),
@@ -159,7 +171,8 @@ pub async fn ensure_kernel_python(options: EnsureKernelPythonOptions) -> anyhow:
     };
     let mut guard = shared.lock().await;
     if guard.is_none() {
-        *guard = Some(ensure_kernel_python_uncached(&options, &python_skills).await);
+        *guard =
+            Some(ensure_kernel_python_uncached(&options, &python_skills, project.as_deref()).await);
     }
     let outcome = guard.take().expect("outcome was just stored");
     // Drop the registry entry so a later call re-validates instead of reusing
@@ -176,6 +189,7 @@ pub async fn ensure_kernel_python(options: EnsureKernelPythonOptions) -> anyhow:
 async fn ensure_kernel_python_uncached(
     options: &EnsureKernelPythonOptions,
     python_skills: &[BootstrapPythonSkill],
+    project: Option<&std::path::Path>,
 ) -> anyhow::Result<PathBuf> {
     if let Ok(override_python) = std::env::var("PRIME_AGENT_KERNEL_PYTHON") {
         if !override_python.is_empty() {
@@ -218,13 +232,14 @@ async fn ensure_kernel_python_uncached(
     }
 
     let venv = resolve_writable_kernel_venv_dir()?;
-    ensure_kernel_venv(options, python_skills, venv).await
+    ensure_kernel_venv(options, python_skills, venv, project).await
 }
 
 async fn ensure_kernel_venv(
     options: &EnsureKernelPythonOptions,
     python_skills: &[BootstrapPythonSkill],
     venv: PathBuf,
+    project: Option<&std::path::Path>,
 ) -> anyhow::Result<PathBuf> {
     let python = kernel_venv_python(&venv);
     let python_str = python.to_string_lossy().to_string();
@@ -250,9 +265,13 @@ async fn ensure_kernel_venv(
             return Ok(python);
         }
         if kernel_base_ready(&python_str, &venv, &runtime_identity) {
-            let uv = ensure_uv()?;
+            let uv = ensure_uv(project)?;
+            let uv_command = UvCommand {
+                executable: &uv,
+                project,
+            };
             sync_python_skills(
-                &uv,
+                &uv_command,
                 &venv,
                 &python,
                 &source_dir,
@@ -276,6 +295,7 @@ async fn ensure_kernel_venv(
             &runtime_identity,
             python_skills,
             options,
+            project,
         )
         .await?;
         Ok(python)
@@ -341,7 +361,7 @@ mod tests {
 
         let error = tokio::time::timeout(
             std::time::Duration::from_secs(121),
-            ensure_kernel_venv(&options, &[], venv),
+            ensure_kernel_venv(&options, &[], venv, None),
         )
         .await
         .expect("lock acquisition must have a bounded wait")

@@ -1,0 +1,1 @@
+- Fixed GPT Responses streams wiping accumulated function-call arguments when an output item done event arrives with empty arguments.

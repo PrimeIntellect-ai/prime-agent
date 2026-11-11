@@ -436,22 +436,23 @@ impl SessionEngine for AgentSessionEngine {
         let Ok(model) = self.resolve_model() else {
             return false;
         };
+        self.rebuild_request_auth_registry();
         {
-            // The switch's resolve-and-install serializes with `/reload`'s
-            // live-input refresh (the failover callbacks' fence): a reload
-            // landing between this resolution and the slot write must not
-            // be clobbered by the switch's older pair.
+            // The switch's slot install serializes with the other slot
+            // writers' fence (the failover callbacks take the same lock),
+            // so a mid-switch turn never sees a half-swapped target.
             let _reload_serialized = self
                 .reload_lock
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            let (api_key, headers) = self.resolve_request_key_and_headers(&model);
             let mut target = self.provider_target.write().expect("provider target lock");
+            // The daemon's stream re-resolves request auth per provider
+            // call; the slot's auth half is write-only here.
             *target = Some(ProviderTarget {
                 service_tier: *self.service_tier.read().expect("service tier lock"),
-                api_key,
+                api_key: None,
                 model: model.clone(),
-                headers,
+                headers: None,
             });
         }
         let session = self.session.blocking_lock();
@@ -630,7 +631,7 @@ impl SessionEngine for AgentSessionEngine {
         let custom_instructions = request.custom_instructions;
         // The live target's key: the config key is the startup snapshot and
         // goes stale with provider switches.
-        let api_key = self.resolve_request_api_key(&model);
+        let (model, api_key) = self.resolve_request_target(model);
         let run = async {
             // The lock covers the clone only; the summarizer call below must not ride it.
             let session = self.session.lock().await.clone();
@@ -717,7 +718,7 @@ impl SessionEngine for AgentSessionEngine {
                 }
             }
         };
-        let api_key = self.resolve_request_api_key(&model);
+        let (model, api_key) = self.resolve_request_target(model);
         let settings =
             pa_core::settings::SettingsManager::create(self.cwd(), &self.config.agent_dir);
         let reserve_tokens = settings
@@ -1240,7 +1241,7 @@ impl SessionEngine for AgentSessionEngine {
     ) -> anyhow::Result<Value> {
         let model = self.resolve_model()?;
         self.ensure_core_session(&model)?;
-        let api_key = self.resolve_request_api_key(&model);
+        let (model, api_key) = self.resolve_request_target(model);
         let global_harness_dir = self.config.agent_dir.clone();
         // The lock covers the clone only; the model call below must not ride it.
         let core = self

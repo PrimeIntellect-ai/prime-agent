@@ -354,6 +354,7 @@ mod tests {
                     daemonless: true,
                     rlm_depth: None,
                     model_info: Some(model.clone()),
+                    kernel_ready_gate: None,
                     prewarm_ipython_kernel: None,
                     on_background_work_settled: None,
                     bash_notice_wake: None,

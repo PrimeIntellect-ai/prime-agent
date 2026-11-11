@@ -156,6 +156,7 @@ fn parse_entry(candidate: &serde_json::Value) -> Result<Model, String> {
         max_tokens: entry.max_tokens,
         max_tokens_explicit: false,
         featured: entry.featured,
+        serving: None,
         headers: None,
         compat: entry.compat.map(|raw| ModelCompat { raw }),
     })

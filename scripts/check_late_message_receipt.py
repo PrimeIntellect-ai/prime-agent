@@ -17,7 +17,7 @@ import tempfile
 import threading
 import time
 
-from lifecycle_lib import digest, env_for, skill_pythonpath
+from lifecycle_lib import digest, env_for, use_skill_python
 from lifecycle_lib import OwnedProcesses, TAG, finish
 from check_restore_notice import texts, probe_from
 
@@ -155,7 +155,7 @@ def validate(observed):
 def observe(binary, root, observed):
     env = env_for(root)
     env[TAG] = str(root)
-    env['PYTHONPATH'] = skill_pythonpath()
+    use_skill_python(root, env)
     provider = Provider(root)
     thread = threading.Thread(target=provider.serve_forever, daemon=True)
     thread.start()

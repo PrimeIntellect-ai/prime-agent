@@ -97,7 +97,7 @@ fn steering_rows(worker: &Worker) -> Vec<(String, Option<String>, bool)> {
 async fn an_idle_arrival_queues_one_short_notice_and_keeps_the_message() {
     let (worker, inbox, arrivals, notify) = routing_state();
     worker.dispatch("clear_queue", &json!({})).await;
-    admit_inbox_notice(
+    let _ = admit_inbox_notice(
         &worker.recovery,
         &worker.core,
         &notify,
@@ -109,6 +109,7 @@ async fn an_idle_arrival_queues_one_short_notice_and_keeps_the_message() {
         ),
         Lane::Steering,
         || false,
+        |_, _| None,
     );
     let rows = steering_rows(&worker);
     assert_eq!(rows.len(), 1, "exactly one notice row: {rows:?}");
@@ -156,7 +157,7 @@ async fn busy_window_arrivals_coalesce_into_one_queued_row() {
     let (worker, inbox, arrivals, notify) = routing_state();
     worker.dispatch("clear_queue", &json!({})).await;
     worker.core.lock().unwrap().busy = true;
-    admit_inbox_notice(
+    let _ = admit_inbox_notice(
         &worker.recovery,
         &worker.core,
         &notify,
@@ -168,8 +169,9 @@ async fn busy_window_arrivals_coalesce_into_one_queued_row() {
         ),
         Lane::Steering,
         || false,
+        |_, _| None,
     );
-    admit_inbox_notice(
+    let _ = admit_inbox_notice(
         &worker.recovery,
         &worker.core,
         &notify,
@@ -181,8 +183,9 @@ async fn busy_window_arrivals_coalesce_into_one_queued_row() {
         ),
         Lane::Steering,
         || false,
+        |_, _| None,
     );
-    admit_inbox_notice(
+    let _ = admit_inbox_notice(
         &worker.recovery,
         &worker.core,
         &notify,
@@ -194,6 +197,7 @@ async fn busy_window_arrivals_coalesce_into_one_queued_row() {
         ),
         Lane::Steering,
         || false,
+        |_, _| None,
     );
     let rows = steering_rows(&worker);
     assert_eq!(rows.len(), 1, "one coalesced row, not three: {rows:?}");
@@ -215,7 +219,7 @@ async fn busy_window_arrivals_coalesce_into_one_queued_row() {
 async fn a_delivered_row_starts_a_fresh_batch() {
     let (worker, inbox, arrivals, notify) = routing_state();
     worker.dispatch("clear_queue", &json!({})).await;
-    admit_inbox_notice(
+    let _ = admit_inbox_notice(
         &worker.recovery,
         &worker.core,
         &notify,
@@ -227,11 +231,12 @@ async fn a_delivered_row_starts_a_fresh_batch() {
         ),
         Lane::Steering,
         || false,
+        |_, _| None,
     );
     // The delivery: the turn runner pops the row off the lane.
     let delivered = worker.core.lock().unwrap().steering.pop_front();
     assert!(delivered.is_some());
-    admit_inbox_notice(
+    let _ = admit_inbox_notice(
         &worker.recovery,
         &worker.core,
         &notify,
@@ -243,6 +248,7 @@ async fn a_delivered_row_starts_a_fresh_batch() {
         ),
         Lane::Steering,
         || false,
+        |_, _| None,
     );
     let rows = steering_rows(&worker);
     assert_eq!(rows.len(), 1, "a fresh row queued: {rows:?}");
@@ -308,7 +314,7 @@ async fn the_reminder_repeats_while_the_inbox_stays_unread() {
 async fn a_collected_handle_drains_its_message_and_drops_the_queued_wake_rows() {
     let (worker, inbox, arrivals, notify) = routing_state();
     worker.dispatch("clear_queue", &json!({})).await;
-    admit_inbox_notice(
+    let _ = admit_inbox_notice(
         &worker.recovery,
         &worker.core,
         &notify,
@@ -317,6 +323,7 @@ async fn a_collected_handle_drains_its_message_and_drops_the_queued_wake_rows() 
         bash_done_notice(4321, "sleep 1"),
         Lane::Steering,
         || false,
+        |_, _| None,
     );
     admit_inbox_reminder(&worker.recovery, &worker.core, &notify, &inbox, || false);
     let rows = steering_rows(&worker);
@@ -360,7 +367,7 @@ async fn a_withdrawal_inside_a_covered_batch_rerenders_the_queued_rows() {
     let (worker, inbox, arrivals, notify) = routing_state();
     worker.dispatch("clear_queue", &json!({})).await;
     worker.core.lock().unwrap().busy = true;
-    admit_inbox_notice(
+    let _ = admit_inbox_notice(
         &worker.recovery,
         &worker.core,
         &notify,
@@ -369,8 +376,9 @@ async fn a_withdrawal_inside_a_covered_batch_rerenders_the_queued_rows() {
         bash_done_notice(4321, "sleep 1"),
         Lane::Steering,
         || false,
+        |_, _| None,
     );
-    admit_inbox_notice(
+    let _ = admit_inbox_notice(
         &worker.recovery,
         &worker.core,
         &notify,
@@ -382,6 +390,7 @@ async fn a_withdrawal_inside_a_covered_batch_rerenders_the_queued_rows() {
         ),
         Lane::Steering,
         || false,
+        |_, _| None,
     );
     admit_inbox_reminder(&worker.recovery, &worker.core, &notify, &inbox, || false);
     withdraw_bash_completion_notice(
@@ -441,7 +450,7 @@ async fn a_withdrawal_inside_a_covered_batch_rerenders_the_queued_rows() {
 async fn a_withdrawal_of_the_last_message_of_its_batch_drops_the_batches_row() {
     let (worker, inbox, arrivals, notify) = routing_state();
     worker.dispatch("clear_queue", &json!({})).await;
-    admit_inbox_notice(
+    let _ = admit_inbox_notice(
         &worker.recovery,
         &worker.core,
         &notify,
@@ -453,11 +462,12 @@ async fn a_withdrawal_of_the_last_message_of_its_batch_drops_the_batches_row() {
         ),
         Lane::Steering,
         || false,
+        |_, _| None,
     );
     // The older message's row delivered; its message stays waiting.
     let delivered = worker.core.lock().unwrap().steering.pop_front();
     assert!(delivered.is_some());
-    admit_inbox_notice(
+    let _ = admit_inbox_notice(
         &worker.recovery,
         &worker.core,
         &notify,
@@ -466,6 +476,7 @@ async fn a_withdrawal_of_the_last_message_of_its_batch_drops_the_batches_row() {
         bash_done_notice(4321, "sleep 1"),
         Lane::Steering,
         || false,
+        |_, _| None,
     );
     assert_eq!(
         steering_rows(&worker).len(),
@@ -506,7 +517,7 @@ async fn a_withdrawal_racing_an_arrival_settles_both() {
     let (worker, inbox, arrivals, notify) = routing_state();
     worker.dispatch("clear_queue", &json!({})).await;
     for i in 0..200u32 {
-        admit_inbox_notice(
+        let _ = admit_inbox_notice(
             &worker.recovery,
             &worker.core,
             &notify,
@@ -515,6 +526,7 @@ async fn a_withdrawal_racing_an_arrival_settles_both() {
             bash_done_notice(10_000 + i, "job a"),
             Lane::Steering,
             || false,
+            |_, _| None,
         );
         let barrier = Arc::new(std::sync::Barrier::new(2));
         let (done_tx, done_rx) = std::sync::mpsc::channel::<()>();
@@ -529,7 +541,7 @@ async fn a_withdrawal_racing_an_arrival_settles_both() {
             );
             std::thread::spawn(move || {
                 barrier.wait();
-                admit_inbox_notice(
+                let _ = admit_inbox_notice(
                     &worker.recovery,
                     &worker.core,
                     &notify,
@@ -538,6 +550,7 @@ async fn a_withdrawal_racing_an_arrival_settles_both() {
                     bash_done_notice(20_000 + i, "job b"),
                     Lane::Steering,
                     || false,
+                    |_, _| None,
                 );
                 let _ = done_tx.send(());
             })
@@ -585,7 +598,7 @@ async fn a_withdrawal_racing_an_arrival_settles_both() {
 async fn a_closed_session_refuses_the_arrival() {
     let (worker, inbox, arrivals, notify) = routing_state();
     worker.dispatch("clear_queue", &json!({})).await;
-    admit_inbox_notice(
+    let _ = admit_inbox_notice(
         &worker.recovery,
         &worker.core,
         &notify,
@@ -597,6 +610,7 @@ async fn a_closed_session_refuses_the_arrival() {
         ),
         Lane::Steering,
         || true,
+        |_, _| None,
     );
     assert!(
         steering_rows(&worker).is_empty(),
@@ -957,6 +971,328 @@ async fn a_retired_session_leaves_no_inbox_for_the_rebuild() {
     assert!(
         engine.inbox().is_some(),
         "the rebuilt session's store serves"
+    );
+    let _ = std::fs::remove_dir_all(worker.config.socket_path.parent().unwrap());
+}
+
+/// A worker over the faux engine (so the agent-message route has an
+/// engine and a store) with its inbox attached; `created` is set
+/// directly so no demand-seam build races the store install.
+fn faux_worker_with_inbox() -> (Arc<Worker>, Arc<SessionInbox>, std::path::PathBuf) {
+    let dir = std::env::temp_dir().join(format!("pa-worker-inbox-faux-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let config = WorkerConfig {
+        socket_path: dir.join("worker.sock"),
+        supervisor_socket_path: PathBuf::new(),
+        token: "token".to_string(),
+        worker_instance_id: String::new(),
+        active_session_id: "target-session".to_string(),
+        agent_dir: dir.join("agent"),
+        recovery_journal_path: dir.join("recovery.jsonl"),
+        telemetry_disabled: None,
+        script: Some(json!({ "engine": "faux", "responses": ["ack"] })),
+    };
+    let worker = Arc::new(Worker::new(config, None));
+    *worker.recovery.lock().unwrap() =
+        Some(WorkerRecoveryJournal::open(&worker.config.recovery_journal_path).unwrap());
+    worker.core.lock().unwrap().created = true;
+    let inbox = Arc::new(SessionInbox::open(Some(&dir)));
+    worker
+        .agent_engine
+        .as_ref()
+        .expect("the faux engine")
+        .set_inbox(std::sync::Arc::clone(&inbox));
+    (worker, inbox, dir)
+}
+
+/// A clear drops unread inbox-routed agent messages and the wake rows
+/// that referred to them: an emptied inbox leaves no stale notice or
+/// reminder, and the withdrawal replays across a reopen.
+#[tokio::test]
+async fn a_clear_drops_unread_agent_messages_and_their_wake_rows() {
+    let (worker, inbox, dir) = faux_worker_with_inbox();
+    worker.dispatch("clear_queue", &json!({})).await;
+    // A busy-window delivery routes into the durable store and queues
+    // ONE short notice; a reminder tick then queues the count row.
+    worker.core.lock().unwrap().busy = true;
+    let mut subscription = worker.events.subscribe();
+    let delivered = worker
+        .dispatch(
+            "worker_deliver_message",
+            &json!({
+                "targetActiveSessionId": "target-session",
+                "message": "peer note",
+                "sender": { "activeSessionId": "peer-1", "sessionName": "peer" },
+            }),
+        )
+        .await;
+    assert!(delivered.success, "delivery failed: {delivered:?}");
+    assert_eq!(inbox.count().0, 1, "the message waits in the store");
+    // The delivery refreshes the queue-strip projection like the direct
+    // route does: the queued notice lands as a session_action_update.
+    let mut frames = Vec::new();
+    while let Ok(frame) = subscription.try_recv() {
+        if frame.outbound_type == "session_event" {
+            if let Ok(outbound) = serde_json::from_slice::<serde_json::Value>(&frame.payload) {
+                frames.push(outbound["event"].clone());
+            }
+        }
+    }
+    assert!(
+        frames.iter().any(|event| {
+            event.get("type").and_then(Value::as_str) == Some("session_action_update")
+                && event.to_string().contains("Inbox:")
+        }),
+        "the queued notice reached the action projection: {frames:?}"
+    );
+    admit_inbox_reminder(
+        &worker.recovery,
+        &worker.core,
+        &worker.work_notify,
+        &inbox,
+        || false,
+    );
+    assert_eq!(reminder_rows(&worker), 1, "the reminder row queued");
+    let cleared = worker.dispatch("agent_messages_clear", &json!({})).await;
+    assert!(cleared.success, "clear failed: {cleared:?}");
+    assert_eq!(
+        cleared.data,
+        Some(json!({ "steering": [], "followUp": [] })),
+        "the lane shape is unchanged"
+    );
+    assert_eq!(
+        inbox.count().0,
+        0,
+        "the durable record leaves with the clear"
+    );
+    let rows = steering_rows(&worker);
+    assert!(
+        rows.is_empty(),
+        "no stale wake row survives the emptied inbox: {rows:?}"
+    );
+    // The withdrawal replays: a reopened store stays empty.
+    let reopened = SessionInbox::open(Some(&dir));
+    assert_eq!(
+        reopened.count(),
+        (0, None, std::collections::BTreeMap::new())
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The capacity gate refuses inside the admission's critical section:
+/// a full store of agent messages refuses the next delivery.
+#[tokio::test]
+async fn a_full_agent_message_inbox_refuses_the_next_delivery() {
+    let (worker, inbox, dir) = faux_worker_with_inbox();
+    worker.dispatch("clear_queue", &json!({})).await;
+    for index in 0..DEFAULT_AGENT_MESSAGE_MAX_PENDING_PER_SESSION {
+        inbox.push(
+            inbox_notice(
+                pa_core::session_engine::inbox::INBOX_CLASS_AGENT_MESSAGE,
+                &format!("waiting {index}"),
+            ),
+            1_000 + index as u64,
+        );
+    }
+    let refused = worker
+        .dispatch(
+            "worker_deliver_message",
+            &json!({
+                "targetActiveSessionId": "target-session",
+                "message": "one too many",
+                "sender": { "activeSessionId": "peer-1" },
+            }),
+        )
+        .await;
+    assert!(!refused.success, "the full store refuses: {refused:?}");
+    assert!(
+        refused
+            .error
+            .as_deref()
+            .unwrap_or_default()
+            .contains("too many pending messages"),
+        "the TS refusal text rides: {refused:?}"
+    );
+    assert_eq!(
+        inbox.count().0,
+        DEFAULT_AGENT_MESSAGE_MAX_PENDING_PER_SESSION,
+        "nothing leaked past the cap"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A closed session takes a durable push with no wake row; a retired
+/// session (no store) is refused instead of injecting a raw row.
+#[tokio::test]
+async fn a_closed_session_takes_the_durable_push_and_refuses_without_a_store() {
+    let (worker, inbox, dir) = faux_worker_with_inbox();
+    worker.dispatch("clear_queue", &json!({})).await;
+    worker
+        .agent_engine
+        .as_ref()
+        .expect("the faux engine")
+        .mark_session_closed();
+    let delivered = worker
+        .dispatch(
+            "worker_deliver_message",
+            &json!({
+                "targetActiveSessionId": "target-session",
+                "message": "for the journal",
+                "sender": { "activeSessionId": "peer-1" },
+            }),
+        )
+        .await;
+    assert!(
+        delivered.success,
+        "a closed session still takes the durable push: {delivered:?}"
+    );
+    assert_eq!(inbox.count().0, 1, "the message waits in the durable store");
+    assert!(
+        steering_rows(&worker).is_empty(),
+        "no wake row for a closed session"
+    );
+    // The retired session (no store) refuses: no raw row lands.
+    worker
+        .agent_engine
+        .as_ref()
+        .expect("the faux engine")
+        .clear_inbox();
+    let refused = worker
+        .dispatch(
+            "worker_deliver_message",
+            &json!({
+                "targetActiveSessionId": "target-session",
+                "message": "into the void",
+                "sender": { "activeSessionId": "peer-1" },
+            }),
+        )
+        .await;
+    assert!(!refused.success, "the retired session refuses: {refused:?}");
+    assert_eq!(
+        refused.error.as_deref(),
+        Some("Target session is closed"),
+        "{refused:?}"
+    );
+    assert!(
+        steering_rows(&worker).is_empty(),
+        "no raw row lands on a retiring session"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A follow-up arrival never demotes a queued steering notice: the batch
+/// keeps the most urgent lane it has already ridden.
+#[tokio::test]
+async fn a_follow_up_arrival_keeps_a_queued_steering_notice() {
+    let (worker, inbox, arrivals, notify) = routing_state();
+    worker.dispatch("clear_queue", &json!({})).await;
+    worker.core.lock().unwrap().busy = true;
+    let _ = admit_inbox_notice(
+        &worker.recovery,
+        &worker.core,
+        &notify,
+        &inbox,
+        &arrivals,
+        inbox_notice(
+            pa_core::session_engine::inbox::INBOX_CLASS_BASH_DONE,
+            "first",
+        ),
+        Lane::Steering,
+        || false,
+        |_, _| None,
+    );
+    let _ = admit_inbox_notice(
+        &worker.recovery,
+        &worker.core,
+        &notify,
+        &inbox,
+        &arrivals,
+        inbox_notice(
+            pa_core::session_engine::inbox::INBOX_CLASS_AGENT_MESSAGE,
+            "second",
+        ),
+        Lane::FollowUp,
+        || false,
+        |_, _| None,
+    );
+    let core = worker.core.lock().unwrap();
+    assert!(
+        core.steering
+            .iter()
+            .any(|item| item.queue_key.as_deref() == Some(INBOX_ARRIVAL_QUEUE_KEY)),
+        "the notice stays on the steering lane"
+    );
+    assert!(
+        !core
+            .follow_up
+            .iter()
+            .any(|item| item.queue_key.as_deref() == Some(INBOX_ARRIVAL_QUEUE_KEY)),
+        "the follow-up arrival never demotes it"
+    );
+    drop(core);
+    let _ = std::fs::remove_dir_all(worker.config.socket_path.parent().unwrap());
+}
+
+/// An edited arrival row leaves the coalescing sweep: a later arrival
+/// queues a fresh notice instead of silently deleting the user's text.
+#[tokio::test]
+async fn an_edited_arrival_row_survives_the_next_arrival() {
+    let (worker, inbox, arrivals, notify) = routing_state();
+    worker.core.lock().unwrap().created = true;
+    worker.dispatch("clear_queue", &json!({})).await;
+    worker.core.lock().unwrap().busy = true;
+    let _ = admit_inbox_notice(
+        &worker.recovery,
+        &worker.core,
+        &notify,
+        &inbox,
+        &arrivals,
+        inbox_notice(
+            pa_core::session_engine::inbox::INBOX_CLASS_BASH_DONE,
+            "first",
+        ),
+        Lane::Steering,
+        || false,
+        |_, _| None,
+    );
+    // The queue strip addresses the row by its visible preview.
+    let queued_preview = steering_rows(&worker)[0]
+        .1
+        .clone()
+        .expect("the notice preview");
+    let applied = worker
+        .dispatch(
+            "mutate_queued_message",
+            &json!({
+                "activeSessionId": "target-session",
+                "lane": "steering",
+                "index": 0,
+                "expectedText": queued_preview,
+                "mutation": { "type": "replace", "text": "user instruction" },
+            }),
+        )
+        .await;
+    assert!(applied.success, "mutation failed: {applied:?}");
+    assert_eq!(applied.data, Some(json!({ "status": "applied" })));
+    let _ = admit_inbox_notice(
+        &worker.recovery,
+        &worker.core,
+        &notify,
+        &inbox,
+        &arrivals,
+        inbox_notice(
+            pa_core::session_engine::inbox::INBOX_CLASS_FACTORY_PROGRESS,
+            "second",
+        ),
+        Lane::Steering,
+        || false,
+        |_, _| None,
+    );
+    let rows = steering_rows(&worker);
+    assert_eq!(rows.len(), 2, "the edited row survives: {rows:?}");
+    assert!(
+        rows.iter().any(|(text, _, _)| text == "user instruction"),
+        "the user's instruction stays queued: {rows:?}"
     );
     let _ = std::fs::remove_dir_all(worker.config.socket_path.parent().unwrap());
 }
