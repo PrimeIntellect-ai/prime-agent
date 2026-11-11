@@ -721,6 +721,18 @@ pub(crate) fn refresh_inbox_wake_rows(
     inbox: &std::sync::Arc<pa_core::session_engine::inbox::SessionInbox>,
 ) {
     let mut core_guard = core.lock().unwrap();
+    refresh_inbox_wake_rows_locked(&mut core_guard, arrivals, inbox);
+}
+
+/// [`refresh_inbox_wake_rows`] over an already locked core: the clear
+/// sweep holds the lock across its withdrawal so a concurrent delivery
+/// either lands before the clear (and leaves) or waits for it (and
+/// stays).
+pub(crate) fn refresh_inbox_wake_rows_locked(
+    core_guard: &mut SessionCore,
+    arrivals: &pa_core::session_engine::inbox::InboxArrivals,
+    inbox: &std::sync::Arc<pa_core::session_engine::inbox::SessionInbox>,
+) {
     let waiting = inbox.waiting_ids();
     let mut batch = arrivals.lock().unwrap();
     batch.retain(|message| waiting.contains(&message.id));
