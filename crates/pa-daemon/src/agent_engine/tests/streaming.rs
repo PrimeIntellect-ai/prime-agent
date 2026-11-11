@@ -20,6 +20,7 @@ fn prompt_images_ride_the_user_message_content() {
             source: "user".to_string(),
             agent_message_id: None,
             custom_message: None,
+            streaming_behavior: None,
         },
         &|| false,
         &mut |event| {
@@ -94,6 +95,7 @@ fn assistant_updates_stream_live_while_the_turn_runs() {
             source: "user".to_string(),
             agent_message_id: None,
             custom_message: None,
+            streaming_behavior: None,
         },
         &|| false,
         &mut |event| {
@@ -172,6 +174,7 @@ fn agent_engine_streams_updates_and_final_message() {
             source: "user".to_string(),
             agent_message_id: None,
             custom_message: None,
+            streaming_behavior: None,
         },
         &|| false,
         &mut |event| {
@@ -256,6 +259,7 @@ fn lazy_build_restores_only_the_pre_admission_prompt_context() {
                 source: "user".to_string(),
                 agent_message_id: None,
                 custom_message: None,
+                streaming_behavior: None,
             },
             &|| false,
             &mut |event| {

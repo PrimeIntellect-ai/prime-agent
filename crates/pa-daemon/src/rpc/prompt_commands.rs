@@ -192,9 +192,14 @@ async fn run_session_command(
         return Err(error.clone());
     }
     if let Some(continuation) = execution.continuation_message {
+        // The continuation is an internal wake: steer a busy session (the
+        // delivery queues into the running turn), never reject it.
         engine
             .session
-            .prompt_injected_message(&continuation)
+            .prompt_injected_message_with_behavior(
+                &continuation,
+                pa_core::session_engine::StreamingBehavior::Steer,
+            )
             .await
             .map_err(|error| format!("{error:#}"))?;
         engine.session.agent().wait_for_idle().await;

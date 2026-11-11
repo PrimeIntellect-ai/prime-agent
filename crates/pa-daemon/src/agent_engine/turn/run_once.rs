@@ -373,6 +373,13 @@ impl AgentSessionEngine {
                                     images: row.images.clone(),
                                 })
                                 .collect(),
+                            // A user message is the steer class: when the
+                            // agent is busy at admission it interrupts the
+                            // running turn (the operator ruling), never
+                            // rejects.
+                            streaming_behavior: Some(
+                                pa_core::session_engine::StreamingBehavior::Steer,
+                            ),
                             ..Default::default()
                         };
                         engine
@@ -381,9 +388,12 @@ impl AgentSessionEngine {
                             .await
                             .map(|_| ())
                     }
-                    TurnPrompt::Injected(message) => engine
+                    // The injected row carries its delivery's lane behavior:
+                    // a busy session queues the row (steer or follow-up),
+                    // never fails the turn with the admission rejection.
+                    TurnPrompt::Injected { message, behavior } => engine
                         .session
-                        .prompt_injected_message(message)
+                        .prompt_injected_message_with_behavior(message, *behavior)
                         .await
                         .map(|_| ()),
                 }

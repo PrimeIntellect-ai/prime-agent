@@ -58,6 +58,36 @@ impl AgentSession {
         Ok(PromptOutcome::Prompt)
     }
 
+    /// Admit an injected custom message with the delivery's streaming
+    /// behavior (the TS `_promptInjectedMessage` contract: queued with
+    /// `streamingBehavior` + `queueIfBusy`, never rejected): a BUSY session
+    /// queues the row onto the agent's steering or follow-up queue — the
+    /// running turn's next boundary delivers it — while an idle session
+    /// admits it as the turn's prompt exactly like
+    /// [`AgentSession::prompt_injected_message`].
+    ///
+    /// # Errors
+    ///
+    /// Error when the digest capture fails or the agent rejects the prompt;
+    /// a busy session never errors here (the behavior queues instead).
+    pub async fn prompt_injected_message_with_behavior(
+        &self,
+        message: &pa_types::session::CustomMessage,
+        behavior: StreamingBehavior,
+    ) -> anyhow::Result<PromptOutcome> {
+        let state = self.agent.state().await;
+        if state.is_streaming {
+            let row = session_message_to_loop(&SessionAgentMessage::Custom(message.clone()))
+                .ok_or_else(|| anyhow::anyhow!("injected custom message conversion failed"))?;
+            match behavior {
+                StreamingBehavior::Steer => self.agent.steer(row),
+                StreamingBehavior::FollowUp => self.agent.follow_up(row),
+            }
+            return Ok(PromptOutcome::Prompt);
+        }
+        self.prompt_injected_message(message).await
+    }
+
     /// Classify a prompt as a session command without admitting it (the same
     /// expansion-plus-grammar parse `prompt` applies). Pre-turn compaction
     /// arms stay off the session-command path (TS never reaches `_prepareForCommit`).
