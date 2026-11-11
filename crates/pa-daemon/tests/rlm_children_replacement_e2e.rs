@@ -582,6 +582,15 @@ fn restart_relists_child(delay_ms: u64, display_status: &str) {
     let dir = tempfile::TempDir::new().expect("temp dir");
     let agent_dir = dir.path().join("agent");
     std::fs::create_dir_all(&agent_dir).expect("agent dir");
+    // The wake oracle reads the delivered message's text in the child's
+    // session file; the default inbox route delivers a short notice with
+    // the message in the durable inbox instead, so this suite pins the
+    // direct route (the inbox route is covered by `agent_inbox_e2e`).
+    std::fs::write(
+        agent_dir.join("settings.json"),
+        json!({ "agentInbox": { "enabled": false } }).to_string(),
+    )
+    .expect("write settings");
     let socket = dir.path().join("supervisor.sock");
     let receipts = dir.path().join("receipts");
     std::fs::create_dir_all(&receipts).expect("receipts dir");
