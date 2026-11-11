@@ -45,6 +45,32 @@ impl AgentSessionEngine {
             .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
     }
 
+    /// Install the worker's post-drain seam for the inbox (the wake-row
+    /// refresh): every session build copies it onto the freshly opened
+    /// store, and the kernel's read handler runs it after each drain.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the read-hook slot lock is poisoned.
+    pub(crate) fn set_inbox_read_hook(&self, hook: pa_core::session_engine::inbox::InboxReadHook) {
+        *self
+            .inbox_read_hook
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(hook);
+    }
+
+    /// The installed post-drain seam, when the worker set one.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the read-hook slot lock is poisoned.
+    pub(crate) fn inbox_read_hook(&self) -> Option<pa_core::session_engine::inbox::InboxReadHook> {
+        self.inbox_read_hook
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
     /// The current session's inbox store, when a session is built.
     ///
     /// # Panics

@@ -368,7 +368,26 @@ impl Worker {
                 // A closed session takes no lane row and no wake (the
                 // notice sink drops the same way): the message stays
                 // durable in the inbox, so a reopened session reads it.
-                inbox.push(notice, pa_core::autonomous::now_millis());
+                // The same capacity bound holds (counted under the core
+                // lock, the store push riding the documented order).
+                {
+                    let core = self.core.lock().unwrap();
+                    let pending = pending_agent_messages(&inbox, &core.steering, &core.follow_up);
+                    if let Err(error) =
+                        pa_core::session_engine::agent_messaging::assert_agent_message_queue_capacity(
+                            pending,
+                            DEFAULT_AGENT_MESSAGE_MAX_PENDING_PER_SESSION,
+                        )
+                    {
+                        return response_failure(
+                            None,
+                            "worker_deliver_message",
+                            &error.to_string(),
+                            None,
+                        );
+                    }
+                    inbox.push(notice, pa_core::autonomous::now_millis());
+                }
                 let receipt = agent_message_receipt(&id, &target, message, lane, queued, &sender);
                 return response_success(None, "worker_deliver_message", Some(receipt));
             }
@@ -378,15 +397,10 @@ impl Worker {
             // deliveries can never pass one stale sample together.
             let capacity_error = {
                 let inbox = std::sync::Arc::clone(&inbox);
-                move |steering: usize, follow_up: usize| {
-                    let waiting = inbox
-                        .count()
-                        .2
-                        .get(pa_core::session_engine::inbox::INBOX_CLASS_AGENT_MESSAGE)
-                        .copied()
-                        .unwrap_or(0) as usize;
+                move |steering: &std::collections::VecDeque<QueuedItem>,
+                      follow_up: &std::collections::VecDeque<QueuedItem>| {
                     pa_core::session_engine::agent_messaging::assert_agent_message_queue_capacity(
-                        steering + follow_up + waiting,
+                        pending_agent_messages(&inbox, steering, follow_up),
                         DEFAULT_AGENT_MESSAGE_MAX_PENDING_PER_SESSION,
                     )
                     .err()
@@ -521,6 +535,28 @@ impl Worker {
         let receipt = agent_message_receipt(&id, &target, message, lane, queued, &sender);
         response_success(None, "worker_deliver_message", Some(receipt))
     }
+}
+
+/// The a2a pending count: waiting inbox agent messages plus queued
+/// direct-route marker rows. The coalesced wake rows ride one notice per
+/// batch, so they never consume the cap.
+fn pending_agent_messages(
+    inbox: &pa_core::session_engine::inbox::SessionInbox,
+    steering: &std::collections::VecDeque<QueuedItem>,
+    follow_up: &std::collections::VecDeque<QueuedItem>,
+) -> usize {
+    let waiting = inbox
+        .count()
+        .2
+        .get(pa_core::session_engine::inbox::INBOX_CLASS_AGENT_MESSAGE)
+        .copied()
+        .unwrap_or(0) as usize;
+    let queued = steering
+        .iter()
+        .chain(follow_up.iter())
+        .filter(|item| item.agent_message.is_some())
+        .count();
+    queued + waiting
 }
 
 /// The `worker_deliver_message` receipt for one accepted delivery (the

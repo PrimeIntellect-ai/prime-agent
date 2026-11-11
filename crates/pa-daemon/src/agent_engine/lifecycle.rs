@@ -140,6 +140,7 @@ impl AgentSessionEngine {
             kernel_notice_sink: std::sync::Mutex::new(None),
             bash_consumed_sink: std::sync::Mutex::new(None),
             inbox: std::sync::Mutex::new(None),
+            inbox_read_hook: std::sync::Mutex::new(None),
             goal_queue_purge: std::sync::Mutex::new(None),
             goal_backoff_wake_job_id: std::sync::Mutex::new(None),
             stale_goal_terminal_pending: std::sync::Mutex::new(None),
@@ -1092,6 +1093,9 @@ impl AgentSessionEngine {
                 .and_then(pa_core::session_engine::harness_digest::session_artifact_dir_for_log)
                 .as_deref(),
         ));
+        if let Some(hook) = self.inbox_read_hook() {
+            inbox.set_read_hook(hook);
+        }
         self.set_inbox(std::sync::Arc::clone(&inbox));
         // The engine session stays non-persisted (the worker owns the
         // durable file); the configured session dir leads, the file's

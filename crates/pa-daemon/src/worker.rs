@@ -27,10 +27,10 @@ pub(crate) use queue::{
     admit_autonomous_follow_up, admit_goal_follow_up, admit_inbox_notice, admit_inbox_reminder,
     admit_kernel_notice, checkpoint_queue_recovery, clear_withdrawn_progress_note,
     enqueue_priority, gather_delivery_batch, parse_custom_message, parse_prompt_images,
-    queue_lanes, restore_queue_snapshot, restored_turn_policy, withdraw_bash_completion_notice,
-    QueueCheckpoint, QueueLanes, QueuedItem, TurnPolicy, TurnSettle, ABORTED_TURN_SETTLE_ERROR,
-    INBOX_ARRIVAL_QUEUE_KEY, INBOX_REMINDER_QUEUE_KEY, PROMPT_ABORTED_BEFORE_DELIVERY,
-    QUEUED_INPUT_SUSPENDED, QUEUED_PROMPT_DELETED, SIDE_QUESTION_SETTLE_TIMEOUT,
+    queue_lanes, refresh_inbox_wake_rows, restore_queue_snapshot, restored_turn_policy,
+    withdraw_bash_completion_notice, QueueCheckpoint, QueueLanes, QueuedItem, TurnPolicy,
+    TurnSettle, ABORTED_TURN_SETTLE_ERROR, PROMPT_ABORTED_BEFORE_DELIVERY, QUEUED_INPUT_SUSPENDED,
+    QUEUED_PROMPT_DELETED, SIDE_QUESTION_SETTLE_TIMEOUT,
 };
 
 mod create;
@@ -792,6 +792,18 @@ impl Worker {
             std::sync::Arc::clone(&engine),
             Arc::clone(&core),
         );
+        // The worker's post-drain inbox seam: every session build copies
+        // it onto the freshly opened store, and the kernel's read handler
+        // runs it so drained wake rows retract or re-render.
+        if let Some(engine) = &agent_engine {
+            let hook_core = Arc::clone(&core);
+            let hook_arrivals = std::sync::Arc::clone(&inbox_arrivals);
+            engine.set_inbox_read_hook(std::sync::Arc::new(
+                move |inbox: &std::sync::Arc<pa_core::session_engine::inbox::SessionInbox>| {
+                    refresh_inbox_wake_rows(&hook_core, &hook_arrivals, inbox);
+                },
+            ));
+        }
         Worker {
             config,
             bound_socket_identity: std::sync::Mutex::new(None),
