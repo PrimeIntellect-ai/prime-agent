@@ -143,81 +143,25 @@ impl Worker {
             }
         }
         core.follow_up = retained_follow_up;
-        // The inbox-routed deliveries: the durable agent-message records
-        // leave the store too (a clear that reports the messages gone
-        // must take them out of `rlm.inbox.read()`), then the wake rows
-        // that referred to them re-render over the surviving batch or
-        // drop when nothing is left.
-        let inbox_removed = self
-            .agent_engine
-            .as_ref()
-            .and_then(|engine| engine.inbox())
-            .map(|inbox| {
-                let removed =
-                    inbox.withdraw_class(pa_core::session_engine::inbox::INBOX_CLASS_AGENT_MESSAGE);
-                if removed.is_empty() {
-                    return;
-                }
-                let removed_ids: std::collections::HashSet<String> =
-                    removed.into_iter().map(|message| message.id).collect();
-                let mut batch = self.inbox_arrivals.lock().unwrap();
-                batch.retain(|message| !removed_ids.contains(&message.id));
-                let (count, _, _) = inbox.count();
-                if batch.is_empty() {
-                    core.steering.retain(|item| {
-                        item.queue_key.as_deref() != Some(crate::worker::INBOX_ARRIVAL_QUEUE_KEY)
-                    });
-                    core.follow_up.retain(|item| {
-                        item.queue_key.as_deref() != Some(crate::worker::INBOX_ARRIVAL_QUEUE_KEY)
-                    });
-                } else {
-                    let (preview, text) =
-                        pa_core::session_engine::inbox::arrival_notice(&batch, count);
-                    let core = &mut *core;
-                    let (steering, follow_up) = (&mut core.steering, &mut core.follow_up);
-                    for item in steering
-                        .iter_mut()
-                        .chain(follow_up.iter_mut())
-                        .filter(|item| {
-                            item.queue_key.as_deref()
-                                == Some(crate::worker::INBOX_ARRIVAL_QUEUE_KEY)
-                        })
-                    {
-                        item.message.clone_from(&text);
-                        item.preview = Some(preview.clone());
-                    }
-                }
-                // The reminder repeats a count that just changed: an
-                // emptied inbox drops the row (nothing would refresh it
-                // again); a surviving inbox re-renders it with the live
-                // count.
-                if count == 0 {
-                    core.steering.retain(|item| {
-                        item.queue_key.as_deref() != Some(crate::worker::INBOX_REMINDER_QUEUE_KEY)
-                    });
-                    core.follow_up.retain(|item| {
-                        item.queue_key.as_deref() != Some(crate::worker::INBOX_REMINDER_QUEUE_KEY)
-                    });
-                } else {
-                    let reminder = pa_core::session_engine::inbox::reminder_notice(count);
-                    let core = &mut *core;
-                    let (steering, follow_up) = (&mut core.steering, &mut core.follow_up);
-                    for item in steering
-                        .iter_mut()
-                        .chain(follow_up.iter_mut())
-                        .filter(|item| {
-                            item.queue_key.as_deref()
-                                == Some(crate::worker::INBOX_REMINDER_QUEUE_KEY)
-                        })
-                    {
-                        item.message.clone_from(&reminder);
-                    }
-                }
-            });
-        let _ = inbox_removed;
-        crate::worker::clear_withdrawn_progress_note(&core, self.engine.as_ref());
-        let snapshot = Self::snapshot_locked(&core);
         drop(core);
+        // The inbox-routed deliveries: the durable records leave the
+        // store too (a clear that reports the messages gone must take
+        // them out of `rlm.inbox.read()`), and the wake rows that
+        // referred to them refresh over what is left (an emptied inbox
+        // leaves no stale notice or reminder).
+        if let Some(inbox) = self.agent_engine.as_ref().and_then(|engine| engine.inbox()) {
+            if !inbox
+                .withdraw_class(pa_core::session_engine::inbox::INBOX_CLASS_AGENT_MESSAGE)
+                .is_empty()
+            {
+                crate::worker::refresh_inbox_wake_rows(&self.core, &self.inbox_arrivals, &inbox);
+            }
+        }
+        let snapshot = {
+            let core = self.core.lock().unwrap();
+            crate::worker::clear_withdrawn_progress_note(&core, self.engine.as_ref());
+            Self::snapshot_locked(&core)
+        };
         // The sweep may have settled the session: the verdict follows the remaining lanes.
         self.checkpoint_queue(crate::worker::QueueCheckpoint::Settle {
             operation: "queue_mutated",

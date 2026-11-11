@@ -1296,3 +1296,150 @@ async fn an_edited_arrival_row_survives_the_next_arrival() {
     );
     let _ = std::fs::remove_dir_all(worker.config.socket_path.parent().unwrap());
 }
+
+/// A queued notice row never consumes the a2a capacity: the bound counts
+/// waiting inbox messages (and direct-route marker rows), not the one
+/// coalesced wake row per batch.
+#[tokio::test]
+async fn a_queued_notice_row_does_not_consume_the_capacity() {
+    let (worker, inbox, _dir) = faux_worker_with_inbox();
+    worker.dispatch("clear_queue", &json!({})).await;
+    worker.core.lock().unwrap().busy = true;
+    let first = worker
+        .dispatch(
+            "worker_deliver_message",
+            &json!({
+                "targetActiveSessionId": "target-session",
+                "message": "one",
+                "sender": { "activeSessionId": "peer-1" },
+            }),
+        )
+        .await;
+    assert!(first.success, "the first delivery admits: {first:?}");
+    assert_eq!(inbox.count().0, 1);
+    for index in 1..DEFAULT_AGENT_MESSAGE_MAX_PENDING_PER_SESSION - 1 {
+        inbox.push(
+            inbox_notice(
+                pa_core::session_engine::inbox::INBOX_CLASS_AGENT_MESSAGE,
+                &format!("waiting {index}"),
+            ),
+            2_000 + index as u64,
+        );
+    }
+    // 19 waiting messages + the queued notice row: the 20th delivery is
+    // still admitted (the notice row is not a pending message), and the
+    // next one refuses.
+    let twentieth = worker
+        .dispatch(
+            "worker_deliver_message",
+            &json!({
+                "targetActiveSessionId": "target-session",
+                "message": "twenty",
+                "sender": { "activeSessionId": "peer-1" },
+            }),
+        )
+        .await;
+    assert!(
+        twentieth.success,
+        "the 20th delivery still admits: {twentieth:?}"
+    );
+    assert_eq!(
+        inbox.count().0,
+        DEFAULT_AGENT_MESSAGE_MAX_PENDING_PER_SESSION
+    );
+    let refused = worker
+        .dispatch(
+            "worker_deliver_message",
+            &json!({
+                "targetActiveSessionId": "target-session",
+                "message": "twenty-one",
+                "sender": { "activeSessionId": "peer-1" },
+            }),
+        )
+        .await;
+    assert!(!refused.success, "the 21st refuses: {refused:?}");
+    assert!(
+        refused
+            .error
+            .as_deref()
+            .unwrap_or_default()
+            .contains("too many pending messages"),
+        "{refused:?}"
+    );
+    let _ = std::fs::remove_dir_all(worker.config.socket_path.parent().unwrap());
+}
+
+/// The wake-row refresh retracts the queued notice and reminder once the
+/// store empties, and re-renders them over a surviving batch.
+#[tokio::test]
+async fn the_wake_row_refresh_follows_the_live_store() {
+    let (worker, inbox, arrivals, notify) = routing_state();
+    worker.dispatch("clear_queue", &json!({})).await;
+    worker.core.lock().unwrap().busy = true;
+    let _ = admit_inbox_notice(
+        &worker.recovery,
+        &worker.core,
+        &notify,
+        &inbox,
+        &arrivals,
+        inbox_notice(
+            pa_core::session_engine::inbox::INBOX_CLASS_BASH_DONE,
+            "first",
+        ),
+        Lane::Steering,
+        || false,
+        |_, _| None,
+    );
+    let _ = admit_inbox_notice(
+        &worker.recovery,
+        &worker.core,
+        &notify,
+        &inbox,
+        &arrivals,
+        inbox_notice(
+            pa_core::session_engine::inbox::INBOX_CLASS_FACTORY_PROGRESS,
+            "second",
+        ),
+        Lane::Steering,
+        || false,
+        |_, _| None,
+    );
+    admit_inbox_reminder(
+        &worker.recovery,
+        &worker.core,
+        &worker.work_notify,
+        &inbox,
+        || false,
+    );
+    // A targeted read takes the bash-done message: the batch trims and
+    // both rows re-render over what is left.
+    let taken = inbox.drain_matching(&pa_core::session_engine::inbox::InboxReadFilter {
+        class: Some(pa_core::session_engine::inbox::INBOX_CLASS_BASH_DONE.to_string()),
+        ..Default::default()
+    });
+    assert_eq!(taken.len(), 1);
+    crate::worker::refresh_inbox_wake_rows(&worker.core, &arrivals, &inbox);
+    let rows = steering_rows(&worker);
+    assert!(
+        rows.iter().any(
+            |(text, preview, _)| text.contains("1 new message (factory-progress)")
+                && preview.as_deref() == Some("Inbox: 1 new message (factory-progress)")
+        ),
+        "the notice re-rendered over the surviving batch: {rows:?}"
+    );
+    assert!(
+        rows.iter()
+            .any(|(text, _, _)| text.starts_with("[inbox reminder] 1 message still waiting")),
+        "the reminder re-rendered with the live count: {rows:?}"
+    );
+    // The final drain empties the store: both rows retract.
+    let rest = inbox.drain();
+    assert_eq!(rest.len(), 1);
+    crate::worker::refresh_inbox_wake_rows(&worker.core, &arrivals, &inbox);
+    let rows = steering_rows(&worker);
+    assert!(
+        rows.is_empty(),
+        "an emptied store leaves no stale wake row: {rows:?}"
+    );
+    let _ = std::fs::remove_dir_all(worker.config.socket_path.parent().unwrap());
+}
