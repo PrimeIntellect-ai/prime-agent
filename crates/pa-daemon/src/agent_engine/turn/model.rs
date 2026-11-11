@@ -153,6 +153,27 @@ impl AgentSessionEngine {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone();
+        // The auth-retry seam: refresh the rejected credential before the retry.
+        let recovery_engine = engine_weak.clone();
+        let auth_recovery: Option<pa_core::session_engine::auto_retry::AuthRecoveryCallback> =
+            Some(&mut move |message| {
+                let engine = recovery_engine.as_ref().and_then(std::sync::Weak::upgrade);
+                let provider = message.provider.clone();
+                Box::pin(async move {
+                    use pa_core::session_engine::auto_retry::AuthRecovery;
+                    let Some(engine) = engine else {
+                        return AuthRecovery::Retry;
+                    };
+                    let refreshed = tokio::task::spawn_blocking(move || {
+                        engine.refresh_rejected_request_auth(&provider)
+                    })
+                    .await;
+                    match refreshed {
+                        Ok(Err(failure)) => AuthRecovery::EndTurn(failure.to_string()),
+                        Ok(Ok(())) | Err(_) => AuthRecovery::Retry,
+                    }
+                })
+            });
         let park: Option<pa_core::session_engine::provider_park::ParkDecisionCallback> =
             Some(&mut move |message, abort| {
                 let engine_weak = engine_weak.clone();
@@ -584,6 +605,7 @@ impl AgentSessionEngine {
                 },
                 &restore_primary,
                 park,
+                auth_recovery,
             ),
         );
         self.runtime.block_on(restore_subscription.unsubscribe());

@@ -489,6 +489,21 @@ impl AgentSessionEngine {
         resolved
     }
 
+    /// Force-refresh the OAuth credential `provider` rejected, on the store
+    /// the per-call resolution reads (its last read served the rejected call).
+    pub(crate) fn refresh_rejected_request_auth(
+        &self,
+        provider: &str,
+    ) -> Result<(), pa_core::auth::OAuthRefreshFailure> {
+        self.request_auth_registry
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_mut()
+            .map_or(Ok(()), |registry| {
+                registry.auth.refresh_rejected_oauth(provider)
+            })
+    }
+
     /// Request auth for a model call outside the session stream
     /// (compaction, branch summary, refine, the turn boundary, session
     /// slash commands): the live resolution's key and the model shaped for

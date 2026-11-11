@@ -5,8 +5,24 @@
 use super::{
     now_epoch_ms, parse_storage_data, refresh_flight, resolve_config_value,
     resolve_config_value_uncached, AuthApiKeyResult, AuthCredential, AuthSourceCandidate,
-    AuthStorage, PRIME_INFERENCE_PROVIDER_ID,
+    AuthStorage, AuthStorageData, OAuthRefreshFailure, PRIME_INFERENCE_PROVIDER_ID,
 };
+
+/// Why a stored OAuth credential is rotated (the refresh-failure log field).
+#[derive(Clone, Copy)]
+enum RefreshTrigger {
+    Expired,
+    Rejected,
+}
+
+impl RefreshTrigger {
+    fn as_str(self) -> &'static str {
+        match self {
+            RefreshTrigger::Expired => "expired",
+            RefreshTrigger::Rejected => "rejected",
+        }
+    }
+}
 
 impl AuthStorage {
     pub fn get_api_key_with_source_token(
@@ -22,6 +38,7 @@ impl AuthStorage {
                         api_key: Some(api_key),
                         source_token: Self::token_for(provider_id, &candidate),
                         credential_type: Some("api_key"),
+                        refresh_failure: None,
                     };
                 }
             }
@@ -38,6 +55,7 @@ impl AuthStorage {
                         api_key: Some(api_key),
                         source_token: Self::token_for(provider_id, &candidate),
                         credential_type: Some("api_key"),
+                        refresh_failure: None,
                     };
                 }
             }
@@ -80,6 +98,7 @@ impl AuthStorage {
                                 api_key,
                                 source_token: Self::token_for(provider_id, &candidate),
                                 credential_type: Some("api_key"),
+                                refresh_failure: None,
                             };
                         }
                         AuthCredential::Oauth { expires, .. } => {
@@ -87,7 +106,16 @@ impl AuthStorage {
                                 .duration_since(std::time::UNIX_EPOCH)
                                 .map_or(i64::MAX, |d| d.as_millis() as i64);
                             if now_ms >= *expires {
-                                if let Some(refreshed) = self.refresh_oauth(provider_id) {
+                                let refreshed = match self.refresh_oauth(provider_id) {
+                                    Ok(refreshed) => refreshed,
+                                    Err(failure) => {
+                                        return AuthApiKeyResult {
+                                            refresh_failure: Some(failure),
+                                            ..AuthApiKeyResult::default()
+                                        };
+                                    }
+                                };
+                                if let Some(refreshed) = refreshed {
                                     let candidate = self.stored_candidate(
                                         provider_id,
                                         /*resolved_command_value*/ None,
@@ -97,6 +125,7 @@ impl AuthStorage {
                                         source_token: candidate
                                             .and_then(|c| Self::token_for(provider_id, &c)),
                                         credential_type: Some("oauth"),
+                                        refresh_failure: None,
                                     };
                                 }
                                 // Refresh failed: keep credentials for a
@@ -107,6 +136,7 @@ impl AuthStorage {
                                 api_key: self.oauth.api_key_for(provider_id, &credential),
                                 source_token: Self::token_for(provider_id, &candidate),
                                 credential_type: Some("oauth"),
+                                refresh_failure: None,
                             };
                         }
                         // A pasted MCP static token IS the api key for its
@@ -116,6 +146,7 @@ impl AuthStorage {
                                 api_key: Some(bearer.clone()),
                                 source_token: Self::token_for(provider_id, &candidate),
                                 credential_type: Some("mcp_static_token"),
+                                refresh_failure: None,
                             };
                         }
                     }
@@ -131,6 +162,7 @@ impl AuthStorage {
                         api_key: Some(api_key),
                         source_token: Self::token_for(provider_id, &candidate),
                         credential_type: None,
+                        refresh_failure: None,
                     };
                 }
             }
@@ -148,6 +180,7 @@ impl AuthStorage {
                         api_key,
                         source_token: Self::token_for(provider_id, &candidate),
                         credential_type: None,
+                        refresh_failure: None,
                     };
                 }
             }
@@ -195,7 +228,10 @@ impl AuthStorage {
     ///    still the credential this refresh set out to rotate: a logout or a new
     ///    login that landed while the (possibly aborted, detached) fetch ran is never
     ///    overwritten or resurrected by the fetched grant.
-    fn refresh_oauth(&mut self, provider_id: &str) -> Option<AuthCredential> {
+    fn refresh_oauth(
+        &mut self,
+        provider_id: &str,
+    ) -> Result<Option<AuthCredential>, OAuthRefreshFailure> {
         // LOAD: no document lock.
         let Ok(content) = self.storage.read() else {
             // A failed read: reload, then serve only a CURRENT credential.
@@ -206,26 +242,56 @@ impl AuthStorage {
             // stale token; TS's catch path returns nothing and lets the
             // environment/fallback arms serve instead.
             self.reload();
-            return self.stored_unexpired_credential(provider_id);
+            return Ok(self.stored_unexpired_credential(provider_id));
         };
         let Ok(data) = parse_storage_data(content.as_deref()) else {
             // A document that does not parse is the same shape: only a
             // current credential serves, never the expired in-memory copy.
             self.reload();
-            return self.stored_unexpired_credential(provider_id);
+            return Ok(self.stored_unexpired_credential(provider_id));
         };
         let Some(credential) = data.credential(provider_id) else {
             self.reload();
-            return None;
+            return Ok(None);
         };
         let AuthCredential::Oauth { expires, .. } = &credential else {
             self.reload();
-            return None;
+            return Ok(None);
         };
         if now_epoch_ms() < *expires {
             self.reload();
-            return Some(credential);
+            return Ok(Some(credential));
         }
+        self.rotate_oauth(provider_id, credential, RefreshTrigger::Expired)
+    }
+
+    /// Force-refresh the stored OAuth credential the provider rejected: this
+    /// store's last-read copy. A store that holds another credential keeps it.
+    ///
+    /// # Errors
+    ///
+    /// Returns the failure when the token fetch fails.
+    pub fn refresh_rejected_oauth(&mut self, provider_id: &str) -> Result<(), OAuthRefreshFailure> {
+        if self.runtime_overrides.contains_key(provider_id) {
+            return Ok(());
+        }
+        match self.data.credential(provider_id) {
+            Some(credential @ AuthCredential::Oauth { .. }) => self
+                .rotate_oauth(provider_id, credential, RefreshTrigger::Rejected)
+                .map(drop),
+            Some(AuthCredential::ApiKey { .. } | AuthCredential::McpStaticToken { .. }) | None => {
+                Ok(())
+            }
+        }
+    }
+
+    /// The FETCH and WRITE phases of [`Self::refresh_oauth`].
+    fn rotate_oauth(
+        &mut self,
+        provider_id: &str,
+        credential: AuthCredential,
+        trigger: RefreshTrigger,
+    ) -> Result<Option<AuthCredential>, OAuthRefreshFailure> {
         // The credential this refresh set out to rotate: its identity
         // guards the re-check and the commit, so a credential that
         // changed underneath (a logout removed it, a new login replaced
@@ -249,7 +315,7 @@ impl AuthStorage {
                 // catch path) instead of racing a second token spend.
                 tracing::debug!(%error, provider = provider_id, "auth refresh lock unavailable");
                 self.reload();
-                return self.stored_unexpired_credential(provider_id);
+                return Ok(self.stored_unexpired_credential(provider_id));
             }
         };
         // The gate may have just released a flight that wrote a fresh
@@ -264,32 +330,65 @@ impl AuthStorage {
         // on it; only a current unexpired stored credential serves.
         let Ok(content) = self.storage.read() else {
             self.reload();
-            return self.stored_unexpired_credential(provider_id);
+            return Ok(self.stored_unexpired_credential(provider_id));
         };
         let current = parse_storage_data(content.as_deref())
             .ok()
             .and_then(|data| data.credential(provider_id));
         let still_original = current.as_ref() == Some(&original_credential);
         if let Some(credential) = current.filter(|credential| {
-            matches!(
-                credential,
-                AuthCredential::Oauth { expires, .. } if now_epoch_ms() < *expires
-            )
+            !still_original
+                && matches!(
+                    credential,
+                    AuthCredential::Oauth { expires, .. } if now_epoch_ms() < *expires
+                )
         }) {
             self.reload();
-            return Some(credential);
+            return Ok(Some(credential));
         }
         if !still_original {
             self.reload();
-            return None;
+            return Ok(None);
         }
-        let fetched = self.oauth.refresh(provider_id, &data);
-        let Some(new_credential) = fetched else {
-            // Refresh failed: keep credentials for a later retry; a peer
-            // or a concurrent `/login` may have landed a fresh credential,
-            // so reload and serve it before failing (the TS catch path).
-            self.reload();
-            return self.stored_unexpired_credential(provider_id);
+        let mut data = AuthStorageData::default();
+        data.insert(provider_id, &original_credential);
+        let new_credential = match self.oauth.refresh(provider_id, &data) {
+            Ok(new_credential) => new_credential,
+            Err(mut reason) => {
+                // Refresh failed: keep credentials for a later retry; a peer
+                // or a concurrent `/login` may have landed a fresh credential,
+                // so reload and serve it before failing (the TS catch path).
+                self.reload();
+                if let Some(credential) = self
+                    .stored_unexpired_credential(provider_id)
+                    .filter(|credential| *credential != original_credential)
+                {
+                    return Ok(Some(credential));
+                }
+                if let AuthCredential::Oauth {
+                    access, refresh, ..
+                } = &original_credential
+                {
+                    for secret in [Some(access), refresh.as_ref()].into_iter().flatten() {
+                        if !secret.is_empty() {
+                            reason = reason.replace(secret.as_str(), "[redacted]");
+                        }
+                    }
+                }
+                let failure = OAuthRefreshFailure {
+                    provider: provider_id.to_string(),
+                    reason,
+                };
+                pa_ai::utils::log::get_logger("auth").warn(
+                    "oauth refresh failed",
+                    serde_json::json!({
+                        "provider": failure.provider,
+                        "trigger": trigger.as_str(),
+                        "reason": failure.reason,
+                    }),
+                );
+                return Err(failure);
+            }
         };
         // WRITE: the locked read-modify-write, guarded by the original
         // credential's identity: the current entry decides whether the
@@ -300,10 +399,11 @@ impl AuthStorage {
             let current_credential = data.credential(provider_id);
             let still_original = current_credential.as_ref() == Some(&original_credential);
             if let Some(credential) = current_credential.filter(|credential| {
-                matches!(
-                    credential,
-                    AuthCredential::Oauth { expires, .. } if now_epoch_ms() < *expires
-                )
+                !still_original
+                    && matches!(
+                        credential,
+                        AuthCredential::Oauth { expires, .. } if now_epoch_ms() < *expires
+                    )
             }) {
                 // A peer refreshed or a concurrent `/login` landed a
                 // fresher credential while this fetch ran: it stands and
@@ -328,11 +428,11 @@ impl AuthStorage {
             // fresh stored credential before failing (an expired stored
             // credential is not a refresh outcome).
             self.reload();
-            return self.stored_unexpired_credential(provider_id);
+            return Ok(self.stored_unexpired_credential(provider_id));
         }
         // Reload from what we wrote: the in-memory snapshot must not serve the
         // pre-refresh credential (a rotated refresh token is single-use).
         self.reload();
-        refreshed
+        Ok(refreshed)
     }
 }

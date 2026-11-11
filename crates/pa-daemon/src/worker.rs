@@ -1086,6 +1086,8 @@ pub async fn run_worker() -> Result<()> {
     if std::env::var(WORKER_ROLE_ENV).unwrap_or_default() != "1" {
         return Err(anyhow!("worker mode requires {WORKER_ROLE_ENV}=1"));
     }
+    // Structured logs land in the worker's captured stderr log.
+    pa_ai::utils::log::install_stderr_log_sink();
     let config = WorkerConfig::from_env()?;
     // Self-registration: the supervisor's roster survives its own restarts
     // because workers re-present their identity (liveness watch + backoff).

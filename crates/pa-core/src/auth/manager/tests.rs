@@ -570,12 +570,16 @@ impl OAuthIntegration for CountingOAuth {
         }
     }
 
-    fn refresh(&self, _provider: &str, _credentials: &AuthStorageData) -> Option<AuthCredential> {
+    fn refresh(
+        &self,
+        _provider: &str,
+        _credentials: &AuthStorageData,
+    ) -> Result<AuthCredential, String> {
         self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         if self.delay_ms > 0 {
             std::thread::sleep(std::time::Duration::from_millis(self.delay_ms));
         }
-        Some(Self::fetched_credential())
+        Ok(Self::fetched_credential())
     }
 }
 
@@ -887,11 +891,15 @@ impl OAuthIntegration for LoginLandingRefresh {
         }
     }
 
-    fn refresh(&self, _provider: &str, _credentials: &AuthStorageData) -> Option<AuthCredential> {
+    fn refresh(
+        &self,
+        _provider: &str,
+        _credentials: &AuthStorageData,
+    ) -> Result<AuthCredential, String> {
         // The concurrent `/login` lands while this fetch runs; the token
         // call itself fails.
         *self.backend.content.lock().expect("catch backend content") = Some(self.login.clone());
-        None
+        Err("the token call failed".to_string())
     }
 }
 
@@ -1244,5 +1252,129 @@ fn a_failed_load_read_never_serves_the_expired_in_memory_credential() {
         counting.calls.load(std::sync::atomic::Ordering::SeqCst),
         0,
         "the failed LOAD read never reaches a token fetch"
+    );
+}
+
+/// A provider rejection force-refreshes the stored OAuth credential the
+/// rejected call was served: one fetch, and the fetched grant is written.
+#[test]
+fn a_rejected_credential_still_stored_is_force_refreshed() {
+    let provider = "x-rejected";
+    let oauth = Arc::new(CountingOAuth {
+        calls: std::sync::atomic::AtomicUsize::new(0),
+        delay_ms: 0,
+    });
+    let (mut auth, backend) = storage_over_backend_with(
+        oauth.clone(),
+        provider,
+        &oauth_credential("rejected-access", now_epoch_ms() + 3_600_000),
+    );
+    assert_eq!(auth.refresh_rejected_oauth(provider), Ok(()));
+    assert_eq!(oauth.calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+    let stored = parse_storage_data(backend.read().unwrap().as_deref())
+        .unwrap()
+        .credential(provider);
+    assert_eq!(stored, Some(CountingOAuth::fetched_credential()));
+}
+
+/// A rejection whose credential the store no longer holds (a peer process
+/// refreshed it, or a newer `/login` landed) adopts the stored credential:
+/// no fetch, and the newer grant stands.
+#[test]
+fn a_rejection_of_a_superseded_credential_adopts_the_stored_one() {
+    let provider = "x-superseded";
+    let oauth = Arc::new(CountingOAuth {
+        calls: std::sync::atomic::AtomicUsize::new(0),
+        delay_ms: 0,
+    });
+    let (mut auth, backend) = storage_over_backend_with(
+        oauth.clone(),
+        provider,
+        &oauth_credential("rejected-access", now_epoch_ms() + 3_600_000),
+    );
+    let newer = oauth_credential("peer-access", now_epoch_ms() + 3_600_000);
+    let mut peer = AuthStorageData::default();
+    peer.insert(provider, &newer);
+    let content = serde_json::to_string_pretty(&peer.0).unwrap();
+    backend
+        .with_lock(&mut |_| Ok(((), Some(content.clone()))))
+        .unwrap();
+    assert_eq!(auth.refresh_rejected_oauth(provider), Ok(()));
+    assert_eq!(oauth.calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+    assert_eq!(auth.get_all().credential(provider), Some(newer));
+}
+
+/// A refresh whose token call fails returns the re-login failure and logs
+/// a structured warning; neither carries the stored token values.
+#[test]
+fn a_failed_forced_refresh_reports_and_logs_a_redacted_reason() {
+    struct EchoingRefusal;
+    impl OAuthIntegration for EchoingRefusal {
+        fn api_key_for(&self, _provider: &str, _credential: &AuthCredential) -> Option<String> {
+            None
+        }
+
+        fn refresh(
+            &self,
+            provider: &str,
+            credentials: &AuthStorageData,
+        ) -> Result<AuthCredential, String> {
+            let Some(AuthCredential::Oauth {
+                access, refresh, ..
+            }) = credentials.credential(provider)
+            else {
+                return Err("no credential".to_string());
+            };
+            Err(format!(
+                "invalid_grant for {access} / {}",
+                refresh.unwrap_or_default()
+            ))
+        }
+    }
+    type Logged = (
+        pa_ai::utils::log::LogLevel,
+        String,
+        String,
+        serde_json::Value,
+    );
+    let provider = "x-refused";
+    let logged: Arc<std::sync::Mutex<Vec<Logged>>> = Arc::default();
+    let sink_logged = Arc::clone(&logged);
+    pa_ai::utils::log::set_log_sink(Some(Arc::new(
+        move |entry: &pa_ai::utils::log::LogEntry| {
+            if entry.fields["provider"] == provider {
+                sink_logged.lock().unwrap().push((
+                    entry.level,
+                    entry.component.clone(),
+                    entry.msg.clone(),
+                    entry.fields.clone(),
+                ));
+            }
+        },
+    )));
+    let mut data = AuthStorageData::default();
+    data.insert(
+        provider,
+        &oauth_credential("rejected-access", now_epoch_ms() + 3_600_000),
+    );
+    let mut auth = AuthStorage::in_memory_without_env(&data, Arc::new(EchoingRefusal));
+    let result = auth.refresh_rejected_oauth(provider);
+    pa_ai::utils::log::set_log_sink(None);
+    let reason = "invalid_grant for [redacted] / [redacted]".to_string();
+    assert_eq!(
+        result,
+        Err(OAuthRefreshFailure {
+            provider: provider.to_string(),
+            reason: reason.clone(),
+        })
+    );
+    assert_eq!(
+        *logged.lock().unwrap(),
+        vec![(
+            pa_ai::utils::log::LogLevel::Warn,
+            "auth".to_string(),
+            "oauth refresh failed".to_string(),
+            serde_json::json!({ "provider": provider, "trigger": "rejected", "reason": reason }),
+        )]
     );
 }
