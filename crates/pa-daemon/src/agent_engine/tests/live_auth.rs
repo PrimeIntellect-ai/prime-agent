@@ -204,6 +204,39 @@ fn the_create_config_key_override_never_store_swaps() {
     registration.unregister();
 }
 
+/// A selection key that leaves the selection stops serving: the session
+/// restore resets the selection to the spawn fallback (no key), and the
+/// next resolution serves the store, never the old key the engine-lived
+/// store held as its runtime override.
+#[test]
+fn a_cleared_selection_key_stops_serving() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let agent_dir = dir.path().join("agent");
+    write_credential_backed_faux_provider(&agent_dir);
+    write_oauth_credential(&agent_dir, "stored-access");
+    let engine = live_auth_engine(dir.path(), None, "battery", "mock-1");
+    let model = engine.resolve_model().expect("the custom model resolves");
+    engine.configure_model(EngineModelSelection {
+        api_key: Some("sk-configured".to_string()),
+        ..Default::default()
+    });
+    assert_eq!(
+        engine.resolve_request_auth(&model).api_key.as_deref(),
+        Some("sk-configured")
+    );
+    let saved = crate::engine::SavedSessionContext {
+        model: None,
+        thinking: None,
+    };
+    engine
+        .runtime
+        .block_on(engine.restore_session_model(&dir.path().join("session.jsonl"), Some(saved)));
+    assert_eq!(
+        engine.resolve_request_auth(&model).api_key.as_deref(),
+        Some("stored-access")
+    );
+}
+
 /// A logout (another process empties the store) changes the very next
 /// call: the resolution's own answer — the configured `models.json`
 /// fallback key — streams per call, and the captured pair never resends
@@ -616,9 +649,8 @@ fn command_runs(counter: &std::path::Path) -> usize {
 /// the first provider call runs it (the build resolves no request auth;
 /// the live seam owns it, the TS streamFn shape) — and never re-runs per
 /// call: candidate building defers the command (TS's lazy value
-/// material), the per-call request-auth registry never resolves the
-/// unrelated Prime Inference credential, and the per-call lookup hits
-/// the process cache. The counter key is a POSIX-shell pipeline (the
+/// material), the engine-lived request-auth registry is not rebuilt per
+/// call, and the per-call lookup hits the process cache. The counter key is a POSIX-shell pipeline (the
 /// ambient shell on Windows resolves it differently), so the test runs
 /// on Unix only.
 #[cfg(unix)]
@@ -674,9 +706,9 @@ fn a_stored_command_key_resolves_once_and_never_re_runs_per_call() {
 }
 
 /// A stored Prime Inference `!command` key never runs for ANOTHER
-/// provider's provider call: the per-call request-auth registry
-/// construction skips the unrelated Prime credential entirely, and its
-/// candidate building defers command-backed fingerprints. The counter key
+/// provider's provider call: the request-auth registry resolves it at
+/// construction (the session build), never per call, and its candidate
+/// building defers command-backed fingerprints. The counter key
 /// is a POSIX-shell pipeline (the ambient shell on Windows resolves it
 /// differently), so the test runs on Unix only.
 #[cfg(unix)]
@@ -727,7 +759,7 @@ fn a_prime_command_key_never_runs_for_another_providers_call() {
 /// A stored Prime Inference `!command` key whose command FAILS never runs
 /// for another provider's provider call: a failed command is retried on
 /// every lookup (never cached), so the per-call request-auth resolution
-/// must not resolve the unrelated Prime credential at all. The counter
+/// must not rebuild the registry that resolves it. The counter
 /// key is a POSIX-shell pipeline (the ambient shell on Windows resolves
 /// it differently), so the test runs on Unix only.
 #[cfg(unix)]

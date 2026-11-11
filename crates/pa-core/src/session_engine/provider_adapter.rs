@@ -1206,8 +1206,8 @@ mod tests {
         )
         .unwrap();
         let agent_dir = dir.path().to_path_buf();
-        // The production resolution shape: a fresh store and request-auth
-        // registry per provider call, over the file the test mutates.
+        // A fresh store and registry per provider call, over the file the
+        // test mutates.
         let resolver_dir = agent_dir.clone();
         let resolver_integration = std::sync::Arc::clone(&integration);
         let live_auth: LiveAuthResolver = Arc::new(move |model: &Model| {
@@ -1215,10 +1215,8 @@ mod tests {
                 &resolver_dir,
                 std::sync::Arc::clone(&resolver_integration),
             );
-            let mut registry = crate::models::ModelRegistry::create_for_request_auth(
-                auth,
-                resolver_dir.join("models.json"),
-            );
+            let mut registry =
+                crate::models::ModelRegistry::create(auth, resolver_dir.join("models.json"));
             let resolved = registry.get_api_key_and_headers(model, model.headers.as_ref());
             finished_tx.send(()).expect("the finished observer lives");
             resolved

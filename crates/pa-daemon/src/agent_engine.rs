@@ -226,12 +226,13 @@ pub struct AgentSessionEngine {
     /// construction; tests swap a scripted integration in before the
     /// engine is shared. Read once per resolution.
     pub(crate) request_auth_oauth: std::sync::Arc<dyn pa_core::auth::OAuthIntegration>,
-    /// The engine's long-lived request-auth store (TS's single
-    /// `AuthStorage` instance): created lazily from `request_auth_oauth`
-    /// on the first resolution and reused for the engine's life, so a
+    /// The engine's long-lived request-auth registry and the store it owns
+    /// (TS's single `ModelRegistry`/`AuthStorage` instance): built over a
+    /// store from `request_auth_oauth`, rebuilt at the session build and a
+    /// model switch, and reused for every provider call in between, so a
     /// failed `reload()` keeps the last read's data — a transiently-held
     /// document lock or a corrupt auth.json is not a logout.
-    pub(crate) request_auth_store: std::sync::Mutex<Option<pa_core::auth::AuthStorage>>,
+    pub(crate) request_auth_registry: std::sync::Mutex<Option<pa_core::models::ModelRegistry>>,
     /// One shared supervisor-link client: agent messaging and RLM children
     /// multiplex the same connection.
     link: Arc<crate::supervisor_link::SupervisorLink>,

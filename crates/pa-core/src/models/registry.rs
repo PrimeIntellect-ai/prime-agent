@@ -107,14 +107,6 @@ pub struct ModelRegistry {
     /// The process-shared live catalog chain (`catalog_chain::catalog_for`);
     /// `resolve()` sources built-ins from it.
     catalog: std::sync::Arc<pa_models::ModelCatalog>,
-    /// Whether model loads resolve the Prime Inference credential for the
-    /// credentialed catalog layer. Request-auth registries
-    /// ([`Self::create_for_request_auth`]) skip it: a per-call resolution
-    /// must pay only the serving provider's lookup, never an unrelated
-    /// stored `!command` key's command (a secret-manager helper). Such
-    /// registries never read or refresh the model list, so the flag gates
-    /// exactly their one construction load.
-    resolve_prime_credentials: bool,
 }
 
 /// Under a stored xAI subscription the provider's models switch onto the
@@ -179,55 +171,16 @@ fn xai_subscription_thinking_map(model_id: &str) -> ThinkingLevelMap {
     map
 }
 
-/// Whether [`ModelRegistry::load_models`] resolves the Prime Inference
-/// credential for the credentialed catalog layer: `Resolve` for model
-/// lists (the credentialed snapshot), `Skip` for request-auth-only
-/// registries (never an unrelated `!command` run per provider call).
-#[derive(Clone, Copy)]
-enum PrimeCredentialResolution {
-    Resolve,
-    Skip,
-}
-
 impl ModelRegistry {
     pub fn create(auth: AuthStorage, models_json_path: impl Into<PathBuf>) -> Self {
-        Self::new(
-            auth,
-            Some(models_json_path.into()),
-            PrimeCredentialResolution::Resolve,
-        )
-    }
-
-    /// [`ModelRegistry::create`] for request-auth resolution: the only
-    /// registry methods such callers use are
-    /// [`Self::get_api_key_and_headers`] (and its inputs), which resolve
-    /// auth for the SERVING provider through the registry's own lookup.
-    /// Construction therefore skips the Prime Inference credential the
-    /// catalog layer would otherwise resolve — an unrelated stored
-    /// `!command` key (a secret-manager helper) must never run on every
-    /// provider call — while the model list still serves the per-call xAI
-    /// request model (the subscription adaptation never depends on Prime
-    /// credentials).
-    pub fn create_for_request_auth(
-        auth: AuthStorage,
-        models_json_path: impl Into<PathBuf>,
-    ) -> Self {
-        Self::new(
-            auth,
-            Some(models_json_path.into()),
-            PrimeCredentialResolution::Skip,
-        )
+        Self::new(auth, Some(models_json_path.into()))
     }
 
     pub fn in_memory(auth: AuthStorage) -> Self {
-        Self::new(auth, None, PrimeCredentialResolution::Resolve)
+        Self::new(auth, None)
     }
 
-    fn new(
-        auth: AuthStorage,
-        models_json_path: Option<PathBuf>,
-        prime_credentials: PrimeCredentialResolution,
-    ) -> Self {
+    fn new(auth: AuthStorage, models_json_path: Option<PathBuf>) -> Self {
         let catalog = catalog_chain::catalog_for(models_json_path.as_deref());
         let mut registry = Self {
             auth,
@@ -242,10 +195,6 @@ impl ModelRegistry {
             authorized_private_models: Vec::new(),
             authorized_team_id: None,
             catalog,
-            resolve_prime_credentials: matches!(
-                prime_credentials,
-                PrimeCredentialResolution::Resolve
-            ),
         };
         registry.load_models();
         registry
@@ -466,10 +415,7 @@ impl ModelRegistry {
             private_models.insert(model.id.clone(), model.clone());
         }
 
-        let credentials = self
-            .resolve_prime_credentials
-            .then(|| self.prime_credentials())
-            .flatten();
+        let credentials = self.prime_credentials();
         let mut built_in = self.load_built_in_models(&result, credentials.as_ref());
         built_in.extend(private_models.into_values());
         self.models = Self::merge_custom_models(built_in, result.models);

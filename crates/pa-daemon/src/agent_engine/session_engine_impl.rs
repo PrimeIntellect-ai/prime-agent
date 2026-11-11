@@ -436,6 +436,7 @@ impl SessionEngine for AgentSessionEngine {
         let Ok(model) = self.resolve_model() else {
             return false;
         };
+        self.rebuild_request_auth_registry();
         {
             // The switch's slot install serializes with the other slot
             // writers' fence (the failover callbacks take the same lock),
@@ -630,7 +631,7 @@ impl SessionEngine for AgentSessionEngine {
         let custom_instructions = request.custom_instructions;
         // The live target's key: the config key is the startup snapshot and
         // goes stale with provider switches.
-        let api_key = self.resolve_request_api_key(&model);
+        let (model, api_key) = self.resolve_request_target(model);
         let run = async {
             // The lock covers the clone only; the summarizer call below must not ride it.
             let session = self.session.lock().await.clone();
@@ -717,7 +718,7 @@ impl SessionEngine for AgentSessionEngine {
                 }
             }
         };
-        let api_key = self.resolve_request_api_key(&model);
+        let (model, api_key) = self.resolve_request_target(model);
         let settings =
             pa_core::settings::SettingsManager::create(self.cwd(), &self.config.agent_dir);
         let reserve_tokens = settings
@@ -1240,7 +1241,7 @@ impl SessionEngine for AgentSessionEngine {
     ) -> anyhow::Result<Value> {
         let model = self.resolve_model()?;
         self.ensure_core_session(&model)?;
-        let api_key = self.resolve_request_api_key(&model);
+        let (model, api_key) = self.resolve_request_target(model);
         let global_harness_dir = self.config.agent_dir.clone();
         // The lock covers the clone only; the model call below must not ride it.
         let core = self

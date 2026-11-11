@@ -165,7 +165,7 @@ impl AgentSessionEngine {
             prompt_context_boundary: std::sync::Mutex::new(None),
             provider_target: std::sync::Arc::new(std::sync::RwLock::new(None)),
             request_auth_oauth: std::sync::Arc::new(pa_core::auth::ProviderOAuth::new()),
-            request_auth_store: std::sync::Mutex::new(None),
+            request_auth_registry: std::sync::Mutex::new(None),
             image_route: std::sync::Mutex::new(None),
             reload_lock: std::sync::Mutex::new(()),
             own_summary: std::sync::Arc::new(std::sync::Mutex::new(None)),
@@ -905,7 +905,7 @@ impl AgentSessionEngine {
     ) -> anyhow::Result<SessionCommandExecution> {
         let model = self.session_model()?;
         self.ensure_core_session(&model)?;
-        let api_key = self.resolve_request_api_key(&model);
+        let (model, api_key) = self.resolve_request_target(model);
         let mut autonomous = self.autonomous.blocking_lock();
         let mut params = SessionCommandParams {
             model: &model,
@@ -1015,6 +1015,7 @@ impl AgentSessionEngine {
         // request without a restart. A resolution for a dead engine (the
         // session torn down) fails the call with the resolution error —
         // no stale captured pair ever streams.
+        self.rebuild_request_auth_registry();
         let live_auth = {
             let weak = self
                 .self_weak

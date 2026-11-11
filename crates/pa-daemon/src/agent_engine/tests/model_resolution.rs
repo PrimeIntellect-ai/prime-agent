@@ -103,7 +103,7 @@ fn create_config_flags_reach_the_engine_model_resolution() {
     // The registry resolves the models.json apiKey (the provider name has
     // no env-key mapping), so the engine can authenticate without env.
     assert_eq!(
-        engine.resolve_request_api_key(&model).as_deref(),
+        engine.resolve_request_auth(&model).api_key.as_deref(),
         Some("sk-battery")
     );
 }
@@ -951,7 +951,7 @@ fn configure_model_merges_only_present_fields() {
     let model = engine.resolve_registry_model().expect("resolved model");
     assert_eq!(model.provider, "battery");
     assert_eq!(
-        engine.resolve_request_api_key(&model).as_deref(),
+        engine.resolve_request_auth(&model).api_key.as_deref(),
         Some("flag-key")
     );
 }

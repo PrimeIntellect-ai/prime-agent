@@ -59,7 +59,7 @@ impl AgentSessionEngine {
                 return BoundaryRun::Proceed;
             }
         };
-        let api_key = self.resolve_request_api_key(&model);
+        let (model, api_key) = self.resolve_request_target(model);
         let global_harness_dir = self.config.agent_dir.clone();
         // The start event goes out before the summarizer runs, carrying the
         // pending instructions.
