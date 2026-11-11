@@ -138,7 +138,9 @@ static PROMPTED: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<
 
 fn already_prompted(cwd: &Path) -> bool {
     let registry = PROMPTED.get_or_init(|| std::sync::Mutex::new(std::collections::HashSet::new()));
-    registry
+    // `insert` returns true for a FIRST insert: already-prompted is the
+    // complement (the entry was present before this call).
+    !registry
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .insert(cwd.to_path_buf())
