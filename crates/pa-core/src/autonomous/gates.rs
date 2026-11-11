@@ -2,8 +2,11 @@
 //! snapshots that suppress re-running a failing gate over an unchanged workspace.
 //!
 //! The snapshot's git probes run inside the session worktree, so their fixed argument sets
-//! carry overrides that keep the project's own git configuration and attributes from
-//! starting programs during capture (see `SNAPSHOT_STATUS_ARGS` and `SNAPSHOT_DIFF_ARGS`).
+//! carry command-line overrides that close the ways the project's own git configuration can
+//! start a program during capture: the fsmonitor hook, index-write hooks, promisor lazy
+//! fetches, diff text conversion or external diff programs, and submodule reads. One
+//! residual stays open and is documented on the argument sets below: `.gitattributes`
+//! clean and process filters still run on modified tracked files, and no flag disables them.
 
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
@@ -276,35 +279,61 @@ const SNAPSHOT_EXCLUDES: [&str; 6] = [
     "runner_args.log",
 ];
 
-/// Fixed arguments of the worktree-snapshot `status` probe. The
-/// `-c core.fsmonitor=false` override outranks repository configuration: a
-/// `.git/config` `core.fsmonitor` names a program git would otherwise start
-/// whenever it refreshes the index, which `status` does.
-const SNAPSHOT_STATUS_ARGS: [&str; 8] = [
+/// Fixed arguments of the worktree-snapshot `status` probe. The `-c` overrides are
+/// command-line configuration: they outrank repository, worktree and included config, and
+/// reach git's own child processes through `GIT_CONFIG_PARAMETERS`. Each closes one way the
+/// project's git configuration can start a program while the probe reads the worktree:
+///
+/// - `core.fsmonitor=false` - the fsmonitor hook would otherwise run on the index refresh
+///   this probe performs;
+/// - `core.hooksPath=/dev/null` and `diff.autoRefreshIndex=false` - a diff refresh can
+///   still write the index (and fire a repository post-index-change hook) even under
+///   `--no-optional-locks`; either override alone prevents it, and both keep the probe
+///   from running the hook and from rewriting the user's index;
+/// - `protocol.allow=never` - a promisor lazy fetch would otherwise run the repository's
+///   uploadpack or ssh command;
+/// - `--ignore-submodules=all` - submodule children (their diffs, statuses and filter
+///   programs) stay out of reach; submodule-only changes no longer count as changes.
+///
+/// `.gitattributes` clean/process filters still run on modified tracked files; no flag
+/// disables them.
+const SNAPSHOT_STATUS_ARGS: [&str; 15] = [
     "-c",
     "core.fsmonitor=false",
+    "-c",
+    "core.hooksPath=/dev/null",
+    "-c",
+    "diff.autoRefreshIndex=false",
+    "-c",
+    "protocol.allow=never",
     "--no-optional-locks",
     "status",
     "--porcelain=v1",
     "-z",
     "-uall",
     "--no-renames",
+    "--ignore-submodules=all",
 ];
 
-/// Fixed arguments of the worktree-snapshot `diff` probe. It carries the
-/// same `core.fsmonitor` override (`diff` also refreshes the index) plus
-/// `--no-textconv`, which keeps a `diff.<driver>.textconv` program declared
-/// through repository `.gitattributes`/`.git/config` from starting during
-/// the diff (`--no-ext-diff` already refuses external diff commands).
-const SNAPSHOT_DIFF_ARGS: [&str; 8] = [
+/// Fixed arguments of the worktree-snapshot `diff` probe: the same overrides, plus
+/// `--no-ext-diff` and `--no-textconv` (neither a text conversion driver nor an external
+/// diff program may start) over the `HEAD` revision.
+const SNAPSHOT_DIFF_ARGS: [&str; 15] = [
     "-c",
     "core.fsmonitor=false",
+    "-c",
+    "core.hooksPath=/dev/null",
+    "-c",
+    "diff.autoRefreshIndex=false",
+    "-c",
+    "protocol.allow=never",
     "--no-optional-locks",
     "diff",
     "--no-ext-diff",
     "--no-textconv",
     "--binary",
     "HEAD",
+    "--ignore-submodules=all",
 ];
 
 /// Snapshot the git worktree state: porcelain status, the HEAD diff, and a content
@@ -334,9 +363,18 @@ async fn run_git(prefix: &[&str], pathspec: &[String], cwd: &Path) -> Option<Str
         .map(std::string::ToString::to_string)
         .collect();
     args.extend(pathspec.iter().cloned());
-    let result = run_child_process("git", &args, cwd, SNAPSHOT_TIMEOUT_MS)
-        .await
-        .ok()?;
+    // GIT_NO_LAZY_FETCH is the environment half of the lazy-fetch guard; the
+    // `-c protocol.allow=never` override is the other, and either alone stops
+    // the fetch.
+    let result = run_child_process(
+        "git",
+        &args,
+        cwd,
+        SNAPSHOT_TIMEOUT_MS,
+        &[("GIT_NO_LAZY_FETCH", "1")],
+    )
+    .await
+    .ok()?;
     if result.status != Some(0)
         || result.error.is_some()
         || result.timed_out
@@ -405,15 +443,18 @@ fn hash_untracked_path(path: &Path) -> String {
 }
 
 /// Run a child process with a timeout, draining both output pipes
-/// concurrently (a chatty command cannot wedge the wait on a full pipe).
+/// concurrently (a chatty command cannot wedge the wait on a full pipe);
+/// `envs` are extra environment entries for the child.
 async fn run_child_process(
     program: &str,
     args: &[String],
     cwd: &Path,
     timeout_ms: u64,
+    envs: &[(&str, &str)],
 ) -> anyhow::Result<ChildProcessResult> {
     let mut child = tokio::process::Command::new(program)
         .args(args)
+        .envs(envs.iter().copied())
         .current_dir(cwd)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
@@ -466,7 +507,7 @@ pub async fn run_gate_command(
     let shell = crate::platform::get_shell_config(None)?;
     let mut args = shell.args;
     args.push(command.to_string());
-    run_child_process(&shell.shell, &args, cwd, timeout_ms).await
+    run_child_process(&shell.shell, &args, cwd, timeout_ms, &[]).await
 }
 
 /// Read one output pipe to EOF, keeping at most `cap` bytes of text; the
@@ -725,38 +766,149 @@ mod tests {
         assert!(digest.starts_with("file:"));
     }
 
-    #[tokio::test]
-    async fn snapshot_git_probes_carry_the_repo_command_guards() {
-        assert!(SNAPSHOT_STATUS_ARGS.starts_with(&["-c", "core.fsmonitor=false"]));
-        assert!(SNAPSHOT_DIFF_ARGS.starts_with(&["-c", "core.fsmonitor=false"]));
-        assert!(SNAPSHOT_DIFF_ARGS.contains(&"--no-textconv"));
-        #[cfg(unix)]
-        repo_program_capture_probe().await;
-    }
-
-    /// The capture runs against a repository whose own config names a program;
-    /// the control shows the program runs unguarded.
+    /// The probes run inside a repository whose own configuration names
+    /// programs - an fsmonitor hook, a textconv driver, an index-write
+    /// hook, a submodule's textconv driver and clean filter, and a
+    /// lazy-fetch uploadpack. The pre-PR probes start them all on a stale
+    /// copy of the repository; a capture must start none of them.
     #[cfg(unix)]
-    async fn repo_program_capture_probe() {
+    #[tokio::test]
+    async fn snapshot_capture_never_starts_repo_configured_commands() {
         use std::os::unix::fs::PermissionsExt;
-        let dir = tempfile::TempDir::new().unwrap();
-        let marker = dir.path().join("fsmonitor-ran");
-        let hook = dir.path().join("fsmonitor.sh");
-        let body = format!("#!/bin/sh\ntouch {}\nexit 0\n", marker.display());
-        std::fs::write(&hook, body).unwrap();
-        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
-        let run = |args: &[&str]| {
-            let mut command = std::process::Command::new("git");
-            command.args(args).current_dir(dir.path());
-            command.output().unwrap().status.success()
+        const PROGRAMS: [&str; 5] = ["fsmonitor", "textconv", "hook", "subtextconv", "subfilter"];
+        fn at(path: &Path) -> &str {
+            path.to_str().unwrap()
+        }
+        let root = tempfile::TempDir::new().unwrap();
+        let marker = |name: &str| root.path().join(name);
+        let script = |path: &Path, target: &str, body: &str| {
+            let text = format!("#!/bin/sh\ntouch {}\n{body}\n", marker(target).display());
+            std::fs::write(path, text).unwrap();
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
         };
-        assert!(run(&["init", "-q"]));
-        assert!(run(&["config", "core.fsmonitor", hook.to_str().unwrap()]));
-        assert!(run(&["status"]));
-        assert!(marker.exists(), "control: the hook runs unguarded");
-        std::fs::remove_file(&marker).unwrap();
-        let _ = ShellGateRunner::new(dir.path()).capture_snapshot().await;
-        assert!(!marker.exists(), "the capture starts no program");
+        let git = |dir: &Path, args: &[&str]| {
+            let mut command = std::process::Command::new("git");
+            command
+                .args(args)
+                .current_dir(dir)
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .env("GIT_AUTHOR_NAME", "t")
+                .env("GIT_AUTHOR_EMAIL", "t@e")
+                .env("GIT_COMMITTER_NAME", "t")
+                .env("GIT_COMMITTER_EMAIL", "t@e");
+            command.output().unwrap()
+        };
+        let ok = |dir: &Path, args: &[&str]| git(dir, args).status.success();
+        let fresh = |name: &str| {
+            let dir = root.path().join(name);
+            assert!(ok(root.path(), &["init", "-q", "-b", "main", at(&dir)]));
+            dir
+        };
+        let copy = |from: &Path, name: &str| {
+            let to = root.path().join(name);
+            let mut cp = std::process::Command::new("cp");
+            let status = cp.args(["-R"]).args([from, &to]).status().unwrap();
+            assert!(status.success());
+            to
+        };
+        let clear = |names: &[&str]| {
+            for name in names {
+                let _ = std::fs::remove_file(marker(name));
+            }
+        };
+
+        // A main repository whose own configuration names four programs and
+        // carries a submodule that adds a fifth and sixth path.
+        let sub = fresh("sub");
+        let sub_tc = sub.join("tc.sh");
+        std::fs::write(sub.join("a.txt"), "x\n").unwrap();
+        std::fs::write(sub.join(".gitattributes"), "*.txt diff=evil filter=evil\n").unwrap();
+        script(&sub_tc, "subtextconv", "cat \"$1\"");
+        assert!(ok(&sub, &["add", "."]));
+        assert!(ok(&sub, &["commit", "-qm", "init"]));
+        let main = fresh("main");
+        let in_main = |args: &[&str]| assert!(ok(&main, args));
+        std::fs::write(main.join("top.txt"), "t\n").unwrap();
+        assert!(ok(&main, &["add", "."]));
+        assert!(ok(&main, &["commit", "-qm", "init"]));
+        let mut add = vec!["-c", "protocol.file.allow=always", "submodule", "add"];
+        add.extend(["-q", at(&sub), "sub"]);
+        assert!(ok(&main, &add));
+        assert!(ok(&main, &["commit", "-qm", "sub"]));
+        let sub_config = main.join(".git/modules/sub/config");
+        let sub_clean = main.join("clean.sh");
+        script(&sub_clean, "subfilter", "cat");
+        in_main(&[
+            "config",
+            "-f",
+            at(&sub_config),
+            "diff.evil.textconv",
+            at(&sub_tc),
+        ]);
+        in_main(&[
+            "config",
+            "-f",
+            at(&sub_config),
+            "filter.evil.clean",
+            at(&sub_clean),
+        ]);
+        let fsm = main.join("fsm.sh");
+        let main_tc = main.join("tc.sh");
+        let hooks = main.join("hooks");
+        script(&fsm, "fsmonitor", "exit 0");
+        script(&main_tc, "textconv", "cat \"$1\"");
+        std::fs::create_dir(&hooks).unwrap();
+        script(&hooks.join("post-index-change"), "hook", ":");
+        in_main(&["config", "diff.submodule", "diff"]);
+        in_main(&["config", "diff.evil.textconv", at(&main_tc)]);
+        in_main(&["config", "core.fsmonitor", at(&fsm)]);
+        in_main(&["config", "core.hooksPath", at(&hooks)]);
+        std::fs::write(main.join(".gitattributes"), "*.txt diff=evil\n").unwrap();
+        std::fs::write(main.join("top.txt"), "two\n").unwrap();
+        std::fs::write(main.join("sub/a.txt"), "z\n").unwrap();
+
+        // The pre-PR diff probe on a stale copy starts every program; the
+        // capture on a fresh stale copy must start none of them.
+        let old = ["diff", "HEAD"];
+        clear(&PROGRAMS);
+        let control = copy(&main, "control");
+        // The control only has to run the programs; its exit status is incidental.
+        let _ = ok(&control, &old);
+        for name in PROGRAMS {
+            assert!(marker(name).exists(), "control ran no {name}");
+        }
+        clear(&PROGRAMS);
+        let guarded = copy(&main, "guarded");
+        let _ = ShellGateRunner::new(&guarded).capture_snapshot().await;
+        for name in PROGRAMS {
+            assert!(!marker(name).exists(), "the capture ran {name}");
+        }
+
+        // With a promisor remote and a missing blob, the diff probe would
+        // fetch through a repository-chosen uploadpack command.
+        let uploadpack = main.join("uploadpack.sh");
+        script(&uploadpack, "fetch", "exit 0");
+        in_main(&["config", "core.repositoryformatversion", "1"]);
+        in_main(&["config", "extensions.partialClone", "origin"]);
+        let server = fresh("server");
+        std::fs::write(server.join("top.txt"), "t\n").unwrap();
+        assert!(ok(&server, &["add", "."]));
+        assert!(ok(&server, &["commit", "-qm", "init"]));
+        in_main(&["config", "remote.origin.url", at(&server)]);
+        in_main(&["config", "remote.origin.promisor", "true"]);
+        in_main(&["config", "remote.origin.uploadpack", at(&uploadpack)]);
+        let head = git(&main, &["rev-parse", "HEAD:top.txt"]);
+        let oid = String::from_utf8_lossy(&head.stdout).trim().to_string();
+        let loose = main.join(".git/objects").join(&oid[..2]).join(&oid[2..]);
+        std::fs::remove_file(loose).unwrap();
+        clear(&["fetch"]);
+        let control = copy(&main, "fetch-control");
+        let _ = ok(&control, &old);
+        assert!(marker("fetch").exists(), "control: no lazy fetch");
+        clear(&["fetch"]);
+        let guarded = copy(&main, "fetch-guarded");
+        let _ = ShellGateRunner::new(&guarded).capture_snapshot().await;
+        assert!(!marker("fetch").exists(), "the capture fetched");
     }
 
     #[tokio::test]

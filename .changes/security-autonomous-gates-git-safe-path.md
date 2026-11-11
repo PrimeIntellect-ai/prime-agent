@@ -1,1 +1,1 @@
-- Stopped repository-controlled git configuration from running commands while the autonomous gates snapshot the workspace.
+- Autonomous-gate workspace snapshots no longer start programs a repository's own git configuration names (fsmonitor hooks, index-write hooks, diff text conversion and external diff programs, promisor fetches, submodule reads); `.gitattributes` clean/process filters remain a documented limit.
