@@ -665,12 +665,41 @@ pub(crate) fn emit_action_update_raw(
     events: &Arc<EventPump>,
     snapshot: &SessionActionSnapshot,
 ) -> Result<()> {
-    let mut core = core.lock().unwrap();
+    let mut core_guard = core.lock().unwrap();
     // TS `_emitQueueUpdate`: an unchanged projection stays silent (an
     // empty queue before and after a turn is not an update).
-    if core.last_action_snapshot.as_ref() == Some(snapshot) {
+    if core_guard.last_action_snapshot.as_ref() == Some(snapshot) {
         return Ok(());
     }
+    let payload = build_action_snapshot_payload_locked(&mut core_guard, snapshot)?;
+    drop(core_guard);
+    events.send(OutboundFrame::session_event(payload));
+    Ok(())
+}
+
+/// The queue projection recomputed and broadcast under ONE lock: the
+/// post-drain hook's refresh can race an admission's own emission, and a
+/// copy snapshotted outside the emission lock could overwrite the newer
+/// strip state.
+pub(crate) fn emit_action_update_fresh(
+    core: &Arc<std::sync::Mutex<SessionCore>>,
+    events: &Arc<EventPump>,
+) -> Result<()> {
+    let mut core_guard = core.lock().unwrap();
+    let snapshot = Worker::snapshot_locked(&core_guard);
+    if core_guard.last_action_snapshot.as_ref() == Some(&snapshot) {
+        return Ok(());
+    }
+    let payload = build_action_snapshot_payload_locked(&mut core_guard, &snapshot)?;
+    drop(core_guard);
+    events.send(OutboundFrame::session_event(payload));
+    Ok(())
+}
+
+fn build_action_snapshot_payload_locked(
+    core: &mut SessionCore,
+    snapshot: &SessionActionSnapshot,
+) -> Result<Vec<u8>> {
     core.last_action_snapshot = Some(snapshot.clone());
     let sequence = core.last_event_sequence + 1;
     core.last_event_sequence = sequence;
@@ -686,8 +715,5 @@ pub(crate) fn emit_action_update_raw(
         meta: Some(meta),
         rest: Map::default(),
     };
-    let payload = serde_json::to_vec(&outbound)?;
-    drop(core);
-    events.send(OutboundFrame::session_event(payload));
-    Ok(())
+    Ok(serde_json::to_vec(&outbound)?)
 }
