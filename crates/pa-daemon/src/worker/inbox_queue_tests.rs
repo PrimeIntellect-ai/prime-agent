@@ -1120,7 +1120,10 @@ async fn the_wake_row_refresh_follows_the_live_store() {
         ..Default::default()
     });
     assert_eq!(taken.len(), 1);
-    crate::worker::refresh_inbox_wake_rows(&worker.core, &arrivals, &inbox);
+    assert!(
+        crate::worker::refresh_inbox_wake_rows(&worker.core, &arrivals, &inbox),
+        "the partial drain re-render reports the change"
+    );
     let rows = steering_rows(&worker);
     assert!(
         rows.iter().any(
@@ -1134,6 +1137,19 @@ async fn the_wake_row_refresh_follows_the_live_store() {
             .any(|(text, _, _)| text.starts_with("[inbox reminder] 1 message still waiting")),
         "the reminder re-rendered with the live count: {rows:?}"
     );
+    // A restart restores the row without its batch: the refresh rebuilds
+    // coverage over the waiting set instead of dropping a wake unread
+    // messages still need.
+    {
+        worker.inbox_arrivals.lock().unwrap().clear();
+        crate::worker::refresh_inbox_wake_rows(&worker.core, &arrivals, &inbox);
+        let rows = steering_rows(&worker);
+        assert!(
+            rows.iter()
+                .any(|(text, _, _)| text.contains("1 new message (factory-progress)")),
+            "the recovered row survives with the waiting message: {rows:?}"
+        );
+    }
     // The final drain empties the store: both rows retract.
     let rest = inbox.drain();
     assert_eq!(rest.len(), 1);
