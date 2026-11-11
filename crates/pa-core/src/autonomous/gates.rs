@@ -298,18 +298,30 @@ const SNAPSHOT_GIT_OVERRIDES: [&str; 5] = [
     "--no-optional-locks",
 ];
 
-const SNAPSHOT_STATUS_ARGS: [&str; 5] = ["status", "--porcelain=v1", "-z", "-uall", "--no-renames"];
+/// `--ignore-submodules=none` keeps submodule edits and gitlink bumps visible
+/// to the status probe whatever the repository's ignore keys say.
+const SNAPSHOT_STATUS_ARGS: [&str; 6] = [
+    "status",
+    "--porcelain=v1",
+    "-z",
+    "-uall",
+    "--no-renames",
+    "--ignore-submodules=none",
+];
 
 /// Neither a text conversion driver nor an external diff program may start;
 /// `--submodule=short` reports submodule changes as commit ids, so no submodule
-/// diff (or its textconv) runs while edits and gitlink bumps stay visible.
-const SNAPSHOT_DIFF_ARGS: [&str; 6] = [
+/// diff (or its textconv) runs while edits and gitlink bumps stay visible;
+/// `--ignore-submodules=none` stops the repository's ignore keys from hiding
+/// them from either probe.
+const SNAPSHOT_DIFF_ARGS: [&str; 7] = [
     "diff",
     "--no-ext-diff",
     "--no-textconv",
     "--submodule=short",
     "--binary",
     "HEAD",
+    "--ignore-submodules=none",
 ];
 
 /// Snapshot the git worktree state: porcelain status, the HEAD diff, and a content
@@ -922,7 +934,8 @@ mod tests {
         );
     }
 
-    /// Edits inside a submodule count as workspace changes.
+    /// Edits inside a submodule count as workspace changes, and the
+    /// repository's ignore keys cannot hide them from the probes.
     #[tokio::test]
     async fn snapshot_tracks_edits_inside_a_submodule() {
         let root = tempfile::TempDir::new().unwrap();
@@ -954,6 +967,22 @@ mod tests {
         let clean = runner.capture_snapshot().await.unwrap();
         std::fs::write(main.join("sub/a.txt"), "y\n").unwrap();
         assert_ne!(runner.capture_snapshot().await.unwrap(), clean);
+        // A repository cannot hide submodule edits from the probes: the ignore
+        // keys (repository config and .gitmodules) are forced off on the
+        // command line. The submodule worktree is clean at the next baseline,
+        // so the only delta the last capture can see is the edit.
+        git(&main.join("sub"), &["checkout", "--", "a.txt"]);
+        git(&main, &["config", "status.ignoreSubmodules", "all"]);
+        git(&main, &["config", "diff.ignoreSubmodules", "all"]);
+        git(
+            &main,
+            &["config", "-f", ".gitmodules", "submodule.sub.ignore", "all"],
+        );
+        git(&main, &["add", ".gitmodules"]);
+        git(&main, &["commit", "-qm", "ignore"]);
+        let hidden_clean = runner.capture_snapshot().await.unwrap();
+        std::fs::write(main.join("sub/a.txt"), "z\n").unwrap();
+        assert_ne!(runner.capture_snapshot().await.unwrap(), hidden_clean);
     }
 
     #[tokio::test]
