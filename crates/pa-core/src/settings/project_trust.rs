@@ -1,9 +1,10 @@
 //! Project-settings trust (the CWE-426 gate): a repository's
 //! `<project>/.prime/agent/settings.json` loads ENTIRELY INERT until the
-//! user has explicitly trusted it. Trust is per project, recorded in the
-//! user-level registry (`<agent dir>/trusted-projects.json`), and pinned to
-//! one fingerprint over `settings.json`, `SYSTEM.md`, and `APPEND_SYSTEM.md`,
-//! so any change to those files re-prompts.
+//! user has explicitly trusted it. Trust is per repository (its
+//! subdirectories and registered worktrees share it), recorded in the
+//! user-level registry (`<agent dir>/trusted-projects.json`) as the set of
+//! approved pins, each one fingerprint over `settings.json`, `SYSTEM.md`,
+//! and `APPEND_SYSTEM.md`, so any other content in those files re-prompts.
 //! Headless and API paths never prompt: no registry entry means denied.
 
 use std::path::{Path, PathBuf};
@@ -127,51 +128,94 @@ pub(crate) fn restrictive_projection(value: &serde_json::Value) -> Settings {
     super::load::from_value_lenient(&serde_json::Value::Object(map))
 }
 
-/// The registry key for one project's settings file: the hex SHA-256 of
-/// the canonicalized project directory's OS bytes (the settings file's
-/// grandparent's parent). Keying by the project directory — never the file
-/// path — is the trust model's core invariant: a second project that
-/// symlinks its settings file at a trusted one shares the fingerprint but
-/// keeps its own key, so it still needs its own trust decision. The digest
-/// encoding is lossless: a `to_string_lossy` key would collide distinct
-/// non-UTF-8 paths. Fail-closed for lookups: an unresolvable key simply
-/// never matches a differently-spelled entry.
-fn registry_key(settings_path: &Path) -> String {
-    let project_dir = settings_path
-        .parent()
-        .and_then(Path::parent)
-        .and_then(Path::parent);
-    let key = project_dir
-        .and_then(|dir| std::fs::canonicalize(dir).ok())
-        .unwrap_or_else(|| settings_path.to_path_buf());
-    hex(&Sha256::digest(key.as_os_str().as_encoded_bytes()))
+/// The canonical directory whose trust covers `project_dir`: the git common
+/// dir, so a repository's subdirectories and the worktrees the user's own
+/// git registered share one decision; outside git, the directory itself. A
+/// `.git` that is a symlink, or a `.git` file whose worktree is not
+/// registered back in the common dir it names, keys as its own checkout
+/// (the root): an untrusted tree never claims another repository's trust.
+fn repository_dir(project_dir: &Path) -> PathBuf {
+    let Ok(dir) = std::fs::canonicalize(project_dir) else {
+        return project_dir.to_path_buf();
+    };
+    let Some(root) = crate::packages::resolve::discovery::find_git_repo_root(&dir) else {
+        return dir;
+    };
+    let dot_git = root.join(".git");
+    let linked_common_dir = || {
+        let gitdir_line = std::fs::read_to_string(&dot_git).ok()?;
+        let gitdir =
+            std::fs::canonicalize(root.join(gitdir_line.strip_prefix("gitdir:")?.trim())).ok()?;
+        let commondir = std::fs::read_to_string(gitdir.join("commondir")).ok()?;
+        let common = std::fs::canonicalize(gitdir.join(commondir.trim())).ok()?;
+        // `git worktree add` records the worktree's back-pointer inside the
+        // common dir: the user's own repository, out of the checkout's reach.
+        let back_pointer = std::fs::read_to_string(gitdir.join("gitdir")).ok()?;
+        let registered = gitdir.parent() == Some(common.join("worktrees").as_path())
+            && std::fs::canonicalize(gitdir.join(back_pointer.trim())).ok()? == dot_git;
+        registered.then_some(common)
+    };
+    match std::fs::symlink_metadata(&dot_git) {
+        Ok(metadata) if metadata.is_dir() => dot_git,
+        Ok(metadata) if metadata.is_file() => linked_common_dir().unwrap_or(root),
+        _ => root,
+    }
 }
 
-/// Read the registry's fingerprint entry for `settings_path`; `None` on any
-/// missing, unreadable, or malformed registry (denied, never open).
-fn registered_fingerprint(registry_path: &Path, settings_path: &Path) -> Option<String> {
+/// The registry key for a repository dir: the hex SHA-256 of its OS bytes
+/// (lossless: a `to_string_lossy` key would collide distinct non-UTF-8
+/// paths). Keying by the repository — never the settings file — keeps a
+/// second project that symlinks its settings file at a trusted one behind
+/// its own trust decision.
+fn registry_key(repository: &Path) -> String {
+    hex(&Sha256::digest(repository.as_os_str().as_encoded_bytes()))
+}
+
+/// One repository's registry entry: its path, for revoking by hand, and
+/// every pin the user approved for it.
+#[derive(Default, serde::Serialize, serde::Deserialize)]
+struct RegistryEntry {
+    path: String,
+    pins: Vec<String>,
+}
+
+/// The registry's entry for `repository`; `None` on any missing,
+/// unreadable, or malformed registry or entry (denied, never open).
+fn registry_entry(registry_path: &Path, repository: &Path) -> Option<RegistryEntry> {
     let content = std::fs::read_to_string(registry_path).ok()?;
-    let registry: serde_json::Map<String, serde_json::Value> =
+    let mut registry: serde_json::Map<String, serde_json::Value> =
         serde_json::from_str(&content).ok()?;
-    registry
-        .get(&registry_key(settings_path))?
-        .as_str()
-        .map(str::to_string)
+    serde_json::from_value(registry.remove(&registry_key(repository))?).ok()
 }
 
-/// The trust decision for one project's settings file: registry lookup plus
-/// fingerprint match. Deny-by-default: any read or parse failure denies.
+/// The trust decision for one project's settings file: its repository has
+/// an entry, and the project's pin is one the user approved there or the
+/// all-absent pin, which carries no content (a subdirectory or worktree
+/// without its own pinned files then behaves like an in-place `git switch`
+/// in the trusted checkout). Deny-by-default: any read or parse failure
+/// denies.
 #[must_use]
 pub fn project_trusted(registry_path: &Path, settings_path: &Path, fingerprint: &str) -> bool {
-    registered_fingerprint(registry_path, settings_path).as_deref() == Some(fingerprint)
+    registry_entry(registry_path, &repository_dir(&project_root(settings_path))).is_some_and(
+        |entry| {
+            fingerprint == pin_over(None, None, None)
+                || entry.pins.iter().any(|pin| pin == fingerprint)
+        },
+    )
 }
 
-/// Record the user's trust for one project's settings file, fingerprint-pinned.
+/// Record the user's trust for one project's settings file: its pin joins
+/// the pins approved for its repository. Returns the repository path the
+/// entry names.
 ///
 /// # Errors
 ///
 /// Returns an error when the registry cannot be read or written.
-pub fn trust_project(registry_path: &Path, settings_path: &Path, fingerprint: &str) -> Result<()> {
+pub fn trust_project(
+    registry_path: &Path,
+    settings_path: &Path,
+    fingerprint: &str,
+) -> Result<PathBuf> {
     // The locks precede the read: two concurrent trusts must never erase
     // each other's entries through a stale read.
     let _process_guard = super::storage::process_lock(registry_path);
@@ -195,17 +239,45 @@ pub fn trust_project(registry_path: &Path, settings_path: &Path, fingerprint: &s
             }
             _ => serde_json::Map::new(),
         };
-    registry.insert(
-        registry_key(settings_path),
-        serde_json::Value::String(fingerprint.to_string()),
-    );
+    let repository = repository_dir(&project_root(settings_path));
+    let key = registry_key(&repository);
+    let mut entry: RegistryEntry = registry
+        .get(&key)
+        .and_then(|value| serde_json::from_value(value.clone()).ok())
+        .unwrap_or_default();
+    // A git common dir named `.git` shows as its main checkout.
+    let path = repository
+        .parent()
+        .filter(|_| repository.ends_with(".git"))
+        .unwrap_or(&repository)
+        .to_path_buf();
+    entry.path = path.to_string_lossy().into_owned();
+    if !entry.pins.iter().any(|pin| pin == fingerprint) {
+        entry.pins.push(fingerprint.to_string());
+    }
+    registry.insert(key, serde_json::to_value(&entry)?);
     atomic_write_with(
         registry_path,
         &serde_json::to_string_pretty(&registry)?,
         AtomicWriteOptions { fsync: true },
     )?;
     drop(guard);
-    Ok(())
+    Ok(path)
+}
+
+/// Trust the project at `cwd` as it is on disk: for fixtures exercising
+/// the trusted path (the gate's own tests pin the untrusted one).
+#[cfg(test)]
+pub(crate) fn trust_as_on_disk(cwd: &Path, agent_dir: &Path) {
+    let settings_path = cwd
+        .join(super::storage::CONFIG_DIR_NAME)
+        .join("settings.json");
+    trust_project(
+        &agent_dir.join(TRUSTED_PROJECTS_FILE),
+        &settings_path,
+        &project_fingerprint(&settings_path).unwrap(),
+    )
+    .unwrap();
 }
 
 #[cfg(test)]
@@ -353,7 +425,7 @@ impl ProjectTrustGate {
     /// # Errors
     ///
     /// Returns an error when the registry cannot be read or written.
-    pub(crate) fn trust_pin(&self, pin: &str) -> Result<()> {
+    pub(crate) fn trust_pin(&self, pin: &str) -> Result<PathBuf> {
         trust_project(&self.registry_path, &self.settings_path, pin)
     }
 }

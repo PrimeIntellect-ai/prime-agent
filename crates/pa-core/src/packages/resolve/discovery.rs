@@ -403,7 +403,7 @@ pub(crate) fn collect_resource_files(
 }
 
 /// Find the nearest ancestor containing a `.git` entry.
-fn find_git_repo_root(start_dir: &Path) -> Option<PathBuf> {
+pub(crate) fn find_git_repo_root(start_dir: &Path) -> Option<PathBuf> {
     let mut dir = start_dir.to_path_buf();
     loop {
         if dir.join(".git").exists() {

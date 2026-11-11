@@ -794,3 +794,76 @@ fn a_project_write_in_the_home_dir_lands() {
         Some(vec!["custom".to_string()])
     );
 }
+
+/// Trust recorded at a repository's root covers its subdirectories (a
+/// session in `pkg` loads the root's `.agents/skills`) and a worktree the
+/// user's git registered, while that worktree's own settings change still
+/// re-gates it. Red against a cwd-keyed registry.
+#[test]
+fn repository_trust_covers_subdirectories_and_registered_worktrees() {
+    let dir = tempfile::tempdir().unwrap();
+    let agent_dir = dir.path().join("agent");
+    let main = dir.path().join("main");
+    let worktree = dir.path().join("worktree");
+    let registration = main.join(".git/worktrees/worktree");
+    std::fs::create_dir_all(&registration).unwrap();
+    std::fs::write(registration.join("commondir"), "../..\n").unwrap();
+    std::fs::write(
+        registration.join("gitdir"),
+        format!("{}\n", worktree.join(".git").display()),
+    )
+    .unwrap();
+    for checkout in [&main, &worktree] {
+        std::fs::create_dir_all(checkout.join(CONFIG_DIR_NAME)).unwrap();
+        std::fs::write(project_settings(checkout), r#"{"theme":"repo-theme"}"#).unwrap();
+    }
+    std::fs::write(
+        worktree.join(".git"),
+        format!("gitdir: {}\n", registration.display()),
+    )
+    .unwrap();
+    let skill = main.join(".agents/skills/repo-skill");
+    std::fs::create_dir_all(&skill).unwrap();
+    std::fs::write(
+        skill.join("SKILL.md"),
+        "---\nname: repo-skill\ndescription: d\n---\nBody",
+    )
+    .unwrap();
+    std::fs::create_dir_all(main.join("pkg")).unwrap();
+    trust_as_on_disk(&main, &agent_dir);
+
+    let resources = load_resources_cold(&main.join("pkg"), &agent_dir);
+    assert!(resources
+        .skills
+        .iter()
+        .any(|skill| skill.name == "repo-skill"));
+    assert!(SettingsManager::create(&worktree, &agent_dir).project_config_trusted());
+
+    std::fs::write(project_settings(&worktree), r#"{"theme":"branch-theme"}"#).unwrap();
+    assert!(!SettingsManager::create(&worktree, &agent_dir).project_config_trusted());
+}
+
+/// A checkout whose `.git` file names a trusted repository's git dir, with
+/// no worktree registration pointing back at it, keeps its own key: copied
+/// settings bytes never ride the other repository's trust.
+#[test]
+fn an_unregistered_git_file_does_not_inherit_another_repositorys_trust() {
+    let dir = tempfile::tempdir().unwrap();
+    let agent_dir = dir.path().join("agent");
+    let trusted = dir.path().join("trusted");
+    let imposter = dir.path().join("imposter");
+    std::fs::create_dir_all(trusted.join(".git")).unwrap();
+    for checkout in [&trusted, &imposter] {
+        std::fs::create_dir_all(checkout.join(CONFIG_DIR_NAME)).unwrap();
+        std::fs::write(project_settings(checkout), r#"{"theme":"repo-theme"}"#).unwrap();
+    }
+    std::fs::write(
+        imposter.join(".git"),
+        format!("gitdir: {}\n", trusted.join(".git").display()),
+    )
+    .unwrap();
+    trust_as_on_disk(&trusted, &agent_dir);
+
+    assert!(SettingsManager::create(&trusted, &agent_dir).project_config_trusted());
+    assert!(!SettingsManager::create(&imposter, &agent_dir).project_config_trusted());
+}
