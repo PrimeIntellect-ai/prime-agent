@@ -169,6 +169,10 @@ pub struct SessionInbox {
 enum InboxRecord {
     Message(InboxMessage),
     Drained,
+    /// The id of one withdrawn message.
+    Withdrawn {
+        id: String,
+    },
     /// A targeted read's taken ids: replay drops exactly these, so a
     /// partial drain never clears the messages it did not return.
     #[serde(rename_all = "camelCase")]
@@ -292,6 +296,36 @@ impl SessionInbox {
         taken
     }
 
+    /// Withdraw every waiting message of one class: the same journal-first,
+    /// then-store order the drained reads use, with one `Withdrawn` record
+    /// per removed id, so a restart keeps the withdrawal. Returns the
+    /// removed messages in arrival order.
+    pub fn withdraw_class(&self, class: &str) -> Vec<InboxMessage> {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut removed = Vec::new();
+        let mut remaining = Vec::new();
+        for message in std::mem::take(&mut state.messages) {
+            if message.class == class {
+                removed.push(message);
+            } else {
+                remaining.push(message);
+            }
+        }
+        for message in &removed {
+            self.append_journal(
+                &serde_json::to_value(InboxRecord::Withdrawn {
+                    id: message.id.clone(),
+                })
+                .unwrap_or(Value::Null),
+            );
+        }
+        state.messages = remaining;
+        removed
+    }
+
     /// The waiting count, its oldest arrival time, and the per-class
     /// breakdown.
     pub fn count(&self) -> (usize, Option<u64>, BTreeMap<String, u64>) {
@@ -387,9 +421,15 @@ impl SessionInbox {
             lines.push_str(&serde_json::to_string(&record).unwrap_or_default());
             lines.push('\n');
         }
-        let tmp = journal.with_extension("jsonl.tmp");
-        let rewrite =
-            std::fs::write(&tmp, lines).and_then(|()| crate::platform::rename_onto(&tmp, journal));
+        // The rewrite replaces every pending record: it must be durable
+        // before the rename can drop the old file on a crash, so this
+        // call site opts into the atomic write's pre-rename fsync and
+        // the post-rename directory sync.
+        let rewrite = crate::settings::storage::atomic_write_with(
+            journal,
+            &lines,
+            crate::settings::storage::AtomicWriteOptions { fsync: true },
+        );
         if let Err(error) = rewrite {
             eprintln!(
                 "pa-daemon: inbox journal compaction failed ({}): {error}",
@@ -442,6 +482,9 @@ fn replay_journal(journal: &Path) -> (Vec<InboxMessage>, u64, bool) {
                 messages.push(message);
             }
             InboxRecord::Drained => messages.clear(),
+            InboxRecord::Withdrawn { id } => {
+                messages.retain(|message| message.id != id);
+            }
             InboxRecord::Read { ids } => {
                 messages.retain(|message| !ids.contains(&message.id));
             }
@@ -749,7 +792,15 @@ mod tests {
         assert_eq!(inbox.count(), (0, None, BTreeMap::new()));
         assert!(journal.is_dir(), "the unread journal is left untouched");
         assert!(
-            !journal.with_extension("jsonl.tmp").exists(),
+            !std::fs::read_dir(dir.path())
+                .unwrap()
+                .flatten()
+                .any(|entry| {
+                    entry
+                        .file_name()
+                        .to_string_lossy()
+                        .starts_with("inbox.jsonl.tmp")
+                }),
             "the skipped compaction wrote no throwaway tmp"
         );
     }
@@ -796,6 +847,66 @@ mod tests {
         assert_eq!(drained.len(), 1, "the unseen record survives");
         assert_eq!(drained[0].text, "kept");
         assert_eq!(drained[0].id, "inbox-1");
+    }
+
+    /// A class withdrawal removes exactly that class, journals one
+    /// `Withdrawn` record per id, and replays as removed (the clear/pause
+    /// sweep of the durable store).
+    #[test]
+    fn withdraw_class_removes_one_class_and_replays() {
+        let dir = tempfile::tempdir().unwrap();
+        {
+            let inbox = SessionInbox::open(Some(dir.path()));
+            inbox.push(
+                notice("sleep 1", INBOX_CLASS_BASH_DONE, "first", json!({})),
+                1_000,
+            );
+            inbox.push(
+                notice("peer", INBOX_CLASS_AGENT_MESSAGE, "second", json!({})),
+                2_000,
+            );
+            inbox.push(
+                notice("peer", INBOX_CLASS_AGENT_MESSAGE, "third", json!({})),
+                3_000,
+            );
+            let removed = inbox.withdraw_class(INBOX_CLASS_AGENT_MESSAGE);
+            assert_eq!(
+                removed.iter().map(|m| m.text.as_str()).collect::<Vec<_>>(),
+                ["second", "third"]
+            );
+            let (count, _, classes) = inbox.count();
+            assert_eq!(count, 1);
+            assert_eq!(classes[INBOX_CLASS_BASH_DONE], 1);
+        }
+        // The withdrawal replays: the removed ids stay gone, the other
+        // class survives, and a fresh id never collides.
+        let reopened = SessionInbox::open(Some(dir.path()));
+        let drained = reopened.drain();
+        assert_eq!(drained.len(), 1);
+        assert_eq!(drained[0].text, "first");
+        let next = reopened.push(
+            notice("echo", INBOX_CLASS_BASH_DONE, "later", json!({})),
+            4_000,
+        );
+        assert_eq!(next.id, "inbox-4", "the id counter keeps counting");
+    }
+
+    /// The compaction opts into the atomic write's fsync: the rewrite
+    /// must be durable before it can replace the journal.
+    #[test]
+    fn the_compaction_opts_into_the_fsync() {
+        let before = crate::settings::storage::opt_in_fsync_calls();
+        let dir = tempfile::tempdir().unwrap();
+        let inbox = SessionInbox::open(Some(dir.path()));
+        inbox.push(
+            notice("sleep 1", INBOX_CLASS_BASH_DONE, "once", json!({})),
+            1_000,
+        );
+        let _ = SessionInbox::open(Some(dir.path()));
+        assert!(
+            crate::settings::storage::opt_in_fsync_calls() > before,
+            "the compaction's rewrite synced the temp file before the rename"
+        );
     }
 
     /// The id counter survives a drained restart: the compacted journal

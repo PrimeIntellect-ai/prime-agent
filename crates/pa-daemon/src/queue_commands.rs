@@ -201,6 +201,10 @@ fn mutate_lane(
             // The edited row loses its labeled preview: the client's
             // own text becomes the preview.
             item.preview = None;
+            // The user's edit removes the row from coalescing: a later
+            // arrival or reminder tick may replace the rows it queued,
+            // never an instruction the user wrote.
+            item.queue_key = None;
             // `images` present clears or replaces the attachments; absent keeps them.
             if mutation.get("images").is_some() {
                 item.images = parse_prompt_images(mutation);
