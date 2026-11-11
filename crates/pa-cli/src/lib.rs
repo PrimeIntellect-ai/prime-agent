@@ -42,6 +42,7 @@ pub(crate) mod mcp_login;
 pub(crate) mod mode;
 pub(crate) mod package_command;
 pub(crate) mod prime_inference_login;
+pub(crate) mod project_trust;
 pub(crate) mod prompt_command;
 pub(crate) mod provider_login;
 pub(crate) mod public_command;
@@ -237,6 +238,12 @@ fn main_impl(args: &[String], runtime: &dyn mode::Runtime) -> Result<i32, String
     }
 
     let agent_dir = crate::config::get_agent_dir();
+    // The CWE-426 first-load trust prompt (interactive only) precedes the
+    // earliest settings reads below (telemetry, sessionDir, image sizing) so
+    // a yes on the first launch applies to this session, not the next.
+    if app_mode == mode::AppMode::Interactive {
+        project_trust::prompt_first_load(&cwd, &agent_dir).map_err(|error| error.to_string())?;
+    }
     // Telemetry opt-in resolution: env override, then settings; the
     // runtime config only carries the disabled case.
     let telemetry_disabled = crate::mode::telemetry_disabled(

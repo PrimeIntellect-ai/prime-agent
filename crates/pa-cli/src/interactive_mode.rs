@@ -22,8 +22,6 @@ mod daemon;
 
 pub use daemon::{ensure_daemon_running, ensure_daemon_running_with};
 
-mod project_trust;
-
 mod onboarding;
 
 use onboarding::onboarding_task;
@@ -39,10 +37,9 @@ mod tests;
 
 /// Run the interactive TUI attached to the daemon. Returns the exit code.
 pub fn run_interactive_mode(options: &RunOptions) -> Result<i32> {
-    // The CWE-426 first-load trust prompt comes before every settings read:
-    // an untrusted project settings document stays entirely inert, and the
-    // session only ever sees a registry the user answered for explicitly.
-    project_trust::prompt_first_load(options)?;
+    // The CWE-426 launch-cwd trust prompt already ran in the composition
+    // root, before its earliest settings reads; `build_tui_options` below
+    // covers a resumed session's saved cwd when it differs.
     let socket_path = resolve_socket_path(options.daemon_socket.as_deref());
     let configuration_load_started = std::time::Instant::now();
     let (tui_options, pending_onboarding_stages) = build_tui_options(
@@ -459,6 +456,9 @@ fn build_tui_options(
     }
     let options = &resolved_options;
     let config = &options.config;
+    // The CWE-426 resume arm: the cwd above switched to the saved session's
+    // project, so its settings trust is asked here — before the reads below.
+    crate::project_trust::prompt_first_load(&config.cwd, &config.agent_dir)?;
     let settings = pa_core::settings::SettingsManager::create(&config.cwd, &config.agent_dir);
     let code_block_indent = settings.get_code_block_indent();
     let show_images = settings.get_show_images();

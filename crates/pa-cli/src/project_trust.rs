@@ -4,24 +4,22 @@
 //! for them the gate stays deny-by-default in `pa-core`.
 
 use std::io::IsTerminal;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 
-use super::{PathBuf, RunOptions};
-
-/// Prompt for the project's settings trust on the interactive first load,
-/// before any settings read: a project `.prime/agent/settings.json` whose
-/// fingerprint the user registry does not pin asks once, and only on a
+/// Prompt for a project's settings trust on the interactive first load,
+/// before any settings read for that project: a `.prime/agent/settings.json`
+/// whose fingerprint the user registry does not pin asks once, and only on a
 /// terminal; every other path (headless, declined, EOF) leaves the project
 /// scope denied. A `yes` persists the fingerprint in the user registry.
-pub(super) fn prompt_first_load(options: &RunOptions) -> Result<()> {
-    let cwd = options.config.cwd.clone();
-    let agent_dir = options.config.agent_dir.clone();
+/// Called for the launch cwd before the CLI's earliest settings reads, and
+/// again for a resumed session's saved cwd when it differs.
+pub(crate) fn prompt_first_load(cwd: &Path, agent_dir: &Path) -> Result<()> {
     if !std::io::stdin().is_terminal() {
         return Ok(());
     }
-    let settings_path = project_settings_path(&cwd);
+    let settings_path = project_settings_path(cwd);
     let Some(content) = std::fs::read_to_string(&settings_path).ok() else {
         return Ok(());
     };

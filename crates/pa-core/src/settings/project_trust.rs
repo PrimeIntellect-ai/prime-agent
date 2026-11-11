@@ -29,11 +29,20 @@ pub fn fingerprint(content: &str) -> String {
         })
 }
 
-/// The registry key for one project's settings file: the canonicalized path
-/// when resolvable, else the literal path (fail-closed for lookups either way:
-/// an unresolvable key simply never matches a differently-spelled entry).
+/// The registry key for one project's settings file: the canonicalized
+/// project directory (the settings file's grandparent's parent). Keying by
+/// the project directory — never the file path — is the trust model's core
+/// invariant: a second project that symlinks its settings file at a trusted
+/// one shares the fingerprint but keeps its own key, so it still needs its
+/// own trust decision. Fail-closed for lookups: an unresolvable key simply
+/// never matches a differently-spelled entry.
 fn registry_key(settings_path: &Path) -> PathBuf {
-    std::fs::canonicalize(settings_path).unwrap_or_else(|_| settings_path.to_path_buf())
+    settings_path
+        .parent()
+        .and_then(Path::parent)
+        .and_then(Path::parent)
+        .and_then(|project_dir| std::fs::canonicalize(project_dir).ok())
+        .unwrap_or_else(|| settings_path.to_path_buf())
 }
 
 /// Read the registry's fingerprint entry for `settings_path`; `None` on any
@@ -61,6 +70,18 @@ pub fn project_trusted(registry_path: &Path, settings_path: &Path, fingerprint: 
 ///
 /// Returns an error when the registry cannot be read or written.
 pub fn trust_project(registry_path: &Path, settings_path: &Path, fingerprint: &str) -> Result<()> {
+    // The locks precede the read: two concurrent trusts must never erase
+    // each other's entries through a stale read.
+    let _process_guard = super::storage::process_lock(registry_path);
+    // `acquire_lock` creates the `{file}.lock` directory without parents:
+    // the registry's parent (the agent dir) must exist first.
+    if let Some(parent) = registry_path
+        .parent()
+        .filter(|dir| !dir.as_os_str().is_empty())
+    {
+        std::fs::create_dir_all(parent)?;
+    }
+    let guard = FileSettingsStorage::acquire_lock(registry_path)?;
     let mut registry: serde_json::Map<String, serde_json::Value> =
         std::fs::read_to_string(registry_path)
             .ok()
@@ -70,8 +91,6 @@ pub fn trust_project(registry_path: &Path, settings_path: &Path, fingerprint: &s
         registry_key(settings_path).to_string_lossy().into_owned(),
         serde_json::Value::String(fingerprint.to_string()),
     );
-    let _process_guard = super::storage::process_lock(registry_path);
-    let guard = FileSettingsStorage::acquire_lock(registry_path)?;
     atomic_write_with(
         registry_path,
         &serde_json::to_string_pretty(&registry)?,
@@ -106,5 +125,14 @@ impl ProjectTrustGate {
     #[must_use]
     pub(crate) fn admits(&self, fingerprint: &str) -> bool {
         project_trusted(&self.registry_path, &self.settings_path, fingerprint)
+    }
+
+    /// Record trust for a fingerprint through this gate's registry entry.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the registry cannot be read or written.
+    pub(crate) fn trust(&self, fingerprint: &str) -> Result<()> {
+        trust_project(&self.registry_path, &self.settings_path, fingerprint)
     }
 }

@@ -552,6 +552,12 @@ impl SettingsManager {
 
     /// Write one field into a scope's file, merging with the current on-disk document
     /// so concurrently-added fields survive; failures are recorded as warnings, never thrown.
+    ///
+    /// A project-scope write extends the user's trust, never replaces it: it
+    /// proceeds only when the current document is absent (this write authors
+    /// every byte) or pinned by the registry, and a successful write re-pins
+    /// the new bytes; diverged bytes (a pull changed the file after trust)
+    /// fail closed instead of laundering them under the user's command.
     fn persist_scope_field(
         &mut self,
         scope: SettingsScope,
@@ -575,7 +581,37 @@ impl SettingsManager {
             });
             return;
         }
+        if scope == SettingsScope::Project {
+            if let Some(gate) = self.trust_gate.as_ref() {
+                let current = match self.storage.read(SettingsScope::Project) {
+                    Ok(current) => current,
+                    Err(error) => {
+                        self.errors.push(SettingsError {
+                            scope,
+                            message: format!(
+                                "Project settings not saved: the current file could not be read for the trust check: {error}"
+                            ),
+                        });
+                        return;
+                    }
+                };
+                let pinned = current
+                    .as_deref()
+                    .map(|content| gate.admits(&fingerprint(content)));
+                if pinned == Some(false) {
+                    self.errors.push(SettingsError {
+                        scope,
+                        message:
+                            "Project settings not saved: this project's settings are not trusted. \
+                                  Reopen the project interactively to trust them."
+                                .to_string(),
+                    });
+                    return;
+                }
+            }
+        }
         let mut failure = None;
+        let mut written: Option<String> = None;
         let result =
             self.storage.with_lock(
                 scope,
@@ -584,13 +620,26 @@ impl SettingsManager {
                     serde_json::to_string_pretty(&serde_json::Value::Object(map))
                         .map_err(Into::into)
                 }) {
-                    Ok(content) => Some(content),
+                    Ok(content) => {
+                        written = Some(content.clone());
+                        Some(content)
+                    }
                     Err(error) => {
                         failure = Some(error);
                         None
                     }
                 },
             );
+        if scope == SettingsScope::Project {
+            if let (Some(gate), Some(content)) = (self.trust_gate.as_ref(), written.as_deref()) {
+                if let Err(error) = gate.trust(&fingerprint(content)) {
+                    self.errors.push(SettingsError {
+                        scope,
+                        message: format!("Project settings saved but the trust pin was not refreshed: {error}. The next interactive launch re-prompts."),
+                    });
+                }
+            }
+        }
         let result = result.and_then(|()| failure.map_or(Ok(()), Err));
         if let Err(error) = result {
             self.errors.push(SettingsError {
