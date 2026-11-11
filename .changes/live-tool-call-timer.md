@@ -1,0 +1,1 @@
+- Tool calls show a live timer while they run.
