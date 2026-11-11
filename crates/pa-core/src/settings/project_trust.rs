@@ -233,15 +233,20 @@ pub fn trust_project(
     let guard = FileSettingsStorage::acquire_lock(registry_path)?;
     let mut registry: serde_json::Map<String, serde_json::Value> =
         match std::fs::read_to_string(registry_path) {
-            Ok(content) if !content.trim().is_empty() => {
-                serde_json::from_str(&content).map_err(|error| {
-                    anyhow::anyhow!(
-                        "the trusted-projects registry {} is malformed; not overwritten: {error}",
-                        registry_path.display()
-                    )
-                })?
-            }
-            _ => serde_json::Map::new(),
+            Ok(content) if content.trim().is_empty() => serde_json::Map::new(),
+            Ok(content) => serde_json::from_str(&content).map_err(|error| {
+                anyhow::anyhow!(
+                    "the trusted-projects registry {} is malformed; not overwritten: {error}",
+                    registry_path.display()
+                )
+            })?,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => serde_json::Map::new(),
+            // Any other read failure keeps the other projects' trust: never
+            // overwrite what could not be read.
+            Err(error) => anyhow::bail!(
+                "the trusted-projects registry {} cannot be read; not overwritten: {error}",
+                registry_path.display()
+            ),
         };
     let repository = repository_dir(&project_root(settings_path));
     let key = registry_key(&repository);

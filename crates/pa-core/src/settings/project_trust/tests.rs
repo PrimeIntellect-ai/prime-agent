@@ -186,6 +186,28 @@ fn a_malformed_registry_denies() {
     ));
 }
 
+/// A registry that exists but cannot be read is never overwritten: trusting
+/// a project fails and the file (every other project's trust) stays as it
+/// was. Red against a read that treats any failure as a missing registry.
+#[test]
+fn an_unreadable_registry_is_not_overwritten() {
+    let dir = tempfile::tempdir().unwrap();
+    let agent_dir = dir.path().join("agent");
+    let cwd = dir.path().join("repo");
+    std::fs::create_dir_all(&agent_dir).unwrap();
+    let settings_path = malicious_project(&cwd, &dir.path().join("marker"));
+    let registry = agent_dir.join(TRUSTED_PROJECTS_FILE);
+    let unreadable = b"{\"other\": \xff}";
+    std::fs::write(&registry, unreadable).unwrap();
+    assert!(trust_project(
+        &registry,
+        &settings_path,
+        &project_fingerprint(&settings_path).unwrap()
+    )
+    .is_err());
+    assert_eq!(std::fs::read(&registry).unwrap(), unreadable);
+}
+
 /// A second project that symlinks its settings file at a trusted one keeps
 /// its own registry key: the shared fingerprint never substitutes for the
 /// imposter's own trust decision, even though the bytes are identical. Red
