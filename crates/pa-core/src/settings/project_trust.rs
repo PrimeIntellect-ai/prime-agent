@@ -365,7 +365,7 @@ pub fn escape_control(text: &str) -> std::borrow::Cow<'_, str> {
 /// this one source of truth so the gated paths the prompt lists can never
 /// drift from what the discovery actually loads.
 #[must_use]
-fn gated_agents_skill_dirs(cwd: &Path) -> Vec<PathBuf> {
+pub(crate) fn gated_agents_skill_dirs(cwd: &Path) -> Vec<PathBuf> {
     let user_agents_skills =
         pa_types::platform::home_dir().map(|home| home.join(".agents").join("skills"));
     crate::packages::resolve::discovery::collect_ancestor_agents_skill_dirs(cwd)
