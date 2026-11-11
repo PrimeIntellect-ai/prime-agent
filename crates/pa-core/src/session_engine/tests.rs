@@ -648,11 +648,14 @@ async fn prompt_injected_message_persists_one_custom_row() {
 
 /// The busy-delivery pins (the inbox-notice injection class): a message
 /// admitted while the agent streams must QUEUE with its streaming
-/// behavior — steer or follow-up — and the streamingBehavior rejection
-/// stays only for the no-behavior call (the exact live failure text).
-/// Mutation: reverting the behavior-carrying admission to the busy bail
-/// turns the queue pins red; dropping the no-behavior bail turns the
-/// rejection pins red.
+/// behavior — steer or follow-up — report the parked outcome
+/// ([`PromptOutcome::Queued`]), and carry every batched co-delivered row
+/// in the same batch; the streamingBehavior rejection stays only for the
+/// no-behavior call (the exact live failure text). Mutation: reverting
+/// the behavior-carrying admission to the busy bail turns the queue pins
+/// red; dropping the batch walk turns the batch pin red; reporting
+/// `Prompt` from the busy branch turns the outcome pins red; dropping the
+/// no-behavior bail turns the rejection pins red.
 #[tokio::test]
 async fn a_busy_session_queues_deliveries_with_a_behavior_and_rejects_without_one() {
     let provider = Arc::new(ScriptedProvider::new(test_model()));
@@ -701,18 +704,26 @@ async fn a_busy_session_queues_deliveries_with_a_behavior_and_rejects_without_on
         rest: serde_json::Map::default(),
     };
 
-    // The injected notice class queues by the delivery's behavior.
-    session
+    // The injected notice class queues by the delivery's behavior, and
+    // the outcome says so: a parked row is never reported as a finished
+    // turn (the daemon's delivery seat keys its drain off `Queued`).
+    let outcome = session
         .prompt_injected_message_with_behavior(&notice("steer notice"), StreamingBehavior::Steer)
         .await
         .unwrap();
-    session
+    assert_eq!(
+        outcome,
+        PromptOutcome::Queued,
+        "a busy injected delivery reports the parked outcome"
+    );
+    let outcome = session
         .prompt_injected_message_with_behavior(
             &notice("follow-up notice"),
             StreamingBehavior::FollowUp,
         )
         .await
         .unwrap();
+    assert_eq!(outcome, PromptOutcome::Queued);
     // A custom row previews as an empty string, so the queue COUNTS are
     // the observable: each behavior landed one batch on its queue.
     assert_eq!(
@@ -728,7 +739,7 @@ async fn a_busy_session_queues_deliveries_with_a_behavior_and_rejects_without_on
 
     // A user message with the steer behavior queues the same way (the
     // operator ruling: user messages steer, never fail the delivery).
-    session
+    let outcome = session
         .prompt(
             "continue",
             PromptOptions {
@@ -738,6 +749,7 @@ async fn a_busy_session_queues_deliveries_with_a_behavior_and_rejects_without_on
         )
         .await
         .unwrap();
+    assert_eq!(outcome, PromptOutcome::Queued);
     assert_eq!(
         session
             .agent()
@@ -747,6 +759,41 @@ async fn a_busy_session_queues_deliveries_with_a_behavior_and_rejects_without_on
             .count(),
         1,
         "the user's steer rides the steering queue"
+    );
+
+    // The batched co-delivery rows ride the busy branch too (the accepted
+    // rows a batched turn already persisted must reach the agent): ONE
+    // batch, primary first, the rows in delivery order.
+    let outcome = session
+        .prompt(
+            "batched primary",
+            PromptOptions {
+                streaming_behavior: Some(StreamingBehavior::Steer),
+                batch: vec![
+                    super::PromptBatchRow {
+                        text: "batch row one".to_string(),
+                        images: Vec::new(),
+                    },
+                    super::PromptBatchRow {
+                        text: "batch row two".to_string(),
+                        images: Vec::new(),
+                    },
+                ],
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(outcome, PromptOutcome::Queued);
+    assert_eq!(
+        session
+            .agent()
+            .steering_previews()
+            .last()
+            .map(String::as_str),
+        Some("batched primary batch row one batch row two"),
+        "the whole batch queues as one batch, primary first: {:?}",
+        session.agent().steering_previews()
     );
 
     // Without a behavior the busy rejection stays LOUD, both classes.

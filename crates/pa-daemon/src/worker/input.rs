@@ -386,7 +386,24 @@ impl Worker {
                             None,
                         );
                     }
-                    inbox.push(notice, pa_core::autonomous::now_millis());
+                    // The append is atomic with the retire: the slot's own
+                    // mutex covers the identity re-check and the journal
+                    // append, so a `clear_inbox` racing this delivery either
+                    // waits for the append (the replacement's build opens
+                    // the journal only after the clear, with the record
+                    // already on disk) or lands first and refuses here —
+                    // two stores never race the same journal across the
+                    // swap.
+                    if !engine.push_to_live_inbox(&inbox, notice, pa_core::autonomous::now_millis())
+                    {
+                        drop(core);
+                        return response_failure(
+                            None,
+                            "worker_deliver_message",
+                            "Target session is closed",
+                            None,
+                        );
+                    }
                 }
                 let receipt = agent_message_receipt(&id, &target, message, lane, queued, &sender);
                 return response_success(None, "worker_deliver_message", Some(receipt));
@@ -423,12 +440,11 @@ impl Worker {
                 return response_failure(None, "worker_deliver_message", &error, None);
             }
             // The direct route's strip refresh: the queued notice row
-            // must reach the clients like any other lane change.
-            let snapshot = {
-                let core = self.core.lock().unwrap();
-                Self::snapshot_locked(&core)
-            };
-            let _ = self.emit_action_update(&snapshot);
+            // must reach the clients like any other lane change. The
+            // projection recomputes under the emission lock, so a
+            // concurrent read hook's newer strip is never overwritten by
+            // a stale copy.
+            let _ = crate::worker::emit_action_update_fresh(&self.core, &self.events);
             // The notice is admitted live work — a restart must revive
             // the worker to deliver it (no client reopens the session).
             let receipt = agent_message_receipt(&id, &target, message, lane, queued, &sender);
