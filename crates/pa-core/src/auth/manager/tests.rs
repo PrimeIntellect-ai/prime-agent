@@ -245,16 +245,17 @@ fn provider_headers_team_selection() {
         Some("team-1")
     );
     assert!(auth.get_provider_headers("anthropic").is_none());
-    // The stored team survives an ambient environment key: PRIME_API_KEY
-    // supplies the key, the stored login's team still scopes the header.
+    // Key and team come from the same source: an ambient PRIME_API_KEY
+    // serves the key, so the stored login's team never rides with it.
+    let stored_team_login = serde_json::json!({
+        "prime-inference": {
+            "type": "api_key",
+            "key": "pi-key",
+            "primeTeam": { "teamId": "team-1", "name": "Team 1" }
+        }
+    });
     let mut auth = storage_with_env(
-        &serde_json::json!({
-            "prime-inference": {
-                "type": "api_key",
-                "key": "pi-key",
-                "primeTeam": { "teamId": "team-1", "name": "Team 1" }
-            }
-        }),
+        &stored_team_login,
         ScriptedEnv(HashMap::from([(
             "PRIME_API_KEY".to_string(),
             "env-key".to_string(),
@@ -264,33 +265,34 @@ fn provider_headers_team_selection() {
         auth.get_api_key(PRIME_INFERENCE_PROVIDER_ID).as_deref(),
         Some("env-key")
     );
+    assert!(auth
+        .get_provider_headers(PRIME_INFERENCE_PROVIDER_ID)
+        .is_none());
+    // The env key with PRIME_TEAM_ID: the environment supplies both.
+    let auth = storage_with_env(
+        &stored_team_login,
+        ScriptedEnv(HashMap::from([
+            ("PRIME_API_KEY".to_string(), "env-key".to_string()),
+            ("PRIME_TEAM_ID".to_string(), "env-team".to_string()),
+        ])),
+    );
     let headers = auth
         .get_provider_headers(PRIME_INFERENCE_PROVIDER_ID)
         .unwrap();
     assert_eq!(
         headers.get("X-Prime-Team-ID").map(String::as_str),
-        Some("team-1")
+        Some("env-team")
     );
-    // The stored team survives a runtime API-key override too.
-    let mut auth = storage_with(&serde_json::json!({
-        "prime-inference": {
-            "type": "api_key",
-            "key": "pi-key",
-            "primeTeam": { "teamId": "team-1", "name": "Team 1" }
-        }
-    }));
+    // A runtime API-key override serves the key: no stored team either.
+    let mut auth = storage_with(&stored_team_login);
     auth.set_runtime_api_key(PRIME_INFERENCE_PROVIDER_ID, "runtime-key".to_string());
     assert_eq!(
         auth.get_api_key(PRIME_INFERENCE_PROVIDER_ID).as_deref(),
         Some("runtime-key")
     );
-    let headers = auth
+    assert!(auth
         .get_provider_headers(PRIME_INFERENCE_PROVIDER_ID)
-        .unwrap();
-    assert_eq!(
-        headers.get("X-Prime-Team-ID").map(String::as_str),
-        Some("team-1")
-    );
+        .is_none());
     // PRIME_TEAM_ID env wins over the stored selection.
     let auth = storage_with_env(
         &serde_json::json!({

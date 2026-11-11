@@ -803,8 +803,11 @@ impl AuthStorage {
                 (!trimmed.is_empty()).then_some(trimmed)
             })
             .or_else(|| {
-                // The stored primeTeam survives runtime and environment API-key
-                // overrides: an ambient `PRIME_API_KEY` supplies the key, never the team.
+                // The stored primeTeam rides only with the stored key: a
+                // runtime or environment key never borrows the login's team.
+                if self.get_auth_status(provider_id).source != Some(AuthSource::Stored) {
+                    return None;
+                }
                 match self.data.credential(provider_id) {
                     Some(AuthCredential::ApiKey { prime_team, .. }) => {
                         prime_team.as_ref().map(|team| team.team_id.clone())
