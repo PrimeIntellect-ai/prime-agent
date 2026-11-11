@@ -96,6 +96,7 @@ fn run_request(
             source: "user".to_string(),
             agent_message_id: None,
             custom_message,
+            streaming_behavior: None,
         },
         &|| false,
         &mut |event| {
