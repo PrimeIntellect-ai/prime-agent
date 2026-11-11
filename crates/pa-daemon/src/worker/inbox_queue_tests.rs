@@ -1613,3 +1613,85 @@ async fn the_wake_row_refresh_follows_the_live_store() {
     );
     let _ = std::fs::remove_dir_all(worker.config.socket_path.parent().unwrap());
 }
+
+/// The read hook retracts the wake rows and refreshes the queue-strip
+/// projection for subscribed clients (the kernel's read handler runs the
+/// engine's installed seam after every drain).
+#[tokio::test]
+async fn the_read_hook_refreshes_the_wake_rows_and_their_action_events() {
+    let (worker, inbox, _dir) = faux_worker_with_inbox();
+    worker.dispatch("clear_queue", &json!({})).await;
+    worker.core.lock().unwrap().busy = true;
+    let mut subscription = worker.events.subscribe();
+    // The delivery routes into the store, queues the notice, and emits
+    // the strip refresh (the direct route's parity).
+    let delivered = worker
+        .dispatch(
+            "worker_deliver_message",
+            &json!({
+                "targetActiveSessionId": "target-session",
+                "message": "waiting",
+                "sender": { "activeSessionId": "peer-1" },
+            }),
+        )
+        .await;
+    assert!(delivered.success, "delivery failed: {delivered:?}");
+    assert_eq!(inbox.count().0, 1);
+    admit_inbox_reminder(
+        &worker.recovery,
+        &worker.core,
+        &worker.work_notify,
+        &inbox,
+        || false,
+    );
+    let delivery_frames = {
+        let mut frames = Vec::new();
+        while let Ok(frame) = subscription.try_recv() {
+            if frame.outbound_type == "session_event" {
+                if let Ok(outbound) = serde_json::from_slice::<serde_json::Value>(&frame.payload) {
+                    frames.push(outbound["event"].clone());
+                }
+            }
+        }
+        frames
+    };
+    assert!(
+        delivery_frames.iter().any(|event| {
+            event.get("type").and_then(Value::as_str) == Some("session_action_update")
+        }),
+        "the delivery refreshed the strip: {delivery_frames:?}"
+    );
+    // The agent reads: the store drains, then the installed seam runs.
+    let drained = inbox.drain();
+    assert_eq!(drained.len(), 1);
+    let hook = worker
+        .agent_engine
+        .as_ref()
+        .expect("the faux engine")
+        .inbox_read_hook()
+        .expect("the worker installed the seam");
+    hook(&inbox);
+    let rows = steering_rows(&worker);
+    assert!(
+        rows.is_empty(),
+        "the drain hook retracts the stale rows: {rows:?}"
+    );
+    let hook_frames = {
+        let mut frames = Vec::new();
+        while let Ok(frame) = subscription.try_recv() {
+            if frame.outbound_type == "session_event" {
+                if let Ok(outbound) = serde_json::from_slice::<serde_json::Value>(&frame.payload) {
+                    frames.push(outbound["event"].clone());
+                }
+            }
+        }
+        frames
+    };
+    assert!(
+        hook_frames.iter().any(|event| {
+            event.get("type").and_then(Value::as_str) == Some("session_action_update")
+        }),
+        "the retraction refreshed the strip: {hook_frames:?}"
+    );
+    let _ = std::fs::remove_dir_all(worker.config.socket_path.parent().unwrap());
+}

@@ -253,6 +253,31 @@ impl SessionInbox {
         inbox
     }
 
+    /// The journal path this store writes (the reopen/reuse seam).
+    #[must_use]
+    pub fn journal_path(&self) -> Option<PathBuf> {
+        self.journal.clone()
+    }
+
+    /// Open the store for one session dir, REUSING the existing store
+    /// when it already serves the same journal: a failed build can leave
+    /// its published store writable while the next attempt reopens the
+    /// same journal, and a fresh open's compaction would race those
+    /// appends. A different journal (or none) opens fresh.
+    #[must_use]
+    pub fn open_or_reuse(
+        existing: Option<&std::sync::Arc<SessionInbox>>,
+        dir: Option<&Path>,
+    ) -> std::sync::Arc<SessionInbox> {
+        let wanted = dir.map(|dir| dir.join(INBOX_JOURNAL_FILE));
+        if let (Some(existing), Some(wanted)) = (existing, wanted.as_deref()) {
+            if existing.journal_path().as_deref() == Some(wanted) {
+                return std::sync::Arc::clone(existing);
+            }
+        }
+        std::sync::Arc::new(Self::open(dir))
+    }
+
     /// Install the daemon's post-drain seam (the worker's wake-row
     /// refresh); the kernel's read handler runs it after every drain.
     pub fn set_read_hook(&self, hook: InboxReadHook) {
@@ -1228,6 +1253,34 @@ mod tests {
             crate::settings::storage::opt_in_fsync_calls() > before,
             "the compaction's rewrite synced the temp file before the rename"
         );
+    }
+
+    /// The rebuild seam reuses a store over the same journal, so a failed
+    /// build's published appends never race a fresh open's compaction;
+    /// another journal opens fresh.
+    #[test]
+    fn the_rebuild_seam_reuses_the_same_journal() {
+        let dir = tempfile::tempdir().unwrap();
+        let first = std::sync::Arc::new(SessionInbox::open(Some(dir.path())));
+        first.push(
+            notice("sleep 1", INBOX_CLASS_BASH_DONE, "kept", json!({})),
+            1_000,
+        );
+        let reused = SessionInbox::open_or_reuse(Some(&first), Some(dir.path()));
+        assert!(
+            std::sync::Arc::ptr_eq(&first, &reused),
+            "the same journal reuses the live store"
+        );
+        assert_eq!(reused.count().0, 1, "the published append stays visible");
+        let other = tempfile::tempdir().unwrap();
+        let fresh = SessionInbox::open_or_reuse(Some(&first), Some(other.path()));
+        assert!(
+            !std::sync::Arc::ptr_eq(&first, &fresh),
+            "another journal opens fresh"
+        );
+        assert_eq!(fresh.count(), (0, None, BTreeMap::new()));
+        let reopened = SessionInbox::open_or_reuse(None, Some(dir.path()));
+        assert_eq!(reopened.count().0, 1, "a fresh open replays the journal");
     }
 
     /// The id counter survives a drained restart: the compacted journal
