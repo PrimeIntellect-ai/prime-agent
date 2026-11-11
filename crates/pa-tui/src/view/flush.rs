@@ -26,7 +26,9 @@ impl AgentView {
         width: usize,
         screen_height: usize,
     ) -> std::io::Result<()> {
+        let sparse = self.sparse_enabled;
         let layout = self.layout_pass(width);
+        self.sparse_enabled = sparse;
         let mut sink = FlushSink {
             flushed: std::mem::take(&mut self.flushed_frame),
             texts: Vec::new(),
