@@ -134,11 +134,10 @@ fn confirm_and_trust(cwd: &Path, agent_dir: &Path, entries: &[PathBuf], yes: boo
     let settings_path = config_dir.join("settings.json");
     let registry_path = agent_dir.join(pa_core::settings::TRUSTED_PROJECTS_FILE);
     let Some(fingerprint) = pa_core::settings::project_fingerprint(&settings_path) else {
-        println!(
-            "A settings.json, SYSTEM.md, or APPEND_SYSTEM.md in {} is unreadable or refused (permissions, not valid UTF-8, over 4 MiB, or a link outside the project), so this project cannot be trusted. Fix that file first.",
+        anyhow::bail!(
+            "a settings.json, SYSTEM.md, or APPEND_SYSTEM.md in {} is unreadable or refused (permissions, not valid UTF-8, over 4 MiB, or a link outside the project), so this project cannot be trusted. Fix that file first.",
             escaped(&config_dir.display().to_string()),
         );
-        return Ok(());
     };
     println!("This project carries its own Prime Agent config, which can change how Prime Agent behaves here:");
     for entry in entries {

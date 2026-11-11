@@ -5,7 +5,7 @@ pub(crate) mod interactive_settings;
 pub(crate) mod load;
 pub(crate) mod manager;
 pub(crate) mod merge;
-pub mod project_trust;
+pub(crate) mod project_trust;
 pub(crate) mod storage;
 pub(crate) mod types;
 

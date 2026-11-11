@@ -265,13 +265,29 @@ pub fn ignored_project_dir(cwd: &Path, agent_dir: &Path, trusted: bool) -> Optio
     (!trusted && !gated_project_entries(cwd, agent_dir).is_empty()).then(|| cwd.to_path_buf())
 }
 
-/// The one-line ignored-config notice for `dir`.
+/// The one-line ignored-config notice for `dir`. The path is printed on
+/// every headless launch, so control bytes (a checkout path carrying
+/// CSI/OSC sequences) are escaped like every other printed path.
 #[must_use]
 pub fn ignored_project_notice(dir: &Path) -> String {
     format!(
         "This project's Prime Agent config is ignored until you trust it: run `prime-agent trust {}`. Sessions started after that load it.",
-        dir.display()
+        escaped_path(dir)
     )
+}
+
+/// A path with control bytes replaced by `?` (the interactive prompt's
+/// escaping rule, for the headless notice).
+fn escaped_path(path: &Path) -> std::borrow::Cow<'_, str> {
+    let text = path.display().to_string();
+    if text.chars().any(char::is_control) {
+        text.chars()
+            .map(|char| if char.is_control() { '?' } else { char })
+            .collect::<String>()
+            .into()
+    } else {
+        text.into()
+    }
 }
 
 /// The `.agents/skills` directories the auto-discovery would load for this
@@ -280,7 +296,7 @@ pub fn ignored_project_notice(dir: &Path) -> String {
 /// this one source of truth so the gated paths the prompt lists can never
 /// drift from what the discovery actually loads.
 #[must_use]
-pub fn gated_agents_skill_dirs(cwd: &Path) -> Vec<PathBuf> {
+fn gated_agents_skill_dirs(cwd: &Path) -> Vec<PathBuf> {
     let user_agents_skills =
         pa_types::platform::home_dir().map(|home| home.join(".agents").join("skills"));
     crate::packages::resolve::discovery::collect_ancestor_agents_skill_dirs(cwd)
