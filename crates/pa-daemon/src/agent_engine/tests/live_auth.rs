@@ -650,9 +650,9 @@ fn command_runs(counter: &std::path::Path) -> usize {
 /// the live seam owns it, the TS streamFn shape) — and never re-runs per
 /// call: candidate building defers the command (TS's lazy value
 /// material), the engine-lived request-auth registry is not rebuilt per
-/// call, and the per-call lookup hits the process cache. The counter key is a POSIX-shell pipeline (the
-/// ambient shell on Windows resolves it differently), so the test runs
-/// on Unix only.
+/// call, and the per-call lookup hits the process cache. The counter key
+/// is a POSIX-shell pipeline (the ambient shell on Windows resolves it
+/// differently), so the test runs on Unix only.
 #[cfg(unix)]
 #[test]
 fn a_stored_command_key_resolves_once_and_never_re_runs_per_call() {
