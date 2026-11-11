@@ -12,6 +12,21 @@ pub fn current_user_id() -> u32 {
     nix::unistd::Uid::current().as_raw()
 }
 
+/// Drop pending terminal type-ahead so a stray pre-typed line cannot answer
+/// a question this process is about to ask (the trust prompt's stdin read).
+#[cfg(unix)]
+pub fn flush_stdin_typeahead() {
+    // Safety: tcflush on the process's own stdin fd is an ioctl-class call
+    // with no memory-safety surface.
+    unsafe {
+        libc::tcflush(libc::STDIN_FILENO, libc::TCIFLUSH);
+    }
+}
+
+/// Non-Unix twin: nothing to flush.
+#[cfg(not(unix))]
+pub fn flush_stdin_typeahead() {}
+
 /// Termination signal for [`kill_pid`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Signal {

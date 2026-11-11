@@ -8,7 +8,7 @@ use anyhow::{anyhow, Context, Result};
 
 use super::load::from_value_lenient;
 use super::merge::{deep_merge, migrate};
-use super::project_trust::{fingerprint, ProjectTrustGate};
+use super::project_trust::{fingerprint, restrictive_projection, ProjectTrustGate};
 use super::storage::{SettingsScope, SettingsStorage};
 use super::types::{
     QueueModeSetting, Settings, ThinkingLevelSetting, TransportSetting, UpdateChannel,
@@ -43,6 +43,9 @@ pub struct SettingsManager {
     /// settings file); `None` for storages without a real project file
     /// (in-memory tests, embedded hosts).
     trust_gate: Option<ProjectTrustGate>,
+    /// The whole-project trust decision (`true` without a gate): covers the
+    /// settings file and the discovered project-config files alike.
+    project_config_trusted: bool,
 }
 
 impl SettingsManager {
@@ -66,6 +69,9 @@ impl SettingsManager {
             &mut errors,
         );
         let merged = deep_merge(&global, &project);
+        let project_config_trusted = trust_gate
+            .as_ref()
+            .is_none_or(ProjectTrustGate::admits_project);
         Self {
             storage,
             global,
@@ -79,7 +85,16 @@ impl SettingsManager {
             global_load_error,
             project_load_error,
             trust_gate,
+            project_config_trusted,
         }
+    }
+
+    /// Whether this project's config surface — the settings file and the
+    /// discovered `SYSTEM.md`/`APPEND_SYSTEM.md`/`skills`/`prompts`/`themes`
+    /// — is trusted: `true` without a gate (in-memory hosts).
+    #[must_use]
+    pub fn project_config_trusted(&self) -> bool {
+        self.project_config_trusted
     }
 
     pub fn create(
@@ -191,6 +206,10 @@ impl SettingsManager {
         self.global_load_error = global_load_error;
         self.project_load_error = project_load_error;
         self.errors = errors;
+        self.project_config_trusted = self
+            .trust_gate
+            .as_ref()
+            .is_none_or(ProjectTrustGate::admits_project);
         self.merged = deep_merge(&self.global, &self.project);
         Ok(())
     }
@@ -1094,13 +1113,28 @@ fn load_scope(
     let Some(content) = content else {
         return (Settings::default(), None, None);
     };
-    // The CWE-426 gate: an untrusted project document is ENTIRELY inert —
-    // no deep-merge, no raw document, no load error — until the registry
-    // pins the trust to these exact bytes (a changed file re-prompts).
+    // The CWE-426 gate: an untrusted project document stays inert except
+    // its privacy opt-outs — declining trust must never increase sharing —
+    // until the registry pins the trust to these exact bytes (a changed
+    // file re-prompts).
     if scope == SettingsScope::Project {
         if let Some(gate) = trust_gate {
             if !gate.admits(&fingerprint(&content)) {
-                return (Settings::default(), None, None);
+                // Parse like the trusted path so a malformed document still
+                // records its load error (the trace upload's fail-closed
+                // `errors().is_empty()` rule keeps working).
+                let value: serde_json::Value = match serde_json::from_str(&content) {
+                    Ok(value) => value,
+                    Err(error) => {
+                        let message = error.to_string();
+                        errors.push(SettingsError {
+                            scope,
+                            message: message.clone(),
+                        });
+                        return (Settings::default(), None, Some(message));
+                    }
+                };
+                return (restrictive_projection(&value), None, None);
             }
         }
     }

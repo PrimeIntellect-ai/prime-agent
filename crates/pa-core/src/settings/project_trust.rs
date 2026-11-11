@@ -11,6 +11,8 @@ use anyhow::Result;
 use sha2::{Digest, Sha256};
 use std::fmt::Write as _;
 
+use super::types::Settings;
+
 use super::storage::{atomic_write_with, AtomicWriteOptions, FileSettingsStorage};
 
 /// The user-level registry file name, beside `settings.json` in the agent dir.
@@ -27,6 +29,49 @@ pub fn fingerprint(content: &str) -> String {
             let _ = write!(hex, "{byte:02x}");
             hex
         })
+}
+
+/// The pinned fingerprint for a project's config surface: the settings
+/// file's exact bytes when present (any change re-prompts), the empty
+/// sentinel when absent (its later appearance re-prompts). `None` for a
+/// symlinked settings file: it is refused outright.
+#[must_use]
+pub fn project_fingerprint(settings_path: &Path) -> Option<String> {
+    if std::fs::symlink_metadata(settings_path)
+        .is_ok_and(|metadata| metadata.file_type().is_symlink())
+    {
+        return None;
+    }
+    Some(
+        std::fs::read_to_string(settings_path)
+            .map(|content| fingerprint(&content))
+            .unwrap_or_default(),
+    )
+}
+
+/// The restrictive-key projection of an untrusted project document: the
+/// privacy opt-outs (`agentTraces.enabled=false`, `telemetry.enabled=false`,
+/// `images.blockImages=true`) apply regardless of trust — declining trust
+/// never increases sharing — while everything else stays inert.
+#[must_use]
+pub(crate) fn restrictive_projection(value: &serde_json::Value) -> Settings {
+    let mut map = serde_json::Map::new();
+    let mut carry = |section: &str, field: &str, when: bool| {
+        let value = value
+            .get(section)
+            .and_then(|section| section.get(field))
+            .and_then(serde_json::Value::as_bool);
+        if value == Some(when) {
+            map.insert(
+                section.to_string(),
+                serde_json::json!({ field.to_string(): when }),
+            );
+        }
+    };
+    carry("agentTraces", "enabled", false);
+    carry("telemetry", "enabled", false);
+    carry("images", "blockImages", true);
+    super::load::from_value_lenient(&serde_json::Value::Object(map))
 }
 
 /// The registry key for one project's settings file: the canonicalized
@@ -70,6 +115,13 @@ pub fn project_trusted(registry_path: &Path, settings_path: &Path, fingerprint: 
 ///
 /// Returns an error when the registry cannot be read or written.
 pub fn trust_project(registry_path: &Path, settings_path: &Path, fingerprint: &str) -> Result<()> {
+    // A symlinked settings file is refused outright: its bytes belong to
+    // another file, so pinning them would trust unseen content.
+    if std::fs::symlink_metadata(settings_path)
+        .is_ok_and(|metadata| metadata.file_type().is_symlink())
+    {
+        anyhow::bail!("a symlinked settings file cannot be trusted; make it a real file");
+    }
     // The locks precede the read: two concurrent trusts must never erase
     // each other's entries through a stale read.
     let _process_guard = super::storage::process_lock(registry_path);
@@ -83,10 +135,16 @@ pub fn trust_project(registry_path: &Path, settings_path: &Path, fingerprint: &s
     }
     let guard = FileSettingsStorage::acquire_lock(registry_path)?;
     let mut registry: serde_json::Map<String, serde_json::Value> =
-        std::fs::read_to_string(registry_path)
-            .ok()
-            .and_then(|content| serde_json::from_str(&content).ok())
-            .unwrap_or_default();
+        match std::fs::read_to_string(registry_path) {
+            Ok(content) if !content.trim().is_empty() => {
+                serde_json::from_str(&content).map_err(|error| {
+                    anyhow::anyhow!(
+                        "the trusted-projects registry is malformed; not overwritten: {error}"
+                    )
+                })?
+            }
+            _ => serde_json::Map::new(),
+        };
     registry.insert(
         registry_key(settings_path).to_string_lossy().into_owned(),
         serde_json::Value::String(fingerprint.to_string()),
@@ -134,5 +192,16 @@ impl ProjectTrustGate {
     /// Returns an error when the registry cannot be read or written.
     pub(crate) fn trust(&self, fingerprint: &str) -> Result<()> {
         trust_project(&self.registry_path, &self.settings_path, fingerprint)
+    }
+
+    /// The whole-project decision: this project directory's registry entry
+    /// pinned to the settings fingerprint (the empty sentinel while the
+    /// file is absent), so one trust covers every gated project file.
+    /// A symlinked settings file is never admitted.
+    #[must_use]
+    pub(crate) fn admits_project(&self) -> bool {
+        project_fingerprint(&self.settings_path).is_some_and(|fingerprint| {
+            project_trusted(&self.registry_path, &self.settings_path, &fingerprint)
+        })
     }
 }

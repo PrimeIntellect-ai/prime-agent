@@ -21,6 +21,24 @@ struct Fixture {
     manager: PackageManager,
 }
 
+/// Seed the fixture project's trust (the pin is the absent-settings
+/// sentinel until a project write appears): the fixture tests exercise the
+/// trusted path; the gate's own tests pin the untrusted one.
+fn seed_project_trust(cwd: &Path, agent_dir: &Path) {
+    let settings_path = cwd
+        .join(crate::settings::CONFIG_DIR_NAME)
+        .join("settings.json");
+    let fingerprint = std::fs::read_to_string(&settings_path)
+        .map(|content| crate::settings::project_trust::fingerprint(&content))
+        .unwrap_or_default();
+    crate::settings::project_trust::trust_project(
+        &agent_dir.join(crate::settings::project_trust::TRUSTED_PROJECTS_FILE),
+        &settings_path,
+        &fingerprint,
+    )
+    .unwrap();
+}
+
 impl Fixture {
     fn new() -> Self {
         let root = tempfile::tempdir().unwrap();
@@ -33,6 +51,7 @@ impl Fixture {
     fn with_cwd(root: tempfile::TempDir, cwd: PathBuf, agent_dir: PathBuf) -> Self {
         std::fs::create_dir_all(&cwd).unwrap();
         let temp_dir = root.path().to_path_buf();
+        seed_project_trust(&cwd, &agent_dir);
         let settings = SettingsManager::create(&cwd, &agent_dir);
         let manager = PackageManager::with_options(PackageManagerOptions {
             cwd,
@@ -83,7 +102,15 @@ impl Fixture {
         );
         settings[field] = entries;
         std::fs::write(&path, settings.to_string()).unwrap();
+        // The fixture writes the project file directly; simulate the user's
+        // trust decision for the new bytes so the fixture exercises the
+        // trusted path (the gate's own tests pin the untrusted one).
+        self.trust_project_config();
         self.reload();
+    }
+
+    fn trust_project_config(&self) {
+        seed_project_trust(self.manager.cwd(), &self.agent_dir);
     }
 
     fn reload(&mut self) {

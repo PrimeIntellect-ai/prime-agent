@@ -128,6 +128,9 @@ pub fn load_resources(mut options: ResourceLoaderOptions) -> Result<LoadedResour
         .settings
         .take()
         .unwrap_or_else(|| SettingsManager::create(&options.cwd, &options.agent_dir));
+    // Captured before `settings` moves into the resolver: the discovery
+    // gates below read the same whole-project trust decision.
+    let project_config_trusted = settings.project_config_trusted();
     let resolution = resolution::resolve_session_resources(&options, settings)?;
 
     let mut resources = LoadedResources::default();
@@ -222,16 +225,18 @@ pub fn load_resources(mut options: ResourceLoaderOptions) -> Result<LoadedResour
         resources.agents_files = load_project_context_files(&options.cwd, &options.agent_dir);
     }
 
-    // System prompt: explicit source or discovered file content.
+    // System prompt: explicit source or discovered file content. The
+    // project-side discovery stays behind the CWE-426 trust decision; the
+    // agent-dir side is the user's own.
     let system_source = options.system_prompt.clone().or_else(|| {
-        discover_system_prompt_file(&options.cwd, &options.agent_dir)
+        discover_system_prompt_file(&options.cwd, &options.agent_dir, project_config_trusted)
             .map(|p| p.to_string_lossy().to_string())
     });
     resources.system_prompt = system_source.and_then(|source| resolve_prompt_input(&source));
 
     // Append system prompt: explicit sources or discovered file.
     let append_sources: Vec<String> = if options.append_system_prompt.is_empty() {
-        discover_append_system_prompt_file(&options.cwd, &options.agent_dir)
+        discover_append_system_prompt_file(&options.cwd, &options.agent_dir, project_config_trusted)
             .map(|path| path.to_string_lossy().to_string())
             .into_iter()
             .collect()
@@ -283,12 +288,19 @@ fn dedupe_prompts(prompts: Vec<PromptTemplate>) -> Vec<PromptTemplate> {
     out
 }
 
-/// `cwd/{CONFIG_DIR_NAME}/SYSTEM.md` then agentDir/SYSTEM.md.
+/// `cwd/{CONFIG_DIR_NAME}/SYSTEM.md` then agentDir/SYSTEM.md. The project
+/// candidate loads only behind the trust decision.
 #[must_use]
-pub fn discover_system_prompt_file(cwd: &Path, agent_dir: &Path) -> Option<PathBuf> {
-    let project = cwd.join(crate::settings::CONFIG_DIR_NAME).join("SYSTEM.md");
-    if project.exists() {
-        return Some(project);
+pub fn discover_system_prompt_file(
+    cwd: &Path,
+    agent_dir: &Path,
+    project_config_trusted: bool,
+) -> Option<PathBuf> {
+    if project_config_trusted {
+        let project = cwd.join(crate::settings::CONFIG_DIR_NAME).join("SYSTEM.md");
+        if project.exists() {
+            return Some(project);
+        }
     }
     let global = agent_dir.join("SYSTEM.md");
     if global.exists() {
@@ -298,13 +310,20 @@ pub fn discover_system_prompt_file(cwd: &Path, agent_dir: &Path) -> Option<PathB
 }
 
 /// `cwd/{CONFIG_DIR_NAME}/APPEND_SYSTEM.md` then `agentDir/APPEND_SYSTEM.md`.
+/// The project candidate loads only behind the trust decision.
 #[must_use]
-pub fn discover_append_system_prompt_file(cwd: &Path, agent_dir: &Path) -> Option<PathBuf> {
-    let project = cwd
-        .join(crate::settings::CONFIG_DIR_NAME)
-        .join("APPEND_SYSTEM.md");
-    if project.exists() {
-        return Some(project);
+pub fn discover_append_system_prompt_file(
+    cwd: &Path,
+    agent_dir: &Path,
+    project_config_trusted: bool,
+) -> Option<PathBuf> {
+    if project_config_trusted {
+        let project = cwd
+            .join(crate::settings::CONFIG_DIR_NAME)
+            .join("APPEND_SYSTEM.md");
+        if project.exists() {
+            return Some(project);
+        }
     }
     let global = agent_dir.join("APPEND_SYSTEM.md");
     if global.exists() {
@@ -317,6 +336,19 @@ pub fn discover_append_system_prompt_file(cwd: &Path, agent_dir: &Path) -> Optio
 mod tests {
     use super::*;
     use std::fs;
+
+    /// Trust the fixture project (the pin is the absent-settings sentinel):
+    /// these tests exercise the trusted path; the gate's own tests pin the
+    /// untrusted one.
+    fn trust_fixture_project(cwd: &Path, agent_dir: &Path) {
+        crate::settings::project_trust::trust_project(
+            &agent_dir.join(crate::settings::TRUSTED_PROJECTS_FILE),
+            &cwd.join(crate::settings::CONFIG_DIR_NAME)
+                .join("settings.json"),
+            "",
+        )
+        .unwrap();
+    }
 
     #[test]
     fn context_files_global_then_ancestors_root_first() {
@@ -350,7 +382,7 @@ mod tests {
             "project system",
         )
         .unwrap();
-        let found = discover_system_prompt_file(&project, &agent_dir).unwrap();
+        let found = discover_system_prompt_file(&project, &agent_dir, true).unwrap();
         assert!(found.to_string_lossy().contains("proj"));
         assert_eq!(
             resolve_prompt_input(&found.to_string_lossy()),
@@ -379,6 +411,7 @@ mod tests {
             "Fix $1",
         )
         .unwrap();
+        trust_fixture_project(&cwd, &agent_dir);
         fs::write(cwd.join("AGENTS.md"), "Project rules").unwrap();
         fs::write(
             cwd.join(".prime").join("agent").join("SYSTEM.md"),
@@ -484,6 +517,14 @@ mod tests {
             serde_json::json!({"skills": [configured_skill.display().to_string()] }).to_string(),
         )
         .unwrap();
+        // The trusted path: the gate's own tests pin the untrusted one.
+        let settings_path = cwd.join(".prime/agent/settings.json");
+        crate::settings::trust_project(
+            &agent_dir.join(crate::settings::TRUSTED_PROJECTS_FILE),
+            &settings_path,
+            &crate::settings::fingerprint(&fs::read_to_string(&settings_path).unwrap()),
+        )
+        .unwrap();
         let resources = load_resources(ResourceLoaderOptions::new(&cwd, &agent_dir)).unwrap();
         for name in ["project-code", "configured-code", "ancestor-code"] {
             let project = resources
@@ -541,6 +582,7 @@ mod tests {
             "---\nname: alpha\ndescription: Project alpha\n---\nBody",
         )
         .unwrap();
+        trust_fixture_project(&cwd, &agent_dir);
 
         let resources = load_resources(ResourceLoaderOptions::new(&cwd, &agent_dir)).unwrap();
         let alpha: Vec<_> = resources

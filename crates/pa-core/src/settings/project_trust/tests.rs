@@ -6,9 +6,18 @@
 
 use super::*;
 use crate::mcp::{McpManager, McpServerConfig};
+use crate::resources::{load_resources, ResourceLoaderOptions};
 use crate::settings::{SettingsManager, CONFIG_DIR_NAME};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+
+fn load_resources_cold(cwd: &Path, agent_dir: &Path) -> crate::resources::LoadedResources {
+    load_resources(ResourceLoaderOptions::new(
+        cwd.to_path_buf(),
+        agent_dir.to_path_buf(),
+    ))
+    .expect("resource load")
+}
 
 /// Write the malicious project fixture: settings that merge visibly
 /// (`theme`, `compaction`) plus a stdio MCP server whose command would
@@ -308,5 +317,133 @@ fn a_write_against_diverged_project_bytes_fails_closed() {
         std::fs::read_to_string(&settings_path).unwrap(),
         r#"{ "theme": "pulled-theme" }"#,
         "the refused write must not touch the file"
+    );
+}
+
+/// The privacy opt-outs in an untrusted project document still apply: the
+/// project's `agentTraces`/`telemetry` opt-outs and `images.blockImages`
+/// survive the gate — declining trust must never increase sharing — while
+/// everything else stays inert. Red against a whole-document drop.
+#[test]
+fn untrusted_project_opt_outs_still_apply() {
+    let dir = tempfile::tempdir().unwrap();
+    let agent_dir = dir.path().join("agent");
+    let cwd = dir.path().join("repo");
+    std::fs::create_dir_all(&agent_dir).unwrap();
+    let marker = dir.path().join("marker");
+    malicious_project(&cwd, &marker);
+    std::fs::write(
+        project_settings(&cwd),
+        r#"{
+        "theme": "injected-theme",
+        "agentTraces": { "enabled": false },
+        "telemetry": { "enabled": false },
+        "images": { "blockImages": true }
+    }"#,
+    )
+    .unwrap();
+    let mut manager = SettingsManager::create(&cwd, &agent_dir);
+    assert_eq!(
+        manager.settings().theme,
+        None,
+        "non-restrictive keys stay inert"
+    );
+    assert!(
+        !manager.get_agent_traces_enabled(),
+        "the trace opt-out applies"
+    );
+    assert!(
+        !manager.get_telemetry_enabled(),
+        "the telemetry opt-out applies"
+    );
+    assert_eq!(
+        manager
+            .settings()
+            .images
+            .as_ref()
+            .and_then(|images| images.block_images),
+        Some(true),
+        "the image restriction applies"
+    );
+    assert!(manager.drain_errors().is_empty());
+}
+
+/// A malformed untrusted project document still records its load error, so
+/// the trace upload's fail-closed `errors().is_empty()` rule keeps working.
+#[test]
+fn a_malformed_untrusted_document_fails_the_trace_upload_gate() {
+    let dir = tempfile::tempdir().unwrap();
+    let agent_dir = dir.path().join("agent");
+    let cwd = dir.path().join("repo");
+    malicious_project(&cwd, &dir.path().join("marker"));
+    std::fs::write(project_settings(&cwd), "{not json").unwrap();
+    let manager = SettingsManager::create(&cwd, &agent_dir);
+    assert!(
+        !manager.errors().is_empty(),
+        "the malformed document must keep the fail-closed rule armed"
+    );
+}
+
+/// The discovered project config (SYSTEM.md, the skills directory, an
+/// ancestor `.agents/skills`) loads only behind the project-dir trust
+/// decision — one trust covers the whole surface. Red against ungated
+/// discovery.
+#[test]
+fn discovered_project_config_loads_only_when_trusted() {
+    let dir = tempfile::tempdir().unwrap();
+    let agent_dir = dir.path().join("agent");
+    let cwd = dir.path().join("repo");
+    malicious_project(&cwd, &dir.path().join("marker")); // settings.json present
+    let config = cwd.join(CONFIG_DIR_NAME);
+    std::fs::write(config.join("SYSTEM.md"), "# replaced system prompt").unwrap();
+    std::fs::create_dir_all(config.join("skills/evil")).unwrap();
+    std::fs::write(
+        config.join("skills/evil/SKILL.md"),
+        "---\nname: evil\ndescription: injected skill\n---\nInjected body",
+    )
+    .unwrap();
+    let ancestor = dir
+        .path()
+        .join(".agents")
+        .join("skills")
+        .join("ancestor-evil");
+    std::fs::create_dir_all(&ancestor).unwrap();
+    std::fs::write(
+        ancestor.join("SKILL.md"),
+        "---\nname: ancestor-evil\ndescription: x\n---\nB",
+    )
+    .unwrap();
+
+    let manager = SettingsManager::create(&cwd, &agent_dir);
+    assert!(!manager.project_config_trusted());
+    let resources = load_resources_cold(&cwd, &agent_dir);
+    assert!(
+        resources
+            .skills
+            .iter()
+            .all(|skill| skill.name != "evil" && skill.name != "ancestor-evil"),
+        "discovered skills must stay inert until trusted"
+    );
+    assert_ne!(
+        resources.system_prompt.as_deref(),
+        Some("# replaced system prompt")
+    );
+
+    let settings_path = project_settings(&cwd);
+    trust_project(
+        &agent_dir.join(TRUSTED_PROJECTS_FILE),
+        &settings_path,
+        &fingerprint(&std::fs::read_to_string(&settings_path).unwrap()),
+    )
+    .unwrap();
+    let resources = load_resources_cold(&cwd, &agent_dir);
+    assert!(resources.skills.iter().any(|skill| skill.name == "evil"));
+    assert!(resources
+        .skills
+        .iter()
+        .any(|skill| skill.name == "ancestor-evil"));
+    assert_eq!(
+        resources.system_prompt.as_deref(),
+        Some("# replaced system prompt")
     );
 }

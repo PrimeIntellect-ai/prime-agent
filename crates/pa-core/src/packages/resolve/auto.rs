@@ -32,26 +32,24 @@ impl PackageManager {
         global_base_dir: &Path,
         project_base_dir: &Path,
     ) {
-        let user_metadata = PathMetadata {
-            source: MetadataSource::Auto,
-            scope: super::super::SourceScope::User,
-            origin: ResourceOrigin::TopLevel,
-            base_dir: Some(global_base_dir.to_path_buf()),
-        };
+        // The CWE-426 gate: repository-discovered project resources
+        // (`.prime/agent/{skills,prompts,themes}` and ancestor
+        // `.agents/skills`) load only behind the project-dir trust
+        // decision; the user-side discovery below is always trusted.
+        if !self.settings().project_config_trusted() {
+            self.add_user_discovered_resources(accumulator, global, global_base_dir);
+            return;
+        }
         let project_metadata = PathMetadata {
             source: MetadataSource::Auto,
             scope: super::super::SourceScope::Project,
             origin: ResourceOrigin::TopLevel,
             base_dir: Some(project_base_dir.to_path_buf()),
         };
-        let user_overrides =
-            RESOURCE_TYPES.map(|resource_type| settings_array(global, resource_type));
         let project_overrides =
             RESOURCE_TYPES.map(|resource_type| settings_array(project, resource_type));
         let project_dirs = RESOURCE_TYPES
             .map(|resource_type| project_base_dir.join(resource_type_dir_name(resource_type)));
-        let user_dirs = RESOURCE_TYPES
-            .map(|resource_type| global_base_dir.join(resource_type_dir_name(resource_type)));
         let user_agents_skills_dir = home_dir().join(".agents").join("skills");
         let project_agents_skill_dirs = collect_ancestor_agents_skill_dirs(self.cwd())
             .into_iter()
@@ -103,6 +101,43 @@ impl PackageManager {
             &project_overrides[2],
             project_base_dir,
         );
+
+        self.add_user_discovered_resources(accumulator, global, global_base_dir);
+    }
+
+    /// The user-side (agent-dir) auto discovery plus bundled skills — the
+    /// half that never depends on the project trust decision.
+    fn add_user_discovered_resources(
+        &self,
+        accumulator: &mut ResourceAccumulator,
+        global: &Settings,
+        global_base_dir: &Path,
+    ) {
+        let user_metadata = PathMetadata {
+            source: MetadataSource::Auto,
+            scope: super::super::SourceScope::User,
+            origin: ResourceOrigin::TopLevel,
+            base_dir: Some(global_base_dir.to_path_buf()),
+        };
+        let user_overrides =
+            RESOURCE_TYPES.map(|resource_type| settings_array(global, resource_type));
+        let user_dirs = RESOURCE_TYPES
+            .map(|resource_type| global_base_dir.join(resource_type_dir_name(resource_type)));
+        let user_agents_skills_dir = home_dir().join(".agents").join("skills");
+
+        let add_resources = |accumulator: &mut ResourceAccumulator,
+                             resource_type: ResourceType,
+                             paths: Vec<PathBuf>,
+                             metadata: &PathMetadata,
+                             overrides: &[String],
+                             base_dir: &Path| {
+            for path in paths {
+                let enabled = is_enabled_by_overrides(&path, overrides, base_dir);
+                accumulator
+                    .map(resource_type)
+                    .add(&path, metadata.clone(), enabled);
+            }
+        };
 
         add_resources(
             accumulator,

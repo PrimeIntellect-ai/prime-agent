@@ -28,6 +28,14 @@ async fn assert_prompt_case(case: PromptCase) {
         }
         if let Some(content) = case.project {
             std::fs::write(cwd.join(".prime/agent/APPEND_SYSTEM.md"), content).unwrap();
+            // The append cases exercise the trusted project file; the
+            // gate's own tests pin the untrusted path.
+            crate::settings::project_trust::trust_project(
+                &agent_dir.join(crate::settings::TRUSTED_PROJECTS_FILE),
+                &cwd.join(".prime/agent/settings.json"),
+                "",
+            )
+            .unwrap();
         }
         let model = Model {
             id: "m".into(),
