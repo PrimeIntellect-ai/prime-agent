@@ -1019,7 +1019,7 @@ async fn fresh_home_runs_the_full_sign_in_flow_to_completion() {
             wait_render("Paste a Prime API key below:"),
             pa_tui::interactive::HeadlessStep::Type("faux-prime-key".to_string()),
             enter(),
-            wait_render("Connect other providers, or continue."),
+            wait_render("Prime Inference is your default. Connect other providers, or continue."),
             down(),
             enter(),
             wait_render("Enter API key"),
@@ -1053,7 +1053,7 @@ async fn fresh_home_runs_the_full_sign_in_flow_to_completion() {
         "the paste prompt mounted inside the pane:\n{rendered}"
     );
     assert!(
-        rendered.contains("Connect other providers, or continue."),
+        rendered.contains("Prime Inference is your default. Connect other providers, or continue."),
         "the providers picker rendered:\n{rendered}"
     );
     assert!(
