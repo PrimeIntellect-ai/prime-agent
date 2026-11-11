@@ -136,6 +136,7 @@ impl Worker {
             context_usage: store.and_then(|store| {
                 crate::session_stats::store_context_usage(store, inputs.model_context_window)
             }),
+            ignored_project_dir: core.ignored_project_dir.clone(),
         }
     }
 

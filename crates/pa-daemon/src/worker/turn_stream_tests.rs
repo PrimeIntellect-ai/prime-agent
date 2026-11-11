@@ -23,6 +23,7 @@ fn burst_runner(engine: Arc<dyn SessionEngine>) -> TurnRunner {
         last_event_sequence: 0,
         store: None,
         cwd: String::new(),
+        ignored_project_dir: None,
         steering: VecDeque::new(),
         follow_up: VecDeque::new(),
         busy: false,

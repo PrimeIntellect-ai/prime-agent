@@ -704,10 +704,10 @@ async fn run_interactive_surface(
         });
         session.dirty = true;
     }
-    if let Some(dir) = session.ignored_project_dir().await {
+    if let Some(dir) = &session.ignored_project_dir {
         view.push_entry(crate::chat::ChatEntry::Status {
             text: format!(
-                "\u{26a0} This project's Prime Agent config is ignored until you trust it: run `prime-agent trust {dir}`, then /reload."
+                "\u{26a0} This project's Prime Agent config is ignored until you trust it: run `prime-agent trust {dir}`. Sessions started after that load it."
             ),
             kind: crate::chat::StatusKind::Warning,
         });

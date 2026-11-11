@@ -325,6 +325,9 @@ pub(crate) struct SessionUi {
     /// This session's persisted file path (family identity of the
     /// subagent linkage; `None` for unpersisted sessions).
     session_file: Option<String>,
+    /// The attach state's `ignoredProjectDir`: the session cwd whose
+    /// project config is present but untrusted.
+    pub(crate) ignored_project_dir: Option<String>,
     pub(crate) pending_selection: Option<SessionSelection>,
     pub(crate) pending_selection_rlm_depth: Option<u32>,
     pub(crate) pending_selection_origin: Option<crate::interactive::SelectionOrigin>,
@@ -531,26 +534,6 @@ impl SessionUi {
         state
             .get("model")?
             .get("provider")?
-            .as_str()
-            .map(str::to_string)
-    }
-
-    /// The project dir whose untrusted config the session's resource load
-    /// ignored (the resource snapshot's `ignoredProjectDir`).
-    pub(crate) async fn ignored_project_dir(&self) -> Option<String> {
-        let snapshot = self
-            .bounded_request(
-                Duration::from_millis(UI_REQUEST_TIMEOUT_MS),
-                DaemonCommand::GetResourceSnapshot {
-                    id: None,
-                    active_session_id: self.active_session_id.clone(),
-                    rest: Map::default(),
-                },
-            )
-            .await
-            .ok()?;
-        snapshot
-            .get("ignoredProjectDir")?
             .as_str()
             .map(str::to_string)
     }

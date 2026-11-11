@@ -120,9 +120,6 @@ pub struct SessionEngine {
     /// Skill-loading diagnostics; the connection resource snapshot
     /// surfaces them.
     pub skill_diagnostics: Vec<crate::skills::ResourceDiagnostic>,
-    /// The project dir whose untrusted config the load ignored; the
-    /// resource snapshot surfaces it.
-    pub ignored_project_dir: Option<std::path::PathBuf>,
     pub prompt_templates: Vec<PromptTemplate>,
     pub agents_files: Vec<crate::resources::ContextFile>,
     pub system_prompt: String,
@@ -950,7 +947,6 @@ pub async fn create_session(mut config: SessionEngineConfig) -> anyhow::Result<S
         session,
         skills: resources.skills,
         skill_diagnostics: resources.skill_diagnostics,
-        ignored_project_dir: resources.ignored_project_dir,
         prompt_templates: resources.prompts,
         agents_files: resources.agents_files,
         system_prompt,

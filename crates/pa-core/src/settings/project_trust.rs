@@ -208,6 +208,22 @@ pub fn gated_project_entries(cwd: &Path, agent_dir: &Path) -> Vec<PathBuf> {
     entries
 }
 
+/// The project dir whose gated config is present but untrusted, so the
+/// session ignores it: the one source of the ignored-config notice.
+#[must_use]
+pub fn ignored_project_dir(cwd: &Path, agent_dir: &Path, trusted: bool) -> Option<PathBuf> {
+    (!trusted && !gated_project_entries(cwd, agent_dir).is_empty()).then(|| cwd.to_path_buf())
+}
+
+/// The one-line ignored-config notice for `dir`.
+#[must_use]
+pub fn ignored_project_notice(dir: &Path) -> String {
+    format!(
+        "This project's Prime Agent config is ignored until you trust it: run `prime-agent trust {}`. Sessions started after that load it.",
+        dir.display()
+    )
+}
+
 /// The `.agents/skills` directories the auto-discovery would load for this
 /// cwd (its own first, up to and including the git repo root), with the
 /// user's global directory excluded: the loader and the trust prompt share

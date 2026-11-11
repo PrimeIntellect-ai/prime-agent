@@ -285,12 +285,21 @@ impl Worker {
     /// and the engine's cwd slot move onto the target's recorded directory
     /// (nothing old observes the move).
     pub(crate) fn rebind_worker_cwd(&self, cwd: &str) {
+        let trusted = pa_core::settings::SettingsManager::create(cwd, &self.config.agent_dir)
+            .project_config_trusted();
+        let ignored_project_dir = pa_core::settings::ignored_project_dir(
+            std::path::Path::new(cwd),
+            &self.config.agent_dir,
+            trusted,
+        )
+        .map(|dir| dir.display().to_string());
         {
             let mut core = self
                 .core
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             core.cwd = cwd.to_string();
+            core.ignored_project_dir = ignored_project_dir;
         }
         self.engine.set_cwd(std::path::PathBuf::from(cwd));
     }

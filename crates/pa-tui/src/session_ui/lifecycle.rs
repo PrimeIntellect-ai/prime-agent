@@ -155,6 +155,7 @@ impl SessionUi {
             activity_group: crate::chrome::ActivityGroup::Subagents,
             subagent_counts: crate::subagents::SubagentCounts::default(),
             session_file: None,
+            ignored_project_dir: None,
             pending_selection: None,
             pending_selection_rlm_depth: None,
             pending_selection_origin: None,
@@ -433,6 +434,10 @@ impl SessionUi {
             .and_then(|state| state.get("sessionFile"))
             .and_then(Value::as_str)
             .filter(|file| !file.is_empty())
+            .map(str::to_string);
+        self.ignored_project_dir = state
+            .and_then(|state| state.get("ignoredProjectDir"))
+            .and_then(Value::as_str)
             .map(str::to_string);
         // The subagent summary follows the fresh session's family; the focus
         // returns to the editor.

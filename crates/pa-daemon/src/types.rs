@@ -241,6 +241,9 @@ pub struct AgentConnectionState {
     pub active_tool_names: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context_usage: Option<Value>,
+    /// The session cwd when its project config is present but untrusted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ignored_project_dir: Option<String>,
 }
 
 #[cfg(test)]
