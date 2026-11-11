@@ -659,7 +659,11 @@ pub fn build_layout(rows: &[crate::agents_view_forest::AgentsViewRow], width: us
         .max()
         .unwrap_or(0)
         .max(12);
-    let model_width = desired_model.min(32).min(available.saturating_sub(12));
+    let model_width = desired_model.min(
+        available
+            .saturating_sub(SESSION_NAME_COLUMN_MAX_CELLS)
+            .max(available / 2),
+    );
     let name_width = (available.saturating_sub(model_width)).min(SESSION_NAME_COLUMN_MAX_CELLS);
     let detail_line = |cost: &str, age: &str| {
         format!(
