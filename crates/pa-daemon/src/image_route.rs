@@ -489,6 +489,7 @@ mod tests {
                 source: "user".to_string(),
                 agent_message_id: None,
                 custom_message: None,
+                streaming_behavior: None,
             },
             &|| false,
             &mut |event| {
@@ -552,6 +553,7 @@ mod tests {
                 source: "user".to_string(),
                 agent_message_id: None,
                 custom_message: None,
+                streaming_behavior: None,
             },
             &|| false,
             &mut |event| {
