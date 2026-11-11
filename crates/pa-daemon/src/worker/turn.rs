@@ -501,9 +501,14 @@ impl TurnRunner {
                     engine.on_turn_done();
                 }
                 // Durable model cleanup is independent of visual abort-row
-                // suppression and emits no client-facing frame.
+                // suppression and emits no client-facing frame. An admitted user
+                // row passes too: the core put it in the live context, so the
+                // transcript must keep it.
                 if core.abort_requested
-                    && !matches!(&event, EngineEvent::ModelChange(_))
+                    && !matches!(
+                        &event,
+                        EngineEvent::ModelChange(_) | EngineEvent::UserMessage(_)
+                    )
                     && (core.suppress_aborted_row || !(abort_settle || aborted_row))
                 {
                     return false;
