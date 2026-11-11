@@ -509,21 +509,20 @@ fn distinct_non_utf8_paths_keep_distinct_registry_keys() {
 #[cfg(unix)]
 #[test]
 fn an_unreadable_settings_file_never_rides_the_absence_pin() {
-    use std::os::unix::fs::PermissionsExt;
+    // Invalid UTF-8 content is the root-proof unreadable case: CI and the
+    // gate containers run as root, where permission bits never fail a read.
     let dir = tempfile::tempdir().unwrap();
     let agent_dir = dir.path().join("agent");
     let cwd = dir.path().join("repo");
     let settings_path = project_settings(&cwd);
     std::fs::create_dir_all(settings_path.parent().unwrap()).unwrap();
     trust_project(&agent_dir.join(TRUSTED_PROJECTS_FILE), &settings_path, "").unwrap();
-    std::fs::write(&settings_path, "{}").unwrap();
-    std::fs::set_permissions(&settings_path, std::fs::Permissions::from_mode(0o000)).unwrap();
+    std::fs::write(&settings_path, b"{\"theme\": \xff invalid}").unwrap();
     let manager = SettingsManager::create(&cwd, &agent_dir);
     assert!(
         !manager.project_config_trusted(),
-        "an unreadable file must refuse instead of riding the absence pin"
+        "an unreadable (non-UTF-8) file must refuse instead of riding the absence pin"
     );
-    std::fs::set_permissions(&settings_path, std::fs::Permissions::from_mode(0o644)).unwrap();
 }
 
 /// The legacy telemetry bool (`"telemetry": false`) is a privacy opt-out and
