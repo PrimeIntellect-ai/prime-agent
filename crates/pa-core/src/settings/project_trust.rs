@@ -14,7 +14,7 @@ use std::fmt::Write as _;
 
 use super::types::Settings;
 
-use super::storage::{atomic_write_with, AtomicWriteOptions, FileSettingsStorage};
+use super::storage::{atomic_write_with, AtomicWriteOptions, FileSettingsStorage, SettingsStorage};
 
 /// The user-level registry file name, beside `settings.json` in the agent dir.
 pub const TRUSTED_PROJECTS_FILE: &str = "trusted-projects.json";
@@ -62,11 +62,18 @@ fn pin(settings_path: &Path, settings: Option<&str>) -> Option<String> {
     Some(hex(&hasher.finalize()))
 }
 
-/// The trust pin for a project as it is on disk now (see [`pin`]); `None`
-/// when a pinned file is unreadable: such a project cannot be trusted.
+/// The trust pin for a project as it is on disk now (see [`pin`]), with
+/// `settings.json` read the way the loader reads it (the bounded project
+/// storage). `None` when a pinned file is unreadable or refused: such a
+/// project cannot be trusted.
 #[must_use]
 pub fn project_fingerprint(settings_path: &Path) -> Option<String> {
-    pin(settings_path, read_pinned(settings_path).ok()?.as_deref())
+    let project_dir = settings_path.parent()?.parent()?.parent()?;
+    // Only the project scope is read, so the agent dir is never consulted.
+    let settings = FileSettingsStorage::new(project_dir, PathBuf::new())
+        .read(super::storage::SettingsScope::Project)
+        .ok()?;
+    pin(settings_path, settings.as_deref())
 }
 
 /// The restrictive-key projection of an untrusted project document: the

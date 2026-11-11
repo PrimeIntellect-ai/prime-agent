@@ -135,7 +135,7 @@ fn confirm_and_trust(cwd: &Path, agent_dir: &Path, entries: &[PathBuf], yes: boo
     let registry_path = agent_dir.join(pa_core::settings::TRUSTED_PROJECTS_FILE);
     let Some(fingerprint) = pa_core::settings::project_fingerprint(&settings_path) else {
         println!(
-            "A settings.json, SYSTEM.md, or APPEND_SYSTEM.md in {} is unreadable (permissions or not valid UTF-8), so this project cannot be trusted. Make it readable text first.",
+            "A settings.json, SYSTEM.md, or APPEND_SYSTEM.md in {} is unreadable or refused (permissions, not valid UTF-8, over 4 MiB, or a link outside the project), so this project cannot be trusted. Fix that file first.",
             escaped(&config_dir.display().to_string()),
         );
         return Ok(());

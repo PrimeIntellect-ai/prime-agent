@@ -269,6 +269,20 @@ fn a_symlinked_settings_file_does_not_reuse_another_projects_trust() {
     );
 }
 
+/// The pin reads `settings.json` like the loader does (the bounded project
+/// storage), so a settings link that leaves the project cannot be pinned.
+#[cfg(unix)]
+#[test]
+fn a_settings_link_outside_the_project_cannot_be_pinned() {
+    let dir = tempfile::tempdir().unwrap();
+    let outside = dir.path().join("outside.json");
+    std::fs::write(&outside, "{}").unwrap();
+    let settings_path = project_settings(&dir.path().join("repo"));
+    std::fs::create_dir_all(settings_path.parent().unwrap()).unwrap();
+    std::os::unix::fs::symlink(&outside, &settings_path).unwrap();
+    assert_eq!(project_fingerprint(&settings_path), None);
+}
+
 /// `trust_project` provisions a missing agent dir: the first trust on a
 /// stripped install must not fail on the registry lock's missing parent.
 #[test]
