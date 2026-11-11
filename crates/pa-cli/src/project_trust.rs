@@ -48,56 +48,38 @@ fn existing_gated_entries(cwd: &Path) -> Vec<PathBuf> {
     entries
 }
 
-/// The settings entry summary the prompt shows: the keys that visibly
-/// change the session, control bytes escaped.
-fn settings_summary(settings_path: &Path) -> Vec<String> {
+/// The settings keys the prompt lists: the ones that visibly change the
+/// session. Keys only, never values: the file may link to content outside
+/// the project.
+fn settings_summary(settings_path: &Path) -> Vec<&'static str> {
+    const KEYS: [&str; 8] = [
+        "sessionDir",
+        "defaultProvider",
+        "defaultModel",
+        "agentTraces.enabled",
+        "telemetry.enabled",
+        "skills",
+        "prompts",
+        "themes",
+    ];
     let Ok(content) = std::fs::read_to_string(settings_path) else {
         return Vec::new();
     };
     let Ok(value) = serde_json::from_str::<serde_json::Value>(&content) else {
-        return vec!["(the settings file does not parse as JSON)".to_string()];
+        return vec!["(the settings file does not parse as JSON)"];
     };
-    let mut rows = Vec::new();
-    for (section, field) in [
-        ("sessionDir", None),
-        ("defaultProvider", None),
-        ("defaultModel", None),
-        ("agentTraces", Some("enabled")),
-        ("telemetry", Some("enabled")),
-    ] {
-        let field_value = match field {
-            Some(field) => value.get(section).and_then(|s| s.get(field)),
-            None => value.get(section),
-        };
-        if let Some(field_value) = field_value {
-            let label = field.map_or(section.to_string(), |field| format!("{section}.{field}"));
-            rows.push(format!("{label} = {field_value}"));
-        }
-    }
+    let present = |key: &str| match key.split_once('.') {
+        Some((section, field)) => value.get(section).and_then(|s| s.get(field)).is_some(),
+        None => value.get(key).is_some(),
+    };
     // The loader migrates a legacy telemetry bool to `telemetry.enabled`
-    // before applying it (untrusted or not); the summary shows the same row.
-    if let Some(legacy) = value.get("telemetry").and_then(serde_json::Value::as_bool) {
-        if value
-            .get("telemetry")
-            .and_then(|t| t.get("enabled"))
-            .is_none()
-        {
-            rows.push(format!("telemetry.enabled = {legacy}"));
-        }
-    }
-    for array in ["skills", "prompts", "themes"] {
-        if let Some(entries) = value.get(array).and_then(serde_json::Value::as_array) {
-            rows.push(format!(
-                "{array} = [{}]",
-                entries
-                    .iter()
-                    .map(std::string::ToString::to_string)
-                    .collect::<Vec<String>>()
-                    .join(", ")
-            ));
-        }
-    }
-    rows.iter().map(|row| escaped(row).into_owned()).collect()
+    // before applying it (untrusted or not); the summary lists the same key.
+    let legacy_telemetry = value
+        .get("telemetry")
+        .is_some_and(serde_json::Value::is_boolean);
+    KEYS.into_iter()
+        .filter(|key| present(key) || (*key == "telemetry.enabled" && legacy_telemetry))
+        .collect()
 }
 
 /// Flush pending type-ahead so a stray pre-typed line cannot answer the
@@ -182,18 +164,21 @@ pub(crate) fn prompt_first_load(cwd: &Path, agent_dir: &Path) -> Result<()> {
 mod tests {
     use super::*;
 
-    /// The summary shows a legacy telemetry bool the way the loader applies
-    /// it (migrated to `telemetry.enabled`), so the prompt never hides an
-    /// opt-out that will take effect.
+    /// The summary lists keys, never values, and shows a legacy telemetry
+    /// bool the way the loader applies it (migrated to `telemetry.enabled`),
+    /// so the prompt never hides an opt-out that will take effect.
     #[test]
-    fn the_summary_shows_a_legacy_telemetry_bool_as_the_migrated_row() {
+    fn the_summary_lists_keys_only_with_a_legacy_telemetry_bool_as_the_migrated_key() {
         let dir = tempfile::tempdir().unwrap();
         let settings_path = dir.path().join("settings.json");
-        std::fs::write(&settings_path, r#"{"telemetry": false}"#).unwrap();
-        let rows = settings_summary(&settings_path);
-        assert!(
-            rows.iter().any(|row| row == "telemetry.enabled = false"),
-            "the legacy opt-out must appear as the migrated row: {rows:?}"
+        std::fs::write(
+            &settings_path,
+            r#"{"telemetry": false, "sessionDir": "/elsewhere"}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            settings_summary(&settings_path),
+            ["sessionDir", "telemetry.enabled"]
         );
     }
 }
