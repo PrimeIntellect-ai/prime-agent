@@ -132,3 +132,37 @@ fn package_provided_skill_appears_in_created_session_skill_list() {
         "empty skills filter disables the skill"
     );
 }
+
+/// A headless run in a project with untrusted config says so on stderr;
+/// `prime-agent trust --yes` records the trust without a terminal, and the
+/// notice goes away.
+#[test]
+fn trust_yes_records_the_project_and_clears_the_headless_notice() {
+    let sandbox = sandbox(&serde_json::json!({}));
+    write(
+        &sandbox.cwd.join(".prime/agent/settings.json"),
+        r#"{"theme": "project-theme"}"#,
+    );
+    let script = serde_json::json!({ "responses": ["ok"] });
+    let (_, stderr, code) = run(&sandbox, &script);
+    assert_eq!(code, 0, "stderr: {stderr}");
+    assert!(stderr.contains("prime-agent trust"), "stderr: {stderr}");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_prime-agent"))
+        .args(["trust", "--yes"])
+        .env("HOME", sandbox.home.path())
+        .env("PRIME_AGENT_CODING_AGENT_DIR", &sandbox.agent_dir)
+        .current_dir(&sandbox.cwd)
+        .stdin(std::process::Stdio::null())
+        .output()
+        .expect("binary present");
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let (_, stderr, code) = run(&sandbox, &script);
+    assert_eq!(code, 0, "stderr: {stderr}");
+    assert!(!stderr.contains("prime-agent trust"), "stderr: {stderr}");
+}

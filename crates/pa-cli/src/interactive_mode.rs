@@ -456,7 +456,11 @@ fn build_tui_options(
                 // The composition root asked for the launch cwd; a resume
                 // into another project asks here, before the reads below.
                 if saved_cwd != options.config.cwd {
-                    crate::project_trust::prompt_first_load(&saved_cwd, &options.config.agent_dir)?;
+                    crate::project_trust::prompt_first_load(
+                        &saved_cwd,
+                        &options.config.agent_dir,
+                        true,
+                    )?;
                 }
                 resolved_options.config.cwd = saved_cwd;
             }

@@ -63,14 +63,12 @@ fn flush_typeahead() {
     pa_core::platform::process::flush_stdin_typeahead();
 }
 
-/// Prompt for the project's config trust on the interactive first load,
-/// before any settings read for that project. Called for the launch cwd
-/// before the CLI's earliest settings reads, and again for a resumed
-/// session's saved cwd when it differs.
-pub(crate) fn prompt_first_load(cwd: &Path, agent_dir: &Path) -> Result<()> {
-    if !std::io::stdin().is_terminal() {
-        return Ok(());
-    }
+/// Prompt for the project's config trust on the first load, before any
+/// settings read for that project. Called for the launch cwd before the
+/// CLI's earliest settings reads, and again for a resumed session's saved
+/// cwd when it differs. Without `ask` or a terminal it prints the
+/// ignored-config notice to stderr instead (stdout carries the protocols).
+pub(crate) fn prompt_first_load(cwd: &Path, agent_dir: &Path, ask: bool) -> Result<()> {
     let entries = pa_core::settings::gated_project_entries(cwd, agent_dir);
     if entries.is_empty() {
         return Ok(());
@@ -84,6 +82,10 @@ pub(crate) fn prompt_first_load(cwd: &Path, agent_dir: &Path) -> Result<()> {
     }) {
         return Ok(());
     }
+    if !ask || !std::io::stdin().is_terminal() {
+        eprintln!("{}", pa_core::settings::ignored_project_notice(cwd));
+        return Ok(());
+    }
     confirm_and_trust(cwd, agent_dir, &entries, false)
 }
 
@@ -92,7 +94,7 @@ pub(crate) fn prompt_first_load(cwd: &Path, agent_dir: &Path) -> Result<()> {
 pub(crate) fn run_trust_command(args: &[String]) -> i32 {
     let yes = args.iter().any(|arg| arg == "--yes");
     let dirs: Vec<&String> = args.iter().filter(|arg| *arg != "--yes").collect();
-    if dirs.len() > 1 {
+    if dirs.len() > 1 || dirs.iter().any(|arg| arg.starts_with("--")) {
         eprintln!("Usage: prime-agent trust [--yes] [<dir>]");
         return 1;
     }

@@ -238,12 +238,11 @@ fn main_impl(args: &[String], runtime: &dyn mode::Runtime) -> Result<i32, String
     }
 
     let agent_dir = crate::config::get_agent_dir();
-    // The CWE-426 first-load trust prompt (interactive only) precedes the
-    // earliest settings reads below (telemetry, sessionDir, image sizing) so
-    // a yes on the first launch applies to this session, not the next.
-    if app_mode == mode::AppMode::Interactive {
-        project_trust::prompt_first_load(&cwd, &agent_dir).map_err(|error| error.to_string())?;
-    }
+    // The CWE-426 first-load trust prompt precedes the earliest settings
+    // reads below (telemetry, sessionDir, image sizing) so a yes on the first
+    // launch applies to this session, not the next. Only interactive runs ask.
+    project_trust::prompt_first_load(&cwd, &agent_dir, app_mode == mode::AppMode::Interactive)
+        .map_err(|error| error.to_string())?;
     // Telemetry opt-in resolution: env override, then settings; the
     // runtime config only carries the disabled case.
     let telemetry_disabled = crate::mode::telemetry_disabled(
