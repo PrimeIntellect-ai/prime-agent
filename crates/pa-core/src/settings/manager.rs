@@ -630,7 +630,7 @@ impl SettingsManager {
                     // prompt-file change after this read leaves the pinned
                     // state stale (re-prompt on the next load), never
                     // silently admitted.
-                    prompts = gate.prompt_files();
+                    prompts = gate.prompt_files().ok();
                     extend_trust = prompts.as_ref().is_some_and(|(system, append)| {
                         gate.matches(&super::project_trust::pin_over(
                             current.as_deref(),

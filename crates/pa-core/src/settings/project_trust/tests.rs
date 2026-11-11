@@ -280,7 +280,7 @@ fn a_settings_link_outside_the_project_cannot_be_pinned() {
     let settings_path = project_settings(&dir.path().join("repo"));
     std::fs::create_dir_all(settings_path.parent().unwrap()).unwrap();
     std::os::unix::fs::symlink(&outside, &settings_path).unwrap();
-    assert_eq!(project_fingerprint(&settings_path), None);
+    assert!(project_fingerprint(&settings_path).is_err());
 }
 
 /// `trust_project` provisions a missing agent dir: the first trust on a
@@ -682,7 +682,7 @@ fn a_pinned_prompt_file_outside_the_project_refuses() {
     std::fs::write(&outside, "outside system prompt").unwrap();
     std::os::unix::fs::symlink(&outside, settings_path.with_file_name("SYSTEM.md")).unwrap();
     // The pin is uncomputable (refused): no pin, no trust.
-    assert_eq!(super::project_fingerprint(&settings_path), None);
+    assert!(super::project_fingerprint(&settings_path).is_err());
     // A FIFO never blocks the read either: refused, not opened.
     let fifo = settings_path.with_file_name("APPEND_SYSTEM.md");
     let _ = std::fs::remove_file(&fifo);
@@ -692,7 +692,7 @@ fn a_pinned_prompt_file_outside_the_project_refuses() {
         let made = unsafe { libc::mkfifo(name.as_ptr(), 0o600) };
         assert_eq!(made, 0, "mkfifo fixture");
     }
-    assert_eq!(super::project_fingerprint(&settings_path), None);
+    assert!(super::project_fingerprint(&settings_path).is_err());
 }
 
 /// A huge prompt file is bounded by the project-settings cap: the pin
@@ -710,11 +710,11 @@ fn a_oversized_prompt_file_refuses_instead_of_reading() {
     let cap = crate::settings::storage::MAX_PROJECT_SETTINGS_BYTES;
     let mut big = vec![b'#'; cap + 1];
     std::fs::write(settings_path.with_file_name("SYSTEM.md"), &big).unwrap();
-    assert_eq!(super::project_fingerprint(&settings_path), None);
+    assert!(super::project_fingerprint(&settings_path).is_err());
     // Inside the cap the pin computes.
     big.truncate(cap);
     std::fs::write(settings_path.with_file_name("SYSTEM.md"), &big).unwrap();
-    assert!(super::project_fingerprint(&settings_path).is_some());
+    assert!(super::project_fingerprint(&settings_path).is_ok());
 }
 
 /// The write path's re-pin lands exactly the pin the lock's own check

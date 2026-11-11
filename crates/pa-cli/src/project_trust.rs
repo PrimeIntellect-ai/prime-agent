@@ -77,26 +77,23 @@ pub(crate) fn prompt_first_load(cwd: &Path, agent_dir: &Path, ask: bool) -> Resu
         .join(pa_core::settings::CONFIG_DIR_NAME)
         .join("settings.json");
     let registry_path = agent_dir.join(pa_core::settings::TRUSTED_PROJECTS_FILE);
-    match pa_core::settings::project_fingerprint(&settings_path) {
-        Some(fingerprint)
-            if pa_core::settings::project_trusted(&registry_path, &settings_path, &fingerprint) =>
-        {
-            return Ok(());
-        }
-        // An uncomputable pin (unreadable or refused file) never aborts the
-        // launch: the config stays ignored and the notice tells the user;
-        // the explicit trust command surfaces the full refusal and fails.
-        None => {
-            eprintln!("{}", pa_core::settings::ignored_project_notice(cwd));
-            return Ok(());
-        }
-        Some(_) => {}
-    }
-    if !ask || !std::io::stdin().is_terminal() {
-        eprintln!("{}", pa_core::settings::ignored_project_notice(cwd));
+    let fingerprint = pa_core::settings::project_fingerprint(&settings_path).ok();
+    if fingerprint.as_deref().is_some_and(|fingerprint| {
+        pa_core::settings::project_trusted(&registry_path, &settings_path, fingerprint)
+    }) {
         return Ok(());
     }
-    confirm_and_trust(cwd, agent_dir, &entries, false)
+    match fingerprint {
+        Some(fingerprint) if ask && std::io::stdin().is_terminal() => {
+            confirm_and_trust(cwd, agent_dir, &entries, &fingerprint, false)
+        }
+        // A refused pinned file cannot be trusted here; `prime-agent trust`
+        // names the file and the cause.
+        _ => {
+            eprintln!("{}", pa_core::settings::ignored_project_notice(cwd));
+            Ok(())
+        }
+    }
 }
 
 /// `prime-agent trust [--yes] [<dir>]`: show the project's gated config and
@@ -117,6 +114,9 @@ pub(crate) fn run_trust_command(args: &[String]) -> i32 {
         None => std::env::current_dir(),
     };
     let result = dir.map_err(anyhow::Error::from).and_then(|dir| {
+        if !dir.is_dir() {
+            anyhow::bail!("{} is not a directory", escaped(&dir.display().to_string()));
+        }
         let agent_dir = crate::config::get_agent_dir();
         let entries = pa_core::settings::gated_project_entries(&dir, &agent_dir);
         if entries.is_empty() {
@@ -126,7 +126,11 @@ pub(crate) fn run_trust_command(args: &[String]) -> i32 {
             );
             return Ok(());
         }
-        confirm_and_trust(&dir, &agent_dir, &entries, yes)
+        let settings_path = dir
+            .join(pa_core::settings::CONFIG_DIR_NAME)
+            .join("settings.json");
+        let fingerprint = pa_core::settings::project_fingerprint(&settings_path)?;
+        confirm_and_trust(&dir, &agent_dir, &entries, &fingerprint, yes)
     });
     match result {
         Ok(()) => 0,
@@ -138,17 +142,18 @@ pub(crate) fn run_trust_command(args: &[String]) -> i32 {
 }
 
 /// List the project's gated config, ask unless `yes`, and record the trust
-/// pinned to the files as shown.
-fn confirm_and_trust(cwd: &Path, agent_dir: &Path, entries: &[PathBuf], yes: bool) -> Result<()> {
-    let config_dir = cwd.join(pa_core::settings::CONFIG_DIR_NAME);
-    let settings_path = config_dir.join("settings.json");
+/// pinned to `fingerprint`, the files as shown.
+fn confirm_and_trust(
+    cwd: &Path,
+    agent_dir: &Path,
+    entries: &[PathBuf],
+    fingerprint: &str,
+    yes: bool,
+) -> Result<()> {
+    let settings_path = cwd
+        .join(pa_core::settings::CONFIG_DIR_NAME)
+        .join("settings.json");
     let registry_path = agent_dir.join(pa_core::settings::TRUSTED_PROJECTS_FILE);
-    let Some(fingerprint) = pa_core::settings::project_fingerprint(&settings_path) else {
-        anyhow::bail!(
-            "a settings.json, SYSTEM.md, or APPEND_SYSTEM.md in {} is unreadable or refused (permissions, not valid UTF-8, over 4 MiB, or a link outside the project), so this project cannot be trusted. Fix that file first.",
-            escaped(&config_dir.display().to_string()),
-        );
-    };
     println!("This project carries its own Prime Agent config, which can change how Prime Agent behaves here:");
     for entry in entries {
         println!("  {}", escaped(&entry.display().to_string()));
@@ -164,7 +169,7 @@ fn confirm_and_trust(cwd: &Path, agent_dir: &Path, entries: &[PathBuf], yes: boo
         crate::daemon_discovery::stop::prompt_yes_no("Trust this project's config?")
     };
     if trusted {
-        pa_core::settings::trust_project(&registry_path, &settings_path, &fingerprint)?;
+        pa_core::settings::trust_project(&registry_path, &settings_path, fingerprint)?;
         println!("Trusted. The project's settings and discovered files now apply.");
     } else {
         println!("Ignored. The project's settings and discovered files stay inactive.");

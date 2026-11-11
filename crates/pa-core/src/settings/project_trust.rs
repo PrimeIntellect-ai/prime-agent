@@ -8,7 +8,7 @@
 
 use std::path::{Path, PathBuf};
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use sha2::{Digest, Sha256};
 use std::fmt::Write as _;
 
@@ -44,22 +44,23 @@ fn project_root(settings_path: &Path) -> PathBuf {
 /// length, bytes, so any change to any of them (a file appearing or
 /// disappearing included) re-prompts. `settings` is the settings document
 /// as the caller read it (`None` when absent); the prompt files are read
-/// beside `settings_path`. `None` when a prompt file exists but cannot be
-/// read (permissions, invalid UTF-8): an unreadable file never rides a pin.
-fn pin(settings_path: &Path, settings: Option<&str>) -> Option<String> {
+/// beside `settings_path`. An error when a prompt file exists but is
+/// refused or unreadable: such a file never rides a pin.
+fn pin(settings_path: &Path, settings: Option<&str>) -> Result<String> {
     let (system, append) = prompt_files(settings_path)?;
-    Some(pin_over(settings, system.as_deref(), append.as_deref()))
+    Ok(pin_over(settings, system.as_deref(), append.as_deref()))
 }
 
 /// The pinned prompt files beside `settings_path`, ONE read of each through
 /// the project storage (its link, size, and regular-file rules), so a
 /// checkout cannot hang or exhaust the process before any trust decision.
-/// `None` when either is refused or unreadable.
-fn prompt_files(settings_path: &Path) -> Option<(Option<String>, Option<String>)> {
+/// An error naming the file when either is refused or unreadable.
+fn prompt_files(settings_path: &Path) -> Result<(Option<String>, Option<String>)> {
     let storage = FileSettingsStorage::new(project_root(settings_path), PathBuf::new());
-    let system = storage.read_project_file("SYSTEM.md").ok()?;
-    let append = storage.read_project_file("APPEND_SYSTEM.md").ok()?;
-    Some((system, append))
+    Ok((
+        storage.read_project_file("SYSTEM.md")?,
+        storage.read_project_file("APPEND_SYSTEM.md")?,
+    ))
 }
 
 /// The pin over given settings and prompt-file contents (already read by
@@ -87,15 +88,17 @@ pub(crate) fn pin_over(
 
 /// The trust pin for a project as it is on disk now (see [`pin`]), with
 /// `settings.json` read the way the loader reads it (the bounded project
-/// storage). `None` when a pinned file is unreadable or refused: such a
-/// project cannot be trusted.
-#[must_use]
-pub fn project_fingerprint(settings_path: &Path) -> Option<String> {
-    let project_dir = settings_path.parent()?.parent()?.parent()?;
+/// storage).
+///
+/// # Errors
+///
+/// Returns an error naming the file and the cause when a pinned file is
+/// refused or unreadable: such a project cannot be trusted.
+pub fn project_fingerprint(settings_path: &Path) -> Result<String> {
     // Only the project scope is read, so the agent dir is never consulted.
-    let settings = FileSettingsStorage::new(project_dir, PathBuf::new())
+    let settings = FileSettingsStorage::new(project_root(settings_path), PathBuf::new())
         .read(super::storage::SettingsScope::Project)
-        .ok()?;
+        .with_context(|| format!("cannot read {}", settings_path.display()))?;
     pin(settings_path, settings.as_deref())
 }
 
@@ -307,16 +310,15 @@ impl ProjectTrustGate {
     /// settings document (as the loader read it; `None` when absent).
     #[must_use]
     pub(crate) fn admits(&self, settings: Option<&str>) -> bool {
-        pin(&self.settings_path, settings).is_some_and(|pin| self.matches(&pin))
+        pin(&self.settings_path, settings).is_ok_and(|pin| self.matches(&pin))
     }
 
     /// The prompt files' content, ONE read of each (the write path's admit
     /// check and its re-pin share this read, so nothing unlocked sits
     /// between the check and the pin that lands in the registry).
-    /// `None` when a prompt file is unreadable or refused: such a project
+    /// An error when a prompt file is unreadable or refused: such a project
     /// cannot be trusted.
-    #[must_use]
-    pub(crate) fn prompt_files(&self) -> Option<(Option<String>, Option<String>)> {
+    pub(crate) fn prompt_files(&self) -> Result<(Option<String>, Option<String>)> {
         prompt_files(&self.settings_path)
     }
 

@@ -133,6 +133,18 @@ fn package_provided_skill_appears_in_created_session_skill_list() {
     );
 }
 
+fn trust(sandbox: &Sandbox, args: &[&str]) -> std::process::Output {
+    Command::new(env!("CARGO_BIN_EXE_prime-agent"))
+        .arg("trust")
+        .args(args)
+        .env("HOME", sandbox.home.path())
+        .env("PRIME_AGENT_CODING_AGENT_DIR", &sandbox.agent_dir)
+        .current_dir(&sandbox.cwd)
+        .stdin(std::process::Stdio::null())
+        .output()
+        .expect("binary present")
+}
+
 /// A headless run in a project with untrusted config says so on stderr;
 /// `prime-agent trust --yes` records the trust without a terminal, and the
 /// notice goes away.
@@ -148,14 +160,7 @@ fn trust_yes_records_the_project_and_clears_the_headless_notice() {
     assert_eq!(code, 0, "stderr: {stderr}");
     assert!(stderr.contains("prime-agent trust"), "stderr: {stderr}");
 
-    let output = Command::new(env!("CARGO_BIN_EXE_prime-agent"))
-        .args(["trust", "--yes"])
-        .env("HOME", sandbox.home.path())
-        .env("PRIME_AGENT_CODING_AGENT_DIR", &sandbox.agent_dir)
-        .current_dir(&sandbox.cwd)
-        .stdin(std::process::Stdio::null())
-        .output()
-        .expect("binary present");
+    let output = trust(&sandbox, &["--yes"]);
     assert!(
         output.status.success(),
         "stderr: {}",
@@ -165,4 +170,23 @@ fn trust_yes_records_the_project_and_clears_the_headless_notice() {
     let (_, stderr, code) = run(&sandbox, &script);
     assert_eq!(code, 0, "stderr: {stderr}");
     assert!(!stderr.contains("prime-agent trust"), "stderr: {stderr}");
+}
+
+/// `prime-agent trust` fails with the cause when it trusts nothing: a
+/// missing directory, or a pinned file it refuses to read.
+#[test]
+fn trust_fails_when_it_trusts_nothing() {
+    let sandbox = sandbox(&serde_json::json!({}));
+    let output = trust(&sandbox, &["--yes", "missing-dir"]);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!output.status.success(), "stderr: {stderr}");
+    assert!(stderr.contains("not a directory"), "stderr: {stderr}");
+
+    let system = sandbox.cwd.join(".prime/agent/SYSTEM.md");
+    std::fs::create_dir_all(system.parent().unwrap()).unwrap();
+    std::fs::write(&system, b"\xff not utf-8").unwrap();
+    let output = trust(&sandbox, &["--yes"]);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!output.status.success(), "stderr: {stderr}");
+    assert!(stderr.contains("SYSTEM.md"), "stderr: {stderr}");
 }
