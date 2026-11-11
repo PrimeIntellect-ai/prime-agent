@@ -366,8 +366,8 @@ fn a_write_against_diverged_project_bytes_fails_closed() {
     assert!(
         errors
             .iter()
-            .any(|error| error.message.contains("not trusted. Reopen")),
-        "the refusal reads as a normal sentence, not a padded line: {errors:?}"
+            .any(|error| error.message.contains("Run `prime-agent trust '")),
+        "the refusal names the command that trusts the project: {errors:?}"
     );
     assert!(
         manager.settings().skills.is_none(),
@@ -772,5 +772,25 @@ fn the_trust_command_quotes_the_path_and_escapes_control_bytes() {
     assert_eq!(
         trust_command(Path::new("/tmp/My Project/it's\u{1b}[2J")),
         "prime-agent trust '/tmp/My Project/it'\\''s?[2J'"
+    );
+}
+
+/// In `$HOME` the project config dir is the agent dir: the "project" file is
+/// the user's own global settings, so a project-scope write is never gated.
+/// Red against a gate that refuses it forever (nothing can trust it).
+#[test]
+fn a_project_write_in_the_home_dir_lands() {
+    let home = tempfile::tempdir().unwrap();
+    let agent_dir = home.path().join(CONFIG_DIR_NAME);
+    std::fs::create_dir_all(&agent_dir).unwrap();
+    std::fs::write(agent_dir.join("settings.json"), r#"{"theme":"mine"}"#).unwrap();
+
+    let mut manager = SettingsManager::create(home.path(), &agent_dir);
+    manager.set_project_resource_array("skills", vec!["custom".to_string()]);
+    assert!(manager.drain_errors().is_empty());
+    let manager = SettingsManager::create(home.path(), &agent_dir);
+    assert_eq!(
+        manager.project_settings().skills,
+        Some(vec!["custom".to_string()])
     );
 }

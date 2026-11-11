@@ -100,7 +100,7 @@ impl SettingsManager {
     ) -> Self {
         let cwd = std::path::PathBuf::from(cwd.as_ref());
         let agent_dir = std::path::PathBuf::from(agent_dir.as_ref());
-        let trust_gate = Some(ProjectTrustGate::new(&cwd, &agent_dir));
+        let trust_gate = ProjectTrustGate::new(&cwd, &agent_dir);
         let storage: Arc<dyn SettingsStorage> =
             Arc::new(super::storage::FileSettingsStorage::new(cwd, agent_dir));
         Self::from_storage_gated(storage, trust_gate)
@@ -619,7 +619,7 @@ impl SettingsManager {
         let mut failure = None;
         let mut admitted_pin: Option<String> = None;
         let mut extend_trust = false;
-        let mut untrusted = false;
+        let mut refused_trust_command: Option<String> = None;
         let result = self.storage.with_lock(scope, &mut |current| {
             let mut prompts: Option<(Option<String>, Option<String>)> = None;
             if scope == SettingsScope::Project {
@@ -639,7 +639,7 @@ impl SettingsManager {
                         ))
                     });
                     if current.is_some() && !extend_trust {
-                        untrusted = true;
+                        refused_trust_command = Some(gate.trust_command());
                         return None;
                     }
                 }
@@ -666,11 +666,12 @@ impl SettingsManager {
                 }
             }
         });
-        if untrusted {
+        if let Some(trust_command) = refused_trust_command {
             self.errors.push(SettingsError {
                 scope,
-                message: "Project settings not saved: this project's settings are not trusted. Reopen the project interactively to trust them."
-                    .to_string(),
+                message: format!(
+                    "Project settings not saved: this project's settings are not trusted. Run `{trust_command}` to trust them."
+                ),
             });
             return false;
         }

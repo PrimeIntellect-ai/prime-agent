@@ -217,10 +217,9 @@ mod tests;
 /// dir is the agent dir itself: that is the user's own global config.
 #[must_use]
 pub fn gated_project_entries(cwd: &Path, agent_dir: &Path) -> Vec<PathBuf> {
-    let config_dir = cwd.join(super::storage::CONFIG_DIR_NAME);
-    if config_dir == agent_dir {
+    let Some(config_dir) = project_config_dir(cwd, agent_dir) else {
         return Vec::new();
-    }
+    };
     let mut entries = [
         "settings.json",
         "SYSTEM.md",
@@ -239,6 +238,13 @@ pub fn gated_project_entries(cwd: &Path, agent_dir: &Path) -> Vec<PathBuf> {
             .filter(|dir| dir.is_dir()),
     );
     entries
+}
+
+/// The project config dir for `cwd`; `None` when it is the agent dir itself
+/// (a session in `$HOME`): that is the user's own global config, never
+/// gated.
+fn project_config_dir(cwd: &Path, agent_dir: &Path) -> Option<PathBuf> {
+    Some(cwd.join(super::storage::CONFIG_DIR_NAME)).filter(|config_dir| config_dir != agent_dir)
 }
 
 /// The project dir whose gated config is present but untrusted, so the
@@ -304,13 +310,18 @@ pub(crate) struct ProjectTrustGate {
 }
 
 impl ProjectTrustGate {
-    pub(crate) fn new(cwd: &Path, agent_dir: &Path) -> Self {
-        ProjectTrustGate {
+    /// The gate for `cwd`'s project scope; `None` when the project config
+    /// dir is the agent dir (see [`gated_project_entries`]).
+    pub(crate) fn new(cwd: &Path, agent_dir: &Path) -> Option<Self> {
+        project_config_dir(cwd, agent_dir).map(|config_dir| ProjectTrustGate {
             registry_path: agent_dir.join(TRUSTED_PROJECTS_FILE),
-            settings_path: cwd
-                .join(super::storage::CONFIG_DIR_NAME)
-                .join("settings.json"),
-        }
+            settings_path: config_dir.join("settings.json"),
+        })
+    }
+
+    /// The command that trusts this project.
+    pub(crate) fn trust_command(&self) -> String {
+        trust_command(&project_root(&self.settings_path))
     }
 
     /// Whether the registry pins this project with `settings` as its
