@@ -1439,7 +1439,7 @@ async fn the_wake_row_refresh_follows_the_live_store() {
     // coverage over the waiting set instead of dropping a wake unread
     // messages still need.
     {
-        worker.inbox_arrivals.lock().unwrap().clear();
+        arrivals.lock().unwrap().clear();
         crate::worker::refresh_inbox_wake_rows(&worker.core, &arrivals, &inbox);
         let rows = steering_rows(&worker);
         assert!(
@@ -1538,6 +1538,52 @@ async fn the_read_hook_refreshes_the_wake_rows_and_their_action_events() {
             event.get("type").and_then(Value::as_str) == Some("session_action_update")
         }),
         "the retraction refreshed the strip: {hook_frames:?}"
+    );
+    let _ = std::fs::remove_dir_all(worker.config.socket_path.parent().unwrap());
+}
+
+/// A live batch drained to nothing drops its arrival row (older unread
+/// mail keeps its reminder); only an unknown recovered batch rebuilds.
+#[tokio::test]
+async fn a_drained_live_batch_drops_its_row_without_rebuilding() {
+    let (worker, inbox, arrivals, notify) = routing_state();
+    worker.dispatch("clear_queue", &json!({})).await;
+    worker.core.lock().unwrap().busy = true;
+    // An older message waits without ever being covered by the row.
+    inbox.push(
+        inbox_notice(
+            pa_core::session_engine::inbox::INBOX_CLASS_BASH_DONE,
+            "older",
+        ),
+        500,
+    );
+    let _ = admit_inbox_notice(
+        &worker.recovery,
+        &worker.core,
+        &notify,
+        &inbox,
+        &arrivals,
+        inbox_notice(
+            pa_core::session_engine::inbox::INBOX_CLASS_BASH_DONE,
+            "covered",
+        ),
+        Lane::Steering,
+        || false,
+        |_, _| None,
+    );
+    // The read takes the covered arrival only; the live batch trims to
+    // nothing while the older message stays.
+    let taken = inbox.drain_matching(&pa_core::session_engine::inbox::InboxReadFilter {
+        since_ms: Some(1_000),
+        ..Default::default()
+    });
+    assert_eq!(taken.len(), 1);
+    assert_eq!(inbox.count().0, 1, "the older message waits");
+    crate::worker::refresh_inbox_wake_rows(&worker.core, &arrivals, &inbox);
+    let rows = steering_rows(&worker);
+    assert!(
+        rows.is_empty(),
+        "the drained live batch drops its row instead of re-announcing: {rows:?}"
     );
     let _ = std::fs::remove_dir_all(worker.config.socket_path.parent().unwrap());
 }
