@@ -637,7 +637,15 @@ impl SettingsManager {
                             return None;
                         }
                         Some(true) => extend_trust = true,
-                        None => {}
+                        None => {
+                            // An absence pin (a trust decision recorded while
+                            // the file was absent) extends to the user's own
+                            // first write; a project with no registry entry
+                            // creates none.
+                            if gate.admits_project() {
+                                extend_trust = true;
+                            }
+                        }
                     }
                 }
             }

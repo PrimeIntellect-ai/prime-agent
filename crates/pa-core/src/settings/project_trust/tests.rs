@@ -553,3 +553,51 @@ fn a_legacy_telemetry_bool_opt_out_survives_untrusted() {
         "the legacy opt-out must apply while untrusted"
     );
 }
+
+/// A trust decision recorded while the settings file was absent (the
+/// absence pin) extends to the user's own first write: the new bytes
+/// re-pin, so the already-authorized gated surface (SYSTEM.md, discovered
+/// skills) survives the file's creation. Red against a write path that
+/// treats every absent document as trust-creating-none.
+#[test]
+fn an_absence_pin_extends_to_the_first_write() {
+    let dir = tempfile::tempdir().unwrap();
+    let agent_dir = dir.path().join("agent");
+    let cwd = dir.path().join("repo");
+    let config = cwd.join(CONFIG_DIR_NAME);
+    std::fs::create_dir_all(config.join("skills/authorized")).unwrap();
+    std::fs::write(
+        config.join("skills/authorized/SKILL.md"),
+        "---\nname: authorized\ndescription: sibling\n---\nBody",
+    )
+    .unwrap();
+    let settings_path = project_settings(&cwd);
+    trust_project(&agent_dir.join(TRUSTED_PROJECTS_FILE), &settings_path, "").unwrap();
+    let before = SettingsManager::create(&cwd, &agent_dir);
+    assert!(
+        before.project_config_trusted(),
+        "the absence pin authorizes"
+    );
+
+    let mut manager = SettingsManager::create(&cwd, &agent_dir);
+    manager.set_project_resource_array("skills", vec!["custom".to_string()]);
+    assert!(
+        manager.drain_errors().is_empty(),
+        "the first write succeeds"
+    );
+    assert!(settings_path.exists(), "the file was created");
+
+    let after = SettingsManager::create(&cwd, &agent_dir);
+    assert!(
+        after.project_config_trusted(),
+        "the first write re-pins the new bytes instead of dropping the trust"
+    );
+    let resources = load_resources_cold(&cwd, &agent_dir);
+    assert!(
+        resources
+            .skills
+            .iter()
+            .any(|skill| skill.name == "authorized"),
+        "the already-authorized sibling survives the write"
+    );
+}
