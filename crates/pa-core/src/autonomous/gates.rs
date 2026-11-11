@@ -279,6 +279,18 @@ const SNAPSHOT_EXCLUDES: [&str; 6] = [
     "runner_args.log",
 ];
 
+/// The `-c` override that keeps repository hooks out of reach: the hooks path points at
+/// the platform's null device, an object no hook can exist under. On unix `/dev/null` is
+/// a character device; on Windows the analogue is `NUL`, a reserved device name no file
+/// or directory can carry. The split matters in both directions - a literal `/dev/null`
+/// on Windows is an ordinary path some child process can materialize as a directory, and
+/// a bare `NUL` on unix is a plain relative name a repository can turn into a hook
+/// location inside the worktree.
+#[cfg(unix)]
+const HOOKS_PATH_OVERRIDE: &str = "core.hooksPath=/dev/null";
+#[cfg(windows)]
+const HOOKS_PATH_OVERRIDE: &str = "core.hooksPath=NUL";
+
 /// Fixed arguments of the worktree-snapshot `status` probe. The `-c` overrides are
 /// command-line configuration: they outrank repository, worktree and included config, and
 /// reach git's own child processes through `GIT_CONFIG_PARAMETERS`. Each closes one way the
@@ -286,10 +298,11 @@ const SNAPSHOT_EXCLUDES: [&str; 6] = [
 ///
 /// - `core.fsmonitor=false` - the fsmonitor hook would otherwise run on the index refresh
 ///   this probe performs;
-/// - `core.hooksPath=/dev/null` and `diff.autoRefreshIndex=false` - a diff refresh can
-///   still write the index (and fire a repository post-index-change hook) even under
-///   `--no-optional-locks`; either override alone prevents it, and both keep the probe
-///   from running the hook and from rewriting the user's index;
+/// - `core.hooksPath` pointed at the platform's null device (`HOOKS_PATH_OVERRIDE`) and
+///   `diff.autoRefreshIndex=false` - a diff refresh can still write the index (and fire a
+///   repository post-index-change hook) even under `--no-optional-locks`; either override
+///   alone prevents it, and both keep the probe from running the hook and from rewriting
+///   the user's index;
 /// - `protocol.allow=never` plus `protocol.<name>.allow=never` for the transport family
 ///   (`file`, `ext`, `git`, `ssh`, `http`, `https`, `ftp`, `ftps`, `rsync`) - a promisor
 ///   lazy fetch would otherwise run the repository's uploadpack, ssh or ext command; the
@@ -304,7 +317,7 @@ const SNAPSHOT_STATUS_ARGS: [&str; 33] = [
     "-c",
     "core.fsmonitor=false",
     "-c",
-    "core.hooksPath=/dev/null",
+    HOOKS_PATH_OVERRIDE,
     "-c",
     "diff.autoRefreshIndex=false",
     "-c",
@@ -343,7 +356,7 @@ const SNAPSHOT_DIFF_ARGS: [&str; 33] = [
     "-c",
     "core.fsmonitor=false",
     "-c",
-    "core.hooksPath=/dev/null",
+    HOOKS_PATH_OVERRIDE,
     "-c",
     "diff.autoRefreshIndex=false",
     "-c",
@@ -803,6 +816,20 @@ mod tests {
         );
         let digest = hash_untracked_path(&dir.path().join("untracked.txt"));
         assert!(digest.starts_with("file:"));
+    }
+
+    /// The hooks override must name the platform object no hook can exist
+    /// under - the unix character device, or the Windows reserved device
+    /// name - and both probe argument lists must carry it. No cfg gate: the
+    /// platform value is pinned wherever the crate's tests are compiled.
+    #[test]
+    fn the_hooks_path_override_is_the_platform_null_device() {
+        assert!(SNAPSHOT_STATUS_ARGS.contains(&HOOKS_PATH_OVERRIDE));
+        assert!(SNAPSHOT_DIFF_ARGS.contains(&HOOKS_PATH_OVERRIDE));
+        #[cfg(unix)]
+        assert_eq!(HOOKS_PATH_OVERRIDE, "core.hooksPath=/dev/null");
+        #[cfg(windows)]
+        assert_eq!(HOOKS_PATH_OVERRIDE, "core.hooksPath=NUL");
     }
 
     /// The probes run inside a repository whose own configuration names
