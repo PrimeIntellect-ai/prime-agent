@@ -1,1 +1,0 @@
-- Reject project settings files above 4 MiB before they can exhaust memory on load.

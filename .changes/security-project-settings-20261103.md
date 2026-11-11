@@ -1,1 +1,1 @@
-- Prevented project settings links from reading or copying files outside the project directory.
+- Project settings (`.prime/agent/settings.json`) can no longer link outside the project: such a link is now refused with an error instead of being read and overwritten. Links inside the project keep working, and saves now write to the linked file instead of replacing the link. Project settings files are limited to 4 MiB.
