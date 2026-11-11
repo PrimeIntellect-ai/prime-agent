@@ -454,6 +454,17 @@ impl SessionInbox {
         removed
     }
 
+    /// The waiting messages in arrival order: the wake-row refresh
+    /// rebuilds an unknown recovered batch from them.
+    #[must_use]
+    pub fn waiting_messages(&self) -> Vec<InboxMessage> {
+        let state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state.messages.clone()
+    }
+
     /// The waiting message ids: the wake-row refresh trims its covered
     /// batches against the live set.
     #[must_use]

@@ -810,18 +810,27 @@ impl Worker {
             let hook_core = Arc::clone(&core);
             let hook_arrivals = std::sync::Arc::clone(&inbox_arrivals);
             let hook_events = Arc::clone(&events);
+            let hook_recovery = Arc::clone(&recovery);
             engine.set_inbox_read_hook(std::sync::Arc::new(
                 move |inbox: &std::sync::Arc<pa_core::session_engine::inbox::SessionInbox>| {
-                    refresh_inbox_wake_rows(&hook_core, &hook_arrivals, inbox);
-                    let snapshot = {
-                        let core = hook_core.lock().unwrap();
-                        Worker::snapshot_locked(&core)
-                    };
-                    let _ = crate::worker::summary::emit_action_update_raw(
-                        &hook_core,
-                        &hook_events,
-                        &snapshot,
-                    );
+                    if refresh_inbox_wake_rows(&hook_core, &hook_arrivals, inbox) {
+                        // The refreshed lanes are live work until the turn
+                        // settles: a crash must not restore a stale wake.
+                        checkpoint_queue_recovery(
+                            &hook_recovery,
+                            &hook_core,
+                            QueueCheckpoint::Settle {
+                                operation: "queue_mutated",
+                            },
+                        );
+                        // The projection recomputes under the emission
+                        // lock, so a concurrent admission's strip state
+                        // is never overwritten by a stale copy.
+                        let _ = crate::worker::summary::emit_action_update_fresh(
+                            &hook_core,
+                            &hook_events,
+                        );
+                    }
                 },
             ));
         }

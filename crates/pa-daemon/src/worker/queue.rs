@@ -723,9 +723,9 @@ pub(crate) fn refresh_inbox_wake_rows(
     core: &Arc<Mutex<SessionCore>>,
     arrivals: &pa_core::session_engine::inbox::InboxArrivals,
     inbox: &std::sync::Arc<pa_core::session_engine::inbox::SessionInbox>,
-) {
+) -> bool {
     let mut core_guard = core.lock().unwrap();
-    refresh_inbox_wake_rows_locked(&mut core_guard, arrivals, inbox);
+    refresh_inbox_wake_rows_locked(&mut core_guard, arrivals, inbox)
 }
 
 /// [`refresh_inbox_wake_rows`] over an already locked core: the clear
@@ -736,18 +736,27 @@ pub(crate) fn refresh_inbox_wake_rows_locked(
     core_guard: &mut SessionCore,
     arrivals: &pa_core::session_engine::inbox::InboxArrivals,
     inbox: &std::sync::Arc<pa_core::session_engine::inbox::SessionInbox>,
-) {
+) -> bool {
     let waiting = inbox.waiting_ids();
     let mut batch = arrivals.lock().unwrap();
     batch.retain(|message| waiting.contains(&message.id));
     let (count, _, _) = inbox.count();
+    // A recovered wake row arrives without its batch (the worker's batch
+    // state starts empty): rebuild coverage over the waiting set instead
+    // of dropping a wake unread messages still need.
+    if batch.is_empty() && count > 0 {
+        batch.extend(inbox.waiting_messages());
+    }
+    let mut changed = false;
     if batch.is_empty() {
+        let before = core_guard.steering.len() + core_guard.follow_up.len();
         core_guard
             .steering
             .retain(|item| item.queue_key.as_deref() != Some(INBOX_ARRIVAL_QUEUE_KEY));
         core_guard
             .follow_up
             .retain(|item| item.queue_key.as_deref() != Some(INBOX_ARRIVAL_QUEUE_KEY));
+        changed |= core_guard.steering.len() + core_guard.follow_up.len() != before;
     } else {
         let (preview, text) = pa_core::session_engine::inbox::arrival_notice(&batch, count);
         let text = inbox.with_persistence_error_clause(text);
@@ -758,17 +767,22 @@ pub(crate) fn refresh_inbox_wake_rows_locked(
             .chain(follow_up.iter_mut())
             .filter(|item| item.queue_key.as_deref() == Some(INBOX_ARRIVAL_QUEUE_KEY))
         {
-            item.message.clone_from(&text);
-            item.preview = Some(preview.clone());
+            if item.message != text || item.preview.as_deref() != Some(preview.as_str()) {
+                item.message.clone_from(&text);
+                item.preview = Some(preview.clone());
+                changed = true;
+            }
         }
     }
     if count == 0 {
+        let before = core_guard.steering.len() + core_guard.follow_up.len();
         core_guard
             .steering
             .retain(|item| item.queue_key.as_deref() != Some(INBOX_REMINDER_QUEUE_KEY));
         core_guard
             .follow_up
             .retain(|item| item.queue_key.as_deref() != Some(INBOX_REMINDER_QUEUE_KEY));
+        changed |= core_guard.steering.len() + core_guard.follow_up.len() != before;
     } else {
         let reminder = inbox
             .with_persistence_error_clause(pa_core::session_engine::inbox::reminder_notice(count));
@@ -779,9 +793,13 @@ pub(crate) fn refresh_inbox_wake_rows_locked(
             .chain(follow_up.iter_mut())
             .filter(|item| item.queue_key.as_deref() == Some(INBOX_REMINDER_QUEUE_KEY))
         {
-            item.message.clone_from(&reminder);
+            if item.message != reminder {
+                item.message.clone_from(&reminder);
+                changed = true;
+            }
         }
     }
+    changed
 }
 
 /// Admit one periodic unread reminder: while the inbox stays non-empty,
@@ -796,16 +814,19 @@ pub(crate) fn admit_inbox_reminder(
     inbox: &std::sync::Arc<pa_core::session_engine::inbox::SessionInbox>,
     session_is_closed: impl Fn() -> bool,
 ) {
+    let mut core_guard = core.lock().unwrap();
+    if session_is_closed() {
+        return;
+    }
+    // The count re-samples under the core lock: a concurrent drain and
+    // its wake-row refresh may have emptied the store since the cycle
+    // sampled it, and a reminder for nothing must not queue.
     let (count, _, _) = inbox.count();
     if count == 0 {
         return;
     }
     let message =
         inbox.with_persistence_error_clause(pa_core::session_engine::inbox::reminder_notice(count));
-    let mut core_guard = core.lock().unwrap();
-    if session_is_closed() {
-        return;
-    }
     let (policy, queue_visible) = if core_guard.busy {
         (TurnPolicy::Queued, true)
     } else {
