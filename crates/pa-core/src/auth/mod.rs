@@ -32,6 +32,7 @@ pub use provider_oauth::{
 };
 pub use storage::{
     parse_storage_data, AuthStorageBackend, FileAuthStorageBackend, InMemoryAuthStorageBackend,
+    RefreshLock,
 };
 pub use types::{
     AuthCredential, AuthSource, AuthSourceToken, AuthStatus, AuthStorageData, PrimeTeamAssignment,

@@ -64,6 +64,9 @@ fn abort_in_flight_turn_cancels_a_mid_provider_wait() {
     })
     .unwrap();
     let engine = std::sync::Arc::new(engine);
+    // The worker registers the engine's own arc: the live-auth resolver
+    // upgrades it per provider call.
+    engine.register_arc();
     let events: std::sync::Arc<std::sync::Mutex<Vec<EngineEvent>>> = Arc::default();
     let turn_engine = std::sync::Arc::clone(&engine);
     let turn_events = std::sync::Arc::clone(&events);
@@ -384,6 +387,10 @@ fn retried_run_restarts_with_its_own_agent_frames() {
         queued_steering_probe: None,
     })
     .unwrap();
+    let engine = std::sync::Arc::new(engine);
+    // The worker registers the engine's own arc: the live-auth resolver
+    // upgrades it per provider call.
+    engine.register_arc();
     let mut events: Vec<EngineEvent> = Vec::new();
     admit(&engine, "retried turn".to_string(), &mut events);
     let agent_end_indexes = events

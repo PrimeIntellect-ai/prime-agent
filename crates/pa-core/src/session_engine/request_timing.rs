@@ -391,18 +391,51 @@ pub fn instrument_stream_fn(wiring: Arc<RequestTimingWiring>, stream_fn: StreamF
                     hook(response, model);
                 }
             }));
+            // The inner call can park past a poll — the live-auth seam
+            // resolves auth off the executor — and the agent loop races it
+            // with an unbiased abort select that DROPS this future before
+            // the call returns. The timed request still needs its summary
+            // there (TS settles the raced call and summarizes it): the
+            // guard emits the aborted summary on drop; from the call's
+            // return on, the `TimingStream` owns the summary and the guard
+            // disarms.
+            let mut pending = PendingTimingGuard {
+                timing: Arc::clone(&timing),
+                armed: true,
+            };
             match stream_fn(model, context, options).await {
                 Err(error) => {
+                    pending.armed = false;
                     timing.emit_summary(Outcome::Failed);
                     Err(error)
                 }
-                Ok(stream) => Ok(Box::new(TimingStream {
-                    inner: stream,
-                    timing,
-                }) as Box<dyn ModelStream>),
+                Ok(stream) => {
+                    pending.armed = false;
+                    Ok(Box::new(TimingStream {
+                        inner: stream,
+                        timing,
+                    }) as Box<dyn ModelStream>)
+                }
             }
         })
     })
+}
+
+/// Emits the aborted summary when the wrapped call's future is dropped
+/// before the call returns (a turn abort mid-resolution); disarmed once
+/// the call returns and the stream owns the summary (a fired summary is a
+/// no-op, so the handover never double-emits).
+struct PendingTimingGuard {
+    timing: Arc<RequestTiming>,
+    armed: bool,
+}
+
+impl Drop for PendingTimingGuard {
+    fn drop(&mut self) {
+        if self.armed {
+            self.timing.emit_summary(Outcome::Aborted);
+        }
+    }
 }
 
 /// Wraps the provider stream to time first-byte (fallback via the start event),

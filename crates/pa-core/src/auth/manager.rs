@@ -228,11 +228,21 @@ pub struct AuthStorage {
     stale_auth_sources: HashMap<String, Vec<AuthSourceToken>>,
     fallback_resolver: Option<FallbackResolver>,
     load_error: Option<String>,
+    /// The retained load/parse/persist diagnostics, bounded to the most
+    /// recent [`MAX_RETAINED_ERRORS`] entries: TS's `recordError` is
+    /// unbounded, but its CLI process is short-lived — the daemon's
+    /// engine-lived store reloads per provider call, so a persistently
+    /// failing auth file would otherwise grow the list for the session
+    /// lifetime.
     errors: Vec<String>,
     /// Memoized candidates (TS `authCandidateMemos`), keyed by `source:provider`,
     /// superseded when the hashed material changes.
     candidate_memos: std::sync::Mutex<HashMap<String, (String, AuthSourceCandidate)>>,
 }
+
+/// The retained diagnostic cap: the newest [`AuthStorage::errors`] entries
+/// stay, the oldest drop.
+const MAX_RETAINED_ERRORS: usize = 32;
 
 impl AuthStorage {
     pub fn from_storage(
@@ -346,9 +356,17 @@ impl AuthStorage {
             }
             Err(error) => {
                 self.load_error = Some(error.to_string());
-                self.errors.push(error.to_string());
+                self.record_error(&error);
             }
         }
+    }
+
+    /// Retain one diagnostic, dropping the oldest past the cap.
+    fn record_error(&mut self, error: &anyhow::Error) {
+        if self.errors.len() >= MAX_RETAINED_ERRORS {
+            self.errors.remove(0);
+        }
+        self.errors.push(error.to_string());
     }
 
     /// Runtime API-key override (CLI `--api-key`); not persisted.
@@ -451,15 +469,58 @@ impl AuthStorage {
         ))
     }
 
-    fn stored_candidate(&self, provider: &str) -> Option<AuthSourceCandidate> {
+    /// The stored candidate (TS `getStoredAuthCandidate`): a `!command`
+    /// key's value material is deferred (`resolveValueMaterial`), so
+    /// building the candidate — every lookup, every status probe — never
+    /// runs the command; only staleness matching against recorded marks
+    /// and stale-marking pay the resolution. The lookup that just
+    /// resolved the command passes its value through (TS's
+    /// `resolvedCommandValue` option): the candidate then carries the
+    /// resolved material and no deferred fingerprint.
+    fn stored_candidate(
+        &self,
+        provider: &str,
+        resolved_command_value: Option<&str>,
+    ) -> Option<AuthSourceCandidate> {
         let credential = self.data.credential(provider)?;
-        let value_material = self.stored_value_material(&credential);
-        let key = format!(
-            "identity:auth.json {}",
-            value_material
-                .as_deref()
-                .unwrap_or(Self::auth_source_lazy_value_key()),
-        );
+        let command_key = match &credential {
+            AuthCredential::ApiKey { key, .. } if key.starts_with('!') => Some(key.clone()),
+            _ => None,
+        };
+        let command_identity = command_key
+            .as_ref()
+            .map(|key| format!("api_key:command:{key}"));
+        let resolved_material = command_identity
+            .as_ref()
+            .zip(resolved_command_value)
+            .map(|(identity, resolved)| format!("{identity} {resolved}"));
+        let value_material = if command_identity.is_some() {
+            resolved_material
+        } else {
+            self.stored_value_material(&credential)
+        };
+        let identity_half = value_material
+            .clone()
+            .or(command_identity)
+            .unwrap_or_else(|| Self::auth_source_lazy_value_key().to_string());
+        let key = format!("identity:auth.json {identity_half}");
+        // The deferred fingerprint exists only for a command key the caller
+        // did not already resolve.
+        let lazy_value_fingerprint: Option<ValueFingerprintResolver> =
+            match (command_key, resolved_command_value) {
+                (Some(key), None) => {
+                    let resolver: ValueFingerprintResolver = Arc::new(move || {
+                        resolve_config_value_uncached(&key).map(|resolved| {
+                            fingerprint(
+                                AuthSource::Stored,
+                                &format!("value:auth.json api_key:command:{key} {resolved}"),
+                            )
+                        })
+                    });
+                    Some(resolver)
+                }
+                _ => None,
+            };
         Some(
             self.reuse_auth_source_candidate(AuthSource::Stored, provider, key, || {
                 AuthSourceCandidate {
@@ -467,10 +528,10 @@ impl AuthStorage {
                     configured: true,
                     label: None,
                     identity_fingerprint: fingerprint(AuthSource::Stored, "identity:auth.json"),
-                    value_fingerprint: value_material.map(|material| {
+                    value_fingerprint: value_material.clone().map(|material| {
                         fingerprint(AuthSource::Stored, &format!("value:auth.json {material}"))
                     }),
-                    resolve_value_fingerprint: None,
+                    resolve_value_fingerprint: lazy_value_fingerprint.clone(),
                 }
             }),
         )
@@ -545,13 +606,13 @@ impl AuthStorage {
             vec![
                 self.runtime_candidate(provider),
                 self.environment_candidate(provider),
-                self.stored_candidate(provider),
+                self.stored_candidate(provider, /*resolved_command_value*/ None),
                 fallback,
             ]
         } else {
             vec![
                 self.runtime_candidate(provider),
-                self.stored_candidate(provider),
+                self.stored_candidate(provider, /*resolved_command_value*/ None),
                 self.environment_candidate(provider),
                 fallback,
             ]
@@ -719,7 +780,7 @@ impl AuthStorage {
             Ok(((), Some(content)))
         });
         if let Err(error) = result {
-            self.errors.push(error.to_string());
+            self.record_error(&error);
             return;
         }
         // Reload from what we wrote.

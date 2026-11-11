@@ -561,15 +561,20 @@ pub fn lock_exclusive(file: &std::fs::File) -> io::Result<()> {
     file.lock()
 }
 
-/// Nonblocking [`lock_exclusive`]: any held lock (fresh contention or I/O
-/// failure) surfaces as an error carrying the platform's try-lock error.
+/// Nonblocking [`lock_exclusive`]: contention surfaces as
+/// [`io::ErrorKind::WouldBlock`] (the wall's contention signal), any other
+/// I/O failure as the platform reports it.
 ///
 /// # Errors
 ///
-/// The platform's [`std::fs::TryLockError`] (contention included) wrapped in
-/// an I/O error; nothing is returned on success.
+/// [`io::ErrorKind::WouldBlock`] while a live lock holds the file; the
+/// underlying OS error otherwise; nothing is returned on success.
 pub fn try_lock_exclusive(file: &std::fs::File) -> io::Result<()> {
-    file.try_lock().map_err(io::Error::other)
+    match file.try_lock() {
+        Ok(()) => Ok(()),
+        Err(std::fs::TryLockError::WouldBlock) => Err(io::Error::from(io::ErrorKind::WouldBlock)),
+        Err(std::fs::TryLockError::Error(error)) => Err(error),
+    }
 }
 
 /// Release an OS file lock without waiting for duplicated or inherited handles

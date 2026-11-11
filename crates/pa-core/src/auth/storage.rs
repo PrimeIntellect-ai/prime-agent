@@ -31,12 +31,54 @@ pub trait AuthStorageBackend: Send + Sync {
 
     /// # Errors
     ///
-    /// Returns an error when the backend fails to lock, the `update` callback fails, or writing the
-    /// document fails; an unreadable file reaches the callback as `None`.
+    /// Returns an error when the backend fails to lock, the document read
+    /// fails, the `update` callback fails, or writing the document fails; a
+    /// file that is genuinely absent reaches the callback as `None`.
     fn with_lock(
         &self,
         update: &mut dyn FnMut(Option<String>) -> Result<((), Option<String>)>,
     ) -> Result<()>;
+
+    /// The cross-process refresh single-flight for one provider: a lock
+    /// held across the OAuth re-check, token fetch, and credential write
+    /// so concurrent processes (the daemon runs one worker per session)
+    /// never spend the same single-use refresh token. The lock is
+    /// process-released ([`RefreshLock`]): the kernel drops the hold when
+    /// the holder process dies, so crash recovery needs no stale-reclaim
+    /// step (no observe-then-remove race can admit two holders) and a
+    /// live holder never loses it. One lock per provider — a stalled
+    /// refresh of one provider's token (the MCP OAuth fetch has no HTTP
+    /// deadline) must not block another provider's. `Ok(None)` on
+    /// single-process backends; the process-local flight gate serializes
+    /// those.
+    ///
+    /// # Errors
+    ///
+    /// Returns the lock-acquisition error when the lock cannot be taken
+    /// within the backend's fixed acquisition budget (150 attempts at
+    /// 100 ms).
+    fn refresh_lock(&self, provider: &str) -> Result<Option<RefreshLock>> {
+        let _ = provider;
+        Ok(None)
+    }
+}
+
+/// The cross-process refresh lock's guard: the OS file lock on the
+/// provider's dedicated lock file. Released by the guard's drop (the
+/// open file description closes) or by the kernel when the holder
+/// process dies — never by a stale-reclaim step, which is why the
+/// refresh single-flight cannot lose exclusivity to a racing reclaimer.
+/// The lock file itself is never removed: an unlinked lock file lets a
+/// later opener lock a second inode while a waiter still holds the
+/// first, breaking exclusivity.
+pub struct RefreshLock(std::fs::File);
+
+impl Drop for RefreshLock {
+    fn drop(&mut self) {
+        // Explicit release; the kernel also drops the hold when the open
+        // file description closes or the holder process dies.
+        let _ = crate::platform::unlock_file(&self.0);
+    }
 }
 
 use crate::platform::lock_dir::LockDir as LockGuard;
@@ -208,7 +250,15 @@ impl AuthStorageBackend for FileAuthStorageBackend {
             .ok()
             .and_then(|metadata| stat_identity(&metadata));
         let guard = self.acquire_lock()?;
-        let content = fs::read_to_string(&self.auth_path).ok();
+        // TS `withLock` reads through `readFileSync` and propagates its
+        // failures (auth-storage.ts:203): an unreadable document is an
+        // ERROR, never an empty store — a failed read is not a logout.
+        // Only a file that is genuinely absent reads as `None`.
+        let content = if self.auth_path.exists() {
+            Some(fs::read_to_string(&self.auth_path)?)
+        } else {
+            None
+        };
         drop(guard);
         if let (Some(identity), Some(content)) = (now_identity, content.as_deref()) {
             read_cache()
@@ -233,7 +283,14 @@ impl AuthStorageBackend for FileAuthStorageBackend {
         self.ensure_parent_dir()?;
         self.ensure_file_exists()?;
         let guard = self.acquire_lock()?;
-        let current = fs::read_to_string(&self.auth_path).ok();
+        // The TS read arm: `readFileSync` failures propagate
+        // (auth-storage.ts:246), only a genuinely absent file reads as
+        // `None`.
+        let current = if self.auth_path.exists() {
+            Some(fs::read_to_string(&self.auth_path)?)
+        } else {
+            None
+        };
         let ((), next) = update(current)?;
         if let Some(next) = next {
             super::super::settings::storage::atomic_write_with(
@@ -244,6 +301,56 @@ impl AuthStorageBackend for FileAuthStorageBackend {
         }
         drop(guard);
         Ok(())
+    }
+
+    /// The refresh single-flight's lock: a dedicated process-released
+    /// file lock beside the document, not the document lock itself — a
+    /// fetch under the document lock would stall every same-process auth
+    /// read and write for the fetch's whole span, and the document lock's
+    /// protocol (a `proper-lockfile`-compatible directory) must stay
+    /// TS-interop on the wire. The lock file is
+    /// `auth.json.refresh.<hash>.lock`, one per provider (`mcp:*` ids
+    /// carry path-hostile characters; a hashed key keeps the name flat),
+    /// and it is never removed — the guard's release is the OS lock, and
+    /// an unlinked lock file would let a later opener lock a second inode
+    /// under a waiting holder. A waiting peer covers one holder's whole
+    /// fetch plus the write: 150 attempts at 100ms; a peer that cannot
+    /// take the lock serves the stored credential instead.
+    fn refresh_lock(&self, provider: &str) -> Result<Option<RefreshLock>> {
+        let mut refresh_file = self.auth_path.as_os_str().to_os_string();
+        refresh_file.push(".refresh.");
+        // The per-provider lock-file key: a short FNV-1a hash, stable and
+        // dependency-free, keeping one lock file per provider id
+        // (`mcp:*` ids carry path-hostile characters).
+        let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+        for byte in provider.as_bytes() {
+            hash ^= u64::from(*byte);
+            hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+        refresh_file.push(format!("{hash:016x}"));
+        refresh_file.push(".lock");
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            // The lock file holds no content — the OS lock rides the open
+            // file description — so an existing file is never truncated.
+            .truncate(false)
+            .open(std::path::Path::new(&refresh_file))?;
+        // Contention (WouldBlock) waits out the budget below; any other
+        // error surfaces immediately as the lock-acquisition failure.
+        for attempt in 1..=150 {
+            match crate::platform::try_lock_exclusive(&file) {
+                Ok(()) => return Ok(Some(RefreshLock(file))),
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
+                Err(error) => return Err(error.into()),
+            }
+            if attempt < 150 {
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+        }
+        Err(anyhow::anyhow!(
+            "Failed to acquire the {provider} refresh lock: locked by a live holder"
+        ))
     }
 }
 

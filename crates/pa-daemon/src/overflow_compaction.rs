@@ -273,7 +273,7 @@ impl AgentSessionEngine {
                 .lock()
                 .expect("auto compaction abort lock") = Some(std::sync::Arc::clone(&controller));
         }
-        let api_key = self.resolve_request_api_key(&model);
+        let (model, api_key) = self.resolve_request_target(model);
         // The lock covers the clone only; the summarizer call below must not ride it.
         let engine = self.session.blocking_lock().clone();
         let Some(engine) = engine else {
@@ -445,7 +445,7 @@ mod tests {
     fn faux_engine_with_compaction_settings(
         script: &Value,
         settings: &Value,
-    ) -> (AgentSessionEngine, tempfile::TempDir) {
+    ) -> (std::sync::Arc<AgentSessionEngine>, tempfile::TempDir) {
         let dir = tempfile::TempDir::new().unwrap();
         let agent_dir = dir.path().join("agent");
         std::fs::create_dir_all(&agent_dir).unwrap();
@@ -466,6 +466,10 @@ mod tests {
             queued_steering_probe: None,
         })
         .unwrap();
+        let engine = std::sync::Arc::new(engine);
+        // The worker registers the engine's own arc: the live-auth
+        // resolver upgrades it per provider call.
+        engine.register_arc();
         (engine, dir)
     }
 

@@ -40,6 +40,11 @@ pub struct ResolvedRequestAuth {
     /// composed request headers randomly.
     pub headers: Option<BTreeMap<String, String>>,
     pub error: Option<String>,
+    /// The per-call request model (TS `requestModel`): for xAI, the model
+    /// shaped for the credential the lookup serves — the stored
+    /// subscription's openai-responses shape or the configured API-key
+    /// shape. `None` keeps the caller's model.
+    pub request_model: Option<Model>,
 }
 
 /// Why a `set_model` selection failed to resolve: the provider is not
@@ -89,6 +94,12 @@ pub struct ModelRegistry {
     load_error: Option<String>,
     provider_request_configs: HashMap<String, ProviderRequestConfig>,
     model_request_headers: HashMap<String, BTreeMap<String, String>>,
+    /// TS `xaiModelSources`: every xAI model id's configured
+    /// (pre-adaptation) model, re-recorded at every load. The per-call
+    /// request model in [`Self::get_api_key_and_headers`] re-resolves
+    /// against this map, so it follows the credential that serves the
+    /// call, not the credential the load saw.
+    xai_model_sources: HashMap<String, Model>,
     explicit_private_ids: HashSet<String>,
     authorized_private_ids: HashSet<String>,
     authorized_private_models: Vec<Model>,
@@ -178,6 +189,7 @@ impl ModelRegistry {
             load_error: None,
             provider_request_configs: HashMap::new(),
             model_request_headers: HashMap::new(),
+            xai_model_sources: HashMap::new(),
             explicit_private_ids: HashSet::new(),
             authorized_private_ids: HashSet::new(),
             authorized_private_models: Vec::new(),
@@ -414,6 +426,17 @@ impl ModelRegistry {
     /// applied at load: stored credentials rewrite the affected models, and
     /// the registry reloads after every credential change.
     fn apply_subscription_model_adaptations(&mut self) {
+        // Re-record the configured (pre-adaptation) model for every xAI id
+        // at every load (TS `xaiModelSources`): the per-call request model
+        // resolves against this map, so it follows the credential that
+        // serves the call, never the credential the load saw.
+        self.xai_model_sources.clear();
+        for model in &self.models {
+            if model.provider == crate::auth::XAI_PROVIDER_ID {
+                self.xai_model_sources
+                    .insert(model.id.clone(), model.clone());
+            }
+        }
         let copilot_credential = self
             .auth
             .get_all()
@@ -835,6 +858,43 @@ impl ModelRegistry {
                 }
             }
         }
+        // TS `getApiKeyAndHeaders` resolves the xAI request model per call
+        // from the lookup's own result (v0.9.8 model-registry.ts:1604-1619):
+        // the subscription shape only when the stored OAuth credential
+        // serves THIS call, the configured API-key shape otherwise — a
+        // failed refresh that falls back to the configured key never sends
+        // that key on the subscription request shape, and no key at all
+        // fails the call instead of streaming keyless. Other providers
+        // keep the caller's model.
+        let mut request_model = None;
+        let mut xai_subscription_serving = false;
+        if model.provider == crate::auth::XAI_PROVIDER_ID {
+            if api_key.is_none() {
+                return ResolvedRequestAuth {
+                    ok: false,
+                    error: Some(
+                        "No usable xAI credential. Use /login and select an xAI entry to sign in again or configure an API key."
+                            .to_string(),
+                    ),
+                    ..Default::default()
+                };
+            }
+            let configured = self
+                .xai_model_sources
+                .get(&model.id)
+                .cloned()
+                .unwrap_or_else(|| model.clone());
+            xai_subscription_serving = stored.credential_type == Some("oauth")
+                && matches!(
+                    &stored.source_token,
+                    Some(token) if token.source == crate::auth::types::AuthSource::Stored
+                );
+            request_model = Some(if xai_subscription_serving {
+                xai_subscription_model(&configured)
+            } else {
+                configured
+            });
+        }
         let provider_headers = provider_config
             .as_ref()
             .and_then(|config| config.headers.clone());
@@ -872,11 +932,31 @@ impl ModelRegistry {
         if let Some(request_headers) = request_headers {
             headers.extend(request_headers.clone());
         }
+        if xai_subscription_serving {
+            // TS refuses a custom Authorization header on the subscription
+            // shape (model-registry.ts:1653-1657): only the bearer of the
+            // serving credential may ride the request.
+            if let Some(bearer) = api_key.as_deref().map(|key| format!("Bearer {key}")) {
+                if headers.iter().any(|(name, value)| {
+                    name.eq_ignore_ascii_case("authorization") && *value != bearer
+                }) {
+                    return ResolvedRequestAuth {
+                        ok: false,
+                        error: Some(
+                            "Grok subscription cannot use a custom Authorization header. Remove the header or use /login and select the xAI API-key entry."
+                                .to_string(),
+                        ),
+                        ..Default::default()
+                    };
+                }
+            }
+        }
         ResolvedRequestAuth {
             ok: true,
             api_key,
             headers: (!headers.is_empty()).then_some(headers),
             error: None,
+            request_model,
         }
     }
 }
