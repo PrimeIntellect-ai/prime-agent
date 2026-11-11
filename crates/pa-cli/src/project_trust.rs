@@ -18,7 +18,11 @@ fn settings_summary(content: &str) -> Option<String> {
     match serde_json::from_str::<serde_json::Value>(content) {
         Ok(serde_json::Value::Object(map)) if map.is_empty() => None,
         Ok(serde_json::Value::Object(map)) => {
-            let keys = map.keys().map(String::as_str).collect::<Vec<_>>().join(", ");
+            let keys = map
+                .keys()
+                .map(String::as_str)
+                .collect::<Vec<_>>()
+                .join(", ");
             Some(format!("settings.json sets: {}", escape_control(&keys)))
         }
         _ => Some("settings.json does not parse as a JSON object".to_string()),
@@ -83,7 +87,10 @@ pub(crate) fn run_trust_command(args: &[String]) -> i32 {
     };
     let result = dir.map_err(anyhow::Error::from).and_then(|dir| {
         if !dir.is_dir() {
-            anyhow::bail!("{} is not a directory", escape_control(&dir.display().to_string()));
+            anyhow::bail!(
+                "{} is not a directory",
+                escape_control(&dir.display().to_string())
+            );
         }
         let agent_dir = crate::config::get_agent_dir();
         let entries = pa_core::settings::gated_project_entries(&dir, &agent_dir);

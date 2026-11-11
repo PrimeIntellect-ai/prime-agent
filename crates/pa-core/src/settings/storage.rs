@@ -112,7 +112,7 @@ impl FileSettingsStorage {
     /// Returns an error naming the file when it is refused or unreadable.
     pub(super) fn read_project_file(&self, name: &str) -> Result<Option<String>> {
         let path = self.project_path.with_file_name(name);
-        let read = || {
+        let read = || -> Result<Option<String>> {
             let target = self.confined(&path)?;
             match fs::symlink_metadata(&target) {
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),

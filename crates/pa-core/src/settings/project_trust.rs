@@ -142,7 +142,7 @@ fn repository_dir(project_dir: &Path) -> PathBuf {
         return dir;
     };
     let dot_git = root.join(".git");
-    let linked_common_dir = || {
+    let linked_common_dir = || -> Option<PathBuf> {
         let gitdir_line = std::fs::read_to_string(&dot_git).ok()?;
         let gitdir =
             std::fs::canonicalize(root.join(gitdir_line.strip_prefix("gitdir:")?.trim())).ok()?;
