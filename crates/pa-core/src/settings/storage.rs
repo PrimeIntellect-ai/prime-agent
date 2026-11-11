@@ -12,7 +12,7 @@ use anyhow::{anyhow, bail, Result};
 pub const CONFIG_DIR_NAME: &str = ".prime/agent";
 
 /// Upper bound on a project settings document, which comes from the checkout.
-const MAX_PROJECT_SETTINGS_BYTES: usize = 4 * 1024 * 1024;
+pub(super) const MAX_PROJECT_SETTINGS_BYTES: usize = 4 * 1024 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SettingsScope {
@@ -121,7 +121,7 @@ impl FileSettingsStorage {
 
 /// `path` made absolute with links resolved; a missing tail (no settings file
 /// or directory yet, or a deleted working directory) is kept as written.
-fn resolve_with_missing(path: &Path) -> std::io::Result<PathBuf> {
+pub(super) fn resolve_with_missing(path: &Path) -> std::io::Result<PathBuf> {
     let mut missing = Vec::new();
     let mut existing = path;
     loop {
@@ -153,7 +153,7 @@ fn check_project_document_size(len: usize) -> Result<()> {
     Ok(())
 }
 
-fn read_document(scope: SettingsScope, path: &Path) -> Result<String> {
+pub(super) fn read_document(scope: SettingsScope, path: &Path) -> Result<String> {
     if scope == SettingsScope::Global {
         return Ok(fs::read_to_string(path)?);
     }

@@ -661,3 +661,106 @@ fn an_absence_pin_extends_to_the_first_write() {
         "the already-authorized sibling survives the write"
     );
 }
+
+/// A pinned prompt file that resolves OUTSIDE the project never feeds the
+/// pin (the confined read): a checkout symlink to outside content — or a
+/// non-regular file like a FIFO — refuses instead of reading it. Red
+/// against a plain unbounded `read_to_string` (the symlink read would
+/// return the target bytes and the FIFO would block).
+#[cfg(unix)]
+#[test]
+fn a_pinned_prompt_file_outside_the_project_refuses() {
+    let dir = tempfile::tempdir().unwrap();
+    let agent_dir = dir.path().join("agent");
+    let cwd = dir.path().join("repo");
+    std::fs::create_dir_all(&agent_dir).unwrap();
+    let settings_path = project_settings(&cwd);
+    std::fs::create_dir_all(settings_path.parent().unwrap()).unwrap();
+    std::fs::write(&settings_path, r#"{"theme":"x"}"#).unwrap();
+    // Outside content the checkout links SYSTEM.md at.
+    let outside = dir.path().join("outside.md");
+    std::fs::write(&outside, "outside system prompt").unwrap();
+    std::os::unix::fs::symlink(&outside, settings_path.with_file_name("SYSTEM.md")).unwrap();
+    // The pin is uncomputable (refused): no pin, no trust.
+    assert_eq!(super::project_fingerprint(&settings_path), None);
+    // A FIFO never blocks the read either: refused, not opened.
+    let fifo = settings_path.with_file_name("APPEND_SYSTEM.md");
+    let _ = std::fs::remove_file(&fifo);
+    {
+        use std::os::unix::ffi::OsStrExt;
+        let name = std::ffi::CString::new(fifo.as_os_str().as_bytes()).expect("fifo path");
+        let made = unsafe { libc::mkfifo(name.as_ptr(), 0o600) };
+        assert_eq!(made, 0, "mkfifo fixture");
+    }
+    assert_eq!(super::project_fingerprint(&settings_path), None);
+}
+
+/// A huge prompt file is bounded by the project-settings cap: the pin
+/// computation refuses instead of reading it in full.
+#[test]
+fn a_oversized_prompt_file_refuses_instead_of_reading() {
+    let dir = tempfile::tempdir().unwrap();
+    let agent_dir = dir.path().join("agent");
+    let cwd = dir.path().join("repo");
+    std::fs::create_dir_all(&agent_dir).unwrap();
+    let settings_path = project_settings(&cwd);
+    std::fs::create_dir_all(settings_path.parent().unwrap()).unwrap();
+    std::fs::write(&settings_path, r#"{"theme":"x"}"#).unwrap();
+    // One byte over the 4 MiB project-settings cap.
+    let cap = crate::settings::storage::MAX_PROJECT_SETTINGS_BYTES;
+    let mut big = vec![b'#'; cap + 1];
+    std::fs::write(settings_path.with_file_name("SYSTEM.md"), &big).unwrap();
+    assert_eq!(super::project_fingerprint(&settings_path), None);
+    // Inside the cap the pin computes.
+    big.truncate(cap);
+    std::fs::write(settings_path.with_file_name("SYSTEM.md"), &big).unwrap();
+    assert!(super::project_fingerprint(&settings_path).is_some());
+}
+
+/// The write path's re-pin lands exactly the pin the lock's own check
+/// validated — no fresh unlocked read of the prompt files sits between
+/// the check and the registry write. (The race window lives inside one
+/// lock call, so the mutation-red is not deterministically injectable;
+/// this contract pin pins the registry's stored value to the check-time
+/// pin, which the re-reading mutant violates the moment any prompt file
+/// differs from the check read.)
+#[test]
+fn the_repin_stores_the_pin_the_check_validated() {
+    let dir = tempfile::tempdir().unwrap();
+    let agent_dir = dir.path().join("agent");
+    let cwd = dir.path().join("repo");
+    std::fs::create_dir_all(&agent_dir).unwrap();
+    let settings_path = project_settings(&cwd);
+    std::fs::create_dir_all(settings_path.parent().unwrap()).unwrap();
+    std::fs::write(&settings_path, r#"{"theme":"x"}"#).unwrap();
+    std::fs::write(settings_path.with_file_name("SYSTEM.md"), "v1").unwrap();
+    let fingerprint = super::project_fingerprint(&settings_path).unwrap();
+    trust_project(
+        &agent_dir.join(TRUSTED_PROJECTS_FILE),
+        &settings_path,
+        &fingerprint,
+    )
+    .unwrap();
+
+    let mut manager = SettingsManager::create(&cwd, &agent_dir);
+    manager.set_project_resource_array("skills", vec!["custom".to_string()]);
+    assert!(
+        manager.drain_errors().is_empty(),
+        "the trusted write succeeds"
+    );
+
+    // The registry entry equals the pin over the WRITTEN settings plus the
+    // check-time SYSTEM.md — the one-pin contract.
+    let written = std::fs::read_to_string(&settings_path).unwrap();
+    let expected = super::pin(&settings_path, Some(&written)).unwrap();
+    let registry = std::fs::read_to_string(agent_dir.join(TRUSTED_PROJECTS_FILE)).unwrap();
+    assert!(
+        registry.contains(&expected),
+        "the registry must hold the check-time pin {expected}"
+    );
+    let after = SettingsManager::create(&cwd, &agent_dir);
+    assert!(
+        after.project_config_trusted(),
+        "the re-pin admits the written state"
+    );
+}

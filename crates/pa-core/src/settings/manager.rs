@@ -617,27 +617,47 @@ impl SettingsManager {
         // (SYSTEM.md, discovered skills) activates unasked.
         let gate = self.trust_gate.clone();
         let mut failure = None;
-        let mut written: Option<String> = None;
+        let mut admitted_pin: Option<String> = None;
         let mut extend_trust = false;
         let mut untrusted = false;
         let result = self.storage.with_lock(scope, &mut |current| {
+            let mut prompts: Option<(Option<String>, Option<String>)> = None;
             if scope == SettingsScope::Project {
                 if let Some(gate) = gate.as_ref() {
-                    extend_trust = gate.admits(current.as_deref());
+                    // ONE prompt-file read serves the check and the re-pin:
+                    // the check pins the locked bytes, the re-pin pins the
+                    // written bytes plus the SAME prompt contents — a
+                    // prompt-file change after this read leaves the pinned
+                    // state stale (re-prompt on the next load), never
+                    // silently admitted.
+                    prompts = gate.prompt_files();
+                    extend_trust = prompts.as_ref().is_some_and(|(system, append)| {
+                        gate.matches(&super::project_trust::pin_over(
+                            current.as_deref(),
+                            system.as_deref(),
+                            append.as_deref(),
+                        ))
+                    });
                     if current.is_some() && !extend_trust {
                         untrusted = true;
                         return None;
                     }
                 }
             }
-            // Only the final invocation's merged output pins.
-            written = None;
             match settings_document(current.as_deref()).and_then(|mut map| {
                 map.insert(field.to_string(), value.clone());
                 serde_json::to_string_pretty(&serde_json::Value::Object(map)).map_err(Into::into)
             }) {
                 Ok(content) => {
-                    written = Some(content.clone());
+                    if scope == SettingsScope::Project && extend_trust {
+                        if let Some((system, append)) = prompts.as_ref() {
+                            admitted_pin = Some(super::project_trust::pin_over(
+                                Some(&content),
+                                system.as_deref(),
+                                append.as_deref(),
+                            ));
+                        }
+                    }
                     Some(content)
                 }
                 Err(error) => {
@@ -654,10 +674,12 @@ impl SettingsManager {
             });
             return false;
         }
-        // A failed or skipped write never pins bytes that are not on disk.
+        // A failed or skipped write never pins; a successful one re-pins
+        // with the pin the lock's own check validated (no fresh unlocked
+        // read of the prompt files).
         if scope == SettingsScope::Project && result.is_ok() && extend_trust {
-            if let (Some(gate), Some(content)) = (self.trust_gate.as_ref(), written.as_deref()) {
-                if let Err(error) = gate.trust(content) {
+            if let (Some(gate), Some(pin)) = (self.trust_gate.as_ref(), admitted_pin.as_deref()) {
+                if let Err(error) = gate.trust_pin(pin) {
                     self.errors.push(SettingsError {
                         scope,
                         message: format!("Project settings saved but the trust pin was not refreshed: {error}. The next interactive launch re-prompts."),

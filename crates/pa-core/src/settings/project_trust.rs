@@ -8,7 +8,7 @@
 
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context as _, Result};
+use anyhow::Result;
 use sha2::{Digest, Sha256};
 use std::fmt::Write as _;
 
@@ -29,13 +29,44 @@ fn hex(digest: &[u8]) -> String {
         })
 }
 
-/// Read one pinned file: `Ok(None)` when it does not exist.
-fn read_pinned(path: &Path) -> std::io::Result<Option<String>> {
-    match std::fs::read_to_string(path) {
-        Ok(content) => Ok(Some(content)),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(error) => Err(error),
+/// Read one pinned prompt file: `Ok(None)` when it does not exist. The
+/// read follows the loader's project-settings rules — confined to the
+/// project (a link may resolve within it, never outside, where a save
+/// would copy the outside file's content into the pin), regular files
+/// only (a FIFO or device never blocks or floods the read), and bounded
+/// by the project-settings cap — so a checkout cannot hang or exhaust the
+/// process before any trust decision.
+fn read_pinned(settings_path: &Path, name: &str) -> anyhow::Result<Option<String>> {
+    let path = settings_path.with_file_name(name);
+    let resolved = super::storage::resolve_with_missing(&path)?;
+    // The root is resolved the same way, so a symlinked prefix (macOS
+    // /tmp -> /private/tmp) stays consistent for both sides.
+    let root = super::storage::resolve_with_missing(&project_root(settings_path))?;
+    if !resolved.starts_with(&root) {
+        anyhow::bail!(
+            "pinned file {} resolves outside the project",
+            path.display()
+        );
     }
+    match std::fs::symlink_metadata(&resolved) {
+        Ok(metadata) if !metadata.file_type().is_file() => {
+            anyhow::bail!("pinned file {} is not a regular file", path.display());
+        }
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.into()),
+    }
+    super::storage::read_document(super::storage::SettingsScope::Project, &resolved).map(Some)
+}
+
+/// The project root a settings file belongs to (`<project>/.prime/agent/`s
+/// parent's parent).
+fn project_root(settings_path: &Path) -> PathBuf {
+    settings_path
+        .parent()
+        .and_then(Path::parent)
+        .and_then(Path::parent)
+        .map_or_else(|| settings_path.to_path_buf(), Path::to_path_buf)
 }
 
 /// The trust pin: one SHA-256 over the project's `settings.json`,
@@ -46,6 +77,20 @@ fn read_pinned(path: &Path) -> std::io::Result<Option<String>> {
 /// beside `settings_path`. `None` when a prompt file exists but cannot be
 /// read (permissions, invalid UTF-8): an unreadable file never rides a pin.
 fn pin(settings_path: &Path, settings: Option<&str>) -> Option<String> {
+    let system = read_pinned(settings_path, "SYSTEM.md").ok()?;
+    let append = read_pinned(settings_path, "APPEND_SYSTEM.md").ok()?;
+    Some(pin_over(settings, system.as_deref(), append.as_deref()))
+}
+
+/// The pin over given settings and prompt-file contents (already read by
+/// the caller): the write path reads the prompt files ONCE and derives
+/// both its admit check and its re-pin from that single read.
+#[must_use]
+pub(crate) fn pin_over(
+    settings: Option<&str>,
+    system: Option<&str>,
+    append: Option<&str>,
+) -> String {
     let mut hasher = Sha256::new();
     let mut frame = |name: &str, content: Option<&str>| {
         let bytes = content.unwrap_or_default().as_bytes();
@@ -55,11 +100,9 @@ fn pin(settings_path: &Path, settings: Option<&str>) -> Option<String> {
         hasher.update(bytes);
     };
     frame("settings.json", settings);
-    for name in ["SYSTEM.md", "APPEND_SYSTEM.md"] {
-        let content = read_pinned(&settings_path.with_file_name(name)).ok()?;
-        frame(name, content.as_deref());
-    }
-    Some(hex(&hasher.finalize()))
+    frame("SYSTEM.md", system);
+    frame("APPEND_SYSTEM.md", append);
+    hex(&hasher.finalize())
 }
 
 /// The trust pin for a project as it is on disk now (see [`pin`]), with
@@ -268,19 +311,35 @@ impl ProjectTrustGate {
     /// settings document (as the loader read it; `None` when absent).
     #[must_use]
     pub(crate) fn admits(&self, settings: Option<&str>) -> bool {
-        pin(&self.settings_path, settings)
-            .is_some_and(|pin| project_trusted(&self.registry_path, &self.settings_path, &pin))
+        pin(&self.settings_path, settings).is_some_and(|pin| self.matches(&pin))
     }
 
-    /// Re-pin this project's trust with `settings` as its settings document.
+    /// The prompt files' content, ONE read of each (the write path's admit
+    /// check and its re-pin share this read, so nothing unlocked sits
+    /// between the check and the pin that lands in the registry).
+    /// `None` when a prompt file is unreadable or refused: such a project
+    /// cannot be trusted.
+    #[must_use]
+    pub(crate) fn prompt_files(&self) -> Option<(Option<String>, Option<String>)> {
+        let system = read_pinned(&self.settings_path, "SYSTEM.md").ok()?;
+        let append = read_pinned(&self.settings_path, "APPEND_SYSTEM.md").ok()?;
+        Some((system, append))
+    }
+
+    /// Whether the registry pins this project with the given pin.
+    #[must_use]
+    pub(crate) fn matches(&self, pin: &str) -> bool {
+        project_trusted(&self.registry_path, &self.settings_path, pin)
+    }
+
+    /// Re-pin this project's trust with an ALREADY-VALIDATED pin — derived
+    /// from the same single prompt-file read the admit check used, never a
+    /// fresh disk read.
     ///
     /// # Errors
     ///
-    /// Returns an error when a pinned file is unreadable or the registry
-    /// cannot be read or written.
-    pub(crate) fn trust(&self, settings: &str) -> Result<()> {
-        let pin = pin(&self.settings_path, Some(settings))
-            .context("a project system-prompt file is unreadable")?;
-        trust_project(&self.registry_path, &self.settings_path, &pin)
+    /// Returns an error when the registry cannot be read or written.
+    pub(crate) fn trust_pin(&self, pin: &str) -> Result<()> {
+        trust_project(&self.registry_path, &self.settings_path, pin)
     }
 }
