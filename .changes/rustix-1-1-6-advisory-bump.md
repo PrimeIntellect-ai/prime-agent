@@ -1,0 +1,1 @@
+- Bumped rustix 1.1.4 -> 1.1.6 so the cargo-deny advisories gate is clean again after RUSTSEC-2026-0486 (informational xattr unsoundness, affected >= 1.0.0, < 1.1.6) landed in the RustSec DB; no other dependency moves.

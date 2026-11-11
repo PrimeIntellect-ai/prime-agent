@@ -1,0 +1,1 @@
+- Directory locks no longer delete a newer lock when two processes reclaim the same stale lock, or when a holder whose lock was reclaimed releases it; oversized lock owner records are no longer read in full.
