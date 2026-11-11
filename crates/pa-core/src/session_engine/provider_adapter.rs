@@ -555,9 +555,11 @@ mod tests {
         })));
         let resolutions = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let live_auth: LiveAuthResolver = Arc::new(move |_: &Model| {
-            if resolutions.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
-                panic!("the first resolution panics");
-            }
+            assert_ne!(
+                resolutions.fetch_add(1, std::sync::atomic::Ordering::SeqCst),
+                0,
+                "the first resolution panics"
+            );
             ResolvedRequestAuth {
                 ok: true,
                 api_key: Some("live-key".to_string()),
