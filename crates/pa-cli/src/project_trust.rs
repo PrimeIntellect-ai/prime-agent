@@ -65,7 +65,7 @@ pub(crate) fn prompt_first_load(cwd: &Path, agent_dir: &Path, ask: bool) -> Resu
 }
 
 /// `prime-agent trust [--yes] [<dir>]`: show the project's gated config and
-/// record the user's trust, also for an already-trusted project.
+/// record the user's trust; an already-trusted project stays unchanged.
 pub(crate) fn run_trust_command(args: &[String]) -> i32 {
     let yes = args.iter().any(|arg| arg == "--yes");
     let dirs: Vec<&String> = args.iter().filter(|arg| *arg != "--yes").collect();
@@ -98,6 +98,14 @@ pub(crate) fn run_trust_command(args: &[String]) -> i32 {
             .join(pa_core::settings::CONFIG_DIR_NAME)
             .join("settings.json");
         let fingerprint = pa_core::settings::project_fingerprint(&settings_path)?;
+        let registry_path = agent_dir.join(pa_core::settings::TRUSTED_PROJECTS_FILE);
+        if pa_core::settings::project_trusted(&registry_path, &settings_path, &fingerprint) {
+            println!(
+                "{} is already trusted; nothing changed.",
+                escape_control(&dir.display().to_string())
+            );
+            return Ok(());
+        }
         confirm_and_trust(&dir, &agent_dir, &entries, &fingerprint, yes)
     });
     match result {
@@ -122,7 +130,7 @@ fn confirm_and_trust(
         .join(pa_core::settings::CONFIG_DIR_NAME)
         .join("settings.json");
     let registry_path = agent_dir.join(pa_core::settings::TRUSTED_PROJECTS_FILE);
-    println!("This project carries its own Prime Agent config, which can change how Prime Agent behaves here:");
+    println!("This repository carries its own Prime Agent config, which can change how Prime Agent behaves here:");
     for entry in entries {
         println!("  {}", escape_control(&entry.display().to_string()));
     }
@@ -137,19 +145,20 @@ fn confirm_and_trust(
     let trusted = if yes {
         true
     } else {
-        println!("They stay ignored until you trust them (any change to settings.json, SYSTEM.md, or APPEND_SYSTEM.md asks again).");
+        println!("They stay ignored until you trust them. Trust covers this repository's subdirectories and worktrees; a different settings.json, SYSTEM.md, or APPEND_SYSTEM.md asks again.");
         flush_typeahead();
-        crate::daemon_discovery::stop::prompt_yes_no("Trust this project's config?")
+        crate::daemon_discovery::stop::prompt_yes_no("Trust this repository's config?")
     };
-    if trusted {
-        pa_core::settings::trust_project(&registry_path, &settings_path, fingerprint)?;
-        println!("Trusted. The project's settings and discovered files now apply.");
-    } else {
-        println!("Ignored. The project's settings and discovered files stay inactive.");
+    if !trusted {
+        println!("Ignored. The repository's settings and discovered files stay inactive.");
+        return Ok(());
     }
+    let repository = pa_core::settings::trust_project(&registry_path, &settings_path, fingerprint)?;
+    println!("Trusted. The repository's settings and discovered files now apply.");
     println!(
-        "Trust is recorded in {} and can be revoked by deleting the project's entry.",
-        escape_control(&registry_path.display().to_string())
+        "Recorded in {}; to revoke, delete the entry for {}.",
+        escape_control(&registry_path.display().to_string()),
+        escape_control(&repository.display().to_string())
     );
     Ok(())
 }

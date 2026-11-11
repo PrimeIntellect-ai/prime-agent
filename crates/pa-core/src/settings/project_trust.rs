@@ -233,7 +233,8 @@ pub fn trust_project(
             Ok(content) if !content.trim().is_empty() => {
                 serde_json::from_str(&content).map_err(|error| {
                     anyhow::anyhow!(
-                        "the trusted-projects registry is malformed; not overwritten: {error}"
+                        "the trusted-projects registry {} is malformed; not overwritten: {error}",
+                        registry_path.display()
                     )
                 })?
             }
@@ -332,7 +333,7 @@ pub fn ignored_project_dir(cwd: &Path, agent_dir: &Path, trusted: bool) -> Optio
 #[must_use]
 pub fn ignored_project_notice(dir: &Path) -> String {
     format!(
-        "This project's Prime Agent config is ignored until you trust it: run `{}`. Sessions started after that load it.",
+        "This repository's Prime Agent config is ignored until you trust it: run `{}`. Sessions started after that load it.",
         trust_command(dir)
     )
 }
