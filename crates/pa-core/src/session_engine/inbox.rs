@@ -46,6 +46,11 @@ pub const INBOX_CLASS_AGENT_MESSAGE: &str = "agent-message";
 /// row delivers or clears).
 pub type InboxArrivals = std::sync::Arc<std::sync::Mutex<Vec<InboxMessage>>>;
 
+/// The daemon's post-drain seam: every successful `rlm.inbox.read` runs
+/// it so the queued wake rows can retract or re-render over what is left
+/// (a drained store leaves no stale notice or reminder behind).
+pub type InboxReadHook = std::sync::Arc<dyn Fn(&std::sync::Arc<SessionInbox>) + Send + Sync>;
+
 /// One inbox message: the same text the notice row carries, its arrival
 /// time, and the notice's metadata. The wire and journal shapes are one
 /// (camelCase, like the TS-era notice rows).
@@ -163,7 +168,6 @@ struct InboxState {
 /// summarizes; every push and drain appends one journal record, and
 /// `open` replays the journal so a daemon restart keeps unread
 /// messages.
-#[derive(Debug)]
 pub struct SessionInbox {
     journal: Option<PathBuf>,
     state: Mutex<InboxState>,
@@ -172,6 +176,20 @@ pub struct SessionInbox {
     /// succeeds again. `append_journal` owns it; a separate slot because
     /// it runs under the state lock.
     persistence_error: Mutex<Option<String>>,
+    /// The daemon's post-drain seam (set once at session build): every
+    /// successful read runs it so the queued wake rows can retract or
+    /// re-render over what is left.
+    read_hook: Mutex<Option<InboxReadHook>>,
+}
+
+impl std::fmt::Debug for SessionInbox {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("SessionInbox")
+            .field("journal", &self.journal)
+            .field("state", &self.state)
+            .finish_non_exhaustive()
+    }
 }
 
 /// One journal record: a message arrival, a drain marker, one
@@ -227,11 +245,30 @@ impl SessionInbox {
             journal: if readable { journal } else { None },
             state: Mutex::new(InboxState { messages, next_id }),
             persistence_error: Mutex::new(None),
+            read_hook: Mutex::new(None),
         };
         if readable {
             inbox.compact_journal();
         }
         inbox
+    }
+
+    /// Install the daemon's post-drain seam (the worker's wake-row
+    /// refresh); the kernel's read handler runs it after every drain.
+    pub fn set_read_hook(&self, hook: InboxReadHook) {
+        *self
+            .read_hook
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(hook);
+    }
+
+    /// The installed post-drain seam, when one is set.
+    #[must_use]
+    pub fn read_hook(&self) -> Option<InboxReadHook> {
+        self.read_hook
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
     }
 
     /// The in-memory inbox (no journal).
@@ -241,6 +278,7 @@ impl SessionInbox {
             journal: None,
             state: Mutex::new(InboxState::default()),
             persistence_error: Mutex::new(None),
+            read_hook: Mutex::new(None),
         }
     }
 
@@ -389,6 +427,21 @@ impl SessionInbox {
         }
         state.messages = remaining;
         removed
+    }
+
+    /// The waiting message ids: the wake-row refresh trims its covered
+    /// batches against the live set.
+    #[must_use]
+    pub fn waiting_ids(&self) -> std::collections::BTreeSet<String> {
+        let state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state
+            .messages
+            .iter()
+            .map(|message| message.id.clone())
+            .collect()
     }
 
     /// The waiting count, its oldest arrival time, and the per-class
@@ -643,8 +696,9 @@ pub fn reminder_notice(count: usize) -> String {
 /// Register the `rlm.inbox.read`/`rlm.inbox.count` host handlers over
 /// one session's store. `read` drains and returns the waiting messages
 /// (an optional `{sender, class, sinceMs, beforeMs}` filter narrows the
-/// drain); `count` returns the count, the oldest arrival, and the
-/// per-class breakdown.
+/// drain) and then runs the daemon's `read_hook`, so the queued wake
+/// rows can retract or re-render over what is left; `count` returns the
+/// count, the oldest arrival, and the per-class breakdown.
 pub fn register_inbox_host_handlers(inbox: &Arc<SessionInbox>, handlers: &mut HostRequestHandlers) {
     let read_inbox = Arc::clone(inbox);
     handlers.register(
@@ -655,6 +709,9 @@ pub fn register_inbox_host_handlers(inbox: &Arc<SessionInbox>, handlers: &mut Ho
                 let filter: InboxReadFilter = serde_json::from_value(payload.data)?;
                 let messages = inbox.drain_matching(&filter);
                 let drained_count = messages.len();
+                if let Some(hook) = inbox.read_hook() {
+                    hook(&inbox);
+                }
                 Ok(json!({ "messages": messages, "drainedCount": drained_count }))
             })
         }),
@@ -1375,6 +1432,7 @@ mod tests {
             journal: Some(journal),
             state: Mutex::new(InboxState::default()),
             persistence_error: Mutex::new(None),
+            read_hook: Mutex::new(None),
         };
         store.push(
             notice(
@@ -1459,6 +1517,13 @@ mod tests {
     async fn the_read_handler_honors_a_filter_payload() {
         let inbox = Arc::new(SessionInbox::in_memory());
         let mut handlers = HostRequestHandlers::default();
+        // The drain hook fires once per read (the daemon's wake-row
+        // refresh seam).
+        let hook_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let hook_counter = Arc::clone(&hook_calls);
+        inbox.set_read_hook(Arc::new(move |_inbox| {
+            hook_counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }));
         register_inbox_host_handlers(&inbox, &mut handlers);
         inbox.push(
             notice("sleep 1", INBOX_CLASS_BASH_DONE, "a", json!({})),
@@ -1494,5 +1559,10 @@ mod tests {
         .await;
         assert!(error.is_err(), "the malformed filter fails the read");
         assert_eq!(inbox.count().0, 1, "the malformed read drained nothing");
+        assert_eq!(
+            hook_calls.load(std::sync::atomic::Ordering::SeqCst),
+            2,
+            "every successful read ran the drain hook; the refused one did not"
+        );
     }
 }

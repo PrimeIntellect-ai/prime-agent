@@ -615,7 +615,10 @@ pub(crate) fn admit_inbox_notice(
     notice: pa_core::session_engine::inbox::InboxNotice,
     lane: Lane,
     session_is_closed: impl Fn() -> bool,
-    capacity_error: impl Fn(usize, usize) -> Option<String>,
+    capacity_error: impl Fn(
+        &std::collections::VecDeque<QueuedItem>,
+        &std::collections::VecDeque<QueuedItem>,
+    ) -> Option<String>,
 ) -> Option<String> {
     // The busy sample, the batch, and the push share ONE critical
     // section, like the notice admission below: a turn starting between
@@ -625,12 +628,12 @@ pub(crate) fn admit_inbox_notice(
     // (the close's clear wipes the lanes); its message already made the
     // journal durable, which is honest — it did arrive.
     if session_is_closed() {
-        return None;
+        return Some("Target session is closed".to_string());
     }
     // The capacity gate, re-sampled under this same lock with the lane
     // lengths it reads here: concurrent arrivals can never pass one
     // stale sample together.
-    if let Some(error) = capacity_error(core_guard.steering.len(), core_guard.follow_up.len()) {
+    if let Some(error) = capacity_error(&core_guard.steering, &core_guard.follow_up) {
         return Some(error);
     }
     let message = inbox.push(notice, pa_core::autonomous::now_millis());
@@ -710,6 +713,63 @@ pub(crate) fn admit_inbox_notice(
     );
     work_notify.notify_one();
     None
+}
+
+/// Retract or re-render the queued inbox wake rows over the live store:
+/// the covered batch trims against the waiting set, an emptied batch
+/// drops the arrival row, and the reminder follows the live count.
+/// Shared by the kernel read's post-drain hook and the clear/pause sweep.
+pub(crate) fn refresh_inbox_wake_rows(
+    core: &Arc<Mutex<SessionCore>>,
+    arrivals: &pa_core::session_engine::inbox::InboxArrivals,
+    inbox: &std::sync::Arc<pa_core::session_engine::inbox::SessionInbox>,
+) {
+    let mut core_guard = core.lock().unwrap();
+    let waiting = inbox.waiting_ids();
+    let mut batch = arrivals.lock().unwrap();
+    batch.retain(|message| waiting.contains(&message.id));
+    let (count, _, _) = inbox.count();
+    if batch.is_empty() {
+        core_guard
+            .steering
+            .retain(|item| item.queue_key.as_deref() != Some(INBOX_ARRIVAL_QUEUE_KEY));
+        core_guard
+            .follow_up
+            .retain(|item| item.queue_key.as_deref() != Some(INBOX_ARRIVAL_QUEUE_KEY));
+    } else {
+        let (preview, text) = pa_core::session_engine::inbox::arrival_notice(&batch, count);
+        let text = inbox.with_persistence_error_clause(text);
+        let core_guard = &mut *core_guard;
+        let (steering, follow_up) = (&mut core_guard.steering, &mut core_guard.follow_up);
+        for item in steering
+            .iter_mut()
+            .chain(follow_up.iter_mut())
+            .filter(|item| item.queue_key.as_deref() == Some(INBOX_ARRIVAL_QUEUE_KEY))
+        {
+            item.message.clone_from(&text);
+            item.preview = Some(preview.clone());
+        }
+    }
+    if count == 0 {
+        core_guard
+            .steering
+            .retain(|item| item.queue_key.as_deref() != Some(INBOX_REMINDER_QUEUE_KEY));
+        core_guard
+            .follow_up
+            .retain(|item| item.queue_key.as_deref() != Some(INBOX_REMINDER_QUEUE_KEY));
+    } else {
+        let reminder = inbox
+            .with_persistence_error_clause(pa_core::session_engine::inbox::reminder_notice(count));
+        let core_guard = &mut *core_guard;
+        let (steering, follow_up) = (&mut core_guard.steering, &mut core_guard.follow_up);
+        for item in steering
+            .iter_mut()
+            .chain(follow_up.iter_mut())
+            .filter(|item| item.queue_key.as_deref() == Some(INBOX_REMINDER_QUEUE_KEY))
+        {
+            item.message.clone_from(&reminder);
+        }
+    }
 }
 
 /// Admit one periodic unread reminder: while the inbox stays non-empty,

@@ -155,6 +155,9 @@ pub struct AgentSessionEngine {
     /// every session build.
     pub(crate) inbox:
         std::sync::Mutex<Option<std::sync::Arc<pa_core::session_engine::inbox::SessionInbox>>>,
+    /// The worker's post-drain inbox seam (see `set_inbox_read_hook`).
+    pub(crate) inbox_read_hook:
+        std::sync::Mutex<Option<pa_core::session_engine::inbox::InboxReadHook>>,
     /// The live agent handle: the eager turn-abort funnel's target, mirrored
     /// because a running turn holds the core session's mutex.
     pub(crate) turn_agent: std::sync::Mutex<Option<std::sync::Arc<pa_agent::agent::Agent>>>,
