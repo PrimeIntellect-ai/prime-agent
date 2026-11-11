@@ -100,29 +100,6 @@ fn settings_summary(settings_path: &Path) -> Vec<String> {
     rows.iter().map(|row| escaped(row).into_owned()).collect()
 }
 
-/// The refusal wording for a settings file the fingerprint would not read:
-/// a symlink, or (permission-denied / non-UTF-8) an unreadable file.
-fn refusal_reason(settings_path: &Path) -> &'static str {
-    if std::fs::symlink_metadata(settings_path)
-        .is_ok_and(|metadata| metadata.file_type().is_symlink())
-    {
-        "a symlink"
-    } else {
-        "unreadable (permissions or not valid UTF-8)"
-    }
-}
-
-/// The fix suggestion matching the refusal reason.
-fn refusal_fix(settings_path: &Path) -> &'static str {
-    if std::fs::symlink_metadata(settings_path)
-        .is_ok_and(|metadata| metadata.file_type().is_symlink())
-    {
-        "Make it a real file first."
-    } else {
-        "Make it readable text first."
-    }
-}
-
 /// Flush pending type-ahead so a stray pre-typed line cannot answer the
 /// trust question.
 fn flush_typeahead() {
@@ -168,10 +145,8 @@ pub(crate) fn prompt_first_load(cwd: &Path, agent_dir: &Path) -> Result<()> {
     let registry_path = agent_dir.join(pa_core::settings::TRUSTED_PROJECTS_FILE);
     let Some(fingerprint) = pa_core::settings::project_fingerprint(&settings_path) else {
         println!(
-            "This project's settings file ({}), is {}, so it cannot be trusted. {}",
+            "This project's settings file ({}) is unreadable (permissions or not valid UTF-8), so it cannot be trusted. Make it readable text first.",
             escaped(&settings_path.display().to_string()),
-            refusal_reason(&settings_path),
-            refusal_fix(&settings_path)
         );
         return Ok(());
     };
@@ -206,21 +181,6 @@ pub(crate) fn prompt_first_load(cwd: &Path, agent_dir: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// The prompt's refusal wording distinguishes a symlink from an
-    /// unreadable file (invalid UTF-8, the root-proof case): the wrong
-    /// diagnosis would tell the user to fix the wrong problem.
-    #[test]
-    fn an_unreadable_file_is_not_reported_as_a_symlink() {
-        let dir = tempfile::tempdir().unwrap();
-        let settings_path = dir.path().join("settings.json");
-        std::fs::write(&settings_path, b"{\"theme\": \xff}").unwrap();
-        assert_eq!(
-            refusal_reason(&settings_path),
-            "unreadable (permissions or not valid UTF-8)"
-        );
-        assert_eq!(refusal_fix(&settings_path), "Make it readable text first.");
-    }
 
     /// The summary shows a legacy telemetry bool the way the loader applies
     /// it (migrated to `telemetry.enabled`), so the prompt never hides an

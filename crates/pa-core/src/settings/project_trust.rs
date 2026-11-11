@@ -38,15 +38,10 @@ fn fingerprint_hex(bytes: &[u8]) -> String {
 
 /// The pinned fingerprint for a project's config surface: the settings
 /// file's exact bytes when present (any change re-prompts), the empty
-/// sentinel when absent (its later appearance re-prompts). `None` for a
-/// symlinked settings file: it is refused outright.
+/// sentinel when absent (its later appearance re-prompts). `None` for an
+/// unreadable settings file: it is refused outright.
 #[must_use]
 pub fn project_fingerprint(settings_path: &Path) -> Option<String> {
-    if std::fs::symlink_metadata(settings_path)
-        .is_ok_and(|metadata| metadata.file_type().is_symlink())
-    {
-        return None;
-    }
     Some(match std::fs::read_to_string(settings_path) {
         Ok(content) => fingerprint(&content),
         // The absence sentinel pins the not-yet-existing file: its later
@@ -128,13 +123,6 @@ pub fn project_trusted(registry_path: &Path, settings_path: &Path, fingerprint: 
 ///
 /// Returns an error when the registry cannot be read or written.
 pub fn trust_project(registry_path: &Path, settings_path: &Path, fingerprint: &str) -> Result<()> {
-    // A symlinked settings file is refused outright: its bytes belong to
-    // another file, so pinning them would trust unseen content.
-    if std::fs::symlink_metadata(settings_path)
-        .is_ok_and(|metadata| metadata.file_type().is_symlink())
-    {
-        anyhow::bail!("a symlinked settings file cannot be trusted; make it a real file");
-    }
     // The locks precede the read: two concurrent trusts must never erase
     // each other's entries through a stale read.
     let _process_guard = super::storage::process_lock(registry_path);
@@ -225,7 +213,6 @@ impl ProjectTrustGate {
     /// The whole-project decision: this project directory's registry entry
     /// pinned to the settings fingerprint (the empty sentinel while the
     /// file is absent), so one trust covers every gated project file.
-    /// A symlinked settings file is never admitted.
     #[must_use]
     pub(crate) fn admits_project(&self) -> bool {
         project_fingerprint(&self.settings_path).is_some_and(|fingerprint| {
