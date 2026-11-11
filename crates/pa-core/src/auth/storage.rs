@@ -47,7 +47,7 @@ pub trait AuthStorageBackend: Send + Sync {
     /// the holder process dies, so crash recovery needs no stale-reclaim
     /// step (no observe-then-remove race can admit two holders) and a
     /// live holder never loses it. One lock per provider — a stalled
-    /// refresh of one provider's token (the MCP OAuth fetch has no HTTP
+    /// refresh of one provider's token (held up to its fetch's HTTP
     /// deadline) must not block another provider's. `Ok(None)` on
     /// single-process backends; the process-local flight gate serializes
     /// those.

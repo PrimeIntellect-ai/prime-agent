@@ -4,8 +4,13 @@
 //! fail, not silently follow).
 
 use std::sync::OnceLock;
+use std::time::Duration;
 
 use anyhow::{Context, Result};
+
+/// Deadline for one OAuth request, connect through body; the built-in
+/// providers bound their token refresh the same way (`REFRESH_TIMEOUT_MS`).
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(8);
 
 /// One OAuth HTTP request.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -89,6 +94,7 @@ impl ReqwestOAuthHttp {
         self.client.get_or_init(|| {
             pa_ai::utils::tls::http_client_builder()
                 .redirect(reqwest::redirect::Policy::none())
+                .timeout(REQUEST_TIMEOUT)
                 .build()
                 .expect("oauth client")
         })
@@ -152,6 +158,37 @@ fn method_label(method: OAuthHttpMethod) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test(start_paused = true)]
+    async fn a_stalled_endpoint_times_out() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/token", listener.local_addr().unwrap());
+        // Accept the connection and never answer it.
+        tokio::spawn(async move {
+            let _stalled = listener.accept().await;
+            std::future::pending::<()>().await;
+        });
+        let request = OAuthHttpRequest {
+            method: OAuthHttpMethod::Get,
+            url,
+            headers: Vec::new(),
+            body: None,
+        };
+        let error = tokio::time::timeout(
+            std::time::Duration::from_secs(60),
+            ReqwestOAuthHttp::new().request(request),
+        )
+        .await
+        .expect("the request gives up before the 60 s guard")
+        .expect_err("a stalled endpoint fails the request");
+        assert!(
+            error
+                .chain()
+                .filter_map(|cause| cause.downcast_ref::<reqwest::Error>())
+                .any(reqwest::Error::is_timeout),
+            "{error:#}"
+        );
+    }
 
     #[test]
     fn response_header_lookup_is_case_insensitive() {
