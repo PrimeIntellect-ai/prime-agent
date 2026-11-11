@@ -77,10 +77,20 @@ pub(crate) fn prompt_first_load(cwd: &Path, agent_dir: &Path, ask: bool) -> Resu
         .join(pa_core::settings::CONFIG_DIR_NAME)
         .join("settings.json");
     let registry_path = agent_dir.join(pa_core::settings::TRUSTED_PROJECTS_FILE);
-    if pa_core::settings::project_fingerprint(&settings_path).is_some_and(|fingerprint| {
-        pa_core::settings::project_trusted(&registry_path, &settings_path, &fingerprint)
-    }) {
-        return Ok(());
+    match pa_core::settings::project_fingerprint(&settings_path) {
+        Some(fingerprint)
+            if pa_core::settings::project_trusted(&registry_path, &settings_path, &fingerprint) =>
+        {
+            return Ok(());
+        }
+        // An uncomputable pin (unreadable or refused file) never aborts the
+        // launch: the config stays ignored and the notice tells the user;
+        // the explicit trust command surfaces the full refusal and fails.
+        None => {
+            eprintln!("{}", pa_core::settings::ignored_project_notice(cwd));
+            return Ok(());
+        }
+        Some(_) => {}
     }
     if !ask || !std::io::stdin().is_terminal() {
         eprintln!("{}", pa_core::settings::ignored_project_notice(cwd));
