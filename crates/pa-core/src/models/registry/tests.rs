@@ -603,3 +603,61 @@ async fn scope_readiness_timeout_keeps_models_available_before_refresh() {
         vec![existing]
     );
 }
+
+#[test]
+fn a_prime_base_url_override_voids_the_live_serving_label() {
+    let dir = tempfile::tempdir().unwrap();
+    let auth = auth_without_env(&serde_json::json!({
+        "prime-inference": { "type": "api_key", "key": "live-key",
+            "primeTeam": { "teamId": "team-1", "name": "Team 1" } }
+    }));
+    // Every compiled route labeled hosted, so the snapshot passes the coverage gate.
+    let compiled = pa_models::transports::prime_inference_offline_entries();
+    let entries: Vec<_> = compiled
+        .iter()
+        .map(|model| {
+            serde_json::json!({
+                "id": model.id,
+                "serving": "hosted",
+                "pricing": { "input_usd_per_mtok": 1.0, "output_usd_per_mtok": 1.0 },
+            })
+        })
+        .collect();
+    let snapshot = serde_json::json!({
+        "url": format!("{}/models", super::super::prime_inference::PRIME_INFERENCE_BASE_URL),
+        "scope": pa_models::prime_inference::scope_key("live-key", "team-1"),
+        "fetchedAt": 1,
+        "payload": { "data": entries },
+    });
+    std::fs::create_dir_all(dir.path().join("models")).unwrap();
+    std::fs::write(
+        dir.path().join("models/prime-inference-models-cache.json"),
+        serde_json::to_vec(&snapshot).unwrap(),
+    )
+    .unwrap();
+    let models_path = dir.path().join("models.json");
+    std::fs::write(&models_path, "{}").unwrap();
+    let mut registry = ModelRegistry::create(auth, &models_path);
+    let probe = |registry: &ModelRegistry| {
+        registry
+            .get_all()
+            .iter()
+            .find(|model| model.id == compiled[0].id && model.provider == "prime-inference")
+            .cloned()
+            .unwrap()
+    };
+    assert_eq!(
+        probe(&registry).serving,
+        Some(pa_types::ai::ModelServing::Hosted)
+    );
+
+    std::fs::write(
+        &models_path,
+        r#"{ "providers": { "prime-inference": { "baseUrl": "https://my-gateway.example/v1" } } }"#,
+    )
+    .unwrap();
+    registry.refresh();
+    let overridden = probe(&registry);
+    assert_eq!(overridden.base_url, "https://my-gateway.example/v1");
+    assert_eq!(overridden.serving, None);
+}

@@ -217,6 +217,7 @@ impl Inner {
                     run_slot.finish(
                         (!ok).then(|| anyhow!("Kernel bootstrap failed after protocol repair")),
                     );
+                    *lock(&inner.rebootstrap_memo) = None;
                 });
                 *memo = Some(slot.clone());
                 slot

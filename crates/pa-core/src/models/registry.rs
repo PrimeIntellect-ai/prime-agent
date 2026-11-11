@@ -629,11 +629,15 @@ impl ModelRegistry {
             .into_iter()
             .map(|mut model| {
                 if let Some(provider_override) = custom.provider_overrides.get(&model.provider) {
-                    if provider_override.base_url.is_some() {
-                        model.base_url = provider_override
-                            .base_url
-                            .clone()
-                            .unwrap_or_else(|| model.base_url.clone());
+                    if let Some(base_url) = &provider_override.base_url {
+                        model.base_url = base_url.clone();
+                        // The live catalog's serving class labels the
+                        // official endpoint; a user-replaced endpoint voids
+                        // it (the label must not claim a serving path the
+                        // route no longer uses).
+                        if model.provider == PRIME_INFERENCE_PROVIDER_ID {
+                            model.serving = None;
+                        }
                     }
                     if provider_override.compat.is_some() {
                         model.compat =

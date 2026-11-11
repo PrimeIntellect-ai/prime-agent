@@ -1,5 +1,6 @@
 //! The abort tests (the in-flight cancel, settled-turn payloads, retries, the live-kernel cancel).
 use super::*;
+use crate::test_support::{live_kernel_python, KernelEnvOverride};
 
 /// The eager turn abort: an abort landing mid-provider-wait cancels the
 /// in-flight fetch immediately; the aborted row carries `EMPTY_USAGE`,
@@ -463,57 +464,6 @@ fn retried_run_restarts_with_its_own_agent_frames() {
         agent_end_indexes[0] < auto_retry_index && auto_retry_index < agent_start_index,
         "the retry start sits between the two runs: {events:?}"
     );
-}
-
-/// Scoped process-env overrides for the live-kernel tests: applied on
-/// construction, restored on drop. Serialized by the faux lock, so
-/// nothing races.
-#[cfg(test)]
-struct KernelEnvOverride {
-    saved: Vec<(String, Option<String>)>,
-}
-
-#[cfg(test)]
-impl KernelEnvOverride {
-    fn apply(pairs: &[(&str, Option<String>)]) -> Self {
-        let saved = pairs
-            .iter()
-            .map(|(key, _)| ((*key).to_string(), std::env::var(key).ok()))
-            .collect();
-        for (key, value) in pairs {
-            match value {
-                Some(value) => std::env::set_var(key, value),
-                None => std::env::remove_var(key),
-            }
-        }
-        KernelEnvOverride { saved }
-    }
-}
-
-#[cfg(test)]
-impl Drop for KernelEnvOverride {
-    fn drop(&mut self) {
-        for (key, value) in &self.saved {
-            match value {
-                Some(value) => std::env::set_var(key, value),
-                None => std::env::remove_var(key),
-            }
-        }
-    }
-}
-
-/// The kernel python for the live-kernel abort test (skipped without one).
-#[cfg(test)]
-fn live_kernel_python() -> Option<std::path::PathBuf> {
-    let candidate = std::path::PathBuf::from(std::env::var("HOME").map_or_else(
-        |_| "/home/ubuntu/.prime/agent/kernel-venv/bin/python".to_string(),
-        |home| format!("{home}/.prime/agent/kernel-venv/bin/python"),
-    ));
-    if candidate.exists() {
-        return Some(candidate);
-    }
-    eprintln!("kernel python {candidate:?} not found; skipping live kernel test");
-    None
 }
 
 /// The abort wedge repro (dogfood P0): a turn executing a long kernel cell

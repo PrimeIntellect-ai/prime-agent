@@ -1,4 +1,4 @@
-# ACP differential corpus (slice 1)
+# ACP capture corpus (slice 1)
 
 Captures of the installed TS binary (`prime-agent --mode acp --no-session
 --provider prime-inference --model z-ai/glm-5.3-flash`) speaking ACP over
@@ -63,57 +63,5 @@ the process exit code and stderr.
   valid admission and close. Failed admissions keep the connection
   serving.
 
-## The Rust captures in this directory
-
-The `rust-*.jsonl` files are the evidence run for this slice: the same
-scenario client against the Rust build with the same provider/model
-(`z-ai/glm-5.3-flash`) and the kernel sidecar resolved through
-`PI_PACKAGE_DIR` (a cargo-built binary has no sidecar next to the exe).
-
-Since slice 4 the Rust ACP mode serves over the daemon-attached transport
-(the TS `shouldUseDaemonClient` behavior): the binary spawns a supervisor
-on the sandboxed `--daemon-socket`, hosts a client-owned daemon session,
-and streams its session events as ACP updates. The daemon-attached
-captures are: happy_path, cwd_mismatch, errors, second_initialize,
-tool_call, compact_command, mcp_stdio, mcp_replace, mcp_errors — all
-MATCH in full mode. `cancel`, `goal_command`, `autonomous_limit`, and
-`autonomous_gate` were captured on the since-removed in-process
-transport; recapture is pending (the files stay):
-
-- `cancel`: the capture matched in full mode; the daemon-attached run
-  resolves the same `{stopReason: "cancelled"}` shape with no boundary
-  frames, but a fresh worker's first-token latency exceeds the
-  scenario's 2s cancel window, so the pre-cancel chunk count differs
-  per run. The daemon-attached cancel semantics are locked by the
-  deterministic e2e (`acp_daemon_attached_cancels_mid_turn`).
-- `goal_command` / `autonomous_limit` / `autonomous_gate`: the captures
-  predate the daemon's `goal_update` / autonomous-accounting producers;
-  recapture is pending.
-
-## Comparing a Rust run
-
-`compare_differential.py` normalizes both captures (volatile ids, version,
-model-generated text, sequence numbers) and compares the frame shape
-sequences field by field. `mcpCapabilities` is compared exactly: both
-binaries advertise `{ "http": true }`:
-
-    python3 compare_differential.py ts-happy_path.jsonl rust-happy_path.jsonl
-
-Both captures must come from the same scenario client with the same
-request order. `crates/pa-cli/tests/acp_mode_e2e.rs` locks the deterministic
-scenarios offline over the daemon-attached transport (the scripted faux
-worker); the network-dependent scenarios (tool_call, cancel mid-turn) are
-verified by running the scenario client against both binaries on a
-networked box.
-
-`--landmarks` drops model-behavior-dependent work frames (tool calls,
-chunk streams, and mid-turn goal-usage updates) and compares the protocol
-envelopes only. Use it for scenarios where the two model runs legally
-diverge in their tool usage (`goal_command`: one run answered directly,
-the other ran several ipython cells; `autonomous_limit`: one run wrote
-the essay with tool calls, the other without — both sequences are
-correct protocol behavior). The goal and autonomous frames themselves are
-locked field-by-field by the offline e2e tests. All other scenarios
-(happy_path, cwd_mismatch, errors, second_initialize, tool_call,
-compact_command, cancel, autonomous_gate, mcp_stdio, mcp_replace,
-mcp_errors) match in full mode.
+`crates/pa-cli/tests/acp_mode_e2e.rs` locks the deterministic scenarios
+offline over the daemon-attached transport (the scripted faux worker).

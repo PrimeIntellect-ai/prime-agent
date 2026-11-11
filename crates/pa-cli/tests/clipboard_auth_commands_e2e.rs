@@ -858,11 +858,18 @@ async fn tui_prime_login_renders_the_inline_team_picker() {
         steps: vec![
             pa_tui::interactive::HeadlessStep::Submit("/login".to_string()),
             enter(),
-            pa_tui::interactive::HeadlessStep::WaitMs(400),
+            // The team rows exist only once the picker loaded its teams.
+            pa_tui::interactive::HeadlessStep::WaitRender {
+                needle: "slug: acme".to_string(),
+                timeout_ms: 10_000,
+            },
             // Personal rides first (TS order): down selects Acme Corp.
             key(crossterm::event::KeyCode::Down),
             enter(),
-            pa_tui::interactive::HeadlessStep::WaitMs(400),
+            pa_tui::interactive::HeadlessStep::WaitRender {
+                needle: "Using team \"Acme Corp\".".to_string(),
+                timeout_ms: 10_000,
+            },
         ],
         width: 120,
         height: 36,
@@ -974,9 +981,16 @@ async fn tui_prime_login_escape_keeps_the_default_team_status() {
         steps: vec![
             pa_tui::interactive::HeadlessStep::Submit("/login".to_string()),
             enter(),
-            pa_tui::interactive::HeadlessStep::WaitMs(400),
+            // The team rows exist only once the picker loaded its teams.
+            pa_tui::interactive::HeadlessStep::WaitRender {
+                needle: "slug: acme".to_string(),
+                timeout_ms: 10_000,
+            },
             key(crossterm::event::KeyCode::Esc),
-            pa_tui::interactive::HeadlessStep::WaitMs(400),
+            pa_tui::interactive::HeadlessStep::WaitRender {
+                needle: "Using personal account.".to_string(),
+                timeout_ms: 10_000,
+            },
         ],
         width: 120,
         height: 36,

@@ -58,6 +58,7 @@ const TAB_LAYOUT: &[TabLayout] = &[
             "idle-eviction-minutes",
             "tree-filter-mode",
             "harness-refinements",
+            "web-search-provider",
         ],
     },
 ];
