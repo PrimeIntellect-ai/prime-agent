@@ -67,7 +67,9 @@ def observe(binary, root, observed):
         observed['before'] = before
         assert before['followUp'] == [DRAFT] and len(before['steering']) == 2, before
         agent_preview = before['steering'][1]
-        assert agent_preview == 'Agent message received: ' + AGENT, before
+        # The agent message routes into the session inbox (default on): the
+        # queued row is the short arrival notice, not the delivered prompt.
+        assert agent_preview == 'Inbox: 1 new message (agent-message)', before
         assert before['steering'][0] == EARLIER, before
         mutation = {'lane': 'followUp', 'index': 0, 'expectedText': DRAFT,
             'mutation': {'type': 'replace', 'text': EDITED, 'lane': 'steering'}}

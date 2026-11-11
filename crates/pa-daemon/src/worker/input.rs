@@ -1,9 +1,9 @@
 //! The input handlers behind dispatch: prompt delivery, queue
 //! operations, and agent-message delivery.
 use super::{
-    enqueue_priority, json, oneshot, parse_custom_message, parse_prompt_images, response_success,
-    sender_is_child_of, AgentFamilyRelationship, AgentMessagePromptPayload, Lane, QueueCheckpoint,
-    QueuePriority, QueuedItem, TurnPolicy, Worker, AGENT_MESSAGE_SOURCE,
+    admit_inbox_notice, enqueue_priority, json, oneshot, parse_custom_message, parse_prompt_images,
+    response_success, sender_is_child_of, AgentFamilyRelationship, AgentMessagePromptPayload, Lane,
+    QueueCheckpoint, QueuePriority, QueuedItem, TurnPolicy, Worker, AGENT_MESSAGE_SOURCE,
     DEFAULT_AGENT_MESSAGE_MAX_PENDING_PER_SESSION, QUEUED_INPUT_SUSPENDED,
 };
 
@@ -306,7 +306,7 @@ impl Worker {
         let prompt = pa_core::session_engine::agent_messaging::create_agent_session_message_prompt(
             &AgentMessagePromptPayload {
                 message: message.to_string(),
-                sender_name,
+                sender_name: sender_name.clone(),
                 from_relationship,
             },
         );
@@ -315,6 +315,93 @@ impl Worker {
         } else {
             Lane::Steering
         };
+        // The agent-inbox route (default on): the delivered prompt lands
+        // in the session's durable inbox, and ONE short coalesced notice
+        // wakes on the delivery's lane instead of steering the full
+        // `[agent-message from ...]` row. `agentInbox.enabled: false`
+        // restores the direct row below.
+        let inbox_route = self.agent_engine.as_ref().and_then(|engine| {
+            if engine.session_is_closed()
+                || !crate::agent_inbox::inbox_enabled(&engine.cwd(), &self.config.agent_dir)
+            {
+                return None;
+            }
+            engine
+                .inbox()
+                .map(|inbox| (std::sync::Arc::clone(engine), inbox))
+        });
+        if let Some((engine, inbox)) = inbox_route {
+            // The capacity bound counts waiting inbox messages too: the
+            // inbox route replaces the lanes, never loosens the cap.
+            let inbox_waiting = inbox
+                .count()
+                .2
+                .get(pa_core::session_engine::inbox::INBOX_CLASS_AGENT_MESSAGE)
+                .copied()
+                .unwrap_or(0) as usize;
+            let (id, queued, target) = {
+                let (core, inputs) = self.summary_inputs();
+                let pending = core.steering.len() + core.follow_up.len() + inbox_waiting;
+                if let Err(error) =
+                    pa_core::session_engine::agent_messaging::assert_agent_message_queue_capacity(
+                        pending,
+                        DEFAULT_AGENT_MESSAGE_MAX_PENDING_PER_SESSION,
+                    )
+                {
+                    drop(core);
+                    return response_failure(
+                        None,
+                        "worker_deliver_message",
+                        &error.to_string(),
+                        None,
+                    );
+                }
+                let id =
+                    pa_core::session_engine::agent_messaging::create_agent_session_message_id();
+                let queued = core.busy;
+                let summary = self.summary_locked(&core, inputs);
+                // The receiving session's endpoint for the receipt's `target`.
+                let mut target = json!({
+                    "activeSessionId": summary.active_session_id.clone().unwrap_or_default(),
+                    "sessionId": summary.session_id,
+                    "runtimeKind": summary
+                        .runtime_kind
+                        .clone()
+                        .unwrap_or_else(|| "top-level".to_string()),
+                });
+                if let Some(name) = summary.session_name.filter(|name| !name.is_empty()) {
+                    target["sessionName"] = json!(name);
+                }
+                (id, queued, target)
+            };
+            // The provenance the targeted reads filter on: the sender
+            // name, the message id, and the family relationship.
+            let mut meta = json!({ "id": &id, "from": &sender });
+            if let Some(relationship) = from_relationship {
+                meta["relationship"] = json!(relationship.as_str());
+            }
+            let notice = pa_core::session_engine::inbox::InboxNotice {
+                class: pa_core::session_engine::inbox::INBOX_CLASS_AGENT_MESSAGE,
+                sender: Some(sender_name),
+                text: prompt,
+                meta,
+            };
+            let closed_engine = engine;
+            admit_inbox_notice(
+                &self.recovery,
+                &self.core,
+                &self.work_notify,
+                &inbox,
+                &self.inbox_arrivals,
+                notice,
+                lane,
+                move || closed_engine.session_is_closed(),
+            );
+            // The notice is admitted live work — a restart must revive
+            // the worker to deliver it (no client reopens the session).
+            let receipt = agent_message_receipt(&id, &target, message, lane, queued, &sender);
+            return response_success(None, "worker_deliver_message", Some(receipt));
+        }
         let (id, queued, snapshot, target) = {
             let (mut core, inputs) = self.summary_inputs();
             let pending = core.steering.len() + core.follow_up.len();
@@ -397,26 +484,40 @@ impl Worker {
         });
         let _ = self.emit_action_update(&snapshot);
         self.work_notify.notify_one();
-        let timestamp = crate::util::now_iso();
-        let mut receipt = json!({
-            "id": id,
-            "source": AGENT_MESSAGE_SOURCE,
-            "target": target,
-            "message": message,
-            // TS receipts always report `steer`; the follow-up lane is the
-            // Rust extension for queue-behind-current-work delivery.
-            "deliveryMode": if lane == Lane::FollowUp { "follow_up" } else { "steer" },
-        });
-        if queued {
-            receipt["deliveryStatus"] = json!("queued");
-            receipt["queuedAt"] = json!(timestamp);
-        } else {
-            receipt["deliveryStatus"] = json!("delivered");
-            receipt["deliveredAt"] = json!(timestamp);
-        }
-        if !sender.is_null() {
-            receipt["from"] = json!(sender);
-        }
+        let receipt = agent_message_receipt(&id, &target, message, lane, queued, &sender);
         response_success(None, "worker_deliver_message", Some(receipt))
     }
+}
+
+/// The `worker_deliver_message` receipt for one accepted delivery (the
+/// direct-row and inbox routes answer the same shape).
+fn agent_message_receipt(
+    id: &str,
+    target: &Value,
+    message: &str,
+    lane: Lane,
+    queued: bool,
+    sender: &Value,
+) -> Value {
+    let timestamp = crate::util::now_iso();
+    let mut receipt = json!({
+        "id": id,
+        "source": AGENT_MESSAGE_SOURCE,
+        "target": target,
+        "message": message,
+        // TS receipts always report `steer`; the follow-up lane is the
+        // Rust extension for queue-behind-current-work delivery.
+        "deliveryMode": if lane == Lane::FollowUp { "follow_up" } else { "steer" },
+    });
+    if queued {
+        receipt["deliveryStatus"] = json!("queued");
+        receipt["queuedAt"] = json!(timestamp);
+    } else {
+        receipt["deliveryStatus"] = json!("delivered");
+        receipt["deliveredAt"] = json!(timestamp);
+    }
+    if !sender.is_null() {
+        receipt["from"] = json!(sender);
+    }
+    receipt
 }
