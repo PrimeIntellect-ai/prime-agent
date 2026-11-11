@@ -493,16 +493,26 @@ impl Inner {
             }
             // append_diagnostic re-locks `guarded`, so it must run OUTSIDE
             // this lock scope (a std Mutex is not reentrant).
-            // An in-flight graceful shutdown() owns this exit: it runs cleanup itself.
-            let (was_live, graceful_in_flight) = {
+            let (was_live, owned_elsewhere) = {
                 let mut g = lock(&inner.guarded);
-                if g.lifecycle.graceful_shutdown_in_flight() {
+                // An in-flight graceful shutdown() owns this exit: it runs cleanup itself.
+                let (was_live, owned_elsewhere) = if g.lifecycle.graceful_shutdown_in_flight() {
                     (false, true)
                 } else {
-                    let was_live = !g.lifecycle.is_shut_down();
+                    match g.lifecycle.current() {
+                        // A protocol repair is killing this child; kill_child_to_idle runs
+                        // cleanup and settles the state itself.
+                        Lifecycle::Discarding => (false, true),
+                        Lifecycle::Idle | Lifecycle::Starting(_) | Lifecycle::Running => {
+                            (true, false)
+                        }
+                        Lifecycle::ShuttingDown { .. } | Lifecycle::Defunct => (false, false),
+                    }
+                };
+                if !owned_elsewhere {
                     g.lifecycle.transition(Lifecycle::Defunct);
-                    (was_live, false)
                 }
+                (was_live, owned_elsewhere)
             };
             if was_live {
                 inner.append_diagnostic(&format!(
@@ -512,7 +522,7 @@ impl Inner {
                 ));
             }
             live_kernels::remove(&inner);
-            if graceful_in_flight {
+            if owned_elsewhere {
                 return;
             }
             inner.cleanup_resources(Signal::Term);
