@@ -320,10 +320,11 @@ impl Worker {
         // wakes on the delivery's lane instead of steering the full
         // `[agent-message from ...]` row. `agentInbox.enabled: false`
         // restores the direct row below.
+        let inbox_on = self.agent_engine.as_ref().is_some_and(|engine| {
+            crate::agent_inbox::inbox_enabled(&engine.cwd(), &self.config.agent_dir)
+        });
         let inbox_route = self.agent_engine.as_ref().and_then(|engine| {
-            if engine.session_is_closed()
-                || !crate::agent_inbox::inbox_enabled(&engine.cwd(), &self.config.agent_dir)
-            {
+            if !inbox_on {
                 return None;
             }
             engine
@@ -331,31 +332,8 @@ impl Worker {
                 .map(|inbox| (std::sync::Arc::clone(engine), inbox))
         });
         if let Some((engine, inbox)) = inbox_route {
-            // The capacity bound counts waiting inbox messages too: the
-            // inbox route replaces the lanes, never loosens the cap.
-            let inbox_waiting = inbox
-                .count()
-                .2
-                .get(pa_core::session_engine::inbox::INBOX_CLASS_AGENT_MESSAGE)
-                .copied()
-                .unwrap_or(0) as usize;
             let (id, queued, target) = {
                 let (core, inputs) = self.summary_inputs();
-                let pending = core.steering.len() + core.follow_up.len() + inbox_waiting;
-                if let Err(error) =
-                    pa_core::session_engine::agent_messaging::assert_agent_message_queue_capacity(
-                        pending,
-                        DEFAULT_AGENT_MESSAGE_MAX_PENDING_PER_SESSION,
-                    )
-                {
-                    drop(core);
-                    return response_failure(
-                        None,
-                        "worker_deliver_message",
-                        &error.to_string(),
-                        None,
-                    );
-                }
                 let id =
                     pa_core::session_engine::agent_messaging::create_agent_session_message_id();
                 let queued = core.busy;
@@ -386,8 +364,37 @@ impl Worker {
                 text: prompt,
                 meta,
             };
+            if engine.session_is_closed() {
+                // A closed session takes no lane row and no wake (the
+                // notice sink drops the same way): the message stays
+                // durable in the inbox, so a reopened session reads it.
+                inbox.push(notice, pa_core::autonomous::now_millis());
+                let receipt = agent_message_receipt(&id, &target, message, lane, queued, &sender);
+                return response_success(None, "worker_deliver_message", Some(receipt));
+            }
+            // The capacity bound counts waiting inbox messages too, and
+            // it is re-checked inside the admission's critical section
+            // (the lane lengths read from the locked core): concurrent
+            // deliveries can never pass one stale sample together.
+            let capacity_error = {
+                let inbox = std::sync::Arc::clone(&inbox);
+                move |steering: usize, follow_up: usize| {
+                    let waiting = inbox
+                        .count()
+                        .2
+                        .get(pa_core::session_engine::inbox::INBOX_CLASS_AGENT_MESSAGE)
+                        .copied()
+                        .unwrap_or(0) as usize;
+                    pa_core::session_engine::agent_messaging::assert_agent_message_queue_capacity(
+                        steering + follow_up + waiting,
+                        DEFAULT_AGENT_MESSAGE_MAX_PENDING_PER_SESSION,
+                    )
+                    .err()
+                    .map(|error| error.to_string())
+                }
+            };
             let closed_engine = engine;
-            admit_inbox_notice(
+            let refused = admit_inbox_notice(
                 &self.recovery,
                 &self.core,
                 &self.work_notify,
@@ -396,11 +403,38 @@ impl Worker {
                 notice,
                 lane,
                 move || closed_engine.session_is_closed(),
+                capacity_error,
             );
+            if let Some(error) = refused {
+                return response_failure(None, "worker_deliver_message", &error, None);
+            }
+            // The direct route's strip refresh: the queued notice row
+            // must reach the clients like any other lane change.
+            let snapshot = {
+                let core = self.core.lock().unwrap();
+                Self::snapshot_locked(&core)
+            };
+            let _ = self.emit_action_update(&snapshot);
             // The notice is admitted live work — a restart must revive
             // the worker to deliver it (no client reopens the session).
             let receipt = agent_message_receipt(&id, &target, message, lane, queued, &sender);
             return response_success(None, "worker_deliver_message", Some(receipt));
+        }
+        // A retiring session with the inbox on but no store left takes
+        // no lane row either: refuse instead of injecting the raw row
+        // the kernel-notice sink would drop.
+        if inbox_on
+            && self
+                .agent_engine
+                .as_ref()
+                .is_some_and(|engine| engine.session_is_closed())
+        {
+            return response_failure(
+                None,
+                "worker_deliver_message",
+                "Target session is closed",
+                None,
+            );
         }
         let (id, queued, snapshot, target) = {
             let (mut core, inputs) = self.summary_inputs();
