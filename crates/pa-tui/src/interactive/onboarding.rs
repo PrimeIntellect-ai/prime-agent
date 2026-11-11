@@ -463,8 +463,9 @@ async fn run_onboarding_flow(
     // daemon resolves the model against its own registry — read fresh at the switch, so the
     // just-stored credential is what makes the default available (the client's startup snapshot
     // predates the sign-in). A resolution failure surfaces as the switch's error row and the flow
-    // still completes.
-    if task.current_model.is_none() {
+    // still completes. The picker below words its prompt and continue row from the same fact.
+    let prime_default = task.current_model.is_none();
+    if prime_default {
         session
             .apply_model_selection(
                 crate::provider_auth::PRIME_INFERENCE_PROVIDER_ID,
@@ -501,7 +502,7 @@ async fn run_onboarding_flow(
             break;
         }
         screen.mount_panel(crate::onboarding_flow::OnboardingPanel::Providers(
-            crate::onboarding_flow::ProviderPicker::new(options),
+            crate::onboarding_flow::ProviderPicker::new(options, prime_default),
         ));
         let (picked_screen, outcome) =
             drive_onboarding_pane(view, &mut *drive, screen, None, &mut session.osc_sink).await?;
