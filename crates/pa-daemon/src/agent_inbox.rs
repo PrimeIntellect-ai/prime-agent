@@ -32,6 +32,19 @@ impl AgentSessionEngine {
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(inbox);
     }
 
+    /// Drop the current session's inbox store (the retire seam: a
+    /// retired session's store never serves a replacement's rebuild).
+    ///
+    /// # Panics
+    ///
+    /// Panics when the inbox slot lock is poisoned.
+    pub(crate) fn clear_inbox(&self) {
+        *self
+            .inbox
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+    }
+
     /// The current session's inbox store, when a session is built.
     ///
     /// # Panics
@@ -59,9 +72,11 @@ pub(crate) fn reminder_interval_ms(cwd: &Path, agent_dir: &Path) -> u64 {
 
 /// The periodic unread reminder: while the session's inbox stays
 /// non-empty, one steering row repeats the waiting count every
-/// `reminderIntervalMs`; the interval re-reads each cycle, and an empty
-/// inbox, a `0` interval, or `agentInbox.enabled: false` skips the cycle
-/// (the period resets when it drains).
+/// `reminderIntervalMs`; the interval re-reads each cycle — including
+/// after the wait, so a flip to `0` never admits — and an empty inbox,
+/// a `0` interval, a closed session, or `agentInbox.enabled: false`
+/// skips the cycle (the period resets when it drains; a closed session
+/// keeps polling so a later session on the worker re-arms the loop).
 pub(crate) fn spawn_inbox_reminder(
     engine: Weak<AgentSessionEngine>,
     core: &Arc<Mutex<SessionCore>>,
@@ -94,8 +109,17 @@ pub(crate) fn spawn_inbox_reminder(
             let Some(engine) = engine.upgrade() else {
                 return;
             };
+            // The interval re-reads after the wait too: a flip to `0`
+            // while this cycle slept never admits (the sample above only
+            // chose the wait).
+            if reminder_interval_ms(&engine.cwd(), &agent_dir) == 0 {
+                continue;
+            }
+            // A closed session skips the cycle instead of ending the
+            // loop: the worker outlives its sessions, so a later session
+            // on the same worker must re-arm the reminder.
             if engine.session_is_closed() {
-                return;
+                continue;
             }
             let Some(inbox) = engine.inbox() else {
                 continue;

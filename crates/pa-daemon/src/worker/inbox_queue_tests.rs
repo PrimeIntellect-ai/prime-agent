@@ -107,6 +107,7 @@ async fn an_idle_arrival_queues_one_short_notice_and_keeps_the_message() {
             pa_core::session_engine::inbox::INBOX_CLASS_BASH_DONE,
             "[bash-done pid:4321 exit:0]",
         ),
+        Lane::Steering,
         || false,
     );
     let rows = steering_rows(&worker);
@@ -165,6 +166,7 @@ async fn busy_window_arrivals_coalesce_into_one_queued_row() {
             pa_core::session_engine::inbox::INBOX_CLASS_BASH_DONE,
             "first",
         ),
+        Lane::Steering,
         || false,
     );
     admit_inbox_notice(
@@ -177,6 +179,7 @@ async fn busy_window_arrivals_coalesce_into_one_queued_row() {
             pa_core::session_engine::inbox::INBOX_CLASS_FACTORY_PROGRESS,
             "second",
         ),
+        Lane::Steering,
         || false,
     );
     admit_inbox_notice(
@@ -189,6 +192,7 @@ async fn busy_window_arrivals_coalesce_into_one_queued_row() {
             pa_core::session_engine::inbox::INBOX_CLASS_BASH_DONE,
             "third",
         ),
+        Lane::Steering,
         || false,
     );
     let rows = steering_rows(&worker);
@@ -221,6 +225,7 @@ async fn a_delivered_row_starts_a_fresh_batch() {
             pa_core::session_engine::inbox::INBOX_CLASS_BASH_DONE,
             "first",
         ),
+        Lane::Steering,
         || false,
     );
     // The delivery: the turn runner pops the row off the lane.
@@ -236,6 +241,7 @@ async fn a_delivered_row_starts_a_fresh_batch() {
             pa_core::session_engine::inbox::INBOX_CLASS_FACTORY_PROGRESS,
             "second",
         ),
+        Lane::Steering,
         || false,
     );
     let rows = steering_rows(&worker);
@@ -276,7 +282,7 @@ async fn the_reminder_repeats_while_the_inbox_stays_unread() {
     assert_eq!(rows.len(), 1, "one reminder row, replaced: {rows:?}");
     let (message, _, _) = &rows[0];
     assert!(
-        message.starts_with("[inbox reminder] 1 messages still waiting"),
+        message.starts_with("[inbox reminder] 1 message still waiting"),
         "the reminder repeats the waiting count: {message}"
     );
     assert!(message.contains("rlm.inbox.read()"));
@@ -309,6 +315,7 @@ async fn a_collected_handle_drains_its_message_and_drops_the_queued_wake_rows() 
         &inbox,
         &arrivals,
         bash_done_notice(4321, "sleep 1"),
+        Lane::Steering,
         || false,
     );
     admit_inbox_reminder(&worker.recovery, &worker.core, &notify, &inbox, || false);
@@ -360,6 +367,7 @@ async fn a_withdrawal_inside_a_covered_batch_rerenders_the_queued_rows() {
         &inbox,
         &arrivals,
         bash_done_notice(4321, "sleep 1"),
+        Lane::Steering,
         || false,
     );
     admit_inbox_notice(
@@ -372,6 +380,7 @@ async fn a_withdrawal_inside_a_covered_batch_rerenders_the_queued_rows() {
             pa_core::session_engine::inbox::INBOX_CLASS_FACTORY_PROGRESS,
             "second",
         ),
+        Lane::Steering,
         || false,
     );
     admit_inbox_reminder(&worker.recovery, &worker.core, &notify, &inbox, || false);
@@ -442,6 +451,7 @@ async fn a_withdrawal_of_the_last_message_of_its_batch_drops_the_batches_row() {
             pa_core::session_engine::inbox::INBOX_CLASS_FACTORY_PROGRESS,
             "still waiting",
         ),
+        Lane::Steering,
         || false,
     );
     // The older message's row delivered; its message stays waiting.
@@ -454,6 +464,7 @@ async fn a_withdrawal_of_the_last_message_of_its_batch_drops_the_batches_row() {
         &inbox,
         &arrivals,
         bash_done_notice(4321, "sleep 1"),
+        Lane::Steering,
         || false,
     );
     assert_eq!(
@@ -502,6 +513,7 @@ async fn a_withdrawal_racing_an_arrival_settles_both() {
             &inbox,
             &arrivals,
             bash_done_notice(10_000 + i, "job a"),
+            Lane::Steering,
             || false,
         );
         let barrier = Arc::new(std::sync::Barrier::new(2));
@@ -524,6 +536,7 @@ async fn a_withdrawal_racing_an_arrival_settles_both() {
                     &inbox,
                     &arrivals,
                     bash_done_notice(20_000 + i, "job b"),
+                    Lane::Steering,
                     || false,
                 );
                 let _ = done_tx.send(());
@@ -582,6 +595,7 @@ async fn a_closed_session_refuses_the_arrival() {
             pa_core::session_engine::inbox::INBOX_CLASS_BASH_DONE,
             "late",
         ),
+        Lane::Steering,
         || true,
     );
     assert!(
@@ -777,5 +791,172 @@ async fn the_disabled_inbox_never_admits_a_reminder() {
         run_reminder_cycles(std::time::Duration::from_millis(60_000)).await;
     }
     assert_eq!(reminder_rows(&worker), 1, "the re-enabled reminder admits");
+    let _ = std::fs::remove_dir_all(worker.config.socket_path.parent().unwrap());
+}
+
+/// A closed session skips reminder cycles without ending the loop: the
+/// reminder task is spawned once per worker, so a later session on the
+/// same worker must re-arm it.
+#[tokio::test(start_paused = true)]
+async fn a_closed_session_keeps_the_reminder_polling_for_the_next_session() {
+    let (worker, inbox, _arrivals, notify) = routing_state();
+    let dir = tempfile::tempdir().unwrap();
+    let agent_dir = dir.path().join("agent");
+    write_inbox_settings(&agent_dir, &json!({ "reminderIntervalMs": 30_000 }));
+    let engine = std::sync::Arc::new(
+        AgentSessionEngine::new(AgentEngineConfig {
+            cwd: dir.path().to_path_buf(),
+            agent_dir: agent_dir.clone(),
+            provider: None,
+            model: None,
+            api_key: None,
+            thinking: None,
+            session_dir: None,
+            session_file: None,
+            faux_script: None,
+            supervisor_link: None,
+            telemetry_disabled: None,
+            cron_store: None,
+            queued_steering_probe: None,
+        })
+        .unwrap(),
+    );
+    engine.set_inbox(std::sync::Arc::clone(&inbox));
+    inbox.push(
+        inbox_notice(
+            pa_core::session_engine::inbox::INBOX_CLASS_BASH_DONE,
+            "waiting",
+        ),
+        1_000,
+    );
+    crate::agent_inbox::spawn_inbox_reminder(
+        std::sync::Arc::downgrade(&engine),
+        &worker.core,
+        &notify,
+        &worker.recovery,
+        &agent_dir,
+    );
+    // The session closes: every cycle skips, nothing admits, and the
+    // loop stays alive.
+    engine.mark_session_closed();
+    for _ in 0..3 {
+        run_reminder_cycles(std::time::Duration::from_millis(60_000)).await;
+    }
+    assert!(
+        reminder_rows(&worker) == 0,
+        "a closed session never admits a reminder"
+    );
+    // The next session on the worker clears the marker: the same loop
+    // re-arms and the reminder admits.
+    engine.clear_session_closed();
+    for _ in 0..3 {
+        run_reminder_cycles(std::time::Duration::from_millis(60_000)).await;
+    }
+    assert_eq!(
+        reminder_rows(&worker),
+        1,
+        "the reminder re-arms for the next session"
+    );
+    let _ = std::fs::remove_dir_all(worker.config.socket_path.parent().unwrap());
+}
+
+/// A mid-cycle flip to `reminderIntervalMs: 0` never admits: the loop
+/// re-reads the interval after its wait, not only at the sample.
+#[tokio::test(start_paused = true)]
+async fn an_interval_flip_to_zero_during_the_wait_never_admits() {
+    let (worker, inbox, _arrivals, notify) = routing_state();
+    let dir = tempfile::tempdir().unwrap();
+    let agent_dir = dir.path().join("agent");
+    write_inbox_settings(&agent_dir, &json!({ "reminderIntervalMs": 30_000 }));
+    let engine = std::sync::Arc::new(
+        AgentSessionEngine::new(AgentEngineConfig {
+            cwd: dir.path().to_path_buf(),
+            agent_dir: agent_dir.clone(),
+            provider: None,
+            model: None,
+            api_key: None,
+            thinking: None,
+            session_dir: None,
+            session_file: None,
+            faux_script: None,
+            supervisor_link: None,
+            telemetry_disabled: None,
+            cron_store: None,
+            queued_steering_probe: None,
+        })
+        .unwrap(),
+    );
+    engine.set_inbox(std::sync::Arc::clone(&inbox));
+    inbox.push(
+        inbox_notice(
+            pa_core::session_engine::inbox::INBOX_CLASS_BASH_DONE,
+            "waiting",
+        ),
+        1_000,
+    );
+    crate::agent_inbox::spawn_inbox_reminder(
+        std::sync::Arc::downgrade(&engine),
+        &worker.core,
+        &notify,
+        &worker.recovery,
+        &agent_dir,
+    );
+    // The cycle samples the 30s interval and starts its wait.
+    run_reminder_cycles(std::time::Duration::from_secs(10)).await;
+    // The flip lands mid-wait: the waking cycle must not admit.
+    write_inbox_settings(&agent_dir, &json!({ "reminderIntervalMs": 0 }));
+    run_reminder_cycles(std::time::Duration::from_secs(30)).await;
+    assert!(
+        reminder_rows(&worker) == 0,
+        "the stale interval sample never admits after a flip to zero"
+    );
+    // The disabled poll keeps reading settings: a flip back re-arms.
+    write_inbox_settings(&agent_dir, &json!({ "reminderIntervalMs": 30_000 }));
+    for _ in 0..3 {
+        run_reminder_cycles(std::time::Duration::from_millis(60_000)).await;
+    }
+    assert_eq!(reminder_rows(&worker), 1, "the re-armed reminder admits");
+    let _ = std::fs::remove_dir_all(worker.config.socket_path.parent().unwrap());
+}
+
+/// A retired session leaves no inbox behind: the replacement's build
+/// installs the next session's store, so no retired store can serve
+/// reads or take appends across the swap.
+#[tokio::test]
+async fn a_retired_session_leaves_no_inbox_for_the_rebuild() {
+    let (worker, inbox, _arrivals, _notify) = routing_state();
+    let dir = tempfile::tempdir().unwrap();
+    let engine = std::sync::Arc::new(
+        AgentSessionEngine::new(AgentEngineConfig {
+            cwd: dir.path().to_path_buf(),
+            agent_dir: dir.path().join("agent"),
+            provider: None,
+            model: None,
+            api_key: None,
+            thinking: None,
+            session_dir: None,
+            session_file: None,
+            faux_script: None,
+            supervisor_link: None,
+            telemetry_disabled: None,
+            cron_store: None,
+            queued_steering_probe: None,
+        })
+        .unwrap(),
+    );
+    engine.set_inbox(std::sync::Arc::clone(&inbox));
+    assert!(engine.inbox().is_some(), "the live session's store serves");
+    engine.mark_session_closed();
+    engine.retire_session_runtime().await;
+    assert!(
+        engine.inbox().is_none(),
+        "the retired store never outlives its session"
+    );
+    // The replacement's build installs the next session's store.
+    engine.set_inbox(std::sync::Arc::new(SessionInbox::in_memory()));
+    assert!(
+        engine.inbox().is_some(),
+        "the rebuilt session's store serves"
+    );
     let _ = std::fs::remove_dir_all(worker.config.socket_path.parent().unwrap());
 }

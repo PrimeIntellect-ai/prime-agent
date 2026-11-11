@@ -593,12 +593,16 @@ pub(crate) const INBOX_ARRIVAL_QUEUE_KEY: &str = "inbox:arrival";
 pub(crate) const INBOX_REMINDER_QUEUE_KEY: &str = "inbox:reminder";
 
 /// Admit one inbox arrival (the daemon's inbox routing of a
-/// `bash.completed` or `factory.progress` notice): the message lands in
-/// the session's durable inbox and ONE short steering notice wakes the
-/// agent. Arrivals inside one busy window coalesce: while a notice row
-/// is still queued, a later arrival extends and replaces it (the batch
-/// the queued row covers); the delivered row leaves the queue, so the
-/// next arrival starts a fresh batch.
+/// `bash.completed`, `factory.progress`, or agent-message notice): the
+/// message lands in the session's durable inbox and ONE short steering
+/// notice wakes the agent. Arrivals inside one busy window coalesce:
+/// while a notice row is still queued, a later arrival extends and
+/// replaces it (the batch the queued row covers); the delivered row
+/// leaves the queue, so the next arrival starts a fresh batch. The
+/// notice rides the lane the arrival requested (agent messages honor
+/// their delivery mode; notices ride steering), and a replacement
+/// clears the key from both lanes first, so a batch never splits.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn admit_inbox_notice(
     recovery: &std::sync::Mutex<Option<WorkerRecoveryJournal>>,
     core: &Arc<Mutex<SessionCore>>,
@@ -606,6 +610,7 @@ pub(crate) fn admit_inbox_notice(
     inbox: &std::sync::Arc<pa_core::session_engine::inbox::SessionInbox>,
     arrivals: &pa_core::session_engine::inbox::InboxArrivals,
     notice: pa_core::session_engine::inbox::InboxNotice,
+    lane: Lane,
     session_is_closed: impl Fn() -> bool,
 ) {
     // The busy sample, the batch, and the push share ONE critical
@@ -647,7 +652,11 @@ pub(crate) fn admit_inbox_notice(
         core_guard
             .follow_up
             .retain(|item| item.queue_key.as_deref() != Some(INBOX_ARRIVAL_QUEUE_KEY));
-        core_guard.steering.push_back(QueuedItem {
+        let lane_queue = match lane {
+            Lane::Steering => &mut core_guard.steering,
+            Lane::FollowUp => &mut core_guard.follow_up,
+        };
+        lane_queue.push_back(QueuedItem {
             priority: QueuePriority::Background,
             preview: Some(preview),
             message: text,
@@ -689,13 +698,11 @@ pub(crate) fn admit_inbox_reminder(
     inbox: &std::sync::Arc<pa_core::session_engine::inbox::SessionInbox>,
     session_is_closed: impl Fn() -> bool,
 ) {
-    let (count, oldest_arrived_at_ms, _) = inbox.count();
+    let (count, _, _) = inbox.count();
     if count == 0 {
         return;
     }
-    let waited_ms =
-        pa_core::autonomous::now_millis().saturating_sub(oldest_arrived_at_ms.unwrap_or_default());
-    let message = pa_core::session_engine::inbox::reminder_notice(count, waited_ms);
+    let message = pa_core::session_engine::inbox::reminder_notice(count);
     let mut core_guard = core.lock().unwrap();
     if session_is_closed() {
         return;
@@ -782,7 +789,7 @@ pub(crate) fn withdraw_bash_completion_notice(
         if let Some(withdrawn) = inbox.withdraw_bash_completion(notice.pid, &notice.command) {
             let mut batch = arrivals.lock().unwrap();
             batch.retain(|message| message.id != withdrawn.id);
-            let (count, oldest_arrived_at_ms, _) = inbox.count();
+            let (count, _, _) = inbox.count();
             if count == 0 {
                 // An emptied inbox drops its queued wake rows (a coalesced
                 // arrival row, a reminder): both would announce an empty
@@ -836,10 +843,8 @@ pub(crate) fn withdraw_bash_completion_notice(
                     inbox_rows_changed = true;
                 }
                 // A queued reminder repeats the count the withdrawal may
-                // have changed: re-render it with the live count and wait.
-                let waited_ms = pa_core::autonomous::now_millis()
-                    .saturating_sub(oldest_arrived_at_ms.unwrap_or_default());
-                let reminder = pa_core::session_engine::inbox::reminder_notice(count, waited_ms);
+                // have changed: re-render it with the live count.
+                let reminder = pa_core::session_engine::inbox::reminder_notice(count);
                 for item in &mut core_guard.steering {
                     if item.queue_key.as_deref() == Some(INBOX_REMINDER_QUEUE_KEY)
                         && item.message != reminder

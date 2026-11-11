@@ -1,11 +1,13 @@
 //! Agent inbox e2e (stage 1): machine notices (`bash.completed`,
-//! `factory.progress`) route into the daemon-owned inbox instead of
-//! steering their full rows; a short coalesced steering notice wakes the
-//! agent mid-batch; `rlm.inbox.read()` returns the messages with their
-//! time signature and drains; the journal persists under the session's
-//! artifact dir; and `agentInbox.enabled: false` (the kill switch)
-//! restores the direct full-row steering. Everything asserts transcript
-//! row order, never wall-clock caps.
+//! `factory.progress`) and delivered agent messages route into the
+//! daemon-owned inbox instead of steering their full rows; a short
+//! coalesced steering notice wakes the agent mid-batch;
+//! `rlm.inbox.read()` returns the messages with their time signature,
+//! drains everything, or narrows to a targeted subset (`sender`,
+//! `inbox_class`, arrival window); the journal persists under the
+//! session's artifact dir; and `agentInbox.enabled: false` (the kill
+//! switch) restores the direct full-row steering. Everything asserts
+//! transcript row order, never wall-clock caps.
 //!
 //! The kernel boots through the real runtime bootstrap: the daemon gets
 //! a private `PRIME_AGENT_KERNEL_VENV` (never the user's shared venv),
@@ -48,6 +50,11 @@ impl Drop for Daemon {
 
 /// The sequential mock: one scripted answer per provider request, in order.
 fn spawn_mock(next: &'static AtomicUsize) -> PathBuf {
+    spawn_mock_with(next, inbox_script)
+}
+
+/// The sequential mock over one test's script function.
+fn spawn_mock_with(next: &'static AtomicUsize, script: fn(usize) -> Vec<String>) -> PathBuf {
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind mock");
     let url = format!(
         "http://127.0.0.1:{}/v1",
@@ -57,7 +64,7 @@ fn spawn_mock(next: &'static AtomicUsize) -> PathBuf {
         for stream in listener.incoming() {
             let Ok(stream) = stream else { continue };
             std::thread::spawn(move || {
-                let _ = serve(stream, next);
+                let _ = serve(stream, next, script);
             });
         }
     });
@@ -82,7 +89,11 @@ fn python_cell(code: &str) -> Value {
     })
 }
 
-fn serve(mut stream: TcpStream, next: &AtomicUsize) -> std::io::Result<()> {
+fn serve(
+    mut stream: TcpStream,
+    next: &AtomicUsize,
+    script: fn(usize) -> Vec<String>,
+) -> std::io::Result<()> {
     let mut reader = BufReader::new(stream.try_clone()?);
     let mut content_length = 0usize;
     loop {
@@ -102,11 +113,26 @@ fn serve(mut stream: TcpStream, next: &AtomicUsize) -> std::io::Result<()> {
     if content_length > 0 {
         reader.read_exact(&mut body)?;
     }
-    // The scripted sequence: the inbox turn (start two detached handles,
-    // count mid-turn, read and drain), its settle, the notice's wake,
-    // then the kill-switch turn and ITS full-row wake.
     let request = next.fetch_add(1, Ordering::SeqCst);
-    let data = match request {
+    let data = script(request);
+    let mut payload = String::new();
+    for data in data {
+        write!(payload, "data: {data}\n\n").expect("write to String");
+    }
+    payload.push_str("data: [DONE]\n\n");
+    stream.write_all(
+        format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n{payload}"
+        )
+        .as_bytes(),
+    )
+}
+
+/// The stage-1 script: the inbox turn (start two detached handles, count
+/// mid-turn, read and drain), its settle, the notice's wake, then the
+/// kill-switch turn and ITS full-row wake.
+fn inbox_script(request: usize) -> Vec<String> {
+    match request {
         0 => [
             chunk(
                 &json!({
@@ -124,7 +150,7 @@ fn serve(mut stream: TcpStream, next: &AtomicUsize) -> std::io::Result<()> {
                 None,
             ),
             chunk(&json!({}), Some("tool_calls")),
-        ],
+        ].to_vec(),
         1 => [
             chunk(
                 &json!({
@@ -142,7 +168,7 @@ fn serve(mut stream: TcpStream, next: &AtomicUsize) -> std::io::Result<()> {
                 None,
             ),
             chunk(&json!({}), Some("tool_calls")),
-        ],
+        ].to_vec(),
         2 => [
             chunk(
                 &json!({
@@ -160,14 +186,14 @@ fn serve(mut stream: TcpStream, next: &AtomicUsize) -> std::io::Result<()> {
                 None,
             ),
             chunk(&json!({}), Some("tool_calls")),
-        ],
+        ].to_vec(),
         3 => [
             chunk(
                 &json!({"role": "assistant", "content": "woken by the inbox notice"}),
                 None,
             ),
             chunk(&json!({}), Some("stop")),
-        ],
+        ].to_vec(),
         4 => [
             chunk(
                 &json!({
@@ -185,35 +211,100 @@ fn serve(mut stream: TcpStream, next: &AtomicUsize) -> std::io::Result<()> {
                 None,
             ),
             chunk(&json!({}), Some("tool_calls")),
-        ],
+        ].to_vec(),
         5 => [
             chunk(
                 &json!({"role": "assistant", "content": "legacy turn complete"}),
                 None,
             ),
             chunk(&json!({}), Some("stop")),
-        ],
+        ].to_vec(),
         _ => [
             chunk(
                 &json!({"role": "assistant", "content": "woken by the legacy notice"}),
                 None,
             ),
             chunk(&json!({}), Some("stop")),
-        ],
-    };
-    let mut payload = String::new();
-    for data in data {
-        write!(payload, "data: {data}\n\n").expect("write to String");
+        ].to_vec(),
     }
-    payload.push_str("data: [DONE]\n\n");
-    stream.write_all(
-        format!(
-            "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n{payload}"
-        )
-        .as_bytes(),
-    )
 }
 
+/// The agent-message script: a busy turn waits while the inbox fills (one
+/// delivered agent message plus one detached completion), the woken turn
+/// reads the shell output by class and drains the rest, then the kill-switch
+/// delivery steers its full row.
+fn agent_message_script(request: usize) -> Vec<String> {
+    match request {
+        0 => [
+            chunk(
+                &json!({
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [{
+                        "index": 0,
+                        "id": "call-am-1",
+                        "type": "function",
+                        "function": python_cell(
+                            "from rlm import bash\nh = bash('sleep 1; echo AM_E2E_BASH')\nprint('AM_E2E_BASH_STARTED')"
+                        )
+                    }]
+                }),
+                None,
+            ),
+            chunk(&json!({}), Some("tool_calls")),
+        ].to_vec(),
+        1 => [
+            chunk(
+                &json!({
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [{
+                        "index": 0,
+                        "id": "call-am-1b",
+                        "type": "function",
+                        "function": python_cell(
+                            "from rlm import inbox\nimport asyncio\nfor _ in range(80):\n    c = await inbox.count()\n    if c.count >= 2:\n        break\n    await asyncio.sleep(0.25)\nprint(('AM_E2E_BUSY', c.count, tuple(sorted(c.classes))))"
+                        )
+                    }]
+                }),
+                None,
+            ),
+            chunk(&json!({}), Some("tool_calls")),
+        ].to_vec(),
+        2 => [
+            chunk(
+                &json!({
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [{
+                        "index": 0,
+                        "id": "call-am-2",
+                        "type": "function",
+                        "function": python_cell(
+                            "from rlm import inbox\nshell = await inbox.read(inbox_class='bash-done')\nmid = await inbox.count()\nmsgs = await inbox.read()\nafter = await inbox.count()\nm = msgs[0]\nprint(('AM_E2E_READ', len(shell), shell[0].inbox_class, 'AM_E2E_BASH' in shell[0].text, mid.count, len(msgs), m.inbox_class, len(m.sender or '') > 0, 'AGENT_MESSAGE_BODY_MARKER' in m.text, after.count))"
+                        )
+                    }]
+                }),
+                None,
+            ),
+            chunk(&json!({}), Some("tool_calls")),
+        ].to_vec(),
+        3 => [
+            chunk(
+                &json!({"role": "assistant", "content": "woken by the agent-message notice"}),
+                None,
+            ),
+            chunk(&json!({}), Some("stop")),
+        ].to_vec(),
+        _ => [
+            chunk(
+                &json!({"role": "assistant", "content": "woken by the legacy agent message"}),
+                None,
+            ),
+            chunk(&json!({}), Some("stop")),
+        ].to_vec(),
+    }
+}
 struct Client {
     reader: BufReader<UnixStream>,
     writer: UnixStream,
@@ -585,6 +676,241 @@ fn machine_notices_inbox_coalesce_and_the_kill_switch_restores_steering() {
     assert!(
         !journal.contains("INBOX_E2E_LEGACY"),
         "the disabled inbox never journals the legacy arrival: {journal}"
+    );
+
+    // Teardown: stop the session through the live supervisor so the
+    // worker (and its kernel + sleepers) do not leak past the test.
+    client.request(
+        "k1",
+        &json!({ "type": "kill", "activeSessionId": active_id }),
+    );
+    drop(client);
+    drop(supervisor);
+}
+
+/// The stage-1 agent-message coverage: a delivered agent message routes
+/// into the inbox (class `agent-message`, its sender label, the rendered
+/// `[agent-message from ...]` prompt as record text), ONE coalesced short
+/// notice steers instead of the full row, the targeted read takes the
+/// shell output by class and then drains the message, the journal keeps
+/// both records, and `agentInbox.enabled: false` restores the direct
+/// full-row steering for the next delivery.
+#[test]
+fn agent_messages_route_into_the_inbox_and_targeted_reads_pull_them_back() {
+    static NEXT_AM: AtomicUsize = AtomicUsize::new(0);
+    let root = tempfile::TempDir::new().expect("temp dir");
+    let dir = root.path().to_path_buf();
+    let agent_dir = dir.join("agent");
+    std::fs::create_dir_all(&agent_dir).expect("agent dir");
+    let socket = dir.join("daemon.sock");
+    let kernel_venv = dir.join("kernel-venv");
+    let url = spawn_mock_with(&NEXT_AM, agent_message_script);
+    std::fs::write(
+        agent_dir.join("models.json"),
+        json!({
+            "providers": {
+                "prime-inference": {
+                    "api": "openai-completions",
+                    "baseUrl": url.to_string_lossy(),
+                    "apiKey": "sk-inbox-am",
+                    "models": [
+                        {
+                            "id": "mock-1",
+                            "name": "Mock 1",
+                            "api": "openai-completions",
+                            "contextWindow": 128_000,
+                            "maxTokens": 4096
+                        }
+                    ]
+                }
+            }
+        })
+        .to_string(),
+    )
+    .expect("write models.json");
+
+    let supervisor = spawn_daemon(&socket, &agent_dir, &kernel_venv);
+    let mut client = Client::connect(&socket);
+    let sessions = agent_dir.join("sessions");
+    std::fs::create_dir_all(&sessions).expect("sessions dir");
+    let created = client.request(
+        "c1",
+        &json!({
+            "type": "create",
+            "name": "agent-inbox-messages",
+            "config": {
+                "cwd": dir.to_string_lossy(),
+                "sessionDir": sessions.to_string_lossy(),
+                "provider": "prime-inference",
+                "model": "mock-1",
+            },
+        }),
+    );
+    assert_eq!(created["success"], true, "create failed: {created}");
+    let active_id = created["data"]["id"]
+        .as_str()
+        .or_else(|| created["data"]["activeSessionId"].as_str())
+        .expect("active session id")
+        .to_string();
+
+    // THE BUSY WINDOW: the turn holds until both a delivered agent
+    // message and a detached completion wait in the inbox.
+    let accepted = client.request(
+        "p1",
+        &json!({
+            "type": "prompt",
+            "activeSessionId": active_id,
+            "message": "hold the turn while the inbox fills",
+        }),
+    );
+    assert_eq!(accepted["success"], true, "prompt failed: {accepted}");
+    // The first provider request was served: the turn is running, so the
+    // delivery below is a busy-window arrival.
+    wait_until(Duration::from_secs(60), || {
+        (NEXT_AM.load(Ordering::SeqCst) >= 1).then_some(())
+    });
+    // The detached command completes ~1s in and its notice fires once
+    // the starting cell ends; this window lands the delivery after that
+    // notice, so both arrivals extend ONE queued batch.
+    std::thread::sleep(Duration::from_secs(3));
+    let delivered = client.request(
+        "m1",
+        &json!({
+            "type": "send_message",
+            "targetActiveSessionId": active_id,
+            "message": "AGENT_MESSAGE_BODY_MARKER from the peer",
+            "deliveryMode": "steer",
+        }),
+    );
+    assert_eq!(
+        delivered["success"], true,
+        "send_message failed: {delivered}"
+    );
+    assert_eq!(
+        delivered["data"]["deliveryStatus"], "queued",
+        "a busy-window delivery reports queued: {delivered}"
+    );
+
+    // THE WOKEN TURN: ONE coalesced short notice steers (never the full
+    // `[agent-message from ...]` row), the notice teaches the read, and
+    // the read output proves the class filter and the drain.
+    let _settled = wait_until(Duration::from_secs(120), || {
+        let transcript = client.transcript(&active_id);
+        (transcript.contains("woken by the agent-message notice")).then_some(transcript)
+    });
+    let transcript = client.transcript(&active_id);
+    assert!(
+        transcript.contains("('AM_E2E_BUSY', 2, ('agent-message', 'bash-done'))"),
+        "the mid-turn count saw both arrivals by class: {transcript}"
+    );
+    assert!(
+        transcript.contains(
+            "('AM_E2E_READ', 1, 'bash-done', True, 1, 1, 'agent-message', True, True, 0)"
+        ),
+        "the targeted read took the shell output first and drained the message: {transcript}"
+    );
+    let rows = client.messages(&active_id);
+    let notice_candidates = delivered_rows(&rows);
+    let notices: Vec<&(String, Value)> = notice_candidates
+        .iter()
+        .filter(|(text, _)| text.starts_with("[inbox "))
+        .collect();
+    assert_eq!(
+        notices.len(),
+        1,
+        "one coalesced notice steers: {notice_candidates:?}"
+    );
+    let notice_text = notices[0].0.clone();
+    assert!(
+        notice_text.contains("+2 arrived")
+            && notice_text.contains("1 bash-done")
+            && notice_text.contains("1 agent-message")
+            && notice_text.contains("rlm.inbox.read()"),
+        "the notice covers both classes and teaches the read: {notice_text}"
+    );
+    assert!(
+        !notice_candidates
+            .iter()
+            .any(|(text, _)| text.contains("[agent-message from")),
+        "no full agent-message row steers while the inbox is on: {notice_candidates:?}"
+    );
+
+    // The durable journal under the session's artifact dir: the
+    // agent-message record plus the read's drain marker.
+    let session_file = sessions
+        .read_dir()
+        .expect("sessions dir readable")
+        .filter_map(std::result::Result::ok)
+        .map(|entry| entry.path())
+        .find(|path| path.extension().is_some_and(|ext| ext == "jsonl"))
+        .expect("the session file landed in the configured session dir");
+    let session_id = session_file
+        .file_stem()
+        .expect("session file stem")
+        .to_string_lossy()
+        .to_string();
+    let inbox_journal = session_file
+        .parent()
+        .and_then(Path::parent)
+        .expect("session file grandparent")
+        .join("session-artifacts")
+        .join(&session_id)
+        .join("inbox.jsonl");
+    let journal = std::fs::read_to_string(&inbox_journal)
+        .unwrap_or_else(|error| panic!("read {}: {error}", inbox_journal.display()));
+    assert!(
+        journal.contains("\"class\":\"agent-message\"")
+            && journal.contains("AGENT_MESSAGE_BODY_MARKER"),
+        "the delivered message journaled with its class: {journal}"
+    );
+    assert!(
+        journal.contains("\"kind\":\"drained\""),
+        "the read appended its drain marker: {journal}"
+    );
+
+    // THE KILL SWITCH: `agentInbox.enabled: false` restores the direct
+    // full-row steering for the next delivery.
+    std::fs::write(
+        agent_dir.join("settings.json"),
+        json!({ "agentInbox": { "enabled": false } }).to_string(),
+    )
+    .expect("write the kill-switch settings");
+    let legacy = client.request(
+        "m2",
+        &json!({
+            "type": "send_message",
+            "targetActiveSessionId": active_id,
+            "message": "AGENT_MESSAGE_LEGACY_BODY",
+            "deliveryMode": "steer",
+        }),
+    );
+    assert_eq!(legacy["success"], true, "legacy delivery failed: {legacy}");
+    let _legacy = wait_until(Duration::from_secs(120), || {
+        let transcript = client.transcript(&active_id);
+        (transcript.contains("woken by the legacy agent message")).then_some(transcript)
+    });
+    let rows = client.messages(&active_id);
+    let legacy_rows = delivered_rows(&rows);
+    let full_row_at = legacy_rows
+        .iter()
+        .position(|(text, _)| {
+            text.contains("[agent-message from") && text.contains("AGENT_MESSAGE_LEGACY_BODY")
+        })
+        .unwrap_or_else(|| panic!("the kill switch never restored the full row: {legacy_rows:?}"));
+    let legacy_reply_at = legacy_rows
+        .iter()
+        .position(|(text, _)| text == "woken by the legacy agent message")
+        .unwrap_or_else(|| panic!("the legacy reply never landed: {legacy_rows:?}"));
+    assert!(
+        full_row_at < legacy_reply_at,
+        "the full row steers before the reply it woke: {}",
+        legacy_rows[full_row_at].0
+    );
+    let journal = std::fs::read_to_string(&inbox_journal)
+        .unwrap_or_else(|error| panic!("re-read {}: {error}", inbox_journal.display()));
+    assert!(
+        !journal.contains("AGENT_MESSAGE_LEGACY_BODY"),
+        "the disabled inbox never journals the legacy delivery: {journal}"
     );
 
     // Teardown: stop the session through the live supervisor so the

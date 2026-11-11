@@ -175,6 +175,9 @@ pub struct Worker {
     pub(crate) agent_messages: crate::agent_message_ingest::AgentMessageIngest,
     /// Session input-pause leases: the admission gate the turn runner consults.
     pub(crate) input_pauses: crate::session_input_pause::InputPauseTable,
+    /// The inbox arrival batch the queued short notice covers: shared by
+    /// the kernel-notice sink and the agent-message delivery route.
+    pub(crate) inbox_arrivals: pa_core::session_engine::inbox::InboxArrivals,
     /// Session navigation: `new_session` / `switch_session` / `import_jsonl`,
     /// the shared replacement flow.
     pub(crate) navigation: crate::session_navigation::SessionNavigation,
@@ -378,6 +381,10 @@ impl Worker {
             Arc::clone(&events),
             Arc::clone(&recovery),
         ));
+        // The coalescing arrival batch the queued short notice covers:
+        // shared by the kernel-notice sink and the agent-message
+        // delivery route, so both classes extend the same batch.
+        let inbox_arrivals = pa_core::session_engine::inbox::InboxArrivals::default();
         let (engine, agent_engine, roster_pushes): (
             std::sync::Arc<dyn SessionEngine>,
             Option<std::sync::Arc<crate::agent_engine::AgentSessionEngine>>,
@@ -626,9 +633,10 @@ impl Worker {
                 // The coalescing batch the queued notice row covers (routing
                 // state, reset when the row delivers or clears). The
                 // consumed-bash withdrawal shares it: a collected handle
-                // trims the same batch its arrival grew.
-                let arrivals_for_sink = pa_core::session_engine::inbox::InboxArrivals::default();
-                let arrivals_for_consumed = Arc::clone(&arrivals_for_sink);
+                // trims the same batch its arrival grew. The worker field
+                // keeps the batch shared with the agent-message route too.
+                let arrivals_for_sink = std::sync::Arc::clone(&inbox_arrivals);
+                let arrivals_for_consumed = std::sync::Arc::clone(&arrivals_for_sink);
                 let notice_sink: crate::engine::KernelNoticeSink = Arc::new(move |notice| {
                     let Some(engine) = notice_engine.upgrade() else {
                         return;
@@ -651,6 +659,7 @@ impl Worker {
                                 &inbox,
                                 &arrivals_for_sink,
                                 fields,
+                                Lane::Steering,
                                 closed,
                             );
                             return;
@@ -824,6 +833,7 @@ impl Worker {
             roster_pushes,
             agent_messages: crate::agent_message_ingest::AgentMessageIngest::new(),
             input_pauses,
+            inbox_arrivals,
             navigation,
             prompt_admissions,
             scheduled,

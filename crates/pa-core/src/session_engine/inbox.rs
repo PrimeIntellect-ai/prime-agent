@@ -20,7 +20,8 @@ use super::bash_notices::KernelNotice;
 use super::messages::{ASYNC_BASH_COMPLETION_CUSTOM_TYPE, FACTORY_PROGRESS_NOTICE_CUSTOM_TYPE};
 use pa_types::ai::UserContent;
 
-/// The kernel host request that drains and returns every waiting message.
+/// The kernel host request that drains and returns the waiting messages
+/// (all of them, or the subset a targeted-read filter narrows to).
 pub const INBOX_READ_REQUEST_TYPE: &str = "rlm.inbox.read";
 /// The kernel host request that counts the waiting messages.
 pub const INBOX_COUNT_REQUEST_TYPE: &str = "rlm.inbox.count";
@@ -31,6 +32,9 @@ pub const INBOX_JOURNAL_FILE: &str = "inbox.jsonl";
 pub const INBOX_CLASS_BASH_DONE: &str = "bash-done";
 /// The `factory.progress` notice class label.
 pub const INBOX_CLASS_FACTORY_PROGRESS: &str = "factory-progress";
+/// The agent-message class label: one delivered `agent_message.send`
+/// row (parent/sibling/child traffic) routed into the inbox.
+pub const INBOX_CLASS_AGENT_MESSAGE: &str = "agent-message";
 
 /// The coalescing batch state the daemon's notice sink owns: the
 /// arrivals the currently queued short-notice row covers (reset when the
@@ -64,6 +68,51 @@ pub struct InboxNotice {
     pub sender: Option<String>,
     pub text: String,
     pub meta: Value,
+}
+
+/// The targeted-read filter for `rlm.inbox.read` (`rlm.inbox.read()` in
+/// Python): every set field narrows the read (`ANDed`), an all-`None`
+/// filter reads everything. The wire shape is camelCase, like the
+/// message rows.
+#[derive(Debug, Clone, Default, PartialEq, serde::Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct InboxReadFilter {
+    /// Exact sender match (the command, the run id, or the agent name).
+    pub sender: Option<String>,
+    /// Exact class match (`bash-done`, `factory-progress`, `agent-message`).
+    pub class: Option<String>,
+    /// Arrival lower bound, inclusive (epoch milliseconds).
+    pub since_ms: Option<u64>,
+    /// Arrival upper bound, exclusive (epoch milliseconds).
+    pub before_ms: Option<u64>,
+}
+
+impl InboxReadFilter {
+    /// Whether the filter narrows the read at all (an all-`None` filter
+    /// is the unfiltered drain).
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.sender.is_none()
+            && self.class.is_none()
+            && self.since_ms.is_none()
+            && self.before_ms.is_none()
+    }
+
+    fn matches(&self, message: &InboxMessage) -> bool {
+        self.sender
+            .as_deref()
+            .is_none_or(|sender| message.sender.as_deref() == Some(sender))
+            && self
+                .class
+                .as_deref()
+                .is_none_or(|class| message.class == class)
+            && self
+                .since_ms
+                .is_none_or(|since| message.arrived_at_ms >= since)
+            && self
+                .before_ms
+                .is_none_or(|before| message.arrived_at_ms < before)
+    }
 }
 
 /// Which inbox class a kernel notice's custom type routes to, if any.
@@ -128,6 +177,12 @@ enum InboxRecord {
     Withdrawn {
         id: String,
     },
+    /// A targeted read's taken ids: replay drops exactly these, so a
+    /// partial drain never clears the messages it did not return.
+    #[serde(rename_all = "camelCase")]
+    Read {
+        ids: Vec<String>,
+    },
     #[serde(rename_all = "camelCase")]
     Counter {
         next_id: u64,
@@ -138,9 +193,10 @@ impl SessionInbox {
     /// Open the inbox over one session dir: replay the journal and
     /// rewrite it compacted to the pending messages (bounded growth
     /// across restarts). A missing journal starts empty; a journal
-    /// that cannot be read starts empty but stays untouched, so the
-    /// compaction never writes the unread state over its records;
-    /// journal write failures degrade to in-process durability only.
+    /// that cannot be read starts empty but stays untouched — and the
+    /// instance stays memory-only, never appending, so nothing it does
+    /// can obscure the records a later open reads; journal write
+    /// failures degrade to in-process durability only.
     #[must_use]
     pub fn open(dir: Option<&Path>) -> Self {
         // The artifact dir may not exist yet on a fresh session; the
@@ -152,8 +208,13 @@ impl SessionInbox {
         let (messages, next_id, readable) = journal
             .as_deref()
             .map_or((Vec::new(), 0, true), replay_journal);
+        // Unreadable records are out of reach: a drain appended now
+        // would erase them for a future readable replay, so the
+        // memory-only instance detaches from the path entirely (the
+        // open's compaction is the one write an unreadable journal
+        // would have taken, and it is skipped the same way).
         let inbox = Self {
-            journal,
+            journal: if readable { journal } else { None },
             state: Mutex::new(InboxState { messages, next_id }),
         };
         if readable {
@@ -230,6 +291,40 @@ impl SessionInbox {
         std::mem::take(&mut state.messages)
     }
 
+    /// A targeted read: only the messages matching the filter return
+    /// (in arrival order) and leave the store; the rest stay waiting.
+    /// The journal records the taken ids (`Read`), never the full
+    /// `Drained` marker, so a restart keeps the untouched messages.
+    pub fn drain_matching(&self, filter: &InboxReadFilter) -> Vec<InboxMessage> {
+        if filter.is_empty() {
+            return self.drain();
+        }
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut taken = Vec::new();
+        let mut remaining = Vec::new();
+        for message in std::mem::take(&mut state.messages) {
+            if filter.matches(&message) {
+                taken.push(message);
+            } else {
+                remaining.push(message);
+            }
+        }
+        if !taken.is_empty() {
+            let ids = taken
+                .iter()
+                .map(|message| message.id.clone())
+                .collect::<Vec<_>>();
+            self.append_journal(
+                &serde_json::to_value(InboxRecord::Read { ids }).unwrap_or(Value::Null),
+            );
+        }
+        state.messages = remaining;
+        taken
+    }
+
     /// The waiting count, its oldest arrival time, and the per-class
     /// breakdown.
     pub fn count(&self) -> (usize, Option<u64>, BTreeMap<String, u64>) {
@@ -255,11 +350,41 @@ impl SessionInbox {
         let line = serde_json::to_string(record).unwrap_or_default();
         let write = std::fs::OpenOptions::new()
             .create(true)
+            .read(true)
             .append(true)
             .open(journal)
             .and_then(|mut file| {
-                use std::io::Write as _;
-                writeln!(file, "{line}")
+                use std::io::{Read as _, Seek as _, Write as _};
+                let start = file.metadata().map(|meta| meta.len()).ok();
+                // One record per line: the append must start on a fresh
+                // line. A fragment left by an interrupted append (a
+                // failed write, a crash, a failed compaction) would
+                // otherwise concatenate with this record and replay
+                // would drop both lines. The guard writes the missing
+                // newline first, so the fragment stays a complete
+                // (unparseable, skipped) line of its own.
+                if start.is_some_and(|len| len > 0) {
+                    let mut last = [0u8; 1];
+                    let ends_clean = file
+                        .seek(std::io::SeekFrom::End(-1))
+                        .and_then(|_| file.read_exact(&mut last))
+                        .is_ok()
+                        && last[0] == b'\n';
+                    if !ends_clean {
+                        file.write_all(b"\n")?;
+                    }
+                }
+                let written = file
+                    .write_all(line.as_bytes())
+                    .and_then(|()| file.write_all(b"\n"));
+                if written.is_err() {
+                    // Drop this attempt's partial bytes: the failure
+                    // never extends the torn fragment it may have left.
+                    if let Some(start) = start {
+                        let _ = file.set_len(start);
+                    }
+                }
+                written
             });
         // Journal failures degrade durability only: the in-process
         // surface stays truthful.
@@ -353,6 +478,9 @@ fn replay_journal(journal: &Path) -> (Vec<InboxMessage>, u64, bool) {
             InboxRecord::Withdrawn { id } => {
                 messages.retain(|message| message.id != id);
             }
+            InboxRecord::Read { ids } => {
+                messages.retain(|message| !ids.contains(&message.id));
+            }
             InboxRecord::Counter { next_id: high } => next_id = next_id.max(high),
         }
     }
@@ -418,27 +546,28 @@ pub fn arrival_notice(batch: &[InboxMessage], total_waiting: usize) -> (String, 
     )
 }
 
-/// The periodic reminder text while the inbox stays unread.
+/// The periodic reminder text while the inbox stays unread: a minimal
+/// count-only nudge (the oldest-wait detail stays on `count()`).
 #[must_use]
-pub fn reminder_notice(count: usize, oldest_waited_ms: u64) -> String {
-    format!(
-        "[inbox reminder] {count} messages still waiting (oldest waited {}m) — rlm.inbox.read()",
-        oldest_waited_ms / 60_000
-    )
+pub fn reminder_notice(count: usize) -> String {
+    let noun = if count == 1 { "message" } else { "messages" };
+    format!("[inbox reminder] {count} {noun} still waiting — rlm.inbox.read()")
 }
 
 /// Register the `rlm.inbox.read`/`rlm.inbox.count` host handlers over
-/// one session's store. `read` drains and returns the waiting messages;
-/// `count` returns the count, the oldest arrival, and the per-class
-/// breakdown.
+/// one session's store. `read` drains and returns the waiting messages
+/// (an optional `{sender, class, sinceMs, beforeMs}` filter narrows the
+/// drain); `count` returns the count, the oldest arrival, and the
+/// per-class breakdown.
 pub fn register_inbox_host_handlers(inbox: &Arc<SessionInbox>, handlers: &mut HostRequestHandlers) {
     let read_inbox = Arc::clone(inbox);
     handlers.register(
         INBOX_READ_REQUEST_TYPE,
-        host_handler(move |_payload| {
+        host_handler(move |payload| {
             let inbox = Arc::clone(&read_inbox);
             Box::pin(async move {
-                let messages = inbox.drain();
+                let filter: InboxReadFilter = serde_json::from_value(payload.data)?;
+                let messages = inbox.drain_matching(&filter);
                 let drained_count = messages.len();
                 Ok(json!({ "messages": messages, "drainedCount": drained_count }))
             })
@@ -799,6 +928,50 @@ mod tests {
         );
     }
 
+    /// An unreadable journal detaches the instance from the path:
+    /// nothing it does can erase the records a later open replays, even
+    /// after the read failure clears (without the detach, the drain's
+    /// `Drained` marker would erase the unseen record).
+    #[cfg(unix)]
+    #[test]
+    fn an_unreadable_journal_detaches_the_instance_from_the_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let journal = dir.path().join(INBOX_JOURNAL_FILE);
+        // The unreadable cause: a symlink loop (root-safe).
+        std::os::unix::fs::symlink(&journal, &journal).unwrap();
+        let inbox = SessionInbox::open(Some(dir.path()));
+        assert_eq!(inbox.count().0, 0, "the unreadable journal starts empty");
+        // The cause clears: the path becomes a real journal with one
+        // unread record the instance never saw.
+        std::fs::remove_file(&journal).unwrap();
+        let record = serde_json::to_value(InboxRecord::Message(message(
+            "inbox-1",
+            INBOX_CLASS_BASH_DONE,
+            1_000,
+            "kept",
+        )))
+        .unwrap();
+        std::fs::write(
+            &journal,
+            format!("{}\n", serde_json::to_string(&record).unwrap()),
+        )
+        .unwrap();
+        // The detached instance's push and drain stay in memory; the
+        // path stays untouched.
+        inbox.push(
+            notice("echo 1", INBOX_CLASS_BASH_DONE, "memory only", json!({})),
+            2_000,
+        );
+        assert_eq!(inbox.drain().len(), 1);
+        // A later open replays the record the detached instance never
+        // saw (no drain marker sits over it).
+        let reopened = SessionInbox::open(Some(dir.path()));
+        let drained = reopened.drain();
+        assert_eq!(drained.len(), 1, "the unseen record survives");
+        assert_eq!(drained[0].text, "kept");
+        assert_eq!(drained[0].id, "inbox-1");
+    }
+
     /// The id counter survives a drained restart: the compacted journal
     /// carries the counter record, so a fresh replay keeps ids monotonic
     /// instead of reissuing a spent id.
@@ -904,13 +1077,118 @@ mod tests {
         );
     }
 
-    /// The reminder names the waiting count and the oldest wait.
+    /// The reminder names the waiting count only (a minimal nudge, no
+    /// content and no oldest-wait detail).
     #[test]
     fn reminder_notice_names_the_wait() {
         assert_eq!(
-            reminder_notice(3, 9 * 60_000),
-            "[inbox reminder] 3 messages still waiting (oldest waited 9m) — rlm.inbox.read()"
+            reminder_notice(3),
+            "[inbox reminder] 3 messages still waiting — rlm.inbox.read()"
         );
+        assert_eq!(
+            reminder_notice(1),
+            "[inbox reminder] 1 message still waiting — rlm.inbox.read()"
+        );
+    }
+
+    /// A targeted read takes exactly the messages the filter matches
+    /// (class, sender, and arrival window, `ANDed`) and leaves the rest
+    /// waiting; the journal replays exactly the taken ids, so a restart
+    /// keeps the untouched messages.
+    #[test]
+    fn a_targeted_read_takes_only_the_matching_messages() {
+        let dir = tempfile::tempdir().unwrap();
+        {
+            let inbox = SessionInbox::open(Some(dir.path()));
+            inbox.push(
+                notice("sleep 1", INBOX_CLASS_BASH_DONE, "first", json!({})),
+                1_000,
+            );
+            inbox.push(
+                notice("peer", INBOX_CLASS_AGENT_MESSAGE, "second", json!({})),
+                2_000,
+            );
+            inbox.push(
+                notice("sleep 2", INBOX_CLASS_BASH_DONE, "third", json!({})),
+                3_000,
+            );
+            // Class: the two bash-done messages leave, the agent message
+            // stays.
+            let taken = inbox.drain_matching(&InboxReadFilter {
+                class: Some(INBOX_CLASS_BASH_DONE.to_string()),
+                ..Default::default()
+            });
+            assert_eq!(
+                taken.iter().map(|m| m.text.as_str()).collect::<Vec<_>>(),
+                ["first", "third"]
+            );
+            // An empty window and an unknown sender take nothing.
+            assert!(inbox
+                .drain_matching(&InboxReadFilter {
+                    since_ms: Some(10_000),
+                    ..Default::default()
+                })
+                .is_empty());
+            assert!(inbox
+                .drain_matching(&InboxReadFilter {
+                    sender: Some("nobody".to_string()),
+                    ..Default::default()
+                })
+                .is_empty());
+            assert_eq!(inbox.count().0, 1, "the unmatched message stays");
+        }
+        // The partial read replays: exactly the taken ids are gone, the
+        // untouched agent message survives the restart.
+        let reopened = SessionInbox::open(Some(dir.path()));
+        let (count, _, classes) = reopened.count();
+        assert_eq!(count, 1);
+        assert_eq!(classes[INBOX_CLASS_AGENT_MESSAGE], 1);
+        // Sender plus arrival window (ANDed) then takes it.
+        let taken = reopened.drain_matching(&InboxReadFilter {
+            sender: Some("peer".to_string()),
+            since_ms: Some(2_000),
+            before_ms: Some(2_001),
+            ..Default::default()
+        });
+        assert_eq!(taken.len(), 1);
+        assert_eq!(taken[0].text, "second");
+        assert_eq!(reopened.count().0, 0);
+    }
+
+    /// A fragment left by an interrupted append never swallows the next
+    /// record: the next append writes the missing line boundary first,
+    /// so the fragment stays its own (skipped) line.
+    #[test]
+    fn a_fragment_never_swallows_the_next_record() {
+        let dir = tempfile::tempdir().unwrap();
+        let journal = dir.path().join(INBOX_JOURNAL_FILE);
+        {
+            let mut file = std::fs::File::create(&journal).unwrap();
+            file.write_all(b"{\"kind\":\"message\",\"id\":\"inbox-1\",\"te")
+                .unwrap();
+        }
+        // The store attaches straight over the fragment (the shape an
+        // interrupted append leaves mid-session; a fresh open would have
+        // compacted it away instead).
+        let store = SessionInbox {
+            journal: Some(journal),
+            state: Mutex::new(InboxState::default()),
+        };
+        store.push(
+            notice(
+                "echo 1",
+                INBOX_CLASS_BASH_DONE,
+                "after the fragment",
+                json!({}),
+            ),
+            1_000,
+        );
+        drop(store);
+        let reopened = SessionInbox::open(Some(dir.path()));
+        let (count, _, _) = reopened.count();
+        assert_eq!(count, 1, "the record after the fragment replays");
+        let drained = reopened.drain();
+        assert_eq!(drained[0].text, "after the fragment");
     }
 
     /// The host handlers drain on read and summarize on count.
@@ -971,5 +1249,48 @@ mod tests {
         );
         let reply = read(HostRequestPayload { data: json!({}) }).await.unwrap();
         assert_eq!(reply, json!({ "messages": [], "drainedCount": 0 }));
+    }
+
+    /// The read host handler narrows on a filter payload and rejects a
+    /// malformed one (a silent default would drain everything).
+    #[tokio::test]
+    async fn the_read_handler_honors_a_filter_payload() {
+        let inbox = Arc::new(SessionInbox::in_memory());
+        let mut handlers = HostRequestHandlers::default();
+        register_inbox_host_handlers(&inbox, &mut handlers);
+        inbox.push(
+            notice("sleep 1", INBOX_CLASS_BASH_DONE, "a", json!({})),
+            1_000,
+        );
+        inbox.push(
+            notice("peer", INBOX_CLASS_AGENT_MESSAGE, "b", json!({})),
+            2_000,
+        );
+        let read = handlers
+            .get(INBOX_READ_REQUEST_TYPE)
+            .expect("read registered")
+            .clone();
+        let reply = read(HostRequestPayload {
+            data: json!({ "class": INBOX_CLASS_AGENT_MESSAGE, "sender": "peer" }),
+        })
+        .await
+        .unwrap();
+        assert_eq!(reply["drainedCount"], 1);
+        assert_eq!(reply["messages"][0]["text"], "b");
+        // The unmatched message stays for the next read.
+        let reply = read(HostRequestPayload { data: json!({}) }).await.unwrap();
+        assert_eq!(reply["drainedCount"], 1);
+        assert_eq!(reply["messages"][0]["text"], "a");
+        // A malformed filter fails the read; nothing drains.
+        inbox.push(
+            notice("sleep 3", INBOX_CLASS_BASH_DONE, "c", json!({})),
+            3_000,
+        );
+        let error = read(HostRequestPayload {
+            data: json!({ "sinceMs": "soon" }),
+        })
+        .await;
+        assert!(error.is_err(), "the malformed filter fails the read");
+        assert_eq!(inbox.count().0, 1, "the malformed read drained nothing");
     }
 }
