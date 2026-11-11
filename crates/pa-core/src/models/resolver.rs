@@ -3,7 +3,7 @@
 use pa_agent::types::ThinkingLevel;
 use pa_types::ai::Model;
 
-use super::prime_inference::is_private_prime_inference_model;
+use super::prime_inference::{is_private_prime_inference_model, private_prime_inference_models};
 
 pub const PRIME_INFERENCE_DEFAULT_MODEL_ID: &str = "z-ai/glm-5.3";
 
@@ -138,19 +138,26 @@ pub fn build_fallback_model(
     if provider_models.is_empty() {
         return None;
     }
-    // Private ids must inherit a private-route template.
-    let template = if is_private_prime_inference_model(&Model {
+    // Private ids must inherit a private-route template: a listed private
+    // route, else the bundled one (the catalog lists private routes only
+    // for an entitled account).
+    let mut model = if is_private_prime_inference_model(&Model {
         id: model_id.to_string(),
         provider: provider.to_string(),
         ..wire_skeleton()
     }) {
-        provider_models.iter().copied().find(|model| {
-            is_private_prime_inference_model(&Model {
-                id: model.id.clone(),
-                provider: model.provider.clone(),
-                ..wire_skeleton()
+        provider_models
+            .iter()
+            .copied()
+            .find(|model| {
+                is_private_prime_inference_model(&Model {
+                    id: model.id.clone(),
+                    provider: model.provider.clone(),
+                    ..wire_skeleton()
+                })
             })
-        })?
+            .cloned()
+            .or_else(|| private_prime_inference_models().into_iter().next())?
     } else {
         let default_id = default_model_per_provider(provider)?;
         provider_models
@@ -158,8 +165,8 @@ pub fn build_fallback_model(
             .copied()
             .find(|model| model.id == default_id)
             .unwrap_or(provider_models[0])
+            .clone()
     };
-    let mut model = template.clone();
     model.id = model_id.to_string();
     model.name = model_id.to_string();
     Some(model)
@@ -654,7 +661,6 @@ pub(super) fn is_private_prime_inference_reference(provider: &str, model_id: &st
 
 #[cfg(test)]
 mod tests {
-    use super::super::prime_inference::private_prime_inference_models;
     use super::*;
 
     fn model(provider: &str, id: &str, name: &str) -> Model {
@@ -870,9 +876,10 @@ mod tests {
     }
 
     #[test]
-    fn fallback_model_prefers_private_template_for_private_ids() {
-        let mut catalog = catalog();
-        catalog.extend(private_prime_inference_models());
+    fn fallback_model_uses_the_private_template_for_private_ids() {
+        // No private route listed (an unentitled account): the bundled
+        // private template still serves.
+        let catalog = catalog();
         let fallback = build_fallback_model("prime-inference", "internal/glm-5.9-turbo", &catalog);
         let fallback = fallback.expect("private template exists");
         assert_eq!(fallback.id, "internal/glm-5.9-turbo");

@@ -1566,8 +1566,7 @@ async fn tui_model_picker_applies_and_effort_reports() {
         &pa_core::auth::AuthStorageData::default(),
         std::sync::Arc::new(pa_core::auth::NoOAuth),
     );
-    let mut registry = pa_core::models::ModelRegistry::create(auth, agent_dir.join("models.json"));
-    registry.load_private_authorization_from_cache();
+    let registry = pa_core::models::ModelRegistry::create(auth, agent_dir.join("models.json"));
     let catalog: Vec<pa_types::ai::Model> = registry.get_available().into_iter().cloned().collect();
     assert_eq!(catalog.len(), 1, "the models.json model resolves available");
     assert_eq!(
@@ -1715,8 +1714,7 @@ async fn tui_effort_applies_on_a_map_addressable_model_without_the_reasoning_fla
         &pa_core::auth::AuthStorageData::default(),
         std::sync::Arc::new(pa_core::auth::NoOAuth),
     );
-    let mut registry = pa_core::models::ModelRegistry::create(auth, agent_dir.join("models.json"));
-    registry.load_private_authorization_from_cache();
+    let registry = pa_core::models::ModelRegistry::create(auth, agent_dir.join("models.json"));
     let catalog: Vec<pa_types::ai::Model> = registry.get_available().into_iter().cloned().collect();
     assert_eq!(catalog.len(), 1, "the models.json model resolves available");
     assert_eq!(catalog[0].id, "chat-plus");
@@ -2782,8 +2780,7 @@ async fn tui_model_pick_refreshes_the_label_and_the_next_turn_resolves() {
         &pa_core::auth::AuthStorageData::default(),
         std::sync::Arc::new(pa_core::auth::NoOAuth),
     );
-    let mut registry = pa_core::models::ModelRegistry::create(auth, agent_dir.join("models.json"));
-    registry.load_private_authorization_from_cache();
+    let registry = pa_core::models::ModelRegistry::create(auth, agent_dir.join("models.json"));
     let catalog: Vec<pa_types::ai::Model> = registry.get_available().into_iter().cloned().collect();
     assert_eq!(
         catalog.len(),
