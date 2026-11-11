@@ -1,0 +1,1 @@
+- A click on a Python card opens that card's session, not the one selected when the click began.

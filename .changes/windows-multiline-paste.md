@@ -1,0 +1,1 @@
+- A multi-line paste on Windows arrives as one paste again instead of one event per line.

@@ -1,0 +1,1 @@
+- `agent_observe.recent_messages` reads its message members now instead of guessing from previews.

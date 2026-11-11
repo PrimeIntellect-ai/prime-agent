@@ -1,0 +1,1 @@
+- MCP server configuration is read from user settings only; a cloned project's declared servers never execute at session start.
