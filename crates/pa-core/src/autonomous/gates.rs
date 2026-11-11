@@ -341,15 +341,17 @@ async fn run_git(command: &[&str], pathspec: &[String], cwd: &Path) -> Option<St
         .collect();
     args.extend(pathspec.iter().cloned());
     // A promisor lazy fetch would run a repository-chosen transport (uploadpack,
-    // ssh or ext command, remote helper). GIT_ALLOW_PROTOCOL is an allowlist that
-    // overrides every `protocol.*` key, so `none` permits no transport on any git;
-    // GIT_NO_LAZY_FETCH (git >= 2.44) skips the fetch attempt.
+    // ssh or ext command, remote helper). GIT_ALLOW_PROTOCOL is a positive list
+    // that overrides every `protocol.*` key: the empty list permits no transport,
+    // so a repository URL like `none::x` fails closed. A name in the list allows
+    // that protocol, including on the gits where GIT_NO_LAZY_FETCH (git >= 2.44)
+    // does nothing and this list is the whole guard.
     let result = run_child_process(
         "git",
         &args,
         cwd,
         SNAPSHOT_TIMEOUT_MS,
-        &[("GIT_ALLOW_PROTOCOL", "none"), ("GIT_NO_LAZY_FETCH", "1")],
+        &[("GIT_ALLOW_PROTOCOL", ""), ("GIT_NO_LAZY_FETCH", "1")],
     )
     .await
     .ok()?;
@@ -896,15 +898,16 @@ mod tests {
         let _ = ShellGateRunner::new(&guarded).capture_snapshot().await;
         assert!(!marker("fetch").exists(), "the capture fetched");
 
-        // The same fetch through a remote helper the repository allows; the
-        // helper resolves to a repository alias, so nothing is put on PATH.
+        // The same fetch through a remote helper; the helper name is `none`,
+        // the name a non-empty GIT_ALLOW_PROTOCOL could itself admit, and it
+        // resolves to a repository alias, so nothing is put on PATH.
         let helper = main.join("helper.sh");
         script(&helper, "helper", "exit 1");
-        in_main(&["config", "remote.origin.url", "foo::x"]);
-        in_main(&["config", "protocol.foo.allow", "always"]);
+        in_main(&["config", "remote.origin.url", "none::x"]);
+        in_main(&["config", "protocol.none.allow", "always"]);
         in_main(&[
             "config",
-            "alias.remote-foo",
+            "alias.remote-none",
             &format!("!{}", helper.display()),
         ]);
         let control = copy(&main, "helper-control");
