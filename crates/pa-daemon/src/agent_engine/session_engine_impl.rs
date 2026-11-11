@@ -144,6 +144,7 @@ impl SessionEngine for AgentSessionEngine {
                     source: "user".to_string(),
                     agent_message_id: None,
                     custom_message: Some(crate::session_commands::custom_message_value(&message)),
+                    streaming_behavior: None,
                 },
                 goal_update,
                 pending_handle,
@@ -1374,7 +1375,14 @@ impl SessionEngine for AgentSessionEngine {
                 )) {
                     return;
                 }
-                self.run_turns(TurnPrompt::Injected(message), aborted, &mut emit);
+                self.run_turns(
+                    TurnPrompt::Injected {
+                        message,
+                        behavior: pa_core::session_engine::StreamingBehavior::Steer,
+                    },
+                    aborted,
+                    &mut emit,
+                );
             } else {
                 emit(EngineEvent::Done(Ok(())));
             }
@@ -1451,7 +1459,16 @@ impl SessionEngine for AgentSessionEngine {
             }
         }
         let turn_prompt = match injected {
-            Some(custom) => TurnPrompt::Injected(custom),
+            // The delivery's queue lane carries the busy-session behavior:
+            // a steering-lane item interrupts the running turn, a
+            // follow-up-lane item queues at its boundary, and a caller
+            // that set none keeps the injected-notice default (steer).
+            Some(custom) => TurnPrompt::Injected {
+                message: custom,
+                behavior: request
+                    .streaming_behavior
+                    .unwrap_or(pa_core::session_engine::StreamingBehavior::Steer),
+            },
             None => TurnPrompt::User {
                 text: request.message.clone(),
                 images: request.images.clone(),
@@ -1465,7 +1482,7 @@ impl SessionEngine for AgentSessionEngine {
             TurnPrompt::User { images, batch, .. } => {
                 !images.is_empty() || batch.iter().any(|row| !row.images.is_empty())
             }
-            TurnPrompt::Injected(message) => Self::custom_message_carries_images(message),
+            TurnPrompt::Injected { message, .. } => Self::custom_message_carries_images(message),
         };
         if let Err(refusal) = self.arm_image_turn_route(carries_images) {
             emit(EngineEvent::Done(Err(refusal)));

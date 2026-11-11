@@ -160,6 +160,7 @@ pub(crate) fn admit(engine: &AgentSessionEngine, message: String, events: &mut V
             source: "user".to_string(),
             agent_message_id: None,
             custom_message: None,
+            streaming_behavior: None,
         },
         &|| false,
         &mut |event| {
@@ -236,6 +237,7 @@ pub(crate) fn admit_parked(
                 source: "user".to_string(),
                 agent_message_id: None,
                 custom_message: None,
+                streaming_behavior: None,
             },
             &|| false,
             &mut |event| {
@@ -357,6 +359,7 @@ fn run_prompts(
                 source: "user".to_string(),
                 agent_message_id: None,
                 custom_message: None,
+                streaming_behavior: None,
             },
             &|| false,
             &mut |event| {

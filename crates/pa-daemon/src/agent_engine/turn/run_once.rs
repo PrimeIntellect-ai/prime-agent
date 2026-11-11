@@ -333,6 +333,9 @@ impl AgentSessionEngine {
         // admission future's head: the whole [pickup, registration] window
         // honours the delivery's cancel flag.
         let abort_raced_admission = std::sync::atomic::AtomicBool::new(false);
+        // A parked delivery whose wait unwound on the cancel flag: the row
+        // stays queued for the next run, and this attempt settles aborted.
+        let queued_aborted = std::sync::atomic::AtomicBool::new(false);
         let mut admitted = std::pin::pin!(async {
             if aborted() {
                 abort_raced_admission.store(true, std::sync::atomic::Ordering::SeqCst);
@@ -355,7 +358,7 @@ impl AgentSessionEngine {
                         }),
                     );
                 }
-                match &prompt {
+                let outcome = match &prompt {
                     // A plain turn admits a user prompt; an injected turn admits the
                     // custom row itself — ONE representation.
                     TurnPrompt::User {
@@ -373,20 +376,42 @@ impl AgentSessionEngine {
                                     images: row.images.clone(),
                                 })
                                 .collect(),
+                            // A user message is the steer class: when the
+                            // agent is busy at admission it interrupts the
+                            // running turn (the operator ruling), never
+                            // rejects.
+                            streaming_behavior: Some(
+                                pa_core::session_engine::StreamingBehavior::Steer,
+                            ),
                             ..Default::default()
                         };
                         engine
                             .session
                             .prompt_with_images(text, images.clone(), options)
-                            .await
-                            .map(|_| ())
+                            .await?
                     }
-                    TurnPrompt::Injected(message) => engine
-                        .session
-                        .prompt_injected_message(message)
-                        .await
-                        .map(|_| ()),
+                    // The injected row carries its delivery's lane behavior:
+                    // a busy session queues the row (steer or follow-up),
+                    // never fails the turn with the admission rejection.
+                    TurnPrompt::Injected { message, behavior } => {
+                        engine
+                            .session
+                            .prompt_injected_message_with_behavior(message, *behavior)
+                            .await?
+                    }
+                };
+                // A busy session parked the delivery on the agent's lanes.
+                // Report nothing from a parked row: wait for the streaming
+                // run to settle and drain the lanes (the delivery actually
+                // runs), so the stale-assistant harvest below never speaks
+                // for this seat and the row never waits past the run it
+                // rode (the AgentEnd window included).
+                if outcome == pa_core::session_engine::PromptOutcome::Queued
+                    && drain_queued_delivery(agent, aborted).await?
+                {
+                    queued_aborted.store(true, std::sync::atomic::Ordering::SeqCst);
                 }
+                Ok(())
             } else {
                 agent.continue_run().await
             }
@@ -445,6 +470,12 @@ impl AgentSessionEngine {
         if abort_raced_admission.load(std::sync::atomic::Ordering::SeqCst) {
             return Ok(TurnOnce::Aborted);
         }
+        // The parked delivery's wait unwound on the cancel flag: the row
+        // stays queued for the next run, and this attempt is the aborted
+        // settle — never a stale harvest of another run's reply.
+        if queued_aborted.load(std::sync::atomic::Ordering::SeqCst) {
+            return Ok(TurnOnce::Aborted);
+        }
         if let Some(error) = admission_error {
             return Err(anyhow::anyhow!("{error:#}"));
         }
@@ -464,6 +495,50 @@ impl AgentSessionEngine {
             }
         }
         Ok(TurnOnce::None)
+    }
+}
+
+/// The busy-session parking seam: a delivery whose admission queued it onto
+/// a streaming run must not be reported as a finished prompt (the stale
+/// assistant harvest), and its parked row must not wait for an unrelated
+/// future run — wait for the streaming run to settle, then drain the parked
+/// lanes so the queued delivery actually runs (the `resumeIfIdle` seam, the
+/// RPC queue pump's contract on the delivery's own run).
+///
+/// The wait observes the delivery's cancel flag: a set flag (abort, the
+/// replacement teardown) ends it with `true` — the row stays parked for the
+/// next run and the caller settles the attempt aborted. The bounded poll
+/// backstop covers a stream that cannot settle (a parked worker whose agent
+/// still reports streaming) exactly like the replacement teardown's own
+/// settle wait.
+async fn drain_queued_delivery(
+    agent: &std::sync::Arc<pa_agent::agent::Agent>,
+    aborted: &dyn Fn() -> bool,
+) -> anyhow::Result<bool> {
+    loop {
+        if aborted() {
+            return Ok(true);
+        }
+        if !agent.state().await.is_streaming {
+            break;
+        }
+        tokio::select! {
+            () = agent.wait_for_idle() => {}
+            () = tokio::time::sleep(std::time::Duration::from_millis(50)) => {}
+        }
+    }
+    if !agent.has_queued_messages() {
+        return Ok(false);
+    }
+    // `Busy` hands the drain to the run that won the agent's slot (its own
+    // polls deliver the parked rows); `NothingToContinue` means another
+    // drainer already took them. Neither is this delivery's error.
+    match agent.continue_run().await {
+        Ok(()) => Ok(false),
+        Err(error) => match error.downcast_ref::<pa_agent::agent::AgentContinueError>() {
+            Some(_) => Ok(false),
+            None => Err(error),
+        },
     }
 }
 
