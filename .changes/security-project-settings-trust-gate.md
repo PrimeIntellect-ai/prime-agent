@@ -1,1 +1,1 @@
-- A repository's own Prime Agent settings (`.prime/agent/settings.json`) now stay ignored until you explicitly trust them once in an interactive session; a changed file asks again.
+- A project's own `.prime/agent/settings.json`, `SYSTEM.md`, `APPEND_SYSTEM.md` and discovered skills, prompts and themes now stay ignored until you trust the project, either at the interactive prompt or with `prime-agent trust [--yes] [<dir>]`; a change to `settings.json`, `SYSTEM.md` or `APPEND_SYSTEM.md` asks again.
