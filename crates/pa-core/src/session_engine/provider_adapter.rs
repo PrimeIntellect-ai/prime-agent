@@ -150,9 +150,8 @@ pub type LiveAuthResolver = Arc<dyn Fn(&Model) -> crate::models::ResolvedRequest
 ///
 /// # Panics
 ///
-/// Panics at stream time if the provider target lock is poisoned, the
-/// target slot was never set before the first stream, or the resolution
-/// task panicked.
+/// Panics at stream time if the provider target lock is poisoned or the
+/// target slot was never set before the first stream.
 pub fn switchable_stream_fn_with_live_auth(
     target: Arc<std::sync::RwLock<Option<ProviderTarget>>>,
     live_auth: LiveAuthResolver,
@@ -177,7 +176,11 @@ pub fn switchable_stream_fn_with_live_auth(
                 let resolution = tokio::task::spawn_blocking(move || live_auth(&resolve_model));
                 let resolved = tokio::select! {
                     resolved = resolution => {
-                        resolved.expect("the live-auth resolution task")
+                        // A panicking resolver fails this call only; the
+                        // next call resolves afresh.
+                        resolved.map_err(|error| {
+                            anyhow::anyhow!("request auth resolution failed: {error}")
+                        })?
                     }
                     () = signal.aborted() => return Err(pa_agent::abort::aborted_error()),
                 };
@@ -526,6 +529,58 @@ mod tests {
                 (model.id.clone(), Some(pa_types::ai::ServiceTier::Priority)),
                 (model.id, None),
             ]
+        );
+        registration.unregister();
+    }
+
+    #[tokio::test]
+    async fn a_panicking_live_auth_resolution_fails_only_its_call() {
+        let registration =
+            pa_ai::faux::register_faux_provider(pa_ai::faux::RegisterFauxProviderOptions {
+                api: Some("live-auth-panic-test".to_owned()),
+                ..Default::default()
+            });
+        registration.set_repeat_last_response(true);
+        registration.set_responses(vec![pa_ai::faux::FauxResponseStep::Message(
+            pa_ai::faux::faux_assistant_text_message(
+                "ok",
+                pa_ai::faux::FauxAssistantMessageOptions::default(),
+            ),
+        )]);
+        let target = Arc::new(std::sync::RwLock::new(Some(ProviderTarget {
+            api_key: None,
+            model: registration.get_model(),
+            service_tier: None,
+            headers: None,
+        })));
+        let resolutions = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let live_auth: LiveAuthResolver = Arc::new(move |_: &Model| {
+            if resolutions.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
+                panic!("the first resolution panics");
+            }
+            ResolvedRequestAuth {
+                ok: true,
+                api_key: Some("live-key".to_string()),
+                ..Default::default()
+            }
+        });
+        let stream_fn = switchable_stream_fn_with_live_auth(target, live_auth);
+        let call = || {
+            stream_fn(
+                AgentModel::unknown(),
+                LlmContext::default(),
+                StreamRequestOptions::default(),
+            )
+        };
+        assert!(
+            call().await.is_err(),
+            "the panicked resolution fails its call"
+        );
+        let mut stream = call().await.expect("the next call resolves afresh");
+        stream.result().await.unwrap();
+        assert_eq!(
+            registration.received_api_keys(),
+            vec![Some("live-key".to_string())]
         );
         registration.unregister();
     }
