@@ -901,9 +901,18 @@ pub(crate) fn withdraw_bash_completion_notice(
     // drain it; the queued rows that announced it stop promising it.
     let mut inbox_rows_changed = false;
     if let Some((inbox, arrivals)) = inbox {
-        if let Some(withdrawn) = inbox.withdraw_bash_completion(notice.pid, &notice.command) {
+        if inbox
+            .withdraw_bash_completion(notice.pid, &notice.command)
+            .is_some()
+        {
             let mut batch = arrivals.lock().unwrap();
-            batch.retain(|message| message.id != withdrawn.id);
+            // The batch reconciles against the LIVE waiting set, not a
+            // single-id trim: a concurrent read can have drained other
+            // covered messages since the batch formed, and the re-rendered
+            // row (and its checkpoint) must not advertise ids that are
+            // already gone.
+            let waiting = inbox.waiting_ids();
+            batch.retain(|message| waiting.contains(&message.id));
             let (count, _, _) = inbox.count();
             if count == 0 {
                 // An emptied inbox drops its queued wake rows (a coalesced

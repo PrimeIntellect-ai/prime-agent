@@ -444,6 +444,89 @@ async fn a_withdrawal_inside_a_covered_batch_rerenders_the_queued_rows() {
     let _ = std::fs::remove_dir_all(worker.config.socket_path.parent().unwrap());
 }
 
+/// A withdrawal reconciles the covered batch against the live waiting set:
+/// ids a concurrent drain left behind must not stay advertised by the
+/// re-rendered row (the single-id trim kept them). Mutation: retaining only
+/// the withdrawn id keeps the ghost in the batch and both assertions go
+/// red.
+#[tokio::test]
+async fn a_withdrawal_reconciles_the_batch_against_the_live_waiting_set() {
+    let (worker, inbox, arrivals, notify) = routing_state();
+    worker.dispatch("clear_queue", &json!({})).await;
+    worker.core.lock().unwrap().busy = true;
+    let _ = admit_inbox_notice(
+        &worker.recovery,
+        &worker.core,
+        &notify,
+        &inbox,
+        &arrivals,
+        bash_done_notice(4321, "sleep 1"),
+        Lane::Steering,
+        || false,
+        |_, _| None,
+    );
+    let milestone = admit_inbox_notice(
+        &worker.recovery,
+        &worker.core,
+        &notify,
+        &inbox,
+        &arrivals,
+        inbox_notice(
+            pa_core::session_engine::inbox::INBOX_CLASS_FACTORY_PROGRESS,
+            "still waiting",
+        ),
+        Lane::Steering,
+        || false,
+        |_, _| None,
+    );
+    assert!(milestone.is_none(), "the milestone admitted");
+    // A concurrent read drained another covered message: the batch holds
+    // an id the store no longer waits on.
+    arrivals
+        .lock()
+        .unwrap()
+        .push(pa_core::session_engine::inbox::InboxMessage {
+            id: "inbox-ghost".to_string(),
+            class: pa_core::session_engine::inbox::INBOX_CLASS_FACTORY_PROGRESS.to_string(),
+            arrived_at_ms: 5,
+            sender: Some("gone".to_string()),
+            text: "drained elsewhere".to_string(),
+            meta: serde_json::Value::Null,
+        });
+    withdraw_bash_completion_notice(
+        &worker.recovery,
+        &worker.core,
+        Some((&inbox, &arrivals)),
+        &crate::engine::BashConsumedNotice {
+            pid: 4321,
+            command: "sleep 1".to_string(),
+        },
+        None,
+    );
+    let batch_ids: Vec<String> = arrivals
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|message| message.id.clone())
+        .collect();
+    assert_eq!(
+        batch_ids.len(),
+        1,
+        "the batch reconciled against the live waiting set: {batch_ids:?}"
+    );
+    assert!(
+        !batch_ids.iter().any(|id| id == "inbox-ghost"),
+        "the drained-elsewhere id left the batch: {batch_ids:?}"
+    );
+    let rows = steering_rows(&worker);
+    assert!(
+        rows.iter()
+            .any(|(text, _, _)| text.contains("1 new message (factory-progress)")),
+        "the re-rendered arrival row counts the live batch only: {rows:?}"
+    );
+    let _ = std::fs::remove_dir_all(worker.config.socket_path.parent().unwrap());
+}
+
 /// A queued arrival row that covered only the withdrawn message drops its
 /// now-empty wake while older waiting messages keep the reminder.
 #[tokio::test]
