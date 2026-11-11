@@ -164,13 +164,15 @@ impl Worker {
             }
         }
         crate::worker::clear_withdrawn_progress_note(&core, self.engine.as_ref());
-        let snapshot = Self::snapshot_locked(&core);
         drop(core);
         // The sweep may have settled the session: the verdict follows the remaining lanes.
         self.checkpoint_queue(crate::worker::QueueCheckpoint::Settle {
             operation: "queue_mutated",
         });
-        let _ = self.emit_action_update(&snapshot);
+        // The projection recomputes under the emission lock, so a
+        // concurrent read hook's newer strip is never overwritten by a
+        // stale copy.
+        let _ = crate::worker::emit_action_update_fresh(&self.core, &self.events);
         json!({ "steering": steering, "followUp": follow_up })
     }
 }

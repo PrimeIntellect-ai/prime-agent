@@ -82,6 +82,39 @@ impl AgentSessionEngine {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone()
     }
+
+    /// The closed-session durable push: the slot identity is re-checked and
+    /// the notice appended under the SLOT's own mutex (the same lock the
+    /// retire's [`Self::clear_inbox`] takes), so a concurrent retire either
+    /// waits for this append — the replacement's build can only open the
+    /// journal after the clear, with the record already on disk — or lands
+    /// first and this call answers `false` (the sender retries into the
+    /// replacement store). The retired store never takes an append that
+    /// could race the next build's reopen and compaction of the same
+    /// journal.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the inbox slot lock is poisoned.
+    pub(crate) fn push_to_live_inbox(
+        &self,
+        inbox: &Arc<SessionInbox>,
+        notice: pa_core::session_engine::inbox::InboxNotice,
+        at_ms: u64,
+    ) -> bool {
+        let slot = self
+            .inbox
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if !slot
+            .as_ref()
+            .is_some_and(|current| Arc::ptr_eq(current, inbox))
+        {
+            return false;
+        }
+        inbox.push(notice, at_ms);
+        true
+    }
 }
 
 /// `agentInbox.enabled` (default on): the kill switch that restores

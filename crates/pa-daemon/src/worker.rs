@@ -19,6 +19,7 @@ mod summary;
 mod connection;
 
 pub(crate) use connection::{AuthOutcome, ConnectionSink, EventPump, OutboundFrame};
+pub(crate) use summary::emit_action_update_fresh;
 
 mod queue;
 

@@ -61,10 +61,10 @@ impl AgentSession {
     /// Admit an injected custom message with the delivery's streaming
     /// behavior (the TS `_promptInjectedMessage` contract: queued with
     /// `streamingBehavior` + `queueIfBusy`, never rejected): a BUSY session
-    /// queues the row onto the agent's steering or follow-up queue — the
-    /// running turn's next boundary delivers it — while an idle session
-    /// admits it as the turn's prompt exactly like
-    /// [`AgentSession::prompt_injected_message`].
+    /// queues the row onto the agent's steering or follow-up queue —
+    /// [`PromptOutcome::Queued`], the running turn's next boundary or the
+    /// next run's poll delivers it — while an idle session admits it as the
+    /// turn's prompt exactly like [`AgentSession::prompt_injected_message`].
     ///
     /// # Errors
     ///
@@ -83,9 +83,35 @@ impl AgentSession {
                 StreamingBehavior::Steer => self.agent.steer(row),
                 StreamingBehavior::FollowUp => self.agent.follow_up(row),
             }
-            return Ok(PromptOutcome::Prompt);
+            // The parked row is not a finished turn: the caller threads
+            // the outcome to its settle (the daemon's delivery seat waits
+            // for the running run and drains it).
+            return Ok(PromptOutcome::Queued);
         }
         self.prompt_injected_message(message).await
+    }
+
+    /// The batched co-delivery rows in their admission-normalized form
+    /// (the skill and template expansion both admission branches apply):
+    /// the idle branch prompts them after the primary, the busy branch
+    /// queues the same rows in the same order.
+    fn normalized_batch_rows(
+        &self,
+        rows: &[super::PromptBatchRow],
+        expand: bool,
+    ) -> Vec<pa_agent::types::AgentMessage> {
+        rows.iter()
+            .map(|row| {
+                let row_text = if expand {
+                    let (skill_expanded, _) =
+                        crate::skills::expand_skill_command(&row.text, &self.skills);
+                    crate::skills::expand_prompt_template(&skill_expanded, &self.prompt_templates)
+                } else {
+                    row.text.clone()
+                };
+                user_prompt_message(&row_text, &row.images)
+            })
+            .collect()
     }
 
     /// Classify a prompt as a session command without admitting it (the same
@@ -97,13 +123,14 @@ impl AgentSession {
     }
 
     /// Prompt with images attached (the ACP prompt-capability path). Busy
-    /// sessions queue the text and images together as one follow-up batch,
-    /// so an admitted prompt never loses its images to a queue race.
+    /// sessions queue the text, the images, and every batched co-delivered
+    /// row together as one batch ([`PromptOutcome::Queued`]): an admitted
+    /// prompt never loses its images or its batch to a queue race.
     ///
     /// # Errors
     ///
-    /// Error when the prompt fails validation, the session is busy, or the
-    /// agent rejects the turn.
+    /// Error when the prompt fails validation, the session is busy without
+    /// an opt-in streaming behavior, or the agent rejects the turn.
     pub async fn prompt_with_images(
         &self,
         text: &str,
@@ -152,70 +179,52 @@ impl AgentSession {
         // double-persist.
 
         if busy {
-            let message = user_prompt_message(&normalized, &images);
+            // The busy branch queues the WHOLE delivery: the primary row
+            // plus every batched co-delivered row, in delivery order, as
+            // one batch — the same rows the idle branch admits — so the
+            // accepted rows a busy session already persisted reach the
+            // agent instead of dropping with the queueing branch.
+            let mut batch = vec![user_prompt_message(&normalized, &images)];
+            batch.extend(self.normalized_batch_rows(&options.batch, expand));
             match options.streaming_behavior {
-                Some(StreamingBehavior::Steer) => self.agent.steer(message),
-                Some(StreamingBehavior::FollowUp) => self.agent.follow_up(message),
+                Some(StreamingBehavior::Steer) => self.agent.steer(batch),
+                Some(StreamingBehavior::FollowUp) => self.agent.follow_up(batch),
                 None => unreachable!("busy without a streaming behavior errors above"),
             }
-        } else {
-            // The dispatch-time image-model routing decision: an
-            // image-attaching batch routes to the host's configured image
-            // model or fails with the actionable refusal, never silently
-            // downgrading the images to placeholders.
-            self.apply_image_model_routing(&images, &options.batch)
-                .await?;
-            // The turn's prompt messages: the deferred first-turn harness
-            // digest rides first when one is due, streamed ahead of the user
-            // prompt and carried on `agent_end`.
-            let mut prompt_messages = Vec::new();
-            if let Some(digest_row) = self.pending_digest_prompt_row().await? {
-                prompt_messages.push(digest_row);
-            }
-            prompt_messages.extend(self.take_next_turn_rows().await);
-            prompt_messages.push(user_prompt_message(&normalized, &images));
-            // Each batched action contributes its user row after the
-            // primary, through the same admission normalization (TS
-            // normalizes each submission at queue time; this engine
-            // normalizes every row at the shared admission).
-            for row in &options.batch {
-                let row_text = if expand {
-                    let (skill_expanded, _) =
-                        crate::skills::expand_skill_command(&row.text, &self.skills);
-                    crate::skills::expand_prompt_template(&skill_expanded, &self.prompt_templates)
-                } else {
-                    row.text.clone()
-                };
-                prompt_messages.push(user_prompt_message(&row_text, &row.images));
-            }
-            if options.return_after_accepted {
-                // `returnAfterAccepted`: this prompt never started, so its
-                // route must not survive (the failure path unwinds it like
-                // the plain prompt branch below).
-                if let Err(error) = self
-                    .agent
-                    .prompt_until_accepted(pa_agent::agent::AgentPromptInput::Messages(
-                        prompt_messages,
-                    ))
-                    .await
-                {
-                    if !self.agent.state().await.is_streaming {
-                        if let Some(router) = self.image_model_router.as_ref() {
-                            (router.swap_target)(None);
-                            self.agent.set_model_override(None);
-                        }
-                    }
-                    return Err(error);
-                }
-            } else if let Err(error) = self
+            // The parked row is not a finished turn: the caller threads
+            // the outcome to its settle (the daemon's delivery seat waits
+            // for the running run and drains it).
+            return Ok(PromptOutcome::Queued);
+        }
+        // The dispatch-time image-model routing decision: an
+        // image-attaching batch routes to the host's configured image
+        // model or fails with the actionable refusal, never silently
+        // downgrading the images to placeholders.
+        self.apply_image_model_routing(&images, &options.batch)
+            .await?;
+        // The turn's prompt messages: the deferred first-turn harness
+        // digest rides first when one is due, streamed ahead of the user
+        // prompt and carried on `agent_end`.
+        let mut prompt_messages = Vec::new();
+        if let Some(digest_row) = self.pending_digest_prompt_row().await? {
+            prompt_messages.push(digest_row);
+        }
+        prompt_messages.extend(self.take_next_turn_rows().await);
+        prompt_messages.push(user_prompt_message(&normalized, &images));
+        // Each batched action contributes its user row after the
+        // primary, through the same admission normalization (TS
+        // normalizes each submission at queue time; this engine
+        // normalizes every row at the shared admission).
+        prompt_messages.extend(self.normalized_batch_rows(&options.batch, expand));
+        if options.return_after_accepted {
+            // `returnAfterAccepted`: this prompt never started, so its
+            // route must not survive (the failure path unwinds it like
+            // the plain prompt branch below).
+            if let Err(error) = self
                 .agent
-                .prompt(pa_agent::agent::AgentPromptInput::Messages(prompt_messages))
+                .prompt_until_accepted(pa_agent::agent::AgentPromptInput::Messages(prompt_messages))
                 .await
             {
-                // A concurrent admission won the agent's run slot: this
-                // prompt never started, so its route must not survive. The
-                // unwind only happens while NO run streams (the winner keeps
-                // its target); TS's single-threaded commit cannot see this race.
                 if !self.agent.state().await.is_streaming {
                     if let Some(router) = self.image_model_router.as_ref() {
                         (router.swap_target)(None);
@@ -224,6 +233,22 @@ impl AgentSession {
                 }
                 return Err(error);
             }
+        } else if let Err(error) = self
+            .agent
+            .prompt(pa_agent::agent::AgentPromptInput::Messages(prompt_messages))
+            .await
+        {
+            // A concurrent admission won the agent's run slot: this
+            // prompt never started, so its route must not survive. The
+            // unwind only happens while NO run streams (the winner keeps
+            // its target); TS's single-threaded commit cannot see this race.
+            if !self.agent.state().await.is_streaming {
+                if let Some(router) = self.image_model_router.as_ref() {
+                    (router.swap_target)(None);
+                    self.agent.set_model_override(None);
+                }
+            }
+            return Err(error);
         }
         Ok(PromptOutcome::Prompt)
     }
