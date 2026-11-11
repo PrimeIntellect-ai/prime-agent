@@ -464,6 +464,7 @@ fn goal_prompt_request(message: &pa_types::session::CustomMessage) -> PromptRequ
         agent_message_id: None,
         custom_message: Some(crate::session_commands::custom_message_value(message)),
         batch: Vec::new(),
+        streaming_behavior: None,
     }
 }
 

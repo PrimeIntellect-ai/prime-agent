@@ -344,6 +344,13 @@ impl TurnRunner {
             source: "user".to_string(),
             agent_message_id: None,
             custom_message: first.custom_message.clone(),
+            // The lane the item rode is the sender's intent: a steering
+            // item interrupts a busy agent, a follow-up item queues at
+            // its boundary — the admission queues (never rejects) either.
+            streaming_behavior: Some(match lane {
+                Lane::Steering => pa_core::session_engine::StreamingBehavior::Steer,
+                Lane::FollowUp => pa_core::session_engine::StreamingBehavior::FollowUp,
+            }),
         };
         // `message_update` frames park in a single slot; other frames go
         // out direct, flushing the parked update first (wire order matches

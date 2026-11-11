@@ -444,6 +444,89 @@ async fn a_withdrawal_inside_a_covered_batch_rerenders_the_queued_rows() {
     let _ = std::fs::remove_dir_all(worker.config.socket_path.parent().unwrap());
 }
 
+/// A withdrawal reconciles the covered batch against the live waiting set:
+/// ids a concurrent drain left behind must not stay advertised by the
+/// re-rendered row (the single-id trim kept them). Mutation: retaining only
+/// the withdrawn id keeps the ghost in the batch and both assertions go
+/// red.
+#[tokio::test]
+async fn a_withdrawal_reconciles_the_batch_against_the_live_waiting_set() {
+    let (worker, inbox, arrivals, notify) = routing_state();
+    worker.dispatch("clear_queue", &json!({})).await;
+    worker.core.lock().unwrap().busy = true;
+    let _ = admit_inbox_notice(
+        &worker.recovery,
+        &worker.core,
+        &notify,
+        &inbox,
+        &arrivals,
+        bash_done_notice(4321, "sleep 1"),
+        Lane::Steering,
+        || false,
+        |_, _| None,
+    );
+    let milestone = admit_inbox_notice(
+        &worker.recovery,
+        &worker.core,
+        &notify,
+        &inbox,
+        &arrivals,
+        inbox_notice(
+            pa_core::session_engine::inbox::INBOX_CLASS_FACTORY_PROGRESS,
+            "still waiting",
+        ),
+        Lane::Steering,
+        || false,
+        |_, _| None,
+    );
+    assert!(milestone.is_none(), "the milestone admitted");
+    // A concurrent read drained another covered message: the batch holds
+    // an id the store no longer waits on.
+    arrivals
+        .lock()
+        .unwrap()
+        .push(pa_core::session_engine::inbox::InboxMessage {
+            id: "inbox-ghost".to_string(),
+            class: pa_core::session_engine::inbox::INBOX_CLASS_FACTORY_PROGRESS.to_string(),
+            arrived_at_ms: 5,
+            sender: Some("gone".to_string()),
+            text: "drained elsewhere".to_string(),
+            meta: serde_json::Value::Null,
+        });
+    withdraw_bash_completion_notice(
+        &worker.recovery,
+        &worker.core,
+        Some((&inbox, &arrivals)),
+        &crate::engine::BashConsumedNotice {
+            pid: 4321,
+            command: "sleep 1".to_string(),
+        },
+        None,
+    );
+    let batch_ids: Vec<String> = arrivals
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|message| message.id.clone())
+        .collect();
+    assert_eq!(
+        batch_ids.len(),
+        1,
+        "the batch reconciled against the live waiting set: {batch_ids:?}"
+    );
+    assert!(
+        !batch_ids.iter().any(|id| id == "inbox-ghost"),
+        "the drained-elsewhere id left the batch: {batch_ids:?}"
+    );
+    let rows = steering_rows(&worker);
+    assert!(
+        rows.iter()
+            .any(|(text, _, _)| text.contains("1 new message (factory-progress)")),
+        "the re-rendered arrival row counts the live batch only: {rows:?}"
+    );
+    let _ = std::fs::remove_dir_all(worker.config.socket_path.parent().unwrap());
+}
+
 /// A queued arrival row that covered only the withdrawn message drops its
 /// now-empty wake while older waiting messages keep the reminder.
 #[tokio::test]
@@ -1355,6 +1438,75 @@ async fn a_closed_session_takes_the_durable_push_and_refuses_without_a_store() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// The closed-session append is atomic with the retire: the slot's own
+/// mutex covers the identity re-check and the journal append, so a
+/// retired store never takes an append that could race the replacement's
+/// reopen and compaction of the same journal, and the sender's retry
+/// lands in the replacement store. Mutation: dropping the identity check
+/// lets the stale store take the append (both refusal pins go red).
+#[tokio::test]
+async fn a_retired_slot_refuses_the_closed_sessions_append_atomically() {
+    let (worker, inbox, dir) = faux_worker_with_inbox();
+    let engine = worker.agent_engine.as_ref().expect("the faux engine");
+    // The live slot takes the closed session's durable push.
+    assert!(
+        engine.push_to_live_inbox(
+            &inbox,
+            inbox_notice(
+                pa_core::session_engine::inbox::INBOX_CLASS_AGENT_MESSAGE,
+                "first",
+            ),
+            1_000,
+        ),
+        "the live slot takes the durable push"
+    );
+    assert_eq!(inbox.count().0, 1);
+    // The retire clears the slot: the stale store is refused — its append
+    // would race the replacement's reopen of the same journal.
+    engine.clear_inbox();
+    assert!(
+        !engine.push_to_live_inbox(
+            &inbox,
+            inbox_notice(
+                pa_core::session_engine::inbox::INBOX_CLASS_AGENT_MESSAGE,
+                "stale",
+            ),
+            2_000,
+        ),
+        "the retired store never takes an append"
+    );
+    assert_eq!(inbox.count().0, 1, "the retired store stayed untouched");
+    // The replacement store is the sender's retry target; the retired one
+    // stays refused even after the slot moved on.
+    let replacement = Arc::new(SessionInbox::open(Some(&dir.join("replacement"))));
+    engine.set_inbox(std::sync::Arc::clone(&replacement));
+    assert!(
+        !engine.push_to_live_inbox(
+            &inbox,
+            inbox_notice(
+                pa_core::session_engine::inbox::INBOX_CLASS_AGENT_MESSAGE,
+                "still stale",
+            ),
+            3_000,
+        ),
+        "the replaced-away store stays refused"
+    );
+    assert!(
+        engine.push_to_live_inbox(
+            &replacement,
+            inbox_notice(
+                pa_core::session_engine::inbox::INBOX_CLASS_AGENT_MESSAGE,
+                "retried",
+            ),
+            4_000,
+        ),
+        "the replacement store takes the retry"
+    );
+    assert_eq!(replacement.count().0, 1);
+    assert_eq!(inbox.count().0, 1, "the retired store stays untouched");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// A follow-up arrival never demotes a queued steering notice: the batch
 /// keeps the most urgent lane it has already ridden.
 #[tokio::test]
@@ -1713,6 +1865,14 @@ async fn the_read_hook_refreshes_the_wake_rows_and_their_action_events() {
             event.get("type").and_then(Value::as_str) == Some("session_action_update")
         }),
         "the retraction refreshed the strip: {hook_frames:?}"
+    );
+    // A late strip refresh over the drained state recomputes under the
+    // emission lock and stays silent: the drained notice is never
+    // republished from a stale copy.
+    crate::worker::emit_action_update_fresh(&worker.core, &worker.events).unwrap();
+    assert!(
+        subscription.try_recv().is_err(),
+        "a refresh over the already-published strip stays silent"
     );
     let _ = std::fs::remove_dir_all(worker.config.socket_path.parent().unwrap());
 }

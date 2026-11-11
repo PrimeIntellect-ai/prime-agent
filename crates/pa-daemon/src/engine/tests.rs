@@ -16,6 +16,7 @@ fn scripted_engine_replays_then_echoes() {
         source: "test".to_string(),
         agent_message_id: None,
         custom_message: None,
+        streaming_behavior: None,
     };
     let collect = |engine: &ScriptedEngine, index: usize, message: &str| {
         let mut final_message = None;
@@ -49,6 +50,7 @@ fn cancellation_stops_the_prompt() {
             source: "test".into(),
             agent_message_id: None,
             custom_message: None,
+            streaming_behavior: None,
         },
         &|| false,
         &mut |event| {

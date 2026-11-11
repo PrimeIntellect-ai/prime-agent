@@ -39,7 +39,7 @@ async fn session_commands_never_reach_the_model() {
             assert_eq!(command.name, "compact");
             assert_eq!(command.args, "focus on tests");
         }
-        PromptOutcome::Prompt => panic!("expected a session command"),
+        PromptOutcome::Prompt | PromptOutcome::Queued => panic!("expected a session command"),
     }
     // No model call and no persisted user message.
     assert!(provider.calls().is_empty());

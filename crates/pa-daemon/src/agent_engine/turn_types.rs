@@ -40,9 +40,16 @@ pub(crate) enum TurnPrompt {
         batch: Vec<crate::engine::PromptBatchRow>,
     },
     /// An injected custom row (goal continuations, RLM child terminal
-    /// notices): the admission carries the row itself, so the transcript
-    /// holds one representation.
-    Injected(pa_types::session::CustomMessage),
+    /// notices, the daemon's notice deliveries): the admission carries
+    /// the row itself, so the transcript holds one representation.
+    Injected {
+        message: pa_types::session::CustomMessage,
+        /// The delivery's streaming behavior when the agent is busy at
+        /// admission: the queue lane the item rode (the steering lane
+        /// steers the running turn, the follow-up lane queues at its
+        /// boundary) — a busy session queues the row, never rejects it.
+        behavior: pa_core::session_engine::StreamingBehavior,
+    },
 }
 
 /// What the turn-boundary consumption did to the run.
