@@ -261,6 +261,16 @@ fn saved_session_wake(location: SavedLocation) {
     let agent_dir = dir.path().join("agent");
     let sessions = agent_dir.join("sessions");
     std::fs::create_dir_all(&sessions).expect("sessions dir");
+    // The woken delivery below asserts its full `[agent-message from ...]`
+    // row in the transcript: the default route sends deliveries through
+    // the session inbox, so this wake suite pins the kill switch and
+    // keeps covering the direct delivery. The inbox route is covered
+    // end-to-end by `agent_inbox_e2e`.
+    std::fs::write(
+        agent_dir.join("settings.json"),
+        json!({ "agentInbox": { "enabled": false } }).to_string(),
+    )
+    .expect("write the inbox kill switch");
     let url = spawn_mock("wake reply");
     std::fs::write(
         agent_dir.join("models.json"),
