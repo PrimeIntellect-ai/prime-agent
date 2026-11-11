@@ -594,7 +594,8 @@ async fn a_withdrawal_racing_an_arrival_settles_both() {
 
 /// A journal write failure names the memory-only degradation in the
 /// notice text: the arrival row and the reminder both carry the clause,
-/// and a recovered journal drops it on the next notice.
+/// and later successful appends never drop it while the failed records
+/// still wait (the append-only journal re-persists only on a rewrite).
 #[tokio::test]
 async fn a_journal_failure_marks_the_notice_memory_only() {
     let (worker, inbox, arrivals, notify) = routing_state();
@@ -642,9 +643,10 @@ async fn a_journal_failure_marks_the_notice_memory_only() {
             .ends_with(pa_core::session_engine::inbox::INBOX_PERSISTENCE_ERROR_CLAUSE),
         "the reminder carries the clause: {rows:?}"
     );
-    // A recovered journal drops the clause on the next notice: the
-    // coalesced arrival row re-renders without it once a write succeeds,
-    // and the next reminder cycle replaces the reminder's stale clause.
+    // A healed journal keeps the clause: the failed records were never
+    // re-persisted (the append-only journal only rewrites at open), so
+    // the next notices must not silence the degradation their unread
+    // rows were queued under.
     std::fs::remove_dir(&journal).unwrap();
     let _ = admit_inbox_notice(
         &worker.recovery,
@@ -657,7 +659,10 @@ async fn a_journal_failure_marks_the_notice_memory_only() {
         || false,
         |_, _| None,
     );
-    assert_eq!(inbox.persistence_error(), None, "the write succeeded again");
+    assert!(
+        inbox.persistence_error().is_some(),
+        "a healed journal keeps the degradation while its failed records wait"
+    );
     admit_inbox_reminder(&worker.recovery, &worker.core, &notify, &inbox, || false);
     let rows = steering_rows(&worker);
     assert_eq!(
@@ -667,8 +672,8 @@ async fn a_journal_failure_marks_the_notice_memory_only() {
     );
     for (message, _, _) in &rows {
         assert!(
-            !message.contains(pa_core::session_engine::inbox::INBOX_PERSISTENCE_ERROR_CLAUSE),
-            "the recovered journal's notices are clean: {rows:?}"
+            message.contains(pa_core::session_engine::inbox::INBOX_PERSISTENCE_ERROR_CLAUSE),
+            "the healed journal's notices keep the clause: {rows:?}"
         );
     }
     let _ = std::fs::remove_dir_all(worker.config.socket_path.parent().unwrap());
