@@ -313,6 +313,16 @@ fn a_write_against_diverged_project_bytes_fails_closed() {
             .any(|error| error.message.contains("settings are not trusted")),
         "the diverged write must fail closed: {errors:?}"
     );
+    assert!(
+        errors
+            .iter()
+            .any(|error| error.message.contains("not trusted. Reopen")),
+        "the refusal reads as a normal sentence, not a padded line: {errors:?}"
+    );
+    assert!(
+        manager.settings().skills.is_none(),
+        "a refused write must not update the in-memory session either"
+    );
     assert_eq!(
         std::fs::read_to_string(&settings_path).unwrap(),
         r#"{ "theme": "pulled-theme" }"#,

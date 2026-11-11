@@ -521,9 +521,12 @@ impl SettingsManager {
 
     pub fn set_project_packages(&mut self, packages: Vec<serde_json::Value>) {
         // Preserve project package entries for explicit removal. They never
-        // become active, including in this manager.
+        // become active, including in this manager; the raw bookkeeping moves
+        // only when the write persisted.
         let value = serde_json::Value::Array(packages);
-        self.persist_scope_field(SettingsScope::Project, "packages", &value);
+        if !self.persist_scope_field(SettingsScope::Project, "packages", &value) {
+            return;
+        }
         if let serde_json::Value::Object(project_raw) = self
             .project_raw
             .get_or_insert_with(|| serde_json::json!({}))
@@ -551,26 +554,36 @@ impl SettingsManager {
         self.merged = deep_merge(&self.global, &self.project);
     }
 
-    /// Replace one resource-path array in the project settings file.
+    /// Replace one resource-path array in the project settings file. The
+    /// in-memory state moves only when the write persisted: a refused
+    /// (untrusted or failed) write changes neither the file nor the session.
     pub fn set_project_resource_array(&mut self, field: &str, values: Vec<String>) {
+        if !["skills", "prompts", "themes"].contains(&field) {
+            return;
+        }
         let array: Vec<serde_json::Value> =
             values.into_iter().map(serde_json::Value::String).collect();
-        match field {
-            "skills" => self.project.skills = Some(strings(&array)),
-            "prompts" => self.project.prompts = Some(strings(&array)),
-            "themes" => self.project.themes = Some(strings(&array)),
-            _ => return,
-        }
-        self.persist_scope_field(
+        let strings = strings(&array);
+        if !self.persist_scope_field(
             SettingsScope::Project,
             field,
             &serde_json::Value::Array(array),
-        );
+        ) {
+            return;
+        }
+        match field {
+            "skills" => self.project.skills = Some(strings),
+            "prompts" => self.project.prompts = Some(strings),
+            "themes" => self.project.themes = Some(strings),
+            _ => return,
+        }
         self.merged = deep_merge(&self.global, &self.project);
     }
 
     /// Write one field into a scope's file, merging with the current on-disk document
     /// so concurrently-added fields survive; failures are recorded as warnings, never thrown.
+    /// Returns whether the write persisted: a refused (untrusted or failed)
+    /// write leaves both the file and the caller's in-memory state untouched.
     ///
     /// A project-scope write extends the user's trust, never replaces it: it
     /// proceeds only when the current document is absent (this write authors
@@ -582,7 +595,7 @@ impl SettingsManager {
         scope: SettingsScope,
         field: &str,
         value: &serde_json::Value,
-    ) {
+    ) -> bool {
         let load_error = match scope {
             SettingsScope::Global => self.global_load_error.clone(),
             SettingsScope::Project => self.project_load_error.clone(),
@@ -598,7 +611,7 @@ impl SettingsManager {
                     "{label} settings not saved: settings file failed to load: {message}"
                 ),
             });
-            return;
+            return false;
         }
         // The whole trust decision rides INSIDE the lock: the callback
         // verifies the very bytes it merges (no read can go stale between
@@ -647,10 +660,10 @@ impl SettingsManager {
         if untrusted {
             self.errors.push(SettingsError {
                 scope,
-                message: "Project settings not saved: this project's settings are not trusted.                           Reopen the project interactively to trust them."
+                message: "Project settings not saved: this project's settings are not trusted. Reopen the project interactively to trust them."
                     .to_string(),
             });
-            return;
+            return false;
         }
         // A failed or skipped write never pins bytes that are not on disk.
         if scope == SettingsScope::Project && result.is_ok() && extend_trust {
@@ -664,12 +677,13 @@ impl SettingsManager {
             }
         }
         let result = result.and_then(|()| failure.map_or(Ok(()), Err));
-        if let Err(error) = result {
+        if let Err(ref error) = result {
             self.errors.push(SettingsError {
                 scope,
                 message: error.to_string(),
             });
         }
+        result.is_ok()
     }
 
     // -- getters with TS semantics ------------------------------------------

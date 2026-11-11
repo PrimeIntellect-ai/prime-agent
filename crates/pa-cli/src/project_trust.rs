@@ -29,9 +29,9 @@ fn escaped(text: &str) -> std::borrow::Cow<'_, str> {
 
 /// The existing gated project-config entries: the `.prime/agent` files and
 /// directories plus the `.agents/skills` directories auto-discovery loads —
-/// `cwd`'s own first, up to and including the git repo root (the filesystem
-/// root outside a repo), mirroring the discovery boundary, and never the
-/// user's global `~/.agents/skills` (that is trusted user config).
+/// through the one shared walk (`gated_agents_skill_dirs`), so the listing
+/// cannot drift from what the discovery actually loads; the user's global
+/// `~/.agents/skills` stays excluded (it is trusted user config).
 fn existing_gated_entries(cwd: &Path) -> Vec<PathBuf> {
     let config_dir = cwd.join(pa_core::settings::CONFIG_DIR_NAME);
     let mut entries = GATED_FILES
@@ -40,43 +40,12 @@ fn existing_gated_entries(cwd: &Path) -> Vec<PathBuf> {
         .chain(GATED_DIRS.iter().map(|name| config_dir.join(name)))
         .filter(|path| path.exists())
         .collect::<Vec<PathBuf>>();
-    let user_agents_skills =
-        pa_types::platform::home_dir().map(|home| home.join(".agents").join("skills"));
-    let git_root = find_git_root(cwd);
-    let mut dir = cwd.to_path_buf();
-    loop {
-        let candidate = dir.join(".agents").join("skills");
-        if candidate.is_dir() && user_agents_skills.as_deref() != Some(candidate.as_path()) {
-            entries.push(candidate);
+    for dir in pa_core::settings::gated_agents_skill_dirs(cwd) {
+        if dir.is_dir() {
+            entries.push(dir);
         }
-        if git_root.as_deref() == Some(dir.as_path()) {
-            break;
-        }
-        let Some(parent) = dir.parent() else {
-            break;
-        };
-        if parent == dir {
-            break;
-        }
-        dir = parent.to_path_buf();
     }
     entries
-}
-
-/// The nearest ancestor (including `dir`) carrying `.git`, mirroring the
-/// discovery's repo-root boundary.
-fn find_git_root(dir: &Path) -> Option<PathBuf> {
-    let mut dir = dir.to_path_buf();
-    loop {
-        if dir.join(".git").exists() {
-            return Some(dir);
-        }
-        let parent = dir.parent()?;
-        if parent == dir {
-            return None;
-        }
-        dir = parent.to_path_buf();
-    }
 }
 
 /// The settings entry summary the prompt shows: the keys that visibly
@@ -103,6 +72,17 @@ fn settings_summary(settings_path: &Path) -> Vec<String> {
         if let Some(field_value) = field_value {
             let label = field.map_or(section.to_string(), |field| format!("{section}.{field}"));
             rows.push(format!("{label} = {field_value}"));
+        }
+    }
+    // The loader migrates a legacy telemetry bool to `telemetry.enabled`
+    // before applying it (untrusted or not); the summary shows the same row.
+    if let Some(legacy) = value.get("telemetry").and_then(serde_json::Value::as_bool) {
+        if value
+            .get("telemetry")
+            .and_then(|t| t.get("enabled"))
+            .is_none()
+        {
+            rows.push(format!("telemetry.enabled = {legacy}"));
         }
     }
     for array in ["skills", "prompts", "themes"] {
@@ -240,5 +220,20 @@ mod tests {
             "unreadable (permissions or not valid UTF-8)"
         );
         assert_eq!(refusal_fix(&settings_path), "Make it readable text first.");
+    }
+
+    /// The summary shows a legacy telemetry bool the way the loader applies
+    /// it (migrated to `telemetry.enabled`), so the prompt never hides an
+    /// opt-out that will take effect.
+    #[test]
+    fn the_summary_shows_a_legacy_telemetry_bool_as_the_migrated_row() {
+        let dir = tempfile::tempdir().unwrap();
+        let settings_path = dir.path().join("settings.json");
+        std::fs::write(&settings_path, r#"{"telemetry": false}"#).unwrap();
+        let rows = settings_summary(&settings_path);
+        assert!(
+            rows.iter().any(|row| row == "telemetry.enabled = false"),
+            "the legacy opt-out must appear as the migrated row: {rows:?}"
+        );
     }
 }

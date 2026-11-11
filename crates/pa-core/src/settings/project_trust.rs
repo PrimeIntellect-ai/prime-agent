@@ -174,6 +174,21 @@ pub fn trust_project(registry_path: &Path, settings_path: &Path, fingerprint: &s
 #[cfg(test)]
 mod tests;
 
+/// The `.agents/skills` directories the auto-discovery would load for this
+/// cwd (its own first, up to and including the git repo root), with the
+/// user's global directory excluded: the loader and the trust prompt share
+/// this one source of truth so the gated paths the prompt lists can never
+/// drift from what the discovery actually loads.
+#[must_use]
+pub fn gated_agents_skill_dirs(cwd: &Path) -> Vec<PathBuf> {
+    let user_agents_skills =
+        pa_types::platform::home_dir().map(|home| home.join(".agents").join("skills"));
+    crate::packages::resolve::discovery::collect_ancestor_agents_skill_dirs(cwd)
+        .into_iter()
+        .filter(|dir| user_agents_skills.as_deref() != Some(dir.as_path()))
+        .collect()
+}
+
 /// The gate a [`super::SettingsManager`] holds for its project scope: the
 /// user registry plus the project settings file it fingerprints.
 #[derive(Debug, Clone)]
