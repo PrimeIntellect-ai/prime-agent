@@ -606,7 +606,12 @@ fn an_absence_pin_extends_to_the_first_write() {
     )
     .unwrap();
     let settings_path = project_settings(&cwd);
-    trust_project(&agent_dir.join(TRUSTED_PROJECTS_FILE), &settings_path, "").unwrap();
+    trust_project(
+        &agent_dir.join(TRUSTED_PROJECTS_FILE),
+        &settings_path,
+        &project_fingerprint(&settings_path).unwrap(),
+    )
+    .unwrap();
     let before = SettingsManager::create(&cwd, &agent_dir);
     assert!(
         before.project_config_trusted(),

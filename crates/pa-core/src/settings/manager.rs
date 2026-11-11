@@ -588,8 +588,9 @@ impl SettingsManager {
     /// A project-scope write extends the user's trust, never replaces it: it
     /// proceeds only when the current document is absent (this write authors
     /// every byte) or pinned by the registry, and a successful write re-pins
-    /// the new bytes; diverged bytes (a pull changed the file after trust)
-    /// fail closed instead of laundering them under the user's command.
+    /// the new bytes iff the project was trusted before it; diverged bytes
+    /// (a pull changed the file after trust) fail closed instead of
+    /// laundering them under the user's command.
     fn persist_scope_field(
         &mut self,
         scope: SettingsScope,
@@ -616,10 +617,10 @@ impl SettingsManager {
         // The whole trust decision rides INSIDE the lock: the callback
         // verifies the very bytes it merges (no read can go stale between
         // the check and the write), and the re-pin lands only on a
-        // committed write that extends an EXISTING trust decision — an
-        // absent document may be written, but the write never creates
-        // trust for its bytes, so no prompt is skipped and no sibling
-        // file (SYSTEM.md, discovered skills) activates unasked.
+        // committed write whose pre-write pin was admitted — an absent
+        // document in an untrusted project may be written, but the write
+        // never creates trust, so no prompt is skipped and no sibling file
+        // (SYSTEM.md, discovered skills) activates unasked.
         let gate = self.trust_gate.clone();
         let mut failure = None;
         let mut written: Option<String> = None;
@@ -628,24 +629,10 @@ impl SettingsManager {
         let result = self.storage.with_lock(scope, &mut |current| {
             if scope == SettingsScope::Project {
                 if let Some(gate) = gate.as_ref() {
-                    match current
-                        .as_deref()
-                        .map(|content| gate.admits(Some(content)))
-                    {
-                        Some(false) => {
-                            untrusted = true;
-                            return None;
-                        }
-                        Some(true) => extend_trust = true,
-                        None => {
-                            // An absence pin (a trust decision recorded while
-                            // the file was absent) extends to the user's own
-                            // first write; a project with no registry entry
-                            // creates none.
-                            if gate.admits_project() {
-                                extend_trust = true;
-                            }
-                        }
+                    extend_trust = gate.admits(current.as_deref());
+                    if current.is_some() && !extend_trust {
+                        untrusted = true;
+                        return None;
                     }
                 }
             }
