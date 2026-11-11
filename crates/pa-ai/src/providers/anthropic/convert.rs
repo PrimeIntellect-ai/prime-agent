@@ -162,7 +162,9 @@ pub fn convert_messages(
                                 }));
                                 continue;
                             }
-                            if thinking.thinking.trim().is_empty() {
+                            // Omitted thinking still carries a signature needed on the next turn.
+                            let signature = thinking.thinking_signature.as_deref().unwrap_or("");
+                            if thinking.thinking.trim().is_empty() && signature.trim().is_empty() {
                                 continue;
                             }
                             // Unsigned thinking comes from an Anthropic-compatible endpoint that
@@ -175,7 +177,6 @@ pub fn convert_messages(
                             // reasoning passed back, so it replays as an unsigned `thinking`
                             // block; Claude rejects a thinking block without a valid signature, so
                             // there it is dropped.
-                            let signature = thinking.thinking_signature.as_deref().unwrap_or("");
                             if signature.trim().is_empty() {
                                 if !requires_thinking_signature {
                                     blocks.push(json!({
@@ -434,19 +435,22 @@ mod tests {
     /// Signed thinking still replays as a `thinking` block with its signature.
     #[test]
     fn signed_thinking_replays_as_thinking() {
-        let turn = assistant_turn(
-            &claude(),
-            &json!([
-                {"type": "thinking", "thinking": "Plan.", "thinkingSignature": "sig"},
-                {"type": "text", "text": "Rebuilt."}
-            ]),
-        );
-        assert_eq!(
-            turn,
-            json!({"role": "assistant", "content": [
-                {"type": "thinking", "thinking": "Plan.", "signature": "sig"},
-                {"type": "text", "text": "Rebuilt."}
-            ]})
-        );
+        // Omitted thinking carries the same signature with an empty summary.
+        for thinking in ["Plan.", ""] {
+            let turn = assistant_turn(
+                &claude(),
+                &json!([
+                    {"type": "thinking", "thinking": thinking, "thinkingSignature": "sig"},
+                    {"type": "text", "text": "Rebuilt."}
+                ]),
+            );
+            assert_eq!(
+                turn,
+                json!({"role": "assistant", "content": [
+                    {"type": "thinking", "thinking": thinking, "signature": "sig"},
+                    {"type": "text", "text": "Rebuilt."}
+                ]})
+            );
+        }
     }
 }
