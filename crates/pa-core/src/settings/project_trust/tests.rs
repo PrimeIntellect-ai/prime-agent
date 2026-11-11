@@ -203,8 +203,15 @@ fn a_changed_or_new_system_prompt_file_re_gates_the_project() {
 
     std::fs::write(&system, "pulled prompt").unwrap();
     let manager = SettingsManager::create(&cwd, &agent_dir);
-    assert!(!manager.project_config_trusted(), "a changed SYSTEM.md re-gates");
-    assert_eq!(manager.settings().theme, None, "the settings re-gate with it");
+    assert!(
+        !manager.project_config_trusted(),
+        "a changed SYSTEM.md re-gates"
+    );
+    assert_eq!(
+        manager.settings().theme,
+        None,
+        "the settings re-gate with it"
+    );
 
     trust();
     std::fs::write(settings_path.with_file_name("APPEND_SYSTEM.md"), "appended").unwrap();

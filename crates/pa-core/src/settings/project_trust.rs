@@ -230,14 +230,4 @@ impl ProjectTrustGate {
             .context("a project system-prompt file is unreadable")?;
         trust_project(&self.registry_path, &self.settings_path, &pin)
     }
-
-    /// The whole-project decision: this project directory's registry entry
-    /// pinned to the project's current files, so one trust covers every
-    /// gated project file.
-    #[must_use]
-    pub(crate) fn admits_project(&self) -> bool {
-        project_fingerprint(&self.settings_path).is_some_and(|pin| {
-            project_trusted(&self.registry_path, &self.settings_path, &pin)
-        })
-    }
 }

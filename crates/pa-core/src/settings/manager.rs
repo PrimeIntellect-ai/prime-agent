@@ -60,18 +60,15 @@ impl SettingsManager {
         trust_gate: Option<ProjectTrustGate>,
     ) -> Self {
         let mut errors = Vec::new();
-        let (global, global_raw, global_load_error) =
+        let (global, global_raw, global_load_error, _) =
             load_scope(storage.as_ref(), SettingsScope::Global, None, &mut errors);
-        let (project, project_raw, project_load_error) = load_scope(
+        let (project, project_raw, project_load_error, project_config_trusted) = load_scope(
             storage.as_ref(),
             SettingsScope::Project,
             trust_gate.as_ref(),
             &mut errors,
         );
         let merged = deep_merge(&global, &project);
-        let project_config_trusted = trust_gate
-            .as_ref()
-            .is_none_or(ProjectTrustGate::admits_project);
         Self {
             storage,
             global,
@@ -186,13 +183,13 @@ impl SettingsManager {
     /// the manager instead.
     pub fn reload(&mut self) -> Result<()> {
         let mut errors = std::mem::take(&mut self.errors);
-        let (global, global_raw, global_load_error) = load_scope(
+        let (global, global_raw, global_load_error, _) = load_scope(
             self.storage.as_ref(),
             SettingsScope::Global,
             None,
             &mut errors,
         );
-        let (project, project_raw, project_load_error) = load_scope(
+        let (project, project_raw, project_load_error, project_config_trusted) = load_scope(
             self.storage.as_ref(),
             SettingsScope::Project,
             self.trust_gate.as_ref(),
@@ -206,10 +203,7 @@ impl SettingsManager {
         self.global_load_error = global_load_error;
         self.project_load_error = project_load_error;
         self.errors = errors;
-        self.project_config_trusted = self
-            .trust_gate
-            .as_ref()
-            .is_none_or(ProjectTrustGate::admits_project);
+        self.project_config_trusted = project_config_trusted;
         self.merged = deep_merge(&self.global, &self.project);
         Ok(())
     }
@@ -1101,14 +1095,15 @@ fn strings(array: &[serde_json::Value]) -> Vec<String> {
 }
 
 /// One loaded scope: the leniently-parsed settings, the migrated raw document,
-/// and the load error (`Some` when the document exists but cannot be read/parsed).
+/// the load error (`Some` when the document exists but cannot be read/parsed),
+/// and the project trust decision (`true` without a gate: the global scope).
 #[allow(clippy::type_complexity)]
 fn load_scope(
     storage: &dyn SettingsStorage,
     scope: SettingsScope,
     trust_gate: Option<&ProjectTrustGate>,
     errors: &mut Vec<SettingsError>,
-) -> (Settings, Option<serde_json::Value>, Option<String>) {
+) -> (Settings, Option<serde_json::Value>, Option<String>, bool) {
     let mut load_error: Option<String> = None;
     // The pure-read arm: a locked protocol read on any cache miss, the
     // process-cached copy on a hit (see `SettingsStorage::read`).
@@ -1120,46 +1115,49 @@ fn load_scope(
                 scope,
                 message: message.clone(),
             });
-            return (Settings::default(), None, Some(message));
+            // An unreadable document never rides a pin.
+            return (
+                Settings::default(),
+                None,
+                Some(message),
+                trust_gate.is_none(),
+            );
         }
     };
+    let trusted = trust_gate.is_none_or(|gate| gate.admits(content.as_deref()));
     let Some(content) = content else {
-        return (Settings::default(), None, None);
+        return (Settings::default(), None, None, trusted);
     };
     // The CWE-426 gate: an untrusted project document stays inert except
     // its privacy opt-outs — declining trust must never increase sharing —
     // until the registry pins the trust to these exact bytes (a changed
     // file re-prompts).
-    if scope == SettingsScope::Project {
-        if let Some(gate) = trust_gate {
-            if !gate.admits(Some(&content)) {
-                // Parse like the trusted path so a malformed document still
-                // records its load error (the trace upload's fail-closed
-                // `errors().is_empty()` rule keeps working).
-                let value: serde_json::Value = match serde_json::from_str(&content) {
-                    Ok(value) => value,
-                    Err(error) => {
-                        let message = error.to_string();
-                        errors.push(SettingsError {
-                            scope,
-                            message: message.clone(),
-                        });
-                        return (Settings::default(), None, Some(message));
-                    }
-                };
-                // The same legacy migration the trusted path applies, so a
-                // legacy-shaped opt-out (`"telemetry": false`) survives the
-                // projection.
-                let migrated = match value {
-                    serde_json::Value::Object(mut map) => {
-                        migrate(&mut map);
-                        serde_json::Value::Object(map)
-                    }
-                    other => other,
-                };
-                return (restrictive_projection(&migrated), None, None);
+    if !trusted {
+        // Parse like the trusted path so a malformed document still
+        // records its load error (the trace upload's fail-closed
+        // `errors().is_empty()` rule keeps working).
+        let value: serde_json::Value = match serde_json::from_str(&content) {
+            Ok(value) => value,
+            Err(error) => {
+                let message = error.to_string();
+                errors.push(SettingsError {
+                    scope,
+                    message: message.clone(),
+                });
+                return (Settings::default(), None, Some(message), false);
             }
-        }
+        };
+        // The same legacy migration the trusted path applies, so a
+        // legacy-shaped opt-out (`"telemetry": false`) survives the
+        // projection.
+        let migrated = match value {
+            serde_json::Value::Object(mut map) => {
+                migrate(&mut map);
+                serde_json::Value::Object(map)
+            }
+            other => other,
+        };
+        return (restrictive_projection(&migrated), None, None, false);
     }
     let value: serde_json::Value = match serde_json::from_str(&content) {
         Ok(value) => value,
@@ -1173,7 +1171,7 @@ fn load_scope(
             scope,
             message: message.clone(),
         });
-        return (Settings::default(), None, Some(message));
+        return (Settings::default(), None, Some(message), true);
     }
     let migrated = match value {
         serde_json::Value::Object(mut map) => {
@@ -1194,7 +1192,7 @@ fn load_scope(
         settings.mcp_servers = None;
         settings.mcp_catalog_sources = None;
     }
-    (settings, Some(migrated), None)
+    (settings, Some(migrated), None, true)
 }
 
 #[cfg(test)]
