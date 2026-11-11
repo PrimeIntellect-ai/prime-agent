@@ -71,16 +71,11 @@ pub(crate) fn prompt_first_load(cwd: &Path, agent_dir: &Path) -> Result<()> {
     if !std::io::stdin().is_terminal() {
         return Ok(());
     }
-    // The config home itself is the user's own global config, not project
-    // content: never self-gate (every global write would re-prompt).
-    let config_dir = cwd.join(pa_core::settings::CONFIG_DIR_NAME);
-    if config_dir == agent_dir {
-        return Ok(());
-    }
-    let entries = existing_gated_entries(cwd);
+    let entries = pa_core::settings::gated_project_entries(cwd, agent_dir);
     if entries.is_empty() {
         return Ok(());
     }
+    let config_dir = cwd.join(pa_core::settings::CONFIG_DIR_NAME);
     let settings_path = config_dir.join("settings.json");
     let registry_path = agent_dir.join(pa_core::settings::TRUSTED_PROJECTS_FILE);
     let Some(fingerprint) = pa_core::settings::project_fingerprint(&settings_path) else {
