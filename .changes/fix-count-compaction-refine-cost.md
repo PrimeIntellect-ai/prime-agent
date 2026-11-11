@@ -1,1 +1,0 @@
-- Session cost and token totals now include the model calls of `/refine`, the automatic refine review, and side questions (`/btw`), even when the caller is cancelled, and a subagent's compaction spend now reaches its parent's total.

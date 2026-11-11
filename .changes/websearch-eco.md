@@ -1,1 +1,0 @@
-- Added a **Web search provider** setting in `/settings` → **Agents**: the `websearch` skill can use You.com Eco Search instead of Serper (still the default). Paste the Eco key in `/mcp` under **You.com Eco (web search)**; the choice applies to new sessions.
