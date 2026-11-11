@@ -415,7 +415,7 @@ async fn a_withdrawal_inside_a_covered_batch_rerenders_the_queued_rows() {
     assert!(
         rows[1]
             .0
-            .starts_with("[inbox reminder] 1 messages still waiting"),
+            .starts_with("[inbox reminder] 1 message still waiting"),
         "the reminder re-rendered with the live count: {rows:?}"
     );
     // The re-render reached the recovery journal: a crash now revives
