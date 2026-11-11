@@ -509,32 +509,21 @@ impl AgentSessionEngine {
             );
         }
         let prompt_context = match prompt_context_boundary.as_ref() {
-            Some(boundary) => {
-                let mut after_boundary = matches!(boundary, PromptContextBoundary::Empty);
-                if let PromptContextBoundary::Leaf(leaf) = boundary {
-                    after_boundary = entries.is_some_and(|entries| {
+            Some(PromptContextBoundary::Leaf(leaf)) => {
+                let entries = entries
+                    .filter(|entries| {
                         entries
                             .iter()
                             .any(|entry| entry.id() == Some(leaf.as_str()))
-                    });
-                }
-                match boundary {
-                    PromptContextBoundary::Leaf(leaf) => {
-                        anyhow::ensure!(
-                            after_boundary,
+                    })
+                    .ok_or_else(|| {
+                        anyhow::anyhow!(
                             "prompt context boundary {leaf} is absent from the retained transcript"
-                        );
-                        Some(
-                            pa_core::session::build_session_context(
-                                entries.expect("a found boundary has entries"),
-                                Some(leaf),
-                            )
-                            .messages,
                         )
-                    }
-                    PromptContextBoundary::Empty => Some(Vec::new()),
-                }
+                    })?;
+                Some(pa_core::session::build_session_context(entries, Some(leaf)).messages)
             }
+            Some(PromptContextBoundary::Empty) => Some(Vec::new()),
             None => None,
         };
         if std::env::var_os("PA_COMPACTION_TRACE").is_some() {

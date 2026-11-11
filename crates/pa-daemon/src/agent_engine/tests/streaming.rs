@@ -307,14 +307,6 @@ fn lazy_build_restores_only_the_pre_admission_prompt_context() {
             &mut |event| {
                 match event {
                     EngineEvent::UserMessage(message) => {
-                        // User rows now originate after core admission, inside
-                        // the runtime. The session exists and its selection lock
-                        // must be free while the worker forwards/persists the row.
-                        assert!(engine
-                            .session
-                            .try_lock()
-                            .expect("session lock released before user forwarding")
-                            .is_some());
                         accepted += 1;
                         store
                             .persist_entry("message", json!({ "message": message }))

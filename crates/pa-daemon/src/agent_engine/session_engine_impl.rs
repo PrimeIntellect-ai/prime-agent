@@ -1321,14 +1321,14 @@ impl SessionEngine for AgentSessionEngine {
         emit: &mut dyn FnMut(EngineEvent) -> bool,
     ) {
         let mut emit = self.goal_tracking_emit(emit);
-        // The accepted-turn row carries the skill-expanded text (the
+        // The admitted user row carries the skill-expanded text (the
         // transcript renders the skill card).
         if request.message.starts_with("/skill:") {
             request.message = self.expand_skill_submission(&request.message);
         }
-        // The batched rows expand in place BEFORE the accepted rows emit:
-        // the core's batch admission re-expands each row itself, so the raw
-        // command must never reach it.
+        // The batched rows expand in place before admission: the core's
+        // batch admission re-expands each row itself, so the raw command must
+        // never reach it.
         for row in &mut request.batch {
             if row.text.starts_with("/skill:") {
                 row.text = self.expand_skill_submission(&row.text);
@@ -1390,11 +1390,9 @@ impl SessionEngine for AgentSessionEngine {
             }
             None => None,
         };
-        // Injected custom rows retain their existing host-owned representation.
-        // User rows are emitted from the core's admitted MessageEnd events:
-        // persisting them here would record prompts that fail before admission
-        // and make a fresh lazy engine mistake this submission for restored
-        // conversation history.
+        // An injected custom row is host-emitted here. User rows come from the
+        // core's MessageEnd after admission (`run_turn_once`), so a prompt that
+        // fails before admission leaves no row.
         if request
             .custom_message
             .as_ref()
