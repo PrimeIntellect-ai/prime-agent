@@ -9,40 +9,20 @@ use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 
 use anyhow::Result;
-use pa_core::settings::escape_control;
+use pa_core::settings::{escape_control, FileSettingsStorage, SettingsScope, SettingsStorage};
 
-/// The settings keys the prompt lists: the ones that visibly change the
-/// session. Keys only, never values: the file may link to content outside
-/// the project.
-fn settings_summary(settings_path: &Path) -> Vec<&'static str> {
-    const KEYS: [&str; 8] = [
-        "sessionDir",
-        "defaultProvider",
-        "defaultModel",
-        "agentTraces.enabled",
-        "telemetry.enabled",
-        "skills",
-        "prompts",
-        "themes",
-    ];
-    let Ok(content) = std::fs::read_to_string(settings_path) else {
-        return Vec::new();
-    };
-    let Ok(value) = serde_json::from_str::<serde_json::Value>(&content) else {
-        return vec!["(the settings file does not parse as JSON)"];
-    };
-    let present = |key: &str| match key.split_once('.') {
-        Some((section, field)) => value.get(section).and_then(|s| s.get(field)).is_some(),
-        None => value.get(key).is_some(),
-    };
-    // The loader migrates a legacy telemetry bool to `telemetry.enabled`
-    // before applying it (untrusted or not); the summary lists the same key.
-    let legacy_telemetry = value
-        .get("telemetry")
-        .is_some_and(serde_json::Value::is_boolean);
-    KEYS.into_iter()
-        .filter(|key| present(key) || (*key == "telemetry.enabled" && legacy_telemetry))
-        .collect()
+/// The prompt's settings line: every top-level key `settings.json` sets.
+/// Keys only, never values: the file may link to content outside the
+/// project.
+fn settings_summary(content: &str) -> Option<String> {
+    match serde_json::from_str::<serde_json::Value>(content) {
+        Ok(serde_json::Value::Object(map)) if map.is_empty() => None,
+        Ok(serde_json::Value::Object(map)) => {
+            let keys = map.keys().map(String::as_str).collect::<Vec<_>>().join(", ");
+            Some(format!("settings.json sets: {}", escape_control(&keys)))
+        }
+        _ => Some("settings.json does not parse as a JSON object".to_string()),
+    }
 }
 
 /// Flush pending type-ahead so a stray pre-typed line cannot answer the
@@ -146,8 +126,13 @@ fn confirm_and_trust(
     for entry in entries {
         println!("  {}", escape_control(&entry.display().to_string()));
     }
-    for row in settings_summary(&settings_path) {
-        println!("  {row}");
+    // The same storage read that fed the pin (its link and size rules).
+    let settings = FileSettingsStorage::new(cwd, agent_dir)
+        .read(SettingsScope::Project)
+        .ok()
+        .flatten();
+    if let Some(summary) = settings.as_deref().and_then(settings_summary) {
+        println!("  {summary}");
     }
     let trusted = if yes {
         true
@@ -173,21 +158,13 @@ fn confirm_and_trust(
 mod tests {
     use super::*;
 
-    /// The summary lists keys, never values, and shows a legacy telemetry
-    /// bool the way the loader applies it (migrated to `telemetry.enabled`),
-    /// so the prompt never hides an opt-out that will take effect.
+    /// The summary lists every top-level key, never a value.
     #[test]
-    fn the_summary_lists_keys_only_with_a_legacy_telemetry_bool_as_the_migrated_key() {
-        let dir = tempfile::tempdir().unwrap();
-        let settings_path = dir.path().join("settings.json");
-        std::fs::write(
-            &settings_path,
-            r#"{"telemetry": false, "sessionDir": "/elsewhere"}"#,
-        )
-        .unwrap();
+    fn the_summary_lists_every_top_level_key_and_no_values() {
+        let content = r#"{"autonomous": true, "sessionDir": "/elsewhere", "telemetry": false}"#;
         assert_eq!(
-            settings_summary(&settings_path),
-            ["sessionDir", "telemetry.enabled"]
+            settings_summary(content).as_deref(),
+            Some("settings.json sets: autonomous, sessionDir, telemetry")
         );
     }
 }
