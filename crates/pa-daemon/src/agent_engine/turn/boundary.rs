@@ -59,7 +59,7 @@ impl AgentSessionEngine {
                 return BoundaryRun::Proceed;
             }
         };
-        let api_key = self.resolve_request_api_key(&model);
+        let (model, api_key) = self.resolve_request_target(model);
         let global_harness_dir = self.config.agent_dir.clone();
         // The start event goes out before the summarizer runs, carrying the
         // pending instructions.
@@ -241,8 +241,9 @@ impl AgentSessionEngine {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agent_engine::tests::{admit, faux_engine_with_settings};
+    use crate::agent_engine::tests::{admit, write_compaction_settings};
     use crate::agent_engine::FAUX_TEST_LOCK;
+    use crate::agent_engine::{AgentEngineConfig, AgentSessionEngine};
     use pa_core::session_engine::turn_boundary::PendingRefine;
     use serde_json::json;
 
@@ -251,19 +252,43 @@ mod tests {
         let _faux = FAUX_TEST_LOCK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let (mut engine, dir) = faux_engine_with_settings(
-            &json!({"responses": [
-                {"text": "seed reply"},
-                {"text": json!({
-                    "summary": "No durable change justified",
-                    "rationale": "Fixture only",
-                    "expectedOutcome": "No change",
-                    "edits": []
-                }).to_string()}
-            ]}),
-            1,
+        // The engine battery shape plus the session dir the durable
+        // outcome rows land in: the shared helper pins `session_dir` to
+        // `None`, so the config is written here.
+        let dir = tempfile::TempDir::new().unwrap();
+        write_compaction_settings(dir.path(), 1);
+        let engine = std::sync::Arc::new(
+            AgentSessionEngine::new(AgentEngineConfig {
+                cwd: dir.path().to_path_buf(),
+                agent_dir: dir.path().join("agent"),
+                provider: None,
+                model: None,
+                api_key: None,
+                thinking: None,
+                session_dir: Some(dir.path().join("sessions")),
+                session_file: None,
+                faux_script: Some(
+                    json!({"responses": [
+                        {"text": "seed reply"},
+                        {"text": json!({
+                            "summary": "No durable change justified",
+                            "rationale": "Fixture only",
+                            "expectedOutcome": "No change",
+                            "edits": []
+                        }).to_string()}
+                    ]})
+                    .to_string(),
+                ),
+                supervisor_link: None,
+                telemetry_disabled: None,
+                cron_store: None,
+                queued_steering_probe: None,
+            })
+            .unwrap(),
         );
-        engine.config.session_dir = Some(dir.path().join("sessions"));
+        // The worker registers the engine's own arc: the live-auth
+        // resolver upgrades it per provider call.
+        engine.register_arc();
         admit(&engine, "seed turn".to_string(), &mut Vec::new());
         {
             let guard = engine.session.blocking_lock();

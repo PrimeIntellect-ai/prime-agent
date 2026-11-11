@@ -336,6 +336,7 @@ fn agent_model_to_ai_model(model: &pa_agent::types::Model) -> AiModel {
         max_tokens: model.max_tokens,
         max_tokens_explicit: model.max_tokens_explicit,
         featured: None,
+        serving: None,
         headers: None,
         compat: None,
     }

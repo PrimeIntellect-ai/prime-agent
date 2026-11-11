@@ -1,0 +1,1 @@
+- Fixed GPT Responses conversations losing encrypted reasoning when replaying earlier turns.

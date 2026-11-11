@@ -164,6 +164,44 @@ fn command_keys_resolve() {
     assert_eq!(auth.get_api_key("anthropic").as_deref(), Some("cmd-key"));
 }
 
+/// A `!command` credential key runs the command only when its value is
+/// actually needed (TS's deferred value material): building the
+/// candidates for a status probe never spawns the command; the serving
+/// lookup resolves it once and the process cache holds it afterwards.
+/// The counter key is a POSIX-shell pipeline (the ambient shell on
+/// Windows resolves it differently), so the test runs on Unix only.
+#[cfg(unix)]
+#[test]
+fn a_command_keys_status_probe_never_runs_the_command() {
+    let counter = std::env::temp_dir().join(format!(
+        "pa-command-probe-{}-{}",
+        std::process::id(),
+        line!()
+    ));
+    let _ = std::fs::remove_file(&counter);
+    let key = format!("!echo run >> {} ; echo cmd-key", counter.display());
+    let mut auth = storage_with(&serde_json::json!({
+        "anthropic": { "type": "api_key", "key": key }
+    }));
+    let runs = || std::fs::read_to_string(&counter).map_or(0, |text| text.lines().count());
+    let status = auth.get_auth_status("anthropic");
+    assert_eq!(status.source, Some(AuthSource::Stored));
+    assert_eq!(
+        runs(),
+        0,
+        "building the candidates for a status probe never runs the command"
+    );
+    assert_eq!(auth.get_api_key("anthropic").as_deref(), Some("cmd-key"));
+    assert_eq!(runs(), 1, "the serving lookup resolves the command once");
+    assert_eq!(auth.get_api_key("anthropic").as_deref(), Some("cmd-key"));
+    assert_eq!(
+        runs(),
+        1,
+        "the source token reuses the resolved value; the process cache holds it"
+    );
+    let _ = std::fs::remove_file(&counter);
+}
+
 #[test]
 fn env_key_priority_for_prime_inference() {
     let mut auth = storage_with_env(
@@ -738,5 +776,473 @@ fn a_second_refresh_joins_the_first_flight_instead_of_fetching_again() {
         oauth.calls.load(std::sync::atomic::Ordering::SeqCst),
         1,
         "one flight per provider: the second caller served the first's fresh credential"
+    );
+}
+
+/// A scripted backend for the refresh catch paths: the in-memory document
+/// core plus two scripted failure points. `peer_on_lock_error` lands a
+/// peer's completed refresh at the `refresh_lock` call and reports the
+/// lock unavailable (a waiting peer's world: the peer's fresh credential
+/// is in the store, the lock cannot be taken); `fail_writes` fails the
+/// credential write, so the document keeps the expired credential.
+struct CatchBackend {
+    content: std::sync::Mutex<Option<String>>,
+    peer_on_lock_error: Option<String>,
+    fail_writes: bool,
+}
+
+impl AuthStorageBackend for CatchBackend {
+    fn read(&self) -> anyhow::Result<Option<String>> {
+        Ok(self.content.lock().expect("catch backend content").clone())
+    }
+
+    fn with_lock(
+        &self,
+        update: &mut dyn FnMut(Option<String>) -> anyhow::Result<((), Option<String>)>,
+    ) -> anyhow::Result<()> {
+        let mut content = self.content.lock().expect("catch backend content");
+        let ((), next) = update(content.clone())?;
+        if let Some(next) = next {
+            anyhow::ensure!(!self.fail_writes, "the scripted credential write fails");
+            *content = Some(next);
+        }
+        Ok(())
+    }
+
+    fn refresh_lock(&self, _provider: &str) -> anyhow::Result<Option<crate::auth::RefreshLock>> {
+        match &self.peer_on_lock_error {
+            Some(peer) => {
+                // The peer refreshed while this flight waited for the
+                // lock; the lock stays unavailable.
+                *self.content.lock().expect("catch backend content") = Some(peer.clone());
+                anyhow::bail!("the scripted refresh lock is unavailable")
+            }
+            // A single-process backend: the process-local flight gate
+            // serializes the refresh.
+            None => Ok(None),
+        }
+    }
+}
+
+/// One stored OAuth credential for `provider`, serialized like the file
+/// document.
+fn catch_document(provider: &str, credential: &AuthCredential) -> String {
+    let mut data = AuthStorageData::default();
+    data.insert(provider, credential);
+    serde_json::to_string_pretty(&data.0).unwrap()
+}
+
+/// The refresh-lock catch path: a lock that cannot be taken serves the
+/// stored unexpired credential (a peer's completed refresh, landed while
+/// this flight waited) and never fetches a token — fetching without the
+/// lock would spend the single-use refresh token a second time.
+#[test]
+fn an_unavailable_refresh_lock_serves_the_peer_credential_and_never_fetches() {
+    let provider = "x-lock-unavailable";
+    let mut peer = AuthStorageData::default();
+    peer.insert(
+        provider,
+        &oauth_credential("peer-access", now_epoch_ms() + 3_600_000),
+    );
+    let backend = Arc::new(CatchBackend {
+        content: std::sync::Mutex::new(Some(catch_document(
+            provider,
+            &expired_oauth("old-access"),
+        ))),
+        peer_on_lock_error: Some(serde_json::to_string_pretty(&peer.0).unwrap()),
+        fail_writes: false,
+    });
+    let counting = Arc::new(CountingOAuth {
+        calls: std::sync::atomic::AtomicUsize::new(0),
+        delay_ms: 0,
+    });
+    let oauth: Arc<dyn OAuthIntegration> = counting.clone();
+    let mut auth =
+        AuthStorage::from_storage(Arc::clone(&backend) as Arc<dyn AuthStorageBackend>, oauth);
+    assert_eq!(
+        auth.get_api_key(provider).as_deref(),
+        Some("peer-access"),
+        "the catch path serves the peer's landed credential"
+    );
+    assert_eq!(
+        counting.calls.load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "an unavailable refresh lock never fetches a token"
+    );
+}
+
+/// A scripted OAuth integration whose refresh lands a concurrent
+/// `/login`'s fresh credential in the backend and then fails its token
+/// call: the failed-fetch catch path must serve the landed credential.
+struct LoginLandingRefresh {
+    backend: Arc<CatchBackend>,
+    login: String,
+}
+
+impl OAuthIntegration for LoginLandingRefresh {
+    fn api_key_for(&self, _provider: &str, credential: &AuthCredential) -> Option<String> {
+        match credential {
+            AuthCredential::Oauth { access, .. } => Some(access.clone()),
+            _ => None,
+        }
+    }
+
+    fn refresh(&self, _provider: &str, _credentials: &AuthStorageData) -> Option<AuthCredential> {
+        // The concurrent `/login` lands while this fetch runs; the token
+        // call itself fails.
+        *self.backend.content.lock().expect("catch backend content") = Some(self.login.clone());
+        None
+    }
+}
+
+/// The failed-fetch catch path: a refresh whose token call fails serves a
+/// credential that landed meanwhile (a peer's refresh or a concurrent
+/// `/login`) instead of nothing.
+#[test]
+fn a_failed_fetch_serves_a_credential_that_landed_meanwhile() {
+    let provider = "x-fetch-failed";
+    let mut login = AuthStorageData::default();
+    login.insert(
+        provider,
+        &oauth_credential("login-access", now_epoch_ms() + 3_600_000),
+    );
+    let backend = Arc::new(CatchBackend {
+        content: std::sync::Mutex::new(Some(catch_document(
+            provider,
+            &expired_oauth("old-access"),
+        ))),
+        peer_on_lock_error: None,
+        fail_writes: false,
+    });
+    let oauth: Arc<dyn OAuthIntegration> = Arc::new(LoginLandingRefresh {
+        backend: Arc::clone(&backend),
+        login: serde_json::to_string_pretty(&login.0).unwrap(),
+    });
+    let mut auth =
+        AuthStorage::from_storage(Arc::clone(&backend) as Arc<dyn AuthStorageBackend>, oauth);
+    assert_eq!(
+        auth.get_api_key(provider).as_deref(),
+        Some("login-access"),
+        "the failed fetch serves the credential that landed meanwhile"
+    );
+}
+
+/// The failed-write catch path: a refresh whose credential write fails
+/// serves only an unexpired credential — the expired stored credential is
+/// not a refresh outcome (serving it would adopt an expired token as a
+/// live pair at the stream seam).
+#[test]
+fn a_failed_write_serves_no_expired_credential() {
+    let provider = "x-write-failed";
+    let backend = Arc::new(CatchBackend {
+        content: std::sync::Mutex::new(Some(catch_document(
+            provider,
+            &expired_oauth("old-access"),
+        ))),
+        peer_on_lock_error: None,
+        fail_writes: true,
+    });
+    let counting = Arc::new(CountingOAuth {
+        calls: std::sync::atomic::AtomicUsize::new(0),
+        delay_ms: 0,
+    });
+    let oauth: Arc<dyn OAuthIntegration> = counting.clone();
+    let mut auth =
+        AuthStorage::from_storage(Arc::clone(&backend) as Arc<dyn AuthStorageBackend>, oauth);
+    assert_eq!(
+        auth.get_api_key(provider),
+        None,
+        "the expired stored credential is not a refresh outcome"
+    );
+    assert_eq!(
+        counting.calls.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "the fetch ran once before the scripted write failed"
+    );
+    assert_eq!(
+        backend
+            .content
+            .lock()
+            .expect("catch backend content")
+            .as_deref(),
+        Some(catch_document(provider, &expired_oauth("old-access")).as_str()),
+        "the failed write left the expired credential in the document"
+    );
+}
+
+/// A scripted backend for the refresh-lock wait: `refresh_lock` first
+/// lands a scripted store change — the world a waiting flight sees when
+/// it finally gets past the lock — then either reports the lock
+/// unavailable or grants it (`Ok(None)`, the single-process shape).
+struct LockWaitChangeBackend {
+    content: std::sync::Mutex<Option<String>>,
+    change_on_lock: Option<String>,
+    lock_error: bool,
+}
+
+impl AuthStorageBackend for LockWaitChangeBackend {
+    fn read(&self) -> anyhow::Result<Option<String>> {
+        Ok(self.content.lock().expect("lock-wait content").clone())
+    }
+
+    fn with_lock(
+        &self,
+        update: &mut dyn FnMut(Option<String>) -> anyhow::Result<((), Option<String>)>,
+    ) -> anyhow::Result<()> {
+        let mut content = self.content.lock().expect("lock-wait content");
+        let ((), next) = update(content.clone())?;
+        if let Some(next) = next {
+            *content = Some(next);
+        }
+        Ok(())
+    }
+
+    fn refresh_lock(&self, _provider: &str) -> anyhow::Result<Option<crate::auth::RefreshLock>> {
+        if let Some(change) = &self.change_on_lock {
+            *self.content.lock().expect("lock-wait content") = Some(change.clone());
+        }
+        if self.lock_error {
+            anyhow::bail!("the scripted refresh lock is unavailable")
+        }
+        Ok(None)
+    }
+}
+
+/// One resolution over an expired stored grant whose `refresh_lock` first
+/// lands `change_on_lock`, then grants or refuses the lock. Returns the
+/// served key, the token fetches, and the stored document.
+fn resolve_over_lock_wait(
+    provider: &str,
+    change_on_lock: Option<String>,
+    lock_error: bool,
+) -> (Option<String>, usize, Option<String>) {
+    let backend = Arc::new(LockWaitChangeBackend {
+        content: std::sync::Mutex::new(Some(catch_document(
+            provider,
+            &expired_oauth("old-access"),
+        ))),
+        change_on_lock,
+        lock_error,
+    });
+    let counting = Arc::new(CountingOAuth {
+        calls: std::sync::atomic::AtomicUsize::new(0),
+        delay_ms: 0,
+    });
+    let oauth: Arc<dyn OAuthIntegration> = counting.clone();
+    let mut auth =
+        AuthStorage::from_storage(Arc::clone(&backend) as Arc<dyn AuthStorageBackend>, oauth);
+    let key = auth.get_api_key(provider);
+    let fetches = counting.calls.load(std::sync::atomic::Ordering::SeqCst);
+    let stored = backend.content.lock().expect("lock-wait content").clone();
+    (key, fetches, stored)
+}
+
+/// The lock-error catch path over a store that still holds the EXPIRED
+/// original: nothing unexpired is served, and the refresh never fetches —
+/// a fetch without the lock is the double spend the lock exists to stop.
+#[test]
+fn an_unavailable_refresh_lock_over_a_still_expired_store_never_fetches() {
+    let (key, fetches, _stored) = resolve_over_lock_wait("x-lock-unavailable-expired", None, true);
+    assert_eq!(
+        fetches, 0,
+        "an unavailable refresh lock never fetches a token"
+    );
+    assert_eq!(
+        key, None,
+        "the expired stored credential is not a refresh outcome"
+    );
+}
+
+/// The re-read identity guard (logout): a logout that lands while this
+/// flight waits for the refresh lock stops the refresh before it spends
+/// the logged-out grant's refresh token; the deletion stays authoritative.
+#[test]
+fn a_logout_during_the_lock_wait_spends_no_refresh_token() {
+    let (key, fetches, stored) =
+        resolve_over_lock_wait("x-logout-during-lock-wait", Some("{}".to_string()), false);
+    assert_eq!(
+        fetches, 0,
+        "the refresh never spends a token for a grant the store no longer holds"
+    );
+    assert_eq!(key, None);
+    assert_eq!(stored.as_deref(), Some("{}"), "the logout stays");
+}
+
+/// The re-read identity guard (replacement): a new API-key login that
+/// lands while this flight waits for the refresh lock stops the refresh
+/// the same way; the replaced credential stays authoritative.
+#[test]
+fn a_login_during_the_lock_wait_spends_no_refresh_token() {
+    let provider = "x-login-during-lock-wait";
+    let mut login = AuthStorageData::default();
+    login.insert(
+        provider,
+        &AuthCredential::ApiKey {
+            key: "new-login-key".to_string(),
+            prime_team: None,
+        },
+    );
+    let login_doc = serde_json::to_string_pretty(&login.0).unwrap();
+    let (key, fetches, stored) = resolve_over_lock_wait(provider, Some(login_doc.clone()), false);
+    assert_eq!(
+        fetches, 0,
+        "the refresh never spends the replaced grant's refresh token"
+    );
+    assert_eq!(
+        key, None,
+        "the re-read stops this attempt; the next resolution's fresh load serves the login"
+    );
+    assert_eq!(
+        stored.as_deref(),
+        Some(login_doc.as_str()),
+        "the login stays"
+    );
+}
+
+/// A scripted backend for the failed protected re-read: `refresh_lock`
+/// lands a completed peer rotation (the world a caller that waited for
+/// the lock sees), the protected re-read then fails exactly once (an
+/// independent credential writer holding the document lock through the
+/// whole read budget), and reads after that serve the current document.
+struct RereadFailingBackend {
+    content: std::sync::Mutex<Option<String>>,
+    reads: std::sync::atomic::AtomicUsize,
+}
+
+impl AuthStorageBackend for RereadFailingBackend {
+    fn read(&self) -> anyhow::Result<Option<String>> {
+        let reads = self.reads.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        if reads == 2 {
+            // The protected re-read: the document lock is held by an
+            // independent writer through the read budget.
+            anyhow::bail!("Failed to acquire auth storage lock");
+        }
+        Ok(self.content.lock().expect("reread content").clone())
+    }
+
+    fn with_lock(
+        &self,
+        update: &mut dyn FnMut(Option<String>) -> anyhow::Result<((), Option<String>)>,
+    ) -> anyhow::Result<()> {
+        let mut content = self.content.lock().expect("reread content");
+        let ((), next) = update(content.clone())?;
+        if let Some(next) = next {
+            *content = Some(next);
+        }
+        Ok(())
+    }
+
+    fn refresh_lock(&self, provider: &str) -> anyhow::Result<Option<crate::auth::RefreshLock>> {
+        // The peer finished its rotation while this caller waited for
+        // the lock: its fresh credential is in the document. The lock
+        // itself is granted (single-process shape: the flight gate
+        // serializes the callers).
+        let mut peer = AuthStorageData::default();
+        peer.insert(
+            provider,
+            &oauth_credential("peer-access", now_epoch_ms() + 3_600_000),
+        );
+        *self.content.lock().expect("reread content") =
+            Some(serde_json::to_string_pretty(&peer.0)?);
+        Ok(None)
+    }
+}
+
+/// A failed protected re-read fails the refresh closed: a peer rotated
+/// the single-use refresh token while this caller waited for the refresh
+/// lock, and an independent writer then holds the document lock through
+/// the re-read's budget. The LOAD-time grant may already be spent, so
+/// no fetch ever runs on it — the refresh serves only a current
+/// unexpired stored credential (the peer's).
+#[test]
+fn a_failed_reread_serves_the_stored_credential_and_never_fetches() {
+    let provider = "x-reread-failed";
+    let backend = Arc::new(RereadFailingBackend {
+        content: std::sync::Mutex::new(Some(catch_document(
+            provider,
+            &expired_oauth("old-access"),
+        ))),
+        reads: std::sync::atomic::AtomicUsize::new(0),
+    });
+    let counting = Arc::new(CountingOAuth {
+        calls: std::sync::atomic::AtomicUsize::new(0),
+        delay_ms: 0,
+    });
+    let oauth: Arc<dyn OAuthIntegration> = counting.clone();
+    let mut auth =
+        AuthStorage::from_storage(Arc::clone(&backend) as Arc<dyn AuthStorageBackend>, oauth);
+    assert_eq!(
+        auth.get_api_key(provider).as_deref(),
+        Some("peer-access"),
+        "the peer's landed credential serves; the LOAD-time grant is never fetched"
+    );
+    assert_eq!(
+        counting.calls.load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "a failed protected re-read never spends the possibly-rotated LOAD-time token"
+    );
+}
+
+/// A scripted backend for the failed LOAD read: the first read (the
+/// construction reload) serves the expired credential, the refresh's
+/// LOAD read fails (an independent writer holds the document lock
+/// through the read budget), and reads after that serve the same
+/// document again — the reload inside the catch parses it and the
+/// in-memory copy stays the expired credential this refresh set out to
+/// rotate.
+struct LoadFailingBackend {
+    content: String,
+    reads: std::sync::atomic::AtomicUsize,
+}
+
+impl AuthStorageBackend for LoadFailingBackend {
+    fn read(&self) -> anyhow::Result<Option<String>> {
+        let reads = self.reads.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        if reads == 1 {
+            anyhow::bail!("Failed to acquire auth storage lock");
+        }
+        Ok(Some(self.content.clone()))
+    }
+
+    fn with_lock(
+        &self,
+        update: &mut dyn FnMut(Option<String>) -> anyhow::Result<((), Option<String>)>,
+    ) -> anyhow::Result<()> {
+        // Never reached in this scenario: the failed LOAD read stops the
+        // refresh before the write phase.
+        let ((), _next) = update(Some(self.content.clone()))?;
+        Ok(())
+    }
+}
+
+/// The refresh's LOAD read failing serves only a CURRENT credential: the
+/// in-memory copy may be the expired credential this refresh set out to
+/// rotate, and serving it would stream a known-stale token. TS's catch
+/// path returns nothing and lets the environment/fallback arms serve
+/// instead (auth-storage.ts reload keeps `this.data`; the lookup's
+/// expired-oauth catch returns `{}`).
+#[test]
+fn a_failed_load_read_never_serves_the_expired_in_memory_credential() {
+    let provider = "x-load-failed";
+    let backend = Arc::new(LoadFailingBackend {
+        content: catch_document(provider, &expired_oauth("expired-access")),
+        reads: std::sync::atomic::AtomicUsize::new(0),
+    });
+    let counting = Arc::new(CountingOAuth {
+        calls: std::sync::atomic::AtomicUsize::new(0),
+        delay_ms: 0,
+    });
+    let oauth: Arc<dyn OAuthIntegration> = counting.clone();
+    let mut auth =
+        AuthStorage::from_storage(Arc::clone(&backend) as Arc<dyn AuthStorageBackend>, oauth);
+    assert_eq!(
+        auth.get_api_key(provider),
+        None,
+        "the expired in-memory credential never serves on a failed read"
+    );
+    assert_eq!(
+        counting.calls.load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "the failed LOAD read never reaches a token fetch"
     );
 }

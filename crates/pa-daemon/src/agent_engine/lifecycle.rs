@@ -6,8 +6,8 @@ use std::sync::atomic::Ordering;
 use super::{
     execute_session_command, json_round_trip, map_thinking_level,
     register_agent_message_host_handlers, register_agent_observe_host_handlers,
-    switchable_stream_fn, AgentEngineConfig, AgentSessionEngine, Arc, CoreSessionEngine,
-    EngineModelSelection, HostRequestHandlers, LinkAgentMessageController,
+    switchable_stream_fn_with_live_auth, AgentEngineConfig, AgentSessionEngine, Arc,
+    CoreSessionEngine, EngineModelSelection, HostRequestHandlers, LinkAgentMessageController,
     LinkAgentObserveController, Model, OverflowRecovery, ProducerUsageSink, PromptContextBoundary,
     ProviderTarget, QuotaParkState, SessionCommandExecution, SessionCommandParams,
     SessionEngineConfig, SupervisorChildSessions, Value,
@@ -165,6 +165,8 @@ impl AgentSessionEngine {
             pending_branch: std::sync::Mutex::new(None),
             prompt_context_boundary: std::sync::Mutex::new(None),
             provider_target: std::sync::Arc::new(std::sync::RwLock::new(None)),
+            request_auth_oauth: std::sync::Arc::new(pa_core::auth::ProviderOAuth::new()),
+            request_auth_registry: std::sync::Mutex::new(None),
             image_route: std::sync::Mutex::new(None),
             reload_lock: std::sync::Mutex::new(()),
             own_summary: std::sync::Arc::new(std::sync::Mutex::new(None)),
@@ -908,7 +910,7 @@ impl AgentSessionEngine {
     ) -> anyhow::Result<SessionCommandExecution> {
         let model = self.session_model()?;
         self.ensure_core_session(&model)?;
-        let api_key = self.resolve_request_api_key(&model);
+        let (model, api_key) = self.resolve_request_target(model);
         let mut autonomous = self.autonomous.blocking_lock();
         let mut params = SessionCommandParams {
             model: &model,
@@ -1011,17 +1013,38 @@ impl AgentSessionEngine {
 
         // The session's stream reads its target from the live slot:
         // `set_model` swaps it so the built session follows without a
-        // rebuild.
-        let stream_fn = switchable_stream_fn(std::sync::Arc::clone(&self.provider_target));
+        // rebuild, and the live-auth resolver overlays fresh request auth
+        // from the credential store on every provider call (the TS
+        // streamFn's per-call `getApiKeyAndHeaders`): a `/login` from
+        // another process or an OAuth refresh at expiry serves the next
+        // request without a restart. A resolution for a dead engine (the
+        // session torn down) fails the call with the resolution error —
+        // no stale captured pair ever streams.
+        self.rebuild_request_auth_registry();
+        let live_auth = {
+            let weak = self
+                .self_weak
+                .lock()
+                .expect("engine self-weak lock")
+                .clone();
+            std::sync::Arc::new(move |model: &Model| {
+                let Some(engine) = weak.as_ref().and_then(std::sync::Weak::upgrade) else {
+                    return pa_core::models::ResolvedRequestAuth::default();
+                };
+                engine.resolve_request_auth(model)
+            })
+        };
+        let stream_fn = switchable_stream_fn_with_live_auth(
+            std::sync::Arc::clone(&self.provider_target),
+            live_auth,
+        );
         {
-            // The build's resolve-and-install serializes with `/reload`'s
-            // live-input refresh (the other slot writers' fence): a reload
-            // landing between this resolution and the slot write must not
-            // be clobbered by the build's older pair. The lock is
-            // acquired by yielding, never by blocking this worker: a
-            // reload holds the lock across auth-file I/O and a possible
-            // OAuth refresh, so a blocking acquire on an async path
-            // would stall the executor for that span.
+            // The build's slot install serializes with the other slot
+            // writers' fence (`set_model`, the failover switch and
+            // restore, the image-route apply/clear): the lock is
+            // acquired by yielding, never by blocking this worker: the
+            // holders run synchronous store I/O, so a blocking acquire
+            // on an async path would stall the executor for that span.
             let _reload_serialized = loop {
                 match self.reload_lock.try_lock() {
                     Ok(guard) => break guard,
@@ -1032,19 +1055,21 @@ impl AgentSessionEngine {
                     // this match's scrutinee still holds.
                     Err(std::sync::TryLockError::Poisoned(poison)) => break poison.into_inner(),
                 }
-                // Park, never hot-spin: a reload holds the lock across
-                // auth-file I/O and a possible OAuth refresh, and
-                // yield_now would leave this task immediately runnable
-                // through all of it.
+                // Park, never hot-spin: the lock's holders run
+                // synchronous store I/O, and yield_now would leave this
+                // task immediately runnable through all of it.
                 tokio::time::sleep(std::time::Duration::from_millis(10)).await;
             };
-            let (api_key, headers) = self.resolve_request_key_and_headers(model);
             let mut target = self.provider_target.write().expect("provider target lock");
+            // The daemon's only stream is the live-auth seam, which
+            // re-resolves request auth on every provider call; the
+            // slot's auth half is write-only here, so the build
+            // installs the model and the service tier only.
             *target = Some(ProviderTarget {
                 service_tier: *self.service_tier.read().expect("service tier lock"),
-                api_key,
+                api_key: None,
                 model: model.clone(),
-                headers,
+                headers: None,
             });
         }
         if let Some(session_dir) = &self.config.session_dir {
@@ -1207,6 +1232,7 @@ impl AgentSessionEngine {
             daemonless: false,
             model_info: Some(model.clone()),
             // Prewarm; the depth gate keeps subagent workers lazy.
+            kernel_ready_gate: None,
             prewarm_ipython_kernel: Some(true),
             on_background_work_settled,
             bash_notice_wake: None,

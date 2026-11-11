@@ -315,6 +315,7 @@ fn rpc_engine_factory(options: &RunOptions) -> pa_daemon::rpc::session::RpcEngin
                 pa_daemon::rpc::session::RpcEngineRequest::Open {
                     session_path,
                     reuse_lease,
+                    ..
                 } => {
                     let session_dir = replacement_session_dir(&options);
                     let cwd = options.config.cwd.clone();
@@ -334,12 +335,18 @@ fn rpc_engine_factory(options: &RunOptions) -> pa_daemon::rpc::session::RpcEngin
                     (manager, lease)
                 }
             };
+            let kernel_ready_gate = match &request {
+                pa_daemon::rpc::session::RpcEngineRequest::Open { ready_gate, .. } => {
+                    ready_gate.clone()
+                }
+                pa_daemon::rpc::session::RpcEngineRequest::New { .. } => None,
+            };
             let engine = build_engine(
                 &options,
                 faux_script_env()?.as_ref(),
                 Some(manager),
                 "rpc",
-                &HeadlessEmbedding::Rpc,
+                &HeadlessEmbedding::Rpc { kernel_ready_gate },
             )
             .await?;
             let mut handle = pa_daemon::rpc::session::RpcEngineHandle::from(engine);
@@ -496,7 +503,10 @@ pub(crate) enum HeadlessEmbedding {
         node: std::sync::Arc<crate::print_rlm::InlineSessionNode>,
     },
     Child(Box<ChildEngineOverrides>),
-    Rpc,
+    Rpc {
+        /// A same-path reopen's gate: the replaced kernel's final snapshot flush.
+        kernel_ready_gate: Option<pa_core::kernel::provisioner::KernelReadyGate>,
+    },
 }
 
 /// One spawned inline child's engine deltas: its model lane, the
@@ -537,6 +547,7 @@ pub(crate) struct HeadlessEmbeddingFields {
     /// The late fire-and-forget `agent_message.send` receipt sink
     /// (#10-print); `None` for the RPC embedding (no print node).
     pub(crate) on_late_sent_agent_message: Option<pa_core::LateSentAgentMessageHandler>,
+    pub(crate) kernel_ready_gate: Option<pa_core::kernel::provisioner::KernelReadyGate>,
 }
 
 /// The embedding-owned fields for one headless engine build: print
@@ -546,7 +557,7 @@ pub(crate) fn headless_embedding_fields(embedding: &HeadlessEmbedding) -> Headle
     let node = match embedding {
         HeadlessEmbedding::Root { node } => Some(Arc::clone(node)),
         HeadlessEmbedding::Child(overrides) => Some(Arc::clone(&overrides.node)),
-        HeadlessEmbedding::Rpc => None,
+        HeadlessEmbedding::Rpc { .. } => None,
     };
     let (rlm_subagent_host, extra_host_handlers) = match &node {
         Some(node) => {
@@ -579,7 +590,7 @@ pub(crate) fn headless_embedding_fields(embedding: &HeadlessEmbedding) -> Headle
         extra_host_handlers,
         rlm_depth: match embedding {
             HeadlessEmbedding::Child(overrides) => Some(overrides.node.depth),
-            HeadlessEmbedding::Root { .. } | HeadlessEmbedding::Rpc => None,
+            HeadlessEmbedding::Root { .. } | HeadlessEmbedding::Rpc { .. } => None,
         },
         factory_child: matches!(
             embedding,
@@ -588,6 +599,10 @@ pub(crate) fn headless_embedding_fields(embedding: &HeadlessEmbedding) -> Headle
         bash_wake,
         rpc_bash_wake,
         on_late_sent_agent_message,
+        kernel_ready_gate: match embedding {
+            HeadlessEmbedding::Rpc { kernel_ready_gate } => kernel_ready_gate.clone(),
+            HeadlessEmbedding::Root { .. } | HeadlessEmbedding::Child(_) => None,
+        },
     }
 }
 
@@ -625,7 +640,9 @@ async fn build_headless_engine_parts(
         faux_script_env()?.as_ref(),
         session_manager,
         execution_mode,
-        &HeadlessEmbedding::Rpc,
+        &HeadlessEmbedding::Rpc {
+            kernel_ready_gate: None,
+        },
     )
     .await
 }
@@ -672,7 +689,7 @@ pub(crate) async fn build_headless_engine_with(
                 return Err("a scripted child builds through the faux builder".to_string());
             }
         },
-        HeadlessEmbedding::Root { .. } | HeadlessEmbedding::Rpc => {
+        HeadlessEmbedding::Root { .. } | HeadlessEmbedding::Rpc { .. } => {
             // The opened session's active context joins the selection (TS
             // `createAgentSession`); `--no-session` selects from no session.
             let session = session_manager
@@ -730,7 +747,7 @@ pub(crate) async fn build_headless_engine_with(
     let telemetry = (!config.telemetry_disabled
         && matches!(
             embedding,
-            HeadlessEmbedding::Root { .. } | HeadlessEmbedding::Rpc
+            HeadlessEmbedding::Root { .. } | HeadlessEmbedding::Rpc { .. }
         ))
     .then(|| {
         let settings = pa_core::settings::SettingsManager::create(&config.cwd, &config.agent_dir);
@@ -778,6 +795,7 @@ pub(crate) async fn build_headless_engine_with(
         bash_wake,
         rpc_bash_wake,
         on_late_sent_agent_message,
+        kernel_ready_gate,
     } = headless_embedding_fields(embedding);
     let (semantic_edges, thinking_level) = match embedding {
         HeadlessEmbedding::Child(overrides) => (
@@ -795,7 +813,7 @@ pub(crate) async fn build_headless_engine_with(
             ),
             Some(pa_core::session_engine::provider_adapter::map_thinking_level(overrides.thinking)),
         ),
-        HeadlessEmbedding::Root { .. } | HeadlessEmbedding::Rpc => (
+        HeadlessEmbedding::Root { .. } | HeadlessEmbedding::Rpc { .. } => (
             Some(
                 pa_core::session_engine::semantic_edges::SemanticEdgeIdentity {
                     session_id: session_manager.get_session_id().to_string(),
@@ -856,6 +874,7 @@ pub(crate) async fn build_headless_engine_with(
             // child boots lazily on first use.
             prewarm_ipython_kernel: (!matches!(embedding, HeadlessEmbedding::Child(_)))
                 .then_some(true),
+            kernel_ready_gate,
             // The background-bash wake pair: the completion row's
             // admission fires it, and the kernel's background settle does
             // too, so the embedding's parked drive or pump re-checks.
@@ -1912,6 +1931,7 @@ mod tests {
                 max_tokens: 8192,
                 max_tokens_explicit: false,
                 featured: None,
+                serving: None,
                 headers: None,
                 compat: None,
             }

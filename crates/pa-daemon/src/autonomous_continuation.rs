@@ -363,8 +363,6 @@ mod tests {
             &serde_json::json!({ "responses": [{"text": "warm ok"}, {"text": "working"}] }),
             u64::MAX,
         );
-        let engine = Arc::new(engine);
-        engine.register_arc();
         // The admission itself is the observable event (the sink hands the owed turn to a channel).
         let (admit_tx, admit_rx) = std::sync::mpsc::channel::<String>();
         engine.set_autonomous_admission(std::sync::Arc::new(move |text| {
@@ -412,9 +410,6 @@ mod tests {
             &serde_json::json!({ "responses": [{"text": "warm ok"}, {"text": "working"}] }),
             u64::MAX,
         );
-        let engine = Arc::new(engine);
-        // The in-run continuation hook upgrades the engine's registered arc.
-        engine.register_arc();
         // The admission collector stands in for the worker's follow-up lane.
         let admitted: std::sync::Arc<std::sync::Mutex<Vec<String>>> =
             std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));

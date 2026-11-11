@@ -24,8 +24,7 @@ use std::process::Command;
 
 use pa_core::platform::LockDir;
 
-/// The TS binary ground truth, located like `differential_cli.rs`
-/// (`PA_TS_BINARY` or `prime-agent` on PATH; skipped when absent).
+/// The TS binary (`PA_TS_BINARY` or `prime-agent` on PATH; skipped when absent).
 fn ts_binary() -> Option<PathBuf> {
     if let Ok(path) = std::env::var("PA_TS_BINARY") {
         return Some(PathBuf::from(path));

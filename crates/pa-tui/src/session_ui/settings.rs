@@ -232,6 +232,7 @@ impl SessionUi {
             values.skill_commands = settings.enable_skill_commands();
             values.builtin_skills = settings.enable_builtin_skills();
             values.harness_refinements = settings.harness_refinements();
+            values.web_search_provider = settings.web_search_provider();
             values.hardware_cursor = settings.show_hardware_cursor();
             values.editor_padding = settings.editor_padding_x();
             values.autocomplete_max_visible = settings.autocomplete_max_visible();
@@ -251,6 +252,7 @@ impl SessionUi {
             values.skill_commands = true;
             values.builtin_skills = true;
             values.harness_refinements = true;
+            values.web_search_provider = "serper".to_string();
             values.idle_eviction_minutes = "90".to_string();
             values.mermaid = "streaming".to_string();
             values.tree_filter_mode = "user-only".to_string();
@@ -385,6 +387,13 @@ impl SessionUi {
                     value,
                     view,
                 );
+            }
+            "web-search-provider" => {
+                if let Some(settings) = &self.client_settings {
+                    if let Err(error) = settings.set_web_search_provider(value) {
+                        self.error_row(&format!("{error:#}"), view);
+                    }
+                }
             }
             "builtin-skills" => {
                 self.persist_bool_setting(

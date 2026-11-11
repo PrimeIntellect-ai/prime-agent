@@ -1,0 +1,1 @@
+- After a repaired Python kernel had to be discarded, a failed re-setup no longer leaves `python_repl` failing for the rest of the session, and a later discard re-installs the runtime (`rlm`, `bash`, skills) instead of starting a bare kernel.

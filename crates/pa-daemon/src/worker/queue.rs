@@ -600,8 +600,11 @@ pub(crate) const INBOX_REMINDER_QUEUE_KEY: &str = "inbox:reminder";
 /// replaces it (the batch the queued row covers); the delivered row
 /// leaves the queue, so the next arrival starts a fresh batch. The
 /// notice rides the lane the arrival requested (agent messages honor
-/// their delivery mode; notices ride steering), and a replacement
-/// clears the key from both lanes first, so a batch never splits.
+/// their delivery mode; notices ride steering), never demoting a
+/// queued steering notice to follow-up, and a replacement clears the
+/// key from both lanes first, so a batch never splits. Answers the
+/// capacity refusal when the gate rejects the arrival (the sink passes
+/// a permissive gate).
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn admit_inbox_notice(
     recovery: &std::sync::Mutex<Option<WorkerRecoveryJournal>>,
@@ -612,7 +615,8 @@ pub(crate) fn admit_inbox_notice(
     notice: pa_core::session_engine::inbox::InboxNotice,
     lane: Lane,
     session_is_closed: impl Fn() -> bool,
-) {
+    capacity_error: impl Fn(usize, usize) -> Option<String>,
+) -> Option<String> {
     // The busy sample, the batch, and the push share ONE critical
     // section, like the notice admission below: a turn starting between
     // them would queue an invisible row for a busy session.
@@ -621,7 +625,13 @@ pub(crate) fn admit_inbox_notice(
     // (the close's clear wipes the lanes); its message already made the
     // journal durable, which is honest — it did arrive.
     if session_is_closed() {
-        return;
+        return None;
+    }
+    // The capacity gate, re-sampled under this same lock with the lane
+    // lengths it reads here: concurrent arrivals can never pass one
+    // stale sample together.
+    if let Some(error) = capacity_error(core_guard.steering.len(), core_guard.follow_up.len()) {
+        return Some(error);
     }
     let message = inbox.push(notice, pa_core::autonomous::now_millis());
     let (policy, queue_visible) = if core_guard.busy {
@@ -644,6 +654,17 @@ pub(crate) fn admit_inbox_notice(
         arrivals.push(message);
         let (count, _, _) = inbox.count();
         let (preview, text) = pa_core::session_engine::inbox::arrival_notice(&arrivals, count);
+        // A follow-up arrival never demotes a queued steering notice: the
+        // batch keeps the most urgent lane it has already ridden.
+        let queued_steering = core_guard
+            .steering
+            .iter()
+            .any(|item| item.queue_key.as_deref() == Some(INBOX_ARRIVAL_QUEUE_KEY));
+        let lane = if queued_steering {
+            Lane::Steering
+        } else {
+            lane
+        };
         // The journal-failure clause: a memory-only inbox says so in the
         // notice that wakes (the degradation is agent-visible, not just
         // a daemon-log line).
@@ -688,6 +709,7 @@ pub(crate) fn admit_inbox_notice(
         },
     );
     work_notify.notify_one();
+    None
 }
 
 /// Admit one periodic unread reminder: while the inbox stays non-empty,

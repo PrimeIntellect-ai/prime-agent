@@ -142,9 +142,10 @@ impl PackageManager {
                 }
                 let mut builtin_skill_overrides = user_overrides[0].clone();
                 if !self.bundled_websearch_enabled() {
-                    // No Serper credential on the machine (and no explicit
-                    // settings override): web search stays off so the prompt
-                    // never advertises a tool that errors on use.
+                    // No key for the selected web search provider on the
+                    // machine (and no explicit settings override): web search
+                    // stays off so the prompt never advertises a tool that
+                    // errors on use.
                     builtin_skill_overrides.push("-websearch/SKILL.md".to_string());
                 }
                 builtin_skill_overrides
