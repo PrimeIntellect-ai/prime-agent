@@ -6,7 +6,7 @@
 //! prompt; for them the gate stays deny-by-default in `pa-core`.
 
 use std::io::IsTerminal;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 
@@ -75,6 +75,59 @@ pub(crate) fn prompt_first_load(cwd: &Path, agent_dir: &Path) -> Result<()> {
     if entries.is_empty() {
         return Ok(());
     }
+    let settings_path = cwd
+        .join(pa_core::settings::CONFIG_DIR_NAME)
+        .join("settings.json");
+    let registry_path = agent_dir.join(pa_core::settings::TRUSTED_PROJECTS_FILE);
+    if pa_core::settings::project_fingerprint(&settings_path).is_some_and(|fingerprint| {
+        pa_core::settings::project_trusted(&registry_path, &settings_path, &fingerprint)
+    }) {
+        return Ok(());
+    }
+    confirm_and_trust(cwd, agent_dir, &entries, false)
+}
+
+/// `prime-agent trust [--yes] [<dir>]`: show the project's gated config and
+/// record the user's trust, also for an already-trusted project.
+pub(crate) fn run_trust_command(args: &[String]) -> i32 {
+    let yes = args.iter().any(|arg| arg == "--yes");
+    let dirs: Vec<&String> = args.iter().filter(|arg| *arg != "--yes").collect();
+    if dirs.len() > 1 {
+        eprintln!("Usage: prime-agent trust [--yes] [<dir>]");
+        return 1;
+    }
+    if !yes && !std::io::stdin().is_terminal() {
+        eprintln!("prime-agent trust asks for confirmation: run it in a terminal, or pass --yes.");
+        return 1;
+    }
+    let dir = match dirs.first() {
+        Some(dir) => std::path::absolute(dir),
+        None => std::env::current_dir(),
+    };
+    let result = dir.map_err(anyhow::Error::from).and_then(|dir| {
+        let agent_dir = crate::config::get_agent_dir();
+        let entries = pa_core::settings::gated_project_entries(&dir, &agent_dir);
+        if entries.is_empty() {
+            println!(
+                "{} has no Prime Agent project config to trust.",
+                escaped(&dir.display().to_string())
+            );
+            return Ok(());
+        }
+        confirm_and_trust(&dir, &agent_dir, &entries, yes)
+    });
+    match result {
+        Ok(()) => 0,
+        Err(error) => {
+            eprintln!("Error: {error:#}");
+            1
+        }
+    }
+}
+
+/// List the project's gated config, ask unless `yes`, and record the trust
+/// pinned to the files as shown.
+fn confirm_and_trust(cwd: &Path, agent_dir: &Path, entries: &[PathBuf], yes: bool) -> Result<()> {
     let config_dir = cwd.join(pa_core::settings::CONFIG_DIR_NAME);
     let settings_path = config_dir.join("settings.json");
     let registry_path = agent_dir.join(pa_core::settings::TRUSTED_PROJECTS_FILE);
@@ -85,19 +138,21 @@ pub(crate) fn prompt_first_load(cwd: &Path, agent_dir: &Path) -> Result<()> {
         );
         return Ok(());
     };
-    if pa_core::settings::project_trusted(&registry_path, &settings_path, &fingerprint) {
-        return Ok(());
-    }
     println!("This project carries its own Prime Agent config, which can change how Prime Agent behaves here:");
-    for entry in &entries {
+    for entry in entries {
         println!("  {}", escaped(&entry.display().to_string()));
     }
     for row in settings_summary(&settings_path) {
         println!("  {row}");
     }
-    println!("They stay ignored until you trust them (any change to settings.json, SYSTEM.md, or APPEND_SYSTEM.md asks again).");
-    flush_typeahead();
-    if crate::daemon_discovery::stop::prompt_yes_no("Trust this project's config?") {
+    let trusted = if yes {
+        true
+    } else {
+        println!("They stay ignored until you trust them (any change to settings.json, SYSTEM.md, or APPEND_SYSTEM.md asks again).");
+        flush_typeahead();
+        crate::daemon_discovery::stop::prompt_yes_no("Trust this project's config?")
+    };
+    if trusted {
         pa_core::settings::trust_project(&registry_path, &settings_path, &fingerprint)?;
         println!("Trusted. The project's settings and discovered files now apply.");
     } else {

@@ -189,6 +189,7 @@ pub fn handle_public_command(args: &[String]) -> PublicCommandResult {
         "session" => rewrite_nested_command("session", "export", "--export", &rest),
         "prompt" => handled_with_exit(crate::prompt_command::run_prompt_command(&rest)),
         "factory" => handled_with_exit(crate::factory_command::run_factory_command(&rest)),
+        "trust" => handled_with_exit(crate::project_trust::run_trust_command(&rest)),
         "config" => {
             if !rest.is_empty() {
                 return fail(format!("Usage: {APP_NAME} config"), None);

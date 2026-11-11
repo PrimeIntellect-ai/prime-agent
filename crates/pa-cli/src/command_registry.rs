@@ -242,6 +242,12 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
     ),
     CommandSpec::new(&["config"], "config", "Configure package resources"),
     CommandSpec::new(
+        &["trust"],
+        "trust [--yes] [<dir>]",
+        "Trust a project's own Prime Agent config",
+    )
+    .options(&["--yes  Trust without asking"]),
+    CommandSpec::new(
         &["factory"],
         "factory <list|import|export>",
         "Share and run factory machines from the machine library",
