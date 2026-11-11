@@ -53,10 +53,14 @@ fn markdown_link_targets_use_the_owning_view_cwd() {
 #[test]
 fn injected_terminal_links_are_not_clickable() {
     let injected = "\x1b]8;;https://evil.example/\x1b\\safe\x1b]8;;\x1b\\";
+    // Removing the inner opener must not join the outer prefix into a new one.
+    let nested = "\x1b]8;;\x1b]8;;x\x1b\\file:///evil\x1b\\safe";
+    // Markdown decodes `\;` after the source is stripped.
+    let escaped = "\x1b]8\\;;file:///evil\x1b\\safe";
     let mut v = view_with(vec![
         ChatEntry::Assistant(Box::new(AssistantMessage {
             blocks: vec![MessageBlock::Text(format!(
-                "{injected} and [docs](https://docs.example/)"
+                "{injected} {nested} {escaped} and [docs](https://docs.example/)"
             ))],
             has_tool_calls: true,
             streaming: false,
@@ -73,7 +77,7 @@ fn injected_terminal_links_are_not_clickable() {
         ChatEntry::AgentMessage(Box::new(crate::custom_message::AgentMessageRow {
             direction: crate::custom_message::AgentMessageDirection::Received,
             counterpart: "lane".to_string(),
-            message: injected.to_string(),
+            message: format!("{injected}\n{nested}"),
         })),
         ChatEntry::ShellCompletion(Box::new(crate::custom_message::ShellCompletionRow {
             pid: Some(1),
