@@ -830,6 +830,22 @@ mod tests {
         assert!(!dir.path().join("agent").join("settings.json").exists());
 
         assert!(manager.list_configured_packages().is_empty());
+        // The removal write extends a trust decision; the fixture's
+        // settings file is untrusted by construction, so seed the user's
+        // trust for the removal leg (the gate's own tests pin the refusal).
+        let settings_path = dir
+            .path()
+            .join("cwd")
+            .join(crate::settings::CONFIG_DIR_NAME)
+            .join("settings.json");
+        crate::settings::trust_project(
+            &dir.path()
+                .join("agent")
+                .join(crate::settings::TRUSTED_PROJECTS_FILE),
+            &settings_path,
+            &crate::settings::fingerprint(&std::fs::read_to_string(&settings_path).unwrap()),
+        )
+        .unwrap();
         assert!(manager.remove_source_from_settings("./project-pkg", UserOrProject::Project));
         let updated: serde_json::Value = serde_json::from_str(
             &std::fs::read_to_string(

@@ -28,7 +28,10 @@ fn escaped(text: &str) -> std::borrow::Cow<'_, str> {
 }
 
 /// The existing gated project-config entries: the `.prime/agent` files and
-/// directories plus ancestor `.agents/skills` directories.
+/// directories plus the `.agents/skills` directories auto-discovery loads —
+/// `cwd`'s own first, up to and including the git repo root (the filesystem
+/// root outside a repo), mirroring the discovery boundary, and never the
+/// user's global `~/.agents/skills` (that is trusted user config).
 fn existing_gated_entries(cwd: &Path) -> Vec<PathBuf> {
     let config_dir = cwd.join(pa_core::settings::CONFIG_DIR_NAME);
     let mut entries = GATED_FILES
@@ -37,23 +40,42 @@ fn existing_gated_entries(cwd: &Path) -> Vec<PathBuf> {
         .chain(GATED_DIRS.iter().map(|name| config_dir.join(name)))
         .filter(|path| path.exists())
         .collect::<Vec<PathBuf>>();
-    let mut ancestor = cwd.to_path_buf();
-    while ancestors_up(&mut ancestor) {
-        let dir = ancestor.join(".agents").join("skills");
-        if dir.is_dir() {
-            entries.push(dir);
+    let user_agents_skills =
+        pa_types::platform::home_dir().map(|home| home.join(".agents").join("skills"));
+    let git_root = find_git_root(cwd);
+    let mut dir = cwd.to_path_buf();
+    loop {
+        let candidate = dir.join(".agents").join("skills");
+        if candidate.is_dir() && user_agents_skills.as_deref() != Some(candidate.as_path()) {
+            entries.push(candidate);
         }
+        if git_root.as_deref() == Some(dir.as_path()) {
+            break;
+        }
+        let Some(parent) = dir.parent() else {
+            break;
+        };
+        if parent == dir {
+            break;
+        }
+        dir = parent.to_path_buf();
     }
     entries
 }
 
-fn ancestors_up(dir: &mut PathBuf) -> bool {
-    match dir.parent() {
-        Some(parent) if parent != dir.as_path() => {
-            *dir = parent.to_path_buf();
-            true
+/// The nearest ancestor (including `dir`) carrying `.git`, mirroring the
+/// discovery's repo-root boundary.
+fn find_git_root(dir: &Path) -> Option<PathBuf> {
+    let mut dir = dir.to_path_buf();
+    loop {
+        if dir.join(".git").exists() {
+            return Some(dir);
         }
-        _ => false,
+        let parent = dir.parent()?;
+        if parent == dir {
+            return None;
+        }
+        dir = parent.to_path_buf();
     }
 }
 
@@ -108,6 +130,20 @@ fn flush_typeahead() {
 /// before any settings read for that project. Called for the launch cwd
 /// before the CLI's earliest settings reads, and again for a resumed
 /// session's saved cwd when it differs.
+/// One prompt per project per process: the composition-root call and the
+/// resume-cwd call both route through here, and a declined answer must not
+/// re-ask in the same session.
+static PROMPTED: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<PathBuf>>> =
+    std::sync::OnceLock::new();
+
+fn already_prompted(cwd: &Path) -> bool {
+    let registry = PROMPTED.get_or_init(|| std::sync::Mutex::new(std::collections::HashSet::new()));
+    registry
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .insert(cwd.to_path_buf())
+}
+
 pub(crate) fn prompt_first_load(cwd: &Path, agent_dir: &Path) -> Result<()> {
     if !std::io::stdin().is_terminal() {
         return Ok(());
@@ -133,6 +169,9 @@ pub(crate) fn prompt_first_load(cwd: &Path, agent_dir: &Path) -> Result<()> {
         return Ok(());
     };
     if pa_core::settings::project_trusted(&registry_path, &settings_path, &fingerprint) {
+        return Ok(());
+    }
+    if already_prompted(cwd) {
         return Ok(());
     }
     println!("This project carries its own Prime Agent config, which can change how Prime Agent behaves here:");

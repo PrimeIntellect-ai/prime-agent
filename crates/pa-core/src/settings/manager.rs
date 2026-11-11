@@ -600,56 +600,60 @@ impl SettingsManager {
             });
             return;
         }
-        if scope == SettingsScope::Project {
-            if let Some(gate) = self.trust_gate.as_ref() {
-                let current = match self.storage.read(SettingsScope::Project) {
-                    Ok(current) => current,
-                    Err(error) => {
-                        self.errors.push(SettingsError {
-                            scope,
-                            message: format!(
-                                "Project settings not saved: the current file could not be read for the trust check: {error}"
-                            ),
-                        });
-                        return;
-                    }
-                };
-                let pinned = current
-                    .as_deref()
-                    .map(|content| gate.admits(&fingerprint(content)));
-                if pinned == Some(false) {
-                    self.errors.push(SettingsError {
-                        scope,
-                        message:
-                            "Project settings not saved: this project's settings are not trusted. \
-                                  Reopen the project interactively to trust them."
-                                .to_string(),
-                    });
-                    return;
-                }
-            }
-        }
+        // The whole trust decision rides INSIDE the lock: the callback
+        // verifies the very bytes it merges (no read can go stale between
+        // the check and the write), and the re-pin lands only on a
+        // committed write that extends an EXISTING trust decision — an
+        // absent document may be written, but the write never creates
+        // trust for its bytes, so no prompt is skipped and no sibling
+        // file (SYSTEM.md, discovered skills) activates unasked.
+        let gate = self.trust_gate.clone();
         let mut failure = None;
         let mut written: Option<String> = None;
-        let result =
-            self.storage.with_lock(
+        let mut extend_trust = false;
+        let mut untrusted = false;
+        let result = self.storage.with_lock(scope, &mut |current| {
+            if scope == SettingsScope::Project {
+                if let Some(gate) = gate.as_ref() {
+                    match current
+                        .as_deref()
+                        .map(|content| gate.admits(&fingerprint(content)))
+                    {
+                        Some(false) => {
+                            untrusted = true;
+                            return None;
+                        }
+                        Some(true) => extend_trust = true,
+                        None => {}
+                    }
+                }
+            }
+            // Only the final invocation's merged output pins.
+            written = None;
+            match settings_document(current.as_deref()).and_then(|mut map| {
+                map.insert(field.to_string(), value.clone());
+                serde_json::to_string_pretty(&serde_json::Value::Object(map)).map_err(Into::into)
+            }) {
+                Ok(content) => {
+                    written = Some(content.clone());
+                    Some(content)
+                }
+                Err(error) => {
+                    failure = Some(error);
+                    None
+                }
+            }
+        });
+        if untrusted {
+            self.errors.push(SettingsError {
                 scope,
-                &mut |current| match settings_document(current.as_deref()).and_then(|mut map| {
-                    map.insert(field.to_string(), value.clone());
-                    serde_json::to_string_pretty(&serde_json::Value::Object(map))
-                        .map_err(Into::into)
-                }) {
-                    Ok(content) => {
-                        written = Some(content.clone());
-                        Some(content)
-                    }
-                    Err(error) => {
-                        failure = Some(error);
-                        None
-                    }
-                },
-            );
-        if scope == SettingsScope::Project {
+                message: "Project settings not saved: this project's settings are not trusted.                           Reopen the project interactively to trust them."
+                    .to_string(),
+            });
+            return;
+        }
+        // A failed or skipped write never pins bytes that are not on disk.
+        if scope == SettingsScope::Project && result.is_ok() && extend_trust {
             if let (Some(gate), Some(content)) = (self.trust_gate.as_ref(), written.as_deref()) {
                 if let Err(error) = gate.trust(&fingerprint(content)) {
                     self.errors.push(SettingsError {
@@ -1134,7 +1138,17 @@ fn load_scope(
                         return (Settings::default(), None, Some(message));
                     }
                 };
-                return (restrictive_projection(&value), None, None);
+                // The same legacy migration the trusted path applies, so a
+                // legacy-shaped opt-out (`"telemetry": false`) survives the
+                // projection.
+                let migrated = match value {
+                    serde_json::Value::Object(mut map) => {
+                        migrate(&mut map);
+                        serde_json::Value::Object(map)
+                    }
+                    other => other,
+                };
+                return (restrictive_projection(&migrated), None, None);
             }
         }
     }

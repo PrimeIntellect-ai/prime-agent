@@ -22,7 +22,12 @@ pub const TRUSTED_PROJECTS_FILE: &str = "trusted-projects.json";
 /// the file's exact bytes: any change (whitespace included) re-prompts.
 #[must_use]
 pub fn fingerprint(content: &str) -> String {
-    let digest = Sha256::digest(content.as_bytes());
+    fingerprint_hex(content.as_bytes())
+}
+
+/// The same digest over raw bytes (registry keys encode OS paths losslessly).
+fn fingerprint_hex(bytes: &[u8]) -> String {
+    let digest = Sha256::digest(bytes);
     digest
         .iter()
         .fold(String::with_capacity(digest.len() * 2), |mut hex, byte| {
@@ -42,11 +47,15 @@ pub fn project_fingerprint(settings_path: &Path) -> Option<String> {
     {
         return None;
     }
-    Some(
-        std::fs::read_to_string(settings_path)
-            .map(|content| fingerprint(&content))
-            .unwrap_or_default(),
-    )
+    Some(match std::fs::read_to_string(settings_path) {
+        Ok(content) => fingerprint(&content),
+        // The absence sentinel pins the not-yet-existing file: its later
+        // appearance re-prompts. Any other read failure (permissions,
+        // invalid UTF-8) refuses outright — an unreadable file must
+        // never ride an absence pin.
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(_) => return None,
+    })
 }
 
 /// The restrictive-key projection of an untrusted project document: the
@@ -74,20 +83,24 @@ pub(crate) fn restrictive_projection(value: &serde_json::Value) -> Settings {
     super::load::from_value_lenient(&serde_json::Value::Object(map))
 }
 
-/// The registry key for one project's settings file: the canonicalized
-/// project directory (the settings file's grandparent's parent). Keying by
-/// the project directory — never the file path — is the trust model's core
-/// invariant: a second project that symlinks its settings file at a trusted
-/// one shares the fingerprint but keeps its own key, so it still needs its
-/// own trust decision. Fail-closed for lookups: an unresolvable key simply
+/// The registry key for one project's settings file: the hex SHA-256 of
+/// the canonicalized project directory's OS bytes (the settings file's
+/// grandparent's parent). Keying by the project directory — never the file
+/// path — is the trust model's core invariant: a second project that
+/// symlinks its settings file at a trusted one shares the fingerprint but
+/// keeps its own key, so it still needs its own trust decision. The digest
+/// encoding is lossless: a `to_string_lossy` key would collide distinct
+/// non-UTF-8 paths. Fail-closed for lookups: an unresolvable key simply
 /// never matches a differently-spelled entry.
-fn registry_key(settings_path: &Path) -> PathBuf {
-    settings_path
+fn registry_key(settings_path: &Path) -> String {
+    let project_dir = settings_path
         .parent()
         .and_then(Path::parent)
-        .and_then(Path::parent)
-        .and_then(|project_dir| std::fs::canonicalize(project_dir).ok())
-        .unwrap_or_else(|| settings_path.to_path_buf())
+        .and_then(Path::parent);
+    let key = project_dir
+        .and_then(|dir| std::fs::canonicalize(dir).ok())
+        .unwrap_or_else(|| settings_path.to_path_buf());
+    fingerprint_hex(key.as_os_str().as_encoded_bytes())
 }
 
 /// Read the registry's fingerprint entry for `settings_path`; `None` on any
@@ -97,7 +110,7 @@ fn registered_fingerprint(registry_path: &Path, settings_path: &Path) -> Option<
     let registry: serde_json::Map<String, serde_json::Value> =
         serde_json::from_str(&content).ok()?;
     registry
-        .get(registry_key(settings_path).to_string_lossy().as_ref())?
+        .get(&registry_key(settings_path))?
         .as_str()
         .map(str::to_string)
 }
@@ -146,7 +159,7 @@ pub fn trust_project(registry_path: &Path, settings_path: &Path, fingerprint: &s
             _ => serde_json::Map::new(),
         };
     registry.insert(
-        registry_key(settings_path).to_string_lossy().into_owned(),
+        registry_key(settings_path),
         serde_json::Value::String(fingerprint.to_string()),
     );
     atomic_write_with(

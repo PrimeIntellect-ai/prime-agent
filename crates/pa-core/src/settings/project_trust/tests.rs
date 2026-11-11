@@ -447,3 +447,100 @@ fn discovered_project_config_loads_only_when_trusted() {
         Some("# replaced system prompt")
     );
 }
+
+/// A project write with no existing settings file creates the file but
+/// never a trust decision: the new pin would have authorized the gated
+/// sibling files (SYSTEM.md, discovered skills) unasked. Red against a
+/// write path that pins authored-fresh bytes.
+#[test]
+fn an_absent_document_write_creates_no_trust() {
+    let dir = tempfile::tempdir().unwrap();
+    let agent_dir = dir.path().join("agent");
+    let cwd = dir.path().join("repo");
+    let config = cwd.join(CONFIG_DIR_NAME);
+    std::fs::create_dir_all(config.join("skills/stray")).unwrap();
+    std::fs::write(
+        config.join("skills/stray/SKILL.md"),
+        "---\nname: stray\ndescription: sibling\n---\nBody",
+    )
+    .unwrap();
+
+    let mut manager = SettingsManager::create(&cwd, &agent_dir);
+    manager.set_project_resource_array("skills", vec!["custom".to_string()]);
+    assert!(
+        manager.drain_errors().is_empty(),
+        "the write itself succeeds"
+    );
+    assert!(project_settings(&cwd).exists(), "the file landed");
+    let manager = SettingsManager::create(&cwd, &agent_dir);
+    assert!(
+        !manager.project_config_trusted(),
+        "an authored-fresh write never creates trust"
+    );
+    let resources = load_resources_cold(&cwd, &agent_dir);
+    assert!(
+        resources.skills.iter().all(|skill| skill.name != "stray"),
+        "gated siblings stay inert without a trust decision"
+    );
+}
+
+/// Distinct non-UTF-8 project paths keep distinct registry keys: the digest
+/// key is lossless where a lossy text key would collide.
+#[cfg(unix)]
+#[test]
+fn distinct_non_utf8_paths_keep_distinct_registry_keys() {
+    use std::ffi::OsStr;
+    use std::os::unix::ffi::OsStrExt;
+    let a = Path::new(OsStr::from_bytes(
+        b"/nonexistent/a\xffb/.prime/agent/settings.json",
+    ));
+    let b = Path::new(OsStr::from_bytes(
+        b"/nonexistent/a\xfeb/.prime/agent/settings.json",
+    ));
+    assert_ne!(
+        super::registry_key(a),
+        super::registry_key(b),
+        "a lossy text key would collide these two projects"
+    );
+}
+
+/// An unreadable settings file never rides the absence pin: after trusting
+/// a settings-less project, a file that appears unreadable refuses.
+#[cfg(unix)]
+#[test]
+fn an_unreadable_settings_file_never_rides_the_absence_pin() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let agent_dir = dir.path().join("agent");
+    let cwd = dir.path().join("repo");
+    let settings_path = project_settings(&cwd);
+    std::fs::create_dir_all(settings_path.parent().unwrap()).unwrap();
+    trust_project(&agent_dir.join(TRUSTED_PROJECTS_FILE), &settings_path, "").unwrap();
+    std::fs::write(&settings_path, "{}").unwrap();
+    std::fs::set_permissions(&settings_path, std::fs::Permissions::from_mode(0o000)).unwrap();
+    let manager = SettingsManager::create(&cwd, &agent_dir);
+    assert!(
+        !manager.project_config_trusted(),
+        "an unreadable file must refuse instead of riding the absence pin"
+    );
+    std::fs::set_permissions(&settings_path, std::fs::Permissions::from_mode(0o644)).unwrap();
+}
+
+/// The legacy telemetry bool (`"telemetry": false`) is a privacy opt-out and
+/// survives the untrusted projection through the same migration the trusted
+/// path applies.
+#[test]
+fn a_legacy_telemetry_bool_opt_out_survives_untrusted() {
+    let dir = tempfile::tempdir().unwrap();
+    let agent_dir = dir.path().join("agent");
+    let cwd = dir.path().join("repo");
+    std::fs::create_dir_all(&agent_dir).unwrap();
+    let settings_path = project_settings(&cwd);
+    std::fs::create_dir_all(settings_path.parent().unwrap()).unwrap();
+    std::fs::write(&settings_path, r#"{"telemetry": false}"#).unwrap();
+    let manager = SettingsManager::create(&cwd, &agent_dir);
+    assert!(
+        !manager.get_telemetry_enabled(),
+        "the legacy opt-out must apply while untrusted"
+    );
+}
