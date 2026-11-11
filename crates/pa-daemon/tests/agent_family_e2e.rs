@@ -268,6 +268,19 @@ fn write_faux_script(dir: &Path, name: &str, responses: &Value) -> PathBuf {
     path
 }
 
+/// Pin the legacy direct-row agent-message rendering for the suites
+/// whose assertions read the delivered prompt and its card out of the
+/// transcript: the default route sends deliveries through the session
+/// inbox (a short notice plus a durable record), so these pin the kill
+/// switch. The inbox route is covered end-to-end by `agent_inbox_e2e`.
+fn pin_legacy_agent_message_delivery(agent_dir: &Path) {
+    std::fs::write(
+        agent_dir.join("settings.json"),
+        json!({ "agentInbox": { "enabled": false } }).to_string(),
+    )
+    .expect("write the inbox kill switch");
+}
+
 fn receipt_listing(dir: &Path) -> String {
     let mut names: Vec<String> = std::fs::read_dir(dir)
         .map(|entries| {
@@ -346,6 +359,7 @@ async fn parent_child_agent_message_round_trip_end_to_end() {
     let agent_dir = dir.path().join("agent");
     let sessions_dir = agent_dir.join("sessions");
     std::fs::create_dir_all(&sessions_dir).expect("sessions dir");
+    pin_legacy_agent_message_delivery(&agent_dir);
     let receipts_dir = dir.path().join("receipts");
     std::fs::create_dir_all(&receipts_dir).expect("receipts dir");
 
@@ -616,6 +630,7 @@ async fn family_edges_never_cross_families_end_to_end() {
     let agent_dir = dir.path().join("agent");
     let sessions_dir = agent_dir.join("sessions");
     std::fs::create_dir_all(&sessions_dir).expect("sessions dir");
+    pin_legacy_agent_message_delivery(&agent_dir);
     let receipts_dir = dir.path().join("receipts");
     std::fs::create_dir_all(&receipts_dir).expect("receipts dir");
 

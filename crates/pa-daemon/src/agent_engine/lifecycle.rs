@@ -706,6 +706,10 @@ impl AgentSessionEngine {
             .quota_park
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+        // The retired session's inbox goes with it: a replacement's
+        // build installs the next session's store, so a retired store
+        // can never serve reads or take appends across the swap.
+        self.clear_inbox();
         // The retired session's provider target goes with it: a pre-build demand seam resolves the
         // CURRENT model.
         *self.provider_target.write().expect("provider target lock") = None;
