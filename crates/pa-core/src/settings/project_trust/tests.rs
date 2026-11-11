@@ -712,3 +712,63 @@ fn an_unregistered_git_file_does_not_inherit_another_repositorys_trust() {
     assert!(SettingsManager::create(&trusted, &agent_dir).project_config_trusted());
     assert!(!SettingsManager::create(&imposter, &agent_dir).project_config_trusted());
 }
+
+/// An oversized git metadata pointer (a checkout-controlled `.git` file)
+/// never feeds the trust keying unbounded: the read is bounded and
+/// regular-file-validated, so the keying falls back to the checkout root
+/// instead of exhausting the process. Red against the plain
+/// `read_to_string` keying (which would read the whole file).
+#[test]
+fn an_oversized_git_pointer_file_falls_back_to_the_checkout_root() {
+    let dir = tempfile::tempdir().unwrap();
+    let agent_dir = dir.path().join("agent");
+    let cwd = dir.path().join("repo");
+    let dot_git = cwd.join(".git");
+    std::fs::create_dir_all(&agent_dir).unwrap();
+    std::fs::create_dir_all(&cwd).unwrap();
+    // One line "gitdir: ..." but padded far past the 64 KiB metadata cap:
+    // bounded read hits the cap and refuses; the keying must not read it all.
+    let cap = super::super::storage::MAX_GIT_METADATA_BYTES_FOR_TEST;
+    let blob = format!("gitdir: {}\n{}", dir.path().display(), "x".repeat(cap + 1));
+    std::fs::write(&dot_git, blob).unwrap();
+    let settings_path = project_settings(&cwd);
+    std::fs::create_dir_all(settings_path.parent().unwrap()).unwrap();
+    std::fs::write(&settings_path, r#"{"theme":"x"}"#).unwrap();
+    let fingerprint = super::project_fingerprint(&settings_path).unwrap();
+    let registry = agent_dir.join(TRUSTED_PROJECTS_FILE);
+    // Trusting via the fingerprint still works (the settings file is fine),
+    // and the registry key falls back to the checkout root: trust recorded
+    // under the root key, not an attacker-influenced common dir.
+    trust_project(&registry, &settings_path, &fingerprint).unwrap();
+    let manager = SettingsManager::create(&cwd, &agent_dir);
+    assert!(
+        manager.project_config_trusted(),
+        "the bounded refusal falls back, not crashes"
+    );
+}
+
+/// A FIFO at the pinned `settings.json` itself never blocks the loader:
+/// the non-blocking open hands the handle to the regular-file validation.
+#[cfg(unix)]
+#[test]
+fn a_settings_fifo_never_blocks_the_pin_read() {
+    let dir = tempfile::tempdir().unwrap();
+    let agent_dir = dir.path().join("agent");
+    let cwd = dir.path().join("repo");
+    let settings_path = project_settings(&cwd);
+    std::fs::create_dir_all(&agent_dir).unwrap();
+    std::fs::create_dir_all(settings_path.parent().unwrap()).unwrap();
+    {
+        use std::os::unix::ffi::OsStrExt;
+        let name = std::ffi::CString::new(settings_path.as_os_str().as_bytes()).expect("path");
+        let made = unsafe { libc::mkfifo(name.as_ptr(), 0o600) };
+        assert_eq!(made, 0, "mkfifo fixture");
+    }
+    // The pin read refuses the FIFO through the OPENED handle (no block,
+    // no hang) — the error names the file.
+    let result = super::project_fingerprint(&settings_path);
+    assert!(
+        result.is_err(),
+        "a FIFO settings file must refuse, not block"
+    );
+}

@@ -143,14 +143,17 @@ fn repository_dir(project_dir: &Path) -> PathBuf {
     };
     let dot_git = root.join(".git");
     let linked_common_dir = || -> Option<PathBuf> {
-        let gitdir_line = std::fs::read_to_string(&dot_git).ok()?;
+        // Git metadata is one-line pointer text by nature; every read is
+        // bounded (a checkout-controlled file must never exhaust the
+        // process before a trust decision) and regular-file-validated.
+        let gitdir_line = super::storage::read_git_metadata(&dot_git).ok()?;
         let gitdir =
             std::fs::canonicalize(root.join(gitdir_line.strip_prefix("gitdir:")?.trim())).ok()?;
-        let commondir = std::fs::read_to_string(gitdir.join("commondir")).ok()?;
+        let commondir = super::storage::read_git_metadata(&gitdir.join("commondir")).ok()?;
         let common = std::fs::canonicalize(gitdir.join(commondir.trim())).ok()?;
         // `git worktree add` records the worktree's back-pointer inside the
         // common dir: the user's own repository, out of the checkout's reach.
-        let back_pointer = std::fs::read_to_string(gitdir.join("gitdir")).ok()?;
+        let back_pointer = super::storage::read_git_metadata(&gitdir.join("gitdir")).ok()?;
         let registered = gitdir.parent() == Some(common.join("worktrees").as_path())
             && std::fs::canonicalize(gitdir.join(back_pointer.trim())).ok()? == dot_git;
         registered.then_some(common)

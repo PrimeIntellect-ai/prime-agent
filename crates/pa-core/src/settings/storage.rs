@@ -14,6 +14,21 @@ pub const CONFIG_DIR_NAME: &str = ".prime/agent";
 /// Upper bound on a project settings document, which comes from the checkout.
 pub(super) const MAX_PROJECT_SETTINGS_BYTES: usize = 4 * 1024 * 1024;
 
+/// Upper bound on a git metadata pointer file (`.git`, `commondir`,
+/// `gitdir` back-pointers): one-line text by nature. The project-settings
+/// cap stays the ceiling; this is the tight bound for the trust keying.
+const MAX_GIT_METADATA_BYTES: usize = 64 * 1024;
+
+/// One git metadata pointer file, bounded and regular-file-validated —
+/// checkout-controlled content never exhausts the process during the
+/// trust keying.
+pub(super) fn read_git_metadata(path: &Path) -> Result<String> {
+    read_regular_bounded(path, MAX_GIT_METADATA_BYTES)
+}
+
+#[cfg(test)]
+pub(crate) const MAX_GIT_METADATA_BYTES_FOR_TEST: usize = MAX_GIT_METADATA_BYTES;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SettingsScope {
     Global,
@@ -186,12 +201,43 @@ fn read_document(scope: SettingsScope, path: &Path) -> Result<String> {
     if scope == SettingsScope::Global {
         return Ok(fs::read_to_string(path)?);
     }
+    read_regular_bounded(path, MAX_PROJECT_SETTINGS_BYTES)
+}
+
+/// A checkout-controlled file read the way every project file must be:
+/// opened non-blocking, validated as a REGULAR FILE on the opened handle
+/// (never on the pathname — a swap between a stat and this open could
+/// hand a FIFO or device to the read), then read up to `cap` bytes.
+/// Regular files ignore `O_NONBLOCK`, so the flag costs nothing on the
+/// honest path.
+fn read_regular_bounded(path: &Path, cap: usize) -> Result<String> {
+    let file = open_nonblocking(path)?;
+    // The handle is what gets read: validate IT, not the pathname.
+    if !file.metadata()?.is_file() {
+        bail!("not a regular file");
+    }
     let mut bytes = Vec::new();
-    fs::File::open(path)?
-        .take(MAX_PROJECT_SETTINGS_BYTES as u64 + 1)
-        .read_to_end(&mut bytes)?;
-    check_project_document_size(bytes.len())?;
+    file.take(cap as u64 + 1).read_to_end(&mut bytes)?;
+    if bytes.len() > cap {
+        bail!("project file exceeds {cap} bytes");
+    }
     Ok(String::from_utf8(bytes)?)
+}
+
+/// Open for reading without blocking: a FIFO (or any non-regular special
+/// file) must never hang the open before the handle can be validated.
+#[cfg(unix)]
+fn open_nonblocking(path: &Path) -> Result<std::fs::File> {
+    use std::os::unix::fs::OpenOptionsExt;
+    Ok(fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NONBLOCK)
+        .open(path)?)
+}
+
+#[cfg(not(unix))]
+fn open_nonblocking(path: &Path) -> Result<std::fs::File> {
+    Ok(fs::File::open(path)?)
 }
 
 /// Same-process serialization for one settings document: the TS lock is
