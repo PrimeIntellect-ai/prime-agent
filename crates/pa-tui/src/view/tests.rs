@@ -57,7 +57,7 @@ fn injected_terminal_links_are_not_clickable() {
     let nested = "\x1b]8;;\x1b]8;;x\x1b\\file:///evil\x1b\\safe";
     // Markdown decodes `\;` after the source is stripped.
     let escaped = "\x1b]8\\;;file:///evil\x1b\\safe";
-    let mut v = view_with(vec![
+    let entries = vec![
         ChatEntry::Assistant(Box::new(AssistantMessage {
             blocks: vec![MessageBlock::Text(format!(
                 "{injected} {nested} {escaped} and [docs](https://docs.example/)"
@@ -84,14 +84,31 @@ fn injected_terminal_links_are_not_clickable() {
             exit_code: Some(0),
             content: format!("[bash-done] {injected}"),
         })),
-    ]);
-    v.detail = Detail::All;
-    let links = crate::hyperlinks::frame_link_ranges(&v.render_transcript(80));
-    assert!(!links.is_empty(), "the markdown link stays clickable");
-    assert!(
-        links.iter().all(|link| link.url == "https://docs.example/"),
-        "{links:?}"
-    );
+        ChatEntry::CompactionSummary {
+            summary: injected.to_string(),
+            tokens_before: 1,
+            custom_instructions: None,
+        },
+    ];
+    for detail in [Detail::Overview, Detail::All] {
+        let mut v = view_with(entries.clone());
+        v.detail = detail;
+        let links = crate::hyperlinks::frame_link_ranges(&v.render_transcript(80));
+        assert!(!links.is_empty(), "the markdown link stays clickable");
+        assert!(
+            links.iter().all(|link| link.url == "https://docs.example/"),
+            "{detail:?}: {links:?}"
+        );
+    }
+    let streaming = crate::compaction_row::CompactionState {
+        reason: crate::compaction_row::CompactionReason::Manual,
+        custom_instructions: None,
+        summary: injected.to_string(),
+    };
+    let theme = Theme::builtin("prime", ColorMode::TrueColor);
+    let rows = crate::compaction_row::render_compaction_stream(&streaming, true, &theme, 80);
+    let links = crate::hyperlinks::frame_link_ranges(&rows);
+    assert!(!rows.is_empty() && links.is_empty(), "{links:?}");
 }
 
 /// The hardware caret never sits over the factory page: the page is an
