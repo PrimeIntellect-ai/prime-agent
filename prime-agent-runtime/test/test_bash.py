@@ -1599,6 +1599,8 @@ class PersistentBashTest(unittest.IsolatedAsyncioTestCase):
         rows = {row["pid"]: row for row in bash_module.activity_request("list")["activities"]}
         self.assertTrue(rows[handle.pid]["persistent"])
         self.assertEqual([(r["pid"], r["sessionId"]) for r in self.records()], [(handle.pid, "own-session")])
+        for path in [self.home, *(os.path.join(self.home, name) for name in self.files())]:
+            self.assertEqual(os.stat(path).st_mode & 0o077, 0, path)
         open(go, "w").close()
         result = await handle
         self.assertEqual((result.exit_code, result.output), (4, "hi\n"))
