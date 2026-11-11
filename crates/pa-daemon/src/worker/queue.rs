@@ -739,12 +739,14 @@ pub(crate) fn refresh_inbox_wake_rows_locked(
 ) -> bool {
     let waiting = inbox.waiting_ids();
     let mut batch = arrivals.lock().unwrap();
+    // An arrived-empty batch is UNKNOWN (a recovered row after a restart
+    // arrives without its batch); a batch emptied by the retain below was
+    // live and its covered messages are gone — older unread mail keeps
+    // its reminder only.
+    let recovered = batch.is_empty();
     batch.retain(|message| waiting.contains(&message.id));
     let (count, _, _) = inbox.count();
-    // A recovered wake row arrives without its batch (the worker's batch
-    // state starts empty): rebuild coverage over the waiting set instead
-    // of dropping a wake unread messages still need.
-    if batch.is_empty() && count > 0 {
+    if recovered && count > 0 {
         batch.extend(inbox.waiting_messages());
     }
     let mut changed = false;
