@@ -249,6 +249,18 @@ fn cold_reopen_uses_saved_cwd_unless_explicitly_overridden() {
     let socket = dir.path().join("daemon.sock");
     let alias = dir.path().join("project-alias");
     std::os::unix::fs::symlink(&project, &alias).unwrap();
+    // The real user flow for a session whose skills loaded once trusts the
+    // project interactively; the cold reopen (headless) then reads that
+    // decision. Seed it — the alias arm resolves to the same canonical key,
+    // and the explicit-override arm runs in its own trusted directory.
+    for trusted_dir in [&project, &override_dir] {
+        pa_core::settings::trust_project(
+            &agent_dir.join(pa_core::settings::TRUSTED_PROJECTS_FILE),
+            &trusted_dir.join(".prime/agent/settings.json"),
+            "",
+        )
+        .unwrap();
+    }
     let _daemon = spawn_daemon_in(&socket, &agent_dir, dir.path());
     let (mut client, _) = Client::connect(&socket);
     for (index, (explicit, relative, recorded)) in [
@@ -443,6 +455,70 @@ fn cold_reopen_python_kernel_uses_saved_cwd_and_explicit_override() {
             .expect("the real Python tool wrote its relative-path cwd probe");
         assert_eq!(observed, expected.canonicalize().unwrap().to_str().unwrap());
     }
+    client.send_command("shutdown", &serde_json::json!({"type": "shutdown"}));
+    assert_eq!(client.read_response("shutdown")["success"], true);
+}
+
+/// A cold reopen of an UNTRUSTED project restores the saved cwd and the
+/// cross-tool AGENTS.md context, but the discovered project skill stays
+/// inert behind the trust decision (the registry, not the saved session,
+/// confers trust).
+#[test]
+fn cold_reopen_holds_untrusted_project_skills_inert() {
+    let dir = tempfile::tempdir_in("/tmp").expect("temp dir");
+    let project = dir.path().join("project-untrusted");
+    let agent_dir = dir.path().join("agent");
+    for path in [&project, &agent_dir] {
+        std::fs::create_dir_all(path).expect("directory");
+    }
+    std::fs::write(project.join("AGENTS.md"), "UNTRUSTED_PROJECT_CONTEXT").unwrap();
+    let skill = project.join(".agents/skills/untrusted-skill");
+    std::fs::create_dir_all(&skill).unwrap();
+    std::fs::write(
+        skill.join("SKILL.md"),
+        "---\nname: untrusted-skill\ndescription: Untrusted skill.\n---\nBody\n",
+    )
+    .unwrap();
+    let saved = dir.path().join("saved-untrusted.jsonl");
+    std::fs::write(
+        &saved,
+        format!(
+            "{}\n",
+            serde_json::json!({
+                "type": "session", "version": 3,
+                "id": "cwd-regression-untrusted",
+                "timestamp": "2026-10-12T00:00:00.000Z", "cwd": project,
+            })
+        ),
+    )
+    .expect("saved session");
+    let socket = dir.path().join("daemon.sock");
+    let _daemon = spawn_daemon_in(&socket, &agent_dir, dir.path());
+    let (mut client, _) = Client::connect(&socket);
+    client.send_command(
+        "resume",
+        &serde_json::json!({ "type": "create", "sessionPath": saved.to_str().unwrap(), "config": serde_json::json!({}) }),
+    );
+    let response = client.read_response("resume");
+    assert_eq!(response["success"], true, "{response}");
+    assert_eq!(
+        response["data"]["cwd"],
+        serde_json::json!(project),
+        "{response}"
+    );
+    let active = &response["data"]["id"];
+    client.send_command(
+        "context",
+        &serde_json::json!({ "type": "get_system_prompt", "activeSessionId": active }),
+    );
+    let context = client.read_response("context");
+    assert_eq!(context["success"], true, "{context}");
+    let prompt = context["data"]["systemPrompt"].as_str().unwrap();
+    assert!(prompt.contains("UNTRUSTED_PROJECT_CONTEXT"), "{context}");
+    assert!(
+        !prompt.contains("untrusted-skill"),
+        "an untrusted project's discovered skill must stay inert: {context}"
+    );
     client.send_command("shutdown", &serde_json::json!({"type": "shutdown"}));
     assert_eq!(client.read_response("shutdown")["success"], true);
 }
