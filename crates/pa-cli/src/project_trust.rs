@@ -92,22 +92,6 @@ fn flush_typeahead() {
 /// before any settings read for that project. Called for the launch cwd
 /// before the CLI's earliest settings reads, and again for a resumed
 /// session's saved cwd when it differs.
-/// One prompt per project per process: the composition-root call and the
-/// resume-cwd call both route through here, and a declined answer must not
-/// re-ask in the same session.
-static PROMPTED: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<PathBuf>>> =
-    std::sync::OnceLock::new();
-
-fn already_prompted(cwd: &Path) -> bool {
-    let registry = PROMPTED.get_or_init(|| std::sync::Mutex::new(std::collections::HashSet::new()));
-    // `insert` returns true for a FIRST insert: already-prompted is the
-    // complement (the entry was present before this call).
-    !registry
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .insert(cwd.to_path_buf())
-}
-
 pub(crate) fn prompt_first_load(cwd: &Path, agent_dir: &Path) -> Result<()> {
     if !std::io::stdin().is_terminal() {
         return Ok(());
@@ -132,9 +116,6 @@ pub(crate) fn prompt_first_load(cwd: &Path, agent_dir: &Path) -> Result<()> {
         return Ok(());
     };
     if pa_core::settings::project_trusted(&registry_path, &settings_path, &fingerprint) {
-        return Ok(());
-    }
-    if already_prompted(cwd) {
         return Ok(());
     }
     println!("This project carries its own Prime Agent config, which can change how Prime Agent behaves here:");

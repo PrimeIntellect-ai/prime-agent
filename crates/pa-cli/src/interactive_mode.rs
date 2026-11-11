@@ -39,7 +39,9 @@ mod tests;
 pub fn run_interactive_mode(options: &RunOptions) -> Result<i32> {
     // The CWE-426 launch-cwd trust prompt already ran in the composition
     // root, before its earliest settings reads; `build_tui_options` below
-    // covers a resumed session's saved cwd when it differs.
+    // covers a resumed session's saved cwd when it differs. Sessions opened
+    // later from the agents view never prompt (the handoff keeps raw mode
+    // and the alternate screen up); their resource load warns instead.
     let socket_path = resolve_socket_path(options.daemon_socket.as_deref());
     let configuration_load_started = std::time::Instant::now();
     let (tui_options, pending_onboarding_stages) = build_tui_options(
@@ -450,15 +452,18 @@ fn build_tui_options(
                         header.cwd
                     ));
                 }
-                resolved_options.config.cwd = PathBuf::from(header.cwd);
+                let saved_cwd = PathBuf::from(header.cwd);
+                // The composition root asked for the launch cwd; a resume
+                // into another project asks here, before the reads below.
+                if saved_cwd != options.config.cwd {
+                    crate::project_trust::prompt_first_load(&saved_cwd, &options.config.agent_dir)?;
+                }
+                resolved_options.config.cwd = saved_cwd;
             }
         }
     }
     let options = &resolved_options;
     let config = &options.config;
-    // The CWE-426 resume arm: the cwd above switched to the saved session's
-    // project, so its settings trust is asked here — before the reads below.
-    crate::project_trust::prompt_first_load(&config.cwd, &config.agent_dir)?;
     let settings = pa_core::settings::SettingsManager::create(&config.cwd, &config.agent_dir);
     let code_block_indent = settings.get_code_block_indent();
     let show_images = settings.get_show_images();
