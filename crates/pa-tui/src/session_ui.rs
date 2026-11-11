@@ -325,9 +325,9 @@ pub(crate) struct SessionUi {
     /// This session's persisted file path (family identity of the
     /// subagent linkage; `None` for unpersisted sessions).
     session_file: Option<String>,
-    /// The attach state's `ignoredProjectDir`: the session cwd whose
+    /// The attach state's `ignoredProjectNotice`: set when the session's
     /// project config is present but untrusted.
-    pub(crate) ignored_project_dir: Option<String>,
+    pub(crate) ignored_project_notice: Option<String>,
     pub(crate) pending_selection: Option<SessionSelection>,
     pub(crate) pending_selection_rlm_depth: Option<u32>,
     pub(crate) pending_selection_origin: Option<crate::interactive::SelectionOrigin>,

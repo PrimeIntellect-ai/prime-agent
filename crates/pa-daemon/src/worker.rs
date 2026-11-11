@@ -290,7 +290,7 @@ impl Worker {
             last_event_sequence: 0,
             store: None,
             cwd: String::new(),
-            ignored_project_dir: None,
+            ignored_project_notice: None,
             steering: VecDeque::new(),
             follow_up: VecDeque::new(),
             busy: false,

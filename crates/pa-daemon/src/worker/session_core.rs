@@ -16,9 +16,9 @@ pub(crate) struct SessionCore {
     pub(crate) last_event_sequence: u64,
     pub(crate) store: Option<SessionFile>,
     pub(crate) cwd: String,
-    /// The session cwd when its gated project config is present but
-    /// untrusted (the attach state's `ignoredProjectDir` notice).
-    pub(crate) ignored_project_dir: Option<String>,
+    /// The ignored-config notice when the session's gated project config is
+    /// present but untrusted (the attach state's `ignoredProjectNotice`).
+    pub(crate) ignored_project_notice: Option<String>,
     pub(crate) steering: VecDeque<QueuedItem>,
     pub(crate) follow_up: VecDeque<QueuedItem>,
     pub(crate) busy: bool,
@@ -124,7 +124,7 @@ impl SessionCore {
             last_event_sequence: 0,
             store,
             cwd,
-            ignored_project_dir: None,
+            ignored_project_notice: None,
             steering: VecDeque::new(),
             follow_up: VecDeque::new(),
             busy: false,

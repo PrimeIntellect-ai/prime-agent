@@ -525,16 +525,16 @@ impl Worker {
         let mut interrupted_compaction_persisted = interrupted_compaction_requested;
         // The core lock stays inside this block: everything after it may await,
         // and a std MutexGuard must never ride an await point.
-        let ignored_project_dir = pa_core::settings::ignored_project_dir(
+        let ignored_project_notice = pa_core::settings::ignored_project_dir(
             std::path::Path::new(&cwd),
             &self.config.agent_dir,
             settings.project_config_trusted(),
         )
-        .map(|dir| dir.display().to_string());
+        .map(|dir| pa_core::settings::ignored_project_notice(&dir));
         let (summary, rlm_depth) = {
             let (mut core, inputs) = self.summary_inputs();
             core.cwd = cwd;
-            core.ignored_project_dir = ignored_project_dir;
+            core.ignored_project_notice = ignored_project_notice;
             core.steering = steering;
             core.follow_up = follow_up;
             // The restored lanes carry their suspension: a user-aborted queue
