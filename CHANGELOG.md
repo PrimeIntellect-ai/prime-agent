@@ -15,7 +15,6 @@ recorded in the [TypeScript changelog](https://github.com/PrimeIntellect-ai/prim
 - Factory machines can now run a Python function as a state: a state with `"python": {"import": "<module>", "callable": "<function>"}` instead of a `subagent` runs the function in a short-lived isolated subprocess, receives its bound inputs as a dict, and returns its declared outputs, so deterministic routing and data shaping no longer need a child agent. The `/factory` diagram labels such states `(py <module>.<function>)`.
 - Factory page: the arrows now walk each run's header and the states that spawned a session, and Enter or → opens that state's latest session. The opened session shows its `depth N` label, and leaving it returns to the factory page on the same run and state. Navigation never stops a run any more: stopping takes two presses of Ctrl+X (the agents view's stop key) — on a run header it stops the run, on a running state it stops that state's agent — and `r` resumes a paused run. `/resume <session>` now opens that session instead of exiting the app.
 - `await bash(cmd)`, `await handle` and `await r.handle` now always return after at most 1 second in sessions with `[bash-done]` notifications: a command still running by then returns the usual snapshot (`r.running` True, `r.handle` the live handle) and its `[bash-done]` notification arrives on completion. The `yield_after` parameter is gone; passing it raises a `TypeError`.
-fix: pass the missing conversation-level argument in the ipython card render tests, repairing a workspace build broken by the combination of the live-timer and click-fix PRs
 - Factory runs no longer wake the parent session once per state: factory children are told their final message is the state's output instead of replying with `agent_message.send`, and their exit and failure notices are no longer posted into the parent conversation (the factory still reads every settle and failure through `rlm.collect`).
 - User `mcpServers` entries accept `clientSecret` and `scopes`, and OAuth discovery accepts an issuer that differs only by a trailing slash, so Google's Drive and Sheets MCP servers can be logged in with your own Google OAuth client; logins against Google request offline access so the grant refreshes. See `docs/google-workspace-mcp.md`.
 - → now opens the selected shell in the bash panel, like Enter (← already closes it), and the footer says so.
@@ -48,6 +47,11 @@ fix: pass the missing conversation-level argument in the ipython card render tes
 - The running daemon now serves re-authenticated provider credentials on the live session's next request: a rotated credential (a fresh `/login`) or an expired OAuth token (refreshed in place) is picked up per request, instead of serving the credential captured when the session started until a `/reload` or a daemon restart.
 - The first-run provider picker now says that Prime Inference is your default model, and its continue row reads `Continue with Prime Inference (default)`. When you started with your own model, it says you are signed in to Prime Inference and offers `Continue with your current model` instead.
 - Fixed the transcript view following output again after suspending the TUI with Ctrl+Z.
+- `agent_observe.recent_messages` reads its message members now instead of guessing from previews.
+- MCP server configuration is read from user settings only; a cloned project's declared servers never execute at session start.
+- A click on a Python card opens that card's session, not the one selected when the click began.
+- A multi-line paste on Windows arrives as one paste again instead of one event per line.
+- Tool calls show a live timer while they run.
 
 ## [0.10.2] - 2026-10-28
 
