@@ -36,13 +36,17 @@ fn overflow_patterns() -> &'static Vec<Regex> {
             // Any HTTP 413 is a request-size overflow regardless of provider or body
             // wording: an oversized request body can never succeed on retry, so
             // it belongs with the compact-and-retry arm, not the error ladder.
-            // The status-prefix arm covers the SDK-composed `"413 <body>"` and
-            // the `"X API error (413): ..."` shapes; the wording arms cover
-            // in-stream error frames that never carry the status prefix.
+            // The primary claim is the structured status on the
+            // `provider_stream_failure` diagnostic (`is_context_overflow` reads
+            // it); the arms below cover message-text-only paths - the
+            // SDK-composed `"413 <body>"`, the `"X API error (413): ..."`
+            // composition, and the 413 wording families.
             r"(?i)^(?:[\w -]+ API error \(413\):|413(?:\s|:|$))",
-            r"(?i)request[_ ]body[_ ](is[_ ])?too[_ ]large", // nginx/express 413 wording
-            r"(?i)exceeds the body size limit",              // Prime Inference 413 wording
-            r"(?i)payload too large",                        // the HTTP 413 reason phrase
+            // "413 Request Entity Too Large" (nginx), "request entity too large"
+            // (express/body-parser), "request body too large" (Go MaxBytesReader).
+            r"(?i)request[_ ](?:body|entity)[_ ](?:is[_ ])?too[_ ]large",
+            r"(?i)exceeds the body size limit", // Prime Inference 413 wording
+            r"(?i)payload too large",           // the HTTP 413 reason phrase
         ]
         .iter()
         .map(|pattern| Regex::new(pattern).expect("static regex"))
@@ -64,6 +68,20 @@ fn non_overflow_patterns() -> &'static Vec<Regex> {
     })
 }
 
+/// The HTTP status recorded on the message's `provider_stream_failure` diagnostic by the
+/// provider terminal path, when one was recorded.
+fn stream_failure_status(message: &AssistantMessage) -> Option<u16> {
+    message
+        .diagnostics
+        .as_ref()?
+        .iter()
+        .find(|diagnostic| diagnostic.type_ == "provider_stream_failure")
+        .and_then(|diagnostic| diagnostic.details.as_ref())
+        .and_then(|details| details.get("status"))
+        .and_then(serde_json::Value::as_u64)
+        .and_then(|status| u16::try_from(status).ok())
+}
+
 /// Check if an assistant message represents a context overflow error.
 ///
 /// Handles error-based overflow (`stop_reason` "error" with a pattern-matching message), silent
@@ -72,6 +90,12 @@ fn non_overflow_patterns() -> &'static Vec<Regex> {
 #[must_use]
 pub fn is_context_overflow(message: &AssistantMessage, context_window: Option<u64>) -> bool {
     if message.stop_reason == StopReason::Error {
+        // A 413 recorded on the failure diagnostic is the request-size overflow regardless of
+        // how the provider composed the message text (`from_http_status_body` rewrites the
+        // text; the structured status covers every provider).
+        if stream_failure_status(message) == Some(413) {
+            return true;
+        }
         if let Some(error_message) = &message.error_message {
             let is_non_overflow = non_overflow_patterns()
                 .iter()
@@ -137,7 +161,11 @@ fn content_text(message: &AssistantMessage) -> String {
 mod tests {
     use super::*;
     use crate::types::{Usage, UsageCost};
+    use crate::utils_inner::stream_failure::{
+        format_stream_failure_message, record_stream_failure, ProviderError,
+    };
     use serde_json::Map;
+    use std::collections::HashMap;
 
     fn message(
         stop_reason: StopReason,
@@ -277,7 +305,7 @@ mod tests {
             "Request body too large",
             "Request body is too large",
             "payload too large",
-            r"Provider rejected request (request_body_too_large, 413)",
+            "Request entity too large",
             r#"{"code":"request_body_too_large","message":"request body too large"}"#,
         ] {
             let m = message(StopReason::Error, Some(text), usage(0, 0, 0));
@@ -286,8 +314,9 @@ mod tests {
     }
 
     /// The byte-oversize class must not swallow other failures: rate-limit
-    /// wording stays with the retry ladder, and a 413 that is only the leading
-    /// digits of a larger number is not a status.
+    /// wording stays with the retry ladder, a 413 that is only the leading
+    /// digits of a larger number is not a status, and a non-413 status on the
+    /// diagnostic does not classify.
     #[test]
     fn byte_oversize_negatives_stay_out() {
         for text in [
@@ -297,5 +326,74 @@ mod tests {
             let m = message(StopReason::Error, Some(text), usage(0, 0, 0));
             assert!(!is_context_overflow(&m, None), "false positive: {text}");
         }
+
+        let error = ProviderError::from_http_status_body(
+            500,
+            r#"{"type":"error","error":{"type":"server_error","message":"internal failure"}}"#,
+            HashMap::default(),
+        );
+        let text = format_stream_failure_message(&error);
+        assert_eq!(
+            text,
+            "Provider server error (server_error, 500): internal failure",
+        );
+        let mut m = message(StopReason::Error, Some(&text), usage(0, 0, 0));
+        record_stream_failure(
+            ("anthropic", "claude-sonnet-4-5", "anthropic"),
+            &mut m,
+            &error,
+        );
+        assert!(!is_context_overflow(&m, None));
+    }
+
+    /// A typed 413 through the real provider terminal path:
+    /// `from_http_status_body` (anthropic, openai-responses, azure, google,
+    /// vertex) rewrites the message to `Provider rejected the request
+    /// (<type>, 413): <detail>`, which the status-prefix arm misses, and
+    /// `record_stream_failure` records the structured status on the
+    /// `provider_stream_failure` diagnostic - the structured check must claim it.
+    #[test]
+    fn typed_413_stream_failure_classifies() {
+        let error = ProviderError::from_http_status_body(
+            413,
+            r#"{"type":"error","error":{"type":"invalid_request_error","message":"Request entity too large"}}"#,
+            HashMap::default(),
+        );
+        let text = format_stream_failure_message(&error);
+        assert_eq!(
+            text,
+            "Provider rejected the request (invalid_request_error, 413): Request entity too large",
+        );
+        let mut m = message(StopReason::Error, Some(&text), usage(0, 0, 0));
+        record_stream_failure(
+            ("anthropic", "claude-sonnet-4-5", "anthropic"),
+            &mut m,
+            &error,
+        );
+        assert!(is_context_overflow(&m, None));
+    }
+
+    /// The structured status is the universal claim: a 413 whose detail
+    /// wording matches no table arm still classifies through the status
+    /// recorded on the `provider_stream_failure` diagnostic.
+    #[test]
+    fn structured_413_status_classifies_unenumerated_wording() {
+        let error = ProviderError::from_http_status_body(
+            413,
+            r#"{"type":"error","error":{"type":"invalid_request_error","message":"upload exceeds the allowed size"}}"#,
+            HashMap::default(),
+        );
+        let text = format_stream_failure_message(&error);
+        assert_eq!(
+            text,
+            "Provider rejected the request (invalid_request_error, 413): upload exceeds the allowed size",
+        );
+        let mut m = message(StopReason::Error, Some(&text), usage(0, 0, 0));
+        record_stream_failure(
+            ("anthropic", "claude-sonnet-4-5", "anthropic"),
+            &mut m,
+            &error,
+        );
+        assert!(is_context_overflow(&m, None));
     }
 }

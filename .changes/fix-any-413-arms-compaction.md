@@ -1,2 +1,2 @@
-Fixed sessions wedging on the provider's request-size limit: any HTTP 413 now arms the request-size compaction and retries the turn.
+Fixed sessions wedging on the provider's request-size limit: a provider 413 now triggers one compact-and-retry.
 
