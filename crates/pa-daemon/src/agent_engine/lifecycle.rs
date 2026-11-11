@@ -1087,12 +1087,16 @@ impl AgentSessionEngine {
         // it through `rlm.inbox.*`): the journal lives in the session's
         // own artifact dir — the same per-session dir the kernel state
         // and the harness state use — so a restart replays.
-        let inbox = std::sync::Arc::new(pa_core::session_engine::inbox::SessionInbox::open(
-            session_file
-                .as_deref()
-                .and_then(pa_core::session_engine::harness_digest::session_artifact_dir_for_log)
-                .as_deref(),
-        ));
+        let inbox_dir = session_file
+            .as_deref()
+            .and_then(pa_core::session_engine::harness_digest::session_artifact_dir_for_log);
+        // A failed build leaves its published store behind: the next
+        // attempt over the same journal reuses it instead of racing a
+        // fresh open's compaction against its appends.
+        let inbox = pa_core::session_engine::inbox::SessionInbox::open_or_reuse(
+            self.inbox().as_ref(),
+            inbox_dir.as_deref(),
+        );
         if let Some(hook) = self.inbox_read_hook() {
             inbox.set_read_hook(hook);
         }

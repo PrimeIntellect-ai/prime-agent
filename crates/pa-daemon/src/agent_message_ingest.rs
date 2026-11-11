@@ -143,25 +143,29 @@ impl Worker {
             }
         }
         core.follow_up = retained_follow_up;
-        drop(core);
         // The inbox-routed deliveries: the durable records leave the
         // store too (a clear that reports the messages gone must take
         // them out of `rlm.inbox.read()`), and the wake rows that
         // referred to them refresh over what is left (an emptied inbox
-        // leaves no stale notice or reminder).
+        // leaves no stale notice or reminder). The withdraw and the
+        // refresh run under the same core lock as the admission, so a
+        // delivery that raced the clear either lands before it (and
+        // leaves) or waits for it (and stays).
         if let Some(inbox) = self.agent_engine.as_ref().and_then(|engine| engine.inbox()) {
             if !inbox
                 .withdraw_class(pa_core::session_engine::inbox::INBOX_CLASS_AGENT_MESSAGE)
                 .is_empty()
             {
-                crate::worker::refresh_inbox_wake_rows(&self.core, &self.inbox_arrivals, &inbox);
+                crate::worker::refresh_inbox_wake_rows_locked(
+                    &mut core,
+                    &self.inbox_arrivals,
+                    &inbox,
+                );
             }
         }
-        let snapshot = {
-            let core = self.core.lock().unwrap();
-            crate::worker::clear_withdrawn_progress_note(&core, self.engine.as_ref());
-            Self::snapshot_locked(&core)
-        };
+        crate::worker::clear_withdrawn_progress_note(&core, self.engine.as_ref());
+        let snapshot = Self::snapshot_locked(&core);
+        drop(core);
         // The sweep may have settled the session: the verdict follows the remaining lanes.
         self.checkpoint_queue(crate::worker::QueueCheckpoint::Settle {
             operation: "queue_mutated",
