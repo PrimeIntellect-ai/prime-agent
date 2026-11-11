@@ -21,20 +21,6 @@ struct Fixture {
     manager: PackageManager,
 }
 
-/// Seed the fixture project's trust as it is on disk: the fixture tests
-/// exercise the trusted path; the gate's own tests pin the untrusted one.
-fn seed_project_trust(cwd: &Path, agent_dir: &Path) {
-    let settings_path = cwd
-        .join(crate::settings::CONFIG_DIR_NAME)
-        .join("settings.json");
-    crate::settings::trust_project(
-        &agent_dir.join(crate::settings::TRUSTED_PROJECTS_FILE),
-        &settings_path,
-        &crate::settings::project_fingerprint(&settings_path).unwrap(),
-    )
-    .unwrap();
-}
-
 impl Fixture {
     fn new() -> Self {
         let root = tempfile::tempdir().unwrap();
@@ -47,7 +33,7 @@ impl Fixture {
     fn with_cwd(root: tempfile::TempDir, cwd: PathBuf, agent_dir: PathBuf) -> Self {
         std::fs::create_dir_all(&cwd).unwrap();
         let temp_dir = root.path().to_path_buf();
-        seed_project_trust(&cwd, &agent_dir);
+        crate::settings::project_trust::trust_as_on_disk(&cwd, &agent_dir);
         let settings = SettingsManager::create(&cwd, &agent_dir);
         let manager = PackageManager::with_options(PackageManagerOptions {
             cwd,
@@ -101,12 +87,8 @@ impl Fixture {
         // The fixture writes the project file directly; simulate the user's
         // trust decision for the new bytes so the fixture exercises the
         // trusted path (the gate's own tests pin the untrusted one).
-        self.trust_project_config();
+        crate::settings::project_trust::trust_as_on_disk(self.manager.cwd(), &self.agent_dir);
         self.reload();
-    }
-
-    fn trust_project_config(&self) {
-        seed_project_trust(self.manager.cwd(), &self.agent_dir);
     }
 
     fn reload(&mut self) {

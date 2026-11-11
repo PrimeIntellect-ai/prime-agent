@@ -337,20 +337,6 @@ mod tests {
     use super::*;
     use std::fs;
 
-    /// Trust the fixture project as it is on disk: these tests exercise
-    /// the trusted path; the gate's own tests pin the untrusted one.
-    fn trust_fixture_project(cwd: &Path, agent_dir: &Path) {
-        let settings_path = cwd
-            .join(crate::settings::CONFIG_DIR_NAME)
-            .join("settings.json");
-        crate::settings::trust_project(
-            &agent_dir.join(crate::settings::TRUSTED_PROJECTS_FILE),
-            &settings_path,
-            &crate::settings::project_fingerprint(&settings_path).unwrap(),
-        )
-        .unwrap();
-    }
-
     #[test]
     fn context_files_global_then_ancestors_root_first() {
         let tmp = tempfile::tempdir().unwrap();
@@ -418,7 +404,7 @@ mod tests {
             "custom system",
         )
         .unwrap();
-        trust_fixture_project(&cwd, &agent_dir);
+        crate::settings::project_trust::trust_as_on_disk(&cwd, &agent_dir);
         let resources = load_resources(ResourceLoaderOptions {
             cwd,
             agent_dir,
@@ -518,14 +504,7 @@ mod tests {
             serde_json::json!({"skills": [configured_skill.display().to_string()] }).to_string(),
         )
         .unwrap();
-        // The trusted path: the gate's own tests pin the untrusted one.
-        let settings_path = cwd.join(".prime/agent/settings.json");
-        crate::settings::trust_project(
-            &agent_dir.join(crate::settings::TRUSTED_PROJECTS_FILE),
-            &settings_path,
-            &crate::settings::project_fingerprint(&settings_path).unwrap(),
-        )
-        .unwrap();
+        crate::settings::project_trust::trust_as_on_disk(&cwd, &agent_dir);
         let resources = load_resources(ResourceLoaderOptions::new(&cwd, &agent_dir)).unwrap();
         for name in ["project-code", "configured-code", "ancestor-code"] {
             let project = resources
@@ -583,7 +562,7 @@ mod tests {
             "---\nname: alpha\ndescription: Project alpha\n---\nBody",
         )
         .unwrap();
-        trust_fixture_project(&cwd, &agent_dir);
+        crate::settings::project_trust::trust_as_on_disk(&cwd, &agent_dir);
 
         let resources = load_resources(ResourceLoaderOptions::new(&cwd, &agent_dir)).unwrap();
         let alpha: Vec<_> = resources

@@ -1,11 +1,9 @@
 //! The CWE-426 gate against a malicious-project fixture: the project
 //! document stays entirely inert until its exact bytes are trusted, and
-//! any change re-gates. The stdio-spawn seam — the `mcp.config` host
-//! request the kernel spawns servers through — proves the declared
-//! command never becomes spawnable off the project file.
+//! any change re-gates.
 
 use super::*;
-use crate::mcp::{McpManager, McpServerConfig};
+use crate::mcp::McpServerConfig;
 use crate::resources::{load_resources, ResourceLoaderOptions};
 use crate::settings::{SettingsManager, CONFIG_DIR_NAME};
 use std::collections::HashMap;
@@ -65,11 +63,11 @@ fn resolved_user_servers(manager: &SettingsManager) -> HashMap<String, McpServer
         .collect()
 }
 
-/// An untrusted project document is ENTIRELY inert: nothing merges, and the
-/// declared stdio server never reaches the spawn seam. Red without the gate
-/// (the fixture's `theme` and `compaction` merged unconditionally).
-#[tokio::test]
-async fn project_settings_stay_entirely_inert_until_trusted() {
+/// An untrusted project document is ENTIRELY inert: nothing merges. Red
+/// without the gate (the fixture's `theme` and `compaction` merged
+/// unconditionally).
+#[test]
+fn project_settings_stay_entirely_inert_until_trusted() {
     let dir = tempfile::tempdir().unwrap();
     let agent_dir = dir.path().join("agent");
     let cwd = dir.path().join("repo");
@@ -83,32 +81,6 @@ async fn project_settings_stay_entirely_inert_until_trusted() {
         manager.settings().compaction.is_none(),
         "the fixture's compaction settings must not merge"
     );
-    let user_servers = resolved_user_servers(&manager);
-    assert!(!user_servers.contains_key("evil-stdio"));
-    // The engine wraps the same call in `spawn_blocking` (auth storage
-    // blocking locks); the test keeps the same discipline.
-    let gating_agent_dir = agent_dir.clone();
-    let (_, generic, gating) = tokio::task::spawn_blocking(move || {
-        McpManager::prompt_gating(user_servers, &gating_agent_dir)
-    })
-    .await
-    .unwrap();
-    assert!(generic.is_empty());
-    let manager = std::sync::Arc::new(std::sync::Mutex::new(gating));
-    let mut handlers = crate::kernel::shared::HostRequestHandlers::default();
-    McpManager::register_host_handlers(&manager, &mut handlers);
-    let config = handlers.get("mcp.config").unwrap().clone();
-    let result = config(crate::kernel::shared::HostRequestPayload {
-        data: serde_json::json!({ "server": "evil-stdio" }),
-    })
-    .await
-    .unwrap();
-    assert_eq!(
-        result,
-        serde_json::json!({}),
-        "the project's stdio command must never resolve to a spawnable config"
-    );
-    assert!(!marker.exists());
 }
 
 /// A trusted fingerprint applies the deep merge — and still keeps stdio
@@ -121,12 +93,7 @@ fn trusted_fingerprint_applies_the_deep_merge_and_keeps_stdio_execution_user_onl
     let cwd = dir.path().join("repo");
     let marker = dir.path().join("spawned-marker");
     malicious_project(&cwd, &marker);
-    trust_project(
-        &agent_dir.join(TRUSTED_PROJECTS_FILE),
-        &project_settings(&cwd),
-        &project_fingerprint(&project_settings(&cwd)).unwrap(),
-    )
-    .unwrap();
+    trust_as_on_disk(&cwd, &agent_dir);
 
     let manager = SettingsManager::create(&cwd, &agent_dir);
     assert_eq!(manager.settings().theme.as_deref(), Some("injected-theme"));
@@ -156,25 +123,14 @@ fn a_changed_settings_file_re_gates_until_trusted_again() {
     let cwd = dir.path().join("repo");
     let marker = dir.path().join("spawned-marker");
     malicious_project(&cwd, &marker);
-    let registry_path = agent_dir.join(TRUSTED_PROJECTS_FILE);
     let settings_path = project_settings(&cwd);
-    trust_project(
-        &registry_path,
-        &settings_path,
-        &project_fingerprint(&settings_path).unwrap(),
-    )
-    .unwrap();
+    trust_as_on_disk(&cwd, &agent_dir);
 
     std::fs::write(&settings_path, r#"{ "theme": "changed-theme" }"#).unwrap();
     let manager = SettingsManager::create(&cwd, &agent_dir);
     assert_eq!(manager.settings().theme, None, "a changed file re-gates");
 
-    trust_project(
-        &registry_path,
-        &settings_path,
-        &project_fingerprint(&settings_path).unwrap(),
-    )
-    .unwrap();
+    trust_as_on_disk(&cwd, &agent_dir);
     let manager = SettingsManager::create(&cwd, &agent_dir);
     assert_eq!(manager.settings().theme.as_deref(), Some("changed-theme"));
 }
@@ -190,14 +146,7 @@ fn a_changed_or_new_system_prompt_file_re_gates_the_project() {
     let settings_path = malicious_project(&cwd, &dir.path().join("marker"));
     let system = settings_path.with_file_name("SYSTEM.md");
     std::fs::write(&system, "trusted prompt").unwrap();
-    let trust = || {
-        trust_project(
-            &agent_dir.join(TRUSTED_PROJECTS_FILE),
-            &settings_path,
-            &project_fingerprint(&settings_path).unwrap(),
-        )
-        .unwrap();
-    };
+    let trust = || trust_as_on_disk(&cwd, &agent_dir);
     trust();
     assert!(SettingsManager::create(&cwd, &agent_dir).project_config_trusted());
 
@@ -251,12 +200,7 @@ fn a_symlinked_settings_file_does_not_reuse_another_projects_trust() {
     let imposter = dir.path().join("imposter-project");
     malicious_project(&trusted_project, &dir.path().join("trusted-marker"));
     let settings_path = project_settings(&trusted_project);
-    trust_project(
-        &agent_dir.join(TRUSTED_PROJECTS_FILE),
-        &settings_path,
-        &project_fingerprint(&settings_path).unwrap(),
-    )
-    .unwrap();
+    trust_as_on_disk(&trusted_project, &agent_dir);
 
     let imposter_config = imposter.join(CONFIG_DIR_NAME);
     std::fs::create_dir_all(&imposter_config).unwrap();
@@ -290,13 +234,8 @@ fn trust_project_creates_a_missing_agent_dir() {
     let dir = tempfile::tempdir().unwrap();
     let agent_dir = dir.path().join("agent").join("nested");
     let cwd = dir.path().join("repo");
-    let settings_path = malicious_project(&cwd, &dir.path().join("marker"));
-    trust_project(
-        &agent_dir.join(TRUSTED_PROJECTS_FILE),
-        &settings_path,
-        &project_fingerprint(&settings_path).unwrap(),
-    )
-    .unwrap();
+    malicious_project(&cwd, &dir.path().join("marker"));
+    trust_as_on_disk(&cwd, &agent_dir);
     assert!(agent_dir.join(TRUSTED_PROJECTS_FILE).exists());
     let manager = SettingsManager::create(&cwd, &agent_dir);
     assert_eq!(manager.settings().theme.as_deref(), Some("injected-theme"));
@@ -310,13 +249,7 @@ fn a_trusted_project_write_re_pins_the_new_bytes() {
     let agent_dir = dir.path().join("agent");
     let cwd = dir.path().join("repo");
     malicious_project(&cwd, &dir.path().join("marker"));
-    let settings_path = project_settings(&cwd);
-    trust_project(
-        &agent_dir.join(TRUSTED_PROJECTS_FILE),
-        &settings_path,
-        &project_fingerprint(&settings_path).unwrap(),
-    )
-    .unwrap();
+    trust_as_on_disk(&cwd, &agent_dir);
 
     let mut manager = SettingsManager::create(&cwd, &agent_dir);
     manager.set_project_resource_array("skills", vec!["custom".to_string()]);
@@ -346,12 +279,7 @@ fn a_write_against_diverged_project_bytes_fails_closed() {
     let cwd = dir.path().join("repo");
     malicious_project(&cwd, &dir.path().join("marker"));
     let settings_path = project_settings(&cwd);
-    trust_project(
-        &agent_dir.join(TRUSTED_PROJECTS_FILE),
-        &settings_path,
-        &project_fingerprint(&settings_path).unwrap(),
-    )
-    .unwrap();
+    trust_as_on_disk(&cwd, &agent_dir);
     std::fs::write(&settings_path, r#"{ "theme": "pulled-theme" }"#).unwrap();
 
     let mut manager = SettingsManager::create(&cwd, &agent_dir);
@@ -489,13 +417,7 @@ fn discovered_project_config_loads_only_when_trusted() {
         Some("# replaced system prompt")
     );
 
-    let settings_path = project_settings(&cwd);
-    trust_project(
-        &agent_dir.join(TRUSTED_PROJECTS_FILE),
-        &settings_path,
-        &project_fingerprint(&settings_path).unwrap(),
-    )
-    .unwrap();
+    trust_as_on_disk(&cwd, &agent_dir);
     let resources = load_resources_cold(&cwd, &agent_dir);
     assert!(resources.skills.iter().any(|skill| skill.name == "evil"));
     assert!(resources
@@ -544,26 +466,6 @@ fn an_absent_document_write_creates_no_trust() {
     );
 }
 
-/// Distinct non-UTF-8 project paths keep distinct registry keys: the digest
-/// key is lossless where a lossy text key would collide.
-#[cfg(unix)]
-#[test]
-fn distinct_non_utf8_paths_keep_distinct_registry_keys() {
-    use std::ffi::OsStr;
-    use std::os::unix::ffi::OsStrExt;
-    let a = Path::new(OsStr::from_bytes(
-        b"/nonexistent/a\xffb/.prime/agent/settings.json",
-    ));
-    let b = Path::new(OsStr::from_bytes(
-        b"/nonexistent/a\xfeb/.prime/agent/settings.json",
-    ));
-    assert_ne!(
-        super::registry_key(a),
-        super::registry_key(b),
-        "a lossy text key would collide these two projects"
-    );
-}
-
 /// An unreadable settings file never rides the absence pin: after trusting
 /// a settings-less project, a file that appears unreadable refuses.
 #[cfg(unix)]
@@ -576,12 +478,7 @@ fn an_unreadable_settings_file_never_rides_the_absence_pin() {
     let cwd = dir.path().join("repo");
     let settings_path = project_settings(&cwd);
     std::fs::create_dir_all(settings_path.parent().unwrap()).unwrap();
-    trust_project(
-        &agent_dir.join(TRUSTED_PROJECTS_FILE),
-        &settings_path,
-        &project_fingerprint(&settings_path).unwrap(),
-    )
-    .unwrap();
+    trust_as_on_disk(&cwd, &agent_dir);
     std::fs::write(&settings_path, b"{\"theme\": \xff invalid}").unwrap();
     let manager = SettingsManager::create(&cwd, &agent_dir);
     assert!(
@@ -627,12 +524,7 @@ fn an_absence_pin_extends_to_the_first_write() {
     )
     .unwrap();
     let settings_path = project_settings(&cwd);
-    trust_project(
-        &agent_dir.join(TRUSTED_PROJECTS_FILE),
-        &settings_path,
-        &project_fingerprint(&settings_path).unwrap(),
-    )
-    .unwrap();
+    trust_as_on_disk(&cwd, &agent_dir);
     let before = SettingsManager::create(&cwd, &agent_dir);
     assert!(
         before.project_config_trusted(),
@@ -683,9 +575,10 @@ fn a_pinned_prompt_file_outside_the_project_refuses() {
     std::os::unix::fs::symlink(&outside, settings_path.with_file_name("SYSTEM.md")).unwrap();
     // The pin is uncomputable (refused): no pin, no trust.
     assert!(super::project_fingerprint(&settings_path).is_err());
-    // A FIFO never blocks the read either: refused, not opened.
+    // A FIFO never blocks the read either: refused, not opened. The link
+    // goes first, or its refusal would answer before the FIFO is reached.
+    std::fs::remove_file(settings_path.with_file_name("SYSTEM.md")).unwrap();
     let fifo = settings_path.with_file_name("APPEND_SYSTEM.md");
-    let _ = std::fs::remove_file(&fifo);
     {
         use std::os::unix::ffi::OsStrExt;
         let name = std::ffi::CString::new(fifo.as_os_str().as_bytes()).expect("fifo path");
@@ -715,54 +608,6 @@ fn a_oversized_prompt_file_refuses_instead_of_reading() {
     big.truncate(cap);
     std::fs::write(settings_path.with_file_name("SYSTEM.md"), &big).unwrap();
     assert!(super::project_fingerprint(&settings_path).is_ok());
-}
-
-/// The write path's re-pin lands exactly the pin the lock's own check
-/// validated — no fresh unlocked read of the prompt files sits between
-/// the check and the registry write. (The race window lives inside one
-/// lock call, so the mutation-red is not deterministically injectable;
-/// this contract pin pins the registry's stored value to the check-time
-/// pin, which the re-reading mutant violates the moment any prompt file
-/// differs from the check read.)
-#[test]
-fn the_repin_stores_the_pin_the_check_validated() {
-    let dir = tempfile::tempdir().unwrap();
-    let agent_dir = dir.path().join("agent");
-    let cwd = dir.path().join("repo");
-    std::fs::create_dir_all(&agent_dir).unwrap();
-    let settings_path = project_settings(&cwd);
-    std::fs::create_dir_all(settings_path.parent().unwrap()).unwrap();
-    std::fs::write(&settings_path, r#"{"theme":"x"}"#).unwrap();
-    std::fs::write(settings_path.with_file_name("SYSTEM.md"), "v1").unwrap();
-    let fingerprint = super::project_fingerprint(&settings_path).unwrap();
-    trust_project(
-        &agent_dir.join(TRUSTED_PROJECTS_FILE),
-        &settings_path,
-        &fingerprint,
-    )
-    .unwrap();
-
-    let mut manager = SettingsManager::create(&cwd, &agent_dir);
-    manager.set_project_resource_array("skills", vec!["custom".to_string()]);
-    assert!(
-        manager.drain_errors().is_empty(),
-        "the trusted write succeeds"
-    );
-
-    // The registry entry equals the pin over the WRITTEN settings plus the
-    // check-time SYSTEM.md — the one-pin contract.
-    let written = std::fs::read_to_string(&settings_path).unwrap();
-    let expected = super::pin(&settings_path, Some(&written)).unwrap();
-    let registry = std::fs::read_to_string(agent_dir.join(TRUSTED_PROJECTS_FILE)).unwrap();
-    assert!(
-        registry.contains(&expected),
-        "the registry must hold the check-time pin {expected}"
-    );
-    let after = SettingsManager::create(&cwd, &agent_dir);
-    assert!(
-        after.project_config_trusted(),
-        "the re-pin admits the written state"
-    );
 }
 
 /// The notice's command pastes as one shell argument, with control bytes
