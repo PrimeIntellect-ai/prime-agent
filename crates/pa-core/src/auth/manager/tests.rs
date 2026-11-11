@@ -549,7 +549,7 @@ impl CountingOAuth {
         AuthCredential::Oauth {
             access: "fetched-access".into(),
             refresh: Some("fetched-refresh".into()),
-            expires: now_epoch_ms() + 3_600_000,
+            expires: 4_102_444_800_000,
             account_id: None,
             enterprise_url: None,
             endpoint: None,
@@ -1377,4 +1377,30 @@ fn a_failed_forced_refresh_reports_and_logs_a_redacted_reason() {
             serde_json::json!({ "provider": provider, "trigger": "rejected", "reason": reason }),
         )]
     );
+}
+
+/// A failed refresh never fails a provider that an environment key still
+/// serves: the provider request falls back to that key.
+#[test]
+fn a_failed_refresh_with_an_environment_key_resolves() {
+    let auth = storage_with_env(
+        &serde_json::json!({
+            "anthropic": {
+                "type": "oauth", "access": "expired-access", "refresh": "stored-refresh", "expires": 1
+            }
+        }),
+        ScriptedEnv(HashMap::from([(
+            "ANTHROPIC_API_KEY".to_string(),
+            "env-key".to_string(),
+        )])),
+    );
+    let mut registry = crate::models::ModelRegistry::in_memory(auth);
+    let model: pa_types::ai::Model = serde_json::from_value(serde_json::json!({
+        "id": "m", "name": "m", "api": "anthropic-messages", "provider": "anthropic",
+        "baseUrl": "https://example.com", "reasoning": false, "input": ["text"],
+        "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0 },
+        "contextWindow": 1000, "maxTokens": 100
+    }))
+    .unwrap();
+    assert!(registry.get_api_key_and_headers(&model, None).ok);
 }

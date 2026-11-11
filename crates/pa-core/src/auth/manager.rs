@@ -85,7 +85,7 @@ pub struct AuthApiKeyResult {
     pub api_key: Option<String>,
     pub source_token: Option<AuthSourceToken>,
     pub credential_type: Option<&'static str>,
-    /// Set when the stored OAuth credential expired and its refresh failed.
+    /// Set when the stored OAuth credential's refresh failed and no environment key serves.
     pub refresh_failure: Option<OAuthRefreshFailure>,
 }
 

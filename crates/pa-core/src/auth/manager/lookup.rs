@@ -109,8 +109,14 @@ impl AuthStorage {
                                 let refreshed = match self.refresh_oauth(provider_id) {
                                     Ok(refreshed) => refreshed,
                                     Err(failure) => {
+                                        // The provider request still falls
+                                        // back to an environment key.
                                         return AuthApiKeyResult {
-                                            refresh_failure: Some(failure),
+                                            refresh_failure: self
+                                                .env_credentials
+                                                .api_key(provider_id)
+                                                .is_none()
+                                                .then_some(failure),
                                             ..AuthApiKeyResult::default()
                                         };
                                     }
