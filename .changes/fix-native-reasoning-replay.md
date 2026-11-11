@@ -1,0 +1,1 @@
+- Preserve signed, redacted, and reasoning-only responses when continuing conversations with Anthropic, Bedrock, Google, and chat-completions providers.

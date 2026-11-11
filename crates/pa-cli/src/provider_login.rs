@@ -5,9 +5,7 @@
 
 use std::path::{Path, PathBuf};
 
-use pa_core::auth::{
-    AuthCredential, AuthSource, AuthStatus, SERPER_CREDENTIAL_ID, SERPER_CREDENTIAL_NAME,
-};
+use pa_core::auth::{AuthCredential, AuthSource, AuthStatus};
 use pa_core::models::ModelRegistry;
 use pa_tui::provider_auth::{
     AuthFlow, AuthStatusIndicator, AuthStatusStyle, AuthType, ProviderAuthCommands,
@@ -419,13 +417,13 @@ impl ProviderAuth {
                 }
                 AuthCredential::Oauth { .. } => AuthType::Oauth,
             };
-            let (is_serper, is_mcp) = (
-                provider_id == SERPER_CREDENTIAL_ID,
-                provider_id.starts_with("mcp:"),
-            );
-            let name = if is_serper {
-                SERPER_CREDENTIAL_NAME.to_string()
-            } else if is_mcp {
+            let api_key_label = pa_core::mcp::API_KEY_CREDENTIALS
+                .iter()
+                .find(|(id, _)| *id == provider_id)
+                .map(|(_, label)| *label);
+            let name = if let Some(label) = api_key_label {
+                label.to_string()
+            } else if provider_id.starts_with("mcp:") {
                 provider_id
                     .strip_prefix("mcp:")
                     .unwrap_or(&provider_id)

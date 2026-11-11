@@ -18,6 +18,73 @@ fn document(storage: &dyn SettingsStorage) -> Value {
 }
 
 #[test]
+fn project_settings_cannot_select_executable_configuration() {
+    let (storage, mut manager) = fixture(
+        r#"{"theme":"global","shellPath":"/trusted/shell","shellCommandPrefix":"trusted", "npmCommand":["trusted-npm"],"packages":["trusted-package"],"mcpServers":{"trusted":{"command":"trusted"}},"mcpCatalogSources":["trusted.json"]}"#,
+    );
+    let project = json!({
+        "theme": "project",
+        "shellPath": "/attacker/shell",
+        "shellCommandPrefix": "attacker",
+        "npmCommand": ["attacker-npm"],
+        "packages": ["npm:attacker"],
+        "mcpServers": {"attacker": {"command": "attacker"}},
+        "mcpCatalogSources": ["attacker.json"]
+    });
+    storage
+        .with_lock(SettingsScope::Project, &mut |_| Some(project.to_string()))
+        .unwrap();
+    manager.reload().unwrap();
+    let reopened = manager.reopen();
+    for effective in [manager.settings(), reopened.settings()] {
+        assert_eq!(effective.theme.as_deref(), Some("project"));
+        assert_eq!(effective.shell_path.as_deref(), Some("/trusted/shell"));
+        assert_eq!(effective.shell_command_prefix.as_deref(), Some("trusted"));
+        assert_eq!(effective.npm_command, Some(vec!["trusted-npm".into()]));
+        assert_eq!(effective.packages, Some(vec![json!("trusted-package")]));
+        assert!(effective
+            .mcp_servers
+            .as_ref()
+            .unwrap()
+            .contains_key("trusted"));
+        assert!(!effective
+            .mcp_servers
+            .as_ref()
+            .unwrap()
+            .contains_key("attacker"));
+        assert_eq!(
+            effective.mcp_catalog_sources,
+            Some(vec!["trusted.json".into()])
+        );
+    }
+    let project_settings = manager.project_settings();
+    assert_eq!(project_settings.shell_path, None);
+    assert_eq!(project_settings.shell_command_prefix, None);
+    assert_eq!(project_settings.npm_command, None);
+    assert_eq!(project_settings.packages, None);
+    assert_eq!(project_settings.mcp_servers, None);
+    assert_eq!(project_settings.mcp_catalog_sources, None);
+    assert_eq!(
+        serde_json::from_str::<Value>(&storage.read(SettingsScope::Project).unwrap().unwrap())
+            .unwrap(),
+        project
+    );
+}
+
+#[test]
+fn project_packages_stay_inert_after_a_project_write() {
+    let (storage, mut manager) = fixture("{}");
+    manager.set_project_packages(vec![json!("npm:attacker")]);
+    assert_eq!(manager.settings().packages, None);
+    assert_eq!(manager.project_settings().packages, None);
+    assert_eq!(
+        serde_json::from_str::<Value>(&storage.read(SettingsScope::Project).unwrap().unwrap())
+            .unwrap(),
+        json!({"packages":["npm:attacker"]})
+    );
+}
+
+#[test]
 fn model_switch_preserves_a_document_that_failed_to_load() {
     for content in ["{\"theme\":\"light\",}", "\u{feff}{\"theme\":\"light\"}"] {
         let (storage, mut manager) = fixture(content);

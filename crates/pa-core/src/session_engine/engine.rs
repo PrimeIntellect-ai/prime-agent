@@ -88,6 +88,9 @@ pub struct SessionEngineConfig {
     /// Boot the kernel in the background at creation, depth-0 gated; boot
     /// failures surface on the next `ensure()`.
     pub prewarm_ipython_kernel: Option<bool>,
+    /// The kernel restores its snapshot only after this resolves: a replaced engine
+    /// sharing the session's artifact dir flushes its final snapshot first.
+    pub kernel_ready_gate: Option<crate::kernel::provisioner::KernelReadyGate>,
     /// Fires when the kernel's last live background `bash()` handle
     /// settles; `None` installs nothing.
     pub on_background_work_settled: Option<crate::kernel::shared::BackgroundWorkSettledCallback>,
@@ -282,6 +285,7 @@ pub async fn create_session(mut config: SessionEngineConfig) -> anyhow::Result<S
     // Captured before `settings` moves into the resource loader: the
     // default cell time limit (default 60s, `0` disables).
     let python_cell_timeout_ms = settings.get_python_cell_timeout_ms();
+    let web_search_provider = settings.get_web_search_provider();
     let (mcp_skill_overrides, mcp_generic_servers, built_manager) =
         mcp_gating(&settings, config.agent_dir.clone()).await?;
     let mcp_manager = config
@@ -478,22 +482,20 @@ pub async fn create_session(mut config: SessionEngineConfig) -> anyhow::Result<S
     let model_visible_skills =
         super::runtime_wiring::model_visible_skills(resources.skills.clone(), &handlers);
     let python_skills = super::runtime_wiring::kernel_python_skills(&model_visible_skills);
-    // TS resolves the serper credential on the host: `!command` key refs
+    // TS resolves the web-search credential on the host: `!command` key refs
     // cannot run in-kernel (the websearch skill's auth.json fallback reads
-    // literals and env-var names, not commands). The credential is read
-    // under the auth lock, then resolved off the async runtime (a `!command`
-    // key can block).
-    let serper_api_key = {
+    // literals and env-var names, not commands). The selected provider's
+    // credential is read under the auth lock, then resolved off the async
+    // runtime (a `!command` key can block).
+    let websearch_env = {
         let credential = {
             let auth = mcp_manager.lock().unwrap().auth_storage_handle();
             let guard = auth.lock().await;
-            guard
-                .get_all()
-                .credential(crate::auth::SERPER_CREDENTIAL_ID)
+            guard.get_all().credential(web_search_provider.id())
         };
         let skills = resources.skills.clone();
         tokio::task::spawn_blocking(move || {
-            super::runtime_wiring::websearch_api_key(&skills, credential)
+            super::runtime_wiring::websearch_env(&skills, web_search_provider, credential)
         })
         .await
         .map_err(|join| anyhow::anyhow!("websearch key resolve join failed: {join}"))?
@@ -511,13 +513,14 @@ pub async fn create_session(mut config: SessionEngineConfig) -> anyhow::Result<S
         &config.agent_dir,
         kernel_shell_path,
         kernel_command_prefix,
-        serper_api_key,
+        websearch_env,
         session_artifact_dir,
         cell_timeout_ms,
         on_restore,
         config.on_background_work_settled.clone(),
         on_unavailable_skills,
         on_bootstrap_result,
+        config.kernel_ready_gate.clone(),
     );
     let mut tools = config.tools.clone();
     if !tools.iter().any(|tool| tool.name() == PYTHON_TOOL_NAME) {

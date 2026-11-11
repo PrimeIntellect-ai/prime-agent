@@ -71,7 +71,7 @@ impl AgentSessionEngine {
             // is selected; the next boundary retries.
             return Ok(None);
         };
-        let api_key = self.resolve_request_api_key(&model);
+        let (model, api_key) = self.resolve_request_target(model);
         let global_harness_dir = self.config.agent_dir.clone();
         // The lock covers the clone only (see `run_compaction`): holding the
         // session mutex across the review serialized every client read seam
@@ -119,7 +119,7 @@ mod tests {
         script: &serde_json::Value,
         reserve_tokens: u64,
         with_session_file: bool,
-    ) -> (AgentSessionEngine, tempfile::TempDir) {
+    ) -> (std::sync::Arc<AgentSessionEngine>, tempfile::TempDir) {
         let (engine, dir) = faux_engine_with_settings(script, reserve_tokens);
         if with_session_file {
             let sessions = dir.path().join("sessions");

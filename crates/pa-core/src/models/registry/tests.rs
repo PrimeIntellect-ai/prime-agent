@@ -129,6 +129,97 @@ fn models_json_custom_models_and_auth_header() {
     );
 }
 
+/// One refreshing lookup per `get_api_key_and_headers` call: an expired
+/// OAuth credential with a failing refresh serves the configured
+/// `models.json` fallback key after exactly one refresh attempt — the
+/// live seam's per-request re-resolution must never re-fetch a token
+/// the same resolution just failed to refresh.
+#[test]
+fn get_api_key_and_headers_attempts_one_refresh_per_call() {
+    struct CountingFailingRefresh(std::sync::Mutex<usize>);
+    impl crate::auth::manager::OAuthIntegration for CountingFailingRefresh {
+        fn api_key_for(
+            &self,
+            _provider: &str,
+            credential: &crate::auth::types::AuthCredential,
+        ) -> Option<String> {
+            match credential {
+                crate::auth::types::AuthCredential::Oauth { access, .. } => Some(access.clone()),
+                _ => None,
+            }
+        }
+
+        fn refresh(
+            &self,
+            _provider: &str,
+            _credentials: &crate::auth::types::AuthStorageData,
+        ) -> Option<crate::auth::types::AuthCredential> {
+            *self.0.lock().unwrap() += 1;
+            None
+        }
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let models_path = dir.path().join("models.json");
+    std::fs::write(
+        &models_path,
+        r#"{ "providers": { "battery": {
+            "baseUrl": "https://battery.example", "apiKey": "sk-config-fallback",
+            "api": "openai-completions",
+            "models": [ { "id": "mock-1" } ]
+        } } }"#,
+    )
+    .unwrap();
+    let data = AuthStorageData(
+        serde_json::json!({
+            "battery": { "type": "oauth", "access": "stale-access", "refresh": "r", "expires": 1 }
+        })
+        .as_object()
+        .cloned()
+        .unwrap_or_default(),
+    );
+    let refreshes = std::sync::Arc::new(CountingFailingRefresh(std::sync::Mutex::new(0)));
+    let auth = AuthStorage::in_memory_without_env(&data, refreshes.clone());
+    let mut registry = ModelRegistry::create(auth, &models_path);
+    let battery = registry
+        .get_all()
+        .iter()
+        .find(|model| model.provider == "battery" && model.id == "mock-1")
+        .expect("the custom model merges")
+        .clone();
+    let resolved = registry.get_api_key_and_headers(&battery, None);
+    assert!(resolved.ok);
+    assert_eq!(
+        resolved.api_key.as_deref(),
+        Some("sk-config-fallback"),
+        "the failed refresh falls back to the configured key"
+    );
+    assert_eq!(
+        *refreshes.0.lock().unwrap(),
+        1,
+        "one lookup, one refresh attempt"
+    );
+
+    // An unexpired stored credential serves with no refresh attempt
+    // at all.
+    let fresh = AuthStorageData(
+        serde_json::json!({
+            "battery": {
+                "type": "oauth", "access": "live-access", "refresh": "r",
+                "expires": 4_102_444_800_000i64
+            }
+        })
+        .as_object()
+        .cloned()
+        .unwrap_or_default(),
+    );
+    let refreshes = std::sync::Arc::new(CountingFailingRefresh(std::sync::Mutex::new(0)));
+    let auth = AuthStorage::in_memory_without_env(&fresh, refreshes.clone());
+    let mut registry = ModelRegistry::create(auth, &models_path);
+    let resolved = registry.get_api_key_and_headers(&battery, None);
+    assert_eq!(resolved.api_key.as_deref(), Some("live-access"));
+    assert_eq!(*refreshes.0.lock().unwrap(), 0, "no refresh fires");
+}
+
 #[test]
 fn models_json_error_keeps_built_ins() {
     let dir = tempfile::tempdir().unwrap();
@@ -399,6 +490,64 @@ fn a_subscription_model_keeps_its_own_thinking_level_map() {
     );
 }
 
+/// TS `getApiKeyAndHeaders`'s per-call request model for xAI: the stored
+/// subscription serves the adapted (openai-responses) shape, an API-key
+/// credential serves the configured shape — even for a model captured
+/// under the subscription (the slot's shape re-resolves onto the
+/// current credential's).
+#[test]
+fn the_request_model_follows_the_xai_credential_shape_per_call() {
+    let auth = auth_without_env(&serde_json::json!({
+        "xai": {
+            "type": "oauth",
+            "access": "grok",
+            "refresh": "r",
+            "expires": 4_102_444_800_000i64,
+        }
+    }));
+    let mut registry = ModelRegistry::in_memory(auth);
+    let configured = registry
+        .get_all()
+        .iter()
+        .find(|model| model.provider == "xai")
+        .expect("the xai model renders")
+        .clone();
+    assert_eq!(
+        configured.api, "openai-responses",
+        "the subscription adapted the registry model at load"
+    );
+    let resolved = registry.get_api_key_and_headers(&configured, None);
+    assert_eq!(resolved.api_key.as_deref(), Some("grok"));
+    let request_model = resolved
+        .request_model
+        .expect("the xAI resolution serves a request model");
+    assert_eq!(request_model.api, "openai-responses");
+    assert_eq!(request_model.base_url, "https://api.x.ai/v1");
+
+    // An API-key credential: the registry stays on the configured shape,
+    // and a model captured under the subscription (the slot's shape)
+    // re-resolves onto the configured shape.
+    let auth = auth_without_env(&serde_json::json!({
+        "xai": { "type": "api_key", "key": "sk-xai" }
+    }));
+    let mut registry = ModelRegistry::in_memory(auth);
+    let configured = registry
+        .get_all()
+        .iter()
+        .find(|model| model.provider == "xai")
+        .expect("the xai model renders")
+        .clone();
+    assert_eq!(configured.api, "openai-completions");
+    let captured = xai_subscription_model(&configured);
+    let resolved = registry.get_api_key_and_headers(&captured, None);
+    assert_eq!(resolved.api_key.as_deref(), Some("sk-xai"));
+    let request_model = resolved
+        .request_model
+        .expect("the xAI resolution serves a request model");
+    assert_eq!(request_model.api, "openai-completions");
+    assert_eq!(request_model, configured);
+}
+
 #[test]
 fn without_a_stored_xai_subscription_the_models_stay_on_completions() {
     let registry = ModelRegistry::in_memory(auth_without_env(&serde_json::json!({})));
@@ -453,4 +602,62 @@ async fn scope_readiness_timeout_keeps_models_available_before_refresh() {
             .collect::<Vec<_>>(),
         vec![existing]
     );
+}
+
+#[test]
+fn a_prime_base_url_override_voids_the_live_serving_label() {
+    let dir = tempfile::tempdir().unwrap();
+    let auth = auth_without_env(&serde_json::json!({
+        "prime-inference": { "type": "api_key", "key": "live-key",
+            "primeTeam": { "teamId": "team-1", "name": "Team 1" } }
+    }));
+    // Every compiled route labeled hosted, so the snapshot passes the coverage gate.
+    let compiled = pa_models::transports::prime_inference_offline_entries();
+    let entries: Vec<_> = compiled
+        .iter()
+        .map(|model| {
+            serde_json::json!({
+                "id": model.id,
+                "serving": "hosted",
+                "pricing": { "input_usd_per_mtok": 1.0, "output_usd_per_mtok": 1.0 },
+            })
+        })
+        .collect();
+    let snapshot = serde_json::json!({
+        "url": format!("{}/models", super::super::prime_inference::PRIME_INFERENCE_BASE_URL),
+        "scope": pa_models::prime_inference::scope_key("live-key", "team-1"),
+        "fetchedAt": 1,
+        "payload": { "data": entries },
+    });
+    std::fs::create_dir_all(dir.path().join("models")).unwrap();
+    std::fs::write(
+        dir.path().join("models/prime-inference-models-cache.json"),
+        serde_json::to_vec(&snapshot).unwrap(),
+    )
+    .unwrap();
+    let models_path = dir.path().join("models.json");
+    std::fs::write(&models_path, "{}").unwrap();
+    let mut registry = ModelRegistry::create(auth, &models_path);
+    let probe = |registry: &ModelRegistry| {
+        registry
+            .get_all()
+            .iter()
+            .find(|model| model.id == compiled[0].id && model.provider == "prime-inference")
+            .cloned()
+            .unwrap()
+    };
+    assert_eq!(
+        probe(&registry).serving,
+        Some(pa_types::ai::ModelServing::Hosted)
+    );
+
+    std::fs::write(
+        &models_path,
+        r#"{ "providers": { "prime-inference": { "baseUrl": "https://my-gateway.example/v1" } } }"#,
+    )
+    .unwrap();
+    registry.refresh();
+    let overridden = probe(&registry);
+    assert_eq!(overridden.base_url, "https://my-gateway.example/v1");
+    assert_eq!(overridden.serving, None);
 }

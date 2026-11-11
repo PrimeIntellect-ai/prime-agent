@@ -27,6 +27,7 @@ pub struct SettingsManager {
     global: Settings,
     pending_global_fields: BTreeSet<&'static str>,
     project: Settings,
+    project_raw: Option<serde_json::Value>,
     merged: Settings,
     runtime_overrides: Settings,
     errors: Vec<SettingsError>,
@@ -34,7 +35,7 @@ pub struct SettingsManager {
     /// gate distinguishes an ABSENT `allowedModels` key (unrestricted) from a
     /// PRESENT-but-malformed one (fails closed); typed `Settings` drops both to `None`.
     global_raw: Option<serde_json::Value>,
-    /// Load failures per scope; a scope whose file failed to parse is never written back.
+    /// Load failures per scope; a scope whose file failed to load is never written back.
     global_load_error: Option<String>,
     project_load_error: Option<String>,
 }
@@ -44,7 +45,7 @@ impl SettingsManager {
         let mut errors = Vec::new();
         let (global, global_raw, global_load_error) =
             load_scope(storage.as_ref(), SettingsScope::Global, &mut errors);
-        let (project, _, project_load_error) =
+        let (project, project_raw, project_load_error) =
             load_scope(storage.as_ref(), SettingsScope::Project, &mut errors);
         let merged = deep_merge(&global, &project);
         Self {
@@ -52,6 +53,7 @@ impl SettingsManager {
             global,
             pending_global_fields: BTreeSet::new(),
             project,
+            project_raw,
             merged,
             runtime_overrides: Settings::default(),
             global_raw,
@@ -119,6 +121,18 @@ impl SettingsManager {
         &self.project
     }
 
+    /// Project package entries remain available for an explicit removal, but
+    /// never participate in session resource resolution or update checks.
+    #[must_use]
+    pub(crate) fn project_packages_for_removal(&self) -> Vec<serde_json::Value> {
+        self.project_raw
+            .as_ref()
+            .and_then(|value| value.get("packages"))
+            .and_then(serde_json::Value::as_array)
+            .cloned()
+            .unwrap_or_default()
+    }
+
     #[must_use]
     pub fn errors(&self) -> &[SettingsError] {
         &self.errors
@@ -138,11 +152,12 @@ impl SettingsManager {
         let mut errors = std::mem::take(&mut self.errors);
         let (global, global_raw, global_load_error) =
             load_scope(self.storage.as_ref(), SettingsScope::Global, &mut errors);
-        let (project, _, project_load_error) =
+        let (project, project_raw, project_load_error) =
             load_scope(self.storage.as_ref(), SettingsScope::Project, &mut errors);
         self.global = global;
         self.pending_global_fields.clear();
         self.project = project;
+        self.project_raw = project_raw;
         self.global_raw = global_raw;
         self.global_load_error = global_load_error;
         self.project_load_error = project_load_error;
@@ -457,12 +472,16 @@ impl SettingsManager {
     }
 
     pub fn set_project_packages(&mut self, packages: Vec<serde_json::Value>) {
-        self.project.packages = Some(packages.clone());
-        self.persist_scope_field(
-            SettingsScope::Project,
-            "packages",
-            &serde_json::Value::Array(packages),
-        );
+        // Preserve project package entries for explicit removal. They never
+        // become active, including in this manager.
+        let value = serde_json::Value::Array(packages);
+        self.persist_scope_field(SettingsScope::Project, "packages", &value);
+        if let serde_json::Value::Object(project_raw) = self
+            .project_raw
+            .get_or_insert_with(|| serde_json::json!({}))
+        {
+            project_raw.insert("packages".into(), value);
+        }
         self.merged = deep_merge(&self.global, &self.project);
     }
 
@@ -522,7 +541,7 @@ impl SettingsManager {
             self.errors.push(SettingsError {
                 scope,
                 message: format!(
-                    "{label} settings not saved: settings file failed to parse: {message}"
+                    "{label} settings not saved: settings file failed to load: {message}"
                 ),
             });
             return;
@@ -910,7 +929,7 @@ impl SettingsManager {
             self.errors.push(SettingsError {
                 scope: SettingsScope::Global,
                 message: format!(
-                    "Global settings not saved: settings file failed to parse: {message}"
+                    "Global settings not saved: settings file failed to load: {message}"
                 ),
             });
             return Ok(());
@@ -1040,13 +1059,63 @@ fn load_scope(
         }
         other => other,
     };
-    (from_value_lenient(&migrated), Some(migrated), None)
+    let mut settings = from_value_lenient(&migrated);
+    if scope == SettingsScope::Project {
+        // A repository can supply this file before the user opens it. Keep its
+        // document on disk, but never let it select a process, command prefix,
+        // package installer, or MCP server through an effective settings read.
+        settings.shell_path = None;
+        settings.shell_command_prefix = None;
+        settings.npm_command = None;
+        settings.packages = None;
+        settings.mcp_servers = None;
+        settings.mcp_catalog_sources = None;
+    }
+    (settings, Some(migrated), None)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::settings::types::{MarkdownSettings, DEFAULT_PYTHON_CELL_TIMEOUT_MS};
+
+    #[test]
+    #[cfg(unix)]
+    fn project_settings_cannot_copy_a_linked_auth_document() {
+        let root = tempfile::tempdir().unwrap();
+        let project = root.path().join("project");
+        let agent_dir = root.path().join("global");
+        let project_settings = project.join(".prime/agent/settings.json");
+        let auth = agent_dir.join("auth.json");
+        std::fs::create_dir_all(project_settings.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(&agent_dir).unwrap();
+        let secret = r#"{"prime-inference":{"type":"api_key","key":"sensitive-key"}}"#;
+        std::fs::write(&auth, secret).unwrap();
+        std::os::unix::fs::symlink("../../../global/auth.json", &project_settings).unwrap();
+
+        let mut manager = SettingsManager::create(&project, &agent_dir);
+        manager.set_project_packages(vec![serde_json::json!({"source": "example"})]);
+
+        assert!(std::fs::symlink_metadata(&project_settings)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert_eq!(std::fs::read_to_string(&auth).unwrap(), secret);
+        let messages: Vec<&str> = manager
+            .errors()
+            .iter()
+            .filter(|error| error.scope == SettingsScope::Project)
+            .map(|error| error.message.as_str())
+            .collect();
+        assert!(!messages.is_empty());
+        assert!(
+            messages
+                .iter()
+                .all(|message| message.contains("outside the project root")
+                    && !message.contains("failed to parse")),
+            "{messages:?}"
+        );
+    }
 
     #[test]
     fn in_memory_loads_merges_and_saves() {

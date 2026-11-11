@@ -178,24 +178,29 @@ async fn streamed_turn_pipeline_benchmark() {
             "contextWindow": 4_000_000,
             "maxTokens": 4_000_000,
         });
-        let engine = AgentSessionEngine::new(AgentEngineConfig {
-            cwd: dir.path().to_path_buf(),
-            agent_dir: dir.path().join("agent"),
-            provider: None,
-            model: None,
-            api_key: None,
-            thinking: None,
-            session_dir: None,
-            session_file: None,
-            faux_script: Some(script.to_string()),
-            supervisor_link: None,
-            telemetry_disabled: Some(true),
-            cron_store: None,
-            queued_steering_probe: None,
-        })
-        .unwrap();
+        let engine = std::sync::Arc::new(
+            AgentSessionEngine::new(AgentEngineConfig {
+                cwd: dir.path().to_path_buf(),
+                agent_dir: dir.path().join("agent"),
+                provider: None,
+                model: None,
+                api_key: None,
+                thinking: None,
+                session_dir: None,
+                session_file: None,
+                faux_script: Some(script.to_string()),
+                supervisor_link: None,
+                telemetry_disabled: Some(true),
+                cron_store: None,
+                queued_steering_probe: None,
+            })
+            .unwrap(),
+        );
+        // The worker registers the engine's own arc: the live-auth
+        // resolver upgrades it per provider call.
+        engine.register_arc();
         let started = std::time::Instant::now();
-        let events = turn_session_events(std::sync::Arc::new(engine)).await;
+        let events = turn_session_events(engine).await;
         let elapsed_ms = started.elapsed().as_secs_f64() * 1000.0;
         let updates = events
             .iter()
@@ -221,23 +226,28 @@ async fn the_last_parked_update_carries_the_final_content() {
     let dir = tempfile::TempDir::new().unwrap();
     let text = "pin word ".repeat(512);
     let script = json!({ "engine": "faux", "responses": [{ "content": [{ "type": "text", "text": text }] }] });
-    let engine = AgentSessionEngine::new(AgentEngineConfig {
-        cwd: dir.path().to_path_buf(),
-        agent_dir: dir.path().join("agent"),
-        provider: None,
-        model: None,
-        api_key: None,
-        thinking: None,
-        session_dir: None,
-        session_file: None,
-        faux_script: Some(script.to_string()),
-        supervisor_link: None,
-        telemetry_disabled: Some(true),
-        cron_store: None,
-        queued_steering_probe: None,
-    })
-    .unwrap();
-    let events = turn_session_events(Arc::new(engine)).await;
+    let engine = std::sync::Arc::new(
+        AgentSessionEngine::new(AgentEngineConfig {
+            cwd: dir.path().to_path_buf(),
+            agent_dir: dir.path().join("agent"),
+            provider: None,
+            model: None,
+            api_key: None,
+            thinking: None,
+            session_dir: None,
+            session_file: None,
+            faux_script: Some(script.to_string()),
+            supervisor_link: None,
+            telemetry_disabled: Some(true),
+            cron_store: None,
+            queued_steering_probe: None,
+        })
+        .unwrap(),
+    );
+    // The worker registers the engine's own arc: the live-auth resolver
+    // upgrades it per provider call.
+    engine.register_arc();
+    let events = turn_session_events(engine).await;
     let end = *positions_of(&events, "message_end")
         .last()
         .expect("message_end");
