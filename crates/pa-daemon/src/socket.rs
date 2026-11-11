@@ -17,6 +17,8 @@ pub use crate::platform::{
 };
 
 /// Try to connect to an endpoint within `timeout`; true when a peer accepts.
+/// A peer refused as another user's still counts as live, so stale-socket
+/// cleanup never unlinks it.
 pub async fn can_connect(path: &Path, timeout: Duration) -> bool {
     let connect = pa_types::platform::transport::connect_transport(path);
     match tokio::time::timeout(timeout, connect).await {
@@ -24,7 +26,10 @@ pub async fn can_connect(path: &Path, timeout: Duration) -> bool {
             drop(stream);
             true
         }
-        _ => false,
+        Ok(Err(error)) => error
+            .downcast_ref::<std::io::Error>()
+            .is_some_and(|error| error.kind() == std::io::ErrorKind::PermissionDenied),
+        Err(_) => false,
     }
 }
 
