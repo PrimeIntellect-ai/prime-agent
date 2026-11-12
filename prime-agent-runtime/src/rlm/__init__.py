@@ -126,12 +126,15 @@ class RLMChildResult:
 class RLMInboxMessage:
     """One machine-generated notice waiting in the session inbox.
 
-    `inbox_class` is `bash-done`, `factory-progress`, or
-    `agent-message`; `arrived_at_ms` is the epoch-ms arrival time;
-    `sender` is the command for a bash completion, the run id for a
-    factory milestone, or the agent name for an agent message; `meta`
-    carries the notice's metadata (pid/command/exitCode, the run's
-    fields, or the message id, sender, and family relationship).
+    `inbox_class` is `bash-done`, `factory-progress`, `agent-message`,
+    `child-exited`, `child-failed`, or `heartbeat`; `arrived_at_ms` is
+    the epoch-ms arrival time; `sender` is the command for a bash
+    completion, the run id for a factory milestone, the agent name for
+    an agent message, the child's session name for a child lifecycle
+    notice, or the job id for a heartbeat fire; `meta` carries the
+    notice's metadata (pid/command/exitCode/exitClass, the run's
+    fields, the message id, sender and family relationship, the child's
+    status and ids, or the fired heartbeat's job fields).
     """
 
     id: str
@@ -597,17 +600,18 @@ async def inbox_read(
     before_ms: int | None = None,
 ) -> list[RLMInboxMessage]:
     """Read and drain the session inbox: the waiting machine-generated
-    notices (bash completions, factory milestones, agent messages)
-    return in arrival order with their arrival time, and the inbox
-    empties.
+    notices (bash completions, factory milestones, agent messages,
+    child lifecycle terminals, heartbeat fires) return in arrival order
+    with their arrival time, and the inbox empties.
 
     Every argument narrows the read (ANDed); no argument drains
-    everything. ``sender`` matches exactly (a command, a run id, or an
-    agent name); ``inbox_class`` matches the message class
-    (``bash-done``, ``factory-progress``, ``agent-message``);
-    ``since_ms`` is the inclusive arrival lower bound and ``before_ms``
-    the exclusive upper bound (epoch milliseconds). Only the matching
-    messages leave the inbox.
+    everything. ``sender`` matches exactly (a command, a run id, an
+    agent name, a child's session name, or a heartbeat job id);
+    ``inbox_class`` matches the message class (``bash-done``,
+    ``factory-progress``, ``agent-message``, ``child-exited``,
+    ``child-failed``, ``heartbeat``); ``since_ms`` is the inclusive
+    arrival lower bound and ``before_ms`` the exclusive upper bound
+    (epoch milliseconds). Only the matching messages leave the inbox.
 
     Machine notices accumulate in the daemon-owned inbox instead of
     steering their full rows; a short steering notice announces their

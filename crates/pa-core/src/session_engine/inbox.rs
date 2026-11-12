@@ -1,5 +1,6 @@
 //! The agent inbox: the daemon-owned store where machine-generated
-//! kernel notices (`bash.completed` and `factory.progress`) accumulate
+//! kernel notices (`bash.completed`, `factory.progress`, agent
+//! messages, child lifecycle terminals, and heartbeat fires) accumulate
 //! per session instead of steering their full rows, plus the
 //! `rlm.inbox.read`/`rlm.inbox.count` host requests the agent reads
 //! them with. The durable journal (`inbox.jsonl` under the session dir)
@@ -16,6 +17,7 @@ use crate::kernel::shared::{host_handler, HostRequestHandlers};
 use super::bash_notices::KernelNotice;
 use super::messages::{ASYNC_BASH_COMPLETION_CUSTOM_TYPE, FACTORY_PROGRESS_NOTICE_CUSTOM_TYPE};
 use pa_types::ai::UserContent;
+use pa_types::session::CustomMessage;
 
 /// The kernel host request that drains and returns the waiting messages
 /// (all of them, or the subset a targeted-read filter narrows to).
@@ -32,6 +34,13 @@ pub const INBOX_CLASS_FACTORY_PROGRESS: &str = "factory-progress";
 /// The agent-message class label: one delivered `agent_message.send`
 /// row (parent/sibling/child traffic) routed into the inbox.
 pub const INBOX_CLASS_AGENT_MESSAGE: &str = "agent-message";
+/// The child-exit class label: one `rlm_child_terminal_notice` row (a
+/// child that ended without a reply or was cancelled).
+pub const INBOX_CLASS_CHILD_EXITED: &str = "child-exited";
+/// The child-failure class label: one `rlm_child_failure` row.
+pub const INBOX_CLASS_CHILD_FAILED: &str = "child-failed";
+/// The heartbeat class label: one fired scheduled heartbeat's prompt.
+pub const INBOX_CLASS_HEARTBEAT: &str = "heartbeat";
 
 /// The coalescing batch state the daemon's notice sink owns: the
 /// arrivals the currently queued short-notice row covers (reset when the
@@ -135,7 +144,21 @@ pub fn inbox_notice_fields(notice: &KernelNotice) -> Option<InboxNotice> {
         UserContent::Text(text) => text.clone(),
         UserContent::Blocks(_) => return None,
     };
-    let meta = notice.row.details.clone().unwrap_or(Value::Null);
+    let mut meta = notice.row.details.clone().unwrap_or(Value::Null);
+    // The bash event's exit class rides beside the raw code: the handle
+    // identity (pid + command) plus one word a targeted read can act on
+    // without decoding the code.
+    if class == INBOX_CLASS_BASH_DONE && meta.is_object() {
+        if let Some(exit_class) = meta.get("exitCode").and_then(Value::as_i64).map(|code| {
+            if code == 0 {
+                "success"
+            } else {
+                "failure"
+            }
+        }) {
+            meta["exitClass"] = json!(exit_class);
+        }
+    }
     let sender = match class {
         INBOX_CLASS_BASH_DONE => meta.get("command").and_then(Value::as_str),
         INBOX_CLASS_FACTORY_PROGRESS => meta.get("runId").and_then(Value::as_str),
@@ -146,6 +169,53 @@ pub fn inbox_notice_fields(notice: &KernelNotice) -> Option<InboxNotice> {
         sender: sender.map(str::to_string),
         text,
         meta,
+    })
+}
+
+/// The inbox projection of one reserved child-status custom row (the
+/// daemon's `rlm_child_terminal_notice`/`rlm_child_failure` wire forms):
+/// the lifecycle class, the child's session name as the sender, the
+/// row's text as the message, and the row's details as the metadata.
+/// `None` for any row that is not a reserved child-status kind or that
+/// carries no text content.
+#[must_use]
+pub fn child_status_notice_fields(custom: &Value) -> Option<InboxNotice> {
+    let class = match custom.get("customType").and_then(Value::as_str)? {
+        super::rlm_notices::RLM_CHILD_TERMINAL_NOTICE_CUSTOM_TYPE => INBOX_CLASS_CHILD_EXITED,
+        super::rlm_notices::RLM_CHILD_FAILURE_CUSTOM_TYPE => INBOX_CLASS_CHILD_FAILED,
+        _ => return None,
+    };
+    let text = match custom.get("content") {
+        Some(Value::String(text)) => text.clone(),
+        _ => return None,
+    };
+    let meta = custom.get("details").cloned().unwrap_or(Value::Null);
+    let sender = meta
+        .get("sessionName")
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    Some(InboxNotice {
+        class,
+        sender,
+        text,
+        meta,
+    })
+}
+
+/// The inbox projection of one fired heartbeat's delivery row (the
+/// scheduled turn the fire would have injected): the `heartbeat` class,
+/// the job id as the sender, and the delivery row's text and details.
+#[must_use]
+pub fn heartbeat_notice_fields(job_id: &str, row: &CustomMessage) -> Option<InboxNotice> {
+    let text = match &row.content {
+        UserContent::Text(text) => text.clone(),
+        UserContent::Blocks(_) => return None,
+    };
+    Some(InboxNotice {
+        class: INBOX_CLASS_HEARTBEAT,
+        sender: Some(job_id.to_string()),
+        text,
+        meta: row.details.clone().unwrap_or(Value::Null),
     })
 }
 
@@ -595,50 +665,51 @@ pub fn utc_hh_mm(ms: u64) -> String {
 }
 
 /// The arrival notice for one batch of messages: the short steering row
-/// that replaces the notices' full rows. The signature is the latest
-/// arrival's time; a batch of one names its class, a wider batch the
-/// arrival window and per-class counts.
+/// that replaces the notices' full rows. One count row per batch: a
+/// single arrival names its class ("1 new bash-done message"), a same
+/// class burst its count ("3 new bash-done messages"), a mixed burst
+/// the per-class breakdown ("3 new messages (2 bash-done, 1
+/// child-exited)"). The signature is the latest arrival's time; a
+/// wider batch carries the arrival window.
 #[must_use]
 pub fn arrival_notice(batch: &[InboxMessage], total_waiting: usize) -> (String, String) {
     let Some(last) = batch.last() else {
         return (String::new(), String::new());
     };
     let signature = utc_hh_mm(last.arrived_at_ms);
-    let (summary, total) = if batch.len() == 1 {
-        (
-            format!("1 new message ({})", last.class),
-            format!("total waiting: {total_waiting}"),
-        )
-    } else {
-        let mut classes: Vec<(&str, u64)> = Vec::new();
-        for message in batch {
-            match classes
-                .iter_mut()
-                .find(|(class, _)| class == &message.class.as_str())
-            {
-                Some((_, count)) => *count += 1,
-                None => classes.push((&message.class, 1)),
-            }
+    let mut classes: Vec<(&str, u64)> = Vec::new();
+    for message in batch {
+        match classes
+            .iter_mut()
+            .find(|(class, _)| class == &message.class.as_str())
+        {
+            Some((_, count)) => *count += 1,
+            None => classes.push((&message.class, 1)),
         }
+    }
+    let count = batch.len();
+    let summary = if count == 1 {
+        format!("1 new message ({})", last.class)
+    } else if classes.len() == 1 {
+        format!("{count} new {} messages", classes[0].0)
+    } else {
         let breakdown = classes
             .iter()
-            .map(|(class, count)| format!("{count} {class}"))
+            .map(|(class, class_count)| format!("{class_count} {class}"))
             .collect::<Vec<_>>()
             .join(", ");
-        (
-            format!(
-                "+{} arrived {}-{}: {}",
-                batch.len(),
-                utc_hh_mm(batch[0].arrived_at_ms),
-                signature,
-                breakdown
-            ),
-            format!("total {total_waiting}"),
-        )
+        format!("{count} new messages ({breakdown})")
+    };
+    let window = if count == 1 {
+        signature
+    } else {
+        format!("{}-{}", utc_hh_mm(batch[0].arrived_at_ms), signature)
     };
     (
         format!("Inbox: {summary}"),
-        format!("[inbox {signature} UTC] {summary}; {total}. Read them with rlm.inbox.read()."),
+        format!(
+            "[inbox {window} UTC] {summary}; total waiting: {total_waiting}. Read them with rlm.inbox.read()."
+        ),
     )
 }
 
@@ -1087,7 +1158,7 @@ mod tests {
         assert!(fields.text.contains("[bash-done pid:4321 exit:7]"));
         assert_eq!(
             fields.meta,
-            json!({"pid": 4321, "command": "sleep 1", "exitCode": 7})
+            json!({"pid": 4321, "command": "sleep 1", "exitCode": 7, "exitClass": "failure"})
         );
         let progress = KernelNotice {
             row: super::super::messages::create_factory_progress_message(
@@ -1105,9 +1176,9 @@ mod tests {
         assert!(fields.text.contains("budget-exceeded"));
     }
 
-    /// The arrival notice: one message names its class and the total
-    /// waiting; a batch carries the arrival window and the per-class
-    /// counts.
+    /// The arrival notice: one count row per batch. One message names
+    /// its class and the total waiting; a same-class burst its count; a
+    /// mixed burst the window and the per-class breakdown.
     #[test]
     fn arrival_notice_covers_the_batch() {
         // 14:03:00 UTC: one new message, two waiting before it.
@@ -1119,6 +1190,16 @@ mod tests {
             text,
             "[inbox 14:03 UTC] 1 new message (bash-done); total waiting: 3. Read them with rlm.inbox.read()."
         );
+        let same_class = [
+            message("inbox-1", INBOX_CLASS_BASH_DONE, at - 60_000, "a"),
+            message("inbox-2", INBOX_CLASS_BASH_DONE, at, "b"),
+        ];
+        let (preview, text) = arrival_notice(&same_class, 2);
+        assert_eq!(preview, "Inbox: 2 new bash-done messages");
+        assert_eq!(
+            text,
+            "[inbox 14:02-14:03 UTC] 2 new bash-done messages; total waiting: 2. Read them with rlm.inbox.read()."
+        );
         let batch = [
             message("inbox-1", INBOX_CLASS_BASH_DONE, at - 60_000, "a"),
             message("inbox-2", INBOX_CLASS_FACTORY_PROGRESS, at - 30_000, "b"),
@@ -1127,12 +1208,114 @@ mod tests {
         let (preview, text) = arrival_notice(&batch, 3);
         assert_eq!(
             preview,
-            "Inbox: +3 arrived 14:02-14:03: 2 bash-done, 1 factory-progress"
+            "Inbox: 3 new messages (2 bash-done, 1 factory-progress)"
         );
         assert_eq!(
             text,
-            "[inbox 14:03 UTC] +3 arrived 14:02-14:03: 2 bash-done, 1 factory-progress; total 3. Read them with rlm.inbox.read()."
+            "[inbox 14:02-14:03 UTC] 3 new messages (2 bash-done, 1 factory-progress); total waiting: 3. Read them with rlm.inbox.read()."
         );
+    }
+
+    /// The child-status projection: the terminal notice routes as
+    /// `child-exited` (the child's session name as sender, the row's
+    /// details as metadata) and the failure row as `child-failed`;
+    /// other custom rows stay unrouted.
+    #[test]
+    fn child_status_notice_fields_route_the_lifecycle_rows() {
+        let terminal = serde_json::to_value(pa_types::session::AgentMessage::Custom(
+            super::super::rlm_notices::create_rlm_child_terminal_notice(
+                &super::super::rlm_notices::RlmChildTerminalNotice::CompletedWithoutReply {
+                    child_id: "sub-8fb5284a".to_string(),
+                    session_name: "f20-worker".to_string(),
+                    last_assistant_text_preview: Some("done with the task".to_string()),
+                },
+                1_000,
+            ),
+        ))
+        .unwrap();
+        let fields = child_status_notice_fields(&terminal).expect("the terminal routes");
+        assert_eq!(fields.class, INBOX_CLASS_CHILD_EXITED);
+        assert_eq!(fields.sender.as_deref(), Some("f20-worker"));
+        assert!(fields
+            .text
+            .contains("[child-exited: no-reply child:f20-worker]"));
+        assert!(fields.text.contains("done with the task"));
+        assert_eq!(fields.meta["kind"], "completed_without_reply");
+        assert_eq!(fields.meta["childId"], "sub-8fb5284a");
+        let cancelled = serde_json::to_value(pa_types::session::AgentMessage::Custom(
+            super::super::rlm_notices::create_rlm_child_terminal_notice(
+                &super::super::rlm_notices::RlmChildTerminalNotice::Cancelled {
+                    child_id: "sub-1".to_string(),
+                    session_name: "lane".to_string(),
+                    reason: Some("Deleted by parent orchestrator".to_string()),
+                },
+                2_000,
+            ),
+        ))
+        .unwrap();
+        let fields = child_status_notice_fields(&cancelled).expect("the cancel routes");
+        assert_eq!(fields.class, INBOX_CLASS_CHILD_EXITED);
+        assert_eq!(fields.sender.as_deref(), Some("lane"));
+        assert_eq!(fields.meta["kind"], "cancelled");
+        let failure = serde_json::to_value(pa_types::session::AgentMessage::Custom(
+            super::super::rlm_notices::create_rlm_child_failure_message(
+                "sub-9", "lane", "boom", 3_000,
+            ),
+        ))
+        .unwrap();
+        let fields = child_status_notice_fields(&failure).expect("the failure routes");
+        assert_eq!(fields.class, INBOX_CLASS_CHILD_FAILED);
+        assert_eq!(fields.sender.as_deref(), Some("lane"));
+        assert!(fields.text.contains("[child-failed child:lane]"));
+        assert_eq!(fields.meta["error"], "boom");
+        assert!(
+            child_status_notice_fields(&json!({"customType": "agent_message"})).is_none(),
+            "a non-lifecycle row stays unrouted"
+        );
+    }
+
+    /// The heartbeat projection: the fired delivery row routes as the
+    /// `heartbeat` class with the job id as sender and the row's details
+    /// as metadata.
+    #[test]
+    fn heartbeat_notice_fields_route_the_fired_prompt() {
+        let job = pa_core_cron_job();
+        let row = super::super::messages::create_heartbeat_prompt_message(&job, 4_000);
+        let fields = heartbeat_notice_fields(&job.id, &row).expect("the fire routes");
+        assert_eq!(fields.class, INBOX_CLASS_HEARTBEAT);
+        assert_eq!(fields.sender.as_deref(), Some("hb-1"));
+        assert!(fields.text.contains("[heartbeat: every 10m run#3]"));
+        assert!(fields.text.contains("nudge the mission"));
+        assert_eq!(fields.meta["jobId"], "hb-1");
+        assert_eq!(fields.meta["runCount"], 3);
+    }
+
+    fn pa_core_cron_job() -> crate::cron::AgentCronJob {
+        crate::cron::AgentCronJob {
+            id: "hb-1".to_string(),
+            status: crate::cron::JobStatus::Active,
+            source: Some("rlm_heartbeat".to_string()),
+            runtime_kind: None,
+            delivery_mode: Some(crate::cron::DeliveryMode::Steer),
+            active_session_id: "a1".to_string(),
+            session_id: "s1".to_string(),
+            session_file: String::new(),
+            cwd: "/w".to_string(),
+            label: None,
+            prompt: "nudge the mission".to_string(),
+            schedule: crate::cron::AgentCronSchedule {
+                kind: crate::cron::ScheduleKind::Interval,
+                expression: "every 10m".to_string(),
+                interval_ms: Some(600_000),
+            },
+            created_at: "2026-11-12T18:00:00.000Z".to_string(),
+            updated_at: "2026-11-12T18:00:00.000Z".to_string(),
+            next_run_at: Some("2026-11-12T18:20:00.000Z".to_string()),
+            last_run_at: None,
+            last_skipped_at: None,
+            last_error: None,
+            run_count: 3,
+        }
     }
 
     /// The reminder names the waiting count only (a minimal nudge, no
