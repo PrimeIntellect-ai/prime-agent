@@ -336,6 +336,8 @@ impl Worker {
                 let (core, inputs) = self.summary_inputs();
                 let id =
                     pa_core::session_engine::agent_messaging::create_agent_session_message_id();
+                // The closed-branch receipt's sample; the live path's
+                // receipt follows the admission's own under-lock sample.
                 let queued = core.busy;
                 let summary = self.summary_locked(&core, inputs);
                 // The receiving session's endpoint for the receipt's `target`.
@@ -427,7 +429,10 @@ impl Worker {
                 }
             };
             let closed_engine = std::sync::Arc::clone(&engine);
-            let refused = admit_inbox_notice(
+            // The admission answers whether ITS busy sample parked the
+            // notice: the receipt's `deliveryStatus` follows that sample,
+            // never the earlier one taken outside the lock.
+            let queued = match admit_inbox_notice(
                 &self.recovery,
                 &self.core,
                 &self.work_notify,
@@ -438,10 +443,12 @@ impl Worker {
                 move || closed_engine.session_is_closed(),
                 capacity_error,
                 Some(engine.as_ref()),
-            );
-            if let Some(error) = refused {
-                return response_failure(None, "worker_deliver_message", &error, None);
-            }
+            ) {
+                Ok(queued) => queued,
+                Err(error) => {
+                    return response_failure(None, "worker_deliver_message", &error, None);
+                }
+            };
             // The direct route's strip refresh: the queued notice row
             // must reach the clients like any other lane change. The
             // projection recomputes under the emission lock, so a

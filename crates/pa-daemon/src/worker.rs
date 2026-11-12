@@ -653,7 +653,7 @@ impl Worker {
                             engine.inbox(),
                             pa_core::session_engine::inbox::inbox_notice_fields(&notice),
                         ) {
-                            let refused = admit_inbox_notice(
+                            let admitted = admit_inbox_notice(
                                 &notice_recovery,
                                 &notice_core,
                                 &notice_notify,
@@ -665,7 +665,7 @@ impl Worker {
                                 |_, _| None,
                                 Some(engine.as_ref()),
                             );
-                            if refused.is_none() {
+                            if admitted.is_ok() {
                                 return;
                             }
                             // The store moved on between the capture and

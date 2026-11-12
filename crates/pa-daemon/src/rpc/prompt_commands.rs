@@ -202,7 +202,24 @@ async fn run_session_command(
             )
             .await
             .map_err(|error| format!("{error:#}"))?;
-        engine.session.agent().wait_for_idle().await;
+        // The parked continuation must RUN: waiting for idle ends when the
+        // running turn finishes — not when the parked row does (the
+        // final-poll window can leave it queued). Drain like the delivery
+        // seat does: a Busy slot waits and retries, NothingToContinue
+        // means another drainer already took the row.
+        let agent = engine.session.agent();
+        agent.wait_for_idle().await;
+        while agent.has_queued_messages() {
+            match agent.continue_run().await {
+                Ok(()) => break,
+                Err(error) => match error.downcast_ref::<pa_agent::agent::AgentContinueError>() {
+                    Some(error) if error.code == pa_agent::agent::AgentContinueErrorCode::Busy => {
+                        agent.wait_for_idle().await;
+                    }
+                    _ => break,
+                },
+            }
+        }
     }
     Ok(())
 }
