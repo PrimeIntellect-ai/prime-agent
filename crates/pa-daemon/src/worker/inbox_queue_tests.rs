@@ -718,6 +718,7 @@ async fn a_journal_failure_marks_the_notice_memory_only() {
         Lane::Steering,
         || false,
         |_, _| None,
+        None,
     );
     let rows = steering_rows(&worker);
     assert_eq!(rows.len(), 1);
@@ -756,6 +757,7 @@ async fn a_journal_failure_marks_the_notice_memory_only() {
         Lane::Steering,
         || false,
         |_, _| None,
+        None,
     );
     assert!(
         inbox.persistence_error().is_some(),
@@ -806,6 +808,7 @@ async fn a_withdrawals_rerender_keeps_the_persistence_error_clause() {
         Lane::Steering,
         || false,
         |_, _| None,
+        None,
     );
     let _ = admit_inbox_notice(
         &worker.recovery,
@@ -820,6 +823,7 @@ async fn a_withdrawals_rerender_keeps_the_persistence_error_clause() {
         Lane::Steering,
         || false,
         |_, _| None,
+        None,
     );
     admit_inbox_reminder(&worker.recovery, &worker.core, &notify, &inbox, || false);
     withdraw_bash_completion_notice(
