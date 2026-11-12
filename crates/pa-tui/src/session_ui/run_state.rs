@@ -42,15 +42,15 @@ impl RunState {
             (
                 Idle | Submitted | Running,
                 RunEvent::Ended | RunEvent::Attached { streaming: false },
-            ) => Idle,
-            (Idle, RunEvent::Submitted) => Submitted,
-            (
+            )
+            | (
                 Submitted,
                 RunEvent::Interrupted
                 | RunEvent::SubmitFailed {
                     others_in_flight: false,
                 },
             ) => Idle,
+            (Idle, RunEvent::Submitted) => Submitted,
             (Idle, RunEvent::Interrupted | RunEvent::SubmitFailed { .. })
             | (
                 Submitted,
