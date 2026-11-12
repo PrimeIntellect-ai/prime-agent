@@ -483,6 +483,16 @@ fn a_busy_delivery_waits_for_the_run_and_drains_the_parked_row() {
         dump.contains("drained reply"),
         "the parked row drained on the delivery's seat: {dump}"
     );
+    // The parked phase forwards nothing from the streaming run: its
+    // stream belongs to that run's own seat (no duplicated rows, no
+    // doubled usage accounting). The drain's own run re-opens the gate,
+    // which is how `drained reply` above reached this seat at all.
+    // Mutation: dropping the parked gate forwards the first run's frames
+    // (its distinctive tail `w119` appears here).
+    assert!(
+        !dump.contains("w119"),
+        "the streaming run's frames never ride the parked seat: {dump}"
+    );
     let (steering, follow_up) = {
         let guard = engine.session.blocking_lock();
         let core = guard.as_deref().expect("session built");

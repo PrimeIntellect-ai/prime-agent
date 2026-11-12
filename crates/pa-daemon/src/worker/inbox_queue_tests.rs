@@ -265,7 +265,14 @@ async fn a_delivered_row_starts_a_fresh_batch() {
 async fn the_reminder_repeats_while_the_inbox_stays_unread() {
     let (worker, inbox, _arrivals, notify) = routing_state();
     worker.dispatch("clear_queue", &json!({})).await;
-    admit_inbox_reminder(&worker.recovery, &worker.core, &notify, &inbox, || false);
+    admit_inbox_reminder(
+        &worker.recovery,
+        &worker.core,
+        &notify,
+        &inbox,
+        || false,
+        None,
+    );
     assert!(
         steering_rows(&worker).is_empty(),
         "an empty inbox never reminds"
@@ -277,8 +284,22 @@ async fn the_reminder_repeats_while_the_inbox_stays_unread() {
         ),
         1_000,
     );
-    admit_inbox_reminder(&worker.recovery, &worker.core, &notify, &inbox, || false);
-    admit_inbox_reminder(&worker.recovery, &worker.core, &notify, &inbox, || false);
+    admit_inbox_reminder(
+        &worker.recovery,
+        &worker.core,
+        &notify,
+        &inbox,
+        || false,
+        None,
+    );
+    admit_inbox_reminder(
+        &worker.recovery,
+        &worker.core,
+        &notify,
+        &inbox,
+        || false,
+        None,
+    );
     let rows = steering_rows(&worker);
     assert_eq!(rows.len(), 1, "one reminder row, replaced: {rows:?}");
     let (message, _, _) = &rows[0];
@@ -372,7 +393,14 @@ async fn a_reminder_row_moved_to_follow_up_still_coalesces() {
         ),
         1_000,
     );
-    admit_inbox_reminder(&worker.recovery, &worker.core, &notify, &inbox, || false);
+    admit_inbox_reminder(
+        &worker.recovery,
+        &worker.core,
+        &notify,
+        &inbox,
+        || false,
+        None,
+    );
     // The queue mutation moved the reminder row onto the follow-up
     // lane, its coalescing key preserved.
     let moved_key = {
@@ -383,7 +411,14 @@ async fn a_reminder_row_moved_to_follow_up_still_coalesces() {
         key
     };
     assert_eq!(moved_key.as_deref(), Some(INBOX_REMINDER_QUEUE_KEY));
-    admit_inbox_reminder(&worker.recovery, &worker.core, &notify, &inbox, || false);
+    admit_inbox_reminder(
+        &worker.recovery,
+        &worker.core,
+        &notify,
+        &inbox,
+        || false,
+        None,
+    );
     assert_eq!(
         reminder_rows(&worker),
         1,
@@ -760,6 +795,7 @@ async fn a_clear_drops_unread_agent_messages_and_their_wake_rows() {
         &worker.work_notify,
         &inbox,
         || false,
+        None,
     );
     assert_eq!(reminder_rows(&worker), 1, "the reminder row queued");
     let cleared = worker.dispatch("agent_messages_clear", &json!({})).await;
@@ -1249,6 +1285,7 @@ async fn the_wake_row_refresh_follows_the_live_store() {
         &worker.work_notify,
         &inbox,
         || false,
+        None,
     );
     // A targeted read takes the bash-done message: the batch trims and
     // both rows re-render over what is left.
@@ -1328,6 +1365,7 @@ async fn the_read_hook_refreshes_the_wake_rows_and_their_action_events() {
         &worker.work_notify,
         &inbox,
         || false,
+        None,
     );
     let delivery_frames = {
         let mut frames = Vec::new();

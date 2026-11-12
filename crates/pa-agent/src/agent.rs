@@ -59,6 +59,14 @@ impl AgentContinueError {
             message: message.into(),
         }
     }
+
+    /// The busy refusal with the caller's message: the shared typed form
+    /// every slot-refusal bail uses (callers classify the refusal instead
+    /// of matching text).
+    #[must_use]
+    pub fn busy(message: impl Into<String>) -> Self {
+        Self::new(AgentContinueErrorCode::Busy, message)
+    }
 }
 
 #[derive(Clone)]
@@ -603,7 +611,13 @@ impl AgentInner {
         {
             let mut run = self.run.lock().unwrap();
             if run.is_some() {
-                anyhow::bail!("Agent is already processing.");
+                // Typed as the busy refusal (the same message): callers that
+                // lost the run slot between their own check and this one
+                // classify the refusal instead of matching text.
+                return Err(anyhow::Error::new(AgentContinueError::new(
+                    AgentContinueErrorCode::Busy,
+                    "Agent is already processing.",
+                )));
             }
             *run = Some(ActiveRun {
                 controller: controller.clone(),
@@ -1173,9 +1187,13 @@ impl Agent {
     /// Panics if the `run` mutex is poisoned.
     pub async fn prompt(&self, input: impl Into<AgentPromptInput>) -> anyhow::Result<()> {
         if self.inner.run.lock().unwrap().is_some() {
-            anyhow::bail!(
-                "Agent is already processing a prompt. Use steer() or followUp() to queue messages, or wait for completion."
-            );
+            // The busy refusal is TYPED (the same message text): a caller
+            // that lost the run slot between its own check and this one
+            // classifies it instead of matching text.
+            return Err(anyhow::Error::new(AgentContinueError::new(
+                AgentContinueErrorCode::Busy,
+                "Agent is already processing a prompt. Use steer() or followUp() to queue messages, or wait for completion.",
+            )));
         }
         let messages = AgentInner::normalize_prompt_input(input.into());
         self.inner.run_prompt_messages(messages, false).await
@@ -1196,9 +1214,13 @@ impl Agent {
         input: impl Into<AgentPromptInput>,
     ) -> anyhow::Result<()> {
         if self.inner.run.lock().unwrap().is_some() {
-            anyhow::bail!(
-                "Agent is already processing a prompt. Use steer() or followUp() to queue messages, or wait for completion."
-            );
+            // The busy refusal is TYPED (the same message text): a caller
+            // that lost the run slot between its own check and this one
+            // classifies it instead of matching text.
+            return Err(anyhow::Error::new(AgentContinueError::new(
+                AgentContinueErrorCode::Busy,
+                "Agent is already processing a prompt. Use steer() or followUp() to queue messages, or wait for completion.",
+            )));
         }
         let messages = AgentInner::normalize_prompt_input(input.into());
         let inner = Arc::clone(&self.inner);
