@@ -4,6 +4,17 @@ use super::{
     SessionAgentMessage, SessionSlashCommand, StreamingBehavior,
 };
 
+/// Whether one admission failure is the busy slot refusal: the agent's run
+/// slot was taken between this session's idle sample and its attempt. The
+/// agent types every slot-refusal bail as `AgentContinueError::Busy`; a
+/// STARTED prompt's own execution or listener failure is never classified
+/// here (the original error must surface, and the row must not queue twice).
+fn is_busy_slot_refusal(error: &anyhow::Error) -> bool {
+    error
+        .downcast_ref::<pa_agent::agent::AgentContinueError>()
+        .is_some_and(|error| error.code == pa_agent::agent::AgentContinueErrorCode::Busy)
+}
+
 impl AgentSession {
     /// Submit a prompt. Session commands (compact/refine/goal/autonomous)
     /// are recognized before admission and never reach the model.
@@ -35,9 +46,9 @@ impl AgentSession {
         let state = self.agent.state().await;
         let busy = state.is_streaming;
         if busy {
-            anyhow::bail!(
-                "Agent is already processing. Specify streamingBehavior ('steer' or 'followUp') to queue the message."
-            );
+            return Err(anyhow::Error::new(pa_agent::agent::AgentContinueError::busy(
+                "Agent is already processing. Specify streamingBehavior ('steer' or 'followUp') to queue the message.",
+            )));
         }
         let mut prompt_messages = Vec::new();
         if let Some(digest_row) = self.pending_digest_prompt_row().await? {
@@ -101,8 +112,9 @@ impl AgentSession {
                 // The idle admission can still lose the run slot to a
                 // starting turn (the idle sample and `Agent::prompt`'s slot
                 // check are separate reads): the caller's behavior applies —
-                // queue the row on its lane, never reject it.
-                if self.agent.state().await.is_streaming || self.agent.has_active_run() {
+                // queue the row on its lane, never reject it. A failure of
+                // a prompt that DID start surfaces unchanged.
+                if is_busy_slot_refusal(&error) {
                     queue_row(behavior)?;
                     return Ok(PromptOutcome::Queued);
                 }
@@ -193,9 +205,9 @@ impl AgentSession {
             }
         }
         if busy && options.streaming_behavior.is_none() {
-            anyhow::bail!(
-                "Agent is already processing. Specify streamingBehavior ('steer' or 'followUp') to queue the message."
-            );
+            return Err(anyhow::Error::new(pa_agent::agent::AgentContinueError::busy(
+                "Agent is already processing. Specify streamingBehavior ('steer' or 'followUp') to queue the message.",
+            )));
         }
         // User messages persist through the loop's `message_end` event
         // (matching TS `_processAgentEvent`); appending here too would
@@ -250,8 +262,9 @@ impl AgentSession {
             {
                 // The idle admission can still lose the run slot to a
                 // starting turn: a caller that opted into a streaming
-                // behavior gets the queue, never the rejection.
-                if self.agent.state().await.is_streaming || self.agent.has_active_run() {
+                // behavior gets the queue, never the rejection. A failure
+                // of a prompt that DID start surfaces unchanged.
+                if is_busy_slot_refusal(&error) {
                     if let Some(behavior) = options.streaming_behavior {
                         let mut batch = vec![user_prompt_message(&normalized, &images)];
                         batch.extend(self.normalized_batch_rows(&options.batch, expand));
@@ -276,9 +289,10 @@ impl AgentSession {
             .await
         {
             // A concurrent admission won the agent's run slot: a caller
-            // that opted into a streaming behavior gets the queue (the
-            // row is preserved, never rejected)…
-            if self.agent.state().await.is_streaming || self.agent.has_active_run() {
+            // that opted into a streaming behavior gets the queue (the row
+            // is preserved, never rejected); a prompt that DID start and
+            // failed surfaces unchanged.
+            if is_busy_slot_refusal(&error) {
                 if let Some(behavior) = options.streaming_behavior {
                     let mut batch = vec![user_prompt_message(&normalized, &images)];
                     batch.extend(self.normalized_batch_rows(&options.batch, expand));

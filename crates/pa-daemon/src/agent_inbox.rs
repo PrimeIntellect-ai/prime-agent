@@ -83,6 +83,23 @@ impl AgentSessionEngine {
             .clone()
     }
 
+    /// Whether the given store is still the session's published inbox: the
+    /// reminder cycle (and any read-and-queue admission) verifies its
+    /// captured store under the slot's own mutex, so a replacement that
+    /// installed the next session's store never admits over the retired
+    /// one's count.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the inbox slot lock is poisoned.
+    pub(crate) fn is_live_inbox(&self, inbox: &Arc<SessionInbox>) -> bool {
+        self.inbox
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+            .is_some_and(|current| Arc::ptr_eq(current, inbox))
+    }
+
     /// The identity-checked durable push: the slot identity is re-checked
     /// and the notice appended under the SLOT's own mutex (the same lock the
     /// retire's [`Self::clear_inbox`] takes), so a concurrent retire — or a
@@ -194,7 +211,14 @@ pub(crate) fn spawn_inbox_reminder(
                 let engine = std::sync::Arc::clone(&engine);
                 move || engine.session_is_closed()
             };
-            crate::worker::admit_inbox_reminder(&recovery, &core, &work_notify, &inbox, closed);
+            crate::worker::admit_inbox_reminder(
+                &recovery,
+                &core,
+                &work_notify,
+                &inbox,
+                closed,
+                Some(engine.as_ref()),
+            );
         }
     });
 }
