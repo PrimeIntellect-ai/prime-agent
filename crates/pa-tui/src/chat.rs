@@ -104,6 +104,9 @@ pub enum ChatEntry {
     Tool(Box<ToolCallCard>),
     /// One agent-message summary row: the received transcript rows.
     AgentMessage(Box<crate::custom_message::AgentMessageRow>),
+    /// One inbox-notice row: the daemon's inbox system announcing waiting
+    /// machine messages (an attributed custom row, never user input).
+    InboxNotice(Box<crate::custom_message::InboxNoticeRow>),
     /// One skill-invocation card: the expandable `<skill>`-block card a
     /// user message carrying a skill invocation parses into.
     SkillInvocation(Box<crate::custom_message::SkillInvocationRow>),
