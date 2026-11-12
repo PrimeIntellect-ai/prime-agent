@@ -104,12 +104,13 @@ impl Drop for PreAuthPumps {
         if !self.installed {
             self.writer.abort();
             self.reader.abort();
-            self.resident.note_connection_lost(self.epoch);
             // A cancelled auth future skips route_command_on's timed-out
             // cleanup. Its dropped oneshot receiver identifies only this
             // attempt's pending slot, without disturbing newer routes.
             let resident = Arc::clone(&self.resident);
+            let epoch = self.epoch;
             tokio::spawn(async move {
+                resident.note_connection_lost(epoch).await;
                 resident
                     .pending
                     .lock()
@@ -222,10 +223,10 @@ impl Supervisor {
                 if let Some(generation) = orphan_generation.take().filter(|_| exited) {
                     generation.reap().await;
                 }
-                // Manual retry still replaces the descriptor's pid without
-                // arming a monitor. Preserve that handoff fence alongside
-                // generation ownership so the predecessor's exit cannot
-                // enter crash recovery over the retry's replacement.
+                // A known-resident registration naming a new pid writes it under
+                // the descriptor lock before its monitor arm claims the generation:
+                // the pid fence keeps the predecessor's exit out of crash recovery
+                // over the registrant in that window.
                 if resident.descriptor.lock().await.pid != adopted_pid {
                     return;
                 }
@@ -362,6 +363,31 @@ impl Supervisor {
     /// poll this instead of holding their own shutdown wiring).
     pub(crate) fn is_shutting_down(&self) -> bool {
         self.shutting_down.load(Ordering::SeqCst)
+    }
+
+    /// A relaunch outside the crash path that takes the resident's supervision over.
+    /// The caller has already retired the current watch (a `monitor_epoch` bump: one
+    /// sleeping in its backoff returns at its superseded check instead of relaunching a
+    /// second worker). The outcome gets a monitor — the new child's, or a failed
+    /// relaunch handed to the crash path's backoff instead of leaving the resident
+    /// unsupervised.
+    pub(crate) async fn relaunch_supervised(
+        self: &Arc<Self>,
+        resident: &Arc<ResidentWorker>,
+    ) -> Result<()> {
+        match self.relaunch_worker(resident).await {
+            Ok(child) => {
+                self.spawn_monitor(Arc::clone(resident), Some(child), 0, None);
+                Ok(())
+            }
+            Err(error) => {
+                if !self.is_stopping(resident) {
+                    resident.spawned_at_ms.store(0, Ordering::SeqCst);
+                    self.spawn_monitor(Arc::clone(resident), None, 0, None);
+                }
+                Err(error)
+            }
+        }
     }
 
     /// Spawn a fresh worker process, connect, and replay the durable create.
@@ -758,7 +784,7 @@ impl Supervisor {
                 while let Ok(request) = cmd_rx.try_recv() {
                     fail_unsent_request(&resident, &request.request_id).await;
                 }
-                resident.note_connection_lost(connection_epoch);
+                resident.note_connection_lost(connection_epoch).await;
             }
         });
         // Reader: route responses to pending requests, forward session events.
@@ -912,7 +938,7 @@ impl Supervisor {
                         pending.clear();
                     }
                 }
-                reader_resident.note_connection_lost(connection_epoch);
+                reader_resident.note_connection_lost(connection_epoch).await;
                 // The connection ended (EOF or frame error): a run without an abort request
                 // dies with the worker; an abort-requested run is declared terminal
                 // immediately — the record must be durable before the relaunch replays.

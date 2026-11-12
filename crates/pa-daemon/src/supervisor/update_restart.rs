@@ -355,29 +355,15 @@ impl Supervisor {
                                 // intentional stop or the new generation.
                                 resident.monitor_epoch.fetch_add(1, Ordering::SeqCst);
                                 resident.intentional_stop.store(false, Ordering::SeqCst);
-                                match self.relaunch_worker(resident).await {
-                                    Ok(child) => {
+                                match self.relaunch_supervised(resident).await {
+                                    Ok(()) => {
                                         resident.consecutive_failures.store(0, Ordering::SeqCst);
-                                        self.spawn_monitor(
-                                            Arc::clone(resident),
-                                            Some(child),
-                                            0,
-                                            None,
-                                        );
                                     }
                                     Err(error) => {
                                         self.log_line(&format!(
                                             "worker {} abandon relaunch failed: {error:#}",
                                             resident.worker_id
                                         ));
-                                        // The old watch already returned on the
-                                        // intentional stop: hand the resident's
-                                        // remaining failure budget to the crash
-                                        // path instead of leaving it unsupervised.
-                                        if !self.is_stopping(resident) {
-                                            resident.spawned_at_ms.store(0, Ordering::SeqCst);
-                                            self.spawn_monitor(Arc::clone(resident), None, 0, None);
-                                        }
                                     }
                                 }
                             }

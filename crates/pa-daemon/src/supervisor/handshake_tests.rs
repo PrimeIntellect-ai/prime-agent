@@ -411,6 +411,36 @@ async fn a_stale_epoch_never_overwrites_the_installed_channel() {
     assert_eq!(frame.command_type, "get_state");
 }
 
+/// A connection that ended before its handshake installed (the worker died right
+/// after answering auth) must not install its dead channel afterwards: the loss
+/// ends the epoch, so a crashed worker never reads as connected.
+#[tokio::test]
+async fn an_ended_connection_never_installs_its_channel() {
+    let dir = tempfile::TempDir::new().expect("temp dir");
+    let descriptor: DaemonWorkerDescriptor = serde_json::from_value(json!({
+        "version": 2, "workerId": "w-ended", "pid": 0, "socketPath": "/tmp/none.sock",
+        "recoveryJournalPath": "/tmp/none.jsonl", "supervisorSocketPath": "/tmp/none.sock",
+        "authenticationToken": "ended-token", "rootActiveSessionId": "none",
+        "createdAt": "2026-11-07T00:00:00Z", "updatedAt": "2026-11-07T00:00:00Z",
+        "lifecycle": "ready", "createCommand": {}, "consecutiveFailures": 0,
+    }))
+    .expect("descriptor");
+    let resident = ResidentWorker::new(
+        "w-ended".to_string(),
+        descriptor,
+        dir.path().join("w-ended.json"),
+    );
+    let (cmd_tx, _cmd_rx) =
+        mpsc::channel::<WorkerRequest>(crate::backpressure::WORKER_INFLIGHT_CAPACITY);
+    let epoch = resident.note_connection_live();
+    resident.note_connection_lost(epoch).await;
+    resident.install_command_channel(epoch, cmd_tx).await;
+    assert!(
+        resident.cmd_tx.lock().await.is_none(),
+        "the ended connection installs no channel"
+    );
+}
+
 /// A lost worker connection fails its in-flight routes right away (TS
 /// `notifyClosed` -> `rejectAll`): the reader drains the connection's reply
 /// slots when the socket ends, so a route waiting on the worker's answer
@@ -501,4 +531,95 @@ async fn a_lost_worker_connection_fails_its_in_flight_route() {
         .expect("the route task lives")
         .expect_err("the drained route fails");
     assert_eq!(error.to_string(), super::routing::WORKER_SOCKET_CLOSED);
+}
+
+/// A crashed worker's lost connection takes its command channel with it: a
+/// `retry_worker` arriving while the crash path is still in its backoff must
+/// relaunch the worker, never answer success over the dead one. The relaunch
+/// here fails at its probe (nothing listens), so the retry reports the failure
+/// and the descriptor names the relaunch's spawn instead of `ready`.
+#[tokio::test]
+async fn a_retry_after_a_lost_connection_relaunches_the_worker() {
+    let dir = tempfile::TempDir::new().expect("temp dir");
+    let socket_path = dir.path().join("worker.sock");
+    let agent_dir = dir.path().join("agent");
+    std::fs::create_dir_all(&agent_dir).unwrap();
+    let supervisor = Arc::new(
+        Supervisor::new(SupervisorOptions {
+            socket_path: dir.path().join("daemon.sock"),
+            agent_dir,
+        })
+        .expect("supervisor"),
+    );
+    let descriptor: DaemonWorkerDescriptor = serde_json::from_value(json!({
+        "version": 2, "workerId": "w-crash", "pid": 4242,
+        "socketPath": socket_path.to_string_lossy(),
+        "recoveryJournalPath": "/tmp/none.jsonl", "supervisorSocketPath": "/tmp/none.sock",
+        "authenticationToken": "crash-token", "rootActiveSessionId": "w-crash",
+        "createdAt": "2026-11-07T00:00:00Z", "updatedAt": "2026-11-07T00:00:00Z",
+        "lifecycle": "ready", "createCommand": {}, "consecutiveFailures": 0,
+    }))
+    .expect("descriptor");
+    let resident = ResidentWorker::new(
+        "w-crash".to_string(),
+        descriptor,
+        dir.path().join("w-crash.json"),
+    );
+    supervisor.registry.insert(Arc::clone(&resident)).await;
+
+    let listener = bind_fake_worker(&socket_path).await;
+    let connect = {
+        let supervisor = Arc::clone(&supervisor);
+        let resident = Arc::clone(&resident);
+        tokio::spawn(async move {
+            supervisor
+                .connect_worker(&resident, worker_connect_deadline())
+                .await
+        })
+    };
+    let mut fake = accept_fake_worker(listener).await;
+    let frame = read_supervisor_frame(&mut fake).await;
+    let request_id = frame
+        .header
+        .get("requestId")
+        .and_then(Value::as_str)
+        .expect("request id")
+        .to_string();
+    answer_supervisor_frame(&mut fake, &request_id, "worker_auth").await;
+    connect
+        .await
+        .expect("the connect task lives")
+        .expect("the handshake completes");
+
+    // The worker process dies: its socket closes and the reader pump sees EOF.
+    drop(fake);
+    let mut route_state = resident.route_state_watcher();
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        route_state.wait_for(|state| !state.connected),
+    )
+    .await
+    .expect("the lost connection is observed")
+    .expect("the resident lives");
+
+    supervisor.pin_worker_connect_budget_for_tests(Duration::from_millis(1));
+    let command = DaemonCommand::RetryWorker {
+        id: None,
+        active_session_id: "w-crash".to_string(),
+        rest: Map::default(),
+    };
+    let (lines, _) = supervisor
+        .handle_retry_worker(&command, "client-1", "rt-1", "retry_worker")
+        .await;
+    assert_eq!(
+        lines[0]["success"],
+        json!(false),
+        "a retry over a dead worker must not answer success: {lines:?}"
+    );
+    let descriptor = resident.descriptor.lock().await;
+    assert_ne!(
+        descriptor.pid, 4242,
+        "the retry relaunched the worker (the spawn record names the new pid)"
+    );
+    assert_ne!(descriptor.lifecycle, DaemonWorkerLifecycle::Ready);
 }

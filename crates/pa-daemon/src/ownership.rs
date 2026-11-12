@@ -225,12 +225,23 @@ impl Supervisor {
             let mut descriptor = resident.descriptor.lock().await;
             descriptor.lifecycle = DaemonWorkerLifecycle::Ready;
             let _ = persist_worker(&resident.descriptor_path, &descriptor);
-        } else if let Err(error) = self.relaunch_worker(&resident).await {
-            return Self::owned_failure(
-                command_id,
-                type_name,
-                &last_error.unwrap_or_else(|| error.to_string()),
-            );
+        } else {
+            // Retire the crash watch before anything awaits: past its backoff it would
+            // relaunch a second worker beside this one.
+            resident
+                .monitor_epoch
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            // The retired watch may not have reached its crash bookkeeping: the dead
+            // parent's resident children close before the replacement, as the crash
+            // path closes them.
+            self.close_children_of_dead_parent(&resident).await;
+            if let Err(error) = self.relaunch_supervised(&resident).await {
+                return Self::owned_failure(
+                    command_id,
+                    type_name,
+                    &last_error.unwrap_or_else(|| error.to_string()),
+                );
+            }
         }
         let lifecycle = resident.descriptor.lock().await.lifecycle;
         if lifecycle != DaemonWorkerLifecycle::Ready {
