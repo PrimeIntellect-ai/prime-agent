@@ -110,6 +110,7 @@ async fn an_idle_arrival_queues_one_short_notice_and_keeps_the_message() {
         Lane::Steering,
         || false,
         |_, _| None,
+        None,
     );
     let rows = steering_rows(&worker);
     assert_eq!(rows.len(), 1, "exactly one notice row: {rows:?}");
@@ -170,6 +171,7 @@ async fn busy_window_arrivals_coalesce_into_one_queued_row() {
         Lane::Steering,
         || false,
         |_, _| None,
+        None,
     );
     let _ = admit_inbox_notice(
         &worker.recovery,
@@ -184,6 +186,7 @@ async fn busy_window_arrivals_coalesce_into_one_queued_row() {
         Lane::Steering,
         || false,
         |_, _| None,
+        None,
     );
     let _ = admit_inbox_notice(
         &worker.recovery,
@@ -198,6 +201,7 @@ async fn busy_window_arrivals_coalesce_into_one_queued_row() {
         Lane::Steering,
         || false,
         |_, _| None,
+        None,
     );
     let rows = steering_rows(&worker);
     assert_eq!(rows.len(), 1, "one coalesced row, not three: {rows:?}");
@@ -232,6 +236,7 @@ async fn a_delivered_row_starts_a_fresh_batch() {
         Lane::Steering,
         || false,
         |_, _| None,
+        None,
     );
     // The delivery: the turn runner pops the row off the lane.
     let delivered = worker.core.lock().unwrap().steering.pop_front();
@@ -249,6 +254,7 @@ async fn a_delivered_row_starts_a_fresh_batch() {
         Lane::Steering,
         || false,
         |_, _| None,
+        None,
     );
     let rows = steering_rows(&worker);
     assert_eq!(rows.len(), 1, "a fresh row queued: {rows:?}");
@@ -694,6 +700,7 @@ async fn a_closed_session_refuses_the_arrival() {
         Lane::Steering,
         || true,
         |_, _| None,
+        None,
     );
     assert!(
         steering_rows(&worker).is_empty(),
@@ -1275,14 +1282,16 @@ async fn a_retired_slot_refuses_the_closed_sessions_append_atomically() {
     let engine = worker.agent_engine.as_ref().expect("the faux engine");
     // The live slot takes the closed session's durable push.
     assert!(
-        engine.push_to_live_inbox(
-            &inbox,
-            inbox_notice(
-                pa_core::session_engine::inbox::INBOX_CLASS_AGENT_MESSAGE,
-                "first",
-            ),
-            1_000,
-        ),
+        engine
+            .push_to_live_inbox(
+                &inbox,
+                inbox_notice(
+                    pa_core::session_engine::inbox::INBOX_CLASS_AGENT_MESSAGE,
+                    "first",
+                ),
+                1_000,
+            )
+            .is_some(),
         "the live slot takes the durable push"
     );
     assert_eq!(inbox.count().0, 1);
@@ -1290,14 +1299,16 @@ async fn a_retired_slot_refuses_the_closed_sessions_append_atomically() {
     // would race the replacement's reopen of the same journal.
     engine.clear_inbox();
     assert!(
-        !engine.push_to_live_inbox(
-            &inbox,
-            inbox_notice(
-                pa_core::session_engine::inbox::INBOX_CLASS_AGENT_MESSAGE,
-                "stale",
-            ),
-            2_000,
-        ),
+        engine
+            .push_to_live_inbox(
+                &inbox,
+                inbox_notice(
+                    pa_core::session_engine::inbox::INBOX_CLASS_AGENT_MESSAGE,
+                    "stale",
+                ),
+                2_000,
+            )
+            .is_none(),
         "the retired store never takes an append"
     );
     assert_eq!(inbox.count().0, 1, "the retired store stayed untouched");
@@ -1306,29 +1317,80 @@ async fn a_retired_slot_refuses_the_closed_sessions_append_atomically() {
     let replacement = Arc::new(SessionInbox::open(Some(&dir.join("replacement"))));
     engine.set_inbox(std::sync::Arc::clone(&replacement));
     assert!(
-        !engine.push_to_live_inbox(
-            &inbox,
-            inbox_notice(
-                pa_core::session_engine::inbox::INBOX_CLASS_AGENT_MESSAGE,
-                "still stale",
-            ),
-            3_000,
-        ),
+        engine
+            .push_to_live_inbox(
+                &inbox,
+                inbox_notice(
+                    pa_core::session_engine::inbox::INBOX_CLASS_AGENT_MESSAGE,
+                    "still stale",
+                ),
+                3_000,
+            )
+            .is_none(),
         "the replaced-away store stays refused"
     );
     assert!(
-        engine.push_to_live_inbox(
-            &replacement,
-            inbox_notice(
-                pa_core::session_engine::inbox::INBOX_CLASS_AGENT_MESSAGE,
-                "retried",
-            ),
-            4_000,
-        ),
+        engine
+            .push_to_live_inbox(
+                &replacement,
+                inbox_notice(
+                    pa_core::session_engine::inbox::INBOX_CLASS_AGENT_MESSAGE,
+                    "retried",
+                ),
+                4_000,
+            )
+            .is_some(),
         "the replacement store takes the retry"
     );
     assert_eq!(replacement.count().0, 1);
     assert_eq!(inbox.count().0, 1, "the retired store stays untouched");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// An open-session delivery is atomic with the session swap too: a store
+/// the `create` replacement already retired refuses the append instead of
+/// accepting a notice the replacement session cannot read, and the wake
+/// row never queues for the replacement. Mutation: dropping the identity
+/// check lands the notice in the retired store (both pins red).
+#[tokio::test]
+async fn a_replaced_inbox_refuses_the_open_sessions_append() {
+    let (worker, inbox, dir) = faux_worker_with_inbox();
+    worker.dispatch("clear_queue", &json!({})).await;
+    let engine = worker.agent_engine.as_ref().expect("the faux engine");
+    // The replacement installs the next session's store.
+    let replacement = Arc::new(SessionInbox::open(Some(&dir.join("replacement"))));
+    engine.set_inbox(std::sync::Arc::clone(&replacement));
+    let refused = admit_inbox_notice(
+        &worker.recovery,
+        &worker.core,
+        &worker.work_notify,
+        &inbox,
+        &worker.inbox_arrivals,
+        inbox_notice(
+            pa_core::session_engine::inbox::INBOX_CLASS_AGENT_MESSAGE,
+            "for the retired store",
+        ),
+        Lane::Steering,
+        || false,
+        |_, _| None,
+        Some(engine.as_ref()),
+    );
+    assert_eq!(
+        refused.as_deref(),
+        Some("Target session is closed"),
+        "the retired store refuses the accepted delivery: {refused:?}"
+    );
+    assert_eq!(inbox.count().0, 0, "nothing landed in the retired store");
+    assert_eq!(
+        replacement.count().0,
+        0,
+        "nothing leaked into the replacement"
+    );
+    assert!(
+        steering_rows(&worker).is_empty(),
+        "no wake row queues for the replacement: {:?}",
+        steering_rows(&worker)
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -1352,6 +1414,7 @@ async fn a_follow_up_arrival_keeps_a_queued_steering_notice() {
         Lane::Steering,
         || false,
         |_, _| None,
+        None,
     );
     let _ = admit_inbox_notice(
         &worker.recovery,
@@ -1366,6 +1429,7 @@ async fn a_follow_up_arrival_keeps_a_queued_steering_notice() {
         Lane::FollowUp,
         || false,
         |_, _| None,
+        None,
     );
     let core = worker.core.lock().unwrap();
     assert!(
@@ -1406,6 +1470,7 @@ async fn an_edited_arrival_row_survives_the_next_arrival() {
         Lane::Steering,
         || false,
         |_, _| None,
+        None,
     );
     // The queue strip addresses the row by its visible preview.
     let queued_preview = steering_rows(&worker)[0]
@@ -1439,6 +1504,7 @@ async fn an_edited_arrival_row_survives_the_next_arrival() {
         Lane::Steering,
         || false,
         |_, _| None,
+        None,
     );
     let rows = steering_rows(&worker);
     assert_eq!(rows.len(), 2, "the edited row survives: {rows:?}");
@@ -1541,6 +1607,7 @@ async fn the_wake_row_refresh_follows_the_live_store() {
         Lane::Steering,
         || false,
         |_, _| None,
+        None,
     );
     let _ = admit_inbox_notice(
         &worker.recovery,
@@ -1555,6 +1622,7 @@ async fn the_wake_row_refresh_follows_the_live_store() {
         Lane::Steering,
         || false,
         |_, _| None,
+        None,
     );
     admit_inbox_reminder(
         &worker.recovery,
@@ -1730,6 +1798,7 @@ async fn a_drained_live_batch_drops_its_row_without_rebuilding() {
         Lane::Steering,
         || false,
         |_, _| None,
+        None,
     );
     // The read takes the covered arrival only; the live batch trims to
     // nothing while the older message stays.

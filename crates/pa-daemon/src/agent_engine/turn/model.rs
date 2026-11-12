@@ -387,6 +387,14 @@ impl AgentSessionEngine {
                                     return Err(anyhow::anyhow!("No response produced."));
                                 }
                                 Ok(TurnOnce::Aborted) => return Ok(aborted_message(&model)),
+                                // The parked delivery was consumed by the
+                                // running turn: no attempt reply exists, and
+                                // the retry driver must pass the acceptance
+                                // through (the sentinel reaches
+                                // `TurnResult::Queued` below).
+                                Ok(TurnOnce::Queued) => {
+                                    return Err(anyhow::Error::new(super::QueuedDeliveryConsumed));
+                                }
                                 Err(error) => return Err(error),
                             };
                             if !self
@@ -599,6 +607,16 @@ impl AgentSessionEngine {
             },
             Ok(message) => Ok(message),
         };
+        // The parked delivery's acceptance: the driver never saw a settled
+        // turn, so no reply, retry, or failover classification applies.
+        if let Err(error) = &result {
+            if error
+                .downcast_ref::<super::QueuedDeliveryConsumed>()
+                .is_some()
+            {
+                return TurnResult::Queued;
+            }
+        }
         match result {
             Ok(message) => match message.stop_reason {
                 // The failure already reached the transcript as the final

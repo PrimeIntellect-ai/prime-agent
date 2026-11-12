@@ -336,6 +336,9 @@ impl AgentSessionEngine {
         // A parked delivery whose wait unwound on the cancel flag: the row
         // stays queued for the next run, and this attempt settles aborted.
         let queued_aborted = std::sync::atomic::AtomicBool::new(false);
+        // A parked delivery the streaming run consumed on its own lane: the
+        // seat settles the acceptance, never the running turn's reply.
+        let queued_consumed = std::sync::atomic::AtomicBool::new(false);
         let mut admitted = std::pin::pin!(async {
             if aborted() {
                 abort_raced_admission.store(true, std::sync::atomic::Ordering::SeqCst);
@@ -406,10 +409,16 @@ impl AgentSessionEngine {
                 // runs), so the stale-assistant harvest below never speaks
                 // for this seat and the row never waits past the run it
                 // rode (the AgentEnd window included).
-                if outcome == pa_core::session_engine::PromptOutcome::Queued
-                    && drain_queued_delivery(agent, aborted).await?
-                {
-                    queued_aborted.store(true, std::sync::atomic::Ordering::SeqCst);
+                if outcome == pa_core::session_engine::PromptOutcome::Queued {
+                    match drain_queued_delivery(agent, aborted).await? {
+                        QueuedDrain::Drained => {}
+                        QueuedDrain::Consumed => {
+                            queued_consumed.store(true, std::sync::atomic::Ordering::SeqCst);
+                        }
+                        QueuedDrain::Aborted => {
+                            queued_aborted.store(true, std::sync::atomic::Ordering::SeqCst);
+                        }
+                    }
                 }
                 Ok(())
             } else {
@@ -476,6 +485,13 @@ impl AgentSessionEngine {
         if queued_aborted.load(std::sync::atomic::Ordering::SeqCst) {
             return Ok(TurnOnce::Aborted);
         }
+        // The running turn consumed the parked row on its own lane: this
+        // seat carries the acceptance settle only — the harvest below would
+        // report that turn's assistant as this seat's reply (its own seat
+        // owns the stream and the settled-turn accounting).
+        if queued_consumed.load(std::sync::atomic::Ordering::SeqCst) {
+            return Ok(TurnOnce::Queued);
+        }
         if let Some(error) = admission_error {
             return Err(anyhow::anyhow!("{error:#}"));
         }
@@ -498,6 +514,20 @@ impl AgentSessionEngine {
     }
 }
 
+/// What the busy-session parking seam did with the parked rows.
+enum QueuedDrain {
+    /// This seat ran the parked rows (`continue_run`): the harvest owns the
+    /// drained run's outcome.
+    Drained,
+    /// The parked row left the lane without this seat running it: a
+    /// streaming run's boundary poll consumed it (the steering contract) or
+    /// another drainer won the slot. This seat reports acceptance only.
+    Consumed,
+    /// The delivery's cancel flag ended the wait or the drain: the row
+    /// stays parked for the next run and the attempt settles aborted.
+    Aborted,
+}
+
 /// The busy-session parking seam: a delivery whose admission queued it onto
 /// a streaming run must not be reported as a finished prompt (the stale
 /// assistant harvest), and its parked row must not wait for an unrelated
@@ -505,19 +535,20 @@ impl AgentSessionEngine {
 /// lanes so the queued delivery actually runs (the `resumeIfIdle` seam, the
 /// RPC queue pump's contract on the delivery's own run).
 ///
-/// The wait observes the delivery's cancel flag: a set flag (abort, the
-/// replacement teardown) ends it with `true` — the row stays parked for the
-/// next run and the caller settles the attempt aborted. The bounded poll
-/// backstop covers a stream that cannot settle (a parked worker whose agent
-/// still reports streaming) exactly like the replacement teardown's own
-/// settle wait.
+/// The wait AND the drain observe the delivery's cancel flag: a set flag
+/// (abort, the replacement teardown) ends them as [`QueuedDrain::Aborted`]
+/// — the row stays parked for the next run (the bounded poll backstop
+/// covers a stream that cannot settle, like the replacement teardown's own
+/// settle wait). A `Busy` drain retries after the still-finishing run
+/// releases its slot (`is_streaming` clears before the active-run slot
+/// does), never leaving the row parked behind a misread slot race.
 async fn drain_queued_delivery(
     agent: &std::sync::Arc<pa_agent::agent::Agent>,
     aborted: &dyn Fn() -> bool,
-) -> anyhow::Result<bool> {
+) -> anyhow::Result<QueuedDrain> {
     loop {
         if aborted() {
-            return Ok(true);
+            return Ok(QueuedDrain::Aborted);
         }
         if !agent.state().await.is_streaming {
             break;
@@ -527,18 +558,29 @@ async fn drain_queued_delivery(
             () = tokio::time::sleep(std::time::Duration::from_millis(50)) => {}
         }
     }
-    if !agent.has_queued_messages() {
-        return Ok(false);
-    }
-    // `Busy` hands the drain to the run that won the agent's slot (its own
-    // polls deliver the parked rows); `NothingToContinue` means another
-    // drainer already took them. Neither is this delivery's error.
-    match agent.continue_run().await {
-        Ok(()) => Ok(false),
-        Err(error) => match error.downcast_ref::<pa_agent::agent::AgentContinueError>() {
-            Some(_) => Ok(false),
-            None => Err(error),
-        },
+    loop {
+        // The drain consults the cancel flag again: an abort (the emit
+        // gate's own `agent.abort()` included) must not be answered by
+        // starting a fresh run.
+        if aborted() {
+            return Ok(QueuedDrain::Aborted);
+        }
+        if !agent.has_queued_messages() {
+            return Ok(QueuedDrain::Consumed);
+        }
+        match agent.continue_run().await {
+            Ok(()) => return Ok(QueuedDrain::Drained),
+            Err(error) => match error.downcast_ref::<pa_agent::agent::AgentContinueError>() {
+                // The active run's slot is still finishing (`is_streaming`
+                // already cleared): wait for it and retry the drain.
+                Some(error) if error.code == pa_agent::agent::AgentContinueErrorCode::Busy => {
+                    agent.wait_for_idle().await;
+                }
+                // `NothingToContinue`: another drainer took the rows.
+                Some(_) => return Ok(QueuedDrain::Consumed),
+                None => return Err(error),
+            },
+        }
     }
 }
 

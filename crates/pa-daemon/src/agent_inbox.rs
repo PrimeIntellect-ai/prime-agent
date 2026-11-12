@@ -83,15 +83,17 @@ impl AgentSessionEngine {
             .clone()
     }
 
-    /// The closed-session durable push: the slot identity is re-checked and
-    /// the notice appended under the SLOT's own mutex (the same lock the
-    /// retire's [`Self::clear_inbox`] takes), so a concurrent retire either
-    /// waits for this append — the replacement's build can only open the
-    /// journal after the clear, with the record already on disk — or lands
-    /// first and this call answers `false` (the sender retries into the
-    /// replacement store). The retired store never takes an append that
-    /// could race the next build's reopen and compaction of the same
-    /// journal.
+    /// The identity-checked durable push: the slot identity is re-checked
+    /// and the notice appended under the SLOT's own mutex (the same lock the
+    /// retire's [`Self::clear_inbox`] takes), so a concurrent retire — or a
+    /// `create` replacement that installs the next session's store — either
+    /// waits for this append (the replacement's build can only open the
+    /// journal after the clear, with the record already on disk) or lands
+    /// first and this call answers `None` (the sender retries into the
+    /// replacement store). A retired store never takes an append that could
+    /// race the next build's reopen and compaction of the same journal, and
+    /// a delivery can never succeed against a store the replacement cannot
+    /// read.
     ///
     /// # Panics
     ///
@@ -101,7 +103,7 @@ impl AgentSessionEngine {
         inbox: &Arc<SessionInbox>,
         notice: pa_core::session_engine::inbox::InboxNotice,
         at_ms: u64,
-    ) -> bool {
+    ) -> Option<pa_core::session_engine::inbox::InboxMessage> {
         let slot = self
             .inbox
             .lock()
@@ -110,10 +112,9 @@ impl AgentSessionEngine {
             .as_ref()
             .is_some_and(|current| Arc::ptr_eq(current, inbox))
         {
-            return false;
+            return None;
         }
-        inbox.push(notice, at_ms);
-        true
+        Some(inbox.push(notice, at_ms))
     }
 }
 
