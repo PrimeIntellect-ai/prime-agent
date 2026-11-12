@@ -394,7 +394,9 @@ impl Worker {
                     // already on disk) or lands first and refuses here —
                     // two stores never race the same journal across the
                     // swap.
-                    if !engine.push_to_live_inbox(&inbox, notice, pa_core::autonomous::now_millis())
+                    if engine
+                        .push_to_live_inbox(&inbox, notice, pa_core::autonomous::now_millis())
+                        .is_none()
                     {
                         drop(core);
                         return response_failure(
@@ -424,7 +426,7 @@ impl Worker {
                     .map(|error| error.to_string())
                 }
             };
-            let closed_engine = engine;
+            let closed_engine = std::sync::Arc::clone(&engine);
             let refused = admit_inbox_notice(
                 &self.recovery,
                 &self.core,
@@ -435,6 +437,7 @@ impl Worker {
                 lane,
                 move || closed_engine.session_is_closed(),
                 capacity_error,
+                Some(engine.as_ref()),
             );
             if let Some(error) = refused {
                 return response_failure(None, "worker_deliver_message", &error, None);
