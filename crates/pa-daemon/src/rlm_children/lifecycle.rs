@@ -3,6 +3,7 @@
 //! spawn-admission outbox types (`CreatedSessionIds`, `CreatedChild`).
 use pa_core::session_engine::semantic_edges::ChildCancelledReason;
 
+use super::run_state::{RunEvent, RunVerdict};
 use super::{
     anyhow, cap_text, compact_rlm_text, create_rlm_child_failure_message,
     create_rlm_child_terminal_notice, json, now_ms, Arc, ChildCloseReason, ChildObservationSource,
@@ -423,10 +424,11 @@ impl SupervisorChildSessionsInner {
             (
                 record.active_session_id.clone(),
                 Arc::clone(&record.direct_observation),
-                !record.settled || record.settled_status == Some("cancelled"),
+                !record.run.funnel_fired()
+                    || matches!(record.run.verdict(), Some(RunVerdict::Cancelled(_))),
                 record
-                    .settled_status
-                    .is_none()
+                    .run
+                    .is_running()
                     .then(|| record.session_file.clone())
                     .flatten()
                     .filter(|path| !path.is_empty()),
@@ -499,24 +501,11 @@ impl SupervisorChildSessionsInner {
             .as_deref()
             .map(|text| cap_text(text, ANSWER_TEXT_MAX_CHARS));
         let mut record = record.lock().await;
-        // The settle verdict is one-shot, the answer capture is not: a
-        // `None` first capture (the settle raced the worker's answer
-        // hand-off) froze the row empty before — the capture fill only
-        // ran while `settled_status` was unset, so a later refresh could
-        // never deliver the text and a re-collect answered the same empty
-        // envelope forever. The fill now runs on every refresh: it only
-        // writes when the fresh round trip produced a text AND the row has
-        // no answer yet, so a settled preview is still never overwritten
-        // with a later miss.
-        if record.settled_status.is_none() {
-            match final_turn_error {
-                Some(error) => {
-                    record.settled_status = Some("error");
-                    record.error = Some(error);
-                }
-                None => record.settled_status = Some("done"),
-            }
-        }
+        // The verdict is one-shot, the answer capture is not: a first
+        // capture can miss (the settle raced the worker's answer hand-off),
+        // so every refresh fills a row that has no answer yet, and a
+        // settled preview is never overwritten with a later miss.
+        record.run.apply(RunEvent::IdleRead { final_turn_error });
         if (!record.answer_captured || record.answer_preview.is_none()) && answer.is_some() {
             record.answer_preview = answer;
             record.answer_text = answer_text;
@@ -548,7 +537,7 @@ impl SupervisorChildSessionsInner {
             )
             .await;
             let busy = self.refresh_record(record).await;
-            let settled = record.lock().await.settled_status.is_some();
+            let settled = !record.lock().await.run.is_running();
             if settled {
                 // A delete in flight (`retiring`) owns this run's terminal
                 // edge: the watcher must not run the settle tail into the
@@ -586,7 +575,7 @@ impl SupervisorChildSessionsInner {
                 // stays `running`, which a restart relists as `error`.
                 let completed = {
                     let record = record.lock().await;
-                    (record.settled_status == Some("done"))
+                    matches!(record.run.verdict(), Some(RunVerdict::Done))
                         .then(|| (record.session_dir.clone(), record.rlm_child_id.clone()))
                 };
                 if let Some((session_dir, child_id)) = completed {
@@ -609,9 +598,13 @@ impl SupervisorChildSessionsInner {
                     }
                 }
                 self.deliver_settle_notice(record).await;
-                // A settled child releases an owed goal continuation.
-                self.fire_settle_hook(record).await;
-                return;
+                // A settled child releases an owed goal continuation. A
+                // refused abort can roll a cancelled run back to running
+                // inside this tail: the live run keeps its watcher.
+                if self.fire_settle_hook(record).await {
+                    return;
+                }
+                continue;
             }
             // Still running (a timed-out slice or a re-queued continuation):
             // re-check liveness so a dead worker cannot spin the watch.
@@ -636,7 +629,7 @@ impl SupervisorChildSessionsInner {
                     // branch owes that verdict its notice and funnel. With
                     // no verdict left, a cancel or a parent close owns the
                     // tail.
-                    if record.lock().await.settled_status.is_none() {
+                    if record.lock().await.run.is_running() {
                         return;
                     }
                     unreachable_polls = 0;
@@ -672,7 +665,12 @@ impl SupervisorChildSessionsInner {
             // A delete in flight owns this child's terminal edge: the
             // delete records a cancel line, so a watcher that wakes inside
             // the kill window must not append a clean return beside it.
-            if record.retiring || !matches!(record.settled_status, Some("done" | "error")) {
+            if record.retiring
+                || !matches!(
+                    record.run.verdict(),
+                    Some(RunVerdict::Done | RunVerdict::Error(_))
+                )
+            {
                 return;
             }
             (record.session_id.clone(), record.session_dir.clone())
@@ -739,15 +737,11 @@ impl SupervisorChildSessionsInner {
                 return;
             }
             record.notice_delivered = true;
-            let failure = match (record.settled_status, &record.error) {
-                (Some("error"), Some(error)) => Some(error.clone()),
-                _ => None,
-            };
-            if let Some(error) = failure {
+            if let Some(RunVerdict::Error(Some(error))) = record.run.verdict() {
                 create_rlm_child_failure_message(
                     &record.rlm_child_id,
                     &record.session_name,
-                    &error,
+                    error,
                     now_ms(),
                 )
             } else {
@@ -824,7 +818,6 @@ impl SupervisorChildSessionsInner {
             if !should_mark_error(&record) {
                 return false;
             }
-            record.settled_status = Some("error");
             record.notice_delivered = true;
             if let Some(text) = exit_text {
                 if !record.answer_captured || record.answer_preview.is_none() {
@@ -839,7 +832,7 @@ impl SupervisorChildSessionsInner {
                 &error,
                 now_ms(),
             );
-            record.error = Some(error);
+            record.run.apply(RunEvent::Failed(error));
             message
         };
         self.emit_child_update(record).await;
@@ -914,7 +907,7 @@ impl SupervisorChildSessionsInner {
 /// change. The settle state is durable and the passive roster row
 /// stays the representation.
 pub(super) fn should_mark_error(state: &ChildRecord) -> bool {
-    !(state.closed_by_parent || state.notice_delivered || state.settled_status.is_some())
+    !(state.closed_by_parent || state.notice_delivered || !state.run.is_running())
 }
 
 /// The child's last assistant text from its durable session file (the exit

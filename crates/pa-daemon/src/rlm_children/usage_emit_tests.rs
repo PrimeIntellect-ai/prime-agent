@@ -51,8 +51,7 @@ fn record_with_file(child_id: &str, session_file: &Path) -> Arc<Mutex<ChildRecor
         model: String::new(),
         label: "child".to_string(),
         started_at_ms: 0,
-        settled_status: None,
-        settled: false,
+        run: RunState::running(),
         answer_preview: None,
         answer_text: None,
         answer_captured: false,
@@ -64,7 +63,6 @@ fn record_with_file(child_id: &str, session_file: &Path) -> Arc<Mutex<ChildRecor
         notice_delivered: false,
         factory: false,
         prompt_admitted: true,
-        error: None,
         closed_by_parent: false,
         retiring: false,
         retirement_finished: false,
@@ -617,7 +615,9 @@ async fn repeated_delete_replays_retired_usage_without_repeating_lifecycle_work(
     sink.fail.store(true, std::sync::atomic::Ordering::Relaxed);
     sessions.set_usage_sink(sink.clone());
     let record = record_with_file("sub-retire-delete", &file);
-    record.lock().await.settled_status = Some("done");
+    record.lock().await.run.apply(RunEvent::IdleRead {
+        final_turn_error: None,
+    });
     sessions.inner.children.lock().await.push(record.clone());
     let settled = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let notified = Arc::new(std::sync::atomic::AtomicUsize::new(0));

@@ -1291,7 +1291,9 @@ async fn a_verdict_landing_inside_the_unreachable_give_up_still_runs_the_settle_
         // answers idle.
         let record = Arc::clone(&sessions.inner.children.lock().await[0]);
         let mut record = record.lock().await;
-        record.settled_status = Some("done");
+        record.run.apply(RunEvent::IdleRead {
+            final_turn_error: None,
+        });
     }
     VERDICT_LANDED.notify_one();
 
@@ -2886,8 +2888,7 @@ fn an_already_settled_child_never_re_scores_as_an_unreachable_error() {
         model: String::new(),
         label: "task".to_string(),
         started_at_ms: 0,
-        settled_status: None,
-        settled: false,
+        run: RunState::running(),
         answer_preview: None,
         answer_text: None,
         answer_captured: false,
@@ -2899,7 +2900,6 @@ fn an_already_settled_child_never_re_scores_as_an_unreachable_error() {
         notice_delivered: false,
         factory: false,
         prompt_admitted: true,
-        error: None,
         closed_by_parent: false,
         retiring: false,
         retirement_finished: false,
@@ -2919,7 +2919,9 @@ fn an_already_settled_child_never_re_scores_as_an_unreachable_error() {
     assert!(super::lifecycle::should_mark_error(&base()));
     // A settled child keeps its positive verdict.
     let mut settled = base();
-    settled.settled_status = Some("done");
+    settled.run.apply(RunEvent::IdleRead {
+        final_turn_error: None,
+    });
     assert!(
         !super::lifecycle::should_mark_error(&settled),
         "an idle-passivated (or post-settle crashed) child keeps its settled verdict"
@@ -2960,8 +2962,7 @@ async fn the_unreachable_give_up_skips_the_exit_capture_when_a_capture_stands() 
         model: String::new(),
         label: "task".to_string(),
         started_at_ms: 0,
-        settled_status: None,
-        settled: false,
+        run: RunState::running(),
         answer_preview: Some("the captured say".to_string()),
         answer_text: Some("the captured say".to_string()),
         answer_captured: true,
@@ -2973,7 +2974,6 @@ async fn the_unreachable_give_up_skips_the_exit_capture_when_a_capture_stands() 
         notice_delivered: false,
         factory: false,
         prompt_admitted: true,
-        error: None,
         closed_by_parent: false,
         retiring: false,
         retirement_finished: false,
@@ -3008,7 +3008,7 @@ async fn the_unreachable_give_up_skips_the_exit_capture_when_a_capture_stands() 
         "no exit-capture round trip may run while a captured answer stands"
     );
     let record = record.lock().await;
-    assert_eq!(record.settled_status, Some("error"));
+    assert_eq!(record.run.status(), "error");
     assert_eq!(record.answer_preview.as_deref(), Some("the captured say"));
     assert_eq!(record.answer_text.as_deref(), Some("the captured say"));
     assert!(record.answer_captured);

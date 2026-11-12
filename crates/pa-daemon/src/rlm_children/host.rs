@@ -2,6 +2,7 @@
 //! (`spawn`, `create_session`, `list_subagents`, `delete_subagent`,
 //! `collect`, `rename`) over the supervisor's child-sessions registry,
 //! with the spawn-admission helpers only this surface uses.
+use super::run_state::RunState;
 use super::{
     assert_thinking_supported, bail, create_default_rlm_subagent_session_name, json, now_ms,
     resolve_child_cwd, resolve_child_model, rlm_child_label, rlm_depth_limit_error,
@@ -175,8 +176,7 @@ impl RlmSubagentHost for SupervisorChildSessions {
                     model: model.clone(),
                     label: rlm_child_label(&request.prompt),
                     started_at_ms: now_ms(),
-                    settled_status: None,
-                    settled: false,
+                    run: RunState::running(),
                     answer_preview: None,
                     answer_text: None,
                     answer_captured: false,
@@ -188,7 +188,6 @@ impl RlmSubagentHost for SupervisorChildSessions {
                     notice_delivered: false,
                     factory: request.factory.is_some(),
                     prompt_admitted: false,
-                    error: None,
                     closed_by_parent: false,
                     retiring: false,
                     retirement_finished: false,
@@ -544,7 +543,7 @@ impl RlmSubagentHost for SupervisorChildSessions {
                 // A settled child's delete records no cancel line, so it
                 // leaves its return alone.
                 let mut row = record.lock().await;
-                let was_running = row.settled_status.is_none();
+                let was_running = row.run.is_running();
                 if was_running {
                     row.retiring = true;
                 }
@@ -635,13 +634,13 @@ impl RlmSubagentHost for SupervisorChildSessions {
                 // A settled child that is busy again runs a follow-up turn:
                 // re-arm usage observation (the task-run watcher retired at
                 // its settle).
-                if record.lock().await.settled_status.is_some() {
+                if !record.lock().await.run.is_running() {
                     let active_session_id = record.lock().await.active_session_id.clone();
                     if matches!(this.child_busy(&active_session_id).await, Ok(true)) {
                         SupervisorChildSessionsInner::arm_usage_watch(&this, record).await;
                     }
                 }
-                let still_running = record.lock().await.settled_status.is_none();
+                let still_running = record.lock().await.run.is_running();
                 if still_running {
                     // Wait inside the shared budget, then re-read the child:
                     // a timeout yields the current snapshot, never an error.
