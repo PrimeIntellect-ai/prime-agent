@@ -262,7 +262,7 @@ jobs:
       matrix:
         include:
           - target: aarch64-apple-darwin
-            runs-on: macos-14
+            runs-on: macos-15
           # The x86_64 leg cross-compiles on the Apple-silicon pool: rustc
           # and the Xcode linker build either darwin arch from an M-series
           # host, and the M-pool links this binary ~2.2x faster than the
