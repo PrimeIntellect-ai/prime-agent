@@ -353,7 +353,14 @@ async fn a_collected_handle_drains_its_message_and_drops_the_queued_wake_rows() 
         |_, _| None,
         None,
     );
-    admit_inbox_reminder(&worker.recovery, &worker.core, &notify, &inbox, || false);
+    admit_inbox_reminder(
+        &worker.recovery,
+        &worker.core,
+        &notify,
+        &inbox,
+        || false,
+        None,
+    );
     let rows = steering_rows(&worker);
     assert_eq!(
         rows.len(),
@@ -422,7 +429,14 @@ async fn a_withdrawal_inside_a_covered_batch_rerenders_the_queued_rows() {
         |_, _| None,
         None,
     );
-    admit_inbox_reminder(&worker.recovery, &worker.core, &notify, &inbox, || false);
+    admit_inbox_reminder(
+        &worker.recovery,
+        &worker.core,
+        &notify,
+        &inbox,
+        || false,
+        None,
+    );
     withdraw_bash_completion_notice(
         &worker.recovery,
         &worker.core,
