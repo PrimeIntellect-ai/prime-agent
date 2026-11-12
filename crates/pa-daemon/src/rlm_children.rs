@@ -28,6 +28,7 @@ use pa_core::session_engine::rlm_host::{
     rlm_child_session_dir, rlm_depth_limit_error, spawn_name_unavailable_error,
 };
 
+use retirement::Retirement;
 use run_state::{RunEvent, RunState, RunVerdict};
 
 use crate::rlm_child_model::{
@@ -192,22 +193,9 @@ struct ChildRecord {
     /// The task prompt was admitted; never settle a pre-prompt child (it
     /// is idle with an empty queue by construction).
     prompt_admitted: bool,
-    /// The parent session closed while this child ran: the settle watcher
-    /// exits without a notice — none is owed to a session being torn down.
-    closed_by_parent: bool,
-    /// A parent delete is in flight for this child: a settle watcher that
-    /// wakes inside the kill window must not record a clean
-    /// `child_returned` (the delete records a cancel edge instead). Kept
-    /// apart from `run` so the live run is never faked settled:
-    /// the watcher stays alive and the row stays correctly reported, which
-    /// also lets a failed kill simply clear the mark.
-    retiring: bool,
-    /// Confirmed retirement completed its roster, notice and settle bookkeeping.
-    retirement_finished: bool,
-    /// Claim the synchronous delete notifier once across interrupted retirement retries.
-    retirement_notified: bool,
-    /// Claim the retirement roster event once even if a later await is canceled.
-    retirement_roster_emitted: bool,
+    /// The delete or close of this child, kept apart from `run` so a live run
+    /// is never faked settled during a delete's kill.
+    retirement: Retirement,
     /// The final unregister acknowledged completion; retries must not repeat it.
     usage_registration_forgotten: bool,
     /// The child's durable session file: the usage walk's source.
@@ -350,23 +338,11 @@ pub type DeleteNotifier = std::sync::Arc<dyn Fn(&str) + Send + Sync>;
 
 pub(crate) type ChildUpdateSink = std::sync::Arc<dyn Fn(Value) + Send + Sync>;
 
-#[derive(Debug, Clone, Copy)]
-enum RetirementIntent {
-    Delete { was_running: bool },
-    Close,
-}
-
 /// The parent worker's turn state as the detached child prompt tasks read it.
 #[derive(Debug, Clone, Copy, Default)]
 struct ParentTurn {
     completed: u64,
     running: bool,
-}
-
-#[derive(Clone)]
-struct RetiredChild {
-    record: Arc<Mutex<ChildRecord>>,
-    intent: RetirementIntent,
 }
 
 struct SupervisorChildSessionsInner {
@@ -387,7 +363,7 @@ struct SupervisorChildSessionsInner {
     identity: std::sync::Mutex<ParentIdentity>,
     children: Mutex<Vec<Arc<Mutex<ChildRecord>>>>,
     /// Confirmed-dead children whose final usage remains owed. Not roster or slot owners.
-    retired_usage: std::sync::Mutex<Vec<RetiredChild>>,
+    retired_usage: std::sync::Mutex<Vec<Arc<Mutex<ChildRecord>>>>,
     /// Spawn-name reservations held until admission is durable, so
     /// parallel same-name spawns cannot both admit (default names never reserve).
     pending_spawn_names: std::sync::Mutex<std::collections::HashSet<String>>,
@@ -765,11 +741,7 @@ impl SupervisorChildSessions {
                 notice_delivered: false,
                 factory: false,
                 prompt_admitted: true,
-                closed_by_parent: false,
-                retiring: false,
-                retirement_finished: false,
-                retirement_notified: false,
-                retirement_roster_emitted: false,
+                retirement: Retirement::live(),
                 usage_registration_forgotten: false,
                 session_file: None,
                 attributed_rows: Some(0),
@@ -1110,6 +1082,7 @@ impl SupervisorChildSessionsInner {
 mod host;
 mod lifecycle;
 mod registry;
+mod retirement;
 mod run_state;
 mod usage;
 

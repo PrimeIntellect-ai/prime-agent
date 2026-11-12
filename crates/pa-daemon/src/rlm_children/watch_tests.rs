@@ -2900,11 +2900,7 @@ fn an_already_settled_child_never_re_scores_as_an_unreachable_error() {
         notice_delivered: false,
         factory: false,
         prompt_admitted: true,
-        closed_by_parent: false,
-        retiring: false,
-        retirement_finished: false,
-        retirement_notified: false,
-        retirement_roster_emitted: false,
+        retirement: Retirement::live(),
         usage_registration_forgotten: false,
         session_file: None,
         attributed_rows: Some(0),
@@ -2928,7 +2924,9 @@ fn an_already_settled_child_never_re_scores_as_an_unreachable_error() {
     );
     // A parent-closed child and a noticed child never re-score.
     let mut closed = base();
-    closed.closed_by_parent = true;
+    closed
+        .retirement
+        .apply(super::retirement::RetirementEvent::BeginClose);
     assert!(!super::lifecycle::should_mark_error(&closed));
     let mut noticed = base();
     noticed.notice_delivered = true;
@@ -2974,11 +2972,7 @@ async fn the_unreachable_give_up_skips_the_exit_capture_when_a_capture_stands() 
         notice_delivered: false,
         factory: false,
         prompt_admitted: true,
-        closed_by_parent: false,
-        retiring: false,
-        retirement_finished: false,
-        retirement_notified: false,
-        retirement_roster_emitted: false,
+        retirement: Retirement::live(),
         usage_registration_forgotten: false,
         session_file: Some(
             std::env::temp_dir()
@@ -3012,4 +3006,13 @@ async fn the_unreachable_give_up_skips_the_exit_capture_when_a_capture_stands() 
     assert_eq!(record.answer_preview.as_deref(), Some("the captured say"));
     assert_eq!(record.answer_text.as_deref(), Some("the captured say"));
     assert!(record.answer_captured);
+}
+
+#[test]
+fn a_close_takes_over_a_delete_interrupted_before_its_kill_outcome() {
+    use super::retirement::RetirementEvent;
+    let mut retirement = Retirement::live();
+    retirement.apply(RetirementEvent::BeginDelete);
+    assert!(retirement.apply(RetirementEvent::BeginClose));
+    assert!(retirement.closed_by_parent());
 }

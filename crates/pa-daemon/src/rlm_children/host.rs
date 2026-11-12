@@ -2,6 +2,7 @@
 //! (`spawn`, `create_session`, `list_subagents`, `delete_subagent`,
 //! `collect`, `rename`) over the supervisor's child-sessions registry,
 //! with the spawn-admission helpers only this surface uses.
+use super::retirement::{Retirement, RetirementEvent, RetirementIntent};
 use super::run_state::RunState;
 use super::{
     assert_thinking_supported, bail, create_default_rlm_subagent_session_name, json, now_ms,
@@ -188,11 +189,7 @@ impl RlmSubagentHost for SupervisorChildSessions {
                     notice_delivered: false,
                     factory: request.factory.is_some(),
                     prompt_admitted: false,
-                    closed_by_parent: false,
-                    retiring: false,
-                    retirement_finished: false,
-                    retirement_notified: false,
-                    retirement_roster_emitted: false,
+                    retirement: Retirement::live(),
                     usage_registration_forgotten: false,
                     session_file: created.session_file.clone(),
                     attributed_rows: Some(0),
@@ -272,7 +269,7 @@ impl RlmSubagentHost for SupervisorChildSessions {
                 // The parent closed before the prompt admitted: the
                 // child is closed with it, so the detached task prompt
                 // never fires.
-                if watcher_record.lock().await.closed_by_parent {
+                if watcher_record.lock().await.retirement.closed_by_parent() {
                     return;
                 }
                 if let Err(error) = watcher_this
@@ -511,10 +508,11 @@ impl RlmSubagentHost for SupervisorChildSessions {
             };
             let rename_lock = record.lock().await.rename_lock.clone();
             let _rename_guard = rename_lock.lock().await;
-            let already_terminated = this.has_retired_usage(&record);
+            let already_terminated = record.lock().await.retirement.intent().is_some();
             let no_longer_matches = {
                 let record = record.lock().await;
-                (record.closed_by_parent && !already_terminated) || !record.matches(&target)
+                (record.retirement.closed_by_parent() && !already_terminated)
+                    || !record.matches(&target)
             };
             if no_longer_matches {
                 bail!("No direct RLM subagent matches \"{target}\" in the current parent session");
@@ -545,7 +543,7 @@ impl RlmSubagentHost for SupervisorChildSessions {
                 let mut row = record.lock().await;
                 let was_running = row.run.is_running();
                 if was_running {
-                    row.retiring = true;
+                    row.retirement.apply(RetirementEvent::BeginDelete);
                 }
                 was_running
             };
@@ -561,10 +559,15 @@ impl RlmSubagentHost for SupervisorChildSessions {
                     // The kill never landed: clear the mark so the
                     // still-live child stays watchable and a later cancel
                     // can still record the parent -> child edge.
-                    record.lock().await.retiring = false;
+                    record
+                        .lock()
+                        .await
+                        .retirement
+                        .apply(RetirementEvent::KillRefused);
                     return Err(error);
                 }
-                this.retain_retired_usage(&record, super::RetirementIntent::Delete { was_running });
+                this.retain_retired_usage(&record, RetirementIntent::Delete { was_running })
+                    .await;
                 // Observe any rows that landed before the acknowledged kill.
                 this.emit_child_usage(&record).await;
             }
@@ -722,7 +725,7 @@ impl RlmSubagentHost for SupervisorChildSessions {
                 None
             };
             if let Some(record) = &record {
-                if record.lock().await.closed_by_parent {
+                if record.lock().await.retirement.closed_by_parent() {
                     bail!(
                         "rlm.rename can only rename the current session or one of its direct children"
                     );
