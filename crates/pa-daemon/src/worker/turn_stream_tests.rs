@@ -295,6 +295,7 @@ async fn a_later_run_without_its_end_still_gets_the_fallback_closer() {
         vec![
             EngineEvent::AgentEnd {
                 messages: Vec::new(),
+                aborted: false,
             },
             EngineEvent::AgentStart,
             EngineEvent::Done(Ok(())),
