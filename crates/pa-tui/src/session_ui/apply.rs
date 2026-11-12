@@ -703,6 +703,10 @@ impl SessionUi {
         self.turn_active = false;
         view.working = None;
         view.working_since = None;
+        // A run that ends without its `turn_end` (a pre-run abort, a detach) still
+        // leaves no live streaming slot or retry countdown behind.
+        self.streaming_index = None;
+        view.retry = None;
         Self::flush_pending_bash(view);
         // A detached run's `turn_end` never arrives: its open cards settle here.
         crate::snapshot::settle_pending_tool_cards(
