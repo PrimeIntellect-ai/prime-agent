@@ -432,7 +432,7 @@ async fn an_ended_connection_never_installs_its_channel() {
     );
     let (cmd_tx, _cmd_rx) =
         mpsc::channel::<WorkerRequest>(crate::backpressure::WORKER_INFLIGHT_CAPACITY);
-    let epoch = resident.note_connection_live();
+    let epoch = resident.begin_connection();
     resident.note_connection_lost(epoch).await;
     resident.install_command_channel(epoch, cmd_tx).await;
     assert!(
