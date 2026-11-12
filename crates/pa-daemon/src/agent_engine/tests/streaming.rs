@@ -20,6 +20,7 @@ fn prompt_images_ride_the_user_message_content() {
             source: "user".to_string(),
             agent_message_id: None,
             custom_message: None,
+            streaming_behavior: None,
         },
         &|| false,
         &mut |event| {
@@ -94,6 +95,7 @@ fn assistant_updates_stream_live_while_the_turn_runs() {
             source: "user".to_string(),
             agent_message_id: None,
             custom_message: None,
+            streaming_behavior: None,
         },
         &|| false,
         &mut |event| {
@@ -172,6 +174,7 @@ fn agent_engine_streams_updates_and_final_message() {
             source: "user".to_string(),
             agent_message_id: None,
             custom_message: None,
+            streaming_behavior: None,
         },
         &|| false,
         &mut |event| {
@@ -256,6 +259,7 @@ fn lazy_build_restores_only_the_pre_admission_prompt_context() {
                 source: "user".to_string(),
                 agent_message_id: None,
                 custom_message: None,
+                streaming_behavior: None,
             },
             &|| false,
             &mut |event| {
@@ -356,4 +360,148 @@ fn lazy_build_restores_only_the_pre_admission_prompt_context() {
             "the worker-owned durable branch remains single-copy"
         );
     }
+}
+
+/// The busy-session delivery seam: a delivery admitted while another run
+/// streams must not settle on the streaming run's state. It waits for the
+/// run to settle, then drains the parked lane so the queued row actually
+/// runs on its own seat (the `resumeIfIdle` contract, covering the
+/// final-poll window where the streaming run exits without consuming it).
+/// Mutation: reverting the seat to the instant return settles the stale
+/// harvest instead (`No response produced.` with the row still parked), so
+/// the `Done(Ok)` and empty-lane pins go red.
+#[test]
+fn a_busy_delivery_waits_for_the_run_and_drains_the_parked_row() {
+    let _faux = FAUX_TEST_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let dir = tempfile::TempDir::new().unwrap();
+    let words = (0..120).fold(String::new(), |mut words, i| {
+        use std::fmt::Write;
+        write!(words, "w{i} ").expect("write to String");
+        words
+    });
+    let script = serde_json::json!({
+        "engine": "faux",
+        "tokensPerSecond": 30.0,
+        "responses": [
+            {"content": [{"type": "text", "text": words}]},
+            {"content": [{"type": "text", "text": "drained reply"}]}
+        ],
+    });
+    // The run-stop lever (the worker's `_steeringStopPending` probe): armed
+    // before the delivery admits, it makes the streaming run exit at its
+    // next boundary WITHOUT consuming the parked row — the exact final-poll
+    // window `drain_queued_delivery` covers.
+    let stop_pending = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let probe = {
+        let stop_pending = std::sync::Arc::clone(&stop_pending);
+        std::sync::Arc::new(move || stop_pending.load(std::sync::atomic::Ordering::SeqCst))
+            as std::sync::Arc<dyn Fn() -> bool + Send + Sync>
+    };
+    let engine = AgentSessionEngine::new(AgentEngineConfig {
+        cwd: dir.path().to_path_buf(),
+        agent_dir: dir.path().join("agent"),
+        provider: None,
+        model: None,
+        api_key: None,
+        thinking: None,
+        session_dir: None,
+        session_file: None,
+        faux_script: Some(script.to_string()),
+        supervisor_link: None,
+        telemetry_disabled: None,
+        cron_store: None,
+        queued_steering_probe: Some(probe),
+    })
+    .unwrap();
+    let engine = std::sync::Arc::new(engine);
+    engine.register_arc();
+    // Run #1 streams a paced turn on its own thread.
+    let first_events = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let runner = {
+        let engine = std::sync::Arc::clone(&engine);
+        let first_events = std::sync::Arc::clone(&first_events);
+        std::thread::spawn(move || {
+            engine.run_prompt(
+                0,
+                PromptRequest {
+                    batch: Vec::new(),
+                    images: Vec::new(),
+                    message: "hold".to_string(),
+                    source: "user".to_string(),
+                    agent_message_id: None,
+                    custom_message: None,
+                    streaming_behavior: None,
+                },
+                &|| false,
+                &mut move |event: EngineEvent| {
+                    first_events.lock().unwrap().push(event);
+                    true
+                },
+            );
+        })
+    };
+    // Wait until the run streams: the admission's busy window. The
+    // session build provisions the kernel skills, so the registration
+    // deadline leaves headroom for a loaded runner.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    loop {
+        let streaming = {
+            let guard = engine.session.blocking_lock();
+            match guard.as_deref() {
+                Some(core) => engine
+                    .runtime
+                    .block_on(async { core.session.agent().state().await.is_streaming }),
+                None => false,
+            }
+        };
+        if streaming {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the first run never registered"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    // Arm the stop lever: run #1 exits at its next boundary with the
+    // delivery's row still parked on the agent's steering lane.
+    stop_pending.store(true, std::sync::atomic::Ordering::SeqCst);
+    // The delivery admits while run #1 streams: it parks, waits for the
+    // run, drains the lane, and settles on the drained run's reply.
+    let mut events: Vec<EngineEvent> = Vec::new();
+    admit(&engine, "continue-queued".to_string(), &mut events);
+    let dump = format!("{events:?}");
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, EngineEvent::Done(result) if result.is_ok())),
+        "the parked delivery settles its own run: {dump}"
+    );
+    assert!(
+        dump.contains("drained reply"),
+        "the parked row drained on the delivery's seat: {dump}"
+    );
+    // The parked phase forwards nothing from the streaming run: its
+    // stream belongs to that run's own seat (no duplicated rows, no
+    // doubled usage accounting). The drain's own run re-opens the gate,
+    // which is how `drained reply` above reached this seat at all.
+    // Mutation: dropping the parked gate forwards the first run's frames
+    // (its distinctive tail `w119` appears here).
+    assert!(
+        !dump.contains("w119"),
+        "the streaming run's frames never ride the parked seat: {dump}"
+    );
+    let (steering, follow_up) = {
+        let guard = engine.session.blocking_lock();
+        let core = guard.as_deref().expect("session built");
+        let agent = core.session.agent();
+        (agent.steering_previews(), agent.follow_up_previews())
+    };
+    assert!(
+        steering.is_empty() && follow_up.is_empty(),
+        "the parked row left the lanes: {steering:?} {follow_up:?}"
+    );
+    let _ = runner.join();
 }

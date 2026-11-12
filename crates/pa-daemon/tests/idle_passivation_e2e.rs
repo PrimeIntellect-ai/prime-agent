@@ -216,9 +216,13 @@ async fn a_settled_child_passivates_stays_listable_and_revives_by_agent_message(
     std::fs::create_dir_all(&sessions_dir).expect("sessions dir");
     // The idle-eviction threshold both sides read (the worker's park arm and the
     // supervisor's fence): the settings-driven shape the VM census measures.
+    // The revival's wake oracle reads the delivered message's row in the
+    // child's session file, and the default inbox route delivers a short
+    // notice with the message in the durable inbox instead, so this suite
+    // pins the direct route; the inbox route is covered by `agent_inbox_e2e`.
     std::fs::write(
         agent_dir.join("settings.json"),
-        json!({ "idleEvictionMinutes": 1 }).to_string(),
+        json!({ "idleEvictionMinutes": 1, "agentInbox": { "enabled": false } }).to_string(),
     )
     .expect("write settings");
 

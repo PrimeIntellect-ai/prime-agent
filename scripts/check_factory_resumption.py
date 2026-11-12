@@ -22,6 +22,7 @@ from lifecycle_lib import OwnedProcesses, TAG, finish
 from check_restore_notice import texts
 
 MARKER = 'FACTORY_RECOVERY_RESULT='
+NOTICES_MARKER = 'FACTORY_NOTICES='
 CELL = '''import asyncio, json, time
 factory_harness = rlm.get_harness_state()
 factory_harness.create_factory('Recovery fixture', 'Actual factory output recovery', id='recovery-fixture', machine={
@@ -34,6 +35,10 @@ factory_harness.create_factory('Recovery fixture', 'Actual factory output recove
         'when': {'output': 'data', 'path': 'ok', 'op': 'eq', 'value': True}}]})
 factory_started = await rlm.factory.run('recovery-fixture')
 print('FACTORY_RECOVERY_RESULT=' + json.dumps(factory_started))'''
+NOTICE_CELL = '''import json
+from rlm import inbox
+messages = await inbox.read()
+print('FACTORY_NOTICES=' + json.dumps([m.text for m in messages if m.inbox_class == 'factory-progress']))'''
 
 
 class Provider(http.server.ThreadingHTTPServer):
@@ -67,7 +72,18 @@ class Handler(http.server.BaseHTTPRequestHandler):
             reason = 'stop'
         else:
             self.server.parent_requests.append(body)
-            if len(self.server.parent_requests) == 1:
+            # The probe fires on its own prompt alone: a history scan would
+            # keep matching after the prompt entered the conversation and
+            # loop the tool call.
+            last = body.get('messages', [])[-1:]
+            notices_probe = any(m.get('role') == 'user'
+                                and 'FACTORY_PARENT_PROBE notices' in ''.join(texts(m.get('content')))
+                                for m in last)
+            if notices_probe:
+                delta = {'tool_calls': [{'index': 0, 'id': 'factory_notices', 'type': 'function',
+                    'function': {'name': 'python_repl', 'arguments': json.dumps({'code': NOTICE_CELL})}}]}
+                reason = 'tool_calls'
+            elif len(self.server.parent_requests) == 1:
                 offered = [t['function']['name'] for t in body.get('tools', [])]
                 assert 'python_repl' in offered, offered
                 delta = {'tool_calls': [{'index': 0, 'id': 'factory_probe', 'type': 'function',
@@ -163,15 +179,31 @@ def observe(binary, root, observed):
             observed.setdefault('timed_out_snapshots', []).extend(snapshots)
             raise AssertionError('factory did not leave running after parent turn completed')
         def parent_notice(kind):
+            # The agent inbox routes factory milestones: the parent is woken
+            # by the short steering notice, and the full text waits in the
+            # durable inbox until the session reads it.
             notice = f'[factory-progress run:{run_id}] {kind}:'
-            deadline = time.monotonic() + 60
+            deadline = time.monotonic() + 120
+            last_probe = 0.0
             while time.monotonic() < deadline:
-                seen = [text for body in list(server.parent_requests)
+                wake = [text for body in list(server.parent_requests)
                         for m in body.get('messages', []) if m.get('role') == 'user'
-                        for text in texts(m.get('content')) if notice in text]
-                if seen:
-                    return seen[0]
-                threading.Event().wait(0.025)
+                        for text in texts(m.get('content'))
+                        if '[inbox ' in text and 'factory-progress' in text]
+                read = [line[len(NOTICES_MARKER):] for body in list(server.parent_requests)
+                        for m in body.get('messages', []) if m.get('role') == 'tool'
+                        for content in texts(m.get('content'))
+                        for line in content.splitlines() if line.startswith(NOTICES_MARKER)]
+                found = [text for payload in read for text in json.loads(payload)]
+                for text in found:
+                    if notice in text:
+                        return {'wake': wake[0] if wake else None, 'read': text}
+                if wake and time.monotonic() - last_probe >= 2.0:
+                    last_probe = time.monotonic()
+                    control.call('prompt', activeSessionId=active,
+                                 message='FACTORY_PARENT_PROBE notices')
+                    control.call('wait_for_idle', timeout_seconds=120, activeSessionId=active)
+                threading.Event().wait(0.05)
             raise AssertionError(f'parent session never received {notice!r}')
         paused = settled()
         assert paused['state'] == 'paused', paused

@@ -200,31 +200,7 @@ impl Worker {
 
     /// Sequence and broadcast one `session_event` for the queue projection.
     pub(crate) fn emit_action_update(&self, snapshot: &SessionActionSnapshot) -> Result<()> {
-        let mut core = self.core.lock().unwrap();
-        // TS `_emitQueueUpdate`: an unchanged projection stays silent (an
-        // empty queue before and after a turn is not an update).
-        if core.last_action_snapshot.as_ref() == Some(snapshot) {
-            return Ok(());
-        }
-        core.last_action_snapshot = Some(snapshot.clone());
-        let sequence = core.last_event_sequence + 1;
-        core.last_event_sequence = sequence;
-        let meta = create_daemon_event_meta(
-            &core.active_session_id,
-            sequence,
-            None,
-            Some(&core.generation),
-        );
-        let outbound = DaemonOutbound::SessionEvent {
-            active_session_id: core.active_session_id.clone(),
-            event: json!({ "type": "session_action_update", "actions": snapshot }),
-            meta: Some(meta),
-            rest: Map::default(),
-        };
-        let payload = serde_json::to_vec(&outbound)?;
-        drop(core);
-        self.events.send(OutboundFrame::session_event(payload));
-        Ok(())
+        emit_action_update_raw(&self.core, &self.events, snapshot)
     }
 
     pub(crate) fn emit_session_closed(
@@ -680,4 +656,67 @@ pub(crate) fn compact_action_label(text: &str) -> String {
     }
     let kept: String = compact.chars().take(MAX_CHARS - 3).collect();
     format!("{}...", kept.trim_end())
+}
+
+/// The queue-projection broadcast over raw handles: the pre-construction
+/// read-hook seam (the worker's post-drain refresh) shares this body.
+pub(crate) fn emit_action_update_raw(
+    core: &Arc<std::sync::Mutex<SessionCore>>,
+    events: &Arc<EventPump>,
+    snapshot: &SessionActionSnapshot,
+) -> Result<()> {
+    let mut core_guard = core.lock().unwrap();
+    // TS `_emitQueueUpdate`: an unchanged projection stays silent (an
+    // empty queue before and after a turn is not an update).
+    if core_guard.last_action_snapshot.as_ref() == Some(snapshot) {
+        return Ok(());
+    }
+    // The send stays under the guard: broadcast ORDER must follow the
+    // projection order (a release before the send lets a concurrent
+    // emission overtake this one and suppress the corrective update).
+    let payload = build_action_snapshot_payload_locked(&mut core_guard, snapshot)?;
+    events.send(OutboundFrame::session_event(payload));
+    drop(core_guard);
+    Ok(())
+}
+
+/// The queue projection recomputed and broadcast under ONE lock: the
+/// post-drain hook's refresh can race an admission's own emission, and a
+/// copy snapshotted outside the emission lock could overwrite the newer
+/// strip state.
+pub(crate) fn emit_action_update_fresh(
+    core: &Arc<std::sync::Mutex<SessionCore>>,
+    events: &Arc<EventPump>,
+) -> Result<()> {
+    let mut core_guard = core.lock().unwrap();
+    let snapshot = Worker::snapshot_locked(&core_guard);
+    if core_guard.last_action_snapshot.as_ref() == Some(&snapshot) {
+        return Ok(());
+    }
+    let payload = build_action_snapshot_payload_locked(&mut core_guard, &snapshot)?;
+    events.send(OutboundFrame::session_event(payload));
+    drop(core_guard);
+    Ok(())
+}
+
+fn build_action_snapshot_payload_locked(
+    core: &mut SessionCore,
+    snapshot: &SessionActionSnapshot,
+) -> Result<Vec<u8>> {
+    core.last_action_snapshot = Some(snapshot.clone());
+    let sequence = core.last_event_sequence + 1;
+    core.last_event_sequence = sequence;
+    let meta = create_daemon_event_meta(
+        &core.active_session_id,
+        sequence,
+        None,
+        Some(&core.generation),
+    );
+    let outbound = DaemonOutbound::SessionEvent {
+        active_session_id: core.active_session_id.clone(),
+        event: json!({ "type": "session_action_update", "actions": snapshot }),
+        meta: Some(meta),
+        rest: Map::default(),
+    };
+    Ok(serde_json::to_vec(&outbound)?)
 }

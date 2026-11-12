@@ -78,6 +78,13 @@ impl AgentSessionEngine {
         aborted: &dyn Fn() -> bool,
         emit: &mut dyn FnMut(EngineEvent) -> bool,
     ) -> anyhow::Result<TurnOnce> {
+        // This seat is live from here through the final harvest below: a
+        // queued drain waits until it is the only live seat, so an earlier
+        // seat's subscription can never forward/account the next run's
+        // events nor harvest its assistant.
+        self.turn_seats
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let _seat = TurnSeatGuard(std::sync::Arc::clone(&self.turn_seats));
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<EngineEvent>();
         // Goal usage accounting at the message_end hook: each settled non-error
         // assistant message records its token delta, from the engine mirror.
@@ -87,6 +94,12 @@ impl AgentSessionEngine {
         // item's first run; this subscription forwards them only once a
         // boundary frame already passed.
         let boundary_passed = std::sync::Arc::clone(boundary_passed);
+        // The parked gate: while the delivery waits on another run's
+        // lane, that run's events belong to its own seat — this
+        // subscription forwards and accounts nothing until the drain
+        // actually starts the parked rows (the gate re-opens then).
+        let parked = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let subscription_parked = std::sync::Arc::clone(&parked);
         let subscription = {
             let tx = tx.clone();
             let pending_model_changes = pending_model_changes.clone();
@@ -107,8 +120,16 @@ impl AgentSessionEngine {
                     let autonomous_driver = std::sync::Arc::clone(&autonomous_driver);
                     let goal_runtime = goal_runtime.clone();
                     let goal_budget_crossed = goal_budget_crossed.clone();
+                    let parked = std::sync::Arc::clone(&subscription_parked);
                     Box::pin(async move {
                         use pa_agent::types::AgentEvent;
+                        if parked.load(std::sync::atomic::Ordering::SeqCst) {
+                            // The delivery parked on the running turn's
+                            // lane: its stream belongs to that turn's own
+                            // seat (this seat would duplicate rows and
+                            // double the usage accounting).
+                            return Ok(());
+                        }
                         if let AgentEvent::MessageEnd {
                             message:
                                 pa_agent::types::AgentMessage::Standard(
@@ -333,6 +354,16 @@ impl AgentSessionEngine {
         // admission future's head: the whole [pickup, registration] window
         // honours the delivery's cancel flag.
         let abort_raced_admission = std::sync::atomic::AtomicBool::new(false);
+        // A parked delivery whose wait unwound on the cancel flag: the row
+        // stays queued for the next run, and this attempt settles aborted.
+        let queued_aborted = std::sync::atomic::AtomicBool::new(false);
+        // A parked delivery the streaming run consumed on its own lane: the
+        // seat settles the acceptance, never the running turn's reply.
+        let queued_consumed = std::sync::atomic::AtomicBool::new(false);
+        // The emit-driven cancellation (the delivery's own gate): the drain
+        // consults it beside the delivery's cancel flag, so a cancelled
+        // turn never starts fresh model/tool work.
+        let emit_cancelled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let mut admitted = std::pin::pin!(async {
             if aborted() {
                 abort_raced_admission.store(true, std::sync::atomic::Ordering::SeqCst);
@@ -355,7 +386,7 @@ impl AgentSessionEngine {
                         }),
                     );
                 }
-                match &prompt {
+                let outcome = match &prompt {
                     // A plain turn admits a user prompt; an injected turn admits the
                     // custom row itself — ONE representation.
                     TurnPrompt::User {
@@ -373,20 +404,56 @@ impl AgentSessionEngine {
                                     images: row.images.clone(),
                                 })
                                 .collect(),
+                            // A user message is the steer class: when the
+                            // agent is busy at admission it interrupts the
+                            // running turn (the operator ruling), never
+                            // rejects.
+                            streaming_behavior: Some(
+                                pa_core::session_engine::StreamingBehavior::Steer,
+                            ),
                             ..Default::default()
                         };
                         engine
                             .session
                             .prompt_with_images(text, images.clone(), options)
-                            .await
-                            .map(|_| ())
+                            .await?
                     }
-                    TurnPrompt::Injected(message) => engine
-                        .session
-                        .prompt_injected_message(message)
-                        .await
-                        .map(|_| ()),
+                    // The injected row carries its delivery's lane behavior:
+                    // a busy session queues the row (steer or follow-up),
+                    // never fails the turn with the admission rejection.
+                    TurnPrompt::Injected { message, behavior } => {
+                        engine
+                            .session
+                            .prompt_injected_message_with_behavior(message, *behavior)
+                            .await?
+                    }
+                };
+                // A busy session parked the delivery on the agent's lanes.
+                // Report nothing from a parked row: wait for the streaming
+                // run to settle and drain the lanes (the delivery actually
+                // runs), so the stale-assistant harvest below never speaks
+                // for this seat and the row never waits past the run it
+                // rode (the AgentEnd window included).
+                if outcome == pa_core::session_engine::PromptOutcome::Queued {
+                    let drain_aborted = {
+                        let emit_cancelled = std::sync::Arc::clone(&emit_cancelled);
+                        move || {
+                            aborted() || emit_cancelled.load(std::sync::atomic::Ordering::SeqCst)
+                        }
+                    };
+                    match drain_queued_delivery(agent, &drain_aborted, &parked, &self.turn_seats)
+                        .await?
+                    {
+                        QueuedDrain::Drained => {}
+                        QueuedDrain::Consumed => {
+                            queued_consumed.store(true, std::sync::atomic::Ordering::SeqCst);
+                        }
+                        QueuedDrain::Aborted => {
+                            queued_aborted.store(true, std::sync::atomic::Ordering::SeqCst);
+                        }
+                    }
                 }
+                Ok(())
             } else {
                 agent.continue_run().await
             }
@@ -400,6 +467,7 @@ impl AgentSessionEngine {
                     match event {
                         Some(event) => {
                             if !emit(event) {
+                                emit_cancelled.store(true, std::sync::atomic::Ordering::SeqCst);
                                 aborted = true;
                             }
                         }
@@ -414,6 +482,7 @@ impl AgentSessionEngine {
                     }
                     while let Ok(event) = rx.try_recv() {
                         if !emit(event) {
+                            emit_cancelled.store(true, std::sync::atomic::Ordering::SeqCst);
                             aborted = true;
                             break;
                         }
@@ -445,6 +514,19 @@ impl AgentSessionEngine {
         if abort_raced_admission.load(std::sync::atomic::Ordering::SeqCst) {
             return Ok(TurnOnce::Aborted);
         }
+        // The parked delivery's wait unwound on the cancel flag: the row
+        // stays queued for the next run, and this attempt is the aborted
+        // settle — never a stale harvest of another run's reply.
+        if queued_aborted.load(std::sync::atomic::Ordering::SeqCst) {
+            return Ok(TurnOnce::Aborted);
+        }
+        // The running turn consumed the parked row on its own lane: this
+        // seat carries the acceptance settle only — the harvest below would
+        // report that turn's assistant as this seat's reply (its own seat
+        // owns the stream and the settled-turn accounting).
+        if queued_consumed.load(std::sync::atomic::Ordering::SeqCst) {
+            return Ok(TurnOnce::Queued);
+        }
         if let Some(error) = admission_error {
             return Err(anyhow::anyhow!("{error:#}"));
         }
@@ -464,6 +546,133 @@ impl AgentSessionEngine {
             }
         }
         Ok(TurnOnce::None)
+    }
+}
+
+/// One live delivery seat's scope: `run_turn_once` holds it from entry
+/// through the final harvest, so a queued drain (see
+/// [`drain_queued_delivery`]) can wait until it is the only live seat —
+/// an earlier seat's still-active subscription forwards and accounts
+/// events, and its harvest could take the next run's assistant.
+struct TurnSeatGuard(std::sync::Arc<std::sync::atomic::AtomicUsize>);
+
+impl Drop for TurnSeatGuard {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+/// What the busy-session parking seam did with the parked rows.
+enum QueuedDrain {
+    /// This seat ran the parked rows (`continue_run`): the harvest owns the
+    /// drained run's outcome.
+    Drained,
+    /// The parked row left the lane without this seat running it: a
+    /// streaming run's boundary poll consumed it (the steering contract) or
+    /// another drainer won the slot. This seat reports acceptance only.
+    Consumed,
+    /// The delivery's cancel flag ended the wait or the drain: the row
+    /// stays parked for the next run and the attempt settles aborted.
+    Aborted,
+}
+
+/// The busy-session parking seam: a delivery whose admission queued it onto
+/// a streaming run must not be reported as a finished prompt (the stale
+/// assistant harvest), and its parked row must not wait for an unrelated
+/// future run — wait for the streaming run to settle, then drain the parked
+/// lanes so the queued delivery actually runs (the `resumeIfIdle` seam, the
+/// RPC queue pump's contract on the delivery's own run).
+///
+/// The wait AND the drain observe the delivery's cancel flag: a set flag
+/// (abort, the replacement teardown) ends them as [`QueuedDrain::Aborted`]
+/// — the row stays parked for the next run (the bounded poll backstop
+/// covers a stream that cannot settle, like the replacement teardown's own
+/// settle wait). A `Busy` drain retries after the still-finishing run
+/// releases its slot (`is_streaming` clears before the active-run slot
+/// does), never leaving the row parked behind a misread slot race.
+async fn drain_queued_delivery(
+    agent: &std::sync::Arc<pa_agent::agent::Agent>,
+    aborted: &dyn Fn() -> bool,
+    parked: &std::sync::atomic::AtomicBool,
+    seats: &std::sync::Arc<std::sync::atomic::AtomicUsize>,
+) -> anyhow::Result<QueuedDrain> {
+    // The delivery is parked: the running turn's events belong to its own
+    // seat (the gate suppresses this seat's forwarding and accounting).
+    parked.store(true, std::sync::atomic::Ordering::SeqCst);
+    loop {
+        if aborted() {
+            return Ok(QueuedDrain::Aborted);
+        }
+        if !agent.state().await.is_streaming {
+            break;
+        }
+        if wait_for_run_slot(agent, aborted).await {
+            return Ok(QueuedDrain::Aborted);
+        }
+    }
+    loop {
+        // The drain consults the cancel flag again: an abort (the emit
+        // gate's own `agent.abort()` included) must not be answered by
+        // starting a fresh run.
+        if aborted() {
+            return Ok(QueuedDrain::Aborted);
+        }
+        if !agent.has_queued_messages() {
+            return Ok(QueuedDrain::Consumed);
+        }
+        // Every earlier delivery seat must finish before a new run starts:
+        // its still-active subscription would forward and account this
+        // run's events, and its harvest could take this run's assistant as
+        // its own reply. This seat itself is counted (the wait ends at 1);
+        // the wait is cancel-aware.
+        while seats.load(std::sync::atomic::Ordering::SeqCst) != 1 {
+            if aborted() {
+                return Ok(QueuedDrain::Aborted);
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        // This seat starts the parked rows: the drained run's events are
+        // ours to forward and account again.
+        parked.store(false, std::sync::atomic::Ordering::SeqCst);
+        match agent.continue_run().await {
+            Ok(()) => return Ok(QueuedDrain::Drained),
+            Err(error) => match error.downcast_ref::<pa_agent::agent::AgentContinueError>() {
+                // The active run's slot is still finishing (`is_streaming`
+                // already cleared) — or a raced drainer beat this one to
+                // it: wait for the slot, re-park (the winner's stream is
+                // its own seat's), and retry the drain.
+                Some(error) if error.code == pa_agent::agent::AgentContinueErrorCode::Busy => {
+                    parked.store(true, std::sync::atomic::Ordering::SeqCst);
+                    if wait_for_run_slot(agent, aborted).await {
+                        return Ok(QueuedDrain::Aborted);
+                    }
+                }
+                // `NothingToContinue`: another drainer took the rows.
+                Some(_) => return Ok(QueuedDrain::Consumed),
+                None => return Err(error),
+            },
+        }
+    }
+}
+
+/// Wait for the active run to release its slot: the bounded-poll backstop
+/// covers a stream that cannot settle, and the cancel flag ends the wait
+/// (answers `true`) exactly like the streaming wait above.
+async fn wait_for_run_slot(
+    agent: &std::sync::Arc<pa_agent::agent::Agent>,
+    aborted: &dyn Fn() -> bool,
+) -> bool {
+    loop {
+        if aborted() {
+            return true;
+        }
+        if !agent.has_active_run() {
+            return false;
+        }
+        tokio::select! {
+            () = agent.wait_for_idle() => {}
+            () = tokio::time::sleep(std::time::Duration::from_millis(50)) => {}
+        }
     }
 }
 

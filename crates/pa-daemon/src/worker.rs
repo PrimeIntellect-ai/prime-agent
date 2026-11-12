@@ -18,19 +18,20 @@ mod summary;
 mod connection;
 
 pub(crate) use connection::{AuthOutcome, ConnectionSink, EventPump, OutboundFrame};
+pub(crate) use summary::emit_action_update_fresh;
 
 mod queue;
 
 pub use queue::Lane;
 pub use queue::QueuePriority;
 pub(crate) use queue::{
-    admit_autonomous_follow_up, admit_goal_follow_up, admit_kernel_notice,
-    checkpoint_queue_recovery, clear_withdrawn_progress_note, enqueue_priority,
-    gather_delivery_batch, parse_custom_message, parse_prompt_images, queue_lanes,
-    restore_queue_snapshot, restored_turn_policy, withdraw_bash_completion_notice, QueueCheckpoint,
-    QueueLanes, QueuedItem, TurnPolicy, TurnSettle, ABORTED_TURN_SETTLE_ERROR,
-    PROMPT_ABORTED_BEFORE_DELIVERY, QUEUED_INPUT_SUSPENDED, QUEUED_PROMPT_DELETED,
-    SIDE_QUESTION_SETTLE_TIMEOUT,
+    admit_autonomous_follow_up, admit_goal_follow_up, admit_inbox_notice, admit_inbox_reminder,
+    admit_kernel_notice, checkpoint_queue_recovery, clear_withdrawn_progress_note,
+    enqueue_priority, gather_delivery_batch, parse_custom_message, parse_prompt_images,
+    queue_lanes, refresh_inbox_wake_rows, refresh_inbox_wake_rows_locked, restore_queue_snapshot,
+    restored_turn_policy, withdraw_bash_completion_notice, QueueCheckpoint, QueueLanes, QueuedItem,
+    TurnPolicy, TurnSettle, ABORTED_TURN_SETTLE_ERROR, PROMPT_ABORTED_BEFORE_DELIVERY,
+    QUEUED_INPUT_SUSPENDED, QUEUED_PROMPT_DELETED, SIDE_QUESTION_SETTLE_TIMEOUT,
 };
 
 mod create;
@@ -175,6 +176,9 @@ pub struct Worker {
     pub(crate) agent_messages: crate::agent_message_ingest::AgentMessageIngest,
     /// Session input-pause leases: the admission gate the turn runner consults.
     pub(crate) input_pauses: crate::session_input_pause::InputPauseTable,
+    /// The inbox arrival batch the queued short notice covers: shared by
+    /// the kernel-notice sink and the agent-message delivery route.
+    pub(crate) inbox_arrivals: pa_core::session_engine::inbox::InboxArrivals,
     /// Session navigation: `new_session` / `switch_session` / `import_jsonl`,
     /// the shared replacement flow.
     pub(crate) navigation: crate::session_navigation::SessionNavigation,
@@ -378,6 +382,10 @@ impl Worker {
             Arc::clone(&events),
             Arc::clone(&recovery),
         ));
+        // The coalescing arrival batch the queued short notice covers:
+        // shared by the kernel-notice sink and the agent-message
+        // delivery route, so both classes extend the same batch.
+        let inbox_arrivals = pa_core::session_engine::inbox::InboxArrivals::default();
         let (engine, agent_engine, roster_pushes): (
             std::sync::Arc<dyn SessionEngine>,
             Option<std::sync::Arc<crate::agent_engine::AgentSessionEngine>>,
@@ -615,10 +623,17 @@ impl Worker {
                 // The kernel-notice wake seam (TS `_promptInjectedMessage`
                 // for `bash.completed` and `factory.progress`): the handlers
                 // validate, the sinks admit/withdraw through the queue lanes.
+                // With the agent inbox enabled (default), the notice's message
+                // lands in the session's durable inbox and ONE short steering
+                // notice wakes instead of the full row.
                 let notice_engine = std::sync::Arc::downgrade(concrete);
                 let notice_core = Arc::clone(&core);
                 let notice_notify = Arc::clone(&work_notify);
                 let notice_recovery = Arc::clone(&recovery);
+                let notice_agent_dir = config.agent_dir.clone();
+                // The coalescing batch the queued notice row covers (routing
+                // state, reset when the row delivers or clears).
+                let arrivals_for_sink = std::sync::Arc::clone(&inbox_arrivals);
                 let notice_sink: crate::engine::KernelNoticeSink = Arc::new(move |notice| {
                     let Some(engine) = notice_engine.upgrade() else {
                         return;
@@ -626,16 +641,50 @@ impl Worker {
                     if engine.session_is_closed() {
                         return;
                     }
+                    // Revalidated inside the admission's lock section: the
+                    // close paths mark the session BEFORE clearing the lanes.
+                    let closed = || engine.session_is_closed();
+                    if crate::agent_inbox::inbox_enabled(&engine.cwd(), &notice_agent_dir) {
+                        if let (Some(inbox), Some(fields)) = (
+                            engine.inbox(),
+                            pa_core::session_engine::inbox::inbox_notice_fields(&notice),
+                        ) {
+                            let admitted = admit_inbox_notice(
+                                &notice_recovery,
+                                &notice_core,
+                                &notice_notify,
+                                &inbox,
+                                &arrivals_for_sink,
+                                fields,
+                                Lane::Steering,
+                                closed,
+                                |_, _| None,
+                                Some(engine.as_ref()),
+                            );
+                            if admitted.is_ok() {
+                                return;
+                            }
+                            // The store moved on between the capture and
+                            // the identity-checked push (a replacement
+                            // retired it): the notice must never vanish —
+                            // steer the full row like the inbox-off lane.
+                        }
+                    }
                     admit_kernel_notice(
                         &notice_recovery,
                         &notice_core,
                         &notice_notify,
                         notice,
-                        // Revalidated inside the admission's lock section: the
-                        // close paths mark the session BEFORE clearing the lanes.
-                        || engine.session_is_closed(),
+                        closed,
                     );
                 });
+                crate::agent_inbox::spawn_inbox_reminder(
+                    std::sync::Arc::downgrade(concrete),
+                    &core,
+                    &work_notify,
+                    &recovery,
+                    &config.agent_dir,
+                );
                 let withdraw_core = Arc::clone(&core);
                 let withdraw_recovery = Arc::clone(&recovery);
                 let withdraw_engine = Arc::downgrade(concrete);
@@ -751,6 +800,38 @@ impl Worker {
             std::sync::Arc::clone(&engine),
             Arc::clone(&core),
         );
+        // The worker's post-drain inbox seam: every session build copies
+        // it onto the freshly opened store, and the kernel's read handler
+        // runs it so drained wake rows retract or re-render — and the
+        // queue strip refreshes for subscribed clients.
+        if let Some(engine) = &agent_engine {
+            let hook_core = Arc::clone(&core);
+            let hook_arrivals = std::sync::Arc::clone(&inbox_arrivals);
+            let hook_events = Arc::clone(&events);
+            let hook_recovery = Arc::clone(&recovery);
+            engine.set_inbox_read_hook(std::sync::Arc::new(
+                move |inbox: &std::sync::Arc<pa_core::session_engine::inbox::SessionInbox>| {
+                    if refresh_inbox_wake_rows(&hook_core, &hook_arrivals, inbox) {
+                        // The refreshed lanes are live work until the turn
+                        // settles: a crash must not restore a stale wake.
+                        checkpoint_queue_recovery(
+                            &hook_recovery,
+                            &hook_core,
+                            QueueCheckpoint::Settle {
+                                operation: "queue_mutated",
+                            },
+                        );
+                        // The projection recomputes under the emission
+                        // lock, so a concurrent admission's strip state
+                        // is never overwritten by a stale copy.
+                        let _ = crate::worker::summary::emit_action_update_fresh(
+                            &hook_core,
+                            &hook_events,
+                        );
+                    }
+                },
+            ));
+        }
         Worker {
             config,
             bound_socket_identity: std::sync::Mutex::new(None),
@@ -783,6 +864,7 @@ impl Worker {
             roster_pushes,
             agent_messages: crate::agent_message_ingest::AgentMessageIngest::new(),
             input_pauses,
+            inbox_arrivals,
             navigation,
             prompt_admissions,
             scheduled,
@@ -1132,6 +1214,8 @@ mod prompt_image_tests;
 
 #[cfg(test)]
 mod compaction_admission_tests;
+#[cfg(test)]
+mod inbox_queue_tests;
 #[cfg(test)]
 mod recovery_verdict_tests;
 #[cfg(test)]

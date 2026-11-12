@@ -481,6 +481,7 @@ fn run_skill_prompt_body(
             source: "user".to_string(),
             agent_message_id: None,
             custom_message: None,
+            streaming_behavior: None,
         },
         &|| false,
         &mut |event| {
