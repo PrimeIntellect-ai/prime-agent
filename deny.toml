@@ -8,19 +8,32 @@ all-features = true
 version = 2
 # Fail the build on any reachable vulnerability or withdrawn advisory.
 yanked = "deny"
+# Also report unsound advisories for transitive crates (the default covers
+# only direct dependencies of workspace crates).
+unsound = "all"
 # Triaged exceptions — every entry must carry a reason and a review date;
 # a landed fix upstream means the entry is removed instead of silenced.
 ignore = [
   # Marvin Attack timing sidechannel in rsa; no patch exists upstream
-  # (RustCrypto/RSA#626 tracks it). `rsa` is currently a dead dependency in
-  # pa-ai (declared, never referenced); no signing path executes it, so no
-  # timing oracle exists. Reviewed 2026-09-17; drop rsa (pa-ai lane) or
-  # re-triage when rsa publishes a fix.
-  { id = "RUSTSEC-2023-0071", reason = "unpatched upstream; rsa is an unused pa-ai dep, no signing path executes it (reviewed 2026-09-17)" },
+  # (RustCrypto/RSA#626 tracks it). The Prime browser login
+  # (pa-core/src/auth/prime_traces.rs, run_prime_browser_login) generates a
+  # fresh 2048-bit key per login and OAEP-decrypts exactly one challenge
+  # result with it, locally. The attack needs many timed decryptions under one
+  # key, so no oracle exists. pa-ai declares rsa without using it; pa-cli uses
+  # it only in tests. Reviewed 2026-11-11; re-triage when rsa publishes a fix.
+  { id = "RUSTSEC-2023-0071", reason = "unpatched upstream; pa-core decrypts one local OAEP login result per fresh key, no repeated-decryption oracle (reviewed 2026-11-11)" },
   # `paste` proc-macro is unmaintained; pulled by ratatui (build-time only,
   # no vulnerable code path). Reviewed 2026-09-17; revisit when ratatui
   # drops the dep.
   { id = "RUSTSEC-2024-0436", reason = "unmaintained proc-macro via ratatui, build-time only (reviewed 2026-09-17)" },
+  # lru 0.12.5 is pulled only by ratatui 0.29, whose private thread-local
+  # layout cache (src/layout/layout.rs) calls only get_or_insert and resize:
+  # it never constructs IterMut (0002) or calls pop (0253), and its
+  # (Rect, Layout) keys have no custom Drop. The fixed lru releases are outside
+  # ratatui 0.29's ^0.12 requirement. Reviewed 2026-11-11; drop both entries
+  # with the ratatui upgrade.
+  { id = "RUSTSEC-2026-0002", reason = "lru via ratatui 0.29; its layout cache never constructs IterMut (reviewed 2026-11-11)" },
+  { id = "RUSTSEC-2026-0253", reason = "lru via ratatui 0.29; its layout cache never calls pop, keys have no custom Drop (reviewed 2026-11-11)" },
 ]
 
 [licenses]
