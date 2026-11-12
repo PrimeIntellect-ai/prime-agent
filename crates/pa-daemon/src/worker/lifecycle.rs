@@ -119,11 +119,14 @@ impl Worker {
                     agent_message: None,
                     queue_key: None,
                     admission_id: None,
+                    client_admission_id: None,
                     images: Vec::new(),
                     done: None,
                     queue_visible: false,
                     policy: TurnPolicy::Direct,
                     forced_batch: false,
+                    kernel_notice: false,
+                    delivery_scoped: false,
                 });
             }
             still_interrupted
@@ -566,11 +569,14 @@ impl Worker {
                                 agent_message: None,
                                 queue_key: None,
                                 admission_id: None,
+                                client_admission_id: None,
                                 images: continuation.request.images,
                                 done: None,
                                 queue_visible: false,
                                 policy: TurnPolicy::Injected,
                                 forced_batch: false,
+                                kernel_notice: false,
+                                delivery_scoped: false,
                             });
                         }
                         // The admission checkpoint: the continuation is admitted while the
@@ -690,7 +696,14 @@ impl Worker {
     /// the settle loop re-runs the idle wait, so a settled child's
     /// terminal notice (a queued turn) drains inside the barrier exactly
     /// like TS's "work may start at the child-settlement boundary"
-    /// re-check.
+    /// re-check. A caller that names its delivery's `admissionId`
+    /// (the A2A completion wait) scopes the descendant arm to the
+    /// children THAT delivery spawned: a shared session hosts other
+    /// clients' children too, and a foreign held child never keeps a
+    /// fully answered task waiting behind it. The admission-scoped wait
+    /// also holds the delivery's own background kernel `bash()` (the
+    /// launch table's binding): its completion notice turn is the
+    /// task's continuation, so the barrier drains it before answering.
     async fn wait_until_quiescent(&self, payload: &Value) {
         let children = if payload.get("waitForRlmQuiescence").and_then(Value::as_bool) == Some(true)
         {
@@ -700,8 +713,51 @@ impl Worker {
         } else {
             None
         };
+        // The requesting delivery's own children, when the request
+        // names it; the whole registry otherwise (the TS-era callers
+        // send no admission).
+        let admission = payload
+            .get("admissionId")
+            .and_then(Value::as_str)
+            .map(str::to_string);
         loop {
             self.wait_until_idle().await;
+            // The requesting delivery's own background `bash()` holds the
+            // admission-scoped barrier (TS `waitForRlmQuiescence`'s
+            // `isSessionActive` owns the kernel manager's background work):
+            // the launch table names the delivery's live launches, and the
+            // binding's leave wakes this arm — the notice's admission
+            // consuming its creator, or the in-cell consumption's activity
+            // end — so the loop's idle wait then drains the completion
+            // notice turn and the task's artifact carries it (print mode
+            // already delivers the same wait). The arm is
+            // admission-scoped: the TS-era callers keep their wire.
+            if let Some(admission) = admission.as_deref() {
+                let (activity, holds) = {
+                    let core = self.core.lock().unwrap();
+                    (
+                        std::sync::Arc::clone(&core.kernel_bash_activity),
+                        core.kernel_bash_creators
+                            .iter()
+                            .any(|(_, creator)| creator == admission),
+                    )
+                };
+                if holds {
+                    let settled_bash = activity.notified();
+                    tokio::pin!(settled_bash);
+                    settled_bash.as_mut().enable();
+                    let still_holds = {
+                        let core = self.core.lock().unwrap();
+                        core.kernel_bash_creators
+                            .iter()
+                            .any(|(_, creator)| creator == admission)
+                    };
+                    if still_holds {
+                        settled_bash.await;
+                        continue;
+                    }
+                }
+            }
             let Some(children) = children.as_ref() else {
                 return;
             };
@@ -709,7 +765,7 @@ impl Worker {
             // that settles between the read and the await still wakes
             // this waiter.
             let settled = children.settle_notified();
-            if !children.any_running().await {
+            if !children.any_running_scoped(admission.as_deref()).await {
                 // A settle funnel queues its terminal-notice follow-up BEFORE it
                 // marks the run settled, so one more idle wait drains the owed
                 // notices before the barrier answers.
@@ -717,7 +773,7 @@ impl Worker {
                 // A notice can start new child work during that drain (a settle
                 // hook spawning a descendant): re-read before answering, so the
                 // barrier holds for the new work too.
-                if !children.any_running().await {
+                if !children.any_running_scoped(admission.as_deref()).await {
                     return;
                 }
                 continue;

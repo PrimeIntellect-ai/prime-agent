@@ -10,11 +10,14 @@ fn priority_test_item(message: &str, policy: TurnPolicy) -> QueuedItem {
         agent_message: None,
         queue_key: None,
         admission_id: None,
+        client_admission_id: None,
         images: Vec::new(),
         done: None,
         queue_visible: true,
         policy,
         forced_batch: false,
+        kernel_notice: false,
+        delivery_scoped: false,
     }
 }
 
@@ -336,6 +339,8 @@ fn queue_snapshot_round_trips_through_the_recovery_journal() {
         queue_visible: true,
         policy: "injected".to_string(),
         forced_batch: false,
+        kernel_notice: false,
+        delivery_scoped: false,
         images: Vec::new(),
     };
     let plain = crate::journal::WorkerQueueItemRecord {
@@ -347,6 +352,8 @@ fn queue_snapshot_round_trips_through_the_recovery_journal() {
         queue_visible: true,
         policy: "queued".to_string(),
         forced_batch: false,
+        kernel_notice: false,
+        delivery_scoped: false,
         images: Vec::new(),
     };
     journal
@@ -425,11 +432,14 @@ async fn forced_batch_arming_classifies_the_visible_plain_rows() {
             agent_message: None,
             queue_key: None,
             admission_id: None,
+            client_admission_id: None,
             images: Vec::new(),
             done: None,
             queue_visible: true,
             policy: TurnPolicy::Queued,
             forced_batch: false,
+            kernel_notice: false,
+            delivery_scoped: false,
         });
         core.steering.push_back(QueuedItem {
             priority: QueuePriority::Background,
@@ -439,11 +449,14 @@ async fn forced_batch_arming_classifies_the_visible_plain_rows() {
             agent_message: Some("agent message row".to_string()),
             queue_key: None,
             admission_id: None,
+            client_admission_id: None,
             images: Vec::new(),
             done: None,
             queue_visible: true,
             policy: TurnPolicy::Injected,
             forced_batch: false,
+            kernel_notice: false,
+            delivery_scoped: false,
         });
         core.steering.push_back(QueuedItem {
             priority: QueuePriority::Background,
@@ -453,11 +466,14 @@ async fn forced_batch_arming_classifies_the_visible_plain_rows() {
             agent_message: None,
             queue_key: None,
             admission_id: None,
+            client_admission_id: None,
             images: Vec::new(),
             done: None,
             queue_visible: true,
             policy: TurnPolicy::Injected,
             forced_batch: false,
+            kernel_notice: false,
+            delivery_scoped: false,
         });
         core.steering.push_back(QueuedItem {
             priority: QueuePriority::Human,
@@ -467,11 +483,14 @@ async fn forced_batch_arming_classifies_the_visible_plain_rows() {
             agent_message: None,
             queue_key: None,
             admission_id: None,
+            client_admission_id: None,
             images: Vec::new(),
             done: None,
             queue_visible: true,
             policy: TurnPolicy::Queued,
             forced_batch: false,
+            kernel_notice: false,
+            delivery_scoped: false,
         });
     }
     assert!(
@@ -501,6 +520,120 @@ async fn forced_batch_arming_classifies_the_visible_plain_rows() {
         assert!(
             core.steering.iter().all(|item| !item.forced_batch),
             "no item carries the armed flag"
+        );
+    }
+}
+
+/// The `kill_if_idle` refusal vocabulary the stop tails read: the
+/// worker's own texts and the saturated route's typed refusal keep
+/// the candidate (a worker at its in-flight bound is a busy one, and
+/// the request never left the supervisor); every other failure leaves
+/// the stop's contract to the caller.
+#[test]
+fn the_kill_refusal_vocabulary_classifies_the_overloaded_answer() {
+    use pa_types::daemon::DaemonErrorInfo;
+    let answer = |error: Option<&str>, error_info: Option<DaemonErrorInfo>| {
+        pa_types::daemon::DaemonResponse {
+            id: None,
+            command: "kill_if_idle".to_string(),
+            success: false,
+            data: None,
+            error: error.map(str::to_string),
+            error_info,
+        }
+    };
+    assert!(kill_refused_by_worker(&answer(
+        None,
+        Some(DaemonErrorInfo::WorkerOverloaded)
+    )));
+    assert!(kill_refused_by_worker(&answer(
+        Some(KILL_IF_IDLE_HOLDS_WORK),
+        None
+    )));
+    assert!(kill_refused_by_worker(&answer(
+        Some(KILL_IF_IDLE_HAS_CLIENT),
+        None
+    )));
+    assert!(
+        !kill_refused_by_worker(&answer(None, None)),
+        "an untyped failure leaves the stop's contract to the caller"
+    );
+    assert!(
+        !kill_refused_by_worker(&answer(Some("unknown session"), None)),
+        "a passivated worker's unknown-session route is not a refusal"
+    );
+}
+
+/// Two ADMISSION-NAMED rows of the legacy daemon shape (each prompt its
+/// own admission, no batch-isolation flag) co-deliver as ONE turn under
+/// the "all" follow-up mode whatever their admission ids name — the
+/// TS-era rule: a legacy client's queued prompts ride one turn, one
+/// model call. The admission-pair split is the DELIVERY-SCOPED rows'
+/// rule alone (the A2A prompt's `deliveryScoped` flag); the
+/// unconditional form of the split once broke this legacy contract.
+#[test]
+fn legacy_admission_named_rows_batch_under_all_mode() {
+    let mut core = SessionCore::test_core(None, "/tmp".to_string());
+    core.follow_up_mode = "all".to_string();
+    for (wire, client, text) in [
+        ("wire-one", "normal-batch-1", "first admission prompt"),
+        ("wire-two", "normal-batch-2", "second admission prompt"),
+    ] {
+        let mut item = priority_test_item(text, TurnPolicy::Queued);
+        item.admission_id = Some(wire.to_string());
+        item.client_admission_id = Some(client.to_string());
+        core.follow_up.push_back(item);
+    }
+    let batch = gather_delivery_batch(&mut core, Lane::FollowUp);
+    assert_eq!(
+        batch.len(),
+        2,
+        "the distinct admission pairs co-deliver one turn: {batch:?}"
+    );
+}
+
+/// A DELIVERY-SCOPED row (the A2A prompt's batch-isolation flag) never
+/// co-delivers with another delivery's row, in either queue order: the
+/// scoped front admits no other row, and a scoped row never joins
+/// another front — one delivery, one turn, one reply per task.
+#[test]
+fn delivery_scoped_rows_never_batch_with_other_deliveries() {
+    let scoped_row = |message: &str| {
+        let mut item = priority_test_item(message, TurnPolicy::Queued);
+        item.delivery_scoped = true;
+        item.admission_id = Some("wire-a".to_string());
+        item.client_admission_id = Some("a2a-delivery-a".to_string());
+        item
+    };
+    let foreign_row = |message: &str| {
+        let mut item = priority_test_item(message, TurnPolicy::Queued);
+        item.admission_id = Some("wire-foreign".to_string());
+        item.client_admission_id = Some("foreign-client".to_string());
+        item
+    };
+    for scoped_first in [true, false] {
+        let mut core = SessionCore::test_core(None, "/tmp".to_string());
+        core.follow_up_mode = "all".to_string();
+        let (scoped, plain) = (
+            scoped_row("the a2a task"),
+            foreign_row("the foreign prompt"),
+        );
+        if scoped_first {
+            core.follow_up.push_back(scoped);
+            core.follow_up.push_back(plain);
+        } else {
+            core.follow_up.push_back(plain);
+            core.follow_up.push_back(scoped);
+        }
+        let batch = gather_delivery_batch(&mut core, Lane::FollowUp);
+        assert_eq!(
+            batch.len(),
+            1,
+            "the delivery-scoped row delivers solo: {batch:?}"
+        );
+        assert_eq!(
+            batch[0].delivery_scoped, scoped_first,
+            "the queue's front delivered alone: {batch:?}"
         );
     }
 }

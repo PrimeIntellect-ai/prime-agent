@@ -776,6 +776,108 @@ fn running_children_owe_the_continuation_and_settle_delivers_it() {
     assert_eq!(engine.goal_state_value()["continuationsUsed"], 1);
 }
 
+/// A withdrawal's goal-chain stop is synchronous: the mint consults read
+/// the recorded delivery before any mint, so the canceled task's loop
+/// spends no turn even while the durable pause's own task is still waiting
+/// on the engine runtime. This pin drives the record WITHOUT the pause —
+/// the pause landing would mask the check under test (the pause pauses the
+/// goal and the mint refuses for that reason instead). The race this pins:
+/// under `cargo test --workspace` parallel load, the children's settle
+/// hook minted the owed continuation while the pause task starved behind
+/// it, and the canceled task's goal loop spent three continuation turns
+/// after the CANCELED answer.
+#[test]
+fn withdrawn_delivery_retires_the_goal_loop_before_the_pause_lands() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let engine = std::sync::Arc::new(
+        AgentSessionEngine::new(AgentEngineConfig {
+            cwd: dir.path().to_path_buf(),
+            agent_dir: dir.path().join("agent"),
+            provider: None,
+            model: None,
+            api_key: None,
+            thinking: None,
+            session_dir: None,
+            session_file: None,
+            faux_script: Some(
+                serde_json::json!({ "responses": [{"text": "parent turn reply"}] }).to_string(),
+            ),
+            supervisor_link: Some(crate::agent_engine::SupervisorLinkConfig {
+                socket_path: dir.path().join("dead.sock"),
+                active_session_id: "parent-session".to_string(),
+                worker_token: "token".to_string(),
+            }),
+            telemetry_disabled: None,
+            cron_store: None,
+            queued_steering_probe: None,
+        })
+        .unwrap(),
+    );
+    engine.register_arc();
+    // The worker's running-delivery probe: the goal's Active transition
+    // stamps this answer as the loop's owning delivery.
+    engine.set_running_delivery_probe(std::sync::Arc::new(|| Some("delivery-1".to_string())));
+    let goal_work = goal_admission_collector(&engine);
+    let children = engine.children.clone().expect("children registry");
+    engine.runtime.block_on(async {
+        children
+            .push_test_child(crate::rlm_children::RlmChildIdentity {
+                rlm_child_id: "child-1".to_string(),
+                active_session_id: "child-session".to_string(),
+                session_id: None,
+                session_name: "worker-1".to_string(),
+            })
+            .await;
+    });
+    let mut events: Vec<EngineEvent> = Vec::new();
+    admit(
+        &engine,
+        "/goal ship behind the children".to_string(),
+        &mut events,
+    );
+    assert_eq!(events.last(), Some(&EngineEvent::Done(Ok(()))));
+    assert_eq!(engine.goal_state_value()["status"], "active");
+    let handles = engine.live_handles().expect("goal runtime").goal.clone();
+    assert!(
+        engine
+            .runtime
+            .block_on(async { handles.driver.lock().await.owes_continuation() }),
+        "the child's unsettled work holds the continuation owed"
+    );
+    assert_eq!(
+        *engine.goal_owner_delivery.lock().unwrap(),
+        Some("delivery-1".to_string()),
+        "the goal's owner is the delivery the withdrawal names"
+    );
+    // The withdrawal's synchronous record — the durable pause is NOT
+    // driven here (its landing would mask the mint check under test).
+    engine.retire_withdrawn_goal_delivery("delivery-1");
+    // Consult B, the settle hook: the children's settle must mint nothing.
+    engine
+        .runtime
+        .block_on(async { children.settle_test_child("child-session").await });
+    for _ in 0..40 {
+        assert!(
+            goal_work.lock().unwrap().is_empty(),
+            "the settled children's hook minted a withdrawn chain's continuation"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(25));
+    }
+    // Consult A, the turn-end boundary: it mints nothing either, and the
+    // owed slot survives for the pause's own durable drop.
+    assert_eq!(
+        engine.goal_turn_end_boundary(),
+        crate::goal_continuation::GoalBoundary::Proceed
+    );
+    assert!(
+        engine
+            .runtime
+            .block_on(async { handles.driver.lock().await.owes_continuation() }),
+        "the pause (not the record) owns the owed slot's durable drop"
+    );
+    assert_eq!(engine.goal_state_value()["status"], "active");
+}
+
 /// The engine session's entries as their persisted wire shapes (the
 /// hydrating snapshot: a windowed manager holds only the suffix).
 fn engine_session_entries(engine: &AgentSessionEngine) -> Vec<pa_types::session::FileEntry> {

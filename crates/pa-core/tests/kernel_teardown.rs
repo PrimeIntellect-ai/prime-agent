@@ -159,6 +159,8 @@ fn test_options() -> Option<pa_core::kernel::shared::KernelManagerOptions> {
         host_handlers: pa_core::kernel::shared::HostRequestHandlers::default(),
         python_skills: Vec::new(),
         on_background_work_settled: None,
+        on_kernel_bash_launch: None,
+        on_kernel_bash_activity_end: None,
         snapshot: None,
         bootstrap_code: Some(pa_core::kernel::bootstrap::build_rlm_bootstrap_code(
             &[],

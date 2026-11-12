@@ -16,6 +16,12 @@ pub(crate) struct ClientSubscriptions {
     connection_id: String,
     sessions: Mutex<Vec<String>>,
     queue: mpsc::Sender<Arc<Value>>,
+    /// The connection's client kind (the command envelope's `clientId`
+    /// prefix — "a2a", "acp", "tui"), latched at the first command that
+    /// names one: the session-event routing reads it (the A2A link
+    /// alone receives the run-anchor attribution beside the bare
+    /// shared broadcast).
+    kind: Mutex<Option<String>>,
 }
 
 impl ClientSubscriptions {
@@ -24,7 +30,28 @@ impl ClientSubscriptions {
             connection_id,
             sessions: Mutex::new(Vec::new()),
             queue,
+            kind: Mutex::new(None),
         })
+    }
+
+    /// Latch the connection's client kind (the first envelope that
+    /// carries a `clientId` prefix wins; a connection's kind never
+    /// changes).
+    pub(crate) fn note_client_kind(&self, client_id: &str) {
+        if let Some((kind, _)) = client_id.split_once(':') {
+            if !kind.is_empty() {
+                self.kind
+                    .lock()
+                    .unwrap()
+                    .get_or_insert_with(|| kind.to_string());
+            }
+        }
+    }
+
+    /// Whether this connection is the A2A mode's link (the one client
+    /// kind the run-anchor attribution is minted for).
+    fn is_a2a(&self) -> bool {
+        self.kind.lock().unwrap().as_deref() == Some("a2a")
     }
 
     /// The attached-session list (pause bookkeeping, detach-on-disconnect
@@ -50,7 +77,12 @@ impl ClientSubscriptions {
                 sessions.push(active_session_id.to_string());
             }
         }
-        registry.register(active_session_id, &self.connection_id, self.queue.clone());
+        registry.register(
+            active_session_id,
+            &self.connection_id,
+            self.queue.clone(),
+            self.is_a2a(),
+        );
     }
 
     /// Detach: the registry first (delivery stops at the detach instant),
@@ -74,7 +106,13 @@ impl ClientSubscriptions {
     ) -> bool {
         let was_attached = self.contains(selector);
         if was_attached {
-            registry.move_subscription(selector, current, &self.connection_id, self.queue.clone());
+            registry.move_subscription(
+                selector,
+                current,
+                &self.connection_id,
+                self.queue.clone(),
+                self.is_a2a(),
+            );
             let mut sessions = self.sessions.lock().unwrap();
             sessions.retain(|id| id != selector);
             if !sessions.iter().any(|id| id == current) {
@@ -93,10 +131,13 @@ impl ClientSubscriptions {
     }
 }
 
-/// One subscriber's queue, with the one-line-per-stall-cycle loss flag.
+/// One subscriber's queue, with the one-line-per-stall-cycle loss flag
+/// and the connection's kind (the A2A link receives the run-anchor
+/// attribution; every other client rides the bare shared broadcast).
 struct Subscriber {
     queue: mpsc::Sender<Arc<Value>>,
     logged_full: bool,
+    a2a: bool,
 }
 
 /// The delivery outcome the publisher must surface: connections whose
@@ -124,6 +165,7 @@ impl SessionSubscribers {
         active_session_id: &str,
         connection_id: &str,
         queue: mpsc::Sender<Arc<Value>>,
+        a2a: bool,
     ) {
         let mut sessions = self.sessions.lock().unwrap();
         sessions
@@ -134,6 +176,7 @@ impl SessionSubscribers {
                 Subscriber {
                     queue,
                     logged_full: false,
+                    a2a,
                 },
             );
     }
@@ -157,6 +200,7 @@ impl SessionSubscribers {
         to: &str,
         connection_id: &str,
         queue: mpsc::Sender<Arc<Value>>,
+        a2a: bool,
     ) {
         let mut sessions = self.sessions.lock().unwrap();
         if let Some(subscribers) = sessions.get_mut(from) {
@@ -170,21 +214,57 @@ impl SessionSubscribers {
             Subscriber {
                 queue,
                 logged_full: false,
+                a2a,
             },
         );
     }
 
-    /// The send-time delivery pass: enqueue to every attached connection under the
-    /// registry lock. A full queue drops the frame (the stall-cycle lands in the daemon
-    /// log); a closed queue prunes its entry.
+    /// The send-time delivery pass: enqueue to every attached
+    /// connection under the registry lock. A full queue drops the
+    /// frame (the stall-cycle lands in the daemon log); a closed queue
+    /// prunes its entry.
     pub(crate) fn publish(&self, active_session_id: &str, payload: &Arc<Value>) -> PublishOutcome {
+        self.deliver(active_session_id, |_| payload)
+    }
+
+    /// The attributed delivery pass (the `agent_start` run-anchor
+    /// frames): every attached connection receives the bare frame —
+    /// byte-identical to the TS wire on every shared socket — except
+    /// the A2A link's own connection, which receives the tagged copy
+    /// carrying the run's delivery identity (the one consumer the
+    /// attribution exists for; a Rust-only daemon extension, no TS
+    /// client sends the tagged copy).
+    pub(crate) fn publish_attributed(
+        &self,
+        active_session_id: &str,
+        bare: &Arc<Value>,
+        tagged: &Arc<Value>,
+    ) -> PublishOutcome {
+        self.deliver(active_session_id, |subscriber| {
+            if subscriber.a2a {
+                tagged
+            } else {
+                bare
+            }
+        })
+    }
+
+    /// The one send-time delivery walk under the registry lock; the
+    /// selector picks each subscriber's payload (the borrowed payload
+    /// lives past the walk — the selector's output lifetime is the
+    /// caller's, never the subscriber's).
+    fn deliver<'p>(
+        &self,
+        active_session_id: &str,
+        select: impl Fn(&Subscriber) -> &'p Arc<Value>,
+    ) -> PublishOutcome {
         let mut outcome = PublishOutcome::default();
         let mut sessions = self.sessions.lock().unwrap();
         let Some(subscribers) = sessions.get_mut(active_session_id) else {
             return outcome;
         };
         subscribers.retain(|connection_id, subscriber| {
-            match subscriber.queue.try_send(Arc::clone(payload)) {
+            match subscriber.queue.try_send(Arc::clone(select(subscriber))) {
                 Ok(()) => {
                     outcome.delivered += 1;
                     subscriber.logged_full = false;
@@ -326,6 +406,43 @@ mod tests {
         client.detach_all(&registry);
         let outcome = registry.publish("session-1", &frame("after-prune"));
         assert_eq!(outcome.delivered, 0);
+    }
+
+    /// The attributed delivery (the `agent_start` run-anchor frames):
+    /// the A2A-kind connection alone receives the tagged payload; every
+    /// other attached connection receives the bare one — the shared
+    /// broadcast stays byte-identical for the plain clients. Reverting
+    /// the kind split (the bare frame to everyone) fails the tagged
+    /// assertion; removing the attributed publish fails the bare one.
+    #[tokio::test]
+    async fn the_attributed_frame_reaches_only_the_a2a_connection() {
+        let registry = SessionSubscribers::new();
+        let (a2a_tx, mut a2a_rx) = queue(8);
+        let (tui_tx, mut tui_rx) = queue(8);
+        let a2a = ClientSubscriptions::new("a2a-conn".into(), a2a_tx);
+        let tui = ClientSubscriptions::new("tui-conn".into(), tui_tx);
+        a2a.note_client_kind("a2a:4242");
+        tui.note_client_kind("tui:1111");
+        a2a.attach(&registry, "session-1");
+        tui.attach(&registry, "session-1");
+        let bare = frame("agent_start-bare");
+        let tagged = frame("agent_start-tagged");
+        let outcome = registry.publish_attributed("session-1", &bare, &tagged);
+        assert_eq!(outcome.delivered, 2);
+        let a2a_frames = drained(&mut a2a_rx);
+        let tui_frames = drained(&mut tui_rx);
+        assert_eq!(a2a_frames[0]["type"], "agent_start-tagged");
+        assert_eq!(
+            tui_frames[0]["type"], "agent_start-bare",
+            "the shared broadcast stays bare for every non-a2a client"
+        );
+        // A connection that never named a client id is not an a2a link.
+        let (plain_tx, mut plain_rx) = queue(8);
+        let plain = ClientSubscriptions::new("plain-conn".into(), plain_tx);
+        plain.attach(&registry, "session-1");
+        registry.publish_attributed("session-1", &bare, &tagged);
+        assert_eq!(drained(&mut plain_rx)[0]["type"], "agent_start-bare");
+        assert_eq!(drained(&mut a2a_rx)[0]["type"], "agent_start-tagged");
     }
 
     #[tokio::test]

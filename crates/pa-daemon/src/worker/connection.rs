@@ -408,15 +408,33 @@ impl Worker {
                                 Ok(frame) => {
                                     // A frame this role does not stream still advances the flush
                                     // position: a gated response must not wait for it.
-                                    if role.lock().unwrap().streams_events() {
-                                        let active_session_id = active_session_id_of(&frame.payload);
+                                    let role = role.lock().unwrap().clone();
+                                    if role.streams_events() {
+                                        // A direct session client (the TUI's
+                                        // attach upgrade) reads the bare TS
+                                        // `agent_start`: the run-anchor
+                                        // attribution rides the supervisor
+                                        // relay alone — its A2A connection
+                                        // is the one consumer — so every
+                                        // frame leaving the worker socket
+                                        // for a session client strips the
+                                        // tags exactly like the relay's
+                                        // shared broadcast.
+                                        let payload: std::borrow::Cow<[u8]> =
+                                            match role {
+                                                ConnectionRole::SessionClient { .. } => crate::worker::bare_agent_start_payload(&frame.payload)
+                                                    .map(std::borrow::Cow::Owned)
+                                                    .unwrap_or(std::borrow::Cow::Borrowed(&frame.payload[..])),
+                                                _ => std::borrow::Cow::Borrowed(&frame.payload[..]),
+                                            };
+                                        let active_session_id = active_session_id_of(&payload);
                                         let header = json!({
                                             "kind": "outbound",
                                             "outboundType": frame.outbound_type,
                                             "activeSessionId": active_session_id,
                                         });
                                         if worker
-                                            .write_frame(&sink.writer, &header, &frame.payload)
+                                            .write_frame(&sink.writer, &header, &payload)
                                             .await
                                             .is_err()
                                         {

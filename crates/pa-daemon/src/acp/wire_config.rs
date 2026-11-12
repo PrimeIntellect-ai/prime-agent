@@ -12,10 +12,11 @@ use super::config_options::{
     config_options_value, model_value, publish_config_options, session_config_options, PickerModel,
     SessionConfigOption,
 };
-use super::daemon::{DaemonAcpState, DaemonLink};
+use super::daemon::DaemonAcpState;
 use super::jsonrpc;
 use super::producer::{self, UpdateProducer};
 use super::types;
+use crate::mode_link::DaemonLink;
 use pa_types::daemon::DaemonCommand;
 
 /// The hosted session's picker state: the published options, the

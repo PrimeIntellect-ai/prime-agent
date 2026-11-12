@@ -206,6 +206,8 @@ async fn an_end_turn_cell_ends_the_turn_without_another_assistant_response() {
         kernel_ready_gate: None,
         prewarm_ipython_kernel: None,
         on_background_work_settled: None,
+        on_kernel_bash_launch: None,
+        on_kernel_bash_activity_end: None,
         bash_notice_wake: Some(wake),
         queued_goal_context_purge: None,
     })

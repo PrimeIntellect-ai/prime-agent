@@ -163,6 +163,27 @@ impl Supervisor {
         }
     }
 
+    /// Publish one attributed `agent_start` (the run-anchor frames):
+    /// the bare frame to every attached connection, the tagged copy to
+    /// the A2A link's own connection alone (see
+    /// [`crate::supervisor::subscribers::SessionSubscribers::publish_attributed`]).
+    pub(crate) fn publish_session_event_attributed(
+        &self,
+        active_session_id: &str,
+        bare: &Arc<Value>,
+        tagged: &Arc<Value>,
+    ) {
+        let outcome = self
+            .session_subscribers
+            .publish_attributed(active_session_id, bare, tagged);
+        if !outcome.lagged.is_empty() {
+            self.log_line(&format!(
+                "clients {} lagged on the session event queue: frames dropped (session {active_session_id})",
+                outcome.lagged.join(", ")
+            ));
+        }
+    }
+
     /// The abort supervision's declaration event (`daemon event` schema v1,
     /// kind `compaction_abort_declared`): one count, never session payload.
     pub(crate) fn note_compaction_abort_declared(&self) {

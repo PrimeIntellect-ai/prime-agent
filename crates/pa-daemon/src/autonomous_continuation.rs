@@ -89,6 +89,20 @@ impl AgentSessionEngine {
         if self.session_input_queued() {
             return Vec::new();
         }
+        // A withdrawn chain's boundary mints nothing: the withdrawal
+        // retired the canceled task's loop (the deferral with the
+        // recorded owner, the later run-on rows — the terminal notice —
+        // with the withdrawn delivery's own stamp), so no later
+        // boundary of the same chain spends a turn no client answers.
+        if let Some(running) = self.running_delivery_identity() {
+            let withdrawn = self
+                .autonomous_withdrawn_deliveries
+                .lock()
+                .expect("autonomous withdrawn deliveries lock");
+            if withdrawn.contains(&running) {
+                return Vec::new();
+            }
+        }
         // The goal arm takes exclusive priority (an active goal owns the boundary).
         if self.goal_owns_continuation_wakeup().await {
             return Vec::new();
@@ -101,6 +115,17 @@ impl AgentSessionEngine {
         if self.has_unsettled_rlm_work().await || self.has_live_background_bash_handles() {
             self.autonomous_awaits_rlm_work
                 .store(true, std::sync::atomic::Ordering::SeqCst);
+            // The deferral's owning delivery rides beside the flag (the
+            // running delivery whose turn deferred): the
+            // identity-scoped withdrawal's retire matches it, so the
+            // flag never names work a cancel cannot touch. The settle
+            // hook's re-stores keep the recorded owner — the deferral
+            // is the one the in-run hook armed, whoever's boundary
+            // observes it settle.
+            *self
+                .autonomous_awaits_rlm_work_owner
+                .lock()
+                .expect("autonomous deferral owner lock") = self.running_delivery_identity();
             // A handle that settles between the probe above and this store
             // raced the callback out of its retry: the owed turn would wait
             // for a wake that already fired - re-arm the retry once.
@@ -205,6 +230,50 @@ impl AgentSessionEngine {
             ),
             &session.session.compaction_settings(),
         )
+    }
+
+    /// The withdrawn delivery's autonomous deferral retires with the
+    /// canceled task: the settle hook's mint consult finds no owed
+    /// continuation left, so the canceled task's own follow-up never
+    /// runs as one more turn with no client to answer it. The retire is
+    /// identity-scoped like the goal pause (the deferral's owner is the
+    /// delivery whose in-run hook deferred): one delivery's withdrawal
+    /// never drops another client's owed continuation on the shared
+    /// session — an unstamped deferral (a harness engine without the
+    /// worker probe) keeps the retire's legacy behavior.
+    pub(crate) fn retire_withdrawn_autonomous_deferral(&self, admission: &str) {
+        // The withdrawn chain records FIRST, whatever the deferral holds:
+        // a boundary whose running delivery names the chain mints nothing
+        // after the withdrawal (the canceled task's run-on notice turn
+        // and a delivered deferral are its own continuation rows), so
+        // the loop spends no turn with no client to answer it. Other
+        // deliveries' boundaries mint on — the mode stays the session's.
+        {
+            let mut withdrawn = self
+                .autonomous_withdrawn_deliveries
+                .lock()
+                .expect("autonomous withdrawn deliveries lock");
+            withdrawn.retain(|id| id != admission);
+            withdrawn.push(admission.to_string());
+            while withdrawn.len() > crate::agent_engine::MAX_WITHDRAWN_AUTONOMOUS_CHAINS {
+                withdrawn.remove(0);
+            }
+        }
+        let owned = self
+            .autonomous_awaits_rlm_work_owner
+            .lock()
+            .expect("autonomous deferral owner lock")
+            .as_deref()
+            .is_none_or(|owner| owner == admission);
+        if !owned {
+            return;
+        }
+        self.autonomous_awaits_rlm_work
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+        *self
+            .autonomous_awaits_rlm_work_owner
+            .lock()
+            .expect("autonomous deferral owner lock") = None;
     }
 
     /// The RLM settle site: deliver the continuation the in-run hook held
@@ -336,7 +405,7 @@ mod tests {
     use std::sync::Arc;
 
     use super::*;
-    use crate::agent_engine::tests::{admit, faux_engine_with_settings};
+    use crate::agent_engine::tests::{admit, faux_engine_with_settings, FAUX_TEST_LOCK};
     use crate::engine::EngineEvent;
 
     /// Inject the engine's background-bash liveness probe (a `true` probe
@@ -455,5 +524,77 @@ mod tests {
         );
         let state = engine.autonomous.blocking_lock();
         assert_eq!(state.continuations_used, 1);
+    }
+
+    /// The withdrawal's autonomous retire is identity-scoped: the
+    /// deferral's owner is the delivery whose in-run hook deferred, so a
+    /// withdrawal naming another delivery never drops it — one client's
+    /// cancel keeps another client's owed continuation on the shared
+    /// session. An unstamped deferral (no worker probe wired) keeps the
+    /// unconditional legacy retire.
+    #[test]
+    fn a_retire_matches_the_deferrals_own_delivery() {
+        let _faux = FAUX_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let (engine, _dir) = faux_engine_with_settings(
+            &serde_json::json!({ "responses": [{"text": "warm ok"}] }),
+            u64::MAX,
+        );
+        let engine = Arc::new(engine);
+        engine
+            .autonomous_awaits_rlm_work
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        *engine
+            .autonomous_awaits_rlm_work_owner
+            .lock()
+            .expect("autonomous deferral owner lock") = Some("foreign-delivery".to_string());
+        engine.retire_withdrawn_autonomous_deferral("a2a-delivery");
+        assert!(
+            engine
+                .autonomous_awaits_rlm_work
+                .load(std::sync::atomic::Ordering::SeqCst),
+            "a foreign withdrawal never drops another delivery's owed continuation"
+        );
+        engine.retire_withdrawn_autonomous_deferral("foreign-delivery");
+        assert!(
+            !engine
+                .autonomous_awaits_rlm_work
+                .load(std::sync::atomic::Ordering::SeqCst),
+            "the owning delivery's withdrawal retires its own deferral"
+        );
+        assert!(
+            engine
+                .autonomous_awaits_rlm_work_owner
+                .lock()
+                .expect("autonomous deferral owner lock")
+                .is_none(),
+            "the retired deferral leaves no owner behind"
+        );
+    }
+
+    /// An unstamped deferral (a harness engine with no worker probe)
+    /// keeps the legacy unconditional retire: the flag clears whatever
+    /// the withdrawal names.
+    #[test]
+    fn an_unstamped_deferral_retires_with_any_withdrawal() {
+        let _faux = FAUX_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let (engine, _dir) = faux_engine_with_settings(
+            &serde_json::json!({ "responses": [{"text": "warm ok"}] }),
+            u64::MAX,
+        );
+        let engine = Arc::new(engine);
+        engine
+            .autonomous_awaits_rlm_work
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        engine.retire_withdrawn_autonomous_deferral("any-delivery");
+        assert!(
+            !engine
+                .autonomous_awaits_rlm_work
+                .load(std::sync::atomic::Ordering::SeqCst),
+            "the unstamped deferral retires with the legacy unconditional stop"
+        );
     }
 }

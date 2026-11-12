@@ -140,6 +140,8 @@ pub(crate) async fn build_faux_engine_with(
     let engine = pa_core::session_engine::engine::create_session(
         pa_core::session_engine::engine::SessionEngineConfig {
             on_late_sent_agent_message,
+            on_kernel_bash_launch: None,
+            on_kernel_bash_activity_end: None,
             cron_store: None,
             // Faux verification harness: no product telemetry.
             semantic_edges: None,

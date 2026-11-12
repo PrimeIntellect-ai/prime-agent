@@ -610,9 +610,52 @@ async fn cancel_owned_admission_aborts_the_running_prompt() {
         queued_three.success,
         "queued adm-3 failed: {queued_three:?}"
     );
+    // A waiting prompt in the drained set settles on the withdrawn
+    // contract too: the drain settles its done sender, never the
+    // generic broken-channel failure ("Prompt did not complete") — and
+    // the clear names its own operator action, not a row's delete (TS
+    // clearQueue vs the queue mutation's delete).
+    let cleared_wait = tokio::spawn({
+        let worker = Arc::clone(&worker);
+        async move {
+            worker
+                .dispatch(
+                    "prompt_and_wait",
+                    &json!({
+                        "activeSessionId": "cancel-owned-session",
+                        "message": "cleared while waiting",
+                        "admissionId": "adm-4",
+                    }),
+                )
+                .await
+        }
+    });
+    loop {
+        if worker.prompt_admissions.cancel("adm-4")
+            == Some(crate::prompt_admission::AdmissionStatus::Owned)
+        {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
     assert!(
         worker.dispatch("clear_queue", &json!({})).await.success,
         "clear_queue failed"
+    );
+    let cleared_result = cleared_wait.await.unwrap();
+    assert!(
+        !cleared_result.success,
+        "the cleared prompt cannot complete"
+    );
+    assert_eq!(
+        cleared_result.error.as_deref(),
+        Some(crate::worker::QUEUED_PROMPT_CLEARED),
+        "the cleared waiter settles with the TS clear text: {cleared_result:?}"
+    );
+    assert_eq!(
+        cleared_result.error_info,
+        Some(pa_types::daemon::DaemonErrorInfo::PromptSettleCancelled),
+        "the withdrawn settle carries the typed cancellation kind: {cleared_result:?}"
     );
     let drained_cancel = worker
         .dispatch(
@@ -629,6 +672,15 @@ async fn cancel_owned_admission_aborts_the_running_prompt() {
     assert!(
         !queued_result.success,
         "the withdrawn prompt cannot complete"
+    );
+    // The withdrawn settle contract — the TS cancel text
+    // (`promptAndWait`'s abort-controller settle), not the queue
+    // mutation's delete text and not the generic broken-channel
+    // failure.
+    assert_eq!(
+        queued_result.error.as_deref(),
+        Some(crate::worker::PROMPT_CANCELLED_BEFORE_START),
+        "the withdrawn prompt settles with the TS cancel text: {queued_result:?}"
     );
     // Simulate the narrow settle gap: an earlier owned admission still
     // exists in the registry, but this different turn is now running.
@@ -652,7 +704,25 @@ async fn cancel_owned_admission_aborts_the_running_prompt() {
     });
     let owned = worker.dispatch("cancel_prompt_admission", &cancel).await;
     assert_eq!(owned.data, Some(json!({ "status": "owned" })), "{owned:?}");
-    wait.await.unwrap();
+    // The swallowed-settle contract: the abort gate can drop the turn's
+    // settle frame, and the honest fallback resolves the waiter (never
+    // a dropped channel) — the abort's wire text plus the typed
+    // cancellation kind, never "Prompt did not complete".
+    let aborted = wait.await.unwrap();
+    assert!(
+        !aborted.success,
+        "the aborted turn's prompt cannot complete: {aborted:?}"
+    );
+    assert_eq!(
+        aborted.error.as_deref(),
+        Some(ABORTED_TURN_SETTLE_ERROR),
+        "the swallowed settle resolves through the abort fallback: {aborted:?}"
+    );
+    assert_eq!(
+        aborted.error_info,
+        Some(pa_types::daemon::DaemonErrorInfo::PromptSettleCancelled),
+        "the aborted settle carries the typed cancellation kind: {aborted:?}"
+    );
     let idle = worker.dispatch("wait_for_idle", &json!({})).await;
     assert!(idle.success, "never went idle: {idle:?}");
     let messages = worker.dispatch("get_messages", &json!({})).await;

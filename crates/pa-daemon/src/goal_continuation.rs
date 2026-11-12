@@ -56,6 +56,32 @@ impl AgentSessionEngine {
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(sink);
     }
 
+    /// Wire the kernel `bash()` launch observer: the pid→delivery
+    /// binding the kernel-notice stamping reads (see
+    /// [`crate::worker::admit_kernel_notice`]).
+    pub(crate) fn set_kernel_bash_launch_observer(
+        &self,
+        observer: pa_core::kernel::shared::KernelBashLaunchCallback,
+    ) {
+        *self
+            .kernel_bash_launch_observer
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(observer);
+    }
+
+    /// Wire the kernel `bash()` activity-end observer: the drop side of
+    /// the pid→delivery binding (a handle whose result the kernel
+    /// consumed in-cell never sends its completion notice).
+    pub(crate) fn set_kernel_bash_activity_end_observer(
+        &self,
+        observer: pa_core::kernel::shared::KernelBashActivityEndCallback,
+    ) {
+        *self
+            .kernel_bash_activity_end_observer
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(observer);
+    }
+
     /// Wire the registered-jobs gate (TS #2483's
     /// `canPassivateSettledSession` `hasRegisteredCronJob`): the worker calls
     /// this once with a probe over the shared cron store; the settled-child
@@ -73,6 +99,51 @@ impl AgentSessionEngine {
             .registered_jobs_probe
             .lock()
             .expect("registered jobs probe lock") = Some(probe);
+    }
+
+    /// Wire the parent worker's running-delivery probe for the child
+    /// registry: `spawn` stamps the probe's answer on the child records,
+    /// so each terminal notice's row names the delivery whose turn
+    /// spawned the children (the notice then runs as that delivery's own
+    /// continuation — see the runner's
+    /// `is_session_own_continuation_item`).
+    pub(crate) fn set_child_delivery_identity(
+        &self,
+        probe: crate::rlm_children::DeliveryIdentityProbe,
+    ) {
+        let Some(children) = self.children.clone() else {
+            return;
+        };
+        children.set_delivery_identity_probe(probe);
+    }
+
+    /// Wire the worker's running-delivery probe for the engine's own
+    /// ownership stamps: the goal's Active transition and the
+    /// autonomous deferral record the delivery whose turn runs, so the
+    /// identity-scoped withdrawal's stops (`pause_goal_for_withdrawn_delivery`,
+    /// `retire_withdrawn_autonomous_deferral`) match the delivery they
+    /// name instead of pausing or clearing whatever work the shared
+    /// session holds.
+    pub(crate) fn set_running_delivery_probe(
+        &self,
+        probe: crate::rlm_children::DeliveryIdentityProbe,
+    ) {
+        *self
+            .running_delivery_probe
+            .lock()
+            .expect("running delivery probe lock") = Some(probe);
+    }
+
+    /// The running delivery's identity (the probe the worker wired): the
+    /// delivery whose turn runs right now, for the engine's ownership
+    /// stamps. `None` without a worker (a standalone harness engine) or
+    /// while no turn runs.
+    pub(crate) fn running_delivery_identity(&self) -> Option<String> {
+        self.running_delivery_probe
+            .lock()
+            .expect("running delivery probe lock")
+            .clone()
+            .and_then(|probe| probe())
     }
 
     /// An error assistant message fails an active goal (an abort keeps
@@ -93,6 +164,109 @@ impl AgentSessionEngine {
                 eprintln!("pa-daemon: goal terminal finish persist failed: {persist_error:#}");
             }
         });
+    }
+
+    /// The withdrawn delivery's goal stop (the A2A cancel contract):
+    /// the continuation loop the canceled task's prompt started is the
+    /// task's own work — the goal the withdrawn delivery started pauses,
+    /// and the owed continuation,
+    /// the pending mint guard, and the backoff wake retire with the
+    /// durable pause, so neither the children's settle hook nor a later
+    /// boundary mints the canceled task another turn. The children the
+    /// task delegated keep running exactly as before (the run-on
+    /// contract); their notice turns resolve foreign to the settled
+    /// task. The paused goal resumes through the session's own goal
+    /// surface. A goal that is not active is untouched.
+    ///
+    /// The stop rides the engine's own runtime, fire-and-forget: the
+    /// withdrawal's command handler answers from the worker's runtime,
+    /// and a blocking pause there would stall the worker's command loop
+    /// (the pause's locks and its durable write are the engine's own
+    /// work, never the withdrawal's response's). The canceled task's
+    /// unsettled children hold the boundary the pause must precede,
+    /// and their settle hook consults the driver under the same lock
+    /// this pause takes — the pause lands before any mint the children
+    /// could trigger.
+    pub(crate) fn pause_goal_for_withdrawn_delivery(self: &Arc<Self>, admission: &str) {
+        let Some(handles) = self.live_handles().map(|live| live.goal.clone()) else {
+            return;
+        };
+        let engine = Arc::clone(self);
+        let admission = admission.to_string();
+        self.runtime.spawn(async move {
+            let mut driver = handles.driver.lock().await;
+            if driver.state().status != pa_core::goals::GoalStatus::Active {
+                return;
+            }
+            // The pause is identity-scoped like the sweep above it: the
+            // goal's owner is the delivery whose turn started it (the
+            // Active transition's stamp), so the withdrawal of one
+            // delivery never pauses another client's goal on the shared
+            // session. A goal with no stamp (started outside any
+            // delivery's turn, or after a worker rebuild lost the
+            // in-memory slot) is no waiting task's own work either —
+            // the cancel leaves it to its own surface.
+            if engine
+                .goal_owner_delivery
+                .lock()
+                .expect("goal owner delivery lock")
+                .as_deref()
+                != Some(admission.as_str())
+            {
+                return;
+            }
+            let mut session = handles.session.lock().await;
+            if let Err(persist_error) = driver.pause(&mut session, "Paused by the canceled task") {
+                // The best-effort stop must not reject the withdrawal.
+                eprintln!("pa-daemon: goal withdrawal pause persist failed: {persist_error:#}");
+                return;
+            }
+            drop((driver, session));
+            // The one-shot wake the goal's refusal arm scheduled retires
+            // with the pause (its marker turn would spend one more model
+            // turn on the canceled task's session).
+            engine.cancel_goal_backoff_wake();
+        });
+    }
+
+    /// Record a withdrawn delivery's goal-chain stop synchronously (the
+    /// withdrawal's command handler calls this before it answers): the
+    /// mint consults below read the record, so no boundary or settle
+    /// hook of the withdrawn delivery's goal mints a continuation turn
+    /// after the cancel — the durable pause rides its own task on this
+    /// runtime and can only land after the locks it needs; under load
+    /// that can come after the children's settle hook has already
+    /// minted the owed continuation (the one the pause was documented
+    /// to precede). Mirrors `retire_withdrawn_autonomous_deferral`'s
+    /// record-first block, bounded the same way.
+    pub(crate) fn retire_withdrawn_goal_delivery(&self, admission: &str) {
+        let mut withdrawn = self
+            .goal_withdrawn_deliveries
+            .lock()
+            .expect("goal withdrawn deliveries lock");
+        withdrawn.retain(|id| id != admission);
+        withdrawn.push(admission.to_string());
+        while withdrawn.len() > crate::agent_engine::MAX_WITHDRAWN_AUTONOMOUS_CHAINS {
+            withdrawn.remove(0);
+        }
+    }
+
+    /// Whether a withdrawn delivery owns the session's active goal: the
+    /// goal loop such a delivery started was canceled with its task, so
+    /// its mints retire (the pause owns the durable stop; this record
+    /// closes the mint window the pause's scheduling cannot).
+    fn withdrawn_delivery_owns_goal(&self) -> bool {
+        let owner = self
+            .goal_owner_delivery
+            .lock()
+            .expect("goal owner delivery lock")
+            .clone();
+        owner.is_some_and(|owner| {
+            self.goal_withdrawn_deliveries
+                .lock()
+                .expect("goal withdrawn deliveries lock")
+                .contains(&owner)
+        })
     }
 
     /// The natural-turn-end goal consult: the goal arm runs before the
@@ -133,6 +307,14 @@ impl AgentSessionEngine {
             if !driver.owes_continuation() {
                 return;
             }
+        }
+        // A withdrawn chain's goal mints nothing here either: the settle
+        // hook the children's terminal notice fired must not spend the
+        // owed continuation the withdrawal retired — the pause's durable
+        // drop follows on this runtime, and this record is the stop that
+        // held even before it lands.
+        if self.withdrawn_delivery_owns_goal() {
+            return;
         }
         if self.has_unsettled_rlm_work().await || self.has_live_background_bash_handles() {
             return;
@@ -276,6 +458,16 @@ impl AgentSessionEngine {
         // would hide the no-progress turn from the later consults.
         let last_turn = self.last_loop_assistant_message();
         self.runtime.block_on(async {
+            // A withdrawn chain's goal mints nothing at any boundary: the
+            // canceled task's loop retired with the withdrawal's
+            // synchronous record (the durable pause lands on this runtime,
+            // which under load can come after this very mint). The owed
+            // slot stays for the pause's own durable drop; the boundary
+            // passes to the autonomous arm, whose consult is
+            // identity-scoped the same way.
+            if self.withdrawn_delivery_owns_goal() {
+                return GoalBoundary::Proceed;
+            }
             let mut driver = handles.driver.lock().await;
             if !driver.owns_continuation_wakeup() {
                 let mut session = handles.session.lock().await;

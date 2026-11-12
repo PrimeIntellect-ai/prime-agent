@@ -166,12 +166,15 @@ impl AgentCronSchedulerHooks for QueueHooks {
                     custom_message,
                     agent_message: None,
                     admission_id: None,
+                    client_admission_id: None,
                     images: Vec::new(),
                     queue_key,
                     done: Some(done_tx),
                     queue_visible: true,
                     policy: crate::worker::TurnPolicy::Injected,
                     forced_batch: false,
+                    kernel_notice: false,
+                    delivery_scoped: false,
                 },
             );
         }

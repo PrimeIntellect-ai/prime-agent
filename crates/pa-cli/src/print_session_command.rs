@@ -321,6 +321,8 @@ mod tests {
             pa_core::session_engine::engine::create_session(
                 pa_core::session_engine::engine::SessionEngineConfig {
                     on_late_sent_agent_message: None,
+                    on_kernel_bash_launch: None,
+                    on_kernel_bash_activity_end: None,
                     semantic_edges: None,
                     cron_store: None,
                     telemetry: None,

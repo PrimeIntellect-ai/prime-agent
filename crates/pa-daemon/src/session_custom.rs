@@ -203,6 +203,7 @@ impl Worker {
                         .and_then(Value::as_str)
                         .map(str::to_string),
                     admission_id: None,
+                    client_admission_id: None,
                     images: crate::worker::parse_prompt_images(payload),
                     done: None,
                     // TS restores the action's own visibility flag; the stored default is visible.
@@ -214,6 +215,8 @@ impl Worker {
                     // "preparation" the direct hand-off; absent restores as queued.
                     policy: crate::worker::restored_turn_policy(payload),
                     forced_batch: false,
+                    kernel_notice: false,
+                    delivery_scoped: false,
                 };
                 if lane_follow_up {
                     core.follow_up.push_back(item);

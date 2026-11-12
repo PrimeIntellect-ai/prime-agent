@@ -713,6 +713,11 @@ impl Supervisor {
                 command,
                 DaemonCommand::Detach { .. }
                     | DaemonCommand::Kill { .. }
+                    // The idle reclamation's response owns a supervisor-side
+                    // stop tail (the worker's close retires the process, the
+                    // registry, and the roster row): the byte relay would skip
+                    // it, leaving every reclaimed context's worker alive.
+                    | DaemonCommand::KillIfIdle { .. }
                     | DaemonCommand::Rename { .. }
                     | DaemonCommand::SetSessionName { .. }
                     | DaemonCommand::CronAdd {
@@ -873,6 +878,26 @@ impl Supervisor {
                         }
                     }
                 }
+                if let DaemonCommand::KillIfIdle { rest, .. } = command {
+                    // The idle reclamation's stop tail: the worker's close
+                    // archives the session, but only the supervisor's stop
+                    // retires the process, the registry entry, and the roster
+                    // row — the same durable tail the plain kill runs, so a
+                    // reclaimed context leaves no live worker behind. The
+                    // worker's refusal (live work or an attached client)
+                    // keeps the session and its worker; the saturated route's
+                    // typed refusal does too (a worker at its in-flight bound
+                    // is by definition a busy one — the request never left
+                    // the supervisor, so the stop's contract stays with the
+                    // caller); every other answer leaves the stop's contract to
+                    // the caller exactly like the A2A server's own `stopped`
+                    // arm.
+                    let refused =
+                        !response.success && crate::worker::kill_refused_by_worker(&response);
+                    if !refused {
+                        self.finish_plain_kill_stop(&resident, rest).await;
+                    }
+                }
                 if let DaemonCommand::Rename { name, .. }
                 | DaemonCommand::SetSessionName { name, .. } = command
                 {
@@ -916,6 +941,14 @@ impl Supervisor {
                     if let DaemonCommand::Kill { rest, .. } = command {
                         self.finish_plain_kill_stop(&resident, rest).await;
                     }
+                }
+                // The idle reclamation's tail runs on a thrown forward
+                // too: an accepted close answers its refusal
+                // synchronously, so a lost response left the stop's
+                // contract with the caller (the A2A server's own
+                // `Err(_) => true` arm) — the worker still stops.
+                if let DaemonCommand::KillIfIdle { rest, .. } = command {
+                    self.finish_plain_kill_stop(&resident, rest).await;
                 }
                 (
                     vec![response_line(&response_failure(

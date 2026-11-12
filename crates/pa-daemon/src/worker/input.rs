@@ -3,8 +3,8 @@
 use super::{
     enqueue_priority, json, oneshot, parse_custom_message, parse_prompt_images, response_success,
     sender_is_child_of, AgentFamilyRelationship, AgentMessagePromptPayload, Lane, QueueCheckpoint,
-    QueuePriority, QueuedItem, TurnPolicy, Worker, AGENT_MESSAGE_SOURCE,
-    DEFAULT_AGENT_MESSAGE_MAX_PENDING_PER_SESSION, QUEUED_INPUT_SUSPENDED,
+    QueuePriority, QueuedItem, TurnPolicy, TurnSettle, Worker, ABORTED_TURN_SETTLE_ERROR,
+    AGENT_MESSAGE_SOURCE, DEFAULT_AGENT_MESSAGE_MAX_PENDING_PER_SESSION, QUEUED_INPUT_SUSPENDED,
 };
 
 use serde_json::Value;
@@ -75,6 +75,21 @@ impl Worker {
         if let Some(admission_id) = &admission_id {
             self.register_prompt_admission(admission_id);
         }
+        // The client's own admission id, carried beside the daemon's
+        // rewrite (the supervisor's `clientAdmissionId` payload
+        // member): the delivery's identity for the turn's event
+        // consumers — the run's `agent_start` tag carries it, so a
+        // consumer can tell this client's delivery from another's.
+        let client_admission_id = payload
+            .get("clientAdmissionId")
+            .and_then(Value::as_str)
+            .filter(|id| !id.is_empty())
+            .map(str::to_string);
+        // The delivery-scoped batch isolation (the A2A prompt's
+        // `deliveryScoped` member rides the supervisor's rewrite): the
+        // row batches with no other delivery, so the task-per-turn
+        // sends keep one reply per task on a shared session.
+        let delivery_scoped = payload.get("deliveryScoped").and_then(Value::as_bool) == Some(true);
         let (done_tx, done_rx) = oneshot::channel();
         let done = if wait { Some(done_tx) } else { None };
         let (snapshot, queued_behind_work) = {
@@ -87,7 +102,7 @@ impl Worker {
                     return response_failure(
                         None,
                         if wait { "prompt_and_wait" } else { "prompt" },
-                        "Prompt admission was cancelled.",
+                        super::PROMPT_ADMISSION_CANCELLED,
                         None,
                     );
                 }
@@ -123,6 +138,7 @@ impl Worker {
                 agent_message: None,
                 queue_key: None,
                 admission_id: admission_id.clone(),
+                client_admission_id,
                 images: images.clone(),
                 done,
                 queue_visible: queued_behind_work,
@@ -132,6 +148,8 @@ impl Worker {
                     TurnPolicy::Direct
                 },
                 forced_batch: false,
+                kernel_notice: false,
+                delivery_scoped,
             };
             match lane {
                 Lane::Steering => enqueue_priority(&mut core.steering, item),
@@ -153,10 +171,25 @@ impl Worker {
             return response_success(None, "prompt", None);
         }
         match done_rx.await {
-            Ok(settle) => match settle.wire_error() {
-                None => response_success(None, "prompt_and_wait", None),
-                Some(error) => response_failure(None, "prompt_and_wait", &error, None),
-            },
+            Ok(TurnSettle::Completed) => response_success(None, "prompt_and_wait", None),
+            Ok(settle @ (TurnSettle::Aborted | TurnSettle::Withdrawn(_))) => {
+                // The cancellation classification rides the typed
+                // error_info: the wire text alone cannot separate an
+                // abort from the engine's no-response failure (they
+                // share the string), and A2A's settle reads the kind.
+                let error = settle
+                    .wire_error()
+                    .unwrap_or_else(|| ABORTED_TURN_SETTLE_ERROR.to_string());
+                response_failure(
+                    None,
+                    "prompt_and_wait",
+                    &error,
+                    Some(pa_types::daemon::DaemonErrorInfo::PromptSettleCancelled),
+                )
+            }
+            Ok(TurnSettle::Failed(error)) => {
+                response_failure(None, "prompt_and_wait", &error, None)
+            }
             Err(_) => response_failure(None, "prompt_and_wait", "Prompt did not complete", None),
         }
     }
@@ -195,6 +228,16 @@ impl Worker {
             }
         }
         let mut core = self.core.lock().unwrap();
+        // The client's own admission id the delivery named (the
+        // supervisor's prompt route stamps it beside the wire rewrite):
+        // the queued row carries the delivery's identity, so the run's
+        // `agent_start` tags and the identity-scoped withdraw can match
+        // it without the daemon's rewrite table.
+        let client_admission_id = payload
+            .get("clientAdmissionId")
+            .and_then(Value::as_str)
+            .filter(|id| !id.is_empty())
+            .map(str::to_string);
         let images = parse_prompt_images(payload);
         let item = QueuedItem {
             priority: if custom_message.is_some() {
@@ -208,11 +251,14 @@ impl Worker {
             agent_message: None,
             queue_key: None,
             admission_id: None,
+            client_admission_id,
             images,
             done: None,
             queue_visible: true,
             policy: TurnPolicy::Queued,
             forced_batch: false,
+            kernel_notice: false,
+            delivery_scoped: false,
         };
         match lane {
             Lane::Steering => enqueue_priority(&mut core.steering, item),
@@ -243,7 +289,7 @@ impl Worker {
     /// Agent-to-agent delivery: render the `[agent-message from ...]` prompt and queue
     /// it on the requested lane with the `agent_message` custom row (the turn renders
     /// the collapsed card). Answers `queued` when running, else `delivered`.
-    pub(crate) fn handle_worker_deliver_message(&self, payload: &Value) -> DaemonResponse {
+    pub(crate) async fn handle_worker_deliver_message(&self, payload: &Value) -> DaemonResponse {
         if let Err(response) = self.require_created("worker_deliver_message") {
             return response;
         }
@@ -277,13 +323,14 @@ impl Worker {
             }
         }
         let sender = payload.get("sender").cloned().unwrap_or(Value::Null);
-        // A delivery from one of this session's RLM children counts as the
-        // child's reply: the settle watcher withholds the no-reply notice.
-        if let Some(child) = sender
+        let sender_active_id = sender
             .get("activeSessionId")
             .and_then(Value::as_str)
             .filter(|id| !id.is_empty())
-        {
+            .map(str::to_string);
+        // A delivery from one of this session's RLM children counts as the
+        // child's reply: the settle watcher withholds the no-reply notice.
+        if let Some(child) = sender_active_id.as_deref() {
             self.engine.mark_child_reply(child);
         }
         // Sender label precedence (TS `createAgentSessionMessagePrompt`):
@@ -302,6 +349,25 @@ impl Worker {
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             sender_is_child_of(&sender, &core).then_some(AgentFamilyRelationship::Child)
+        };
+        // A child's reply carries the spawning delivery's stamp (the
+        // same identity its terminal notice carries): the queued row
+        // runs as that delivery's own continuation, so the reply turn's
+        // answer — the delegated work's result — credits the task still
+        // waiting it out, exactly like the notice turn does. The stamp
+        // comes from the registry's record (the durable parent edge
+        // proved the sender a child of this session first), never the
+        // delivery payload, so no sender names its own credit.
+        let child_reply_delivery = match (from_relationship, sender_active_id.as_deref()) {
+            (Some(AgentFamilyRelationship::Child), Some(child)) => match self
+                .agent_engine
+                .as_ref()
+                .and_then(|engine| engine.children.clone())
+            {
+                Some(children) => children.child_reply_delivery_admission(child).await,
+                None => None,
+            },
+            _ => None,
         };
         let prompt = pa_core::session_engine::agent_messaging::create_agent_session_message_prompt(
             &AgentMessagePromptPayload {
@@ -374,11 +440,19 @@ impl Worker {
                 agent_message: Some(message.to_string()),
                 queue_key: None,
                 admission_id: None,
+                // A child's reply runs as the delivery's own
+                // continuation (the registry's stamp): the turn's
+                // answer credits the waiting task. Every other
+                // delivery's row stays unstamped — the injected class
+                // an event consumer must never credit.
+                client_admission_id: child_reply_delivery,
                 images: Vec::new(),
                 done: None,
                 queue_visible: true,
                 policy: TurnPolicy::Injected,
                 forced_batch: false,
+                kernel_notice: false,
+                delivery_scoped: false,
             };
             match lane {
                 Lane::Steering => enqueue_priority(&mut core.steering, item),

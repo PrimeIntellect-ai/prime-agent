@@ -166,16 +166,26 @@ async fn spawn_fake_supervisor(
                                 None,
                             )
                         }
-                        "create" => response_success(
-                            Some(&id),
-                            command_type,
-                            Some(json!({
-                                "activeSessionId": "child-live",
-                                "sessionId": "child-file",
-                                "sessionFile": *child_session_file,
-                                "sessionName": "f20-worker",
-                            })),
-                        ),
+                        "create" => {
+                            if let Some(gate) = child_subagents
+                                .create_gate
+                                .as_ref()
+                                .filter(|gate| gate.armed.swap(false, Ordering::SeqCst))
+                            {
+                                gate.copied.notify_one();
+                                gate.release.notified().await;
+                            }
+                            response_success(
+                                Some(&id),
+                                command_type,
+                                Some(json!({
+                                    "activeSessionId": "child-live",
+                                    "sessionId": "child-file",
+                                    "sessionFile": *child_session_file,
+                                    "sessionName": "f20-worker",
+                                })),
+                            )
+                        }
                         "prompt" => {
                             if matches!(child, FakeChild::FinalTurnFails) {
                                 use super::lifecycle::exit_capture_tests::{
@@ -366,6 +376,9 @@ struct FakeChildSubagents {
     peer_gate: Option<Arc<FakePeerGate>>,
     /// Holds the task `prompt` in flight: the worker has not accepted it yet.
     prompt_gate: Option<Arc<FakePeerGate>>,
+    /// Holds the child `create` in flight: the spawn's admission awaits
+    /// it (the probes that pin the create-vs-registry races).
+    create_gate: Option<Arc<FakePeerGate>>,
 }
 
 #[derive(Default)]
@@ -833,6 +846,84 @@ async fn a_settled_child_without_a_reply_delivers_the_terminal_notice() {
     let extra =
         tokio::time::timeout(std::time::Duration::from_millis(300), follow_up_rx.recv()).await;
     assert!(extra.is_err(), "no second notice may arrive");
+}
+
+/// The quiescence read a `waitForRlmQuiescence` barrier serves: the
+/// delivery-scoped arm (the A2A completion wait names its task's
+/// admission) holds only the children THAT delivery spawned — a
+/// foreign held child on the shared session never keeps a fully
+/// answered task WORKING behind it — while the unscoped arm (the
+/// TS-era wire, no admission named) holds the whole registry exactly
+/// as before.
+#[tokio::test]
+async fn the_quiescence_read_scopes_to_the_named_delivery() {
+    let (follow_up_tx, _follow_up_rx) = mpsc::unbounded_channel();
+    let (sessions, _kill_rx) =
+        sessions_with_fake_supervisor(follow_up_tx, 0, FakeKill::Success, FakeChild::Healthy).await;
+    let own = RlmChildIdentity {
+        rlm_child_id: "own-child".to_string(),
+        active_session_id: "own-child-live".to_string(),
+        session_id: Some("own-child-session".to_string()),
+        session_name: "own-worker".to_string(),
+    };
+    let foreign = RlmChildIdentity {
+        rlm_child_id: "foreign-child".to_string(),
+        active_session_id: "foreign-child-live".to_string(),
+        session_id: Some("foreign-child-session".to_string()),
+        session_name: "foreign-worker".to_string(),
+    };
+    sessions
+        .push_test_child_of_delivery(own.clone(), Some("task-own".to_string()))
+        .await;
+    sessions
+        .push_test_child_of_delivery(foreign, Some("foreign-delivery".to_string()))
+        .await;
+    assert!(
+        sessions.any_running_scoped(Some("task-own")).await,
+        "the delivery's own running child holds the scoped read"
+    );
+    sessions.settle_test_child(&own.active_session_id).await;
+    assert!(
+        !sessions.any_running_scoped(Some("task-own")).await,
+        "the delivery's own children settled: the scoped read answers quiescent although a foreign held child still runs"
+    );
+    assert!(
+        sessions.any_running().await,
+        "the whole-registry read still holds behind the foreign child"
+    );
+    assert!(
+        sessions.any_running_scoped(None).await,
+        "the TS-era wire (no admission named) holds the whole registry behind the foreign child"
+    );
+    assert!(
+        sessions.any_running_scoped(Some("foreign-delivery")).await,
+        "the foreign delivery's own scoped read still holds its child"
+    );
+}
+
+/// The terminal notice's row carries the identity of the delivery whose
+/// turn spawned the children — the same stamp the goal mint carries
+/// (`clientAdmissionId`, the member the parent worker's queue intake
+/// reads into the row): the notice turn then runs as the delivery's own
+/// continuation, so its frames credit to the task the delivery owns and
+/// a withdrawal of that id stops the post-children goal loop.
+#[tokio::test]
+async fn a_childs_terminal_notice_carries_the_spawning_deliverys_identity() {
+    let (follow_up_tx, mut follow_up_rx) = mpsc::unbounded_channel();
+    let (sessions, _kill_rx) =
+        sessions_with_fake_supervisor(follow_up_tx, 0, FakeKill::Success, FakeChild::Healthy).await;
+    sessions.set_delivery_identity_probe(std::sync::Arc::new(|| Some("task-1".to_string())));
+    let _handle = spawn_child(&sessions).await;
+    sessions.notify_turn_done();
+
+    let follow_up = tokio::time::timeout(std::time::Duration::from_secs(10), follow_up_rx.recv())
+        .await
+        .expect("the watcher must deliver the notice")
+        .expect("the follow_up channel stays open");
+    assert_eq!(
+        follow_up["clientAdmissionId"], "task-1",
+        "the notice names the delivery whose turn spawned the children: {follow_up}"
+    );
 }
 
 /// A spawn admitted while the parent is idle (a background kernel task: a
@@ -2880,6 +2971,7 @@ async fn collect_answers_the_cancelled_envelope_after_an_inactive_delete() {
 #[test]
 fn an_already_settled_child_never_re_scores_as_an_unreachable_error() {
     let base = || ChildRecord {
+        parent_delivery_admission: None,
         rlm_child_id: "child-id".to_string(),
         session_name: "lane".to_string(),
         active_session_id: "child-live".to_string(),
@@ -2952,6 +3044,7 @@ async fn the_unreachable_give_up_skips_the_exit_capture_when_a_capture_stands() 
     )
     .await;
     let record = Arc::new(tokio::sync::Mutex::new(ChildRecord {
+        parent_delivery_admission: None,
         rlm_child_id: "child-id".to_string(),
         session_name: "lane".to_string(),
         active_session_id: "child-live".to_string(),
@@ -3015,4 +3108,346 @@ fn a_close_takes_over_a_delete_interrupted_before_its_kill_outcome() {
     retirement.apply(RetirementEvent::BeginDelete);
     assert!(retirement.apply(RetirementEvent::BeginClose));
     assert!(retirement.closed_by_parent());
+}
+
+/// The delivery stamp belongs to the turn that invoked `spawn`, never a
+/// registry read after the awaited create: the host request survives
+/// the kernel cell as an independent task, and a create that outlives
+/// its spawning turn would register the child under `None` — or the
+/// next delivery's id — losing the scoped completion and cancellation
+/// that name the original delivery.
+#[tokio::test]
+async fn a_spawn_in_flight_keeps_the_spawning_delivery() {
+    let (follow_up_tx, _follow_up_rx) = mpsc::unbounded_channel();
+    let create = Arc::new(FakePeerGate {
+        armed: AtomicBool::new(true),
+        ..FakePeerGate::default()
+    });
+    let prompt = Arc::new(FakePeerGate {
+        armed: AtomicBool::new(true),
+        ..FakePeerGate::default()
+    });
+    let (sessions, _kill_rx) = sessions_with_fake_child_subagents(
+        follow_up_tx,
+        0,
+        FakeKill::Success,
+        FakeChild::Healthy,
+        Arc::new(FakeChildSubagents {
+            create_gate: Some(Arc::clone(&create)),
+            prompt_gate: Some(Arc::clone(&prompt)),
+            ..FakeChildSubagents::default()
+        }),
+    )
+    .await;
+    let delivery = Arc::new(std::sync::Mutex::new(Some("original-delivery".to_string())));
+    sessions.set_delivery_identity_probe({
+        let delivery = Arc::clone(&delivery);
+        Arc::new(move || delivery.lock().unwrap().clone())
+    });
+    sessions.notify_turn_started();
+    let spawn = tokio::spawn({
+        let sessions = sessions.clone();
+        async move { spawn_child(&sessions).await }
+    });
+    tokio::time::timeout(Duration::from_secs(10), create.copied.notified())
+        .await
+        .expect("the create travels");
+    // The spawning delivery ends (the cell interrupted, the turn
+    // closed) while the create response is still in flight.
+    *delivery.lock().unwrap() = None;
+    sessions.notify_turn_done();
+    create.release.notify_one();
+    spawn
+        .await
+        .expect("the spawn admits against the captured delivery");
+    tokio::time::timeout(Duration::from_secs(10), prompt.copied.notified())
+        .await
+        .expect("the kickoff runs");
+    let (owner, owns_child) = {
+        let record = sessions.inner.children.lock().await[0].clone();
+        let owner = record.lock().await.parent_delivery_admission.clone();
+        let owns_child = sessions.any_running_scoped(Some("original-delivery")).await;
+        (owner, owns_child)
+    };
+    prompt.release.notify_one();
+    assert_eq!(
+        owner.as_deref(),
+        Some("original-delivery"),
+        "ownership belongs to the turn that called spawn, never a later registry read"
+    );
+    assert!(
+        owns_child,
+        "the original delivery's scoped completion still counts its own child"
+    );
+}
+
+/// The delivery probe runs OUTSIDE the pending-spawn lock: the probe
+/// may lock the worker's session core (its production shape), so the
+/// pending-admission count must never hold its lock across the probe —
+/// the two locks would nest. The probe read and the count take their
+/// locks one at a time; the count follows the probe read in program
+/// order, and the gap between them costs at most one uncredited child
+/// (a scoped read that answers between them), never canceled work that
+/// runs on.
+#[tokio::test]
+async fn a_delivery_probe_runs_free_of_the_pending_spawn_lock() {
+    let (follow_up_tx, _follow_up_rx) = mpsc::unbounded_channel();
+    let (sessions, _kill_rx) = sessions_with_fake_child_subagents(
+        follow_up_tx,
+        0,
+        FakeKill::Success,
+        FakeChild::Healthy,
+        Arc::new(FakeChildSubagents::default()),
+    )
+    .await;
+    // The probe try-locks the pending-spawn table itself: the count
+    // must never hold that lock while the probe runs, so the probe's
+    // own try answers whether it was held. A Weak keeps the stored
+    // probe out of a reference cycle with the registry.
+    let inner = Arc::downgrade(&sessions.inner);
+    let probe_saw_lock_free = Arc::new(std::sync::Mutex::new(false));
+    sessions.set_delivery_identity_probe({
+        let inner = inner.clone();
+        let probe_saw_lock_free = Arc::clone(&probe_saw_lock_free);
+        Arc::new(move || {
+            let delivery = "own-delivery".to_string();
+            if let Some(inner) = inner.upgrade() {
+                // The try never blocks: a count holding the lock
+                // across the probe would answer held and record a
+                // false.
+                let lock_free = inner.pending_spawns.try_lock().is_ok();
+                *probe_saw_lock_free.lock().unwrap() |= lock_free;
+            }
+            Some(delivery)
+        })
+    });
+    sessions.notify_turn_started();
+    let spawning = tokio::spawn({
+        let sessions = sessions.clone();
+        async move { spawn_child(&sessions).await }
+    });
+    spawning.await.expect("the spawn admits against the fake");
+    sessions.notify_turn_done();
+    assert!(
+        *probe_saw_lock_free.lock().unwrap(),
+        "the delivery probe must never run under the pending-spawn lock"
+    );
+    assert_eq!(
+        sessions
+            .inner
+            .pending_spawns
+            .lock()
+            .unwrap()
+            .get("own-delivery"),
+        None,
+        "the admitted spawn's count closed at its registration"
+    );
+}
+
+/// The session close walk (kill/shutdown/replace) keeps the pre-kill
+/// close flags on a refused child kill: the walk ends the parent
+/// session, so the child's deferred kickoff never fires once the
+/// parent's aborted turn ends — a child never starts model work for a
+/// parent that is already gone — and its close stays a plain stop
+/// while the scoped quiescence keeps counting the unsettled run.
+#[tokio::test]
+async fn a_refused_kill_in_the_session_close_suppresses_the_deferred_kickoff() {
+    let (follow_up_tx, _follow_up_rx) = mpsc::unbounded_channel();
+    let gate = Arc::new(FakePeerGate::default());
+    gate.armed.store(true, Ordering::SeqCst);
+    let child_subagents = Arc::new(FakeChildSubagents {
+        prompt_gate: Some(Arc::clone(&gate)),
+        ..FakeChildSubagents::default()
+    });
+    let (sessions, _kill_rx) = sessions_with_fake_child_subagents(
+        follow_up_tx,
+        0,
+        FakeKill::Failure,
+        FakeChild::Healthy,
+        child_subagents,
+    )
+    .await;
+    // The parent's turn runs: the spawn's kickoff defers to its end.
+    sessions.notify_turn_started();
+    let _child = spawn_child(&sessions).await;
+    // The session close (worker kill/shutdown/replace) refuses the kill.
+    let close = sessions.close_children(ChildCloseReason::Killed).await;
+    let closed_by_parent = {
+        let record = sessions.inner.children.lock().await[0].clone();
+        let state = record.lock().await;
+        state.retirement.closed_by_parent()
+    };
+    // The parent's aborted turn ends (the kill closes the children
+    // before it aborts the turn): the deferred kickoff must not fire.
+    sessions.notify_turn_done();
+    let kicked = tokio::time::timeout(std::time::Duration::from_secs(1), gate.copied.notified())
+        .await
+        .is_ok();
+    gate.release.notify_one();
+    assert!(close.is_err(), "the fake refuses the kill");
+    assert!(
+        closed_by_parent,
+        "the refused close keeps the child closed with its parent"
+    );
+    assert!(
+        !kicked,
+        "a refused kill in the session close walk let the closed child's deferred kickoff fire after the parent's turn ended"
+    );
+}
+
+/// The scoped quiescence read counts the delivery's spawn admissions
+/// still in flight: a create whose answer
+/// has not landed will register a child after the read, so a completion
+/// barrier that answered over it would settle its task while the child
+/// starts work behind the terminal stream.
+#[tokio::test]
+async fn a_pending_spawn_holds_the_scoped_quiescence_read() {
+    let (follow_up_tx, _follow_up_rx) = mpsc::unbounded_channel();
+    let create = Arc::new(FakePeerGate {
+        armed: AtomicBool::new(true),
+        ..FakePeerGate::default()
+    });
+    let prompt = Arc::new(FakePeerGate {
+        armed: AtomicBool::new(true),
+        ..FakePeerGate::default()
+    });
+    let (sessions, _kill_rx) = sessions_with_fake_child_subagents(
+        follow_up_tx,
+        0,
+        FakeKill::Success,
+        FakeChild::Healthy,
+        Arc::new(FakeChildSubagents {
+            create_gate: Some(Arc::clone(&create)),
+            prompt_gate: Some(Arc::clone(&prompt)),
+            ..FakeChildSubagents::default()
+        }),
+    )
+    .await;
+    sessions.set_delivery_identity_probe(Arc::new(|| Some("own-delivery".to_string())));
+    sessions.notify_turn_started();
+    let spawn = tokio::spawn({
+        let sessions = sessions.clone();
+        async move { spawn_child(&sessions).await }
+    });
+    tokio::time::timeout(Duration::from_secs(5), create.copied.notified())
+        .await
+        .expect("the create is in flight");
+    // The parent turn ended before the create answered: the barrier's
+    // scoped read must hold on the pending admission alone.
+    sessions.notify_turn_done();
+    let pending = sessions.inner.pending_spawns.lock().unwrap().len();
+    let during_create = sessions.any_running_scoped(Some("own-delivery")).await;
+    create.release.notify_one();
+    let _handle = spawn.await.expect("the spawn registers");
+    tokio::time::timeout(Duration::from_secs(5), prompt.copied.notified())
+        .await
+        .expect("the registered child's kickoff fires");
+    prompt.release.notify_one();
+    assert_eq!(pending, 1, "the held create owns one pending admission");
+    assert!(
+        during_create,
+        "the completion barrier must count the delivery's admitted create, not complete before its child registers"
+    );
+}
+
+/// A spawn whose admission fails after it opened its pending count (a
+/// nonexistent cwd) must close that count: a leaked count would hold
+/// the delivery's scoped completion wait open forever for work that
+/// never registered.
+#[tokio::test]
+async fn a_failed_spawn_admission_closes_its_pending_count() {
+    let (follow_up_tx, _follow_up_rx) = mpsc::unbounded_channel();
+    let (sessions, _kill_rx) = sessions_with_fake_child_subagents(
+        follow_up_tx,
+        0,
+        FakeKill::Success,
+        FakeChild::Healthy,
+        Arc::new(FakeChildSubagents::default()),
+    )
+    .await;
+    sessions
+        .set_delivery_identity_probe(Arc::new(|| Some("failed-admission-delivery".to_string())));
+    sessions.notify_turn_started();
+    let failed = sessions
+        .spawn(RlmSpawnRequest {
+            prompt: "task".to_string(),
+            name: Some("failed-admission".to_string()),
+            model: None,
+            thinking: None,
+            cwd: Some("no-such-directory".to_string()),
+            spawned_by_request_id: None,
+            factory: None,
+        })
+        .await;
+    assert!(failed.is_err(), "the nonexistent cwd fails the admission");
+    sessions.notify_turn_done();
+    // The failed admission closed its pending count: no admission of
+    // the delivery remains open, so the scoped wait holds nothing.
+    assert!(
+        !sessions
+            .any_running_scoped(Some("failed-admission-delivery"))
+            .await,
+        "the failed spawn's closed count holds no scoped work"
+    );
+    assert!(
+        sessions.inner.pending_spawns.lock().unwrap().is_empty(),
+        "the failed admission left no open pending count"
+    );
+}
+
+/// The pending admission's resolution wakes the quiescence barrier
+/// (the parked permit this resolution fires): the barrier parks on the
+/// settle permit while the delivery's create is still in flight, and
+/// the admission's close — registration or failure — must fire it, so
+/// the barrier re-reads and answers instead of wedging on a permit
+/// nothing else wakes.
+#[tokio::test]
+async fn a_pending_spawns_resolution_wakes_the_quiescence_barrier() {
+    let (follow_up_tx, _follow_up_rx) = mpsc::unbounded_channel();
+    let create = Arc::new(FakePeerGate {
+        armed: AtomicBool::new(true),
+        ..FakePeerGate::default()
+    });
+    // The child's own settle never fires in this probe: its kickoff
+    // parks at the held prompt gate, so the admission's close is the
+    // ONLY notify the parked barrier can receive (a spawn whose
+    // registration settles nothing on its own, like the failure arm).
+    let prompt = Arc::new(FakePeerGate {
+        armed: AtomicBool::new(true),
+        ..FakePeerGate::default()
+    });
+    let (sessions, _kill_rx) = sessions_with_fake_child_subagents(
+        follow_up_tx,
+        0,
+        FakeKill::Success,
+        FakeChild::Healthy,
+        Arc::new(FakeChildSubagents {
+            create_gate: Some(Arc::clone(&create)),
+            prompt_gate: Some(Arc::clone(&prompt)),
+            ..FakeChildSubagents::default()
+        }),
+    )
+    .await;
+    sessions.set_delivery_identity_probe(Arc::new(|| Some("own-delivery".to_string())));
+    sessions.notify_turn_started();
+    let spawn = tokio::spawn({
+        let sessions = sessions.clone();
+        async move { spawn_child(&sessions).await }
+    });
+    tokio::time::timeout(Duration::from_secs(5), create.copied.notified())
+        .await
+        .expect("the create is in flight");
+    sessions.notify_turn_done();
+    assert!(
+        sessions.any_running_scoped(Some("own-delivery")).await,
+        "the pending admission holds the scoped read"
+    );
+    // The barrier's parked permit, registered before the resolution.
+    let settled = sessions.settle_notified();
+    create.release.notify_one();
+    tokio::time::timeout(Duration::from_secs(5), settled)
+        .await
+        .expect("the admission's close wakes the parked barrier");
+    spawn.await.expect("the spawn ends");
+    prompt.release.notify_one();
 }

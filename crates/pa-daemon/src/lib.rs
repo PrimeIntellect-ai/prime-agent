@@ -22,6 +22,7 @@
     clippy::struct_excessive_bools,
     clippy::struct_field_names
 )]
+pub mod a2a;
 pub mod acp;
 pub mod agent_engine;
 pub mod agent_message_broadcast;
@@ -58,6 +59,7 @@ pub mod lease;
 pub mod mcp_connections;
 pub mod mcp_login;
 pub(crate) mod messaging;
+mod mode_link;
 pub mod model_allowlist;
 pub(crate) mod model_catalog;
 pub(crate) mod model_switch;

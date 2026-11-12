@@ -21,6 +21,11 @@ tokio = { workspace = true }
 tokio-util = "0.7"
 sha2 = "0.10"
 uuid = { version = "1", features = ["v4", "v7"] }
+# The A2A mode's HTTP/SSE listener: the same hyper stack reqwest already
+# pulls into the lock, promoted to direct deps.
+hyper = "1"
+hyper-util = { version = "0.1", features = ["server", "http1", "tokio"] }
+http-body-util = "0.1"
 
 [dev-dependencies]
 filetime = "0.2"

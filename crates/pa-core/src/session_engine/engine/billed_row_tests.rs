@@ -30,6 +30,8 @@ async fn scripted_engine(
     std::fs::create_dir_all(&cwd).unwrap();
     let engine = create_session(SessionEngineConfig {
         on_late_sent_agent_message: None,
+        on_kernel_bash_launch: None,
+        on_kernel_bash_activity_end: None,
         semantic_edges: None,
         cron_store: None,
         queued_steering_probe: None,

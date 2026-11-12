@@ -1,9 +1,10 @@
 //! The dispatch surface: command routing, the command handlers,
 //! and the abort family.
 use super::{
-    clear_withdrawn_progress_note, json, persist_custom_row, response_failure, response_success,
-    KillCloseReason, Lane, QueueCheckpoint, QueuedItem, Result, SessionFile, TurnSettle, VecDeque,
-    Worker, PROMPT_ABORTED_BEFORE_DELIVERY, SIDE_QUESTION_SETTLE_TIMEOUT,
+    clear_withdrawn_progress_note, json, oneshot, persist_custom_row, response_failure,
+    response_success, sweep_named_deliveries, KillCloseReason, Lane, QueueCheckpoint, QueuedItem,
+    Result, SessionFile, SweptDeliveries, TurnSettle, VecDeque, Worker,
+    PROMPT_ABORTED_BEFORE_DELIVERY, QUEUED_PROMPT_CLEARED, SIDE_QUESTION_SETTLE_TIMEOUT,
 };
 
 use serde_json::Value;
@@ -75,6 +76,8 @@ impl Worker {
             "get_queue" => self.handle_get_queue(),
             "clear_queue" => self.handle_clear_queue(),
             "abort_and_clear_queue" => self.handle_abort_and_clear_queue(),
+            "withdraw_admission" => self.handle_withdraw_admission(payload),
+            "kill_if_idle" => self.handle_kill_if_idle(payload).await,
             "get_last_assistant_text" => self.handle_get_last_assistant_text(),
             "get_connection_state" => self.handle_get_connection_state(),
             "get_mcp_connections" => self.handle_get_mcp_connections().await,
@@ -89,7 +92,7 @@ impl Worker {
             "get_tool_definition" => self.handle_get_tool_definition(payload).await,
             "get_rlm_max_depth_status" => self.handle_get_rlm_max_depth_status(),
             "get_available_models" => self.handle_get_available_models(),
-            "worker_deliver_message" => self.handle_worker_deliver_message(payload),
+            "worker_deliver_message" => self.handle_worker_deliver_message(payload).await,
             "update_snapshot" => self.handle_update_snapshot(),
             "kill" => self.handle_kill(payload).await,
             "shutdown" => self.handle_shutdown(payload).await,
@@ -596,26 +599,51 @@ impl Worker {
         let mut core = self.core.lock().unwrap();
         // The dropped agent-message rows bounce to their senders: a queued
         // row's sender otherwise never learns its message will not deliver.
+        // The dropped waiters settle on the withdrawn contract (the clear's
+        // own text below; a queue mutation's delete and the cancel sweep
+        // send their own).
         let mut dropped_agent_rows = Vec::new();
-        let drain_lane =
-            |lane: &mut VecDeque<QueuedItem>, dropped_agent_rows: &mut Vec<Value>| -> Vec<String> {
-                lane.drain(..)
-                    .map(|item| {
-                        if let Some(id) = item.admission_id.as_deref() {
-                            self.prompt_admissions.clear(id);
-                        }
-                        if item.agent_message.is_some() {
-                            dropped_agent_rows.extend(item.custom_message);
-                        }
-                        item.message
-                    })
-                    .collect()
-            };
-        let steering: Vec<String> = drain_lane(&mut core.steering, &mut dropped_agent_rows);
-        let follow_up: Vec<String> = drain_lane(&mut core.follow_up, &mut dropped_agent_rows);
+        let mut dropped_done = Vec::new();
+        let drain_lane = |lane: &mut VecDeque<QueuedItem>,
+                          dropped_agent_rows: &mut Vec<Value>,
+                          dropped_done: &mut Vec<oneshot::Sender<TurnSettle>>|
+         -> Vec<String> {
+            lane.drain(..)
+                .map(|mut item| {
+                    if let Some(id) = item.admission_id.as_deref() {
+                        self.prompt_admissions.clear(id);
+                    }
+                    if item.agent_message.is_some() {
+                        dropped_agent_rows.extend(item.custom_message);
+                    }
+                    if let Some(done) = item.done.take() {
+                        dropped_done.push(done);
+                    }
+                    item.message
+                })
+                .collect()
+        };
+        let steering: Vec<String> = drain_lane(
+            &mut core.steering,
+            &mut dropped_agent_rows,
+            &mut dropped_done,
+        );
+        let follow_up: Vec<String> = drain_lane(
+            &mut core.follow_up,
+            &mut dropped_agent_rows,
+            &mut dropped_done,
+        );
         clear_withdrawn_progress_note(&core, self.engine.as_ref());
         let snapshot = Self::snapshot_locked(&core);
         drop(core);
+        // The dropped waiters learn the withdrawal after the lock (the
+        // settle is a channel write, never a core mutation — the same
+        // contract the cancel sweep and the queue mutation's delete
+        // send). The clear's own text names the operator action (TS
+        // `clearQueue`), distinct from a row's delete.
+        for done in dropped_done {
+            let _ = done.send(TurnSettle::Withdrawn(QUEUED_PROMPT_CLEARED.to_string()));
+        }
         // The verdict refresh rides the same checkpoint as the snapshot: a stale
         // busy=true from the cleared items' admission must not revive an empty session.
         self.checkpoint_queue(QueueCheckpoint::Settle {
@@ -678,6 +706,171 @@ impl Worker {
                 eprintln!("pa-daemon: cleared agent-message bounce to {sender} failed: {error:#}");
             }
         });
+    }
+
+    /// `withdraw_admission` (a Rust-only daemon extension, no TS client
+    /// sends it): the identity-scoped withdraw — every queued row the
+    /// admission named (its wire id or its client id, whichever the
+    /// caller holds) leaves the lanes, its waiter settles on the
+    /// withdrawn contract, and a running turn anchored on the same
+    /// delivery aborts at its boundary. Other clients' rows — their
+    /// own admissions, their plain prompts — survive untouched: the
+    /// A2A cancel sweep withdraws its conversation's work without the
+    /// session-wide clear `abort_and_clear_queue` does.
+    fn handle_withdraw_admission(&self, payload: &Value) -> DaemonResponse {
+        if let Err(response) = self.require_created("withdraw_admission") {
+            return response;
+        }
+        let admission_id = payload
+            .get("admissionId")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        if admission_id.is_empty() {
+            return response_failure(
+                None,
+                "withdraw_admission",
+                "withdraw_admission requires string admissionId",
+                None,
+            );
+        }
+        // The locked steps run in one block (the same shape
+        // `handle_kill_if_idle` uses).
+        let (steering, follow_up, dropped_agent_rows, dropped_done, running_anchored, snapshot) = {
+            let mut core = self.core.lock().unwrap();
+            // The identity match: either half names the delivery (the A2A
+            // cancel names the task's delivery id — the unique admission
+            // its prompt carried, the client half; the supervisor's
+            // admission cancel names the wire half) — the shared
+            // `sweep_named_deliveries` (a failed or aborted turn's own
+            // unwind removes nothing).
+            let SweptDeliveries {
+                steering,
+                follow_up,
+                agent_rows: dropped_agent_rows,
+                done: dropped_done,
+            } = sweep_named_deliveries(
+                &mut core,
+                &self.prompt_admissions,
+                &[admission_id.to_string()],
+            );
+            // A running turn anchored on the same delivery aborts at its
+            // boundary (the queue keeps serving every other client): the
+            // running set carries both halves of the anchor's identity.
+            let running_anchored = core.running_admission_ids.contains(admission_id);
+            if running_anchored {
+                core.abort_requested = true;
+                core.turn_cancelled = true;
+                // The same TS `requestAbort()` suspension the bare abort
+                // sets: the queue keeps its idle contract for the aborted
+                // boundary (the suspension itself stops no loop — the
+                // withdrawal's own loop stop below retires the
+                // continuation the canceled task's turn would have
+                // re-minted), and the resume sites (a prompt carrying a
+                // streaming behavior — every A2A send does) clear it
+                // exactly like the abort's.
+                core.queued_input_suspended = true;
+            }
+            let snapshot = Self::snapshot_locked(&core);
+            (
+                steering,
+                follow_up,
+                dropped_agent_rows,
+                dropped_done,
+                running_anchored,
+                snapshot,
+            )
+        };
+        let withdrew = !steering.is_empty() || !follow_up.is_empty();
+        if running_anchored {
+            self.engine.abort_in_flight_turn();
+        }
+        // The dropped waiters learn the withdrawal after the lock (the
+        // settle is a channel write, never a core mutation — the same
+        // contract the clear's drain sends).
+        for done in dropped_done {
+            let _ = done.send(TurnSettle::Withdrawn(QUEUED_PROMPT_CLEARED.to_string()));
+        }
+        if withdrew || running_anchored {
+            self.checkpoint_queue(QueueCheckpoint::Settle {
+                operation: "queue_withdrawn",
+            });
+            let _ = self.emit_action_update(&snapshot);
+            for row in &dropped_agent_rows {
+                self.bounce_cleared_agent_message(row);
+            }
+        }
+        // The canceled task's continuation loops stop with the
+        // withdrawal: the loop its prompt started is the task's own
+        // work — the run-on contract keeps only the DELEGATED children
+        // running, and an owed continuation the withdrawal's sweep
+        // cannot reach (the goal defers behind the unsettled children,
+        // the autonomous twin the same) would otherwise mint one turn
+        // after another on the session long after the client's CANCELED
+        // answer, with every later send on the conversation waiting the
+        // loop out. The goal pause rides the engine's runtime (a
+        // best-effort durable stop — see the pause), the autonomous
+        // deferral drops, and the children's own notice turns keep
+        // resolving foreign to the settled task.
+        if let Some(agent_engine) = &self.agent_engine {
+            // The goal-chain record lands synchronously BEFORE the cancel
+            // answers: the mint consults read it, so the loop mints
+            // nothing after this withdrawal even while the durable pause's
+            // own task is still waiting on the engine runtime (the
+            // workspace-load race: the children's settle hook minted the
+            // owed continuation before the starved pause could precede
+            // it).
+            agent_engine.retire_withdrawn_goal_delivery(admission_id);
+            agent_engine.pause_goal_for_withdrawn_delivery(admission_id);
+            agent_engine.retire_withdrawn_autonomous_deferral(admission_id);
+        }
+        response_success(
+            None,
+            "withdraw_admission",
+            Some(json!({
+                "steering": steering,
+                "followUp": follow_up,
+                "aborted": running_anchored,
+            })),
+        )
+    }
+
+    /// `kill_if_idle` (a Rust-only daemon extension, no TS client sends
+    /// it): the idle check and the destructive stop are ONE worker-owned
+    /// decision — a turn in flight or queued work refuses the kill
+    /// (another client's live work is never aborted by a reclamation
+    /// that read an earlier idle snapshot), a live attached client
+    /// refuses it too (the A2A link detaches before it asks, so a
+    /// client left attached is a foreign observer whose connection the
+    /// reclamation never drops), and the close owns the session from
+    /// the decision's own lock: intake's `created` gate refuses work
+    /// admitted behind the decision, so the close never accepts then
+    /// discards a foreign prompt that raced it. Only a session holding
+    /// nothing and observing no one runs the close.
+    async fn handle_kill_if_idle(&self, payload: &Value) -> DaemonResponse {
+        {
+            let mut core = self.core.lock().unwrap();
+            let holds_work = core.busy || !core.steering.is_empty() || !core.follow_up.is_empty();
+            let holds_client = !core.attached_client_ids.is_empty();
+            if holds_work || holds_client {
+                return response_failure(
+                    None,
+                    "kill_if_idle",
+                    if holds_client {
+                        crate::worker::KILL_IF_IDLE_HAS_CLIENT
+                    } else {
+                        crate::worker::KILL_IF_IDLE_HOLDS_WORK
+                    },
+                    None,
+                );
+            }
+            // The close owns the session from the decision's own lock
+            // (the same `created` gate a settled close leaves): a
+            // prompt dispatched while the close settles its side
+            // questions answers the closed session's refusal instead
+            // of a receipt whose work the close then destroys.
+            core.created = false;
+        }
+        self.handle_kill(payload).await
     }
 
     fn handle_abort_and_clear_queue(&self) -> DaemonResponse {
