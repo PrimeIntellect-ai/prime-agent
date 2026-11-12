@@ -647,9 +647,12 @@ impl SessionUi {
     ) -> Result<()> {
         // A new prompt settles the held bash cards into the transcript first.
         Self::flush_pending_bash(view);
-        if let Some(error) = self.reconnection_failed.clone() {
+        if let crate::interactive::reconnect::Connection::SessionPlaneFailed(error) =
+            &self.connection
+        {
             // The re-attach window expired: the connection is closed, nothing dispatches.
-            self.error_row(&format!("Daemon reconnection failed: {error}"), view);
+            let row = format!("Daemon reconnection failed: {error}");
+            self.error_row(&row, view);
             view.editor.set_text(text);
             return Ok(());
         }
