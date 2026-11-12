@@ -848,6 +848,8 @@ async fn a_journal_failure_marks_the_notice_memory_only() {
         &arrivals,
         bash_done_notice(4321, "sleep 1"),
         || false,
+        |_, _| None,
+        None,
     );
     let rows = steering_rows(&worker);
     assert_eq!(rows.len(), 1);
@@ -884,6 +886,8 @@ async fn a_journal_failure_marks_the_notice_memory_only() {
         &arrivals,
         bash_done_notice(4322, "sleep 2"),
         || false,
+        |_, _| None,
+        None,
     );
     assert!(
         inbox.persistence_error().is_some(),
@@ -932,6 +936,8 @@ async fn a_withdrawals_rerender_keeps_the_persistence_error_clause() {
         &arrivals,
         bash_done_notice(4321, "sleep 1"),
         || false,
+        |_, _| None,
+        None,
     );
     admit_inbox_notice(
         &worker.recovery,
@@ -944,6 +950,8 @@ async fn a_withdrawals_rerender_keeps_the_persistence_error_clause() {
             "second",
         ),
         || false,
+        |_, _| None,
+        None,
     );
     admit_inbox_reminder(&worker.recovery, &worker.core, &notify, &inbox, || false);
     withdraw_bash_completion_notice(
