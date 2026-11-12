@@ -289,8 +289,8 @@ mod tests {
         // message carries the status inside a prefix instead of at the start.
         for text in [
             "413 status code (no body)",
-            "413 Payload Too Large",
-            "Mistral API error (413): request entity too large",
+            "413 Content Too Large",
+            "Mistral API error (413): API error occurred: Status 413. Body: \"\"",
         ] {
             let m = message(StopReason::Error, Some(text), usage(0, 0, 0));
             assert!(is_context_overflow(&m, None), "unrecognized: {text}");
@@ -306,6 +306,7 @@ mod tests {
             "Request body is too large",
             "payload too large",
             "Request entity too large",
+            "Hosted decision request exceeds the body size limit.",
             r#"{"code":"request_body_too_large","message":"request body too large"}"#,
         ] {
             let m = message(StopReason::Error, Some(text), usage(0, 0, 0));
