@@ -107,10 +107,8 @@ fn the_list_renders_columned_rows_and_one_hint() {
         1,
         "the close hint appears once: {text:?}"
     );
-    assert!(text
-        .iter()
-        .any(|row| row
-            .contains("\u{2191}/\u{2193} move \u{b7} Enter open \u{b7} \u{2190}/Esc close")));
+    assert!(text.iter().any(|row| row
+        .contains("\u{2191}/\u{2193} move \u{b7} Enter/\u{2192} open \u{b7} \u{2190}/Esc close")));
     for line in &frame {
         assert!(crate::width::spans_width(line) <= 70);
     }
@@ -120,6 +118,7 @@ fn the_list_renders_columned_rows_and_one_hint() {
 fn the_list_hint_drops_unbound_keys() {
     let mut cfg = crate::keybindings::KeybindingsConfig::new();
     cfg.insert("app.modal.back".to_string(), Vec::new());
+    cfg.insert("app.modal.open".to_string(), Vec::new());
     let kb = KeybindingsManager::with_user_bindings(cfg);
     let view = BashView::new(activities(), 24);
     let frame = view.render(&theme(), 70, &kb);
@@ -127,7 +126,7 @@ fn the_list_hint_drops_unbound_keys() {
     assert!(
         text.iter()
             .any(|row| row.contains("\u{2191}/\u{2193} move \u{b7} Enter open \u{b7} Esc close")),
-        "the emptied back binding drops the arrow: {text:?}"
+        "the emptied open and back bindings drop their arrows: {text:?}"
     );
 }
 
@@ -320,6 +319,24 @@ fn enter_opens_the_detail_and_the_cancel_action() {
     assert_eq!(open_id, "b");
     assert_eq!(view.handle_key("enter", &kb()), BashViewAction::None);
     let _ = first_generation;
+}
+
+#[test]
+fn right_opens_the_selected_row_like_enter() {
+    let mut view = BashView::new(activities(), 24);
+    let action = view.handle_key("right", &kb());
+    let BashViewAction::OpenDetail { id, .. } = &action else {
+        panic!("right opens the selected row: {action:?}");
+    };
+    assert_eq!(id, "a");
+    // In the detail Right is not Enter: the running row is not killed.
+    assert_eq!(view.handle_key("right", &kb()), BashViewAction::None);
+    assert_eq!(
+        view.mode,
+        Mode::Detail {
+            id: "a".to_string()
+        }
+    );
 }
 
 /// No labeled-pair blocks, no section labels, no duplicated title.

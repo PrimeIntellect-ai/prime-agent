@@ -286,6 +286,7 @@ mod tests {
             featured: None,
             headers: None,
             compat: None,
+            serving: None,
         };
         assert_eq!(
             authorizations(&model, None),
@@ -344,6 +345,7 @@ mod tests {
             featured: None,
             headers: None,
             compat: None,
+            serving: None,
         };
         assert!(uses_reasoning_effort(&model));
         assert_eq!(

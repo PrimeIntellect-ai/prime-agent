@@ -143,9 +143,9 @@ impl SessionFile {
                 if self.entry(id).is_none() {
                     return Err(anyhow!("Entry {id} not found"));
                 }
-                self.leaf_id = Some(id.to_string());
+                self.set_leaf(Some(id.to_string()));
             }
-            None => self.leaf_id = None,
+            None => self.set_leaf(None),
         }
         Ok(())
     }
@@ -327,7 +327,7 @@ impl SessionFile {
         for entry in path_without_labels {
             self.index_entry(entry);
         }
-        let mut parent = self.leaf_id.clone();
+        let mut parent = self.leaf_id().map(str::to_string);
         for id in &path_ids {
             if let Some(label) = labels.labels.get(id) {
                 let entry = SessionEntry {

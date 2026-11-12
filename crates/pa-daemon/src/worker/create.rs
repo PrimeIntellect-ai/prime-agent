@@ -179,6 +179,9 @@ impl Worker {
                 }
                 _ => (None, None, None, None),
             };
+        let factory_child = payload
+            .get("runtimeMetadata")
+            .is_some_and(|metadata| metadata.get("factory").is_some());
         let thinking = payload
             .get("thinking")
             .and_then(Value::as_str)
@@ -605,6 +608,7 @@ impl Worker {
             thinking,
             child_script: child_script.clone(),
             semantic_spawn,
+            factory_child,
         }) {
             return response_failure(None, "create", &error.to_string(), None);
         }

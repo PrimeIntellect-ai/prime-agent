@@ -947,6 +947,23 @@ mod tests {
     }
 
     #[test]
+    fn confirming_a_stale_menu_replaces_the_whole_typed_token() {
+        let (_base, mut e) = at_editor();
+        for ch in "@pr".chars() {
+            e.handle_input(&ch.to_string());
+        }
+        assert!(settled_menu(&mut e).is_some());
+        // Typing on parks a refresh: the open menu still answers `@pr`.
+        for ch in "ime-ag".chars() {
+            e.handle_input(&ch.to_string());
+        }
+        e.handle_input("down");
+        e.handle_input("up");
+        e.handle_input("enter");
+        assert_eq!(e.get_text(), "@prime-agent/");
+    }
+
+    #[test]
     fn quoted_directory_completions_list_children_on_tab_and_enter() {
         for accept in ["tab", "enter"] {
             let (base, mut e) = at_editor();

@@ -1,0 +1,1356 @@
+//! The live request-auth seam: the built session's stream re-resolves
+//! request auth from the credential store on every provider call (the TS
+//! streamFn's per-call `getApiKeyAndHeaders`), so a credential rotated by
+//! another process (`/login`) or refreshed at expiry serves the live
+//! session's next request without a restart.
+use std::sync::Arc;
+
+use pa_agent::stream::{LlmContext, StreamFn, StreamRequestOptions};
+use pa_agent::types::Model as AgentModel;
+
+use super::*;
+
+/// A custom provider whose configured key is a placeholder: the stored
+/// OAuth credential wins over it, so the request auth follows the store.
+fn write_credential_backed_faux_provider(agent_dir: &std::path::Path) {
+    std::fs::create_dir_all(agent_dir).unwrap();
+    std::fs::write(
+        agent_dir.join("models.json"),
+        json!({
+            "providers": {
+                "battery": {
+                    "api": "faux", "baseUrl": "http://localhost:0", "apiKey": "sk-config-fallback",
+                    "models": [{
+                        "id": "mock-1", "name": "Mock 1",
+                        "contextWindow": 128_000, "maxTokens": 16384,
+                    }],
+                }
+            }
+        })
+        .to_string(),
+    )
+    .unwrap();
+}
+
+/// One stored OAuth credential for the custom provider, the shape `/login`
+/// writes from another process.
+fn write_oauth_credential(agent_dir: &std::path::Path, access: &str) {
+    std::fs::create_dir_all(agent_dir).unwrap();
+    std::fs::write(
+        agent_dir.join("auth.json"),
+        json!({
+            "battery": { "type": "oauth", "access": access, "refresh": "r",
+                "expires": 4_102_444_800_000i64 }
+        })
+        .to_string(),
+    )
+    .unwrap();
+}
+
+fn live_auth_engine(
+    dir: &std::path::Path,
+    api_key: Option<&str>,
+    provider: &str,
+    model_id: &str,
+) -> std::sync::Arc<AgentSessionEngine> {
+    live_auth_engine_with_oauth(dir, api_key, provider, model_id, None)
+}
+
+/// [`live_auth_engine`] with a scripted request-auth OAuth integration,
+/// swapped in before the engine is shared (production sets it once at
+/// construction; the per-call resolution reads it).
+fn live_auth_engine_with_oauth(
+    dir: &std::path::Path,
+    api_key: Option<&str>,
+    provider: &str,
+    model_id: &str,
+    request_auth_oauth: Option<std::sync::Arc<dyn pa_core::auth::OAuthIntegration>>,
+) -> std::sync::Arc<AgentSessionEngine> {
+    let mut engine = AgentSessionEngine::new(AgentEngineConfig {
+        cwd: dir.to_path_buf(),
+        agent_dir: dir.join("agent"),
+        provider: Some(provider.to_string()),
+        model: Some(model_id.to_string()),
+        api_key: api_key.map(str::to_string),
+        thinking: None,
+        session_dir: None,
+        session_file: None,
+        faux_script: None,
+        supervisor_link: None,
+        telemetry_disabled: Some(true),
+        cron_store: None,
+        queued_steering_probe: None,
+    })
+    .expect("engine");
+    if let Some(oauth) = request_auth_oauth {
+        engine.request_auth_oauth = oauth;
+    }
+    let engine = Arc::new(engine);
+    // The worker registers the engine's own arc: the live-auth resolver
+    // upgrades it per provider call.
+    engine.register_arc();
+    engine
+}
+
+/// One registered faux provider serving `api: "faux"`, recording every
+/// request's api key.
+fn register_recording_faux() -> pa_ai::faux::FauxProviderRegistration {
+    let registration =
+        pa_ai::faux::register_faux_provider(pa_ai::faux::RegisterFauxProviderOptions {
+            api: Some("faux".to_string()),
+            ..Default::default()
+        });
+    registration.set_repeat_last_response(true);
+    registration.set_responses(vec![pa_ai::faux::FauxResponseStep::Message(
+        pa_ai::faux::faux_assistant_text_message(
+            "ok",
+            pa_ai::faux::FauxAssistantMessageOptions::default(),
+        ),
+    )]);
+    registration
+}
+
+/// Drive one provider call through the built session's stream.
+fn call_stream_once(engine: &AgentSessionEngine, stream_fn: &StreamFn) {
+    engine.runtime.block_on(async {
+        let mut stream = stream_fn(
+            AgentModel::unknown(),
+            LlmContext::default(),
+            StreamRequestOptions::default(),
+        )
+        .await
+        .expect("the stream call succeeds");
+        stream.result().await.expect("the stream settles");
+    });
+}
+
+/// The api keys the faux provider served, in order.
+fn served_keys(registration: &pa_ai::faux::FauxProviderRegistration) -> Vec<Option<String>> {
+    registration.received_api_keys()
+}
+
+/// The seam's pickup scenario: a fresh credential another process wrote
+/// (`/login`) reaches the LIVE session's next provider call — no
+/// restart, no `/reload`, no rebuild.
+#[test]
+fn the_built_sessions_stream_picks_up_an_external_reauth_per_call() {
+    let _faux = FAUX_TEST_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let dir = tempfile::TempDir::new().unwrap();
+    let agent_dir = dir.path().join("agent");
+    write_credential_backed_faux_provider(&agent_dir);
+    write_oauth_credential(&agent_dir, "stale-access");
+    let registration = register_recording_faux();
+    let engine = live_auth_engine(dir.path(), None, "battery", "mock-1");
+    let model = engine.resolve_model().expect("the custom model resolves");
+    let agent = engine.session_agent(&model).expect("the session builds");
+    let stream_fn = agent
+        .stream_fn()
+        .expect("the built session streams")
+        .clone();
+
+    // The build-time resolution: the stored credential serves.
+    call_stream_once(&engine, &stream_fn);
+    assert_eq!(
+        served_keys(&registration).last(),
+        Some(&Some("stale-access".to_string())),
+        "the build-time credential serves the first call"
+    );
+
+    // A `/login` from ANOTHER process replaces the stored credential.
+    write_oauth_credential(&agent_dir, "fresh-access");
+    call_stream_once(&engine, &stream_fn);
+    assert_eq!(
+        served_keys(&registration).last(),
+        Some(&Some("fresh-access".to_string())),
+        "the fresh credential serves the very next provider call, live"
+    );
+    registration.unregister();
+}
+
+/// The create-config key override never store-swaps: a session created with
+/// an explicit config key keeps serving it across store changes.
+#[test]
+fn the_create_config_key_override_never_store_swaps() {
+    let _faux = FAUX_TEST_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let dir = tempfile::TempDir::new().unwrap();
+    let agent_dir = dir.path().join("agent");
+    write_credential_backed_faux_provider(&agent_dir);
+    write_oauth_credential(&agent_dir, "stored-access");
+    let registration = register_recording_faux();
+    let engine = live_auth_engine(dir.path(), Some("sk-override"), "battery", "mock-1");
+    let model = engine.resolve_model().expect("the custom model resolves");
+    let agent = engine.session_agent(&model).expect("the session builds");
+    let stream_fn = agent
+        .stream_fn()
+        .expect("the built session streams")
+        .clone();
+
+    call_stream_once(&engine, &stream_fn);
+    // The store changes underneath the session: the override key stands.
+    write_oauth_credential(&agent_dir, "fresh-access");
+    call_stream_once(&engine, &stream_fn);
+    assert_eq!(
+        served_keys(&registration),
+        vec![
+            Some("sk-override".to_string()),
+            Some("sk-override".to_string())
+        ],
+        "the create-config key override never swaps to a store credential"
+    );
+    registration.unregister();
+}
+
+/// A selection key that leaves the selection stops serving: the session
+/// restore resets the selection to the spawn fallback (no key), and the
+/// next resolution serves the store, never the old key the engine-lived
+/// store held as its runtime override.
+#[test]
+fn a_cleared_selection_key_stops_serving() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let agent_dir = dir.path().join("agent");
+    write_credential_backed_faux_provider(&agent_dir);
+    write_oauth_credential(&agent_dir, "stored-access");
+    let engine = live_auth_engine(dir.path(), None, "battery", "mock-1");
+    let model = engine.resolve_model().expect("the custom model resolves");
+    engine.configure_model(EngineModelSelection {
+        api_key: Some("sk-configured".to_string()),
+        ..Default::default()
+    });
+    assert_eq!(
+        engine.resolve_request_auth(&model).api_key.as_deref(),
+        Some("sk-configured")
+    );
+    let saved = crate::engine::SavedSessionContext {
+        model: None,
+        thinking: None,
+    };
+    engine
+        .runtime
+        .block_on(engine.restore_session_model(&dir.path().join("session.jsonl"), Some(saved)));
+    assert_eq!(
+        engine.resolve_request_auth(&model).api_key.as_deref(),
+        Some("stored-access")
+    );
+}
+
+/// A logout (another process empties the store) changes the very next
+/// call: the resolution's own answer — the configured `models.json`
+/// fallback key — streams per call, and the captured pair never resends
+/// (a captured credential is the stale-token loop this seam ends).
+#[test]
+fn a_logout_serves_the_fallback_key_never_the_captured_pair() {
+    let _faux = FAUX_TEST_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let dir = tempfile::TempDir::new().unwrap();
+    let agent_dir = dir.path().join("agent");
+    write_credential_backed_faux_provider(&agent_dir);
+    write_oauth_credential(&agent_dir, "stale-access");
+    let registration = register_recording_faux();
+    let engine = live_auth_engine(dir.path(), None, "battery", "mock-1");
+    let model = engine.resolve_model().expect("the custom model resolves");
+    let agent = engine.session_agent(&model).expect("the session builds");
+    let stream_fn = agent
+        .stream_fn()
+        .expect("the built session streams")
+        .clone();
+
+    call_stream_once(&engine, &stream_fn);
+    // A logout from another process empties the store.
+    std::fs::write(agent_dir.join("auth.json"), "{}").unwrap();
+    call_stream_once(&engine, &stream_fn);
+    assert_eq!(
+        served_keys(&registration),
+        vec![
+            Some("stale-access".to_string()),
+            Some("sk-config-fallback".to_string())
+        ],
+        "the fallback key serves after the logout; the captured pair never resends"
+    );
+    registration.unregister();
+}
+
+/// An expired OAuth credential whose refresh cannot serve (the dispatch for
+/// a non-subscription provider has no token endpoint) never keeps the
+/// captured pair serving: the resolution reports no live credential and
+/// falls to the configured fallback key, which streams per call — the
+/// expired captured token never resends.
+#[test]
+fn an_expired_credential_without_a_refresh_path_serves_the_fallback_key() {
+    let _faux = FAUX_TEST_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let dir = tempfile::TempDir::new().unwrap();
+    let agent_dir = dir.path().join("agent");
+    write_credential_backed_faux_provider(&agent_dir);
+    let registration = register_recording_faux();
+    // The session builds against the live credential...
+    write_oauth_credential(&agent_dir, "live-access");
+    let engine = live_auth_engine(dir.path(), None, "battery", "mock-1");
+    let model = engine.resolve_model().expect("the custom model resolves");
+    let agent = engine.session_agent(&model).expect("the session builds");
+    let stream_fn = agent
+        .stream_fn()
+        .expect("the built session streams")
+        .clone();
+    call_stream_once(&engine, &stream_fn);
+    assert_eq!(
+        served_keys(&registration).last(),
+        Some(&Some("live-access".to_string()))
+    );
+    // ...then the credential expires (and this provider has no refresh
+    // endpoint, so the resolution cannot serve anything fresh).
+    let expired = json!({
+        "battery": { "type": "oauth", "access": "expired-access", "refresh": "r", "expires": 1 }
+    });
+    std::fs::write(
+        agent_dir.join("auth.json"),
+        serde_json::to_string_pretty(&expired).unwrap(),
+    )
+    .unwrap();
+    call_stream_once(&engine, &stream_fn);
+    assert_eq!(
+        served_keys(&registration).last(),
+        Some(&Some("sk-config-fallback".to_string())),
+        "the fallback key serves when the store's credential expires without a refresh path; the captured token never resends"
+    );
+    registration.unregister();
+}
+
+/// A transiently unreadable store is not a logout: the engine keeps one
+/// `AuthStorage` for its life (TS's single instance, whose `reload()`
+/// keeps the last read's data on a read error — v0.9.8
+/// auth-storage.ts:674-687), so while another writer holds the auth
+/// document's lock the call keeps serving the last-read credential —
+/// never an error, never the fallback key — and the pickup resumes the
+/// moment the read succeeds again.
+#[test]
+fn a_held_document_lock_keeps_serving_the_last_read_credential() {
+    let _faux = FAUX_TEST_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let dir = tempfile::TempDir::new().unwrap();
+    let agent_dir = dir.path().join("agent");
+    write_credential_backed_faux_provider(&agent_dir);
+    write_oauth_credential(&agent_dir, "stale-access");
+    let registration = register_recording_faux();
+    let engine = live_auth_engine(dir.path(), None, "battery", "mock-1");
+    let model = engine.resolve_model().expect("the custom model resolves");
+    let agent = engine.session_agent(&model).expect("the session builds");
+    let stream_fn = agent
+        .stream_fn()
+        .expect("the built session streams")
+        .clone();
+
+    call_stream_once(&engine, &stream_fn);
+    assert_eq!(
+        served_keys(&registration).last(),
+        Some(&Some("stale-access".to_string())),
+        "the stored credential serves the first call"
+    );
+    // A `/login` lands, and an independent writer holds the auth
+    // document's lock through the read budget: the engine's reload fails
+    // and the last-read credential keeps serving.
+    write_oauth_credential(&agent_dir, "fresh-access");
+    let held = pa_core::platform::lock_dir::LockDir::acquire(
+        &agent_dir.join("auth.json"),
+        std::time::Duration::from_secs(10),
+    )
+    .expect("the test holds the auth document lock");
+    call_stream_once(&engine, &stream_fn);
+    assert_eq!(
+        served_keys(&registration).last(),
+        Some(&Some("stale-access".to_string())),
+        "the last-read credential serves while the document lock is held; a failed read is not a logout"
+    );
+    drop(held);
+    call_stream_once(&engine, &stream_fn);
+    assert_eq!(
+        served_keys(&registration).last(),
+        Some(&Some("fresh-access".to_string())),
+        "the fresh credential serves the moment the read succeeds again"
+    );
+    registration.unregister();
+}
+
+/// A corrupt auth store is the same not-a-logout shape: the last-read
+/// credential keeps serving while the file does not parse, and a fresh
+/// credential is picked up as soon as the store parses again.
+#[test]
+fn a_corrupt_auth_store_keeps_serving_the_last_read_credential() {
+    let _faux = FAUX_TEST_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let dir = tempfile::TempDir::new().unwrap();
+    let agent_dir = dir.path().join("agent");
+    write_credential_backed_faux_provider(&agent_dir);
+    write_oauth_credential(&agent_dir, "stale-access");
+    let registration = register_recording_faux();
+    let engine = live_auth_engine(dir.path(), None, "battery", "mock-1");
+    let model = engine.resolve_model().expect("the custom model resolves");
+    let agent = engine.session_agent(&model).expect("the session builds");
+    let stream_fn = agent
+        .stream_fn()
+        .expect("the built session streams")
+        .clone();
+
+    call_stream_once(&engine, &stream_fn);
+    assert_eq!(
+        served_keys(&registration).last(),
+        Some(&Some("stale-access".to_string())),
+        "the stored credential serves the first call"
+    );
+    // The store turns unreadable mid-session (a torn write): the
+    // last-read credential keeps serving.
+    std::fs::write(agent_dir.join("auth.json"), "{ not json").unwrap();
+    call_stream_once(&engine, &stream_fn);
+    assert_eq!(
+        served_keys(&registration).last(),
+        Some(&Some("stale-access".to_string())),
+        "the last-read credential serves while the store does not parse; a corrupt file is not a logout"
+    );
+    write_oauth_credential(&agent_dir, "fresh-access");
+    call_stream_once(&engine, &stream_fn);
+    assert_eq!(
+        served_keys(&registration).last(),
+        Some(&Some("fresh-access".to_string())),
+        "the fresh credential serves once the store parses again"
+    );
+    registration.unregister();
+}
+
+/// The create-config key survives a failed store read: the runtime
+/// override lives in memory on the engine's long-lived store, so a
+/// transiently-held document lock never fails the call and never swaps
+/// the key.
+#[test]
+fn a_create_config_key_keeps_serving_while_the_store_read_fails() {
+    let _faux = FAUX_TEST_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let dir = tempfile::TempDir::new().unwrap();
+    let agent_dir = dir.path().join("agent");
+    write_credential_backed_faux_provider(&agent_dir);
+    write_oauth_credential(&agent_dir, "stored-access");
+    let registration = register_recording_faux();
+    let engine = live_auth_engine(dir.path(), Some("sk-override"), "battery", "mock-1");
+    let model = engine.resolve_model().expect("the custom model resolves");
+    let agent = engine.session_agent(&model).expect("the session builds");
+    let stream_fn = agent
+        .stream_fn()
+        .expect("the built session streams")
+        .clone();
+
+    call_stream_once(&engine, &stream_fn);
+    write_oauth_credential(&agent_dir, "fresh-access");
+    let held = pa_core::platform::lock_dir::LockDir::acquire(
+        &agent_dir.join("auth.json"),
+        std::time::Duration::from_secs(10),
+    )
+    .expect("the test holds the auth document lock");
+    call_stream_once(&engine, &stream_fn);
+    drop(held);
+    call_stream_once(&engine, &stream_fn);
+    assert_eq!(
+        served_keys(&registration),
+        vec![
+            Some("sk-override".to_string()),
+            Some("sk-override".to_string()),
+            Some("sk-override".to_string())
+        ],
+        "the create-config key keeps serving across a failed store read; the override never fails the call"
+    );
+    registration.unregister();
+}
+
+/// An expired stored OAuth credential, the shape an expiring token leaves
+/// in the store: the refresh machinery's input.
+fn write_expired_oauth_credential(agent_dir: &std::path::Path, access: &str) {
+    std::fs::create_dir_all(agent_dir).unwrap();
+    std::fs::write(
+        agent_dir.join("auth.json"),
+        json!({
+            "battery": { "type": "oauth", "access": access, "refresh": "r", "expires": 1 }
+        })
+        .to_string(),
+    )
+    .unwrap();
+}
+
+/// A scripted OAuth integration counting refresh attempts: each refresh
+/// serves a fresh credential (or fails, per `succeeds`).
+struct CountingRefresh {
+    attempts: Arc<std::sync::Mutex<usize>>,
+    succeeds: bool,
+}
+
+impl pa_core::auth::OAuthIntegration for CountingRefresh {
+    fn api_key_for(
+        &self,
+        _provider: &str,
+        credential: &pa_core::auth::AuthCredential,
+    ) -> Option<String> {
+        match credential {
+            pa_core::auth::AuthCredential::Oauth { access, .. } => Some(access.clone()),
+            _ => None,
+        }
+    }
+
+    fn refresh(
+        &self,
+        _provider: &str,
+        _credentials: &pa_core::auth::AuthStorageData,
+    ) -> Result<pa_core::auth::AuthCredential, String> {
+        *self.attempts.lock().unwrap() += 1;
+        if !self.succeeds {
+            return Err("invalid_grant: the refresh token was revoked".to_string());
+        }
+        Ok(pa_core::auth::AuthCredential::Oauth {
+            access: "refreshed-access".to_string(),
+            refresh: Some("rotated-refresh".to_string()),
+            expires: 4_102_444_800_000,
+            account_id: None,
+            enterprise_url: None,
+            endpoint: None,
+            token_endpoint: None,
+            client_id: None,
+            resource: None,
+            issuer: None,
+            audience_mode: None,
+        })
+    }
+}
+
+/// An expired credential refreshes through the engine's request-auth
+/// resolution and the refreshed token serves the LIVE session's next
+/// provider call (no restart): the resolution's OAuth integration is the
+/// refresh path, and the refreshed credential lands in the store so a
+/// later call serves it without another refresh.
+#[test]
+fn an_expired_credential_refreshes_and_serves_the_live_session() {
+    let _faux = FAUX_TEST_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let dir = tempfile::TempDir::new().unwrap();
+    let agent_dir = dir.path().join("agent");
+    write_credential_backed_faux_provider(&agent_dir);
+    write_oauth_credential(&agent_dir, "live-access");
+    let registration = register_recording_faux();
+    let attempts = Arc::new(std::sync::Mutex::new(0));
+    let engine = live_auth_engine_with_oauth(
+        dir.path(),
+        None,
+        "battery",
+        "mock-1",
+        Some(Arc::new(CountingRefresh {
+            attempts: Arc::clone(&attempts),
+            succeeds: true,
+        })),
+    );
+    let model = engine.resolve_model().expect("the custom model resolves");
+    let agent = engine.session_agent(&model).expect("the session builds");
+    let stream_fn = agent
+        .stream_fn()
+        .expect("the built session streams")
+        .clone();
+    call_stream_once(&engine, &stream_fn);
+    assert_eq!(
+        served_keys(&registration).last(),
+        Some(&Some("live-access".to_string())),
+        "the build-time credential serves the first call"
+    );
+    assert_eq!(
+        *attempts.lock().unwrap(),
+        0,
+        "a live credential does not refresh"
+    );
+
+    // The credential expires: the next provider call refreshes it at the
+    // token endpoint and serves the fresh token, live.
+    write_expired_oauth_credential(&agent_dir, "expired-access");
+    call_stream_once(&engine, &stream_fn);
+    assert_eq!(
+        served_keys(&registration).last(),
+        Some(&Some("refreshed-access".to_string())),
+        "the refreshed token serves the live session's next call"
+    );
+    assert_eq!(*attempts.lock().unwrap(), 1, "one refresh attempt");
+    // The refreshed credential landed in the store: a later call serves
+    // it without another refresh.
+    call_stream_once(&engine, &stream_fn);
+    assert_eq!(
+        served_keys(&registration).last(),
+        Some(&Some("refreshed-access".to_string()))
+    );
+    assert_eq!(
+        *attempts.lock().unwrap(),
+        1,
+        "the landed credential serves without another refresh"
+    );
+    registration.unregister();
+}
+
+/// A failed refresh makes exactly ONE attempt per resolution: the
+/// resolution's single possibly-refreshing lookup never re-fetches a
+/// token it just failed to refresh, and its own answer — the configured
+/// fallback key — streams per call, never the captured pair.
+#[test]
+fn a_failed_refresh_makes_one_attempt_per_resolution() {
+    let _faux = FAUX_TEST_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let dir = tempfile::TempDir::new().unwrap();
+    let agent_dir = dir.path().join("agent");
+    write_credential_backed_faux_provider(&agent_dir);
+    write_oauth_credential(&agent_dir, "live-access");
+    let registration = register_recording_faux();
+    let attempts = Arc::new(std::sync::Mutex::new(0));
+    let engine = live_auth_engine_with_oauth(
+        dir.path(),
+        None,
+        "battery",
+        "mock-1",
+        Some(Arc::new(CountingRefresh {
+            attempts: Arc::clone(&attempts),
+            succeeds: false,
+        })),
+    );
+    let model = engine.resolve_model().expect("the custom model resolves");
+    let agent = engine.session_agent(&model).expect("the session builds");
+    let stream_fn = agent
+        .stream_fn()
+        .expect("the built session streams")
+        .clone();
+    for call in 1..=2u32 {
+        write_expired_oauth_credential(&agent_dir, "expired-access");
+        call_stream_once(&engine, &stream_fn);
+        assert_eq!(
+            served_keys(&registration).last(),
+            Some(&Some("sk-config-fallback".to_string())),
+            "the fallback key serves while the refresh fails; the captured pair never resends"
+        );
+        assert_eq!(
+            *attempts.lock().unwrap(),
+            usize::try_from(call).expect("small"),
+            "exactly one refresh attempt per resolution"
+        );
+    }
+    registration.unregister();
+}
+
+/// One live-auth engine run of a user prompt through the full turn (the
+/// retry driver included), returning its events.
+fn run_live_prompt(engine: &AgentSessionEngine) -> Vec<EngineEvent> {
+    let mut events = Vec::new();
+    engine.run_prompt(
+        0,
+        PromptRequest {
+            batch: Vec::new(),
+            images: Vec::new(),
+            message: "hi".to_string(),
+            source: "user".to_string(),
+            agent_message_id: None,
+            custom_message: None,
+        },
+        &|| false,
+        &mut |event| {
+            events.push(event);
+            true
+        },
+    );
+    events
+}
+
+/// A faux `battery` provider that rejects `rejected-access` with a
+/// 401-classified auth failure and answers any other key.
+fn register_rejecting_faux() -> pa_ai::faux::FauxProviderRegistration {
+    let registration =
+        pa_ai::faux::register_faux_provider(pa_ai::faux::RegisterFauxProviderOptions {
+            api: Some("faux".to_string()),
+            provider: Some("battery".to_string()),
+            ..Default::default()
+        });
+    registration.set_repeat_last_response(true);
+    registration.set_responses(vec![pa_ai::faux::FauxResponseStep::Factory(Arc::new(
+        |_, options, _, _| {
+            if options.and_then(|options| options.api_key.as_deref()) != Some("rejected-access") {
+                return Ok(pa_ai::faux::faux_assistant_text_message(
+                    "ok",
+                    pa_ai::faux::FauxAssistantMessageOptions::default(),
+                ));
+            }
+            let mut rejection = pa_ai::faux::faux_assistant_message(
+                Vec::new(),
+                pa_ai::faux::FauxAssistantMessageOptions {
+                    stop_reason: Some(pa_types::ai::StopReason::Error),
+                    error_message: Some("401 invalid bearer token".to_string()),
+                    ..Default::default()
+                },
+            );
+            rejection.diagnostics = Some(vec![serde_json::from_value(json!({
+                "type": "provider_stream_failure", "timestamp": 0,
+                "details": { "kind": "auth", "status": 401 }
+            }))
+            .unwrap()]);
+            Ok(rejection)
+        },
+    ))]);
+    registration
+}
+
+/// The engine over a stored, locally unexpired OAuth credential the
+/// provider rejects, with a scripted refresh and a fast retry ladder.
+fn rejected_credential_engine(
+    dir: &std::path::Path,
+    refresh_succeeds: bool,
+    attempts: &Arc<std::sync::Mutex<usize>>,
+) -> std::sync::Arc<AgentSessionEngine> {
+    let agent_dir = dir.join("agent");
+    write_credential_backed_faux_provider(&agent_dir);
+    std::fs::write(
+        agent_dir.join("auth.json"),
+        json!({
+            "battery": { "type": "oauth", "access": "rejected-access",
+                "refresh": "stored-refresh", "expires": 4_102_444_800_000i64 }
+        })
+        .to_string(),
+    )
+    .unwrap();
+    std::fs::write(
+        agent_dir.join("settings.json"),
+        json!({ "retry": { "baseDelayMs": 1 } }).to_string(),
+    )
+    .unwrap();
+    live_auth_engine_with_oauth(
+        dir,
+        None,
+        "battery",
+        "mock-1",
+        Some(Arc::new(CountingRefresh {
+            attempts: Arc::clone(attempts),
+            succeeds: refresh_succeeds,
+        })),
+    )
+}
+
+/// A provider rejection of a locally unexpired OAuth credential
+/// force-refreshes it, and the turn's one auth retry carries the
+/// refreshed token.
+#[test]
+fn a_rejected_unexpired_credential_is_refreshed_and_the_retry_serves_it() {
+    let _faux = FAUX_TEST_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let dir = tempfile::TempDir::new().unwrap();
+    let registration = register_rejecting_faux();
+    let attempts = Arc::new(std::sync::Mutex::new(0));
+    let engine = rejected_credential_engine(dir.path(), true, &attempts);
+    let events = run_live_prompt(&engine);
+    let served = served_keys(&registration);
+    registration.unregister();
+    assert_eq!(
+        served,
+        vec![
+            Some("rejected-access".to_string()),
+            Some("refreshed-access".to_string())
+        ]
+    );
+    assert_eq!(*attempts.lock().unwrap(), 1, "one forced refresh");
+    assert_eq!(events.last(), Some(&EngineEvent::Done(Ok(()))));
+}
+
+/// A forced refresh the token endpoint refuses ends the turn with the
+/// re-login sentence instead of re-sending the rejected token.
+#[test]
+fn a_refused_forced_refresh_ends_the_turn_with_the_re_login_sentence() {
+    let _faux = FAUX_TEST_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let dir = tempfile::TempDir::new().unwrap();
+    let registration = register_rejecting_faux();
+    let attempts = Arc::new(std::sync::Mutex::new(0));
+    let engine = rejected_credential_engine(dir.path(), false, &attempts);
+    let events = run_live_prompt(&engine);
+    let served = served_keys(&registration);
+    registration.unregister();
+    assert_eq!(served, vec![Some("rejected-access".to_string())]);
+    let retry_ends: Vec<&EngineEvent> = events
+        .iter()
+        .filter(|event| matches!(event, EngineEvent::AutoRetryEnd { .. }))
+        .collect();
+    assert_eq!(
+        retry_ends,
+        vec![&EngineEvent::AutoRetryEnd {
+            success: false,
+            attempt: 0,
+            final_error: Some(
+                "Authentication failed for \"battery\": the stored credential could not be refreshed (invalid_grant: the refresh token was revoked).\n\nRun /login to update credentials."
+                    .to_string()
+            ),
+            restored_model: None,
+        }]
+    );
+}
+
+/// Runs of a counting `!command` (one line appended per execution).
+#[cfg(unix)]
+fn command_runs(counter: &std::path::Path) -> usize {
+    std::fs::read_to_string(counter).map_or(0, |text| text.lines().count())
+}
+
+/// A stored `!command` api key for the serving provider resolves ONCE —
+/// the first provider call runs it (the build resolves no request auth;
+/// the live seam owns it, the TS streamFn shape) — and never re-runs per
+/// call: candidate building defers the command (TS's lazy value
+/// material), the engine-lived request-auth registry is not rebuilt per
+/// call, and the per-call lookup hits the process cache. The counter key
+/// is a POSIX-shell pipeline (the ambient shell on Windows resolves it
+/// differently), so the test runs on Unix only.
+#[cfg(unix)]
+#[test]
+fn a_stored_command_key_resolves_once_and_never_re_runs_per_call() {
+    let _faux = FAUX_TEST_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let dir = tempfile::TempDir::new().unwrap();
+    let agent_dir = dir.path().join("agent");
+    write_credential_backed_faux_provider(&agent_dir);
+    let counter = dir.path().join("battery-command-runs");
+    let key = format!("!echo run >> {} ; echo cmd-key", counter.display());
+    std::fs::write(
+        agent_dir.join("auth.json"),
+        json!({ "battery": { "type": "api_key", "key": key } }).to_string(),
+    )
+    .unwrap();
+    let registration = register_recording_faux();
+    let engine = live_auth_engine(dir.path(), None, "battery", "mock-1");
+    let model = engine.resolve_model().expect("the custom model resolves");
+    let agent = engine.session_agent(&model).expect("the session builds");
+    let stream_fn = agent
+        .stream_fn()
+        .expect("the built session streams")
+        .clone();
+    // The first provider call resolves the command exactly once.
+    let before_first = command_runs(&counter);
+    call_stream_once(&engine, &stream_fn);
+    assert_eq!(
+        command_runs(&counter) - before_first,
+        1,
+        "the first provider call resolves the command once"
+    );
+    assert_eq!(
+        served_keys(&registration).last(),
+        Some(&Some("cmd-key".to_string()))
+    );
+    for _ in 0..4 {
+        let before = command_runs(&counter);
+        call_stream_once(&engine, &stream_fn);
+        assert_eq!(
+            command_runs(&counter) - before,
+            0,
+            "a provider call must not re-run the stored credential command"
+        );
+        assert_eq!(
+            served_keys(&registration).last(),
+            Some(&Some("cmd-key".to_string()))
+        );
+    }
+    registration.unregister();
+}
+
+/// A stored Prime Inference `!command` key never runs for ANOTHER
+/// provider's provider call: the request-auth registry resolves it at
+/// construction (the session build), never per call, and its candidate
+/// building defers command-backed fingerprints. The counter key
+/// is a POSIX-shell pipeline (the ambient shell on Windows resolves it
+/// differently), so the test runs on Unix only.
+#[cfg(unix)]
+#[test]
+fn a_prime_command_key_never_runs_for_another_providers_call() {
+    let _faux = FAUX_TEST_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let dir = tempfile::TempDir::new().unwrap();
+    let agent_dir = dir.path().join("agent");
+    write_credential_backed_faux_provider(&agent_dir);
+    let counter = dir.path().join("prime-command-runs");
+    let key = format!("!echo run >> {} ; echo prime-key", counter.display());
+    std::fs::write(
+        agent_dir.join("auth.json"),
+        json!({
+            "battery": { "type": "oauth", "access": "battery-access", "refresh": "r",
+                "expires": 4_102_444_800_000i64 },
+            "prime-inference": { "type": "api_key", "key": key }
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let registration = register_recording_faux();
+    let engine = live_auth_engine(dir.path(), None, "battery", "mock-1");
+    let model = engine.resolve_model().expect("the custom model resolves");
+    let agent = engine.session_agent(&model).expect("the session builds");
+    let stream_fn = agent
+        .stream_fn()
+        .expect("the built session streams")
+        .clone();
+    for _ in 0..5 {
+        let before = command_runs(&counter);
+        call_stream_once(&engine, &stream_fn);
+        assert_eq!(
+            command_runs(&counter) - before,
+            0,
+            "a battery provider call must not run the Prime Inference credential command"
+        );
+        assert_eq!(
+            served_keys(&registration).last(),
+            Some(&Some("battery-access".to_string()))
+        );
+    }
+    registration.unregister();
+}
+
+/// A stored Prime Inference `!command` key whose command FAILS never runs
+/// for another provider's provider call: a failed command is retried on
+/// every lookup (never cached), so the per-call request-auth resolution
+/// must not rebuild the registry that resolves it. The counter
+/// key is a POSIX-shell pipeline (the ambient shell on Windows resolves
+/// it differently), so the test runs on Unix only.
+#[cfg(unix)]
+#[test]
+fn a_failed_prime_command_key_never_runs_for_another_providers_call() {
+    let _faux = FAUX_TEST_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let dir = tempfile::TempDir::new().unwrap();
+    let agent_dir = dir.path().join("agent");
+    write_credential_backed_faux_provider(&agent_dir);
+    let counter = dir.path().join("failed-prime-command-runs");
+    let key = format!("!echo run >> {} ; exit 1", counter.display());
+    std::fs::write(
+        agent_dir.join("auth.json"),
+        json!({
+            "battery": { "type": "oauth", "access": "battery-access", "refresh": "r",
+                "expires": 4_102_444_800_000i64 },
+            "prime-inference": { "type": "api_key", "key": key }
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let registration = register_recording_faux();
+    let engine = live_auth_engine(dir.path(), None, "battery", "mock-1");
+    let model = engine.resolve_model().expect("the custom model resolves");
+    let agent = engine.session_agent(&model).expect("the session builds");
+    let stream_fn = agent
+        .stream_fn()
+        .expect("the built session streams")
+        .clone();
+    for _ in 0..3 {
+        let before = command_runs(&counter);
+        call_stream_once(&engine, &stream_fn);
+        assert_eq!(
+            command_runs(&counter) - before,
+            0,
+            "a battery provider call must not run the failed Prime Inference credential command"
+        );
+        assert_eq!(
+            served_keys(&registration).last(),
+            Some(&Some("battery-access".to_string()))
+        );
+    }
+    registration.unregister();
+}
+
+/// A stored `!command` api key for the serving provider whose command
+/// FAILS resolves EXACTLY ONCE per provider call — the resolution
+/// attempt — and never again through the candidate's deferred
+/// fingerprint for a source token it cannot produce: a failed command
+/// retries per lookup (TS #2497), not twice per lookup. The resolution
+/// serves no live credential, so its own answer — the configured
+/// fallback key — streams per call, never the captured pair. The counter
+/// key is a POSIX-shell pipeline (the ambient shell on Windows resolves
+/// it differently), so the test runs on Unix only.
+#[cfg(unix)]
+#[test]
+fn a_failed_serving_command_key_resolves_once_per_call() {
+    let _faux = FAUX_TEST_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let dir = tempfile::TempDir::new().unwrap();
+    let agent_dir = dir.path().join("agent");
+    write_credential_backed_faux_provider(&agent_dir);
+    let counter = dir.path().join("failed-serving-command-runs");
+    let key = format!("!echo run >> {} ; exit 1", counter.display());
+    std::fs::write(
+        agent_dir.join("auth.json"),
+        json!({ "battery": { "type": "api_key", "key": key } }).to_string(),
+    )
+    .unwrap();
+    let registration = register_recording_faux();
+    let engine = live_auth_engine(dir.path(), None, "battery", "mock-1");
+    let model = engine.resolve_model().expect("the custom model resolves");
+    let agent = engine.session_agent(&model).expect("the session builds");
+    let stream_fn = agent
+        .stream_fn()
+        .expect("the built session streams")
+        .clone();
+    for _ in 0..3 {
+        let before = command_runs(&counter);
+        call_stream_once(&engine, &stream_fn);
+        assert_eq!(
+            command_runs(&counter) - before,
+            1,
+            "a failed serving command resolves exactly once per provider call (the attempt, never a second source-token run)"
+        );
+        assert_eq!(
+            served_keys(&registration).last(),
+            Some(&Some("sk-config-fallback".to_string())),
+            "the resolution serves no live credential; its fallback key streams per call"
+        );
+    }
+    registration.unregister();
+}
+
+/// One served (model, api, base-url, key) tuple per adapted provider
+/// call.
+type ServedAdapted = (String, String, String, Option<String>);
+
+/// A custom `xai` provider whose model rides the faux API: the registry
+/// adapts it onto `openai-responses` once a stored xAI OAuth credential
+/// serves, and the live session's next provider call carries the ADAPTED
+/// request model (TS `requestModel`) together with the credential.
+#[test]
+fn a_mid_session_xai_login_switches_the_request_model_live() {
+    let _faux = FAUX_TEST_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let dir = tempfile::TempDir::new().unwrap();
+    let agent_dir = dir.path().join("agent");
+    std::fs::create_dir_all(&agent_dir).unwrap();
+    std::fs::write(
+        agent_dir.join("models.json"),
+        json!({
+            "providers": {
+                "xai": {
+                    "api": "faux", "baseUrl": "http://localhost:0",
+                    "apiKey": "sk-config-fallback",
+                    "models": [{
+                        "id": "grok-test", "name": "Grok Test",
+                        "contextWindow": 128_000, "maxTokens": 16384,
+                    }],
+                }
+            }
+        })
+        .to_string(),
+    )
+    .unwrap();
+    // The pre-login calls land on the faux API; the adapted calls land on
+    // the openai-responses API (the shadow registration proves the live
+    // session really switched, without any network). The built-ins
+    // register first: a shadow registered before the process's first
+    // dispatch would be replaced by `resolve_provider`'s one-time
+    // `ensure_builtins`.
+    pa_ai::registry::ensure_builtins();
+    let pre_login = register_recording_faux();
+    let adapted: Arc<std::sync::Mutex<Vec<ServedAdapted>>> =
+        Arc::new(std::sync::Mutex::new(Vec::new()));
+    let captured = Arc::clone(&adapted);
+    let adapted_registration =
+        pa_ai::faux::register_faux_provider(pa_ai::faux::RegisterFauxProviderOptions {
+            api: Some("openai-responses".to_string()),
+            ..Default::default()
+        });
+    adapted_registration.set_repeat_last_response(true);
+    adapted_registration.set_responses(vec![pa_ai::faux::FauxResponseStep::Factory(Arc::new(
+        move |_, options, _, model| {
+            captured.lock().unwrap().push((
+                model.id.clone(),
+                model.api.clone(),
+                model.base_url.clone(),
+                options.and_then(|options| options.api_key.clone()),
+            ));
+            Ok(pa_ai::faux::faux_assistant_text_message(
+                "ok",
+                pa_ai::faux::FauxAssistantMessageOptions::default(),
+            ))
+        },
+    ))]);
+    let engine = live_auth_engine(dir.path(), None, "xai", "grok-test");
+    let model = engine.resolve_model().expect("the custom model resolves");
+    assert_eq!(model.api, "faux", "the session builds on the API-key shape");
+    let agent = engine.session_agent(&model).expect("the session builds");
+    let stream_fn = agent
+        .stream_fn()
+        .expect("the built session streams")
+        .clone();
+    call_stream_once(&engine, &stream_fn);
+    assert_eq!(
+        pre_login.received_api_keys().last(),
+        Some(&Some("sk-config-fallback".to_string())),
+        "the build-time shape serves via the faux API"
+    );
+    assert!(adapted.lock().unwrap().is_empty());
+
+    // The login (from another process) lands a stored xAI OAuth
+    // credential: the next provider call adopts the subscription-shaped
+    // request model together with the credential.
+    std::fs::create_dir_all(&agent_dir).unwrap();
+    std::fs::write(
+        agent_dir.join("auth.json"),
+        json!({
+            "xai": { "type": "oauth", "access": "grok-access", "refresh": "r",
+                "expires": 4_102_444_800_000i64 }
+        })
+        .to_string(),
+    )
+    .unwrap();
+    call_stream_once(&engine, &stream_fn);
+    assert_eq!(
+        *adapted.lock().unwrap(),
+        vec![(
+            "grok-test".to_string(),
+            "openai-responses".to_string(),
+            "https://api.x.ai/v1".to_string(),
+            Some("grok-access".to_string()),
+        )],
+        "the live session's next call carried the adapted request model and credential"
+    );
+
+    // A logout (from another process) empties the store: the next call
+    // serves the resolution's own answer — the fallback key on the
+    // API-key request shape — and the captured subscription pair (its
+    // token and its shape) never resends.
+    std::fs::write(agent_dir.join("auth.json"), "{}").unwrap();
+    call_stream_once(&engine, &stream_fn);
+    assert_eq!(
+        adapted.lock().unwrap().len(),
+        1,
+        "no further call rides the adapted registration"
+    );
+    assert_eq!(
+        pre_login.received_api_keys(),
+        vec![
+            Some("sk-config-fallback".to_string()),
+            Some("sk-config-fallback".to_string())
+        ],
+        "the logout returns the session to the API-key shape with the fallback key"
+    );
+    pre_login.unregister();
+    adapted_registration.unregister();
+    // Restore the built-in the shadowed registration replaced.
+    pa_ai::registry::register_builtin_api_providers();
+}
+
+/// A logout after a subscription build changes the very next call: the
+/// resolution serves the configured fallback key on the API-key request
+/// shape (the registry computes it for xAI even when no credential
+/// serves), and the captured subscription pair — its token AND its
+/// openai-responses shape — never resends.
+#[test]
+fn a_mid_session_xai_logout_serves_the_api_key_shape_never_the_captured_token() {
+    let _faux = FAUX_TEST_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let dir = tempfile::TempDir::new().unwrap();
+    let agent_dir = dir.path().join("agent");
+    std::fs::create_dir_all(&agent_dir).unwrap();
+    std::fs::write(
+        agent_dir.join("models.json"),
+        json!({
+            "providers": {
+                "xai": {
+                    "api": "faux", "baseUrl": "http://localhost:0",
+                    "apiKey": "sk-config-fallback",
+                    "models": [{
+                        "id": "grok-test", "name": "Grok Test",
+                        "contextWindow": 128_000, "maxTokens": 16384,
+                    }],
+                }
+            }
+        })
+        .to_string(),
+    )
+    .unwrap();
+    // The subscription is in the store at build time, so the session
+    // builds on the subscription shape with the subscription token.
+    std::fs::write(
+        agent_dir.join("auth.json"),
+        json!({
+            "xai": { "type": "oauth", "access": "grok-access", "refresh": "r",
+                "expires": 4_102_444_800_000i64 }
+        })
+        .to_string(),
+    )
+    .unwrap();
+    pa_ai::registry::ensure_builtins();
+    let api_key_shape = register_recording_faux();
+    let adapted: Arc<std::sync::Mutex<Vec<ServedAdapted>>> =
+        Arc::new(std::sync::Mutex::new(Vec::new()));
+    let captured = Arc::clone(&adapted);
+    let adapted_registration =
+        pa_ai::faux::register_faux_provider(pa_ai::faux::RegisterFauxProviderOptions {
+            api: Some("openai-responses".to_string()),
+            ..Default::default()
+        });
+    adapted_registration.set_repeat_last_response(true);
+    adapted_registration.set_responses(vec![pa_ai::faux::FauxResponseStep::Factory(Arc::new(
+        move |_, options, _, model| {
+            captured.lock().unwrap().push((
+                model.id.clone(),
+                model.api.clone(),
+                model.base_url.clone(),
+                options.and_then(|options| options.api_key.clone()),
+            ));
+            Ok(pa_ai::faux::faux_assistant_text_message(
+                "ok",
+                pa_ai::faux::FauxAssistantMessageOptions::default(),
+            ))
+        },
+    ))]);
+    let engine = live_auth_engine(dir.path(), None, "xai", "grok-test");
+    let model = engine.resolve_model().expect("the custom model resolves");
+    assert_eq!(
+        model.api, "openai-responses",
+        "the session builds on the subscription shape"
+    );
+    let agent = engine.session_agent(&model).expect("the session builds");
+    let stream_fn = agent
+        .stream_fn()
+        .expect("the built session streams")
+        .clone();
+    call_stream_once(&engine, &stream_fn);
+    // A logout from another process empties the store.
+    std::fs::write(agent_dir.join("auth.json"), "{}").unwrap();
+    call_stream_once(&engine, &stream_fn);
+    let subscription_calls = adapted.lock().unwrap().clone();
+    let api_key_shape_calls = api_key_shape.received_api_keys();
+    api_key_shape.unregister();
+    adapted_registration.unregister();
+    // Restore the built-in the shadowed registration replaced.
+    pa_ai::registry::register_builtin_api_providers();
+    assert_eq!(
+        subscription_calls,
+        vec![(
+            "grok-test".to_string(),
+            "openai-responses".to_string(),
+            "https://api.x.ai/v1".to_string(),
+            Some("grok-access".to_string()),
+        )],
+        "only the build-time call rides the subscription shape: {subscription_calls:?}"
+    );
+    assert_eq!(
+        api_key_shape_calls,
+        vec![Some("sk-config-fallback".to_string())],
+        "the logout lands the next call on the API-key shape with the fallback key: {api_key_shape_calls:?}"
+    );
+}
+
+/// A mid-session xAI subscription login never switches a session the
+/// create config keys explicitly: the create-config key rides the
+/// resolution's runtime-override arm (TS installs `--api-key` with
+/// `setRuntimeApiKey` before lookup), so the registry's request model
+/// and the key follow the same winning source — the configured API-key
+/// shape with the explicit key, never the stored subscription's
+/// `openai-responses` shape.
+#[test]
+fn a_mid_session_xai_login_never_switches_a_create_config_key_session() {
+    let _faux = FAUX_TEST_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let dir = tempfile::TempDir::new().unwrap();
+    let agent_dir = dir.path().join("agent");
+    std::fs::create_dir_all(&agent_dir).unwrap();
+    std::fs::write(
+        agent_dir.join("models.json"),
+        json!({
+            "providers": {
+                "xai": {
+                    "api": "faux", "baseUrl": "http://localhost:0",
+                    "apiKey": "sk-config-fallback",
+                    "models": [{
+                        "id": "grok-test", "name": "Grok Test",
+                        "contextWindow": 128_000, "maxTokens": 16384,
+                    }],
+                }
+            }
+        })
+        .to_string(),
+    )
+    .unwrap();
+    // The explicit key wins over the provider's configured fallback, and
+    // the subscription shape dispatches to a separate registration so a
+    // re-shaped call is observable without any network.
+    pa_ai::registry::ensure_builtins();
+    let explicit_shape = register_recording_faux();
+    let adapted: Arc<std::sync::Mutex<Vec<ServedAdapted>>> =
+        Arc::new(std::sync::Mutex::new(Vec::new()));
+    let captured = Arc::clone(&adapted);
+    let adapted_registration =
+        pa_ai::faux::register_faux_provider(pa_ai::faux::RegisterFauxProviderOptions {
+            api: Some("openai-responses".to_string()),
+            ..Default::default()
+        });
+    adapted_registration.set_repeat_last_response(true);
+    adapted_registration.set_responses(vec![pa_ai::faux::FauxResponseStep::Factory(Arc::new(
+        move |_, options, _, model| {
+            captured.lock().unwrap().push((
+                model.id.clone(),
+                model.api.clone(),
+                model.base_url.clone(),
+                options.and_then(|options| options.api_key.clone()),
+            ));
+            Ok(pa_ai::faux::faux_assistant_text_message(
+                "ok",
+                pa_ai::faux::FauxAssistantMessageOptions::default(),
+            ))
+        },
+    ))]);
+    let engine = live_auth_engine(dir.path(), Some("sk-create-config"), "xai", "grok-test");
+    let model = engine.resolve_model().expect("the custom model resolves");
+    assert_eq!(model.api, "faux", "the session builds on the API-key shape");
+    let agent = engine.session_agent(&model).expect("the session builds");
+    let stream_fn = agent
+        .stream_fn()
+        .expect("the built session streams")
+        .clone();
+    call_stream_once(&engine, &stream_fn);
+    assert_eq!(
+        explicit_shape.received_api_keys(),
+        vec![Some("sk-create-config".to_string())],
+        "the create-config key serves on the configured API-key shape"
+    );
+
+    // A subscription login (from another process) lands a stored xAI
+    // OAuth credential: the explicit key still wins and the registry
+    // keeps the API-key request shape — one winning source for the model
+    // and the key.
+    std::fs::write(
+        agent_dir.join("auth.json"),
+        json!({
+            "xai": { "type": "oauth", "access": "grok-access", "refresh": "r",
+                "expires": 4_102_444_800_000i64 }
+        })
+        .to_string(),
+    )
+    .unwrap();
+    call_stream_once(&engine, &stream_fn);
+    assert!(
+        adapted.lock().unwrap().is_empty(),
+        "the stored subscription never re-shapes the explicitly keyed session"
+    );
+    assert_eq!(
+        explicit_shape.received_api_keys(),
+        vec![
+            Some("sk-create-config".to_string()),
+            Some("sk-create-config".to_string())
+        ],
+        "the create-config key keeps serving across the login, never the subscription token"
+    );
+    explicit_shape.unregister();
+    adapted_registration.unregister();
+    // Restore the built-in the shadowed registration replaced.
+    pa_ai::registry::register_builtin_api_providers();
+}

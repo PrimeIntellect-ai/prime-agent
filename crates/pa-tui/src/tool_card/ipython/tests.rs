@@ -488,6 +488,55 @@ fn bash_dominated_cell_renders_as_bash() {
 }
 
 #[test]
+fn transcript_reads_render_one_summary_row_below_the_summary() {
+    let read = |returned: u64, first: u64, roles: &[&str]| json!({ "returned": returned, "first": first, "total": 17, "roles": roles });
+    for (reads, summary) in [
+        (
+            json!([read(5, 12, &["user"])]),
+            "read 5 messages (role user) #12\u{2013}#16 of 17",
+        ),
+        (
+            json!([read(3, 0, &["*"]), read(10, 7, &["user", "assistant"])]),
+            "read 13 messages in 2 reads",
+        ),
+        (
+            json!([{ "returned": 10, "first": 30, "total": 40, "roles": ["*"], "agent": "worker-a" }]),
+            "read 10 messages from worker-a #30\u{2013}#39 of 40",
+        ),
+    ] {
+        let card = cell_card(
+            "msgs = await rlm.session.messages(role='user')",
+            json!({ "status": "ok", "durationMs": 40, "transcriptReads": reads }),
+            false,
+            false,
+        );
+        let rows: Vec<String> = render(
+            &card,
+            0,
+            Detail::Overview,
+            Detail::Overview,
+            &theme(),
+            100,
+            true,
+        )
+        .iter()
+        .map(text_of)
+        .collect();
+        assert_eq!(
+            rows[1..],
+            [format!(" \u{2261} transcript \u{b7} {summary}")]
+        );
+        for detail in [Detail::Overview, Detail::All] {
+            assert_eq!(
+                count(&card, 0, detail, detail, &theme(), 100, true),
+                render(&card, 0, detail, detail, &theme(), 100, true).len(),
+                "the row count matches the painted rows"
+            );
+        }
+    }
+}
+
+#[test]
 fn bash_minority_cell_stays_python() {
     let code = "async def sh(cmd):\n    return await bash(cmd)\nr = await sh(\"ls\")\nprint(r.pid)";
     let card = cell_card(
@@ -508,6 +557,93 @@ fn bash_minority_cell_stays_python() {
         " \u{2713} python \u{00b7} r = await sh(\"ls\") \u{00b7} \u{2191} 4 \u{2193} 1 lines \u{00b7} 5ms"
     );
     assert_eq!(bash_dominated_stats(&card), None);
+}
+
+fn edit_cell_card() -> ToolCallCard {
+    cell_card(
+        "await edit.run('src/app.py', 'x = 1', 'x = 2')",
+        json!({
+            "status": "ok",
+            "durationMs": 5,
+            "result": "'Edited src/app.py'",
+            "diffs": [{ "path": "src/app.py", "diff": "-10 x = 1\n+10 x = 2\n 11 y = 3\n    ..." }],
+        }),
+        false,
+        false,
+    )
+}
+
+fn trimmed_rows(lines: &[Line]) -> Vec<String> {
+    lines
+        .iter()
+        .skip(1)
+        .map(|line| text_of(line).trim_end().to_string())
+        .collect()
+}
+
+#[test]
+fn edit_diffs_collapse_to_a_file_summary_line_in_overview() {
+    let card = edit_cell_card();
+    let summary = vec!["    \u{2570}\u{2500} src/app.py +1 -1".to_string()];
+    let lines = render(
+        &card,
+        0,
+        Detail::Overview,
+        Detail::Overview,
+        &theme(),
+        40,
+        true,
+    );
+    assert_eq!(trimmed_rows(&lines), summary);
+    // A click-expanded card keeps the conversation level's collapsed diff.
+    let toggled = render(&card, 0, Detail::All, Detail::Overview, &theme(), 40, true);
+    assert!(!trimmed_rows(&toggled)
+        .iter()
+        .any(|row| row.contains("10 + x = 2")));
+}
+
+#[test]
+fn edit_diffs_expand_to_numbered_rows_in_details() {
+    let card = edit_cell_card();
+    let lines = render(
+        &card,
+        0,
+        Detail::Details,
+        Detail::Details,
+        &theme(),
+        40,
+        true,
+    );
+    assert_eq!(
+        trimmed_rows(&lines),
+        vec![
+            "    \u{2570}\u{2500} src/app.py +1 -1".to_string(),
+            "  10 - x = 1".to_string(),
+            "  10 + x = 2".to_string(),
+            "  11   y = 3".to_string(),
+            "       ...".to_string(),
+        ]
+    );
+    // Full-width rows on the diff backgrounds.
+    assert_eq!(text_of(&lines[2]).chars().count(), 40);
+    assert_eq!(
+        lines[3][1].style,
+        theme()
+            .fg_style(ThemeColor::ToolDiffAdded)
+            .patch(theme().bg_style(crate::theme::ThemeBg::ToolDiffAddedBg))
+    );
+    assert_eq!(
+        count(
+            &card,
+            0,
+            Detail::Details,
+            Detail::Details,
+            &theme(),
+            40,
+            true
+        ),
+        lines.len()
+    );
 }
 
 #[test]

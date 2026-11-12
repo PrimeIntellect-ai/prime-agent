@@ -92,6 +92,12 @@ impl SessionManager {
         self.persist_listeners.push(listener);
     }
 
+    /// Report each appended row that bills a model call (see
+    /// [`billed_file_entry`](crate::session::billed_row::billed_file_entry)).
+    pub fn on_billed_row(&mut self, sink: crate::session::billed_row::BilledRowSink) {
+        self.billed_row_sink = Some(sink);
+    }
+
     #[must_use]
     pub fn is_persisted(&self) -> bool {
         self.persist

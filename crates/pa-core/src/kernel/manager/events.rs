@@ -6,7 +6,7 @@ use super::{
     Arc, Event, ExecBuffers, ExecuteStatus, Guarded, Inner, KernelBashCommands, KernelError,
     StreamName, Value, AGENT_MESSAGE_DISPLAY_MIME, ATTACHMENT_DISPLAY_MIME,
     BASH_ACTIVITY_DISPLAY_MIME, BASH_COMMAND_DISPLAY_MIME, DIFF_DISPLAY_MIME,
-    MAX_ATTACHMENT_DATA_CHARS, MAX_BACKGROUND_OUTPUT_CHARS,
+    MAX_ATTACHMENT_DATA_CHARS, MAX_BACKGROUND_OUTPUT_CHARS, TRANSCRIPT_READ_DISPLAY_MIME,
 };
 
 impl Inner {
@@ -50,7 +50,11 @@ impl Inner {
                 self.dispatch_display(id.as_deref(), data);
             }
             Event::Ready { protocol } => {
-                if let Some(tx) = lock(&self.guarded).ready_tx.take() {
+                let ready_tx = lock(&self.guarded)
+                    .lifecycle
+                    .starting_mut()
+                    .and_then(|starting| starting.ready_tx.take());
+                if let Some(tx) = ready_tx {
                     let _ = tx.send(Ok(protocol));
                 }
             }
@@ -215,6 +219,9 @@ impl Inner {
             if let Some(message) = parse_sent_agent_message(payload) {
                 buffers.sent_agent_messages.push(message);
             }
+        }
+        if let Some(read) = data.get(TRANSCRIPT_READ_DISPLAY_MIME) {
+            buffers.transcript_reads.push(read.clone());
         }
         if let Some(payload) = data.get(BASH_COMMAND_DISPLAY_MIME) {
             if let (Some(command), Some(lines)) = (

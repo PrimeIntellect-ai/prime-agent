@@ -3,7 +3,7 @@
 
 use super::{
     anyhow, json, lock, parse_sent_agent_message, AbortSignal, ActiveExecution, Arc, AsyncWriteExt,
-    Duration, ExecuteResult, ExecuteStatus, Inner, Instant, InternalExecuteResult, KernelState,
+    Duration, ExecuteResult, ExecuteStatus, Inner, Instant, InternalExecuteResult,
     LateSentAgentMessageCallback, Value, AGENT_MESSAGE_DISPLAY_MIME,
     KERNEL_BUSY_AFTER_INTERRUPT_MESSAGE, KERNEL_BUSY_INTERRUPT_INTERVAL_MS,
     KERNEL_BUSY_REUSE_WAIT_MS, MAX_BACKGROUND_OUTPUT_CHARS, MAX_LATE_SENT_AGENT_MESSAGE_HANDLERS,
@@ -65,7 +65,7 @@ impl Inner {
                 if g.active_execution.is_none() {
                     return Ok(());
                 }
-                if g.state == KernelState::Shutdown {
+                if g.lifecycle.is_shut_down() {
                     return Err(anyhow!("Kernel has been shut down"));
                 }
             }
@@ -182,29 +182,19 @@ impl Inner {
                     result = Some(clipped);
                 }
             }
-            if execution
+            let user_aborted = execution
                 .opts
                 .signal
                 .as_ref()
-                .is_some_and(AbortSignal::is_aborted)
-            {
+                .is_some_and(AbortSignal::is_aborted);
+            if user_aborted {
                 status = ExecuteStatus::Aborted;
             }
-            // The watchdog teaches instead of killing: a cell that outlived
-            // its budget but still settled ok keeps its ok status and its own
-            // result; only a stderr note teaches. A completed cell reported
-            // as a timeout error invites a duplicate run of finished work and
-            // corrupts error-based telemetry, so the overage must not lie. A
-            // cell that failed or was aborted keeps its own outcome, no note.
-            let mut stderr = stderr;
-            if status == ExecuteStatus::Ok {
-                if let Some(note) = cell_watchdog_note(execution) {
-                    if !stderr.is_empty() {
-                        stderr.push('\n');
-                    }
-                    stderr.push_str(&note);
-                }
-            }
+            // A user abort wins over the limit (plain Ctrl+C: no timeout text, no
+            // kill), and a cell that completed ok as its limit fired keeps its ok outcome.
+            let timed_out_after_ms = buffers
+                .timed_out_after_ms
+                .filter(|_| !user_aborted && status != ExecuteStatus::Ok);
 
             let mut background_output = std::mem::take(&mut buffers.background_output);
             buffers.background_output_chars = 0;
@@ -224,10 +214,14 @@ impl Inner {
                 sent_agent_messages: (!buffers.sent_agent_messages.is_empty())
                     .then(|| std::mem::take(&mut buffers.sent_agent_messages)),
                 bash_commands: buffers.bash_commands.take(),
+                transcript_reads: (!buffers.transcript_reads.is_empty())
+                    .then(|| std::mem::take(&mut buffers.transcript_reads)),
                 background_output: (!background_output.is_empty()).then_some(background_output),
+                ended_turn: buffers.ended_turn,
                 status,
                 error: buffers.error.take(),
                 duration_ms: execution.started.elapsed().as_millis() as u64,
+                timed_out_after_ms,
             };
             drop(buffers);
             if let Some(tx) = lock(&execution.result_tx).take() {
@@ -288,54 +282,5 @@ impl Inner {
         };
         callback(message);
         true
-    }
-}
-
-/// The watchdog's teaching note for a cell that outlived its budget, or `None`
-/// when the watchdog is off or the cell stayed inside the budget. Measured from
-/// the wire write to the settle: queue wait and kernel boot are excluded. The
-/// note rides stderr (the kernel lane's degrade-hint precedent) and the cell
-/// keeps its ok status: the teaching must not turn a completed cell into a
-/// retried timeout.
-fn cell_watchdog_note(execution: &ActiveExecution) -> Option<String> {
-    let timeout_ms = execution.opts.cell_timeout_ms.filter(|ms| *ms > 0)?;
-    let started = (*lock(&execution.cell_started))?;
-    let elapsed_ms = started.elapsed().as_millis() as u64;
-    if elapsed_ms <= timeout_ms {
-        return None;
-    }
-    Some(format!(
-        "[watchdog] Cell exceeded the {} python_repl budget (ran {}). Move long shell work to \
-bash() (it auto-backgrounds past its yield window) and split long python work into smaller \
-cells. Intentional long awaits (rlm.collect timeouts) can ignore this note.",
-        humanize_ms(timeout_ms),
-        humanize_ms(elapsed_ms),
-    ))
-}
-
-/// Milliseconds as one plain reading: whole seconds when the value divides,
-/// a decimal otherwise, raw milliseconds under one second.
-fn humanize_ms(ms: u64) -> String {
-    if ms < 1000 {
-        format!("{ms}ms")
-    } else if ms.is_multiple_of(1000) {
-        format!("{}s", ms / 1000)
-    } else {
-        format!("{}.{:03}s", ms / 1000, ms % 1000)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn humanize_ms_pads_the_millisecond_remainder() {
-        assert_eq!(humanize_ms(500), "500ms");
-        assert_eq!(humanize_ms(2000), "2s");
-        assert_eq!(humanize_ms(60_000), "60s");
-        assert_eq!(humanize_ms(1500), "1.500s");
-        // A sub-100ms remainder must not read as tenths: 60.005s, not 60.5s.
-        assert_eq!(humanize_ms(60_005), "60.005s");
     }
 }

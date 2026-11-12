@@ -17,6 +17,7 @@ pub mod engine;
 pub mod error_classify;
 pub mod factory_host;
 pub mod goal_boundary;
+pub mod goal_continuation;
 pub mod goal_driver;
 pub mod harness_digest;
 pub mod headless;
@@ -25,6 +26,7 @@ pub mod image_model_routing;
 pub mod ipython_state;
 pub mod late_sent_messages;
 pub mod messages;
+pub mod model_usage;
 pub mod provider_adapter;
 pub mod provider_failover;
 pub mod provider_park;
@@ -185,6 +187,10 @@ pub struct AgentSession {
     /// resolves it (verification harnesses building the session directly
     /// keep `None`, which reads as the fail-closed disabled default).
     agent_dir: Option<std::path::PathBuf>,
+    /// Where the session's own model calls outside the agent loop record
+    /// their `model_usage` rows: the session file unless the host binds
+    /// its durable store (the daemon worker's).
+    usage_store: std::sync::Arc<dyn rlm_usage::RlmChildUsageStore>,
 }
 
 impl AgentSession {
@@ -222,6 +228,7 @@ impl AgentSession {
         harness_digest: Option<harness_digest::HarnessDigestContext>,
     ) -> anyhow::Result<Self> {
         let persistence = session.clone();
+        let usage_store = std::sync::Arc::new(rlm_usage::SessionUsageStore(session.clone()));
         agent
             .subscribe(move |event, _signal| {
                 let persistence = persistence.clone();
@@ -254,6 +261,7 @@ impl AgentSession {
             side_question_stream_fn: std::sync::Mutex::new(None),
             agent_dir: None,
             compaction_flight: tokio::sync::Mutex::new(()),
+            usage_store,
         };
         this.ensure_harness_digest_context().await?;
         Ok(this)

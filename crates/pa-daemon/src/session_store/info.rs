@@ -365,9 +365,6 @@ pub(super) struct SessionInfoEntry<'a> {
     child_usage: Option<crate::session_usage::ScanUsage>,
     #[serde(default)]
     aggregate_usage: Option<crate::session_usage::ScanUsage>,
-    /// `compaction`/`branch_summary`: the summarization call's own usage.
-    #[serde(default)]
-    usage: Option<crate::session_usage::ScanUsage>,
 }
 
 /// Read a session file's list metadata: unchanged files answer from the cache,
@@ -650,10 +647,6 @@ pub(super) fn fold_scan_entry(acc: &mut SessionScanAccumulator, raw: &str) -> Op
                 entry.aggregate_usage.map(Usage::from),
             );
         }
-        "compaction" | "branch_summary" => {
-            acc.usage_scan
-                .fold_summarization(entry.usage.map(Usage::from));
-        }
         "message" => {
             acc.message_count += 1;
             if let Some(message) = entry.message {
@@ -682,7 +675,9 @@ pub(super) fn fold_scan_entry(acc: &mut SessionScanAccumulator, raw: &str) -> Op
                 }
             }
         }
-        _ => {}
+        type_ => acc
+            .usage_scan
+            .fold_billed_row(crate::session_usage::billed_line(type_, trimmed)),
     }
     Some(())
 }

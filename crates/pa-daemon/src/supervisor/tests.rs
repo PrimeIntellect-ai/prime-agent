@@ -196,7 +196,7 @@ async fn a_stop_during_the_storm_leaves_the_terminal_state_to_the_stop() {
     resident
         .consecutive_failures
         .store(MAX_CONSECUTIVE_FAILURES, Ordering::SeqCst);
-    resident.intentional_stop.store(true, Ordering::SeqCst);
+    resident.transition(crate::registry::WorkerTransition::RequestStop);
     supervisor.registry.insert(Arc::clone(&resident)).await;
     tokio::time::timeout(
         Duration::from_secs(60),
@@ -256,7 +256,7 @@ async fn an_adopted_watch_hands_off_at_exit_without_a_timer() {
             futures::poll!(watch.as_mut()).is_pending(),
             "a live adopted worker keeps the watch parked"
         );
-        resident.intentional_stop.store(true, Ordering::SeqCst);
+        resident.transition(crate::registry::WorkerTransition::RequestStop);
         worker.kill().expect("kill sleep");
         worker.wait().expect("reap sleep");
         watch.await;
@@ -723,7 +723,9 @@ async fn an_abandoned_updates_failed_relaunch_arms_supervision_again() {
     // the exit wait); the refuser never answers inside the budget.
     let stopped = abandon_update_resident(dir.path(), "w-abandon-stopped");
     let (stopped_tx, mut stopped_rx) = mpsc::channel::<WorkerRequest>(1);
-    *stopped.cmd_tx.lock().await = Some(stopped_tx);
+    stopped
+        .install_command_channel(stopped.begin_connection(), stopped_tx)
+        .await;
     let pump_resident = Arc::clone(&stopped);
     tokio::spawn(async move {
         let request = stopped_rx.recv().await.expect("the stop routes a shutdown");
@@ -738,16 +740,16 @@ async fn an_abandoned_updates_failed_relaunch_arms_supervision_again() {
         )));
     });
     supervisor.registry.insert(Arc::clone(&stopped)).await;
-    stopped.note_connection_live();
     let refused = abandon_update_resident(dir.path(), "w-abandon-refused");
     let (refused_tx, mut refused_rx) = mpsc::channel::<WorkerRequest>(1);
-    *refused.cmd_tx.lock().await = Some(refused_tx);
+    refused
+        .install_command_channel(refused.begin_connection(), refused_tx)
+        .await;
     tokio::spawn(async move {
         // The refuser never answers: the shutdown request runs out of budget.
         let _ = refused_rx.recv().await;
     });
     supervisor.registry.insert(Arc::clone(&refused)).await;
-    refused.note_connection_live();
 
     // Reach the committed stop window without the prepare machinery's
     // snapshot phase: the update state machine is driven directly.
@@ -823,15 +825,191 @@ fn saved_session_rows_publish_deleted_descendant_usage() {
         output_tokens: 110,
         cost: 0.5,
     });
-    let row = saved_session_row(&info, &std::collections::HashMap::new());
+    let row = saved_session_row(
+        &info,
+        &std::collections::HashMap::new(),
+        &std::collections::HashMap::new(),
+    );
     assert_eq!(
         row["deletedDescendantUsage"],
         json!({ "inputTokens": 1_100, "outputTokens": 110, "cost": 0.5 })
     );
     // Absent again: the field never rides as a null.
     info.deleted_descendant_usage = None;
-    let row = saved_session_row(&info, &std::collections::HashMap::new());
+    let row = saved_session_row(
+        &info,
+        &std::collections::HashMap::new(),
+        &std::collections::HashMap::new(),
+    );
     assert!(row.get("deletedDescendantUsage").is_none());
+}
+
+/// A catalog row carries the session's own stored factory specs (its local harness store's factory
+/// entries), read from disk without a kernel; a session without any carries no field.
+#[tokio::test]
+async fn saved_session_rows_count_the_sessions_stored_factory_specs() {
+    let root = std::env::temp_dir().join(format!("pa-saved-fs-{}", uuid::Uuid::new_v4()));
+    let sessions = root.join("sessions");
+    std::fs::create_dir_all(&sessions).unwrap();
+    let mut session = crate::session_store::SessionFile::create("/tmp", None, 0);
+    let path = sessions.join(format!("{}.jsonl", session.session_id()));
+    session.set_path(path.clone());
+    session.rewrite().unwrap();
+    let info = crate::session_store::read_session_info(&path).unwrap();
+    let shells = std::collections::HashMap::new();
+    let specs = super::sessions::stored_factory_specs(vec![info.clone()])
+        .await
+        .unwrap();
+    assert!(saved_session_row(&info, &shells, &specs)
+        .get("factorySpecs")
+        .is_none());
+    let harness = pa_core::refinement::get_local_harness_state_dir(
+        crate::scheduled_jobs::session_artifact_dir(&path, &info.id).as_deref(),
+    )
+    .unwrap();
+    crate::test_support::write_factory_specs(&harness, &["a", "b"]);
+    let specs = super::sessions::stored_factory_specs(vec![info.clone()])
+        .await
+        .unwrap();
+    assert_eq!(
+        saved_session_row(&info, &shells, &specs)["factorySpecs"],
+        json!(2)
+    );
+    #[cfg(unix)]
+    {
+        let state_path = pa_core::refinement::get_harness_state_path(&harness);
+        let specs = crate::test_support::assert_async_file_read(
+            &state_path,
+            super::sessions::stored_factory_specs(vec![info.clone()]),
+        )
+        .await
+        .expect("asynchronous factory spec read");
+        assert_eq!(
+            saved_session_row(&info, &shells, &specs)["factorySpecs"],
+            json!(2)
+        );
+    }
+    std::fs::remove_dir_all(&root).unwrap();
+}
+
+/// One catalog listing reads each session's harness store once: the streamed rows and the final
+/// response share that read, so they publish the same rows.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_saved_session_listing_reads_each_sessions_harness_store_once() {
+    let root = std::env::temp_dir().join(format!("pa-saved-once-{}", uuid::Uuid::new_v4()));
+    let sessions = root.join("sessions");
+    std::fs::create_dir_all(&sessions).unwrap();
+    let mut counters = Vec::new();
+    for specs in [&["a"][..], &["a", "b"][..]] {
+        let mut session = crate::session_store::SessionFile::create("/tmp", None, 0);
+        let path = sessions.join(format!("{}.jsonl", session.session_id()));
+        session.set_path(path.clone());
+        session.rewrite().unwrap();
+        let harness = pa_core::refinement::get_local_harness_state_dir(
+            crate::scheduled_jobs::session_artifact_dir(&path, session.session_id()).as_deref(),
+        )
+        .unwrap();
+        crate::test_support::write_factory_specs(&harness, specs);
+        counters.push(crate::test_support::count_file_reads(
+            &pa_core::refinement::get_harness_state_path(&harness),
+        ));
+    }
+    std::fs::create_dir_all(root.join("agent")).unwrap();
+    std::fs::write(
+        root.join("agent/settings.json"),
+        json!({ "factory": { "enabled": true } }).to_string(),
+    )
+    .unwrap();
+    let supervisor = Arc::new(
+        Supervisor::new(SupervisorOptions {
+            socket_path: root.join("daemon.sock"),
+            agent_dir: root.join("agent"),
+        })
+        .expect("supervisor"),
+    );
+    let command = DaemonCommand::ListSavedSessions {
+        id: None,
+        active_session_id: None,
+        cwd: Some("/tmp".to_string()),
+        session_dir: Some(sessions.to_string_lossy().to_string()),
+        scope: Value::Null,
+        limit: None,
+        cursor: None,
+        rest: Map::new(),
+    };
+    let (stream, mut frames) = mpsc::channel(64);
+    let lines = supervisor
+        .handle_saved_session_list(&command, "list", &stream)
+        .await;
+    drop(stream);
+    let reads: Vec<usize> = counters
+        .into_iter()
+        .map(crate::test_support::FileReadCounter::finish)
+        .collect();
+    assert_eq!(reads, [1, 1], "one harness read per session per listing");
+    let mut streamed = Vec::new();
+    while let Some((bundle, _)) = frames.recv().await {
+        for frame in bundle {
+            if let Outbound::Line(line) = frame {
+                if line["type"] == "session_list_item" {
+                    streamed.push(line["session"].clone());
+                }
+            }
+        }
+    }
+    let sessions_served = lines[0]["data"]["sessions"].as_array().unwrap();
+    assert_eq!(&streamed, sessions_served);
+    let mut specs: Vec<u64> = streamed
+        .iter()
+        .map(|row| row["factorySpecs"].as_u64().unwrap())
+        .collect();
+    specs.sort_unstable();
+    assert_eq!(specs, [1, 2]);
+    std::fs::remove_dir_all(&root).unwrap();
+}
+
+/// While the factory stays off (the opt-in gate), the catalog reads no stored factory specs: a
+/// session holding specs carries no `factorySpecs`.
+#[tokio::test]
+async fn a_saved_session_listing_skips_stored_factory_specs_while_the_factory_is_off() {
+    let root = std::env::temp_dir().join(format!("pa-saved-off-{}", uuid::Uuid::new_v4()));
+    let sessions = root.join("sessions");
+    std::fs::create_dir_all(&sessions).unwrap();
+    let mut session = crate::session_store::SessionFile::create("/tmp", None, 0);
+    let path = sessions.join(format!("{}.jsonl", session.session_id()));
+    session.set_path(path.clone());
+    session.rewrite().unwrap();
+    let harness = pa_core::refinement::get_local_harness_state_dir(
+        crate::scheduled_jobs::session_artifact_dir(&path, session.session_id()).as_deref(),
+    )
+    .unwrap();
+    crate::test_support::write_factory_specs(&harness, &["a"]);
+    let supervisor = Arc::new(
+        Supervisor::new(SupervisorOptions {
+            socket_path: root.join("daemon.sock"),
+            agent_dir: root.join("agent"),
+        })
+        .expect("supervisor"),
+    );
+    let command = DaemonCommand::ListSavedSessions {
+        id: None,
+        active_session_id: None,
+        cwd: Some("/tmp".to_string()),
+        session_dir: Some(sessions.to_string_lossy().to_string()),
+        scope: Value::Null,
+        limit: None,
+        cursor: None,
+        rest: Map::new(),
+    };
+    let (stream, _frames) = mpsc::channel(64);
+    let lines = supervisor
+        .handle_saved_session_list(&command, "list", &stream)
+        .await;
+    let rows = lines[0]["data"]["sessions"].as_array().unwrap();
+    assert_eq!(rows.len(), 1);
+    assert!(rows[0].get("factorySpecs").is_none(), "{rows:?}");
+    std::fs::remove_dir_all(&root).unwrap();
 }
 
 #[test]
@@ -850,7 +1028,11 @@ fn saved_session_rows_carry_the_persisted_thinking_level() {
     let summary = saved_session_summary(&info);
     assert_eq!(summary["thinkingLevel"], json!("high"));
     assert!(summary["model"].is_null(), "saved rows carry no model");
-    let row = saved_session_row(&info, &std::collections::HashMap::new());
+    let row = saved_session_row(
+        &info,
+        &std::collections::HashMap::new(),
+        &std::collections::HashMap::new(),
+    );
     assert_eq!(row["thinkingLevel"], json!("high"));
     assert_eq!(row["model"], json!({ "provider": "p", "modelId": "m" }));
     // A session file without a persisted level stays bare (a fresh
@@ -864,11 +1046,13 @@ fn saved_session_rows_carry_the_persisted_thinking_level() {
     assert!(saved_session_summary(&draft_info)
         .get("thinkingLevel")
         .is_none());
-    assert!(
-        saved_session_row(&draft_info, &std::collections::HashMap::new())
-            .get("thinkingLevel")
-            .is_none()
-    );
+    assert!(saved_session_row(
+        &draft_info,
+        &std::collections::HashMap::new(),
+        &std::collections::HashMap::new()
+    )
+    .get("thinkingLevel")
+    .is_none());
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -891,7 +1075,11 @@ fn saved_session_rows_publish_the_own_usage_summary() {
     }));
     session.rewrite().unwrap();
     let info = crate::session_store::read_session_info(&path).unwrap();
-    let row = saved_session_row(&info, &std::collections::HashMap::new());
+    let row = saved_session_row(
+        &info,
+        &std::collections::HashMap::new(),
+        &std::collections::HashMap::new(),
+    );
     assert_eq!(
         row["usage"],
         json!({ "inputTokens": 105, "outputTokens": 10, "cost": 0.25 })
@@ -907,11 +1095,13 @@ fn saved_session_rows_publish_the_own_usage_summary() {
     draft.set_path(draft_path.clone());
     draft.rewrite().unwrap();
     let draft_info = crate::session_store::read_session_info(&draft_path).unwrap();
-    assert!(
-        saved_session_row(&draft_info, &std::collections::HashMap::new())
-            .get("usage")
-            .is_none()
-    );
+    assert!(saved_session_row(
+        &draft_info,
+        &std::collections::HashMap::new(),
+        &std::collections::HashMap::new()
+    )
+    .get("usage")
+    .is_none());
     assert!(saved_session_summary(&draft_info).get("usage").is_none());
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -955,7 +1145,11 @@ fn saved_session_rows_match_the_catalog_row_golden() {
 
     let info = crate::session_store::read_session_info(&path).unwrap();
     assert_eq!(
-        saved_session_row(&info, &std::collections::HashMap::new()),
+        saved_session_row(
+            &info,
+            &std::collections::HashMap::new(),
+            &std::collections::HashMap::new()
+        ),
         json!({
             "path": path.to_string_lossy(),
             "id": "golden-session",
@@ -1343,7 +1537,7 @@ async fn an_existing_tombstone_carries_the_stop_past_its_failed_re_write() {
         "the stop completed: the worker left the registry"
     );
     assert!(
-        resident.intentional_stop.load(Ordering::SeqCst),
+        resident.route_state().stop_requested(),
         "the stop is intentional"
     );
 }
@@ -1386,7 +1580,9 @@ async fn first_signal_drains_a_settling_turn_and_rejects_new_work() {
     // The fake worker connection: the routed `shutdown` reply is the flush barrier, held
     // until the test releases the settle. One channel slot is plenty.
     let (cmd_tx, mut cmd_rx) = mpsc::channel::<WorkerRequest>(1);
-    *resident.cmd_tx.lock().await = Some(cmd_tx);
+    resident
+        .install_command_channel(resident.begin_connection(), cmd_tx)
+        .await;
     let (shutdown_routed_tx, shutdown_routed_rx) = oneshot::channel::<()>();
     let (turn_settled_tx, turn_settled_rx) = oneshot::channel::<()>();
     let (settle_release_tx, settle_release_rx) = oneshot::channel::<()>();
@@ -1530,7 +1726,9 @@ async fn a_prompt_and_wait_route_outlives_the_old_ten_minute_cap() {
     // The fake worker holds the turn for a virtual hour — past the old
     // ten-minute cap, inside the 24 h worker-request budget.
     let (cmd_tx, mut cmd_rx) = mpsc::channel::<WorkerRequest>(1);
-    *resident.cmd_tx.lock().await = Some(cmd_tx);
+    resident
+        .install_command_channel(resident.begin_connection(), cmd_tx)
+        .await;
     let pump_resident = Arc::clone(&resident);
     tokio::spawn(async move {
         let request = cmd_rx.recv().await.expect("the route lands the prompt");
@@ -1548,8 +1746,7 @@ async fn a_prompt_and_wait_route_outlives_the_old_ten_minute_cap() {
         )));
     });
     supervisor.registry.insert(Arc::clone(&resident)).await;
-    resident.note_connection_live();
-    resident.note_session_ready();
+    resident.transition(crate::registry::WorkerTransition::SessionReady);
     let (targeted_tx, _targeted_rx) = tokio::sync::mpsc::channel::<Arc<Value>>(16);
     let attached = subscribers::ClientSubscriptions::new("c".to_string(), targeted_tx);
     let command: DaemonCommand = serde_json::from_value(serde_json::json!({
@@ -2516,7 +2713,7 @@ proptest! {
             let resident = ResidentWorker::new(active.clone(), descriptor, PathBuf::from("none"));
             supervisor.registry.insert(resident.clone()).await;
             // Retired: a forward past the ladder fails fast with WORKER_NOT_CONNECTED.
-            resident.note_retired();
+            resident.transition(crate::registry::WorkerTransition::GiveUp);
             let pre_key = pre_reserved.then(|| {
                 let scope = supervisor
                     .live_session_name_scope(&active, trimmed.into())

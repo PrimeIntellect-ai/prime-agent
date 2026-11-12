@@ -1,7 +1,8 @@
 //! RLM child model resolution and roster text helpers: reference resolution against the
-//! credential-backed catalog, the spawn-time thinking-support check, plus the roster text caps.
+//! credential-backed catalog, the spawn-time thinking-support check, the requested child cwd,
+//! plus the roster text caps.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, bail, Result};
 use pa_ai::models::{get_supported_thinking_levels, thinking_level_from_str};
@@ -156,6 +157,27 @@ pub fn assert_thinking_supported(
     bail!(
         "Requested thinking level \"{level}\" is not supported by model \"{selector}\"; supported levels: {levels}"
     );
+}
+
+/// The directory a child starts in: a requested `cwd` resolves against the
+/// session cwd and is canonicalized (project-context discovery walks its
+/// ancestors), otherwise the child shares the session cwd.
+///
+/// # Errors
+/// Returns an error naming `operation` when the requested directory does not exist.
+pub fn resolve_child_cwd(
+    session_cwd: &Path,
+    requested: Option<&str>,
+    operation: &str,
+) -> Result<PathBuf> {
+    let Some(requested) = requested else {
+        return Ok(session_cwd.to_path_buf());
+    };
+    let joined = session_cwd.join(requested);
+    match joined.canonicalize() {
+        Ok(cwd) if cwd.is_dir() => Ok(cwd),
+        _ => bail!("{operation} cwd {} is not a directory", joined.display()),
+    }
 }
 
 /// Rejection message for an unresolved model reference: the
@@ -430,42 +452,49 @@ mod tests {
             .to_string(),
         )
         .unwrap();
-        // The authorized private model: the compiled fallback lacks it, the
-        // fingerprint-scoped disk cache carries it.
+        // The entitled private model: the compiled fallback lacks it, the
+        // account's scoped Prime Inference snapshot carries it.
         let mut auth = pa_core::auth::AuthStorage::create(dir.path());
         let api_key = auth.get_api_key("prime-inference").expect("api key");
-        // The stored team selection survives ambient env credentials (a
-        // dogfood box's ambient `PRIME_API_KEY` changes the pair); the
-        // cache below is written for whatever pair resolves.
+        // The snapshot below is written for whatever pair resolves (an
+        // ambient `PRIME_API_KEY` on a dogfood box changes the pair).
         let team_id = auth
             .get_provider_headers("prime-inference")
             .and_then(|headers| headers.get("X-Prime-Team-ID").cloned())
-            .expect("stored team selection");
-        let fingerprint =
-            pa_core::models::private_prime_authorization_fingerprint(&api_key, &team_id);
-        pa_core::models::write_private_prime_authorization_cache(
-            &dir.path().join("models.json"),
-            &pa_core::models::PrivatePrimeAuthorizationCache {
-                fingerprint,
-                // The durable wire items (an `/models` payload shape): the
-                // read path parses and builds the model from them.
-                items: vec![json!({
-                    "id": "internal/glm-5.3-fast",
-                    "display_name": "GLM 5.3 Fast",
-                    "pricing": {
-                        "input_usd_per_mtok": 0.42, "output_usd_per_mtok": 2.1,
-                        "cache_read_usd_per_mtok": 0.0, "cache_write_usd_per_mtok": 0.0,
-                    },
-                    "specs": {
-                        "context_window": 400_000, "max_output_tokens": 131_072,
-                        "supports_reasoning": true,
-                        "modalities": { "input": ["text"], "output": ["text"] },
-                    },
-                })],
-                models: Vec::new(),
-                refreshed_at: 1,
+            .unwrap_or_default();
+        // Every compiled route, so the snapshot passes the coverage gate.
+        let mut data: Vec<serde_json::Value> =
+            pa_models::transports::prime_inference_offline_entries()
+                .iter()
+                .map(|model| {
+                    json!({
+                        "id": model.id,
+                        "pricing": { "input_usd_per_mtok": 1.0, "output_usd_per_mtok": 1.0 },
+                    })
+                })
+                .collect();
+        data.push(json!({
+            "id": "internal/glm-5.3-fast",
+            "display_name": "GLM 5.3 Fast",
+            "pricing": { "input_usd_per_mtok": 0.42, "output_usd_per_mtok": 2.1 },
+            "specs": {
+                "context_window": 400_000, "max_output_tokens": 131_072,
+                "supports_reasoning": true,
+                "modalities": { "input": ["text"], "output": ["text"] },
             },
-        );
+        }));
+        std::fs::create_dir_all(dir.path().join("models")).unwrap();
+        std::fs::write(
+            dir.path().join("models/prime-inference-models-cache.json"),
+            json!({
+                "url": format!("{}/models", pa_core::models::PRIME_INFERENCE_BASE_URL),
+                "scope": pa_models::prime_inference::scope_key(&api_key, &team_id),
+                "fetchedAt": 1,
+                "payload": { "data": data },
+            })
+            .to_string(),
+        )
+        .unwrap();
 
         assert!(catalog_models(dir.path())
             .iter()

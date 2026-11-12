@@ -143,6 +143,7 @@ impl SessionUi {
             heartbeats_paused: paused_heartbeat_count(&self.heartbeat_catalog),
             shells,
             shells_persistent: crate::bash_view::ShellCounts::of(&shell_rows).persistent,
+            factory_specs: crate::factory_view::stored_spec_count(&self.factory_graph),
             factory_runs,
             factory_counts: crate::factory_view::FactoryRunCounts::of(&runs),
             // The group renders exactly while the daemon advertises the
@@ -357,11 +358,6 @@ impl SessionUi {
         let Some(id) = key_event_to_id(&key) else {
             return Ok(());
         };
-        // The panel consumes Ctrl+C (close, not exit); report it so the force-quit
-        // guard can disarm.
-        if id == "ctrl+c" {
-            self.exit_guard.note_ctrl_c_handled();
-        }
         if view.editor.keybindings().matches(&id, "tui.select.cancel")
             || view.editor.keybindings().matches(&id, "app.modal.back")
             || view.editor.keybindings().matches(&id, "app.clear")
@@ -385,11 +381,6 @@ impl SessionUi {
         let Some(id) = key_event_to_id(&key) else {
             return Ok(());
         };
-        // The panel consumes Ctrl+C (close, not exit); report it so the force-quit
-        // guard can disarm.
-        if id == "ctrl+c" {
-            self.exit_guard.note_ctrl_c_handled();
-        }
         if view.info_panel.as_mut().is_some_and(|panel| {
             panel.handle_key(&id, view.editor.keybindings()) == InfoPanelAction::Close
         }) {

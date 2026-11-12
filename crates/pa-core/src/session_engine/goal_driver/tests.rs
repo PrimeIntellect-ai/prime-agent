@@ -269,6 +269,24 @@ fn usage_accounting_and_budget_limit() {
     assert_eq!(driver.state().status, GoalStatus::BudgetLimited);
 }
 
+/// A call billed while the goal ran still charges it across a pause and
+/// resume; a call billed during the pause does not.
+#[test]
+fn a_pause_keeps_the_calls_billed_while_the_goal_ran() {
+    let mut session = persisted_session();
+    let mut driver = GoalDriver::new();
+    let bill = driver.billed_row_recorder();
+    driver.start(&mut session, "work", Some(1_000)).unwrap();
+    bill(&usage(30, 10));
+    driver.pause(&mut session, "Paused by user").unwrap();
+    bill(&usage(500, 0));
+    driver.resume(&mut session).unwrap();
+    driver
+        .record_assistant_usage(&mut session, "a1", &usage(5, 5))
+        .unwrap();
+    assert_eq!(driver.state().tokens_used, 40 + 10);
+}
+
 #[test]
 fn terminal_messages_fail_or_keep_the_goal() {
     use pa_types::ai::StopReason;

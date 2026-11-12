@@ -104,6 +104,7 @@ fn main_impl(args: &[String], runtime: &dyn mode::Runtime) -> Result<i32, String
     // Install-time kernel preparation: the installer invokes `--prime-agent-bootstrap`
     // after extracting a release, so the venv is ready before the first session.
     if args.len() == 1 && args[0] == "--prime-agent-bootstrap" {
+        crate::config::require_agent_dir()?;
         return run_runtime_bootstrap();
     }
 
@@ -116,6 +117,7 @@ fn main_impl(args: &[String], runtime: &dyn mode::Runtime) -> Result<i32, String
     let args = public_command.args;
 
     if args.first().map(String::as_str) == Some("config") {
+        crate::config::require_agent_dir()?;
         return Ok(crate::config_command::run());
     }
 
@@ -135,6 +137,10 @@ fn main_impl(args: &[String], runtime: &dyn mode::Runtime) -> Result<i32, String
     }
 
     let app_mode = mode::AppMode::resolve(&parsed, std::io::stdin().is_terminal());
+    // The TUI owns the terminal: structured logs go to stderr only outside it.
+    if app_mode != mode::AppMode::Interactive {
+        pa_ai::utils::log::install_stderr_log_sink();
+    }
 
     // Enable Windows VT processing before raw ANSI mode writes.
     pa_types::platform::console_init();
@@ -156,6 +162,8 @@ fn main_impl(args: &[String], runtime: &dyn mode::Runtime) -> Result<i32, String
         println!("{}", command_registry::format_top_level_help());
         return Ok(0);
     }
+
+    crate::config::require_agent_dir()?;
 
     if parsed.export.is_some() {
         // The TS product only reaches the export subsystem through the `session

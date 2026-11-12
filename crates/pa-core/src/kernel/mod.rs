@@ -11,6 +11,7 @@ pub mod manager;
 pub mod orphan_journal;
 pub mod protocol;
 pub mod provisioner;
+pub(crate) mod python_env;
 pub mod rlm_runtime;
 pub mod shared;
 pub mod state_snapshot;
@@ -29,9 +30,16 @@ pub use rlm_runtime::{
     normalize_requested_rlm_subagent_thinking_level, RlmModelInfo, RlmModelMatch, THINKING_LEVELS,
 };
 pub use shared::{
-    HostRequestHandler, HostRequestHandlers, HostRequestPayload, KernelBusyAfterInterruptError,
-    KernelDiffDisplay, KernelManagerOptions, KernelSentAgentMessage, KernelShutdownOptions,
-    KernelSnapshotConfig, StreamName, EXECUTE_STATUS_ABORTED, EXECUTE_STATUS_ERROR,
-    EXECUTE_STATUS_OK,
+    HostRequestHandler, HostRequestHandlers, HostRequestPayload, KernelDiffDisplay,
+    KernelManagerOptions, KernelSentAgentMessage, KernelShutdownOptions, KernelSnapshotConfig,
+    StreamName, EXECUTE_STATUS_ABORTED, EXECUTE_STATUS_ERROR, EXECUTE_STATUS_OK,
 };
 pub use state_snapshot::{manifest_path_in, snapshot_path_in, RestoreResult, SnapshotResult};
+
+/// Environment for a Python process: ambient Python import roots and the
+/// default user site are disabled before interpreter initialization.
+#[must_use]
+pub fn python_process_environment(
+) -> std::collections::HashMap<std::ffi::OsString, std::ffi::OsString> {
+    python_env::inherited_python_env()
+}

@@ -545,6 +545,7 @@ async fn an_rlm_spawn_child_inherits_the_parent_worker_env() {
             name: Some("worker-a".to_string()),
             model: None,
             thinking: None,
+            cwd: None,
             spawned_by_request_id: None,
             factory: None,
         })

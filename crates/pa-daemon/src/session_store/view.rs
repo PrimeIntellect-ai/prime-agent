@@ -2,8 +2,8 @@
 //! compacted message fold and its scalars, and the wire-shape message helpers.
 
 use super::{
-    json, MessageWindowScalars, SessionEntry, SessionFile, SessionMessages, TranscriptPageRows,
-    Value,
+    json, HashMap, MessageWindowScalars, SessionEntry, SessionFile, SessionMessages,
+    TranscriptPageRows, Value,
 };
 use pa_types::daemon::TranscriptPage;
 
@@ -33,6 +33,15 @@ const CONTENT_ENTRY_TYPES: &[&str] = &[
     "compaction",
     "branch_summary",
 ];
+
+/// One more `role` row in `counts`; the key is allocated only for a role's first row.
+pub(super) fn count_role(counts: &mut HashMap<String, usize>, role: &str) {
+    if let Some(count) = counts.get_mut(role) {
+        *count += 1;
+    } else {
+        counts.insert(role.to_owned(), 1);
+    }
+}
 
 /// Whether `entry` is the session's Anthropic subscription warning shown
 /// marker: a `custom` row carrying
@@ -589,31 +598,34 @@ impl SessionFile {
 
     /// `rows[start:][:limit]` (Python slice semantics) over the active branch's display
     /// transcript filtered to the roles `keep_role` accepts, each row with its index among
-    /// those rows. The total is a window's prefix counts plus one walk over the loaded
-    /// branch; only the returned rows materialize. `None` when the slice reaches into a
-    /// windowed store's unloaded prefix: the caller hydrates and reads again.
+    /// those rows. The total comes from the stored role counts; the walk starts at the
+    /// nearer end of a full store (a windowed one reads its window from the leaf) and only
+    /// the returned rows materialize. `None` when the slice reaches into a windowed store's
+    /// unloaded prefix: the caller hydrates and reads again.
     #[must_use]
     pub fn session_messages(
-        &self,
+        &mut self,
         start: i64,
         limit: usize,
         keep_role: impl Fn(&str) -> bool,
         running_calls: &std::collections::HashSet<String>,
     ) -> Option<SessionMessages> {
-        let in_flight = self.in_flight(running_calls);
-        let kept = |position: &usize| {
-            Some(*position) != in_flight && self.display_role(*position).is_some_and(&keep_role)
-        };
-        let prefix: usize = self.window.as_ref().map_or(0, |window| {
-            window
-                .older_path_stats
-                .display_rows
+        let matching = |counts: &HashMap<String, usize>| -> usize {
+            counts
                 .iter()
                 .filter(|(role, _)| keep_role(role))
                 .map(|(_, count)| count)
                 .sum()
-        });
-        let total = prefix + self.walk_back(self.branch_leaf()).filter(kept).count();
+        };
+        let in_flight = self.in_flight(running_calls);
+        let in_flight_kept = in_flight
+            .and_then(|position| self.display_role(position))
+            .is_some_and(&keep_role);
+        let total = matching(self.branch_role_counts()) - usize::from(in_flight_kept);
+        let prefix = self
+            .window
+            .as_ref()
+            .map_or(0, |window| matching(&window.older_path_stats.display_rows));
         let begin = if start < 0 {
             total.saturating_sub(usize::try_from(start.unsigned_abs()).unwrap_or(usize::MAX))
         } else {
@@ -623,23 +635,65 @@ impl SessionFile {
         if begin < end && begin < prefix {
             return None;
         }
-        let mut rows: Vec<(usize, String, Value)> = self
-            .walk_back(self.branch_leaf())
-            .filter(kept)
-            .skip(total - end)
-            .take(end - begin)
-            .zip((begin..end).rev())
+        let kept = |position: &usize| {
+            Some(*position) != in_flight && self.display_role(*position).is_some_and(&keep_role)
+        };
+        let positions: Vec<usize> = match self.branch_leaf() {
+            Some(leaf) if self.window.is_none() && end < total - begin => self
+                .walk_forward(None, leaf)
+                .filter(kept)
+                .skip(begin)
+                .take(end - begin)
+                .collect(),
+            leaf => {
+                let mut positions: Vec<usize> = self
+                    .walk_back(leaf)
+                    .filter(kept)
+                    .skip(total - end)
+                    .take(end - begin)
+                    .collect();
+                positions.reverse();
+                positions
+            }
+        };
+        let rows = positions
+            .into_iter()
+            .zip(begin..end)
             .filter_map(|(position, index)| {
                 let (id, message) = self.display_row(position)?;
                 Some((index, id.to_string(), message.into_owned()))
             })
             .collect();
-        rows.reverse();
         Some(SessionMessages { rows, total })
     }
 
+    /// The active branch's display rows by role, recounted when a leaf move left them stale.
+    fn branch_role_counts(&mut self) -> &HashMap<String, usize> {
+        let counts = match self.branch_roles.take() {
+            Some(counts) => counts,
+            None => self.recount_branch_roles(),
+        };
+        self.branch_roles.insert(counts)
+    }
+
+    /// The branch's display rows by role from a full walk: a window's prefix counts plus
+    /// every row it holds.
+    fn recount_branch_roles(&self) -> HashMap<String, usize> {
+        let mut counts = self
+            .window
+            .as_ref()
+            .map(|window| window.older_path_stats.display_rows.clone())
+            .unwrap_or_default();
+        for position in self.walk_back(self.branch_leaf()) {
+            if let Some(role) = self.display_role(position) {
+                count_role(&mut counts, role);
+            }
+        }
+        counts
+    }
+
     /// The role a branch position shows under in the display transcript.
-    fn display_role(&self, position: usize) -> Option<&str> {
+    pub(super) fn display_role(&self, position: usize) -> Option<&str> {
         let entry = &self.entries[position];
         pa_core::session::window::display_role(
             &entry.type_,

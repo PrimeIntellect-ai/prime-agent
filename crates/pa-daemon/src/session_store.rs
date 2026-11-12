@@ -168,10 +168,9 @@ impl SessionMessagesQuery {
     }
 
     /// The slice from `store`; `None` when it reaches a windowed store's unloaded prefix.
-    #[must_use]
     pub fn read(
         &self,
-        store: &SessionFile,
+        store: &mut SessionFile,
         running_calls: &std::collections::HashSet<String>,
     ) -> Option<SessionMessages> {
         store.session_messages(
@@ -192,10 +191,10 @@ impl SessionMessagesQuery {
     /// Returns an error when the file cannot be read.
     pub fn read_file(&self, path: &Path) -> Result<SessionMessages> {
         let idle = std::collections::HashSet::new();
-        if let Some(slice) = self.read(&SessionFile::open_windowed(path)?, &idle) {
+        if let Some(slice) = self.read(&mut SessionFile::open_windowed(path)?, &idle) {
             return Ok(slice);
         }
-        let slice = self.read(&SessionFile::open(path)?, &idle);
+        let slice = self.read(&mut SessionFile::open(path)?, &idle);
         // The whole-file load was transient: release its freed heap.
         pa_types::memory_release::trim_freed_heap();
         slice.ok_or_else(|| anyhow!("Session history is unavailable"))
@@ -221,7 +220,10 @@ pub struct SessionFile {
     pub(crate) by_id: HashMap<String, usize>,
     /// Parallel to `entries`: each entry's parent-chain link (maintained with `by_id`).
     chain: Vec<index::ChainLink>,
-    pub(crate) leaf_id: Option<String>,
+    leaf_id: Option<String>,
+    /// The active branch's display rows by role, a window's unloaded prefix included: kept
+    /// by [`Self::set_leaf`], `None` while stale (the next read recounts).
+    branch_roles: Option<HashMap<String, usize>>,
     pub(crate) window: Option<SessionWindow>,
     pub(crate) trace_upload: Option<std::sync::Arc<pa_core::agent_traces::ContinuousTraceUpload>>,
     pub(crate) lease: Option<std::sync::Arc<crate::lease::SessionLease>>,
@@ -240,6 +242,21 @@ pub struct SessionFile {
     /// serve it through `get_state`
     /// (`SessionSummary::anthropic_warning_shown`).
     pub(crate) anthropic_warning_shown: bool,
+    /// Told about each appended row that bills a model call (the engine's
+    /// goal budget and telemetry accounting).
+    pub(crate) billed_row_sink: BilledRowSinkSlot,
+}
+
+#[derive(Clone, Default)]
+pub(crate) struct BilledRowSinkSlot(pub(crate) Option<pa_core::session::billed_row::BilledRowSink>);
+
+impl std::fmt::Debug for BilledRowSinkSlot {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_tuple("BilledRowSinkSlot")
+            .field(&self.0.is_some())
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone)]

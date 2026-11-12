@@ -9,7 +9,10 @@ use pa_agent::abort::AbortSignal;
 use pa_agent::types::{AssistantMessage, StopReason};
 use pa_types::ai::Model;
 
-use super::auto_retry::{run_turn_with_auto_retry, AutoRetryEvent, RetryStartReason};
+use super::auto_retry::{
+    end_turn_on_auth_rejection, run_turn_with_auto_retry, AuthRecoveryCallback, AutoRetryEvent,
+    RetryStartReason,
+};
 use super::provider_park::{is_quota_block_failure, ParkDecisionCallback};
 use super::provider_retry::{
     has_provider_stream_failure, is_agent_lifecycle_failure, is_context_overflow_failure,
@@ -80,7 +83,7 @@ pub fn failover_retry_delay(
 /// is exactly [`run_turn_with_auto_retry`] under `quick_policy`; otherwise each provider gets
 /// `failover.max_retries` quick retries, and a spent budget switches to the next candidate
 /// immediately. `switch` re-binds the session to a provider; `restore` hands the primary back and
-/// returns its `"provider/model-id"`.
+/// returns its `"provider/model-id"`; `auth_recovery` is the auth-retry seam.
 ///
 /// # Errors
 ///
@@ -100,6 +103,7 @@ pub async fn run_turn_with_provider_failover<A, AF, E, EF, W, WF, S, SF, R, RF>(
     mut switch: S,
     mut restore: R,
     mut park: Option<ParkDecisionCallback<'_>>,
+    mut auth_recovery: Option<AuthRecoveryCallback<'_>>,
 ) -> anyhow::Result<AssistantMessage>
 where
     A: FnMut() -> AF,
@@ -124,6 +128,7 @@ where
             emit,
             wait,
             park,
+            auth_recovery,
         )
         .await;
     }
@@ -204,6 +209,16 @@ where
                 })
                 .await?;
             }
+            return Ok(message);
+        }
+        if let Some(message) = end_turn_on_auth_rejection(&message, auth_recovery.as_mut()).await {
+            emit(AutoRetryEvent::End {
+                success: false,
+                attempt: total_retries,
+                final_error: Some(final_error_of(&message)),
+                restored_model: None,
+            })
+            .await?;
             return Ok(message);
         }
         total_retries += 1;
@@ -520,6 +535,7 @@ mod tests {
                     }
                 }
             },
+            None,
             None,
         )
         .await
@@ -855,6 +871,57 @@ mod tests {
                     "404 No endpoints found that support tool use. Try disabling \"ipython\"."
                         .to_string(),
                 ),
+                restored_model: None,
+            }]
+        );
+    }
+
+    /// A credential rejection whose recovery ends the turn never retries
+    /// and never walks the candidate chain.
+    #[tokio::test]
+    async fn an_auth_rejection_whose_recovery_ends_the_turn_never_walks_the_chain() {
+        let attempts = std::sync::atomic::AtomicUsize::new(0);
+        let switches = std::sync::atomic::AtomicUsize::new(0);
+        let events: Mutex<Vec<AutoRetryEvent>> = Mutex::new(Vec::new());
+        let mut recovery = |_: &AssistantMessage| {
+            Box::pin(async {
+                super::super::auto_retry::AuthRecovery::EndTurn("sign in again".to_string())
+            }) as super::super::auto_retry::AuthRecoveryFuture
+        };
+        let message = run_turn_with_provider_failover(
+            &quick_policy(),
+            &fast_failover(),
+            &[model("backup-a")],
+            0,
+            None,
+            || {
+                attempts.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                async { Ok(error_message(Some("auth"), Some(401), "invalid token")) }
+            },
+            |event| {
+                events.lock().unwrap().push(event);
+                async { Ok(()) }
+            },
+            |_| async { true },
+            |_: &Model| {
+                switches.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                async { Ok(()) }
+            },
+            || async { Ok(None) },
+            None,
+            Some(&mut recovery),
+        )
+        .await
+        .unwrap();
+        assert_eq!(attempts.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(switches.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert_eq!(message.error_message.as_deref(), Some("sign in again"));
+        assert_eq!(
+            *events.lock().unwrap(),
+            vec![AutoRetryEvent::End {
+                success: false,
+                attempt: 0,
+                final_error: Some("sign in again".to_string()),
                 restored_model: None,
             }]
         );

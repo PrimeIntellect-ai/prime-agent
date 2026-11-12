@@ -71,7 +71,7 @@ impl AgentSessionEngine {
             // is selected; the next boundary retries.
             return Ok(None);
         };
-        let api_key = self.resolve_request_api_key(&model);
+        let (model, api_key) = self.resolve_request_target(model);
         let global_harness_dir = self.config.agent_dir.clone();
         // The lock covers the clone only (see `run_compaction`): holding the
         // session mutex across the review serialized every client read seam
@@ -119,7 +119,7 @@ mod tests {
         script: &serde_json::Value,
         reserve_tokens: u64,
         with_session_file: bool,
-    ) -> (AgentSessionEngine, tempfile::TempDir) {
+    ) -> (std::sync::Arc<AgentSessionEngine>, tempfile::TempDir) {
         let (engine, dir) = faux_engine_with_settings(script, reserve_tokens);
         if with_session_file {
             let sessions = dir.path().join("sessions");
@@ -281,6 +281,32 @@ mod tests {
         // Round one: the review declines.
         let consumed = engine.consume_compact_auto_refine().expect("the round ran");
         assert!(consumed.is_none(), "the decline surfaced nothing");
+        // The declined review still billed the session: one usage row records it.
+        let built = engine
+            .session
+            .blocking_lock()
+            .clone()
+            .expect("session built");
+        let rows = engine.runtime.block_on(async {
+            built
+                .session
+                .shared_persistence()
+                .lock()
+                .await
+                .get_entries()
+        });
+        let review_rows = serde_json::to_value(rows)
+            .unwrap()
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|row| row["type"] == "custom" && row["data"]["source"] == "refine_review")
+            .map(|row| row["data"]["usage"]["totalTokens"].as_u64().unwrap_or(0))
+            .collect::<Vec<_>>();
+        assert!(
+            matches!(review_rows.as_slice(), [tokens] if *tokens > 0),
+            "one billed review row, got {review_rows:?}"
+        );
         assert!(
             !engine.compact_auto_refine_pending(),
             "the trigger consumed"

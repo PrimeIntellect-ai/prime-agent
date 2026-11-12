@@ -863,6 +863,7 @@ mod tests {
             featured: None,
             headers: None,
             compat: None,
+            serving: None,
         };
         let (writer, _stream) = create_assistant_message_event_stream();
         let mut state = MistralStreamState::new();

@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use crate::skills::diagnostics::ResourceDiagnostic;
 use crate::skills::{
     load_prompt_templates, load_skills, LoadPromptTemplatesOptions, LoadSkillsOptions,
-    PromptTemplate, Skill,
+    PromptTemplate, Skill, SkillKind, SourceScope,
 };
 
 /// AGENTS.md-family candidates, in priority order.
@@ -155,6 +155,13 @@ pub fn load_resources(mut options: ResourceLoaderOptions) -> Result<LoadedResour
                 resolution::find_source_info(&resolution.source_infos, &skill.file_path)
             {
                 skill.source_info = source_info;
+            }
+            if skill.source_info.scope == SourceScope::Project && skill.is_python() {
+                // Project files can supply pyproject.toml and Python modules.
+                // Keep the skill's markdown text, but do not offer or prepare
+                // executable code from a repository on session startup.
+                skill.kind = SkillKind::Markdown;
+                skill.python = None;
             }
             skill
         })
@@ -436,6 +443,74 @@ mod tests {
             .find(|prompt| prompt.name == "fix")
             .expect("package prompt loaded");
         assert_eq!(prompt.source_info.source, "../fixture-pkg");
+    }
+
+    #[test]
+    fn project_python_skills_are_markdown_only_before_kernel_bootstrap() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cwd = tmp.path().join("project");
+        let agent_dir = tmp.path().join("agent");
+        let project_skill = cwd.join(".prime/agent/skills/project-code");
+        let configured_skill = tmp.path().join("configured/configured-code");
+        let ancestor_skill = tmp.path().join(".agents/skills/ancestor-code");
+        let user_skill = agent_dir.join("skills/user-code");
+        for (dir, name) in [
+            (&project_skill, "project-code"),
+            (&configured_skill, "configured-code"),
+            (&ancestor_skill, "ancestor-code"),
+            (&user_skill, "user-code"),
+        ] {
+            fs::create_dir_all(dir.join("src").join(name.replace('-', "_"))).unwrap();
+            fs::write(
+                dir.join("SKILL.md"),
+                format!("---\nname: {name}\ndescription: Python skill\n---\nBody"),
+            )
+            .unwrap();
+            fs::write(
+                dir.join("pyproject.toml"),
+                "[project]\nname = \"skill\"\nversion = \"0.1.0\"\n",
+            )
+            .unwrap();
+            fs::write(
+                dir.join("src")
+                    .join(name.replace('-', "_"))
+                    .join("__init__.py"),
+                "# would execute if imported\n",
+            )
+            .unwrap();
+        }
+        fs::write(
+            cwd.join(".prime/agent/settings.json"),
+            serde_json::json!({"skills": [configured_skill.display().to_string()] }).to_string(),
+        )
+        .unwrap();
+        let resources = load_resources(ResourceLoaderOptions::new(&cwd, &agent_dir)).unwrap();
+        for name in ["project-code", "configured-code", "ancestor-code"] {
+            let project = resources
+                .skills
+                .iter()
+                .find(|skill| skill.name == name)
+                .unwrap();
+            assert_eq!(project.source_info.scope, SourceScope::Project);
+            assert_eq!(project.kind, SkillKind::Markdown);
+            assert!(project.python.is_none());
+        }
+        let user = resources
+            .skills
+            .iter()
+            .find(|skill| skill.name == "user-code")
+            .unwrap();
+        assert_eq!(user.source_info.scope, SourceScope::User);
+        assert_eq!(user.kind, SkillKind::Python);
+        let imports =
+            crate::session_engine::runtime_wiring::kernel_python_skills(&resources.skills)
+                .into_iter()
+                .map(|skill| skill.import_name)
+                .collect::<Vec<_>>();
+        assert!(imports.contains(&"user_code".to_string()));
+        for name in ["project_code", "configured_code", "ancestor_code"] {
+            assert!(!imports.contains(&name.to_string()));
+        }
     }
 
     #[test]

@@ -258,7 +258,7 @@ impl HeartbeatsPicker {
             self.move_selection(delta);
             return HeartbeatsPickerAction::None;
         }
-        if self.mode == Mode::List && kb.matches(key, "app.heartbeats.openSelected") {
+        if self.mode == Mode::List && kb.matches(key, "app.modal.open") {
             self.open_detail();
             return HeartbeatsPickerAction::None;
         }
@@ -561,7 +561,7 @@ impl HeartbeatsPicker {
                 .map_or_else(|| fallback.to_string(), |key| format_key_text(&key))
         };
         let bound = |binding: &str| kb.first_key(binding).map(|key| format_key_text(&key));
-        let open = match bound("app.heartbeats.openSelected") {
+        let open = match bound("app.modal.open") {
             Some(detail) => format!("{}/{}", key("tui.select.confirm", "Enter"), detail),
             None => key("tui.select.confirm", "Enter"),
         };

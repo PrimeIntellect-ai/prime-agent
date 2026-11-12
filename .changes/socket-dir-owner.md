@@ -1,0 +1,1 @@
+- On shared Unix hosts, the daemon now refuses a default socket directory owned by another user or replaced by a symlink, and clients refuse a daemon socket served by another user.

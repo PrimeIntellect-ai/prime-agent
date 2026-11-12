@@ -7,7 +7,7 @@ import json
 import os
 from pathlib import Path
 
-# httpx is imported inside `_fetch_serper` on first call: importing it at
+# httpx is imported inside each `_fetch_*` on first call: importing it at
 # module level would put its full import cost on every kernel bootstrap, in
 # every session, even when no search is ever run. `find_spec` keeps the
 # import-time contract — importing this module still fails with the same
@@ -35,16 +35,26 @@ def _agent_dir() -> Path:
     return Path(raw).expanduser()
 
 
-def _resolve_api_key() -> str:
+# Per provider id (the host passes the /settings choice as PRIME_AGENT_WEBSEARCH_PROVIDER;
+# the id is also the key's auth.json slot): the key's env var, the provider's name (its
+# /mcp row is "<name> (web search)"), and where to get a key.
+_PROVIDERS = {
+    "serper": ("SERPER_API_KEY", "Serper", "https://serper.dev"),
+    "eco": ("YOU_API_KEY", "You.com Eco", "https://you.com/platform"),
+}
+
+
+def _resolve_api_key(provider: str) -> str:
     # Read auth.json on each call (not just the injected env var) so a key added
     # via /login after the kernel started is still picked up. Env var wins.
-    env_key = os.environ.get("SERPER_API_KEY", "").strip()
+    key_env, _, _ = _PROVIDERS[provider]
+    env_key = os.environ.get(key_env, "").strip()
     if env_key:
         return env_key
 
     try:
         auth = json.loads((_agent_dir() / "auth.json").read_text())
-        cred = auth.get("serper") if isinstance(auth, dict) else None
+        cred = auth.get(provider) if isinstance(auth, dict) else None
         if isinstance(cred, dict) and cred.get("type") == "api_key":
             return _resolve_config_value(str(cred.get("key") or ""))
     except (OSError, ValueError):
@@ -137,6 +147,35 @@ async def _fetch_serper(query: str, api_key: str, timeout: int = 45, num_results
     return _format_serper_results(data, query, num_results=num_results)
 
 
+def _format_eco_results(data: dict, query: str, num_results: int = 5) -> str:
+    """Format a You.com Eco Search response like Serper's organic results."""
+    organic = [
+        {"title": item.get("title"), "link": item.get("url"), "snippet": item.get("description")}
+        for item in (data.get("results") or {}).get("web") or []
+    ]
+    return _format_serper_results({"organic": organic}, query, num_results=num_results)
+
+
+async def _fetch_eco(query: str, api_key: str, timeout: int = 45, num_results: int = 5) -> str:
+    """Execute a single You.com Eco Search (at most 10 results per page)."""
+    import httpx
+
+    try:
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            resp = await client.get(
+                "https://ydc-index.io/v1/eco_search",
+                params={"query": query},
+                headers={"X-API-Key": api_key},
+            )
+            resp.raise_for_status()
+            data = resp.json()
+    except httpx.HTTPStatusError as e:
+        body = e.response.text if e.response is not None else ""
+        raise RuntimeError(f"Eco search error ({e.response.status_code}): {body}") from e
+
+    return _format_eco_results(data, query, num_results=num_results)
+
+
 async def run(
     query: str,
     *,
@@ -144,10 +183,10 @@ async def run(
     timeout: int | None = None,
     num_results: int | None = None,
 ) -> str:
-    """Run a Google search via Serper and return formatted results.
+    """Run a web search with the provider chosen in /settings and return formatted results.
 
     Args:
-        query: Google search query.
+        query: Web search query.
         max_output: Truncate output to this many chars.
         timeout: HTTP timeout in seconds.
         num_results: Organic results to return.
@@ -155,13 +194,15 @@ async def run(
     Returns:
         Formatted search results.
     """
-    api_key = _resolve_api_key()
+    provider = os.environ.get("PRIME_AGENT_WEBSEARCH_PROVIDER") or "serper"
+    api_key = _resolve_api_key(provider)
     if not api_key:
+        _, name, signup_url = _PROVIDERS[provider]
         return (
-            "Web search is not set up yet: no Serper API key is configured.\n"
+            f"Web search is not set up yet: no {name} API key is configured.\n"
             "Tell the user how to enable it:\n"
-            "  1. Get a free API key at https://serper.dev (sign up, copy the key).\n"
-            "  2. In Prime Agent, run /mcp, choose \"Serper (web search)\", and paste the key.\n"
+            f"  1. Get a free API key at {signup_url} (sign up, copy the key).\n"
+            f"  2. In Prime Agent, run /mcp, choose \"{name} (web search)\", and paste the key.\n"
             "Do not ask the user to set environment variables. Once the key is saved, web search works automatically."
         )
 
@@ -170,8 +211,9 @@ async def run(
     if num_results is None:
         num_results = _env_int("PRIME_AGENT_WEBSEARCH_NUM_RESULTS", 5)
 
+    fetch = _fetch_eco if provider == "eco" else _fetch_serper
     try:
-        result = await _fetch_serper(query, api_key, timeout=timeout, num_results=num_results)
+        result = await fetch(query, api_key, timeout=timeout, num_results=num_results)
     except Exception as e:
         result = f"Error searching for '{query}': {e}"
     output = f'Results for query "{query}":\n\n{result}'

@@ -96,6 +96,7 @@ use crate::protocol::{
 };
 use crate::registry::{
     ResidentWorker, SessionRegistry, WorkerRegistration, WorkerReply, WorkerRequest,
+    WorkerTransition,
 };
 use crate::saved_session_commands::{name_unavailable_error, reservation_key, NameScope};
 use crate::session_store::list_sessions;

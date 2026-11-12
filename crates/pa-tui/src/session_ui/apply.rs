@@ -5,6 +5,7 @@ use super::{
     CompactionReason, CompactionState, DaemonClientEvent, DaemonCommand, Map, MessageBlock, Result,
     RetryState, SessionUi, StatusKind, ToolResultView, TurnUpdate, Value,
 };
+use crate::interactive::reconnect::{ConnectionEffect, ConnectionEvent};
 
 /// One backgrounded compaction-abort outcome: a failed abort surfaces as
 /// the transcript note and clears the stuck compaction loader locally.
@@ -17,6 +18,41 @@ pub(crate) struct CompactionAbortNote {
 }
 
 impl SessionUi {
+    /// Apply one connection event and show its row; the effect tells the run loop what to do next.
+    pub(crate) fn connection_event(
+        &mut self,
+        event: ConnectionEvent,
+        view: &mut AgentView,
+    ) -> ConnectionEffect {
+        let before = std::mem::discriminant(&self.connection);
+        let effect = self.connection.on(event);
+        match &effect {
+            ConnectionEffect::Note(text) | ConnectionEffect::Exit { note: text, .. } => {
+                self.note(text, view);
+            }
+            ConnectionEffect::Info(text) => self.note_as(text, StatusKind::Info, view),
+            ConnectionEffect::Warning(text) => self.note_as(text, StatusKind::Warning, view),
+            ConnectionEffect::ErrorRow(text) => self.error_row(text, view),
+            ConnectionEffect::None
+            | ConnectionEffect::Connect { .. }
+            | ConnectionEffect::Attach(_) => {}
+        }
+        if let ConnectionEffect::Exit { reason, .. } = &effect {
+            self.exit_reason = reason;
+        }
+        if before != std::mem::discriminant(&self.connection)
+            || !matches!(
+                effect,
+                ConnectionEffect::None
+                    | ConnectionEffect::Connect { .. }
+                    | ConnectionEffect::Attach(_)
+            )
+        {
+            self.dirty = true;
+        }
+        effect
+    }
+
     /// Abort the active turn off the UI loop: with the schema-29 capability the daemon aborts the
     /// run and the queue keeps flowing behind the settled turn; otherwise the plain abort.
     fn abort_turn(&self) {
@@ -269,47 +305,54 @@ impl SessionUi {
                 }
             }
             DaemonClientEvent::DirectLinkLost { active_session_id } => {
-                // A direct-transport loss is never itself a session loss — the loop re-attaches
+                // A direct-transport loss is never itself a session loss — the session re-attaches
                 // through the supervisor; only the active session arms it.
                 if active_session_id == self.active_session_id {
-                    self.transport_lost = Some(active_session_id);
+                    self.connection_event(
+                        ConnectionEvent::DirectLinkLost { active_session_id },
+                        view,
+                    );
                 }
             }
             DaemonClientEvent::DaemonClosing { reason, update } => {
-                // The announcement is the discriminator the loop's shutdown recovery arms on: a
-                // bare session stop without it stays stopped.
-                self.daemon_closing_notice = Some(reason.clone());
-                match update {
-                    Some(update) => {
-                        // Spec §10: reattach is the default end state. The banner carries the
-                        // resume contract; the interactive run's reconnect loop drives the rest.
-                        let names = update
-                            .sessions
-                            .iter()
-                            .map(|row| {
-                                row.get("name")
-                                    .and_then(|value| value.as_str())
-                                    .filter(|name| !name.is_empty())
-                                    .unwrap_or_else(|| {
-                                        row.get("sessionId")
-                                            .and_then(|value| value.as_str())
-                                            .unwrap_or_default()
-                                    })
-                            })
-                            .collect::<Vec<_>>()
-                            .join(", ");
-                        view.push_entry(crate::chat::ChatEntry::Status {
-                            text: format!(
-                                "Prime Agent is updating — restarting the daemon (about {}s). {} will resume automatically.",
-                                update.est_seconds.max(1),
-                                if names.is_empty() { "Your session".to_string() } else { names }
-                            ),
-                            kind: crate::chat::StatusKind::Info,
-                        });
-                        self.reconnect = Some(update);
-                    }
-                    None => {
-                        self.note(&format!("the daemon is shutting down ({reason})"), view);
+                if let Some(update) = update {
+                    // Spec §10: reattach is the default end state. The banner carries the
+                    // resume contract; the interactive run's reconnect loop drives the rest.
+                    let names = update
+                        .sessions
+                        .iter()
+                        .map(|row| {
+                            row.get("name")
+                                .and_then(|value| value.as_str())
+                                .filter(|name| !name.is_empty())
+                                .unwrap_or_else(|| {
+                                    row.get("sessionId")
+                                        .and_then(|value| value.as_str())
+                                        .unwrap_or_default()
+                                })
+                        })
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    view.push_entry(crate::chat::ChatEntry::Status {
+                        text: format!(
+                            "Prime Agent is updating — restarting the daemon (about {}s). {} will resume automatically.",
+                            update.est_seconds.max(1),
+                            if names.is_empty() { "Your session".to_string() } else { names }
+                        ),
+                        kind: crate::chat::StatusKind::Info,
+                    });
+                    self.connection_event(
+                        ConnectionEvent::UpdateNotice {
+                            est_seconds: update.est_seconds,
+                        },
+                        view,
+                    );
+                } else {
+                    self.note(&format!("the daemon is shutting down ({reason})"), view);
+                    // The announcement is what arms the shutdown recovery: a bare session stop
+                    // without it stays stopped.
+                    if reason == "shutdown" {
+                        self.connection_event(ConnectionEvent::ShutdownNotice, view);
                     }
                 }
             }

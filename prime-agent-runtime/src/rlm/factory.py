@@ -1039,18 +1039,27 @@ event and the status node's ``answer_preview`` stay compact (the host's
 own roster previews cap at 160 characters, ``compactRlmText``).
 """
 
-ANSWER_BINDING_CAP = 8192
-"""Local cap for the settle-capture binding lane.
+ANSWER_BINDING_CAP = 65_536
+"""Local cap for the settle-capture binding lane, at parity with the
+host's collect bound (the daemon's ANSWER_TEXT_MAX_CHARS: 65,536
+characters).
 
 ``rlm.collect`` carries the child's full final answer (``answer_text``,
-host-bounded at 64 KiB): input binding and output capture work on that
-text, not the roster preview — a fenced JSON output longer than the old
-200-character preview cap was truncated before the executor ever saw it,
-and the downstream bind failed with "no JSON object containing output"
-although the child settled with exactly the fenced JSON (the M2 class).
-The factory caps its own storage here so a run of many long answers
-cannot balloon kernel memory; a bind failure names this cap when the
-capture was cut at it. Full child transcripts stay in the child's own
+host-bounded at that size): input binding and output capture work on
+that text, not the roster preview — a fenced JSON output longer than the
+old 200-character preview cap was truncated before the executor ever saw
+it, and the downstream bind failed with "no JSON object containing
+output" although the child settled with exactly the fenced JSON (the M2
+class). The old 8192-character cap failed the same class one lane later:
+a valid fenced JSON longer than it (a design node's 26–29 KiB output,
+observed three times) was cut mid-object before the parse, so the capture
+failed deterministically although the envelope still carried the whole
+answer. At parity the slice is a no-op on what the host delivers (it
+bounds answer_text at this same size), so a fenced JSON the child kept
+within this size binds whole; the cap still bounds each captured answer
+the factory stores, and a bind failure names the stored answer's length
+when it reaches this cap (a joined multi-instance answer can cross it
+with nothing cut). Full child transcripts stay in the child's own
 session regardless.
 """
 
@@ -1263,6 +1272,75 @@ def _suffixed_spawn_form(base: str, candidate: str) -> bool:
     return True
 
 
+def _terminal_json_object(answer: str) -> str | None:
+    """The bare JSON object that terminates the answer, if one does.
+
+    A string-aware balanced-brace scan walks the answer's top-level object
+    spans (braces inside string literals never count); the terminal object
+    is the last balanced span that only benign residue -- whitespace or
+    punctuation such as fence fragments, dashes, or dots, never letters,
+    digits, quotes, or more brackets -- follows. That is the settle shape
+    the strict fence contract rejected: a JSON tail emitted as plain text
+    after prose, an unclosed fence, or a dirty tail. Prose is never JSON
+    syntax: quotes outside an object do not open strings, and a brace in
+    prose only opens a candidate where it starts a string key -- so a
+    settle that mentions a block or leaves a quote open still finds its
+    terminal object. An object followed by prose or by a later incomplete
+    emit stays non-terminal -- the whole-answer fallback and the
+    truncation error own those cases -- an unterminated candidate owns the
+    tail (a truncated emit never binds), and the output-name check applies
+    to this candidate exactly as to a fence.
+    """
+    length = len(answer)
+    last: tuple[int, int] | None = None
+    index = 0
+    while index < length:
+        if answer[index] != "{":
+            index += 1
+            continue
+        # a candidate opens only where its brace starts a string key; a
+        # stray brace in prose is not syntax and hides nothing
+        cursor = index + 1
+        while cursor < length and answer[cursor].isspace():
+            cursor += 1
+        if cursor == length or answer[cursor] != '"':
+            index += 1
+            continue
+        depth = 1
+        in_string = False
+        escaped = False
+        while cursor < length:
+            char = answer[cursor]
+            if in_string:
+                if escaped:
+                    escaped = False
+                elif char == "\\":
+                    escaped = True
+                elif char == '"':
+                    in_string = False
+            elif char == '"':
+                in_string = True
+            elif char == "{":
+                depth += 1
+            elif char == "}":
+                depth -= 1
+                if depth == 0:
+                    last = (index, cursor + 1)
+                    cursor += 1
+                    break
+            cursor += 1
+        if depth:
+            # an unterminated candidate is a truncated emit: it owns the
+            # tail, so nothing later binds
+            return None
+        index = cursor
+    if last is None:
+        return None
+    if any(char.isalnum() or char in "\"'{}[]\\" for char in answer[last[1] :]):
+        return None
+    return answer[last[0] : last[1]]
+
+
 def _parse_json_output(
     answer: str, output_name: str, *, truncated_at: int | None = None
 ) -> tuple[Any, str | None]:
@@ -1271,13 +1349,19 @@ def _parse_json_output(
     Prefers the fenced `````json`` block whose object contains the output
     name, scanning trailing blocks first (an answer with several fences,
     e.g. a verdict block followed by a summary block, binds from whichever
-    block carries the port), then falls back to parsing the whole answer.
-    Returns ``(value, None)`` or ``(None, error_sentence)``. A capture cut
-    at the binding cap (``truncated_at``) names the size and the cap in the
-    error, so a too-large fenced JSON reads as a size problem, not a
-    missing output.
+    block carries the port), then the answer's terminal bare JSON object
+    (``_terminal_json_object``), then falls back to parsing the whole
+    answer. The output-name requirement is the same for every shape: only
+    an object that contains the port binds, so widening the accepted
+    shapes never widens the contract. Returns ``(value, None)`` or
+    ``(None, error_sentence)``. A capture cut at the binding cap
+    (``truncated_at``) names the size and the cap in the error, so a
+    too-large fenced JSON reads as a size problem, not a missing output.
     """
     candidates: list[str] = list(reversed(_FENCED_JSON_RE.findall(answer)))
+    terminal = _terminal_json_object(answer)
+    if terminal is not None:
+        candidates.append(terminal)
     candidates.append(answer.strip())
     for candidate in candidates:
         try:
@@ -5352,8 +5436,9 @@ the cap, fails to capture, and fails the producing state through its
   source that offers no value is not a value, so the dependent that
   declared the input optional proceeds). A state's own declared outputs
   capture from its settle's full answer: a declared port that binds no
-  value — no parseable fenced JSON for it, or a payload past the
-  executor's capture cap — is retried once and then FAILS the producing
+  value — no parseable JSON for it (a fenced ```json block, or a bare
+  JSON object ending the answer), or a payload past the executor's
+  capture cap — is retried once and then FAILS the producing
   entry as a task failure (`retries`, then `failure_policy`, apply, and
   the answer stays preserved under `needs_verify`), so a valueless
   settle never reaches a dependent's bind. A required self-input is
@@ -5655,10 +5740,12 @@ watched = await rlm.factory.watch(result["run_id"], 30)
   admissions); the default `escalate` policy pauses
   instead of failing, so read `status` (or the notice) before resuming.
 - Outputs bind from the child's full final answer (the collect envelope
-  carries it; the executor caps its own capture at 8,192 characters): a
-  fenced json output block binds whole as long as it fits that cap, so
-  keep declared outputs compact — the rosters and ledger previews stay
-  ~160 characters — and let the full answer live in the child's session.
+  carries it; the executor caps its own capture at 65,536 characters,
+  the same bound the daemon puts on the envelope's answer text): a
+  fenced json output block binds whole as long as it fits that cap (a
+  bare JSON object that ends the answer binds too), so keep declared
+  outputs compact — the rosters and ledger previews stay ~160 characters
+  — and let the full answer live in the child's session.
 - Run registries live in kernel memory: a kernel restart loses `status`
   for old runs, but the children keep running under the supervisor
   (`rlm.list_subagents` sees them). Stop runs before restarting, or

@@ -1,8 +1,8 @@
 //! The `rlm.*` kernel host-request bridge: wire validation, the child-session
 //! host seam, and handler registration for `rlm.spawn` (`rlm.run`),
 //! `rlm.create_session`, `rlm.find_models`, `rlm.list_subagents`,
-//! `rlm.collect`, `rlm.progress.note`, `rlm.delete_subagent`, and
-//! `rlm.rename`.
+//! `rlm.collect`, `rlm.progress.note`, `rlm.delete_subagent`,
+//! `rlm.rename`, and `rlm.session.messages`.
 //!
 //! Wire contract: the Python side (`rlm/__init__.py`) sends typed requests and
 //! parses strict `snake_case` replies. Pure normalization lives in
@@ -143,6 +143,8 @@ pub struct RlmSpawnRequest {
     pub model: Option<String>,
     /// Validated thinking level; the host checks model support.
     pub thinking: Option<String>,
+    /// Working directory; the host resolves relative paths against the session cwd.
+    pub cwd: Option<String>,
     /// The parent's in-flight turn request the spawn anchors to (TS
     /// `spawnedByRequestId`): `None` for a spawn outside an active run.
     pub spawned_by_request_id: Option<String>,
@@ -191,6 +193,18 @@ pub trait RlmSubagentHost: Send + Sync {
     /// Rename the current session (`session_id` absent) or one direct
     /// child (TS `rlm.rename`); answers the applied name.
     fn rename(&self, name: String, session_id: Option<String>) -> RlmHostFuture<String>;
+    /// One slice of the current session's display transcript
+    /// (`rlm.session.messages`): `rows[start:][:limit]` over the rows whose role
+    /// matches a `roles` glob, as `{messages: [{index, id, message}], total}`.
+    /// Only the daemon keeps that transcript.
+    fn session_messages(
+        &self,
+        _start: i64,
+        _limit: u64,
+        _roles: Vec<String>,
+    ) -> RlmHostFuture<Value> {
+        Box::pin(async { anyhow::bail!("rlm.session.messages requires a daemon-backed session") })
+    }
 }
 
 /// Host behavior for sessions with no child runtime: truthful empties and the
@@ -526,6 +540,7 @@ pub fn register_rlm_host_handlers(handlers: &mut HostRequestHandlers, bridge: &A
     register_delete_subagent(handlers, bridge);
     register_collect(handlers, bridge);
     register_rename(handlers, bridge);
+    register_session_messages(handlers, bridge);
 }
 
 fn register_find_models(handlers: &mut HostRequestHandlers, bridge: &Arc<RlmHostBridge>) {
@@ -660,7 +675,7 @@ fn spawn_request_from_payload(prompt: &str, data: &Value) -> anyhow::Result<RlmS
     reject_unsupported_kwargs(
         &kwargs,
         OPERATION,
-        &["name", "model", "thinking", "factory"],
+        &["name", "model", "thinking", "cwd", "factory"],
     )?;
     let name = optional_string_kwarg(&kwargs, "name", OPERATION)?;
     let name = normalize_requested_rlm_subagent_session_name(name, OPERATION)?;
@@ -672,6 +687,7 @@ fn spawn_request_from_payload(prompt: &str, data: &Value) -> anyhow::Result<RlmS
     let thinking = optional_string_kwarg(&kwargs, "thinking", OPERATION)?;
     let thinking =
         normalize_requested_rlm_subagent_thinking_level(thinking, OPERATION)?.map(String::from);
+    let cwd = cwd_kwarg(&kwargs, OPERATION)?;
     let factory = match kwargs.get("factory") {
         None | Some(Value::Null) => None,
         Some(tag) => Some(serde_json::from_value(tag.clone()).map_err(|_| {
@@ -685,6 +701,7 @@ fn spawn_request_from_payload(prompt: &str, data: &Value) -> anyhow::Result<RlmS
         name,
         model,
         thinking,
+        cwd,
         spawned_by_request_id: None,
         factory,
     })
@@ -722,17 +739,7 @@ fn register_create_session(handlers: &mut HostRequestHandlers, bridge: &Arc<RlmH
                 let thinking =
                     normalize_requested_rlm_subagent_thinking_level(thinking, OPERATION)?
                         .map(String::from);
-                let cwd = match kwargs.get("cwd") {
-                    None => None,
-                    Some(Value::String(cwd)) => {
-                        let cwd = cwd.trim();
-                        if cwd.is_empty() {
-                            anyhow::bail!("rlm.create_session cwd must be a non-empty string");
-                        }
-                        Some(cwd.to_string())
-                    }
-                    Some(_) => anyhow::bail!("rlm.create_session cwd must be a non-empty string"),
-                };
+                let cwd = cwd_kwarg(&kwargs, OPERATION)?;
                 let handle = host
                     .create_session(RlmCreateSessionRequest {
                         prompt: prompt.to_string(),
@@ -869,6 +876,28 @@ fn register_rename(handlers: &mut HostRequestHandlers, bridge: &Arc<RlmHostBridg
     );
 }
 
+fn register_session_messages(handlers: &mut HostRequestHandlers, bridge: &Arc<RlmHostBridge>) {
+    #[derive(serde::Deserialize)]
+    struct Request {
+        start: i64,
+        limit: u64,
+        roles: Vec<String>,
+    }
+    let host = Arc::clone(&bridge.host);
+    handlers.register(
+        "rlm.session.messages",
+        host_handler(move |payload| {
+            let host = Arc::clone(&host);
+            Box::pin(async move {
+                let request: Request = serde_json::from_value(payload.data.clone())
+                    .map_err(|error| anyhow::anyhow!("rlm.session.messages is invalid: {error}"))?;
+                host.session_messages(request.start, request.limit, request.roles)
+                    .await
+            })
+        }),
+    );
+}
+
 /// Present-but-non-string kwargs fail like the TS normalizers do.
 fn optional_string_kwarg<'a>(
     kwargs: &'a Map<String, Value>,
@@ -879,6 +908,14 @@ fn optional_string_kwarg<'a>(
         None | Some(Value::Null) => Ok(None),
         Some(Value::String(value)) => Ok(Some(value)),
         Some(_) => anyhow::bail!("{operation} {key} must be a string"),
+    }
+}
+
+fn cwd_kwarg(kwargs: &Map<String, Value>, operation: &str) -> anyhow::Result<Option<String>> {
+    match kwargs.get("cwd") {
+        None => Ok(None),
+        Some(Value::String(cwd)) if !cwd.trim().is_empty() => Ok(Some(cwd.trim().to_string())),
+        Some(_) => anyhow::bail!("{operation} cwd must be a non-empty string"),
     }
 }
 
@@ -1331,7 +1368,7 @@ mod tests {
                 "type": "rlm.run",
                 "prompt": "ship the lane",
                 "kwargs": {
-                    "name": "worker", "model": "p/m", "thinking": "High",
+                    "name": "worker", "model": "p/m", "thinking": "High", "cwd": "lanes/a",
                     "factory": { "runId": "r1", "specId": "sw", "stateId": "build" },
                 }
             }),
@@ -1353,6 +1390,7 @@ mod tests {
         assert_eq!(requests[0].name.as_deref(), Some("worker"));
         assert_eq!(requests[0].model.as_deref(), Some("p/m"));
         assert_eq!(requests[0].thinking.as_deref(), Some("high"));
+        assert_eq!(requests[0].cwd.as_deref(), Some("lanes/a"));
         assert_eq!(
             requests[0].factory,
             Some(RlmFactoryTag {

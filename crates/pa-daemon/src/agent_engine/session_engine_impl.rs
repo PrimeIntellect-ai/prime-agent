@@ -436,22 +436,23 @@ impl SessionEngine for AgentSessionEngine {
         let Ok(model) = self.resolve_model() else {
             return false;
         };
+        self.rebuild_request_auth_registry();
         {
-            // The switch's resolve-and-install serializes with `/reload`'s
-            // live-input refresh (the failover callbacks' fence): a reload
-            // landing between this resolution and the slot write must not
-            // be clobbered by the switch's older pair.
+            // The switch's slot install serializes with the other slot
+            // writers' fence (the failover callbacks take the same lock),
+            // so a mid-switch turn never sees a half-swapped target.
             let _reload_serialized = self
                 .reload_lock
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            let (api_key, headers) = self.resolve_request_key_and_headers(&model);
             let mut target = self.provider_target.write().expect("provider target lock");
+            // The daemon's stream re-resolves request auth per provider
+            // call; the slot's auth half is write-only here.
             *target = Some(ProviderTarget {
                 service_tier: *self.service_tier.read().expect("service tier lock"),
-                api_key,
+                api_key: None,
                 model: model.clone(),
-                headers,
+                headers: None,
             });
         }
         let session = self.session.blocking_lock();
@@ -609,6 +610,12 @@ impl SessionEngine for AgentSessionEngine {
         }
     }
 
+    fn set_auto_compaction_enabled(&self, enabled: bool) {
+        if let Some(core) = self.session.blocking_lock().as_deref() {
+            core.session.set_auto_compaction_enabled(enabled);
+        }
+    }
+
     fn run_compaction(
         &self,
         request: CompactionRequest,
@@ -630,7 +637,7 @@ impl SessionEngine for AgentSessionEngine {
         let custom_instructions = request.custom_instructions;
         // The live target's key: the config key is the startup snapshot and
         // goes stale with provider switches.
-        let api_key = self.resolve_request_api_key(&model);
+        let (model, api_key) = self.resolve_request_target(model);
         let run = async {
             // The lock covers the clone only; the summarizer call below must not ride it.
             let session = self.session.lock().await.clone();
@@ -717,7 +724,7 @@ impl SessionEngine for AgentSessionEngine {
                 }
             }
         };
-        let api_key = self.resolve_request_api_key(&model);
+        let (model, api_key) = self.resolve_request_target(model);
         let settings =
             pa_core::settings::SettingsManager::create(self.cwd(), &self.config.agent_dir);
         let reserve_tokens = settings
@@ -866,6 +873,8 @@ impl SessionEngine for AgentSessionEngine {
         // This session's own depth gates the kernel `refine.*` host requests (depth-0 only).
         self.rlm_depth
             .store(identity.rlm_depth, std::sync::atomic::Ordering::Relaxed);
+        self.factory_child
+            .store(identity.factory_child, std::sync::atomic::Ordering::Relaxed);
         if let Some(thinking) = &identity.thinking {
             pa_ai::models::thinking_level_from_str(thinking)
                 .ok_or_else(|| anyhow::anyhow!("unknown thinking level \"{thinking}\""))?;
@@ -1007,13 +1016,13 @@ impl SessionEngine for AgentSessionEngine {
         // and the ledger records nothing. The engine build always wires
         // it; no fallback to the agent's own fn, which would leak the
         // id-carrying wrapper into the side call.
-        let side_stream_fn = {
-            let guard = self.session.blocking_lock();
-            guard
-                .as_deref()
-                .and_then(|engine| engine.session.side_question_stream_fn())
-        };
-        let Some(side_stream_fn) = side_stream_fn else {
+        // The run bills the engine it started on: a replace during the run must
+        // not move the bill to the replacement.
+        let built = self.session.blocking_lock().clone();
+        let side_stream_fn = built
+            .as_deref()
+            .and_then(|engine| engine.session.side_question_stream_fn());
+        let (Some(built), Some(side_stream_fn)) = (built, side_stream_fn) else {
             return SideQuestionOutcome::Failed {
                 answer: String::new(),
                 error: "Select a model before asking a side question".to_string(),
@@ -1030,6 +1039,9 @@ impl SessionEngine for AgentSessionEngine {
                     signal,
                     sink,
                 ));
+        // The answer never enters the history, but the run's model calls bill the session.
+        self.runtime
+            .block_on(built.session.record_model_usage(result.usage.clone()));
         match result.status {
             pa_core::session_engine::side_question::SideQuestionStatus::Complete => {
                 SideQuestionOutcome::Complete {
@@ -1235,7 +1247,7 @@ impl SessionEngine for AgentSessionEngine {
     ) -> anyhow::Result<Value> {
         let model = self.resolve_model()?;
         self.ensure_core_session(&model)?;
-        let api_key = self.resolve_request_api_key(&model);
+        let (model, api_key) = self.resolve_request_target(model);
         let global_harness_dir = self.config.agent_dir.clone();
         // The lock covers the clone only; the model call below must not ride it.
         let core = self

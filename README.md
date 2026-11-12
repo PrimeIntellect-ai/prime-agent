@@ -61,7 +61,7 @@ Prime Agent combines a persistent Python control environment with durable harnes
 - **Everything is programmatic:** a persistent Python REPL is the built-in model tool; file operations, shell commands, tool use, subagents, and context management happen through code.
 - **Subagents are built in:** `rlm.spawn(...)` spawns real child agents for parallel or background work and returns their results programmatically.
 - **The harness can improve:** `/refine` reviews the current trajectory and can apply small, evidence-backed updates to supplemental harness state. It never rewrites the immutable base system prompt, and recorded snapshots support rollback.
-- **Skills are executable:** skills are importable Python packages, and the built-in skill creator can turn recurring workflows into project or personal skills.
+- **Skills can be executable:** Python skills in your user configuration are imported into the kernel; repository skills provide Markdown instructions without automatic code execution.
 - **Sessions run in the background:** daemon-backed agents keep running when the terminal disconnects and can be reattached later.
 - **Agents communicate directly:** running agents can exchange messages and orchestrate one another without routing everything through the user.
 - **Long tasks keep moving:** automatic compaction, persistent goals, heartbeats, schedules, autonomous mode, and retained subagents preserve progress across turns and terminal sessions.
@@ -71,6 +71,14 @@ Prime Agent combines a persistent Python control environment with durable harnes
 Connect Slack from `/mcp` or run `/mcp login slack` inside Prime Agent to search
 your workspace and use Slack tools. See the [Slack connector guide](docs/slack-mcp.md)
 for OAuth setup and troubleshooting.
+
+## Google Drive and Google Sheets
+
+Connect Google's official Drive and Sheets MCP servers with your own Google
+OAuth client: add them to `mcpServers` with `clientId`, `clientSecret`,
+`callbackPort`, and `scopes`, then run `/mcp login <name>`. See the
+[Google Drive and Google Sheets guide](docs/google-workspace-mcp.md) for the
+Google Cloud setup and the tool mapping.
 
 ## Clipboard over SSH and tmux
 

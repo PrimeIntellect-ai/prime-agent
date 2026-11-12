@@ -303,6 +303,10 @@ impl Worker {
     /// TS dispatch handlers that call `rebindCronJobsToState` after the
     /// runtime call.
     pub(crate) async fn refresh_replaced_session_state(&self) {
+        // The teardown closed the retired session; its successor starts live.
+        if let Some(agent_engine) = &self.agent_engine {
+            agent_engine.clear_session_closed();
+        }
         let (rlm_depth, summary, child_script) = {
             let (mut core, inputs) = self.summary_inputs();
             // The moved-to file's persisted depth wins (the replacement
@@ -336,6 +340,7 @@ impl Worker {
                 child_script,
                 // A TS replacement runtime has no semantic spawn.
                 semantic_spawn: None,
+                factory_child: false,
             }) {
             Ok(()) => self.reseed_rlm_children().await,
             Err(error) => eprintln!("pa-daemon: replacement identity rebind failed: {error:#}"),

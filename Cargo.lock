@@ -1441,7 +1441,7 @@ checksum = "7c87def4c32ab89d880effc9e097653c8da5d6ef28e6b539d313baaacfbafcbe"
 
 [[package]]
 name = "pa-agent"
-version = "0.10.2"
+version = "0.10.3"
 dependencies = [
  "anyhow",
  "serde",
@@ -1452,7 +1452,7 @@ dependencies = [
 
 [[package]]
 name = "pa-ai"
-version = "0.10.2"
+version = "0.10.3"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -1487,7 +1487,7 @@ dependencies = [
 
 [[package]]
 name = "pa-cli"
-version = "0.10.2"
+version = "0.10.3"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -1517,7 +1517,7 @@ dependencies = [
 
 [[package]]
 name = "pa-core"
-version = "0.10.2"
+version = "0.10.3"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -1526,7 +1526,6 @@ dependencies = [
  "futures",
  "getrandom 0.3.4",
  "globset",
- "hmac",
  "ignore",
  "libc",
  "nix",
@@ -1557,7 +1556,7 @@ dependencies = [
 
 [[package]]
 name = "pa-daemon"
-version = "0.10.2"
+version = "0.10.3"
 dependencies = [
  "anyhow",
  "filetime",
@@ -1585,7 +1584,7 @@ dependencies = [
 
 [[package]]
 name = "pa-models"
-version = "0.10.2"
+version = "0.10.3"
 dependencies = [
  "hex",
  "hmac",
@@ -1605,7 +1604,7 @@ dependencies = [
 
 [[package]]
 name = "pa-perf"
-version = "0.10.2"
+version = "0.10.3"
 dependencies = [
  "anyhow",
  "clap",
@@ -1621,11 +1620,11 @@ dependencies = [
 
 [[package]]
 name = "pa-telemetry"
-version = "0.10.2"
+version = "0.10.3"
 dependencies = [
  "anyhow",
  "reqwest",
- "rustix 1.1.4",
+ "rustix 1.1.6",
  "serde",
  "serde_json",
  "tempfile",
@@ -1636,7 +1635,7 @@ dependencies = [
 
 [[package]]
 name = "pa-tui"
-version = "0.10.2"
+version = "0.10.3"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -1664,7 +1663,7 @@ dependencies = [
 
 [[package]]
 name = "pa-types"
-version = "0.10.2"
+version = "0.10.3"
 dependencies = [
  "anyhow",
  "libc",
@@ -2158,9 +2157,9 @@ dependencies = [
 
 [[package]]
 name = "rustix"
-version = "1.1.4"
+version = "1.1.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b6fe4565b9518b83ef4f91bb47ce29620ca828bd32cb7e408f0062e9930ba190"
+checksum = "e5e76742e5294153d4dde1207dbec5bdd81eef6fabdc0d2118babadabfd858aa"
 dependencies = [
  "bitflags",
  "errno",
@@ -2572,7 +2571,7 @@ dependencies = [
  "fastrand",
  "getrandom 0.4.3",
  "once_cell",
- "rustix 1.1.4",
+ "rustix 1.1.6",
  "windows-sys 0.52.0",
 ]
 
@@ -3377,7 +3376,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32e45ad4206f6d2479085147f02bc2ef834ac85886624a23575ae137c8aa8156"
 dependencies = [
  "libc",
- "rustix 1.1.4",
+ "rustix 1.1.6",
 ]
 
 [[package]]
