@@ -3,8 +3,8 @@
 
 use super::{
     describe_failure, lock, Arc, CaptureFreshness, Duration, ExecuteOptions, ExecuteStatus, Inner,
-    Instant, KernelState, ManifestStat, MemoSlot, Request, RestoreResult, RestoredNamespaceSkip,
-    SnapshotResult, SnapshotSkip, Value, DEFAULT_SNAPSHOT_DEBOUNCE_MS, DEFAULT_SNAPSHOT_MAX_BYTES,
+    Instant, ManifestStat, MemoSlot, Request, RestoreResult, RestoredNamespaceSkip, SnapshotResult,
+    SnapshotSkip, Value, DEFAULT_SNAPSHOT_DEBOUNCE_MS, DEFAULT_SNAPSHOT_MAX_BYTES,
     DEFAULT_SNAPSHOT_MAX_VARIABLE_BYTES, REPAIR_STEP_TIMEOUT_MS, RESTORE_EXECUTION_TIMEOUT_MS,
     SNAPSHOT_EXECUTION_TIMEOUT_MS,
 };
@@ -26,7 +26,7 @@ impl Inner {
         prune_oversized: bool,
     ) -> Option<SnapshotResult> {
         let cfg = self.options.snapshot.clone()?;
-        if !self.is_running_state() {
+        if !lock(&self.guarded).lifecycle.is_running() {
             return None;
         }
         // While the namespace provably cannot have changed, a fresh capture would reproduce the
@@ -110,10 +110,6 @@ impl Inner {
                 None
             }
         }
-    }
-
-    fn is_running_state(&self) -> bool {
-        lock(&self.guarded).state == KernelState::Running
     }
 
     /// The recurring capture-freshness skip (see `CaptureFreshness`):
@@ -415,7 +411,7 @@ impl Inner {
     }
 
     async fn run_snapshot_flush_for_dispose(self: &Arc<Self>) {
-        if self.options.snapshot.is_none() || !self.is_running_state() {
+        if self.options.snapshot.is_none() || !lock(&self.guarded).lifecycle.is_running() {
             return;
         }
         // A kernel that never (fully) restored the saved namespace must not
