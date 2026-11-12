@@ -27,6 +27,11 @@ pub const INBOX_READ_REQUEST_TYPE: &str = "rlm.inbox.read";
 pub const INBOX_COUNT_REQUEST_TYPE: &str = "rlm.inbox.count";
 /// The journal file one session's inbox appends under its session dir.
 pub const INBOX_JOURNAL_FILE: &str = "inbox.jsonl";
+/// The notice clause while the journal's last write failed: the inbox
+/// stays memory-only until a write succeeds again (nano-rlm's
+/// `inbox_error` visibility — the notice names the degradation).
+pub const INBOX_PERSISTENCE_ERROR_CLAUSE: &str =
+    "(inbox persistence failed; messages are memory-only)";
 
 /// The `bash.completed` notice class label.
 pub const INBOX_CLASS_BASH_DONE: &str = "bash-done";
@@ -166,6 +171,13 @@ struct InboxState {
 pub struct SessionInbox {
     journal: Option<PathBuf>,
     state: Mutex<InboxState>,
+    /// The journal's degradation, surfaced in the notice text (the
+    /// [`INBOX_PERSISTENCE_ERROR_CLAUSE`] rides it): a failed append sets
+    /// it and only a full rewrite that re-persists the pending set clears
+    /// it (an unreadable journal never rewrites, so its instance keeps
+    /// the slot). `append_journal` owns it; a separate slot because it
+    /// runs under the state lock.
+    persistence_error: Mutex<Option<String>>,
     /// The daemon's post-drain seam (set once at session build): every
     /// successful read runs it so the queued wake rows can retract or
     /// re-render over what is left.
@@ -231,9 +243,19 @@ impl SessionInbox {
         // memory-only instance detaches from the path entirely (the
         // open's compaction is the one write an unreadable journal
         // would have taken, and it is skipped the same way).
+        // The detached instance can never persist, so the degradation is
+        // named from the first notice on (only a full rewrite clears the
+        // slot, and an unreadable journal never rewrites).
+        let unreadable_error = (!readable).then(|| {
+            journal.as_ref().map_or_else(
+                || "inbox journal unreadable".to_string(),
+                |path| format!("{}: unreadable", path.display()),
+            )
+        });
         let inbox = Self {
             journal: if readable { journal } else { None },
             state: Mutex::new(InboxState { messages, next_id }),
+            persistence_error: Mutex::new(unreadable_error),
             read_hook: Mutex::new(None),
         };
         if readable {
@@ -291,7 +313,32 @@ impl SessionInbox {
         Self {
             journal: None,
             state: Mutex::new(InboxState::default()),
+            persistence_error: Mutex::new(None),
             read_hook: Mutex::new(None),
+        }
+    }
+
+    /// The journal's last write failure, while the inbox is memory-only:
+    /// the notice texts carry the [`INBOX_PERSISTENCE_ERROR_CLAUSE`]
+    /// until a write succeeds again.
+    #[must_use]
+    pub fn persistence_error(&self) -> Option<String> {
+        self.persistence_error
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    /// One notice text with the degradation named while the journal's
+    /// last write failed (the arrival, reminder, and withdrawal
+    /// re-render sites share this decoration, so a re-rendered queued row
+    /// never loses the clause its row was queued with).
+    #[must_use]
+    pub fn with_persistence_error_clause(&self, text: String) -> String {
+        if self.persistence_error().is_some() {
+            format!("{text} {INBOX_PERSISTENCE_ERROR_CLAUSE}")
+        } else {
+            text
         }
     }
 
@@ -506,12 +553,25 @@ impl SessionInbox {
                 written
             });
         // Journal failures degrade durability only: the in-process
-        // surface stays truthful.
-        if let Err(error) = write {
-            eprintln!(
-                "pa-daemon: inbox journal append failed ({}): {error}",
-                journal.display()
-            );
+        // surface stays truthful, and the error slot names the
+        // degradation in the notices until a full rewrite re-persists
+        // the pending set. A successful append never clears it: the
+        // journal is append-only, so a later write does not persist the
+        // records whose appends failed, and the clause must not vanish
+        // while those unread rows can still be lost on restart.
+        match write {
+            Ok(()) => {}
+            Err(error) => {
+                eprintln!(
+                    "pa-daemon: inbox journal append failed ({}): {error}",
+                    journal.display()
+                );
+                *self
+                    .persistence_error
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                    Some(format!("{}: {error}", journal.display()));
+            }
         }
     }
 
@@ -548,11 +608,27 @@ impl SessionInbox {
             &lines,
             crate::settings::storage::AtomicWriteOptions { fsync: true },
         );
-        if let Err(error) = rewrite {
-            eprintln!(
-                "pa-daemon: inbox journal compaction failed ({}): {error}",
-                journal.display()
-            );
+        match rewrite {
+            Ok(()) => {
+                // The rewrite re-persisted every pending message: the
+                // degradation epoch is over (the only append-only-safe
+                // clear).
+                *self
+                    .persistence_error
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+            }
+            Err(error) => {
+                eprintln!(
+                    "pa-daemon: inbox journal compaction failed ({}): {error}",
+                    journal.display()
+                );
+                *self
+                    .persistence_error
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                    Some(format!("{}: {error}", journal.display()));
+            }
         }
     }
 }
@@ -928,6 +1004,62 @@ mod tests {
         );
     }
 
+    /// A journal write failure degrades to memory-only and says so: the
+    /// error slot holds the failure across later successful appends too
+    /// (the append-only journal never re-persists the failed records)
+    /// until a full rewrite re-persists the pending set.
+    #[cfg(unix)]
+    #[test]
+    fn a_journal_write_failure_surfaces_until_a_rewrite() {
+        let dir = tempfile::tempdir().unwrap();
+        let journal = dir.path().join(INBOX_JOURNAL_FILE);
+        let inbox = SessionInbox::open(Some(dir.path()));
+        inbox.push(
+            notice("sleep 1", INBOX_CLASS_BASH_DONE, "first", json!({"pid": 1})),
+            1_000,
+        );
+        assert_eq!(inbox.persistence_error(), None, "the first write succeeded");
+        // A directory in the journal's place fails the append even when
+        // the tests run as root (chmod alone does not).
+        std::fs::remove_file(&journal).unwrap();
+        std::fs::create_dir(&journal).unwrap();
+        inbox.push(
+            notice(
+                "sleep 2",
+                INBOX_CLASS_BASH_DONE,
+                "second",
+                json!({"pid": 2}),
+            ),
+            2_000,
+        );
+        let error = inbox
+            .persistence_error()
+            .expect("the failed append surfaced");
+        assert!(
+            error.contains("inbox.jsonl"),
+            "the error names the journal: {error}"
+        );
+        // The in-process surface stays truthful: both messages wait.
+        assert_eq!(inbox.count().0, 2);
+        std::fs::remove_dir(&journal).unwrap();
+        inbox.push(
+            notice("sleep 3", INBOX_CLASS_BASH_DONE, "third", json!({"pid": 3})),
+            3_000,
+        );
+        assert!(
+            inbox.persistence_error().is_some(),
+            "a later append never re-persists the failed record: the clause stays"
+        );
+        // The next full rewrite re-persists every pending message: the
+        // only append-only-safe clear.
+        inbox.compact_journal();
+        assert_eq!(
+            inbox.persistence_error(),
+            None,
+            "the rewrite re-persisted the pending set"
+        );
+    }
+
     /// The journal appends one line per push and drain, and an open
     /// replays the messages in order with the id counter caught up.
     #[test]
@@ -1050,6 +1182,10 @@ mod tests {
         std::fs::create_dir(&journal).unwrap();
         let inbox = SessionInbox::open(Some(dir.path()));
         assert_eq!(inbox.count(), (0, None, BTreeMap::new()));
+        assert!(
+            inbox.persistence_error().is_some(),
+            "the unreadable journal names its degradation from the start"
+        );
         assert!(journal.is_dir(), "the unread journal is left untouched");
         assert!(
             !std::fs::read_dir(dir.path())
@@ -1078,6 +1214,10 @@ mod tests {
         std::os::unix::fs::symlink(&journal, &journal).unwrap();
         let inbox = SessionInbox::open(Some(dir.path()));
         assert_eq!(inbox.count().0, 0, "the unreadable journal starts empty");
+        assert!(
+            inbox.persistence_error().is_some(),
+            "the detached instance keeps the unreadable degradation"
+        );
         // The cause clears: the path becomes a real journal with one
         // unread record the instance never saw.
         std::fs::remove_file(&journal).unwrap();
@@ -1398,6 +1538,7 @@ mod tests {
         let store = SessionInbox {
             journal: Some(journal),
             state: Mutex::new(InboxState::default()),
+            persistence_error: Mutex::new(None),
             read_hook: Mutex::new(None),
         };
         store.push(

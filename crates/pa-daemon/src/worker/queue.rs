@@ -686,6 +686,10 @@ pub(crate) fn admit_inbox_notice(
         } else {
             lane
         };
+        // The journal-failure clause: a memory-only inbox says so in the
+        // notice that wakes (the degradation is agent-visible, not just
+        // a daemon-log line).
+        let text = inbox.with_persistence_error_clause(text);
         // The replacement pattern the scheduler's queue keys use: the
         // fresh row replaces the coalesced one instead of stacking.
         core_guard
@@ -775,6 +779,7 @@ pub(crate) fn refresh_inbox_wake_rows_locked(
         changed |= core_guard.steering.len() + core_guard.follow_up.len() != before;
     } else {
         let (preview, text) = pa_core::session_engine::inbox::arrival_notice(&batch, count);
+        let text = inbox.with_persistence_error_clause(text);
         let core_guard = &mut *core_guard;
         let (steering, follow_up) = (&mut core_guard.steering, &mut core_guard.follow_up);
         for item in steering
@@ -799,7 +804,8 @@ pub(crate) fn refresh_inbox_wake_rows_locked(
             .retain(|item| item.queue_key.as_deref() != Some(INBOX_REMINDER_QUEUE_KEY));
         changed |= core_guard.steering.len() + core_guard.follow_up.len() != before;
     } else {
-        let reminder = pa_core::session_engine::inbox::reminder_notice(count);
+        let reminder = inbox
+            .with_persistence_error_clause(pa_core::session_engine::inbox::reminder_notice(count));
         let core_guard = &mut *core_guard;
         let (steering, follow_up) = (&mut core_guard.steering, &mut core_guard.follow_up);
         for item in steering
@@ -848,7 +854,8 @@ pub(crate) fn admit_inbox_reminder(
     if count == 0 {
         return;
     }
-    let message = pa_core::session_engine::inbox::reminder_notice(count);
+    let message =
+        inbox.with_persistence_error_clause(pa_core::session_engine::inbox::reminder_notice(count));
     let (policy, queue_visible) = if core_guard.busy {
         (TurnPolicy::Queued, true)
     } else {
@@ -979,6 +986,7 @@ pub(crate) fn withdraw_bash_completion_notice(
                 {
                     let (preview, text) =
                         pa_core::session_engine::inbox::arrival_notice(&batch, count);
+                    let text = inbox.with_persistence_error_clause(text);
                     for item in &mut core_guard.steering {
                         if item.queue_key.as_deref() == Some(INBOX_ARRIVAL_QUEUE_KEY) {
                             item.message.clone_from(&text);
@@ -995,7 +1003,9 @@ pub(crate) fn withdraw_bash_completion_notice(
                 }
                 // A queued reminder repeats the count the withdrawal may
                 // have changed: re-render it with the live count.
-                let reminder = pa_core::session_engine::inbox::reminder_notice(count);
+                let reminder = inbox.with_persistence_error_clause(
+                    pa_core::session_engine::inbox::reminder_notice(count),
+                );
                 for item in &mut core_guard.steering {
                     if item.queue_key.as_deref() == Some(INBOX_REMINDER_QUEUE_KEY)
                         && item.message != reminder
