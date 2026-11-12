@@ -605,7 +605,7 @@ pub(crate) const INBOX_REMINDER_QUEUE_KEY: &str = "inbox:reminder";
 /// key from both lanes first, so a batch never splits. Answers the
 /// capacity refusal when the gate rejects the arrival (the sink passes
 /// a permissive gate).
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)] // the admission's gates and seams ride as separate handles (lock-order reasons)
 pub(crate) fn admit_inbox_notice(
     recovery: &std::sync::Mutex<Option<WorkerRecoveryJournal>>,
     core: &Arc<Mutex<SessionCore>>,
@@ -620,7 +620,7 @@ pub(crate) fn admit_inbox_notice(
         &std::collections::VecDeque<QueuedItem>,
     ) -> Option<String>,
     engine: Option<&crate::agent_engine::AgentSessionEngine>,
-) -> Option<String> {
+) -> Result<bool, String> {
     // The busy sample, the batch, and the push share ONE critical
     // section, like the notice admission below: a turn starting between
     // them would queue an invisible row for a busy session.
@@ -629,13 +629,13 @@ pub(crate) fn admit_inbox_notice(
     // (the close's clear wipes the lanes); its message already made the
     // journal durable, which is honest — it did arrive.
     if session_is_closed() {
-        return Some("Target session is closed".to_string());
+        return Err("Target session is closed".to_string());
     }
     // The capacity gate, re-sampled under this same lock with the lane
     // lengths it reads here: concurrent arrivals can never pass one
     // stale sample together.
     if let Some(error) = capacity_error(&core_guard.steering, &core_guard.follow_up) {
-        return Some(error);
+        return Err(error);
     }
     // The append is atomic with the session swap: the route-fetched store
     // is identity-checked under the slot's own mutex (push_to_live_inbox),
@@ -646,12 +646,16 @@ pub(crate) fn admit_inbox_notice(
         Some(engine) => {
             match engine.push_to_live_inbox(inbox, notice, pa_core::autonomous::now_millis()) {
                 Some(message) => message,
-                None => return Some("Target session is closed".to_string()),
+                None => return Err("Target session is closed".to_string()),
             }
         }
         None => inbox.push(notice, pa_core::autonomous::now_millis()),
     };
-    let (policy, queue_visible) = if core_guard.busy {
+    // The admission's own busy sample: the receipt's `deliveryStatus`
+    // follows THIS read (one critical section), never an earlier sample
+    // taken outside the lock.
+    let queued = core_guard.busy;
+    let (policy, queue_visible) = if queued {
         (TurnPolicy::Queued, true)
     } else {
         (TurnPolicy::Injected, false)
@@ -726,7 +730,7 @@ pub(crate) fn admit_inbox_notice(
         },
     );
     work_notify.notify_one();
-    None
+    Ok(queued)
 }
 
 /// Retract or re-render the queued inbox wake rows over the live store:
