@@ -194,6 +194,22 @@ impl Worker {
                 }
             }
         }
+        // The routed lifecycle class: a minted child-status row lands in
+        // the session's durable inbox (class `child-exited`/`child-failed`)
+        // and ONE coalesced wake row replaces the loud follow-up turn —
+        // the same routing the kernel notices and agent messages take. A
+        // disabled inbox, an engine without a store, or a closed session
+        // falls back to the direct lane row below.
+        if let Some(row) = custom_message.as_ref() {
+            if self.route_child_status_notice(row, lane) {
+                let command = if lane == Lane::Steering {
+                    "steer"
+                } else {
+                    "follow_up"
+                };
+                return response_success(None, command, Some(json!({ "queued": true })));
+            }
+        }
         let mut core = self.core.lock().unwrap();
         let images = parse_prompt_images(payload);
         let item = QueuedItem {
@@ -238,6 +254,55 @@ impl Worker {
             "follow_up"
         };
         response_success(None, command, Some(json!({ "queued": true })))
+    }
+
+    /// Route one minted reserved child-status row into the session inbox
+    /// (the agent-lifecycle notification class) instead of parking its
+    /// full row: the notice becomes one durable inbox entry and one
+    /// coalesced wake row carries the arrival. Answers whether the row
+    /// routed; a non-reserved row, a disabled inbox, an engine without a
+    /// store, or a closed session answers `false` and the caller parks
+    /// the direct lane row.
+    fn route_child_status_notice(&self, row: &Value, lane: Lane) -> bool {
+        if !crate::child_status_notices::is_reserved_child_status_custom_type(row) {
+            return false;
+        }
+        let Some(engine) = self.agent_engine.as_ref() else {
+            return false;
+        };
+        if !crate::agent_inbox::inbox_enabled(&engine.cwd(), &self.config.agent_dir) {
+            return false;
+        }
+        let Some(fields) = pa_core::session_engine::inbox::child_status_notice_fields(row) else {
+            return false;
+        };
+        let Some(inbox) = engine.inbox() else {
+            return false;
+        };
+        let closed_engine = std::sync::Arc::clone(engine);
+        let closed = move || closed_engine.session_is_closed();
+        match admit_inbox_notice(
+            &self.recovery,
+            &self.core,
+            &self.work_notify,
+            &inbox,
+            &self.inbox_arrivals,
+            fields,
+            lane,
+            closed,
+            |_, _| None,
+            Some(engine.as_ref()),
+        ) {
+            Ok(_queued) => {
+                // The routed arrival is a lane change like any other: the
+                // refreshed strip must reach the clients (the projection
+                // recomputes under the emission lock so a concurrent read
+                // hook's newer copy is never overwritten).
+                let _ = crate::worker::emit_action_update_fresh(&self.core, &self.events);
+                true
+            }
+            Err(_) => false,
+        }
     }
 
     /// Agent-to-agent delivery: render the `[agent-message from ...]` prompt and queue

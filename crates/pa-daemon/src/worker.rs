@@ -800,6 +800,16 @@ impl Worker {
             std::sync::Arc::clone(&engine),
             Arc::clone(&core),
         );
+        // The scheduling seam: heartbeat fires route into the session's
+        // durable inbox (class `heartbeat`) instead of injecting the full
+        // delivery row, once the worker's engine exists.
+        if let Some(engine) = &agent_engine {
+            scheduled.set_inbox_seam(
+                std::sync::Arc::downgrade(engine),
+                std::sync::Arc::clone(&inbox_arrivals),
+                config.agent_dir.clone(),
+            );
+        }
         // The worker's post-drain inbox seam: every session build copies
         // it onto the freshly opened store, and the kernel's read handler
         // runs it so drained wake rows retract or re-render — and the

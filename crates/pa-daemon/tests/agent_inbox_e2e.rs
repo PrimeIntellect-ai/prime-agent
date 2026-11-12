@@ -564,9 +564,7 @@ fn machine_notices_inbox_coalesce_and_the_kill_switch_restores_steering() {
     let notice_at = delivered
         .iter()
         .position(|(text, _)| {
-            text.starts_with("[inbox ")
-                && text.contains("+2 arrived")
-                && text.contains("2 bash-done")
+            text.starts_with("[inbox ") && text.contains("2 new bash-done messages")
         })
         .unwrap_or_else(|| panic!("the coalesced short notice never steered: {delivered:?}"));
     let notice_text = delivered[notice_at].0.clone();
@@ -822,7 +820,7 @@ fn agent_messages_route_into_the_inbox_and_targeted_reads_pull_them_back() {
     );
     let notice_text = notices[0].0.clone();
     assert!(
-        notice_text.contains("+2 arrived")
+        notice_text.contains("2 new messages")
             && notice_text.contains("1 bash-done")
             && notice_text.contains("1 agent-message")
             && notice_text.contains("rlm.inbox.read()"),
@@ -915,6 +913,246 @@ fn agent_messages_route_into_the_inbox_and_targeted_reads_pull_them_back() {
 
     // Teardown: stop the session through the live supervisor so the
     // worker (and its kernel + sleepers) do not leak past the test.
+    client.request(
+        "k1",
+        &json!({ "type": "kill", "activeSessionId": active_id }),
+    );
+    drop(client);
+    drop(supervisor);
+}
+
+/// The child-lifecycle script: the parent spawns a worker through the
+/// kernel, the child finishes its task with a plain answer (no message
+/// back), the settle watcher routes its terminal notice into the
+/// parent's inbox, and the woken parent reads it.
+fn child_lifecycle_script(request: usize) -> Vec<String> {
+    match request {
+        0 => [
+            chunk(
+                &json!({
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [{
+                        "index": 0,
+                        "id": "call-child-1",
+                        "type": "function",
+                        "function": python_cell(
+                            "from rlm import spawn
+h = await spawn('finish the task without sending a message back', name='f20-worker')
+print('CHILD_SPAWNED ' + h.rlm_child_id)"
+                        )
+                    }]
+                }),
+                None,
+            ),
+            chunk(&json!({}), Some("tool_calls")),
+        ]
+        .to_vec(),
+        // Requests 1-2 race (the parent's spawning-turn continuation and
+        // the child's single answer): the same plain text fits both.
+        1 | 2 => [
+            chunk(&json!({"role": "assistant", "content": "ack"}), None),
+            chunk(&json!({}), Some("stop")),
+        ]
+        .to_vec(),
+        // The woken parent turn reads the lifecycle notice.
+        3 => [
+            chunk(
+                &json!({
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [{
+                        "index": 0,
+                        "id": "call-child-read",
+                        "type": "function",
+                        "function": python_cell(
+                            "from rlm import inbox
+msgs = await inbox.read()
+after = await inbox.count()
+entry = [(m.inbox_class, m.sender, m.meta.get('kind', '')) for m in msgs]
+print(('CHILD_NOTICE_READ', entry, after.count, msgs[0].text.split(chr(10))[0]))"
+                        )
+                    }]
+                }),
+                None,
+            ),
+            chunk(&json!({}), Some("tool_calls")),
+        ]
+        .to_vec(),
+        _ => [
+            chunk(
+                &json!({"role": "assistant", "content": "woken by the child-exit notice"}),
+                None,
+            ),
+            chunk(&json!({}), Some("stop")),
+        ]
+        .to_vec(),
+    }
+}
+
+/// The agent-lifecycle class: a settled child's terminal notice lands in
+/// the parent's durable inbox (class `child-exited`, sender = the child
+/// name, status in the metadata), ONE coalesced short notice wakes the
+/// parent, the read drains it, no full `rlm_child_terminal_notice` row
+/// steers, and the journal keeps the record.
+#[test]
+fn a_settled_child_lands_its_child_notice_in_the_parent_inbox() {
+    static NEXT_CHILD: AtomicUsize = AtomicUsize::new(0);
+    let root = tempfile::TempDir::new().expect("temp dir");
+    let dir = root.path().to_path_buf();
+    let agent_dir = dir.join("agent");
+    std::fs::create_dir_all(&agent_dir).expect("agent dir");
+    let socket = dir.join("daemon.sock");
+    let kernel_venv = dir.join("kernel-venv");
+    let url = spawn_mock_with(&NEXT_CHILD, child_lifecycle_script);
+    std::fs::write(
+        agent_dir.join("models.json"),
+        json!({
+            "providers": {
+                "prime-inference": {
+                    "api": "openai-completions",
+                    "baseUrl": url.to_string_lossy(),
+                    "apiKey": "sk-inbox",
+                    "models": [
+                        {
+                            "id": "mock-1",
+                            "name": "Mock 1",
+                            "api": "openai-completions",
+                            "contextWindow": 128_000,
+                            "maxTokens": 4096
+                        }
+                    ]
+                }
+            }
+        })
+        .to_string(),
+    )
+    .expect("write models.json");
+
+    let supervisor = spawn_daemon(&socket, &agent_dir, &kernel_venv);
+    let mut client = Client::connect(&socket);
+    let sessions = agent_dir.join("sessions");
+    std::fs::create_dir_all(&sessions).expect("sessions dir");
+    let created = client.request(
+        "c1",
+        &json!({
+            "type": "create",
+            "name": "child-notice-lane",
+            "config": {
+                "cwd": dir.to_string_lossy(),
+                "sessionDir": sessions.to_string_lossy(),
+                "provider": "prime-inference",
+                "model": "mock-1",
+            },
+        }),
+    );
+    assert_eq!(created["success"], true, "create failed: {created}");
+    let active_id = created["data"]["id"]
+        .as_str()
+        .or_else(|| created["data"]["activeSessionId"].as_str())
+        .expect("active session id")
+        .to_string();
+
+    // The spawning turn: the kernel cell admits a child that finishes
+    // without replying; its terminal notice then wakes the parent.
+    let turn = client.request(
+        "p1",
+        &json!({
+            "type": "prompt_and_wait",
+            "activeSessionId": active_id,
+            "message": "spawn a worker that finishes without replying, then finish",
+        }),
+    );
+    assert_eq!(turn["success"], true, "spawn turn failed: {turn}");
+    let _settled = wait_until(Duration::from_secs(180), || {
+        let messages = client.transcript(&active_id);
+        (messages.contains("CHILD_NOTICE_READ")
+            && messages.contains("woken by the child-exit notice"))
+        .then_some(messages)
+    });
+    let after_read = client.transcript(&active_id);
+    assert!(
+        after_read.contains("CHILD_SPAWNED sub-"),
+        "the spawn admission answered the handle: {after_read}"
+    );
+    assert!(
+        after_read.contains("('child-exited', 'f20-worker', 'completed_without_reply')"),
+        "the read returned the lifecycle entry (class, sender, kind): {after_read}"
+    );
+    assert!(
+        after_read.contains("[child-exited: no-reply child:f20-worker]"),
+        "the read returned the notice text: {after_read}"
+    );
+    assert!(
+        after_read.contains(", 0, '"),
+        "the read drained the record (count 0 after): {after_read}"
+    );
+
+    // The wake: ONE short coalesced notice steers, no full terminal row.
+    let rows = client.messages(&active_id);
+    let delivered = delivered_rows(&rows);
+    let notice_at = delivered
+        .iter()
+        .position(|(text, _)| text.starts_with("[inbox ") && text.contains("child-exited"))
+        .unwrap_or_else(|| panic!("the coalesced short notice never steered: {delivered:?}"));
+    let notice_text = delivered[notice_at].0.clone();
+    assert!(
+        notice_text.contains("1 new message (child-exited)"),
+        "the wake counts the class: {notice_text}"
+    );
+    let reply_at = delivered
+        .iter()
+        .position(|(text, _)| text == "woken by the child-exit notice")
+        .unwrap_or_else(|| panic!("the woken reply never landed: {delivered:?}"));
+    assert!(
+        notice_at < reply_at,
+        "the notice steers before the reply it woke: {notice_text}"
+    );
+    let full_rows = delivered
+        .iter()
+        .filter(|(_, row)| {
+            row.get("customType").and_then(Value::as_str) == Some("rlm_child_terminal_notice")
+        })
+        .count();
+    assert_eq!(
+        full_rows, 0,
+        "no full terminal row steers while the inbox is enabled: {delivered:?}"
+    );
+
+    // The durable journal under the session's artifact dir keeps the
+    // lifecycle record.
+    let session_file = sessions
+        .read_dir()
+        .expect("sessions dir readable")
+        .filter_map(std::result::Result::ok)
+        .map(|entry| entry.path())
+        .find(|path| path.extension().is_some_and(|ext| ext == "jsonl"))
+        .expect("the parent session file landed in the configured session dir");
+    let session_id = session_file
+        .file_stem()
+        .expect("session file stem")
+        .to_string_lossy()
+        .to_string();
+    let inbox_journal = session_file
+        .parent()
+        .and_then(Path::parent)
+        .expect("session file grandparent")
+        .join("session-artifacts")
+        .join(&session_id)
+        .join("inbox.jsonl");
+    let journal = std::fs::read_to_string(&inbox_journal)
+        .unwrap_or_else(|error| panic!("read {}: {error}", inbox_journal.display()));
+    assert!(
+        journal.contains("[child-exited: no-reply child:f20-worker]"),
+        "the journal holds the lifecycle record: {journal}"
+    );
+    assert!(
+        journal.contains("\"class\":\"child-exited\""),
+        "the journal names the class: {journal}"
+    );
+
+    // Teardown: stop the session through the live supervisor so the
+    // worker (and its kernel, child, and sleepers) do not leak.
     client.request(
         "k1",
         &json!({ "type": "kill", "activeSessionId": active_id }),

@@ -197,9 +197,9 @@ async fn busy_window_arrivals_coalesce_into_one_queued_row() {
     let (message, _preview, visible) = &rows[0];
     assert!(visible, "a busy session keeps a visible queued row");
     assert!(
-        message.contains("+3 arrived")
+        message.contains("3 new messages")
             && message.contains("2 bash-done, 1 factory-progress")
-            && message.contains("total 3"),
+            && message.contains("total waiting: 3"),
         "the row covers the whole busy window: {message}"
     );
     assert_eq!(inbox.count().0, 3);
@@ -747,6 +747,134 @@ fn faux_worker_with_inbox() -> (Arc<Worker>, Arc<SessionInbox>, std::path::PathB
         .expect("the faux engine")
         .set_inbox(std::sync::Arc::clone(&inbox));
     (worker, inbox, dir)
+}
+
+/// The wrapped wire row of one child-status notice (the daemon's
+/// reserved-kind delivery form).
+fn child_notice_wire(message: pa_types::session::CustomMessage) -> (String, serde_json::Value) {
+    let text = message.content.text();
+    let wire = serde_json::to_value(pa_types::session::AgentMessage::Custom(message)).unwrap();
+    (text, wire)
+}
+
+/// A minted child-status row routes into the durable inbox (the
+/// agent-lifecycle class): the message waits with its sender, ONE
+/// coalesced wake row replaces the loud full row, and the arrival is
+/// journal busy evidence.
+#[tokio::test]
+async fn a_minted_child_notice_routes_into_the_inbox() {
+    let (worker, inbox, dir) = faux_worker_with_inbox();
+    worker.dispatch("clear_queue", &json!({})).await;
+    let (text, wire) = child_notice_wire(
+        pa_core::session_engine::rlm_notices::create_rlm_child_failure_message(
+            "sub-9", "lane", "boom", 1_000,
+        ),
+    );
+    let nonce = crate::child_status_notices::mint();
+    let delivered = worker
+        .dispatch(
+            "follow_up",
+            &json!({
+                "message": text,
+                "customMessage": wire,
+                "rlmNoticeNonce": nonce,
+            }),
+        )
+        .await;
+    assert!(delivered.success, "the notice routes: {delivered:?}");
+    assert_eq!(delivered.command, "follow_up");
+    let (count, _, classes) = inbox.count();
+    assert_eq!(count, 1, "the message waits in the durable store");
+    assert_eq!(classes["child-failed"], 1);
+    let messages = inbox.drain();
+    assert_eq!(messages[0].sender.as_deref(), Some("lane"));
+    assert!(messages[0].text.contains("[child-failed child:lane]"));
+    assert_eq!(messages[0].meta["error"], "boom");
+    // The loud full row never parked: one short coalesced wake rides the
+    // requested lane, and the strip projection refreshed.
+    let rows = steering_rows(&worker);
+    assert!(
+        rows.is_empty(),
+        "the wake rides the follow-up lane: {rows:?}"
+    );
+    let follow_up: Vec<(String, Option<String>, bool)> = worker
+        .core
+        .lock()
+        .unwrap()
+        .follow_up
+        .iter()
+        .map(|item| {
+            (
+                item.message.clone(),
+                item.queue_key.clone(),
+                item.custom_message.is_some(),
+            )
+        })
+        .collect();
+    assert_eq!(follow_up.len(), 1, "one coalesced wake row: {follow_up:?}");
+    let (wake, queue_key, full_row) = &follow_up[0];
+    assert!(
+        wake.contains("1 new message (child-failed)"),
+        "the wake counts the class: {wake}"
+    );
+    assert_eq!(queue_key.as_deref(), Some(INBOX_ARRIVAL_QUEUE_KEY));
+    assert!(
+        !full_row,
+        "no full notice row rides the wake: {follow_up:?}"
+    );
+    // The arrival is journal busy evidence like every inbox admission.
+    assert!(
+        WorkerRecoveryJournal::read_interrupted(&worker.config.recovery_journal_path),
+        "the routed notice is live work"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// `agentInbox.enabled: false` keeps the minted child-status row direct:
+/// the full row parks on the follow-up lane and nothing lands in a store.
+#[tokio::test]
+async fn the_inbox_kill_switch_keeps_the_child_notice_row_direct() {
+    let (worker, inbox, dir) = faux_worker_with_inbox();
+    worker.dispatch("clear_queue", &json!({})).await;
+    std::fs::create_dir_all(&worker.config.agent_dir).unwrap();
+    std::fs::write(
+        worker.config.agent_dir.join("settings.json"),
+        json!({ "agentInbox": { "enabled": false } }).to_string(),
+    )
+    .unwrap();
+    let (text, wire) = child_notice_wire(
+        pa_core::session_engine::rlm_notices::create_rlm_child_terminal_notice(
+            &pa_core::session_engine::rlm_notices::RlmChildTerminalNotice::CompletedWithoutReply {
+                child_id: "sub-1".to_string(),
+                session_name: "lane".to_string(),
+                last_assistant_text_preview: None,
+            },
+            2_000,
+        ),
+    );
+    let nonce = crate::child_status_notices::mint();
+    let delivered = worker
+        .dispatch(
+            "follow_up",
+            &json!({
+                "message": text,
+                "customMessage": wire,
+                "rlmNoticeNonce": nonce,
+            }),
+        )
+        .await;
+    assert!(delivered.success, "the direct row parks: {delivered:?}");
+    assert_eq!(inbox.count().0, 0, "the disabled inbox takes nothing");
+    let core = worker.core.lock().unwrap();
+    let parked = core.follow_up.front().expect("the full row parked");
+    assert!(
+        parked.custom_message.is_some(),
+        "the direct route keeps the full row"
+    );
+    assert_eq!(parked.message, text);
+    assert!(core.steering.is_empty());
+    drop(core);
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// A clear drops unread inbox-routed agent messages and the wake rows

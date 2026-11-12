@@ -106,6 +106,7 @@ async fn a_fire_at_a_killed_session_cancels_and_skips() {
         user_bash: Arc::new(crate::user_bash::UserBash::new()),
         store: Arc::new(AgentCronJobStore::for_session_artifacts()),
         recovery: Arc::new(std::sync::Mutex::new(None)),
+        inbox_seam: Mutex::new(None),
     };
     // The dead-target cancel registers the artifact partition itself (a fresh store knows
     // nothing of the session yet).
@@ -147,6 +148,7 @@ async fn heartbeat_fire_parks_the_labeled_preview_on_its_lane() {
         user_bash: Arc::new(crate::user_bash::UserBash::new()),
         store: Arc::new(AgentCronJobStore::for_session_artifacts()),
         recovery: Arc::new(std::sync::Mutex::new(None)),
+        inbox_seam: Mutex::new(None),
     });
     let steer_heartbeat = heartbeat_job("hb-1", "steer the mission", DeliveryMode::Steer, &session);
     let follow_up_heartbeat = heartbeat_job(
@@ -254,6 +256,7 @@ async fn settles_classify_ran_failed_or_skipped() {
             user_bash: Arc::new(crate::user_bash::UserBash::new()),
             store: Arc::new(AgentCronJobStore::for_session_artifacts()),
             recovery: Arc::new(std::sync::Mutex::new(None)),
+            inbox_seam: Mutex::new(None),
         });
         let job = heartbeat_job("hb-1", "steer the mission", DeliveryMode::Steer, session);
         let hooks_for_run = Arc::clone(&hooks);
@@ -440,4 +443,110 @@ async fn rlm_heartbeat_mutation_hook_fires_into_the_session_queue() {
     assert_eq!(details["schedule"], "every 10s");
     assert_eq!(details["status"], "active");
     assert_eq!(details["runCount"], 0);
+}
+
+/// A heartbeat fire with the worker's inbox seam set routes its prompt
+/// into the session's durable inbox (class `heartbeat`): ONE coalesced
+/// wake row rides the delivery-mode lane instead of the full injected
+/// delivery row, the fire counts as ran (the instruction is durable at
+/// admission, so no turn-settle handshake), and a busy-window pair
+/// coalesces into one count row.
+#[tokio::test]
+async fn a_seam_set_heartbeat_fire_routes_into_the_inbox() {
+    let dir = std::env::temp_dir().join(format!("pa-sched-inbox-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let session = write_active_session(&dir);
+    let core = Arc::new(std::sync::Mutex::new(
+        crate::worker::SessionCore::test_core(None, "/w".to_string()),
+    ));
+    // The faux engine stands in for the worker's live engine: the seam
+    // only needs its store slot and settings gate.
+    let (engine, engine_dir) = crate::agent_engine::tests::faux_engine_with_settings(
+        &serde_json::json!({ "responses": ["ack"] }),
+        0,
+    );
+    let inbox = Arc::new(pa_core::session_engine::inbox::SessionInbox::open(Some(
+        engine_dir.path(),
+    )));
+    engine.set_inbox(Arc::clone(&inbox));
+    let hooks = Arc::new(QueueHooks {
+        core: Arc::clone(&core),
+        work_notify: Arc::new(Notify::new()),
+        user_bash: Arc::new(crate::user_bash::UserBash::new()),
+        store: Arc::new(AgentCronJobStore::for_session_artifacts()),
+        recovery: Arc::new(std::sync::Mutex::new(None)),
+        inbox_seam: Mutex::new(Some(InboxSeam {
+            engine: Arc::downgrade(&engine),
+            arrivals: pa_core::session_engine::inbox::InboxArrivals::default(),
+            agent_dir: engine_dir.path().join("agent"),
+        })),
+    });
+
+    // The steer heartbeat routes: one invisible wake row on the steering
+    // lane, no full delivery row, and the verdict counts as ran.
+    let steer = heartbeat_job("hb-1", "steer the mission", DeliveryMode::Steer, &session);
+    let verdict = AgentCronSchedulerHooks::run_job(&*hooks, &steer)
+        .await
+        .expect("the routed fire answers");
+    assert_eq!(verdict, None, "a routed fire counts as ran");
+    {
+        let core = core.lock().unwrap();
+        let wake = core.steering.front().expect("the wake row queued");
+        assert!(
+            wake.message.contains("1 new message (heartbeat)"),
+            "the wake counts the class: {}",
+            wake.message
+        );
+        assert!(
+            wake.custom_message.is_none(),
+            "no full delivery row parks: {:?}",
+            wake.custom_message
+        );
+        assert!(
+            wake.done.is_none(),
+            "the routed fire keeps no settle handshake"
+        );
+        assert!(core.follow_up.is_empty());
+    }
+    // A second fire inside the busy window coalesces onto the queued row.
+    core.lock().unwrap().busy = true;
+    let verdict = AgentCronSchedulerHooks::run_job(&*hooks, &steer)
+        .await
+        .expect("the coalesced fire answers");
+    assert_eq!(verdict, None);
+    {
+        let mut core = core.lock().unwrap();
+        let wake = core.steering.front().expect("the coalesced wake row");
+        assert!(
+            wake.message.contains("2 new heartbeat messages"),
+            "the busy window reads as one count row: {}",
+            wake.message
+        );
+        assert_eq!(core.steering.len(), 1, "never one row per fire");
+        core.busy = false;
+        core.steering.pop_front();
+    }
+    let (count, _, classes) = inbox.count();
+    assert_eq!(count, 2, "both prompts wait in the durable store");
+    assert_eq!(classes["heartbeat"], 2);
+    let messages = inbox.drain();
+    assert_eq!(messages[0].sender.as_deref(), Some("hb-1"));
+    assert!(messages[0].text.contains("[heartbeat: every 10s run#0]"));
+    assert!(messages[0].text.contains("steer the mission"));
+    assert_eq!(messages[0].meta["jobId"], "hb-1");
+
+    // A follow-up heartbeat keeps its lane.
+    let follow_up = heartbeat_job("hb-2", "wrap up", DeliveryMode::FollowUp, &session);
+    let verdict = AgentCronSchedulerHooks::run_job(&*hooks, &follow_up)
+        .await
+        .expect("the follow-up fire answers");
+    assert_eq!(verdict, None);
+    let core = core.lock().unwrap();
+    assert!(core.steering.is_empty());
+    let wake = core
+        .follow_up
+        .front()
+        .expect("the follow-up wake row queued");
+    assert!(wake.message.contains("1 new message (heartbeat)"));
+    assert!(wake.custom_message.is_none());
 }
