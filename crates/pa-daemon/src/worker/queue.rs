@@ -829,10 +829,19 @@ pub(crate) fn admit_inbox_reminder(
     work_notify: &Arc<Notify>,
     inbox: &std::sync::Arc<pa_core::session_engine::inbox::SessionInbox>,
     session_is_closed: impl Fn() -> bool,
+    engine: Option<&crate::agent_engine::AgentSessionEngine>,
 ) {
     let mut core_guard = core.lock().unwrap();
     if session_is_closed() {
         return;
+    }
+    // The captured store is re-checked under the slot's own mutex: a
+    // replacement that installed the next session's store must never wake
+    // with the retired session's count.
+    if let Some(engine) = engine {
+        if !engine.is_live_inbox(inbox) {
+            return;
+        }
     }
     // The count re-samples under the core lock: a concurrent drain and
     // its wake-row refresh may have emptied the store since the cycle

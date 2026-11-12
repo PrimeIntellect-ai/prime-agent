@@ -653,7 +653,7 @@ impl Worker {
                             engine.inbox(),
                             pa_core::session_engine::inbox::inbox_notice_fields(&notice),
                         ) {
-                            let _ = admit_inbox_notice(
+                            let refused = admit_inbox_notice(
                                 &notice_recovery,
                                 &notice_core,
                                 &notice_notify,
@@ -665,7 +665,13 @@ impl Worker {
                                 |_, _| None,
                                 Some(engine.as_ref()),
                             );
-                            return;
+                            if refused.is_none() {
+                                return;
+                            }
+                            // The store moved on between the capture and
+                            // the identity-checked push (a replacement
+                            // retired it): the notice must never vanish —
+                            // steer the full row like the inbox-off lane.
                         }
                     }
                     admit_kernel_notice(
