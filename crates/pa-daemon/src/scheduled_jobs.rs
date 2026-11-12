@@ -21,7 +21,7 @@ use pa_core::cron::{
 };
 
 use crate::protocol::{response_failure, response_success, DaemonResponse};
-use crate::worker::{QueuedItem, SessionCore, Worker};
+use crate::worker::{admit_inbox_notice, Lane, QueuedItem, SessionCore, Worker};
 
 /// How long a fire waits for its turn to settle before answering the scheduler with a skip (a stuck
 /// turn must not pin the dispatch lane forever).
@@ -35,6 +35,17 @@ pub(crate) fn session_artifact_dir(session_file: &Path, session_id: &str) -> Opt
         .map(|root| root.join("session-artifacts").join(session_id))
 }
 
+/// The late-bound inbox seam of the queue hooks: the worker's live
+/// engine (weak), the shared arrival batch the wake rows coalesce in,
+/// and the agent dir the settings gate reads. Set once after the engine
+/// is built; a worker whose engine never arrives keeps the direct lane.
+#[derive(Clone)]
+struct InboxSeam {
+    engine: std::sync::Weak<crate::agent_engine::AgentSessionEngine>,
+    arrivals: pa_core::session_engine::inbox::InboxArrivals,
+    agent_dir: PathBuf,
+}
+
 /// The scheduler hooks: how a claimed job reaches this session.
 pub(crate) struct QueueHooks {
     core: Arc<Mutex<SessionCore>>,
@@ -43,6 +54,9 @@ pub(crate) struct QueueHooks {
     store: Arc<AgentCronJobStore>,
     /// The worker recovery journal (the fire checkpoint's busy evidence).
     recovery: Arc<Mutex<Option<crate::journal::WorkerRecoveryJournal>>>,
+    /// The late-bound inbox seam (heartbeat fires route into the session's
+    /// durable inbox once it is set; `None` keeps the direct lane).
+    inbox_seam: Mutex<Option<InboxSeam>>,
 }
 
 impl QueueHooks {
@@ -93,6 +107,79 @@ impl QueueHooks {
     }
 }
 
+impl QueueHooks {
+    /// Route one heartbeat fire into the session's durable inbox: the
+    /// fired prompt becomes one `heartbeat` entry and ONE coalesced wake
+    /// row carries the arrival on the delivery-mode lane. The instruction
+    /// is durable at admission, so the fire counts as ran (no turn-settle
+    /// handshake); a disabled inbox, an engine without a store, or a
+    /// closed/uncreated session answers `false` and the caller keeps the
+    /// direct lane row.
+    fn route_heartbeat_fire(&self, job: &AgentCronJob) -> bool {
+        let Some(seam) = self
+            .inbox_seam
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+        else {
+            return false;
+        };
+        let Some(engine) = seam.engine.upgrade() else {
+            return false;
+        };
+        if !crate::agent_inbox::inbox_enabled(&engine.cwd(), &seam.agent_dir) {
+            return false;
+        }
+        let Some(inbox) = engine.inbox() else {
+            return false;
+        };
+        let row = pa_core::session_engine::messages::create_heartbeat_prompt_message(
+            job,
+            crate::util::now_ms(),
+        );
+        let Some(fields) = pa_core::session_engine::inbox::heartbeat_notice_fields(&job.id, &row)
+        else {
+            return false;
+        };
+        // TS cron fires resume the suspension before admission
+        // (`resumeIfIdle: true`): a fire on a post-abort/post-compact
+        // session is a resume site (the runner refuses suspended lanes).
+        {
+            let mut core = self
+                .core
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if !core.created || core.shutdown_requested || job.status != JobStatus::Active {
+                return false;
+            }
+            core.queued_input_suspended = false;
+        }
+        // A heartbeat rides its delivery-mode lane; the wake row keeps it.
+        let lane = if matches!(job.delivery_mode, Some(DeliveryMode::FollowUp)) {
+            Lane::FollowUp
+        } else {
+            Lane::Steering
+        };
+        let closed_engine = Arc::clone(&engine);
+        let closed = move || closed_engine.session_is_closed();
+        match admit_inbox_notice(
+            &self.recovery,
+            &self.core,
+            &self.work_notify,
+            &inbox,
+            &seam.arrivals,
+            fields,
+            lane,
+            closed,
+            |_, _| None,
+            Some(engine.as_ref()),
+        ) {
+            Ok(_queued) => true,
+            Err(_) => false,
+        }
+    }
+}
+
 impl AgentCronSchedulerHooks for QueueHooks {
     async fn run_job(&self, job: &AgentCronJob) -> anyhow::Result<Option<&'static str>> {
         // A persisted job whose target is no longer live (killed — `archived` — or deleted)
@@ -104,6 +191,15 @@ impl AgentCronSchedulerHooks for QueueHooks {
         let activity = self.activity();
         if should_defer_heartbeat_cron_job(job, &activity) {
             return Ok(Some("skipped"));
+        }
+        // The inbox route: a heartbeat fire lands its prompt in the
+        // session's durable inbox (the `heartbeat` class) and ONE
+        // coalesced wake row replaces the injected full-row turn — the
+        // instruction is durable at admission, so the fire counts as ran.
+        // The direct queue below serves a disabled inbox, an engine
+        // without a store, and plain (non-heartbeat) cron jobs.
+        if is_heartbeat_cron_job(job) && self.route_heartbeat_fire(job) {
+            return Ok(None);
         }
         let (done_tx, done_rx) = oneshot::channel();
         let heartbeat = is_heartbeat_cron_job(job);
@@ -245,6 +341,7 @@ impl ScheduledJobs {
                 user_bash,
                 store: Arc::clone(&store),
                 recovery,
+                inbox_seam: Mutex::new(None),
             }),
             store,
             scheduler: tokio::sync::Mutex::new(None),
@@ -253,6 +350,26 @@ impl ScheduledJobs {
 
     pub(crate) fn store(&self) -> &Arc<AgentCronJobStore> {
         &self.store
+    }
+
+    /// Late-bind the worker's inbox seam (the live engine and the shared
+    /// arrival batch) onto the queue hooks: heartbeat fires route into
+    /// the session's durable inbox once it is set.
+    pub(crate) fn set_inbox_seam(
+        &self,
+        engine: std::sync::Weak<crate::agent_engine::AgentSessionEngine>,
+        arrivals: pa_core::session_engine::inbox::InboxArrivals,
+        agent_dir: PathBuf,
+    ) {
+        *self
+            .hooks
+            .inbox_seam
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(InboxSeam {
+            engine,
+            arrivals,
+            agent_dir,
+        });
     }
 
     /// Bind the live session (TS `rebindCronJobsToState`): register the session's artifact
