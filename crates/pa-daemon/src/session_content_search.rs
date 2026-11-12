@@ -1,6 +1,7 @@
 //! Full-text search over saved sessions: the ids of the session files whose user or assistant
 //! message text contains a query, case-insensitively.
 
+use std::io::BufRead;
 use std::path::Path;
 
 use serde_json::Value;
@@ -28,9 +29,14 @@ pub(crate) fn search_session_content(session_dir: &Path, query: &str) -> Vec<Str
 
 /// The session's header id when one of its messages matches the lowercased `needle`.
 fn matching_session_id(path: &Path, needle: &str) -> Option<String> {
-    let text = std::fs::read_to_string(path).ok()?;
-    let mut lines = text.lines().filter(|line| !line.trim().is_empty());
-    let id = parse_session_header_line(lines.next()?)?.id;
+    // Streamed line by line: one line is resident at a time, so a session grown to gigabytes
+    // never holds its raw text in the supervisor.
+    let file = std::fs::File::open(path).ok()?;
+    let mut lines = std::io::BufReader::new(file)
+        .lines()
+        .map_while(Result::ok)
+        .filter(|line| !line.trim().is_empty());
+    let id = parse_session_header_line(&lines.next()?)?.id;
     // JSON writes such a needle verbatim, so a raw-line check skips most lines without a parse;
     // a needle with a space could span two text blocks, which the joined text separates by one.
     let prefilter = needle.is_ascii()
@@ -39,7 +45,7 @@ fn matching_session_id(path: &Path, needle: &str) -> Option<String> {
     lines
         .filter(|line| line.contains(r#""type":"message""#))
         .filter(|line| !prefilter || line.to_ascii_lowercase().contains(needle))
-        .any(|line| message_matches(line, needle))
+        .any(|line| message_matches(&line, needle))
         .then_some(id)
 }
 

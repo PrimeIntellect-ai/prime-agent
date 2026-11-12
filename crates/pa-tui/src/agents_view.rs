@@ -808,7 +808,7 @@ async fn run_agents_view_surface(
     mode.content_search.supported = client.supports_server_capability(content_search::CAPABILITY);
     mode.content_search.enabled = mode.content_search.supported && content_search_carried;
     mode.content_search
-        .arm(&mode.query, tokio::time::Instant::now());
+        .arm(mode.query.trim(), tokio::time::Instant::now());
     mode.rebuild_rows();
     // The notice from the log's bounded tail paints on the FIRST frame, before the interval's
     // first tick.
