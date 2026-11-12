@@ -1,0 +1,1 @@
+- Fixed a duplicated `cwd` field in pa-daemon's watch tests that broke the workspace build.

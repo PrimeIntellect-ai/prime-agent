@@ -6,6 +6,9 @@ use super::{
     Worker, SIDE_QUESTION_SETTLE_TIMEOUT,
 };
 
+/// How long the shutdown waits for the connections' fan-outs to flush.
+const SHUTDOWN_FLUSH_BUDGET: std::time::Duration = std::time::Duration::from_secs(2);
+
 impl Worker {
     /// `update_snapshot` (supervisor plane, update flow spec §8): a read-only
     /// capture; the queue lanes persist BEFORE replying, so the reported queue
@@ -159,6 +162,28 @@ impl Worker {
                 && (!core.steering.is_empty() || !core.follow_up.is_empty())
         };
         let _ = self.record_recovery(busy, "shutdown");
+        // The reply unlocks the process exit (and the supervisor's stop
+        // escalation), so every connection's fan-out first writes the
+        // frames broadcast so far - the kill's `session_closed` among them:
+        // an exit mid-write tears the frame an attached client is reading.
+        // Bounded: a client that stopped reading must not hold the stop.
+        let gate = self.events.current_seq();
+        let sinks: Vec<_> = self
+            .connection_sinks
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(std::sync::Weak::upgrade)
+            .collect();
+        let flushed = futures::future::join_all(sinks.iter().map(|sink| sink.wait_flushed(gate)));
+        if tokio::time::timeout(SHUTDOWN_FLUSH_BUDGET, flushed)
+            .await
+            .is_err()
+        {
+            eprintln!(
+                "pa-daemon: shutdown proceeds with a client's frames unflushed after {SHUTDOWN_FLUSH_BUDGET:?}"
+            );
+        }
         response_success(None, "shutdown", None)
     }
 

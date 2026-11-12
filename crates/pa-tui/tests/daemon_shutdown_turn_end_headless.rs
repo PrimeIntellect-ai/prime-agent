@@ -135,6 +135,7 @@ impl FirstGeneration {
                         }),
                     );
                     write_session_event(&mut writer, &json!({ "type": "turn_end" }));
+                    write_session_event(&mut writer, &json!({ "type": "agent_end" }));
                     write_json(
                         &mut writer,
                         &json!({ "type": "daemon_closing", "reason": "shutdown" }),
@@ -219,7 +220,11 @@ fn accept(listener: &UnixListener, what: &str) -> UnixStream {
     let deadline = std::time::Instant::now() + Duration::from_millis(ACCEPT_WAIT_MS);
     loop {
         match listener.accept() {
-            Ok((stream, _)) => return stream,
+            Ok((stream, _)) => {
+                // macOS inherits O_NONBLOCK from the listener on accept; the request loop blocks.
+                stream.set_nonblocking(false).expect("blocking mock stream");
+                return stream;
+            }
             Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
                 assert!(
                     std::time::Instant::now() < deadline,

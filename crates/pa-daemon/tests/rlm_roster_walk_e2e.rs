@@ -370,8 +370,10 @@ fn write_synthetic_family(agent_dir: &Path, children: usize) -> (PathBuf, usize)
 fn list_all_returns_the_full_synthetic_thousand_child_roster() {
     const CHILDREN: usize = 1_000;
     let dir = tempfile::TempDir::new().expect("temp dir");
-    let socket = dir.path().join("daemon.sock");
-    let agent_dir = dir.path().join("agent");
+    // Canonical, so the paths the daemon reports (canonicalized) match.
+    let root = dir.path().canonicalize().expect("canonical temp dir");
+    let socket = root.join("daemon.sock");
+    let agent_dir = root.join("agent");
     std::fs::create_dir_all(&agent_dir).expect("agent dir");
     write_synthetic_family(&agent_dir, CHILDREN);
     let _daemon = spawn_daemon(&socket, &agent_dir);
@@ -625,14 +627,16 @@ async fn subscribe_after_spawn_then_shutdown_seeds_the_passive_child() {
 #[test]
 fn open_resume_publishes_the_family_in_the_first_subscribe_snapshot() {
     let dir = tempfile::TempDir::new().expect("temp dir");
-    let socket = dir.path().join("daemon.sock");
-    let agent_dir = dir.path().join("agent");
+    // Canonical, so the paths the daemon reports (canonicalized) match.
+    let root = dir.path().canonicalize().expect("canonical temp dir");
+    let socket = root.join("daemon.sock");
+    let agent_dir = root.join("agent");
     std::fs::create_dir_all(&agent_dir).expect("agent dir");
     let (root_path, live) = write_synthetic_family(&agent_dir, 2);
     assert_eq!(live, 2, "two passive ledger children");
     let _daemon = spawn_daemon(&socket, &agent_dir);
     drain_boot_seed(&socket);
-    let backend = dir.path().join("backend.sock");
+    let backend = root.join("backend.sock");
     let registration = RegistrationGate::bind(&socket, &backend);
     let (mut client, hello) = Client::connect(&backend);
     assert_eq!(hello["type"], "daemon_hello");
@@ -643,7 +647,7 @@ fn open_resume_publishes_the_family_in_the_first_subscribe_snapshot() {
         &json!({
             "type": "create",
             "sessionPath": root_session_path,
-            "config": { "cwd": dir.path().to_string_lossy() },
+            "config": { "cwd": root.to_string_lossy() },
         }),
     );
     assert_eq!(created["success"], true, "resume create failed: {created}");

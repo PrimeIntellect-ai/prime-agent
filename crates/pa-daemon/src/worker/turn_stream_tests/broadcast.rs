@@ -319,9 +319,6 @@ async fn a_retried_turn_broadcasts_one_agent_end_per_run() {
             })
             .unwrap_or_default()
     }
-    let _faux = crate::agent_engine::tests::FAUX_TEST_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let dir = std::env::temp_dir().join(format!(
         "pa-worker-agent-end-retry-{}",
         uuid::Uuid::new_v4()

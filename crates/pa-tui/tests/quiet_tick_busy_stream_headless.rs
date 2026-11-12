@@ -111,6 +111,7 @@ fn stream_reply(mut writer: UnixStream) {
         );
     }
     write_json(&mut writer, &event(json!({ "type": "turn_end" })));
+    write_json(&mut writer, &event(json!({ "type": "agent_end" })));
 }
 
 /// The attach result: one empty, quiet session.
