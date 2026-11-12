@@ -330,6 +330,7 @@ async fn a_collected_handle_drains_its_message_and_drops_the_queued_wake_rows() 
         Lane::Steering,
         || false,
         |_, _| None,
+        None,
     );
     admit_inbox_reminder(&worker.recovery, &worker.core, &notify, &inbox, || false);
     let rows = steering_rows(&worker);
@@ -383,6 +384,7 @@ async fn a_withdrawal_inside_a_covered_batch_rerenders_the_queued_rows() {
         Lane::Steering,
         || false,
         |_, _| None,
+        None,
     );
     let _ = admit_inbox_notice(
         &worker.recovery,
@@ -397,6 +399,7 @@ async fn a_withdrawal_inside_a_covered_batch_rerenders_the_queued_rows() {
         Lane::Steering,
         || false,
         |_, _| None,
+        None,
     );
     admit_inbox_reminder(&worker.recovery, &worker.core, &notify, &inbox, || false);
     withdraw_bash_completion_notice(
@@ -470,6 +473,7 @@ async fn a_withdrawal_reconciles_the_batch_against_the_live_waiting_set() {
         Lane::Steering,
         || false,
         |_, _| None,
+        None,
     );
     let milestone = admit_inbox_notice(
         &worker.recovery,
@@ -484,6 +488,7 @@ async fn a_withdrawal_reconciles_the_batch_against_the_live_waiting_set() {
         Lane::Steering,
         || false,
         |_, _| None,
+        None,
     );
     assert!(milestone.is_none(), "the milestone admitted");
     // A concurrent read drained another covered message: the batch holds
@@ -552,6 +557,7 @@ async fn a_withdrawal_of_the_last_message_of_its_batch_drops_the_batches_row() {
         Lane::Steering,
         || false,
         |_, _| None,
+        None,
     );
     // The older message's row delivered; its message stays waiting.
     let delivered = worker.core.lock().unwrap().steering.pop_front();
@@ -566,6 +572,7 @@ async fn a_withdrawal_of_the_last_message_of_its_batch_drops_the_batches_row() {
         Lane::Steering,
         || false,
         |_, _| None,
+        None,
     );
     assert_eq!(
         steering_rows(&worker).len(),
@@ -616,6 +623,7 @@ async fn a_withdrawal_racing_an_arrival_settles_both() {
             Lane::Steering,
             || false,
             |_, _| None,
+            None,
         );
         let barrier = Arc::new(std::sync::Barrier::new(2));
         let (done_tx, done_rx) = std::sync::mpsc::channel::<()>();
@@ -640,6 +648,7 @@ async fn a_withdrawal_racing_an_arrival_settles_both() {
                     Lane::Steering,
                     || false,
                     |_, _| None,
+                    None,
                 );
                 let _ = done_tx.send(());
             })
