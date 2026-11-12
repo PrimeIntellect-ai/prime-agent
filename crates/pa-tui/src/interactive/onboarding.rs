@@ -202,12 +202,9 @@ async fn drive_onboarding_pane(
                         screen = pane;
                         continue;
                     };
-                    // The onboarding exit keys include Ctrl+C: report the handled press so the
-                    // force-quit guard's handled counter stays in sync with the reader's
-                    // observations.
-                    if key_id == "ctrl+c" {
-                        drive.exit_guard.note_ctrl_c_handled();
-                    }
+                    // Every key that reaches the pane is handled (the force-quit guard counts
+                    // the Ctrl+C presses).
+                    drive.exit_guard.note_key_handled(&key_id);
                     if let Some(decision) = pane.handle_key(&key_id, &drive.keybindings, osc_sink) {
                         // A decision tears the pane down mid-drive: end a still-running login flow.
                         if let Some(task) = flow.take() {
