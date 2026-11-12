@@ -113,9 +113,8 @@ pub fn key_event_to_id(key: &KeyEvent) -> Option<KeyId> {
             }
             return Some(c.to_string());
         }
-        // The super prefix keeps Cmd-modified keys their own identity
-        // (unbound combos match nothing instead of falling through to the
-        // bare action and submitting); ctrl and alt do the same.
+        // Every modifier stays in the id (unbound combos match nothing instead of falling through
+        // to the bare action and submitting).
         KeyCode::Enter => modified_name("enter", ctrl, alt, shift, super_key),
         KeyCode::Tab => modified_name("tab", ctrl, alt, shift, super_key),
         // A bare shift+backspace stays `backspace`.
@@ -132,9 +131,9 @@ pub fn key_event_to_id(key: &KeyEvent) -> Option<KeyId> {
         KeyCode::Delete => return Some(modified_name("delete", ctrl, alt, shift, super_key)),
         KeyCode::Insert => return Some(modified_name("insert", ctrl, alt, shift, super_key)),
         KeyCode::F(n) => return Some(modified_name(&format!("f{n}"), ctrl, alt, shift, super_key)),
-        // With alt this is also the merged meta-wrapped `ESC ESC [ Z`
-        // (Option+Shift+Tab with option-as-meta): TS's double-ESC branch
-        // strips alt and matches the rest, so the identity keeps the ALT.
+        // With alt this is also the merged meta-wrapped `ESC ESC [ Z` (Option+Shift+Tab with
+        // option-as-meta): TS's double-ESC branch strips alt and matches the rest, so the identity
+        // keeps the ALT.
         KeyCode::BackTab => return Some(modified_name("tab", ctrl, alt, true, super_key)),
         KeyCode::Null
         | KeyCode::CapsLock
