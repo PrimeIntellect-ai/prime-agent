@@ -104,10 +104,10 @@ impl RequestTimingLog {
             std::fs::create_dir_all(self.path.parent().unwrap_or_else(|| Path::new(".")))?;
             // Best-effort rotation: keep appending when the rotate fails.
             let _ = self.rotate_if_needed();
-            let mut file = std::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(&self.path)?;
+            let mut options = std::fs::OpenOptions::new();
+            options.create(true).append(true);
+            crate::platform::perms::set_private_mode(&mut options);
+            let mut file = options.open(&self.path)?;
             file.write_all(line.as_bytes())?;
             file.flush()
         };

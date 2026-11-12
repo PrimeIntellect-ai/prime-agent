@@ -37,10 +37,10 @@ pub(crate) fn open_for_spawn(log_path: &Path) -> Result<File> {
         .parent()
         .context("worker stderr log has no parent dir")?;
     crate::paths::ensure_dir(logs_dir)?;
-    let file = std::fs::OpenOptions::new()
-        .create(true)
-        .truncate(true)
-        .write(true)
+    let mut options = std::fs::OpenOptions::new();
+    options.create(true).truncate(true).write(true);
+    pa_core::platform::perms::set_private_mode(&mut options);
+    let file = options
         .open(log_path)
         .with_context(|| format!("open worker stderr log {}", log_path.display()))?;
     prune_retained(logs_dir, log_path, worker_stderr_log_name);
