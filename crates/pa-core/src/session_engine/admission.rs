@@ -75,20 +75,40 @@ impl AgentSession {
         message: &pa_types::session::CustomMessage,
         behavior: StreamingBehavior,
     ) -> anyhow::Result<PromptOutcome> {
-        let state = self.agent.state().await;
-        if state.is_streaming {
+        let queue_row = |behavior: StreamingBehavior| -> anyhow::Result<()> {
             let row = session_message_to_loop(&SessionAgentMessage::Custom(message.clone()))
                 .ok_or_else(|| anyhow::anyhow!("injected custom message conversion failed"))?;
             match behavior {
                 StreamingBehavior::Steer => self.agent.steer(row),
                 StreamingBehavior::FollowUp => self.agent.follow_up(row),
             }
+            Ok(())
+        };
+        let state = self.agent.state().await;
+        // The busy decision consults the active-run slot beside the stream
+        // state: the slot is taken before `is_streaming` flips and released
+        // after it clears, so neither window misreads an active run as idle.
+        if state.is_streaming || self.agent.has_active_run() {
+            queue_row(behavior)?;
             // The parked row is not a finished turn: the caller threads
             // the outcome to its settle (the daemon's delivery seat waits
             // for the running run and drains it).
             return Ok(PromptOutcome::Queued);
         }
-        self.prompt_injected_message(message).await
+        match self.prompt_injected_message(message).await {
+            Ok(outcome) => Ok(outcome),
+            Err(error) => {
+                // The idle admission can still lose the run slot to a
+                // starting turn (the idle sample and `Agent::prompt`'s slot
+                // check are separate reads): the caller's behavior applies —
+                // queue the row on its lane, never reject it.
+                if self.agent.state().await.is_streaming || self.agent.has_active_run() {
+                    queue_row(behavior)?;
+                    return Ok(PromptOutcome::Queued);
+                }
+                Err(error)
+            }
+        }
     }
 
     /// The batched co-delivery rows in their admission-normalized form
@@ -155,7 +175,10 @@ impl AgentSession {
         }
 
         let state = self.agent.state().await;
-        let busy = state.is_streaming;
+        // The busy sample consults the active-run slot beside the stream
+        // state (the slot is taken before `is_streaming` flips and released
+        // after it clears): neither window misreads an active run as idle.
+        let busy = state.is_streaming || self.agent.has_active_run();
         // The `skill_use_count` session counter counts at the admission
         // seam: an admitted user turn whose text IS a skill block counts
         // once. A pre-expanded block (the daemon emits the accepted row
@@ -225,6 +248,20 @@ impl AgentSession {
                 .prompt_until_accepted(pa_agent::agent::AgentPromptInput::Messages(prompt_messages))
                 .await
             {
+                // The idle admission can still lose the run slot to a
+                // starting turn: a caller that opted into a streaming
+                // behavior gets the queue, never the rejection.
+                if self.agent.state().await.is_streaming || self.agent.has_active_run() {
+                    if let Some(behavior) = options.streaming_behavior {
+                        let mut batch = vec![user_prompt_message(&normalized, &images)];
+                        batch.extend(self.normalized_batch_rows(&options.batch, expand));
+                        match behavior {
+                            StreamingBehavior::Steer => self.agent.steer(batch),
+                            StreamingBehavior::FollowUp => self.agent.follow_up(batch),
+                        }
+                        return Ok(PromptOutcome::Queued);
+                    }
+                }
                 if !self.agent.state().await.is_streaming {
                     if let Some(router) = self.image_model_router.as_ref() {
                         (router.swap_target)(None);
@@ -238,10 +275,24 @@ impl AgentSession {
             .prompt(pa_agent::agent::AgentPromptInput::Messages(prompt_messages))
             .await
         {
-            // A concurrent admission won the agent's run slot: this
-            // prompt never started, so its route must not survive. The
-            // unwind only happens while NO run streams (the winner keeps
-            // its target); TS's single-threaded commit cannot see this race.
+            // A concurrent admission won the agent's run slot: a caller
+            // that opted into a streaming behavior gets the queue (the
+            // row is preserved, never rejected)…
+            if self.agent.state().await.is_streaming || self.agent.has_active_run() {
+                if let Some(behavior) = options.streaming_behavior {
+                    let mut batch = vec![user_prompt_message(&normalized, &images)];
+                    batch.extend(self.normalized_batch_rows(&options.batch, expand));
+                    match behavior {
+                        StreamingBehavior::Steer => self.agent.steer(batch),
+                        StreamingBehavior::FollowUp => self.agent.follow_up(batch),
+                    }
+                    return Ok(PromptOutcome::Queued);
+                }
+            }
+            // …while a plain prompt never started, so its route must not
+            // survive. The unwind only happens while NO run streams (the
+            // winner keeps its target); TS's single-threaded commit cannot
+            // see this race.
             if !self.agent.state().await.is_streaming {
                 if let Some(router) = self.image_model_router.as_ref() {
                     (router.swap_target)(None);
