@@ -478,10 +478,8 @@ async fn abort_and_send_queued_delivers_the_steering_batch_then_the_follow_ups()
             .as_ref()
             .and_then(|engine| {
                 engine
-                    .turn_agent
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .clone()
+                    .built_handles()
+                    .map(|handles| handles.turn_agent.clone())
             })
             .and_then(|agent| agent.signal())
             .is_some();

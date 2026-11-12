@@ -53,10 +53,8 @@ fn dump_hang_state(worker: &Worker) -> String {
     // next admission).
     match worker.agent_engine.as_ref().map(|engine| {
         engine
-            .turn_agent
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone()
+            .built_handles()
+            .map(|handles| handles.turn_agent.clone())
     }) {
         Some(Some(agent)) => {
             let run_signal = match agent.signal() {

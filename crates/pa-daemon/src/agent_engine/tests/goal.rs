@@ -357,18 +357,13 @@ fn post_compaction_goal_continuation_mint() {
     // mint the same way: the mint defers (owed, not consumed) until the
     // handle settles.
     let live_probe: std::sync::Arc<dyn Fn() -> bool + Send + Sync> = std::sync::Arc::new(|| true);
-    *engine.background_bash_probe.lock().unwrap() = Some(live_probe);
+    engine.set_test_probes(Some(live_probe), None);
     assert!(
         engine.mint_post_compaction_goal_continuation().is_none(),
         "a live handle minted the post-compaction continuation"
     );
     {
-        let handles = engine
-            .goal_runtime
-            .lock()
-            .unwrap()
-            .clone()
-            .expect("goal runtime");
+        let handles = engine.live_handles().expect("goal runtime").goal.clone();
         assert!(
             engine
                 .runtime
@@ -378,7 +373,7 @@ fn post_compaction_goal_continuation_mint() {
     }
     let settled_probe: std::sync::Arc<dyn Fn() -> bool + Send + Sync> =
         std::sync::Arc::new(|| false);
-    *engine.background_bash_probe.lock().unwrap() = Some(settled_probe);
+    engine.set_test_probes(Some(settled_probe), None);
     assert!(
         engine.mint_post_compaction_goal_continuation().is_some(),
         "the settled handle releases the post-compaction mint"
@@ -416,12 +411,7 @@ fn post_compaction_mint_delivers_the_armed_deferral_once() {
     );
     assert_eq!(engine.goal_state_value()["status"], "active");
     assert_eq!(engine.goal_state_value()["continuationsUsed"], 1);
-    let handles = engine
-        .goal_runtime
-        .lock()
-        .unwrap()
-        .clone()
-        .expect("goal runtime");
+    let handles = engine.live_handles().expect("goal runtime").goal.clone();
     engine
         .runtime
         .block_on(async { handles.driver.lock().await.mark_continuation_owed() });
@@ -559,12 +549,7 @@ fn goal_turn_end_mints_the_loop_until_the_goal_completes() {
             serde_json::json!(expected_count)
         );
     }
-    let handles = engine
-        .goal_runtime
-        .lock()
-        .unwrap()
-        .clone()
-        .expect("goal runtime");
+    let handles = engine.live_handles().expect("goal runtime").goal.clone();
     engine.runtime.block_on(async {
         let mut driver = handles.driver.lock().await;
         let mut session = handles.session.lock().await;
@@ -783,12 +768,7 @@ fn running_children_owe_the_continuation_and_settle_delivers_it() {
     assert_eq!(events.last(), Some(&EngineEvent::Done(Ok(()))));
     assert_eq!(engine.goal_state_value()["status"], "active");
     assert_eq!(engine.goal_state_value()["continuationsUsed"], 0);
-    let handles = engine
-        .goal_runtime
-        .lock()
-        .unwrap()
-        .clone()
-        .expect("goal runtime");
+    let handles = engine.live_handles().expect("goal runtime").goal.clone();
     assert!(engine
         .runtime
         .block_on(async { handles.driver.lock().await.owes_continuation() }));
@@ -1072,7 +1052,9 @@ fn active_goal_aborted_turn_row_broadcasts_and_goal_accounting_skips_it() {
     });
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
     loop {
-        let agent = engine.turn_agent.lock().expect("turn agent lock").clone();
+        let agent = engine
+            .built_handles()
+            .map(|handles| handles.turn_agent.clone());
         if let Some(agent) = agent {
             let state = engine.runtime.block_on(agent.state());
             if state.is_streaming {

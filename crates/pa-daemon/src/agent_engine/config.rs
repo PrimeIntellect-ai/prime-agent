@@ -58,7 +58,7 @@ pub struct SupervisorLinkConfig {
 pub(crate) type AutonomousAdmission = std::sync::Arc<dyn Fn(String) + Send + Sync>;
 
 /// The goal driver and session-manager handles mirrored from the core
-/// session (see `AgentSessionEngine::goal_runtime`).
+/// session (see `core_state::BuiltHandles`).
 #[derive(Clone)]
 pub(crate) struct GoalRuntimeHandles {
     pub(crate) driver:

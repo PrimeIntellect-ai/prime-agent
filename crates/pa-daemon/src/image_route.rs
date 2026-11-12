@@ -239,9 +239,8 @@ impl AgentSessionEngine {
         // The agent override clears even when the session target cannot be
         // rebuilt: the next run must not silently serve on the routed
         // image model (a stale pin beats a leftover routed image target).
-        let agent = self.turn_agent.lock().expect("turn agent lock").clone();
-        if let Some(agent) = agent {
-            agent.set_model_override(None);
+        if let Some(handles) = self.built_handles() {
+            handles.turn_agent.set_model_override(None);
         }
         // The cleared slot returns to the CURRENT session state: the
         // freshly resolved model (a mid-episode switch is honored); the
@@ -510,11 +509,10 @@ mod tests {
         assert_eq!(turn_end["provider"], serde_json::json!("battery"));
         assert_eq!(engine.session_model().unwrap().id, "mock-1");
         let agent = engine
+            .built_handles()
+            .expect("session built by the routed turn")
             .turn_agent
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone()
-            .expect("session built by the routed turn");
+            .clone();
         assert!(agent.model_override().is_none());
         registration.unregister();
     }
