@@ -455,6 +455,15 @@ impl super::AgentSession {
         Ok(())
     }
 
+    /// Re-arm the deferred digest after an admission lost the run slot
+    /// before the prompt processed its rows: the digest delivery never ran,
+    /// so the next admission still owes it (rendered fresh from the live
+    /// state at that point).
+    pub(crate) fn rearm_digest_pending(&self) {
+        self.digest_pending
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
     /// The deferred first-turn digest as the prompt row that rides the turn's
     /// admission; disabled sessions defer the pending flag until enabled.
     pub(crate) async fn pending_digest_prompt_row(&self) -> anyhow::Result<Option<AgentMessage>> {

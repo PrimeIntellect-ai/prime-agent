@@ -78,6 +78,13 @@ impl AgentSessionEngine {
         aborted: &dyn Fn() -> bool,
         emit: &mut dyn FnMut(EngineEvent) -> bool,
     ) -> anyhow::Result<TurnOnce> {
+        // This seat is live from here through the final harvest below: a
+        // queued drain waits until it is the only live seat, so an earlier
+        // seat's subscription can never forward/account the next run's
+        // events nor harvest its assistant.
+        self.turn_seats
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let _seat = TurnSeatGuard(std::sync::Arc::clone(&self.turn_seats));
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<EngineEvent>();
         // Goal usage accounting at the message_end hook: each settled non-error
         // assistant message records its token delta, from the engine mirror.
@@ -434,7 +441,9 @@ impl AgentSessionEngine {
                             aborted() || emit_cancelled.load(std::sync::atomic::Ordering::SeqCst)
                         }
                     };
-                    match drain_queued_delivery(agent, &drain_aborted, &parked).await? {
+                    match drain_queued_delivery(agent, &drain_aborted, &parked, &self.turn_seats)
+                        .await?
+                    {
                         QueuedDrain::Drained => {}
                         QueuedDrain::Consumed => {
                             queued_consumed.store(true, std::sync::atomic::Ordering::SeqCst);
@@ -540,6 +549,19 @@ impl AgentSessionEngine {
     }
 }
 
+/// One live delivery seat's scope: `run_turn_once` holds it from entry
+/// through the final harvest, so a queued drain (see
+/// [`drain_queued_delivery`]) can wait until it is the only live seat —
+/// an earlier seat's still-active subscription forwards and accounts
+/// events, and its harvest could take the next run's assistant.
+struct TurnSeatGuard(std::sync::Arc<std::sync::atomic::AtomicUsize>);
+
+impl Drop for TurnSeatGuard {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
 /// What the busy-session parking seam did with the parked rows.
 enum QueuedDrain {
     /// This seat ran the parked rows (`continue_run`): the harvest owns the
@@ -572,6 +594,7 @@ async fn drain_queued_delivery(
     agent: &std::sync::Arc<pa_agent::agent::Agent>,
     aborted: &dyn Fn() -> bool,
     parked: &std::sync::atomic::AtomicBool,
+    seats: &std::sync::Arc<std::sync::atomic::AtomicUsize>,
 ) -> anyhow::Result<QueuedDrain> {
     // The delivery is parked: the running turn's events belong to its own
     // seat (the gate suppresses this seat's forwarding and accounting).
@@ -596,6 +619,17 @@ async fn drain_queued_delivery(
         }
         if !agent.has_queued_messages() {
             return Ok(QueuedDrain::Consumed);
+        }
+        // Every earlier delivery seat must finish before a new run starts:
+        // its still-active subscription would forward and account this
+        // run's events, and its harvest could take this run's assistant as
+        // its own reply. This seat itself is counted (the wait ends at 1);
+        // the wait is cancel-aware.
+        while seats.load(std::sync::atomic::Ordering::SeqCst) != 1 {
+            if aborted() {
+                return Ok(QueuedDrain::Aborted);
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         }
         // This seat starts the parked rows: the drained run's events are
         // ours to forward and account again.
