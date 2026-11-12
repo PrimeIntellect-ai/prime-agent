@@ -156,15 +156,19 @@ impl FileReadCounter {
 }
 
 /// Scoped process-env overrides for the live-kernel tests: applied on
-/// construction, restored on drop.
+/// construction, restored on drop, under the crate-wide env lock.
 #[cfg(test)]
 pub(crate) struct KernelEnvOverride {
     saved: Vec<(String, Option<String>)>,
+    _env_lock: std::sync::MutexGuard<'static, ()>,
 }
 
 #[cfg(test)]
 impl KernelEnvOverride {
     pub(crate) fn apply(pairs: &[(&str, Option<String>)]) -> Self {
+        let env_lock = TELEMETRY_ENV_MUTEX
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let saved = pairs
             .iter()
             .map(|(key, _)| ((*key).to_string(), std::env::var(key).ok()))
@@ -175,7 +179,10 @@ impl KernelEnvOverride {
                 None => std::env::remove_var(key),
             }
         }
-        KernelEnvOverride { saved }
+        KernelEnvOverride {
+            saved,
+            _env_lock: env_lock,
+        }
     }
 }
 
