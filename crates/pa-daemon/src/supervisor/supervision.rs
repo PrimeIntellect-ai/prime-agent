@@ -6,7 +6,7 @@ use super::{
     persist_worker_at, probe_worker_socket, util, write_frame, Arc, Child, ClientRouting, Command,
     Context, DaemonWorkerLifecycle, Duration, Ordering, PathBuf, PrivateFrameReader,
     ResidentWorker, Result, RouteAdmission, Supervisor, TempSync, TypedCreateRejection, Value,
-    WorkerReply, WorkerRequest, DEFAULT_PRIVATE_FRAME_LIMITS, ROUTE_TIMEOUT_MS,
+    WorkerReply, WorkerRequest, WorkerTransition, DEFAULT_PRIVATE_FRAME_LIMITS, ROUTE_TIMEOUT_MS,
     WORKER_AUTH_FLOOR_MS,
 };
 use crate::lease::is_process_alive;
@@ -185,7 +185,7 @@ impl Supervisor {
                 if status.is_ok() {
                     child.orphan_generation.reap().await;
                 }
-                if resident.intentional_stop.load(Ordering::SeqCst)
+                if resident.route_state().stop_requested()
                     || self.shutting_down.load(Ordering::SeqCst)
                 {
                     self.log_line(&format!(
@@ -286,7 +286,7 @@ impl Supervisor {
                 }
                 // The give-up is final: routes waiting out this worker's
                 // replacement must fail fast instead of parking.
-                resident.note_retired();
+                resident.transition(WorkerTransition::GiveUp);
                 self.registry.remove(&resident.worker_id).await;
                 self.registry.forget(&resident.worker_id).await;
                 // The residency change lands in the scheduled-jobs invalidation (TS
@@ -348,8 +348,7 @@ impl Supervisor {
     }
 
     pub(crate) fn is_stopping(&self, resident: &Arc<ResidentWorker>) -> bool {
-        self.shutting_down.load(Ordering::SeqCst)
-            || resident.intentional_stop.load(Ordering::SeqCst)
+        self.shutting_down.load(Ordering::SeqCst) || resident.route_state().stop_requested()
     }
 
     /// Whether this watch no longer owns the resident's process: the stop
@@ -400,7 +399,7 @@ impl Supervisor {
         }
         // The replacement's create replay is pending: routed client commands must wait
         // for the replayed session (the replacement-aware route gates on this).
-        resident.note_session_replaying();
+        resident.transition(WorkerTransition::SessionReplaying);
         // The old worker is gone for good: a run with a pending abort is declared
         // terminal HERE, before the create payload is built, so the journal record
         // rides this replay even when the dead connection's EOF is late.
@@ -543,7 +542,7 @@ impl Supervisor {
         drop(descriptor);
         // The replayed create restored the session: routed client commands
         // may run against this worker again.
-        resident.note_session_ready();
+        resident.transition(WorkerTransition::SessionReady);
         // The replacement is identity-complete and its replay answered: record the binding
         // now — the boot registration carries no session id, so this retargets every
         // stale client id.
@@ -738,7 +737,7 @@ impl Supervisor {
         let events = self.events.clone();
         // The connection epoch ties both pumps to this connection: only they
         // may retire it, and a superseded connection ending late cannot.
-        let connection_epoch = resident.note_connection_live();
+        let connection_epoch = resident.begin_connection();
 
         // Writer pump: holds only a weak resident reference — a strong one would keep
         // `cmd_tx` alive and park this pump forever after the resident is dropped.

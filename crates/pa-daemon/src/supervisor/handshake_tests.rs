@@ -372,10 +372,10 @@ async fn a_stale_epoch_never_overwrites_the_installed_channel() {
 
     // The stale epoch is a real issued one (an epoch-0 oracle would pass a guard that
     // only rejects the never-issued epoch, leaving the live stale interleaving unexercised).
-    let stale_epoch = resident.note_connection_live();
+    let stale_epoch = resident.begin_connection();
     // The newer connection installs first; the stale connect's epoch is
     // now superseded.
-    let newer_epoch = resident.note_connection_live();
+    let newer_epoch = resident.begin_connection();
     resident
         .install_command_channel(newer_epoch, newer_tx)
         .await;
@@ -432,7 +432,7 @@ async fn an_ended_connection_never_installs_its_channel() {
     );
     let (cmd_tx, _cmd_rx) =
         mpsc::channel::<WorkerRequest>(crate::backpressure::WORKER_INFLIGHT_CAPACITY);
-    let epoch = resident.note_connection_live();
+    let epoch = resident.begin_connection();
     resident.note_connection_lost(epoch).await;
     resident.install_command_channel(epoch, cmd_tx).await;
     assert!(
