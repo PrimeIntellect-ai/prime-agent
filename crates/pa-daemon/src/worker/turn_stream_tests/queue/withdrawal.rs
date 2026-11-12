@@ -9,6 +9,7 @@ async fn queue_withdrawals_clear_only_the_last_idle_notes() {
         "agent_messages_pause",
         "agent_messages_clear",
         "bash_consumed",
+        "inbox_drain",
         "abort",
     ] {
         for state in ["last", "busy", "remaining"] {
@@ -41,7 +42,7 @@ async fn queue_withdrawals_clear_only_the_last_idle_notes() {
                 core.created = true;
                 core.busy = state == "busy";
                 core.queued_input_suspended = true;
-                if command != "bash_consumed" {
+                if !matches!(command, "bash_consumed" | "inbox_drain") {
                     let mut row = queued_prompt("withdraw me", TurnPolicy::Queued);
                     row.admission_id = Some("owned-note".to_string());
                     if command.starts_with("agent_messages_") {
@@ -76,6 +77,43 @@ async fn queue_withdrawals_clear_only_the_last_idle_notes() {
                         command: "fixture command".to_string(),
                     },
                     Some(engine.as_ref()),
+                );
+            } else if command == "inbox_drain" {
+                // THE DRAIN SWEEP'S CLEAR: a background kernel task's
+                // `rlm.inbox.read` drained the store and fired the sweep
+                // while the queued wake row was the session's last work —
+                // the clear belongs to that sweep, at the drain.
+                let inbox = Arc::new(pa_core::session_engine::inbox::SessionInbox::in_memory());
+                let arrivals: pa_core::session_engine::inbox::InboxArrivals =
+                    Arc::new(Mutex::new(Vec::new()));
+                let _ = admit_inbox_notice(
+                    &worker.recovery,
+                    &worker.core,
+                    &Arc::new(Notify::new()),
+                    &inbox,
+                    &arrivals,
+                    pa_core::session_engine::inbox::InboxNotice {
+                        class: pa_core::session_engine::inbox::INBOX_CLASS_BASH_DONE,
+                        sender: Some("fixture command".to_string()),
+                        text: "[bash-done pid:4321 exit:0]".to_string(),
+                        meta: json!({ "pid": 4321, "command": "fixture command", "exitCode": 0 }),
+                    },
+                    Lane::Steering,
+                    || false,
+                    |_, _| None,
+                    None,
+                );
+                assert_eq!(
+                    inbox.drain().len(),
+                    1,
+                    "{command}/{state}: the read drained the waiting message"
+                );
+                withdraw_drained_inbox_notice(
+                    &worker.recovery,
+                    &worker.core,
+                    &arrivals,
+                    &inbox,
+                    engine.as_ref(),
                 );
             } else {
                 let payload = match command {

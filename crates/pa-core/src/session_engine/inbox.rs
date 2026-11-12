@@ -755,6 +755,33 @@ pub fn reminder_notice(count: usize) -> String {
     format!("[inbox reminder] {count} {noun} still waiting — rlm.inbox.read()")
 }
 
+// The notice rows' wire vocabulary — the customType, the notice-class
+// words, and the sender identity — lives in `pa_types::inbox_notice`: ONE
+// definition the daemon's queue lanes and the TUI's decode import too
+// (the TUI cannot import the session engine, so a twin constant would
+// drift silently); this module keeps only its own private use.
+use pa_types::inbox_notice::{INBOX_NOTICE_CUSTOM_TYPE, INBOX_NOTICE_SENDER};
+
+/// The `role: "custom"` inbox-notice row one queued notice delivers as,
+/// mirroring `create_agent_session_message_row`: `content` IS the notice
+/// text, so the turn's model context stays byte-identical to the
+/// plain-prompt delivery, while the details carry the inbox-system sender
+/// and the notice class for the transcript's own row class.
+#[must_use]
+pub fn create_inbox_notice_row(text: &str, class: &str, timestamp: u64) -> Value {
+    json!({
+        "role": "custom",
+        "customType": INBOX_NOTICE_CUSTOM_TYPE,
+        "content": text,
+        "display": true,
+        "details": {
+            "sender": INBOX_NOTICE_SENDER,
+            "class": class,
+        },
+        "timestamp": timestamp,
+    })
+}
+
 /// Register the `rlm.inbox.read`/`rlm.inbox.count` host handlers over
 /// one session's store. `read` drains and returns the waiting messages
 /// (an optional `{sender, class, sinceMs, beforeMs}` filter narrows the
@@ -799,6 +826,7 @@ pub fn register_inbox_host_handlers(inbox: &Arc<SessionInbox>, handlers: &mut Ho
 mod tests {
     use super::*;
     use crate::kernel::shared::HostRequestPayload;
+    use pa_types::inbox_notice::{INBOX_NOTICE_CLASS_ARRIVAL, INBOX_NOTICE_CLASS_REMINDER};
     use std::io::Write as _;
 
     fn message(id: &str, class: &str, arrived_at_ms: u64, text: &str) -> InboxMessage {
@@ -1556,6 +1584,42 @@ mod tests {
         assert_eq!(count, 1, "the record after the fragment replays");
         let drained = reopened.drain();
         assert_eq!(drained[0].text, "after the fragment");
+    }
+
+    /// The notice row: `content` is the notice text byte-identical (the
+    /// persistence clause included), the details carry the inbox-system
+    /// sender and the notice class, and the row parses as the engine's
+    /// injected-turn shape (`AgentMessage::Custom`), so a delivered turn's
+    /// model context is exactly the notice text.
+    #[test]
+    fn inbox_notice_row_carries_the_text_and_the_sender_identity() {
+        let arrival = format!(
+            "[inbox 14:03 UTC] 1 new message (bash-done); total waiting: 3. Read them with rlm.inbox.read(). {INBOX_PERSISTENCE_ERROR_CLAUSE}"
+        );
+        let reminder = format!("{} {INBOX_PERSISTENCE_ERROR_CLAUSE}", reminder_notice(3));
+        for (class, text) in [
+            (INBOX_NOTICE_CLASS_ARRIVAL, arrival),
+            (INBOX_NOTICE_CLASS_REMINDER, reminder),
+        ] {
+            let row = create_inbox_notice_row(&text, class, 1_730_000_000_000);
+            // Whole-object equality: the exact wire shape, no extra keys,
+            // every field present at once.
+            let expected = json!({
+                "role": "custom",
+                "customType": INBOX_NOTICE_CUSTOM_TYPE,
+                "content": text.clone(),
+                "display": true,
+                "details": { "sender": INBOX_NOTICE_SENDER, "class": class },
+                "timestamp": 1_730_000_000_000u64,
+            });
+            assert_eq!(row, expected, "the {class} notice row");
+            match serde_json::from_value::<pa_types::session::AgentMessage>(expected) {
+                Ok(pa_types::session::AgentMessage::Custom(custom)) => {
+                    assert_eq!(custom.content.text(), text);
+                }
+                other => panic!("the notice row must parse as AgentMessage::Custom: {other:?}"),
+            }
+        }
     }
 
     /// The host handlers drain on read and summarize on count.

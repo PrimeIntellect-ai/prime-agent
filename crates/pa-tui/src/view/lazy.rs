@@ -171,6 +171,7 @@ impl AgentView {
             self.chat.get(index)?,
             crate::chat::ChatEntry::Tool(_)
                 | crate::chat::ChatEntry::AgentMessage(_)
+                | crate::chat::ChatEntry::InboxNotice(_)
                 | crate::chat::ChatEntry::ShellCompletion(_)
         )
         .then(|| self.conversation_leading(index, self.entry_detail(index).tool_output_expanded()))

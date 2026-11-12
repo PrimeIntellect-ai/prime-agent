@@ -31,6 +31,7 @@ use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
@@ -49,12 +50,20 @@ impl Drop for Daemon {
 }
 
 /// The sequential mock: one scripted answer per provider request, in order.
-fn spawn_mock(next: &'static AtomicUsize) -> PathBuf {
-    spawn_mock_with(next, inbox_script)
+fn spawn_mock(next: &'static AtomicUsize) -> (PathBuf, RequestBodies) {
+    let bodies = RequestBodies::default();
+    let url = spawn_mock_with(next, inbox_script, Arc::clone(&bodies));
+    (url, bodies)
 }
 
-/// The sequential mock over one test's script function.
-fn spawn_mock_with(next: &'static AtomicUsize, script: fn(usize) -> Vec<String>) -> PathBuf {
+/// The sequential mock over one test's script function; the mock captures
+/// each provider request body into `bodies` (per-mock state, so parallel
+/// tests never cross-wire their pins).
+fn spawn_mock_with(
+    next: &'static AtomicUsize,
+    script: fn(usize) -> Vec<String>,
+    bodies: RequestBodies,
+) -> PathBuf {
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind mock");
     let url = format!(
         "http://127.0.0.1:{}/v1",
@@ -63,8 +72,9 @@ fn spawn_mock_with(next: &'static AtomicUsize, script: fn(usize) -> Vec<String>)
     std::thread::spawn(move || {
         for stream in listener.incoming() {
             let Ok(stream) = stream else { continue };
+            let bodies = Arc::clone(&bodies);
             std::thread::spawn(move || {
-                let _ = serve(stream, next, script);
+                let _ = serve(stream, next, script, &bodies);
             });
         }
     });
@@ -89,10 +99,52 @@ fn python_cell(code: &str) -> Value {
     })
 }
 
+/// One mock's captured provider request bodies, keyed by its scripted
+/// index: the wake request's last user message is the delivered notice
+/// row's own model-visible text (the byte-identical delivery pin). The
+/// capture is per-mock state — the binary's tests run in parallel over
+/// their own mocks, so a shared capture would cross-wire one test's
+/// pin against another test's provider request.
+type RequestBodies = Arc<Mutex<Vec<(usize, Value)>>>;
+
+/// The captured provider request body for `request` (its scripted index).
+fn captured_request_body(bodies: &RequestBodies, request: usize) -> Value {
+    let bodies = bodies.lock().expect("request bodies lock");
+    let (_, body) = bodies
+        .iter()
+        .find(|(index, _)| *index == request)
+        .expect("the wake request reached the mock");
+    body.clone()
+}
+
+/// The body's last user-role message text: the provider request carries
+/// the delivered row's user-role view, so this is exactly the
+/// model-visible prompt the notice's wake request sends.
+fn last_user_text(body: &Value) -> String {
+    let last = body
+        .get("messages")
+        .and_then(Value::as_array)
+        .expect("messages array in the request body")
+        .iter()
+        .rev()
+        .find(|message| message.get("role").and_then(Value::as_str) == Some("user"))
+        .expect("a user message in the request body");
+    match last.get("content").expect("content on the user message") {
+        Value::String(text) => text.clone(),
+        Value::Array(blocks) => blocks
+            .iter()
+            .filter_map(|block| block.get("text").and_then(Value::as_str))
+            .collect::<Vec<_>>()
+            .join("\n"),
+        other => panic!("unexpected user content shape: {other}"),
+    }
+}
+
 fn serve(
     mut stream: TcpStream,
     next: &AtomicUsize,
     script: fn(usize) -> Vec<String>,
+    bodies: &RequestBodies,
 ) -> std::io::Result<()> {
     let mut reader = BufReader::new(stream.try_clone()?);
     let mut content_length = 0usize;
@@ -114,6 +166,12 @@ fn serve(
         reader.read_exact(&mut body)?;
     }
     let request = next.fetch_add(1, Ordering::SeqCst);
+    if let Ok(captured) = serde_json::from_slice::<Value>(&body) {
+        bodies
+            .lock()
+            .expect("request bodies lock")
+            .push((request, captured));
+    }
     let data = script(request);
     let mut payload = String::new();
     for data in data {
@@ -222,6 +280,67 @@ fn inbox_script(request: usize) -> Vec<String> {
         _ => [
             chunk(
                 &json!({"role": "assistant", "content": "woken by the legacy notice"}),
+                None,
+            ),
+            chunk(&json!({}), Some("stop")),
+        ].to_vec(),
+    }
+}
+
+/// The scripted sequence for the drain-run test: the cell starts one
+/// detached handle; the next cell waits PAST its completion (the arrival
+/// notice queues behind the busy run) and then reads the inbox itself —
+/// the drain seam must withdraw the queued row, so the model answers
+/// the read's tool result (request 2) with no stale notice wake in
+/// between. Any fourth request is an unexpected wake.
+fn drain_run_script(request: usize) -> Vec<String> {
+    match request {
+        0 => [
+            chunk(
+                &json!({
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [{
+                        "index": 0,
+                        "id": "call-drain-1",
+                        "type": "function",
+                        "function": python_cell(
+                            "from rlm import bash\nh1 = bash('sleep 2; echo DRAIN_E2E_ONE')\nprint('handle started')"
+                        )
+                    }]
+                }),
+                None,
+            ),
+            chunk(&json!({}), Some("tool_calls")),
+        ].to_vec(),
+        1 => [
+            chunk(
+                &json!({
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [{
+                        "index": 0,
+                        "id": "call-drain-2",
+                        "type": "function",
+                        "function": python_cell(
+                            "import asyncio\nawait asyncio.sleep(5)\nfrom rlm import inbox\nmsgs = await inbox.read()\nprint(('drained', len(msgs)))"
+                        )
+                    }]
+                }),
+                None,
+            ),
+            chunk(&json!({}), Some("tool_calls")),
+        ].to_vec(),
+        2 => [
+            chunk(
+                &json!({"role": "assistant", "content": "continued after the read"}),
+                None,
+            ),
+            chunk(&json!({}), Some("stop")),
+        ].to_vec(),
+        _ => [
+            chunk(
+                &json!({"role": "assistant", "content": "unexpected extra request"}),
                 None,
             ),
             chunk(&json!({}), Some("stop")),
@@ -475,7 +594,7 @@ fn machine_notices_inbox_coalesce_and_the_kill_switch_restores_steering() {
     std::fs::create_dir_all(&agent_dir).expect("agent dir");
     let socket = dir.join("daemon.sock");
     let kernel_venv = dir.join("kernel-venv");
-    let url = spawn_mock(&NEXT);
+    let (url, bodies) = spawn_mock(&NEXT);
     std::fs::write(
         agent_dir.join("models.json"),
         json!({
@@ -573,6 +692,40 @@ fn machine_notices_inbox_coalesce_and_the_kill_switch_restores_steering() {
     assert!(
         notice_text.contains("rlm.inbox.read()"),
         "the notice teaches the read API: {notice_text}"
+    );
+    // THE ROW-SHAPE PIN (the real admission -> delivery -> transcript
+    // path): the delivered notice row is the inbox system's attributed
+    // custom row, never typed user input.
+    let notice_row = &delivered[notice_at].1;
+    assert_eq!(
+        notice_row["role"], "custom",
+        "the delivered notice row's role: {notice_row}"
+    );
+    assert_eq!(
+        notice_row["customType"], "inbox_notice",
+        "the delivered notice row's customType: {notice_row}"
+    );
+    assert_eq!(
+        notice_row["display"], true,
+        "the delivered notice row stays displayed: {notice_row}"
+    );
+    assert_eq!(
+        notice_row["details"]["sender"], "Agent inbox",
+        "the delivered notice row's sender identity: {notice_row}"
+    );
+    assert_eq!(
+        notice_row["details"]["class"], "arrival",
+        "the arrival notice row's class word: {notice_row}"
+    );
+    // THE MODEL-VISIBLE PIN (byte-identical): the wake request's last
+    // user message — the provider view of the injected row — equals the
+    // delivered notice text exactly, so the row's typing change never
+    // touched what the model reads.
+    let wake_body = captured_request_body(&bodies, 3);
+    assert_eq!(
+        last_user_text(&wake_body),
+        notice_text,
+        "the wake request's model-visible prompt equals the notice text"
     );
     let woken_at = delivered
         .iter()
@@ -688,6 +841,124 @@ fn machine_notices_inbox_coalesce_and_the_kill_switch_restores_steering() {
     drop(supervisor);
 }
 
+/// THE DRAIN-SEAM PIN: a cell that waits past a bash completion and
+/// then reads the inbox itself — the arrival notice queued behind the
+/// busy run — must answer its own tool result. The drain seam withdraws
+/// the queued row AT THE READ, inside the read's own host handler, so
+/// the steering probe sees an empty lane and the run continues with its
+/// tool result answered; no stale notice ever delivers.
+#[test]
+fn a_read_that_drains_the_inbox_continues_the_run_and_never_wakes_a_stale_notice() {
+    static NEXT: AtomicUsize = AtomicUsize::new(0);
+    let root = tempfile::TempDir::new().expect("temp dir");
+    let dir = root.path().to_path_buf();
+    let agent_dir = dir.join("agent");
+    std::fs::create_dir_all(&agent_dir).expect("agent dir");
+    let socket = dir.join("daemon.sock");
+    let kernel_venv = dir.join("kernel-venv");
+    let url = spawn_mock_with(&NEXT, drain_run_script, RequestBodies::default());
+    std::fs::write(
+        agent_dir.join("models.json"),
+        json!({
+            "providers": {
+                "prime-inference": {
+                    "api": "openai-completions",
+                    "baseUrl": url.to_string_lossy(),
+                    "apiKey": "sk-inbox",
+                    "models": [
+                        {
+                            "id": "mock-1",
+                            "name": "Mock 1",
+                            "api": "openai-completions",
+                            "contextWindow": 128_000,
+                            "maxTokens": 4096
+                        }
+                    ]
+                }
+            }
+        })
+        .to_string(),
+    )
+    .expect("write models.json");
+
+    let supervisor = spawn_daemon(&socket, &agent_dir, &kernel_venv);
+    let mut client = Client::connect(&socket);
+    let sessions = agent_dir.join("sessions");
+    std::fs::create_dir_all(&sessions).expect("sessions dir");
+    let created = client.request(
+        "c1",
+        &json!({
+            "type": "create",
+            "name": "inbox-drain-lane",
+            "config": {
+                "cwd": dir.to_string_lossy(),
+                "sessionDir": sessions.to_string_lossy(),
+                "provider": "prime-inference",
+                "model": "mock-1",
+            },
+        }),
+    );
+    assert_eq!(created["success"], true, "create failed: {created}");
+    let active_id = created["data"]["id"]
+        .as_str()
+        .or_else(|| created["data"]["activeSessionId"].as_str())
+        .expect("active session id")
+        .to_string();
+
+    // ONE run: start the handle; the next cell waits past its completion
+    // (the arrival notice queues behind the busy run) and reads the
+    // inbox itself. The read's tool result must get its follow-up
+    // request — the drain seam swept the queued row first.
+    let turn = client.request(
+        "p1",
+        &json!({
+            "type": "prompt_and_wait",
+            "activeSessionId": active_id,
+            "message": "start the handle, wait past its completion, read the inbox, then continue",
+        }),
+    );
+    assert_eq!(turn["success"], true, "the drain turn failed: {turn}");
+    let settled = wait_until(Duration::from_secs(120), || {
+        let messages = client.transcript(&active_id);
+        (messages.contains("continued after the read")).then_some(messages)
+    });
+    // THE FOLLOW-UP REQUEST: the model answered the read's tool result —
+    // the run continued past the drain.
+    assert!(
+        settled.contains("('drained', 1)"),
+        "the read drained the completion's message: {settled}"
+    );
+    assert_eq!(
+        NEXT.load(Ordering::SeqCst),
+        3,
+        "exactly the three scripted requests: start, wait-and-read, continue — no stale wake"
+    );
+    // NO STALE NOTICE DELIVERS: the queued arrival row withdrew at the
+    // drain; neither its custom shape nor its user-role ghost appears.
+    let rows = client.messages(&active_id);
+    let delivered = delivered_rows(&rows);
+    let stale = delivered
+        .iter()
+        .filter(|(text, row)| {
+            row.get("customType").and_then(Value::as_str) == Some("inbox_notice")
+                || text.starts_with("[inbox ")
+        })
+        .count();
+    assert_eq!(
+        stale, 0,
+        "no inbox notice row (custom or user-typed) ever delivered: {delivered:?}"
+    );
+
+    // Teardown: stop the session through the live supervisor so the
+    // worker (and its kernel + sleeper) do not leak past the test.
+    client.request(
+        "k1",
+        &json!({ "type": "kill", "activeSessionId": active_id }),
+    );
+    drop(client);
+    drop(supervisor);
+}
+
 /// The stage-1 agent-message coverage: a delivered agent message routes
 /// into the inbox (class `agent-message`, its sender label, the rendered
 /// `[agent-message from ...]` prompt as record text), ONE coalesced short
@@ -704,7 +975,7 @@ fn agent_messages_route_into_the_inbox_and_targeted_reads_pull_them_back() {
     std::fs::create_dir_all(&agent_dir).expect("agent dir");
     let socket = dir.join("daemon.sock");
     let kernel_venv = dir.join("kernel-venv");
-    let url = spawn_mock_with(&NEXT_AM, agent_message_script);
+    let url = spawn_mock_with(&NEXT_AM, agent_message_script, RequestBodies::default());
     std::fs::write(
         agent_dir.join("models.json"),
         json!({
