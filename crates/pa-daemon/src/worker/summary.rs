@@ -2,10 +2,11 @@
 //! roster push, and the event emission family.
 use super::lifecycle::active_lifecycle;
 use super::{
-    checkpoint_queue_recovery, create_daemon_event_meta, is_injected_prompt_item,
-    is_rlm_child_status_item, json, AgentConnectionState, Arc, DaemonOutbound,
-    DaemonSessionClosedReason, EventPump, Map, Mutex, OutboundFrame, QueueCheckpoint, QueueLanes,
-    QueuedItem, Result, SessionActionSnapshot, SessionCore, SessionEngine, Value, Worker,
+    checkpoint_queue_recovery, create_daemon_event_meta, is_inbox_notice_item,
+    is_injected_prompt_item, is_rlm_child_status_item, json, AgentConnectionState, Arc,
+    DaemonOutbound, DaemonSessionClosedReason, EventPump, Map, Mutex, OutboundFrame,
+    QueueCheckpoint, QueueLanes, QueuedItem, Result, SessionActionSnapshot, SessionCore,
+    SessionEngine, Value, Worker,
 };
 
 use crate::types::SessionSummary;
@@ -630,6 +631,10 @@ pub(crate) fn session_snapshot(core: &SessionCore) -> SessionActionSnapshot {
     // 2026-09-28), unlike TS's filtered-out projection.
     let injected_prompts =
         |items: &std::collections::VecDeque<QueuedItem>| indices(items, is_injected_prompt_item);
+    // The daemon inbox notices fold by their own typed provenance: the
+    // arrival/reminder rows never render as browsable steering previews.
+    let inbox_notice =
+        |items: &std::collections::VecDeque<QueuedItem>| indices(items, is_inbox_notice_item);
     SessionActionSnapshot {
         queued_count: (core.steering.len() + core.follow_up.len()) as u32,
         steering: lane(&core.steering),
@@ -641,6 +646,10 @@ pub(crate) fn session_snapshot(core: &SessionCore) -> SessionActionSnapshot {
         injected_prompts: crate::types::QueueLaneIndices {
             steering: injected_prompts(&core.steering),
             follow_up: injected_prompts(&core.follow_up),
+        },
+        inbox_notice: crate::types::QueueLaneIndices {
+            steering: inbox_notice(&core.steering),
+            follow_up: inbox_notice(&core.follow_up),
         },
         active: core.active_action.clone(),
     }

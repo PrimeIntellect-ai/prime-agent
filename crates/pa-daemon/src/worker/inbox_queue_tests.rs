@@ -2,7 +2,7 @@
 //! notice (the message in the durable store), busy-window arrivals
 //! coalesce into one queued row, a delivered row frees the next batch,
 //! and the periodic reminder repeats while the inbox stays unread.
-use super::queue::{INBOX_ARRIVAL_QUEUE_KEY, INBOX_REMINDER_QUEUE_KEY};
+use super::queue::{refresh_inbox_wake_rows, INBOX_ARRIVAL_QUEUE_KEY, INBOX_REMINDER_QUEUE_KEY};
 use super::*;
 use pa_core::session_engine::inbox::SessionInbox;
 
@@ -133,9 +133,31 @@ async fn an_idle_arrival_queues_one_short_notice_and_keeps_the_message() {
         Some(INBOX_ARRIVAL_QUEUE_KEY),
         "the notice row carries the coalescing key: {queue_key:?}"
     );
-    assert!(
-        custom_message.is_none(),
-        "no full notice row rides the turn: {custom_message:?}"
+    // THE CUSTOM TWIN: the notice rides as the inbox system's attributed
+    // custom row — never a plain user message — its content the
+    // model-visible notice text, byte-identical (the class the TUI renders
+    // as its own row). Whole-object equality against the builder: every
+    // field at once, no extra keys, the admission timestamp read back.
+    let (_, expected_text) =
+        pa_core::session_engine::inbox::arrival_notice(&arrivals.lock().unwrap(), 1);
+    let row = custom_message
+        .as_ref()
+        .expect("the notice row carries its custom twin");
+    let admitted_at = row["timestamp"]
+        .as_u64()
+        .expect("the twin carries the admission timestamp");
+    assert_eq!(
+        row,
+        &pa_core::session_engine::inbox::create_inbox_notice_row(
+            &expected_text,
+            pa_types::inbox_notice::INBOX_NOTICE_CLASS_ARRIVAL,
+            admitted_at,
+        ),
+        "the arrival twin is exactly the builder's row"
+    );
+    assert_eq!(
+        message, &expected_text,
+        "the turn's model-visible text is the notice text"
     );
     let (count, _, classes) = inbox.count();
     assert_eq!(count, 1);
@@ -319,15 +341,448 @@ async fn the_reminder_repeats_while_the_inbox_stays_unread() {
         "the reminder repeats the waiting count: {message}"
     );
     assert!(message.contains("rlm.inbox.read()"));
-    let queue_key = {
+    let (queue_key, custom_message) = {
         let core = worker.core.lock().unwrap();
         let item = core.steering.front().expect("the reminder row queued");
-        item.queue_key.clone()
+        (item.queue_key.clone(), item.custom_message.clone())
     };
     assert_eq!(
         queue_key.as_deref(),
         Some("inbox:reminder"),
         "the reminder carries its coalescing key: {queue_key:?}"
+    );
+    // The reminder's custom twin: the same inbox-notice row, class
+    // `reminder`, its content the model-visible reminder text —
+    // whole-object equality against the builder, the admission
+    // timestamp read back.
+    let row = custom_message
+        .as_ref()
+        .expect("the reminder row carries its custom twin");
+    let admitted_at = row["timestamp"]
+        .as_u64()
+        .expect("the twin carries the admission timestamp");
+    assert_eq!(
+        row,
+        &pa_core::session_engine::inbox::create_inbox_notice_row(
+            message,
+            pa_types::inbox_notice::INBOX_NOTICE_CLASS_REMINDER,
+            admitted_at,
+        ),
+        "the reminder twin is exactly the builder's row"
+    );
+    let _ = std::fs::remove_dir_all(worker.config.socket_path.parent().unwrap());
+}
+
+/// A read that drains the store withdraws the queued wake rows AT THE
+/// DRAIN (`rlm.inbox.read` fires the queue sweep inside the cell): the
+/// arrival's turn read everything, so a reminder left behind the same
+/// busy window carries a dead count and never wakes. An unread store
+/// keeps the queued rows — the sweep is the emptied-store rule, never an
+/// unconditional one — and the withdrawal checkpoints the lanes so the
+/// swept rows cannot revive as interrupted work.
+#[tokio::test]
+async fn a_drained_read_withdraws_its_queued_wake_rows() {
+    let (worker, inbox, arrivals, notify) = routing_state();
+    worker.dispatch("clear_queue", &json!({})).await;
+    worker.core.lock().unwrap().busy = true;
+    let _ = admit_inbox_notice(
+        &worker.recovery,
+        &worker.core,
+        &notify,
+        &inbox,
+        &arrivals,
+        bash_done_notice(4321, "sleep 1"),
+        Lane::Steering,
+        || false,
+        |_, _| None,
+        None,
+    );
+    admit_inbox_reminder(
+        &worker.recovery,
+        &worker.core,
+        &notify,
+        &inbox,
+        || false,
+        None,
+    );
+    assert_eq!(
+        steering_rows(&worker).len(),
+        2,
+        "the arrival row and the reminder row queue behind the busy turn"
+    );
+    // The turn's cell called rlm.inbox.read(): the store drains and the
+    // drain seam (the kernel host handler) fires the sweep.
+    let drained = inbox.drain();
+    assert_eq!(drained.len(), 1, "the read drained the waiting message");
+    withdraw_drained_inbox_notice(
+        &worker.recovery,
+        &worker.core,
+        &arrivals,
+        &inbox,
+        worker.engine.as_ref(),
+    );
+    assert!(
+        steering_rows(&worker).is_empty(),
+        "the arrival row and the stale reminder both withdrew at the drain"
+    );
+    // The durable side: the recovery snapshot lost the swept rows while
+    // the turn still runs (mid-turn the busy verdict stays true — the
+    // turn IS live work — but a crash must revive no stale wake row).
+    let (steering, follow_up, _) = WorkerRecoveryJournal::read_queue_snapshot(
+        &worker.config.recovery_journal_path,
+        "target-session",
+    )
+    .unwrap()
+    .expect("the sweep checkpointed its snapshot");
+    assert!(
+        steering.is_empty() && follow_up.is_empty(),
+        "the swept rows left the durable snapshot: {steering:?} {follow_up:?}"
+    );
+    // Control: an unread store keeps the queued rows — the sweep is the
+    // emptied-store rule, never an unconditional one.
+    inbox.push(
+        inbox_notice(
+            pa_core::session_engine::inbox::INBOX_CLASS_BASH_DONE,
+            "freshly waiting",
+        ),
+        pa_core::autonomous::now_millis(),
+    );
+    admit_inbox_reminder(
+        &worker.recovery,
+        &worker.core,
+        &notify,
+        &inbox,
+        || false,
+        None,
+    );
+    assert_eq!(
+        steering_rows(&worker).len(),
+        1,
+        "the unread reminder row stays queued"
+    );
+    withdraw_drained_inbox_notice(
+        &worker.recovery,
+        &worker.core,
+        &arrivals,
+        &inbox,
+        worker.engine.as_ref(),
+    );
+    assert_eq!(
+        steering_rows(&worker).len(),
+        1,
+        "the sweep never withdraws an unread store's rows"
+    );
+    let _ = std::fs::remove_dir_all(worker.config.socket_path.parent().unwrap());
+}
+
+/// THE DRAIN-WINDOW PIN: an arrival landing between the read's drain and
+/// its sweep (the store drain runs outside the core lock, the sweep
+/// takes it) refills the store — the sweep must never leave the queued
+/// reminder at its pre-read count. The live count re-renders the queued
+/// reminder row, its custom twin, and the durable snapshot (the
+/// consumed-bash withdrawal's `count > 0` rule); the racing arrival's
+/// own row stays queued.
+#[tokio::test]
+async fn a_refill_inside_the_drain_window_rerenders_the_queued_reminder() {
+    const SENTINEL_TIMESTAMP: u64 = 1;
+    let (worker, inbox, arrivals, notify) = routing_state();
+    worker.dispatch("clear_queue", &json!({})).await;
+    worker.core.lock().unwrap().busy = true;
+    let _ = admit_inbox_notice(
+        &worker.recovery,
+        &worker.core,
+        &notify,
+        &inbox,
+        &arrivals,
+        bash_done_notice(4321, "job one"),
+        Lane::Steering,
+        || false,
+        |_, _| None,
+        None,
+    );
+    let _ = admit_inbox_notice(
+        &worker.recovery,
+        &worker.core,
+        &notify,
+        &inbox,
+        &arrivals,
+        bash_done_notice(4322, "job two"),
+        Lane::Steering,
+        || false,
+        |_, _| None,
+        None,
+    );
+    admit_inbox_reminder(
+        &worker.recovery,
+        &worker.core,
+        &notify,
+        &inbox,
+        || false,
+        None,
+    );
+    // The busy cell's read drained the store; the queued reminder still
+    // promises its pre-read count of two.
+    let drained = inbox.drain();
+    assert_eq!(drained.len(), 2, "the read drained both waiting messages");
+    // A third completion lands inside the drain window — after the
+    // drain, before the sweep — refilling the store.
+    let _ = admit_inbox_notice(
+        &worker.recovery,
+        &worker.core,
+        &notify,
+        &inbox,
+        &arrivals,
+        bash_done_notice(4323, "job three"),
+        Lane::Steering,
+        || false,
+        |_, _| None,
+        None,
+    );
+    // The queued reminder's twin keeps its identity across the re-render
+    // (sender, class, timestamp — the re-render moves only its content).
+    // Pin the timestamp half without racing the millisecond clock:
+    // stamp a sentinel into the queued twin's timestamp BEFORE the
+    // sweep, then expect the sentinel back — a rebuild with
+    // `now_millis()` goes red deterministically (the class half pins
+    // identically).
+    {
+        let mut guard = worker.core.lock().unwrap();
+        let core = &mut *guard;
+        let twin = core
+            .steering
+            .iter_mut()
+            .chain(core.follow_up.iter_mut())
+            .find(|item| item.queue_key.as_deref() == Some(INBOX_REMINDER_QUEUE_KEY))
+            .and_then(|item| item.custom_message.as_mut())
+            .expect("the queued reminder carries its custom twin");
+        twin["timestamp"] = json!(SENTINEL_TIMESTAMP);
+    }
+    // The sweep: the live count re-renders the queued reminder.
+    withdraw_drained_inbox_notice(
+        &worker.recovery,
+        &worker.core,
+        &arrivals,
+        &inbox,
+        worker.engine.as_ref(),
+    );
+    {
+        let core = worker.core.lock().unwrap();
+        let reminder = core
+            .steering
+            .iter()
+            .chain(core.follow_up.iter())
+            .find(|item| item.queue_key.as_deref() == Some(INBOX_REMINDER_QUEUE_KEY))
+            .expect("the re-rendered reminder row stays queued");
+        assert!(
+            reminder
+                .message
+                .starts_with("[inbox reminder] 1 message still waiting"),
+            "the reminder re-rendered over the live count: {reminder:?}"
+        );
+        // THE TWIN-SYNC (the stale-twin trap): the re-render rewrote the
+        // row's text, and the twin keeps its identity (sender, class,
+        // timestamp — the sentinel stamped in BEFORE the sweep) while
+        // its content moves with the row — whole-object equality against
+        // the builder.
+        let row = reminder
+            .custom_message
+            .as_ref()
+            .expect("the re-rendered reminder keeps its custom twin");
+        assert_eq!(
+            row,
+            &pa_core::session_engine::inbox::create_inbox_notice_row(
+                &reminder.message,
+                pa_types::inbox_notice::INBOX_NOTICE_CLASS_REMINDER,
+                SENTINEL_TIMESTAMP,
+            ),
+            "the re-rendered twin keeps its identity and only its content moved: {row}"
+        );
+        assert_eq!(
+            core.steering
+                .iter()
+                .chain(core.follow_up.iter())
+                .filter(|item| item.queue_key.as_deref() == Some(INBOX_ARRIVAL_QUEUE_KEY))
+                .count(),
+            1,
+            "the racing arrival's own row stays queued"
+        );
+    }
+    // The re-render reached the recovery journal: a crash now revives
+    // the live-count reminder, not the pre-read count.
+    let (steering, follow_up, _) = WorkerRecoveryJournal::read_queue_snapshot(
+        &worker.config.recovery_journal_path,
+        "target-session",
+    )
+    .unwrap()
+    .expect("the sweep checkpointed its snapshot");
+    assert!(
+        steering.iter().chain(follow_up.iter()).any(|record| record
+            .message
+            .starts_with("[inbox reminder] 1 message still waiting")),
+        "the durable snapshot carries the re-rendered reminder: {steering:?} {follow_up:?}"
+    );
+    let _ = std::fs::remove_dir_all(worker.config.socket_path.parent().unwrap());
+}
+
+// The test-only scheduler gate inside the reminder admission's critical
+// section, AFTER the count (`queue.rs` calls
+// [`pause_inbox_reminder_after_count`] there): the reminder thread arms
+// the gate and pauses — its count snapshotted, the core lock held —
+// until the probe releases it. The gate changes no payload, count,
+// lock, or state — it pins the admission's critical-section order
+// against a concurrent drain.
+thread_local! {
+    static INBOX_REMINDER_CORE_LOCK_GATE:
+        std::cell::RefCell<Option<(std::sync::mpsc::Sender<()>, std::sync::mpsc::Receiver<()>)>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// The armed thread asserts the core lock is held (the count ran inside
+/// the critical section — any order that counts outside the lock fails
+/// deterministically at the pause), signals the probe, then blocks at
+/// the gate until the release (no gate armed: a plain no-op, the
+/// ordinary admission).
+pub(super) fn pause_inbox_reminder_after_count(core: &Arc<Mutex<SessionCore>>) {
+    INBOX_REMINDER_CORE_LOCK_GATE.with(|gate| {
+        if let Some((observed, release)) = gate.borrow_mut().take() {
+            assert!(
+                core.try_lock().is_err(),
+                "the reminder counts inside its core-lock critical section"
+            );
+            observed.send(()).expect("the probe observes the gate");
+            release
+                .recv_timeout(std::time::Duration::from_secs(10))
+                .expect("the probe releases the gate");
+        }
+    });
+}
+
+/// THE SERIALIZATION PIN (the drain sweep's lock-order family): a
+/// reminder paused INSIDE its admission critical section — the count
+/// snapshotted, the core lock held — while a busy turn's cell drains
+/// the inbox through the PRODUCTION `rlm.inbox.read` host handler must
+/// never leave its row behind the drain's sweep. The count, the render,
+/// and the push share the admission's one critical section: the resumed
+/// reminder enqueued ahead of the parked sweep (its row drops with the
+/// rest), and the gate's held-lock assert fails any order that counts
+/// outside the lock. The live lanes AND the durable snapshot keep no
+/// dead-count wake.
+#[tokio::test]
+async fn a_reminder_racing_a_drained_read_never_queues_a_dead_count() {
+    let (worker, inbox, arrivals, notify) = routing_state();
+    worker.dispatch("clear_queue", &json!({})).await;
+    worker.core.lock().unwrap().busy = true;
+    let _ = admit_inbox_notice(
+        &worker.recovery,
+        &worker.core,
+        &notify,
+        &inbox,
+        &arrivals,
+        bash_done_notice(4321, "detached command"),
+        Lane::Steering,
+        || false,
+        |_, _| None,
+        None,
+    );
+    // The reminder thread arms the gate on its own thread, then admits:
+    // it pauses inside the critical section, AFTER the count, holding
+    // the core lock (the gate asserts it).
+    let (observed_tx, observed_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let reminder = {
+        let worker = Arc::clone(&worker);
+        let inbox = Arc::clone(&inbox);
+        let notify = Arc::clone(&notify);
+        std::thread::spawn(move || {
+            INBOX_REMINDER_CORE_LOCK_GATE.with(|gate| {
+                *gate.borrow_mut() = Some((observed_tx, release_rx));
+            });
+            admit_inbox_reminder(
+                &worker.recovery,
+                &worker.core,
+                &notify,
+                &inbox,
+                || false,
+                None,
+            );
+        })
+    };
+    observed_rx
+        .recv_timeout(std::time::Duration::from_secs(10))
+        .expect("the reminder paused after its count, the core lock held");
+    // The busy cell's rlm.inbox.read on its own thread (its own
+    // single-thread runtime): the production host handler drains the
+    // store, then runs the installed read hook — the drain sweep — which
+    // parks on the core lock the paused admission still holds.
+    let mut handlers = pa_core::kernel::shared::HostRequestHandlers::default();
+    let drained_worker = Arc::clone(&worker);
+    let drained_arrivals = Arc::clone(&arrivals);
+    inbox.set_read_hook(Arc::new(move |inbox| {
+        withdraw_drained_inbox_notice(
+            &drained_worker.recovery,
+            &drained_worker.core,
+            &drained_arrivals,
+            inbox,
+            drained_worker.engine.as_ref(),
+        );
+    }));
+    pa_core::session_engine::inbox::register_inbox_host_handlers(&inbox, &mut handlers);
+    let read = handlers
+        .get(pa_core::session_engine::inbox::INBOX_READ_REQUEST_TYPE)
+        .expect("the read host handler registered")
+        .clone();
+    let (read_reply_tx, read_reply_rx) = std::sync::mpsc::channel::<serde_json::Value>();
+    let read_thread = std::thread::spawn(move || {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .expect("the read thread's runtime");
+        let reply = runtime
+            .block_on(async {
+                read(pa_core::kernel::shared::HostRequestPayload { data: json!({}) }).await
+            })
+            .expect("the read answered");
+        read_reply_tx.send(reply).expect("the read reply returns");
+    });
+    // The store drains under the paused admission; the parked sweep
+    // cannot drop any queued row yet — it waits on the held lock.
+    let mut store_drained = false;
+    for _ in 0..2_000 {
+        if inbox.count().0 == 0 {
+            store_drained = true;
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    assert!(
+        store_drained,
+        "the read drained the store under the paused admission"
+    );
+    // The paused reminder resumes: its count predates the drain, but its
+    // push enqueued ahead of the parked sweep, which drops the row with
+    // the rest — no dead count survives onto the emptied lanes.
+    release_tx.send(()).expect("the probe releases the gate");
+    let reply = read_reply_rx
+        .recv_timeout(std::time::Duration::from_secs(10))
+        .expect("the read finished once the admission released the lock");
+    assert_eq!(
+        reply["drainedCount"], 1,
+        "the read drained the waiting message"
+    );
+    read_thread.join().expect("the read thread finished");
+    reminder.join().expect("the reminder admission finished");
+    assert!(
+        steering_rows(&worker).is_empty(),
+        "the resumed reminder never queues a dead count onto the emptied lanes"
+    );
+    let (steering, follow_up, _) = WorkerRecoveryJournal::read_queue_snapshot(
+        &worker.config.recovery_journal_path,
+        "target-session",
+    )
+    .unwrap()
+    .expect("the sweep checkpointed its snapshot");
+    assert!(
+        steering.is_empty() && follow_up.is_empty(),
+        "the durable snapshot keeps no dead-count wake: {steering:?} {follow_up:?}"
     );
     let _ = std::fs::remove_dir_all(worker.config.socket_path.parent().unwrap());
 }
@@ -399,6 +854,7 @@ async fn a_collected_handle_drains_its_message_and_drops_the_queued_wake_rows() 
 /// refreshes the recovery snapshot the revival replays.
 #[tokio::test]
 async fn a_withdrawal_inside_a_covered_batch_rerenders_the_queued_rows() {
+    const SENTINEL_TIMESTAMP: u64 = 1;
     let (worker, inbox, arrivals, notify) = routing_state();
     worker.dispatch("clear_queue", &json!({})).await;
     worker.core.lock().unwrap().busy = true;
@@ -437,6 +893,29 @@ async fn a_withdrawal_inside_a_covered_batch_rerenders_the_queued_rows() {
         || false,
         None,
     );
+    // Each queued twin keeps its identity across the re-render (sender,
+    // class, timestamp — the re-render moves only its content). Pin the
+    // timestamp half without racing the millisecond clock: stamp one
+    // sentinel into every queued inbox twin's timestamp BEFORE the
+    // withdrawal, then expect the sentinel back — a rebuild with
+    // `now_millis()` goes red deterministically (the class half pins
+    // identically).
+    {
+        let mut guard = worker.core.lock().unwrap();
+        let core = &mut *guard;
+        for item in core.steering.iter_mut().chain(core.follow_up.iter_mut()) {
+            if matches!(
+                item.queue_key.as_deref(),
+                Some(INBOX_ARRIVAL_QUEUE_KEY | INBOX_REMINDER_QUEUE_KEY)
+            ) {
+                let twin = item
+                    .custom_message
+                    .as_mut()
+                    .expect("the queued inbox row carries its custom twin");
+                twin["timestamp"] = json!(SENTINEL_TIMESTAMP);
+            }
+        }
+    }
     withdraw_bash_completion_notice(
         &worker.recovery,
         &worker.core,
@@ -471,8 +950,44 @@ async fn a_withdrawal_inside_a_covered_batch_rerenders_the_queued_rows() {
             .starts_with("[inbox reminder] 1 message still waiting"),
         "the reminder re-rendered with the live count: {rows:?}"
     );
+    // THE TWIN-SYNC PIN (the stale-twin trap): the re-render rewrote the
+    // queued rows' texts, and every twin keeps its identity (sender,
+    // class, timestamp — the sentinel stamped in BEFORE the withdrawal)
+    // while its content moves with the row — whole-object equality
+    // against the builder. A twin left at its pre-render content, or
+    // one rebuilt with the other class or a fresh timestamp, fails
+    // here.
+    {
+        let core = worker.core.lock().unwrap();
+        for item in core.steering.iter().chain(core.follow_up.iter()) {
+            let row = item
+                .custom_message
+                .as_ref()
+                .expect("the re-rendered row keeps its custom twin");
+            let key = item
+                .queue_key
+                .as_deref()
+                .expect("the re-rendered rows keep their coalescing keys");
+            let class = if key == INBOX_ARRIVAL_QUEUE_KEY {
+                pa_types::inbox_notice::INBOX_NOTICE_CLASS_ARRIVAL
+            } else if key == INBOX_REMINDER_QUEUE_KEY {
+                pa_types::inbox_notice::INBOX_NOTICE_CLASS_REMINDER
+            } else {
+                panic!("the re-rendered rows keep their inbox keys: {key}")
+            };
+            assert_eq!(
+                row,
+                &pa_core::session_engine::inbox::create_inbox_notice_row(
+                    &item.message,
+                    class,
+                    SENTINEL_TIMESTAMP,
+                ),
+                "the re-rendered twin keeps its identity and only its content moved: {row}"
+            );
+        }
+    }
     // The re-render reached the recovery journal: a crash now revives
-    // the re-rendered text, not the admission's.
+    // the re-rendered text and its twin, not the admission's.
     let (steering, _, _) = WorkerRecoveryJournal::read_queue_snapshot(
         &worker.config.recovery_journal_path,
         "target-session",
@@ -480,10 +995,14 @@ async fn a_withdrawal_inside_a_covered_batch_rerenders_the_queued_rows() {
     .unwrap()
     .expect("the withdrawal checkpointed its snapshot");
     assert!(
-        steering
-            .iter()
-            .any(|record| record.message == expected_text),
-        "the revived row carries the re-rendered text: {steering:?}"
+        steering.iter().any(|record| {
+            record.message == expected_text
+                && record
+                    .custom_message
+                    .as_ref()
+                    .is_some_and(|row| row["content"] == serde_json::json!(record.message))
+        }),
+        "the revived row carries the re-rendered text and its twin: {steering:?}"
     );
     let _ = std::fs::remove_dir_all(worker.config.socket_path.parent().unwrap());
 }
@@ -983,9 +1502,12 @@ async fn run_reminder_cycles(cycle: std::time::Duration) {
     tokio::task::yield_now().await;
 }
 
-/// A reminder row moved onto the follow-up lane still coalesces: the
-/// next reminder replaces it there instead of stacking a second row
-/// that could deliver as its own turn.
+/// A reminder row on the follow-up lane still coalesces: the next
+/// reminder replaces it there instead of stacking a second row that
+/// could deliver as its own turn. The daemon refuses a replace of any
+/// row that carries the custom twin, so a live mutation never moves one
+/// across lanes — the hand-move stands in for a journal-revived
+/// follow-up row (a journal written before the upgrade).
 #[tokio::test]
 async fn a_reminder_row_moved_to_follow_up_still_coalesces() {
     let (worker, inbox, _arrivals, notify) = routing_state();
@@ -1005,8 +1527,8 @@ async fn a_reminder_row_moved_to_follow_up_still_coalesces() {
         || false,
         None,
     );
-    // The queue mutation moved the reminder row onto the follow-up
-    // lane, its coalescing key preserved.
+    // A journal-revived row: the reminder sits on the follow-up lane,
+    // its coalescing key preserved.
     let moved_key = {
         let mut core = worker.core.lock().unwrap();
         let moved = core.steering.pop_front().expect("the reminder row queued");
@@ -1708,10 +2230,13 @@ async fn a_follow_up_arrival_keeps_a_queued_steering_notice() {
     let _ = std::fs::remove_dir_all(worker.config.socket_path.parent().unwrap());
 }
 
-/// An edited arrival row leaves the coalescing sweep: a later arrival
-/// queues a fresh notice instead of silently deleting the user's text.
+/// The queued arrival row is daemon-owned: a raw `mutate_queued_message`
+/// replace against it is refused (the row carries the custom twin, and
+/// the strip — which walks only the user-typed rows — never offers it
+/// for editing), so the row keeps its identity and the next arrival
+/// coalesces into the one daemon-authored notice.
 #[tokio::test]
-async fn an_edited_arrival_row_survives_the_next_arrival() {
+async fn a_replace_of_an_arrival_row_is_refused_and_the_next_arrival_coalesces() {
     let (worker, inbox, arrivals, notify) = routing_state();
     worker.core.lock().unwrap().created = true;
     worker.dispatch("clear_queue", &json!({})).await;
@@ -1736,7 +2261,7 @@ async fn an_edited_arrival_row_survives_the_next_arrival() {
         .1
         .clone()
         .expect("the notice preview");
-    let applied = worker
+    let refused = worker
         .dispatch(
             "mutate_queued_message",
             &json!({
@@ -1748,8 +2273,12 @@ async fn an_edited_arrival_row_survives_the_next_arrival() {
             }),
         )
         .await;
-    assert!(applied.success, "mutation failed: {applied:?}");
-    assert_eq!(applied.data, Some(json!({ "status": "applied" })));
+    assert!(refused.success, "the command itself answers: {refused:?}");
+    assert_eq!(
+        refused.data,
+        Some(json!({ "status": "rejected" })),
+        "the daemon refuses a replace of the twin-carrying arrival row: {refused:?}"
+    );
     let _ = admit_inbox_notice(
         &worker.recovery,
         &worker.core,
@@ -1766,10 +2295,15 @@ async fn an_edited_arrival_row_survives_the_next_arrival() {
         None,
     );
     let rows = steering_rows(&worker);
-    assert_eq!(rows.len(), 2, "the edited row survives: {rows:?}");
+    assert_eq!(
+        rows.len(),
+        1,
+        "the next arrival coalesces into the one daemon-authored row: {rows:?}"
+    );
     assert!(
-        rows.iter().any(|(text, _, _)| text == "user instruction"),
-        "the user's instruction stays queued: {rows:?}"
+        rows.iter()
+            .all(|(text, _, _)| { text.starts_with("[inbox ") && text.contains("+2 arrived") }),
+        "the row stays the coalesced notice, never a user instruction: {rows:?}"
     );
     let _ = std::fs::remove_dir_all(worker.config.socket_path.parent().unwrap());
 }
@@ -1899,7 +2433,7 @@ async fn the_wake_row_refresh_follows_the_live_store() {
     });
     assert_eq!(taken.len(), 1);
     assert!(
-        crate::worker::refresh_inbox_wake_rows(&worker.core, &arrivals, &inbox),
+        refresh_inbox_wake_rows(&worker.core, &arrivals, &inbox),
         "the partial drain re-render reports the change"
     );
     let rows = steering_rows(&worker);
@@ -1920,7 +2454,7 @@ async fn the_wake_row_refresh_follows_the_live_store() {
     // messages still need.
     {
         arrivals.lock().unwrap().clear();
-        crate::worker::refresh_inbox_wake_rows(&worker.core, &arrivals, &inbox);
+        refresh_inbox_wake_rows(&worker.core, &arrivals, &inbox);
         let rows = steering_rows(&worker);
         assert!(
             rows.iter()
@@ -1931,7 +2465,7 @@ async fn the_wake_row_refresh_follows_the_live_store() {
     // The final drain empties the store: both rows retract.
     let rest = inbox.drain();
     assert_eq!(rest.len(), 1);
-    crate::worker::refresh_inbox_wake_rows(&worker.core, &arrivals, &inbox);
+    refresh_inbox_wake_rows(&worker.core, &arrivals, &inbox);
     let rows = steering_rows(&worker);
     assert!(
         rows.is_empty(),
@@ -2069,7 +2603,7 @@ async fn a_drained_live_batch_drops_its_row_without_rebuilding() {
     });
     assert_eq!(taken.len(), 1);
     assert_eq!(inbox.count().0, 1, "the older message waits");
-    crate::worker::refresh_inbox_wake_rows(&worker.core, &arrivals, &inbox);
+    refresh_inbox_wake_rows(&worker.core, &arrivals, &inbox);
     let rows = steering_rows(&worker);
     assert!(
         rows.is_empty(),

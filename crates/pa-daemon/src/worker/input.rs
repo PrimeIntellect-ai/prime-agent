@@ -31,13 +31,23 @@ impl Worker {
             Err(error) => return response_failure(None, "prompt", &error, None),
         };
         // The reserved child-status kinds are daemon provenance: a prompt row
-        // claiming one is always a spoof — answered loudly, never parked.
+        // claiming one is always a spoof — answered loudly, never parked. The
+        // inbox notice kind is the same provenance (the daemon's admission
+        // paths own it), so it refuses identically.
         if let Some(row) = custom_message.as_ref() {
             if crate::child_status_notices::is_reserved_child_status_custom_type(row) {
                 return response_failure(
                     None,
                     "prompt",
                     &crate::child_status_notices::reserved_intake_error(),
+                    None,
+                );
+            }
+            if crate::worker::is_inbox_notice_custom_type(row) {
+                return response_failure(
+                    None,
+                    "prompt",
+                    &crate::worker::inbox_notice_intake_error(),
                     None,
                 );
             }
@@ -179,6 +189,8 @@ impl Worker {
         // The reserved child-status kinds are daemon provenance: a caller-supplied
         // row claiming one is answered loudly, never parked. The daemon's own
         // notice injection rides this command with the one-shot capability.
+        // The inbox notice kind carries the same provenance with NO client
+        // route (the daemon's inbox paths admit it), so it refuses outright.
         if let Some(row) = custom_message.as_ref() {
             if crate::child_status_notices::is_reserved_child_status_custom_type(row) {
                 let minted = crate::child_status_notices::consume(
@@ -192,6 +204,14 @@ impl Worker {
                         None,
                     );
                 }
+            }
+            if crate::worker::is_inbox_notice_custom_type(row) {
+                return response_failure(
+                    None,
+                    lane.as_str(),
+                    &crate::worker::inbox_notice_intake_error(),
+                    None,
+                );
             }
         }
         let mut core = self.core.lock().unwrap();

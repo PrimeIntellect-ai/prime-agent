@@ -28,10 +28,11 @@ pub(crate) use queue::{
     admit_autonomous_follow_up, admit_goal_follow_up, admit_inbox_notice, admit_inbox_reminder,
     admit_kernel_notice, checkpoint_queue_recovery, clear_withdrawn_progress_note,
     enqueue_priority, gather_delivery_batch, parse_custom_message, parse_prompt_images,
-    queue_lanes, refresh_inbox_wake_rows, refresh_inbox_wake_rows_locked, restore_queue_snapshot,
-    restored_turn_policy, withdraw_bash_completion_notice, QueueCheckpoint, QueueLanes, QueuedItem,
-    TurnPolicy, TurnSettle, ABORTED_TURN_SETTLE_ERROR, PROMPT_ABORTED_BEFORE_DELIVERY,
-    QUEUED_INPUT_SUSPENDED, QUEUED_PROMPT_DELETED, SIDE_QUESTION_SETTLE_TIMEOUT,
+    queue_lanes, refresh_inbox_wake_rows_locked, restore_queue_snapshot, restored_turn_policy,
+    withdraw_bash_completion_notice, withdraw_drained_inbox_notice, QueueCheckpoint, QueueLanes,
+    QueuedItem, TurnPolicy, TurnSettle, ABORTED_TURN_SETTLE_ERROR, INBOX_ARRIVAL_QUEUE_KEY,
+    INBOX_REMINDER_QUEUE_KEY, PROMPT_ABORTED_BEFORE_DELIVERY, QUEUED_INPUT_SUSPENDED,
+    QUEUED_PROMPT_DELETED, SIDE_QUESTION_SETTLE_TIMEOUT,
 };
 
 mod create;
@@ -812,8 +813,11 @@ impl Worker {
         );
         // The worker's post-drain inbox seam: every session build copies
         // it onto the freshly opened store, and the kernel's read handler
-        // runs it so drained wake rows retract or re-render — and the
-        // queue strip refreshes for subscribed clients.
+        // runs it so drained wake rows retract or re-render (the drain
+        // sweep: the batch trim, the reminder re-render, the twin
+        // re-sync, the progress-note clear, the settled checkpoint) —
+        // and the queue strip refreshes for subscribed clients.
+        let hook_engine = std::sync::Arc::clone(&engine);
         if let Some(engine) = &agent_engine {
             let hook_core = Arc::clone(&core);
             let hook_arrivals = std::sync::Arc::clone(&inbox_arrivals);
@@ -821,16 +825,13 @@ impl Worker {
             let hook_recovery = Arc::clone(&recovery);
             engine.set_inbox_read_hook(std::sync::Arc::new(
                 move |inbox: &std::sync::Arc<pa_core::session_engine::inbox::SessionInbox>| {
-                    if refresh_inbox_wake_rows(&hook_core, &hook_arrivals, inbox) {
-                        // The refreshed lanes are live work until the turn
-                        // settles: a crash must not restore a stale wake.
-                        checkpoint_queue_recovery(
-                            &hook_recovery,
-                            &hook_core,
-                            QueueCheckpoint::Settle {
-                                operation: "queue_mutated",
-                            },
-                        );
+                    if withdraw_drained_inbox_notice(
+                        &hook_recovery,
+                        &hook_core,
+                        &hook_arrivals,
+                        inbox,
+                        hook_engine.as_ref(),
+                    ) {
                         // The projection recomputes under the emission
                         // lock, so a concurrent admission's strip state
                         // is never overwritten by a stale copy.
@@ -1204,6 +1205,38 @@ fn is_rlm_child_status_item(item: &QueuedItem) -> bool {
     // One reserved-kind predicate, owned by the intake module: every
     // reader shares the same exact match.
     crate::child_status_notices::is_reserved_child_status_custom_type(row)
+}
+
+/// One parked item's inbox-notice provenance: the daemon-authored arrival
+/// and reminder twins carry the inbox customType (a user-typed row never
+/// does), so the queue strip folds them — typed provenance, never a
+/// preview-prefix match.
+fn is_inbox_notice_item(item: &QueuedItem) -> bool {
+    item.custom_message
+        .as_ref()
+        .is_some_and(is_inbox_notice_custom_type)
+}
+
+/// One custom row's inbox-notice provenance: the customType exact match
+/// (the same wire vocabulary the daemon's own admission writes). A
+/// caller-supplied row claiming it is a spoof of the inbox system's
+/// identity — the intakes refuse it loudly (the queue-fold anti-spoof
+/// rule, like the reserved child-status kinds: unrefused, the spoof
+/// parks, folds itself out of the strip's browsable rows, and delivers
+/// under the inbox system's identity as an "Agent inbox" row the inbox
+/// never sent).
+pub(crate) fn is_inbox_notice_custom_type(custom_message: &Value) -> bool {
+    custom_message.get("customType").and_then(Value::as_str)
+        == Some(pa_types::inbox_notice::INBOX_NOTICE_CUSTOM_TYPE)
+}
+
+/// The loud intake rejection for a caller-supplied row claiming the
+/// inbox notice kind.
+pub(crate) fn inbox_notice_intake_error() -> String {
+    format!(
+        "Invalid customMessage: the {} custom type is reserved for daemon-authored agent-inbox notices",
+        pa_types::inbox_notice::INBOX_NOTICE_CUSTOM_TYPE
+    )
 }
 
 /// One parked item's engine-minted internal-prompt provenance: the turn

@@ -11,6 +11,7 @@ fn queue() -> QueuedMessages {
         follow_ups: vec!["then summarize".to_string()],
         starting: None,
         rlm_child_status: QueueLaneIndices::default(),
+        inbox_notice: QueueLaneIndices::default(),
         injected_prompts: QueueLaneIndices::default(),
     }
 }
@@ -29,6 +30,7 @@ fn a_preparing_turn_renders_the_starting_row_alone() {
         follow_ups: Vec::new(),
         starting: Some("queued before compaction".to_string()),
         rlm_child_status: QueueLaneIndices::default(),
+        inbox_notice: QueueLaneIndices::default(),
         injected_prompts: QueueLaneIndices::default(),
     };
     let rows = render_queue(&theme(), &queue, "alt+up", 80);
@@ -45,6 +47,7 @@ fn the_starting_row_renders_above_the_parked_lanes() {
         follow_ups: vec!["then summarize".to_string()],
         starting: Some("queued before compaction".to_string()),
         rlm_child_status: QueueLaneIndices::default(),
+        inbox_notice: QueueLaneIndices::default(),
         injected_prompts: QueueLaneIndices::default(),
     };
     let rows = render_queue(&theme(), &queue, "alt+up", 80);
@@ -66,6 +69,7 @@ fn the_starting_row_drops_with_the_projection() {
             follow_ups: Vec::new(),
             starting: None,
             rlm_child_status: QueueLaneIndices::default(),
+            inbox_notice: QueueLaneIndices::default(),
             injected_prompts: QueueLaneIndices::default(),
         },
         "alt+up",
@@ -113,6 +117,7 @@ fn slash_previews_render_the_command_segment_in_accent() {
         follow_ups: vec!["fix @Cargo.toml --quiet".to_string()],
         starting: None,
         rlm_child_status: QueueLaneIndices::default(),
+        inbox_notice: QueueLaneIndices::default(),
         injected_prompts: QueueLaneIndices::default(),
     };
     let theme = theme();
@@ -153,6 +158,7 @@ fn long_previews_truncate_with_ellipsis() {
         follow_ups: Vec::new(),
         starting: None,
         rlm_child_status: QueueLaneIndices::default(),
+        inbox_notice: QueueLaneIndices::default(),
         injected_prompts: QueueLaneIndices::default(),
     };
     let rows = render_queue(&theme(), &queue, "alt+up", 30);
@@ -177,6 +183,7 @@ fn multiline_preview_renders_its_first_line() {
         follow_ups: Vec::new(),
         starting: None,
         rlm_child_status: QueueLaneIndices::default(),
+        inbox_notice: QueueLaneIndices::default(),
         injected_prompts: QueueLaneIndices::default(),
     };
     let rows = render_queue(&theme(), &queue, "alt+up", 80);
@@ -207,6 +214,7 @@ fn internal_prompts_condense_into_one_counted_row() {
         follow_ups: vec!["Goal context: milestone".to_string()],
         starting: None,
         rlm_child_status: QueueLaneIndices::default(),
+        inbox_notice: QueueLaneIndices::default(),
         injected_prompts: QueueLaneIndices::default(),
     };
     let rows = render_queue(&theme(), &queue, "alt+up", 80);
@@ -249,6 +257,7 @@ fn human_prompts_render_before_the_condensed_row() {
         ],
         starting: None,
         rlm_child_status: QueueLaneIndices::default(),
+        inbox_notice: QueueLaneIndices::default(),
         injected_prompts: QueueLaneIndices::default(),
     };
     let rows = render_queue(&theme(), &queue, "alt+up", 80);
@@ -294,6 +303,7 @@ fn condensed_row_counts_each_origin_with_correct_plurals() {
         follow_ups: vec!["Heartbeat prompt: again".to_string()],
         starting: None,
         rlm_child_status: QueueLaneIndices::default(),
+        inbox_notice: QueueLaneIndices::default(),
         injected_prompts: QueueLaneIndices::default(),
     };
     let rows = render_queue(&theme(), &queue, "alt+up", 80);
@@ -313,6 +323,7 @@ fn one_queued_agent_message_reads_singular() {
         follow_ups: Vec::new(),
         starting: None,
         rlm_child_status: QueueLaneIndices::default(),
+        inbox_notice: QueueLaneIndices::default(),
         injected_prompts: QueueLaneIndices::default(),
     };
     let rows = render_queue(&theme(), &queue, "alt+up", 80);
@@ -331,6 +342,7 @@ fn condensed_row_truncates_to_the_width() {
         follow_ups: vec![],
         starting: None,
         rlm_child_status: QueueLaneIndices::default(),
+        inbox_notice: QueueLaneIndices::default(),
         injected_prompts: QueueLaneIndices::default(),
     };
     let rows = render_queue(&theme(), &queue, "alt+up", 30);
@@ -370,6 +382,7 @@ fn browse_walks_only_the_user_typed_items() {
         follow_ups: Vec::new(),
         starting: None,
         rlm_child_status: QueueLaneIndices::default(),
+        inbox_notice: QueueLaneIndices::default(),
         injected_prompts: QueueLaneIndices::default(),
     };
     let header = |selection: &QueueSelection| {
@@ -416,6 +429,7 @@ fn reorder_targets_the_adjacent_user_item() {
         follow_ups: Vec::new(),
         starting: None,
         rlm_child_status: QueueLaneIndices::default(),
+        inbox_notice: QueueLaneIndices::default(),
         injected_prompts: QueueLaneIndices::default(),
     };
     let mut selection = QueueSelection::default();
@@ -494,6 +508,7 @@ fn refresh_keeps_a_matching_selection_and_drops_a_stale_one() {
         follow_ups: vec!["edited".to_string()],
         starting: None,
         rlm_child_status: QueueLaneIndices::default(),
+        inbox_notice: QueueLaneIndices::default(),
         injected_prompts: QueueLaneIndices::default(),
     };
     assert_eq!(
@@ -516,6 +531,7 @@ fn refresh_finds_a_user_item_past_interleaved_internal_items() {
         ],
         starting: None,
         rlm_child_status: QueueLaneIndices::default(),
+        inbox_notice: QueueLaneIndices::default(),
         injected_prompts: QueueLaneIndices::default(),
     };
     let mut selection = QueueSelection::default();
@@ -542,6 +558,7 @@ fn mirror_lane_move_swaps_within_the_lane_only() {
         follow_ups: vec!["later".to_string()],
         starting: None,
         rlm_child_status: QueueLaneIndices::default(),
+        inbox_notice: QueueLaneIndices::default(),
         injected_prompts: QueueLaneIndices::default(),
     };
     mirror_lane_move(&mut queue, QueueLane::Steering, 0, 1);
@@ -575,6 +592,7 @@ fn mirror_lane_move_rides_the_marked_indices() {
             steering: vec![0, 2],
             follow_up: Vec::new(),
         },
+        inbox_notice: QueueLaneIndices::default(),
         injected_prompts: QueueLaneIndices::default(),
     };
     mirror_lane_move(&mut queue, QueueLane::Steering, 1, 0);
@@ -630,6 +648,7 @@ fn child_status_notices_condense_by_wire_provenance() {
             steering: Vec::new(),
             follow_up: vec![0, 1],
         },
+        inbox_notice: QueueLaneIndices::default(),
         injected_prompts: QueueLaneIndices::default(),
     };
     let rows = render_queue(&theme(), &queue, "alt+up", 80);
@@ -670,6 +689,7 @@ fn a_steering_lane_notice_condenses_too() {
             steering: vec![0],
             follow_up: Vec::new(),
         },
+        inbox_notice: QueueLaneIndices::default(),
         injected_prompts: QueueLaneIndices::default(),
     };
     let rows = render_queue(&theme(), &queue, "alt+up", 80);
@@ -702,6 +722,7 @@ fn user_typed_rows_that_look_like_notices_stay_human() {
         follow_ups: vec!["RLM child status: typed by hand".to_string()],
         starting: None,
         rlm_child_status: QueueLaneIndices::default(),
+        inbox_notice: QueueLaneIndices::default(),
         injected_prompts: QueueLaneIndices::default(),
     };
     let rows = render_queue(&theme(), &queue, "alt+up", 80);
@@ -754,6 +775,7 @@ fn mixed_origins_count_child_status_in_the_fixed_order() {
             steering: vec![2, 3],
             follow_up: vec![1],
         },
+        inbox_notice: QueueLaneIndices::default(),
         injected_prompts: QueueLaneIndices::default(),
     };
     // Width 120 so the four-origin row reads untruncated (the row text is 88
@@ -821,6 +843,7 @@ fn seven_child_exits_render_as_one_counted_row() {
             steering: Vec::new(),
             follow_up: vec![0, 1, 2, 3, 4, 5, 6],
         },
+        inbox_notice: QueueLaneIndices::default(),
         injected_prompts: QueueLaneIndices::default(),
     };
     let rows = render_queue(&theme(), &queue, "alt+up", 80);
@@ -867,6 +890,7 @@ fn injected_continuations_condense_into_the_counted_row() {
         ],
         starting: None,
         rlm_child_status: QueueLaneIndices::default(),
+        inbox_notice: QueueLaneIndices::default(),
         injected_prompts: QueueLaneIndices {
             steering: vec![0],
             follow_up: vec![1, 2],
@@ -912,6 +936,7 @@ fn an_only_internal_queue_renders_just_the_summary_row() {
         ],
         starting: None,
         rlm_child_status: QueueLaneIndices::default(),
+        inbox_notice: QueueLaneIndices::default(),
         injected_prompts: QueueLaneIndices {
             steering: Vec::new(),
             follow_up: vec![1],
@@ -942,6 +967,7 @@ fn a_same_text_user_row_never_rides_the_injected_rider() {
         follow_ups: Vec::new(),
         starting: None,
         rlm_child_status: QueueLaneIndices::default(),
+        inbox_notice: QueueLaneIndices::default(),
         injected_prompts: QueueLaneIndices::default(),
     };
     let rows = render_queue(&theme(), &queue, "alt+up", 80);
@@ -976,6 +1002,7 @@ fn mixed_origins_count_the_injected_continuations_as_other() {
             steering: vec![3],
             follow_up: Vec::new(),
         },
+        inbox_notice: QueueLaneIndices::default(),
         injected_prompts: QueueLaneIndices {
             steering: vec![2],
             follow_up: vec![0],
@@ -1022,6 +1049,7 @@ fn browse_skips_every_internal_origin() {
             steering: Vec::new(),
             follow_up: vec![0],
         },
+        inbox_notice: QueueLaneIndices::default(),
         injected_prompts: QueueLaneIndices {
             steering: vec![2],
             follow_up: Vec::new(),
@@ -1059,6 +1087,7 @@ fn mirror_lane_move_rides_the_injected_rider_too() {
         follow_ups: Vec::new(),
         starting: None,
         rlm_child_status: QueueLaneIndices::default(),
+        inbox_notice: QueueLaneIndices::default(),
         injected_prompts: QueueLaneIndices {
             steering: vec![0],
             follow_up: Vec::new(),
@@ -1076,5 +1105,74 @@ fn mirror_lane_move_rides_the_injected_rider_too() {
         queue.injected_prompts.steering,
         vec![1],
         "the injected mark rides its item through the swap"
+    );
+}
+
+/// The daemon inbox notices (the arrival and reminder rows) fold by
+/// wire-typed provenance — the operator ruling: a queued inbox row is
+/// the counted row, never a browsable "Steering: Inbox: ..." preview the
+/// daemon refuses to edit — and a user-typed look-alike stays a human
+/// row.
+#[test]
+fn inbox_notice_rows_condense_by_wire_provenance() {
+    let queue = QueuedMessages {
+        steering: vec![
+            "Inbox: 1 new message (bash-done)".to_string(),
+            "Inbox reminder".to_string(),
+            "turn right".to_string(),
+        ],
+        follow_ups: vec!["Inbox: typed by hand".to_string()],
+        starting: None,
+        rlm_child_status: QueueLaneIndices::default(),
+        inbox_notice: QueueLaneIndices {
+            steering: vec![0, 1],
+            follow_up: Vec::new(),
+        },
+        injected_prompts: QueueLaneIndices::default(),
+    };
+    let rows = render_queue(&theme(), &queue, "alt+up", 80);
+    assert_eq!(
+        rows.len(),
+        5,
+        "spacer + the two human previews + the folded count + hint"
+    );
+    let texts: Vec<String> = rows
+        .iter()
+        .map(|row| {
+            row.iter()
+                .map(|span| span.content.as_str())
+                .collect::<String>()
+        })
+        .collect();
+    assert_eq!(texts[1].trim(), "Steering: turn right");
+    assert_eq!(
+        texts[2].trim(),
+        "Follow-up: Inbox: typed by hand",
+        "the unmarked look-alike keeps its human preview"
+    );
+    assert_eq!(
+        texts[3].trim(),
+        "2 inbox notices queued",
+        "both marked rows fold into one counted row"
+    );
+    // The browse never offers the folded rows: the walk sees only the
+    // user-typed items, newest-first.
+    let mut selection = QueueSelection::default();
+    assert_eq!(
+        selection
+            .browse(&queue, "draft", QueueBrowseDirection::Older)
+            .as_deref(),
+        Some("Inbox: typed by hand")
+    );
+    assert_eq!(
+        selection
+            .browse(&queue, "", QueueBrowseDirection::Older)
+            .as_deref(),
+        Some("turn right")
+    );
+    assert_eq!(
+        selection.browse(&queue, "", QueueBrowseDirection::Older),
+        None,
+        "the marked rows are never walked; the oldest user row ends the browse"
     );
 }

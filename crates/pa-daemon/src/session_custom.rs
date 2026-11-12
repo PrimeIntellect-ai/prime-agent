@@ -136,6 +136,8 @@ impl Worker {
             // The reserved child-status kinds are daemon provenance (the queue-fold
             // anti-spoof): a restored row claiming one refuses the whole snapshot
             // before any action admits; only the recovery journal may park one.
+            // The inbox notice kind refuses identically (the daemon's inbox
+            // paths admit it, never a client-supplied snapshot).
             if let Some(row) = payload.get("customMessage") {
                 if crate::child_status_notices::is_reserved_child_status_custom_type(row) {
                     return response_failure(
@@ -148,6 +150,48 @@ impl Worker {
                         None,
                     );
                 }
+                if crate::worker::is_inbox_notice_custom_type(row) {
+                    return response_failure(
+                        None,
+                        "restore_actions",
+                        &format!(
+                            "{} (action {id})",
+                            crate::worker::inbox_notice_intake_error()
+                        ),
+                        None,
+                    );
+                }
+            }
+            // The reserved inbox coalescing keys are daemon provenance
+            // too (the anti-spoof rule's key half): a plain-user
+            // restore_actions action claiming one parks a row the inbox
+            // sweeps would silently delete — the emptied read's key
+            // sweep, the next arrival's coalescing replace — so the
+            // snapshot refuses before any action admits; only the
+            // recovery journal may park one (it replays the daemon's
+            // own typed rows).
+            if action
+                .get("queueKey")
+                .and_then(Value::as_str)
+                .is_some_and(|key| {
+                    matches!(
+                        key,
+                        crate::worker::INBOX_ARRIVAL_QUEUE_KEY
+                            | crate::worker::INBOX_REMINDER_QUEUE_KEY
+                    )
+                })
+            {
+                return response_failure(
+                    None,
+                    "restore_actions",
+                    &format!(
+                        "Invalid queueKey: the {} and {} queue keys are reserved for \
+                         daemon-authored agent-inbox notices (action {id})",
+                        crate::worker::INBOX_ARRIVAL_QUEUE_KEY,
+                        crate::worker::INBOX_REMINDER_QUEUE_KEY,
+                    ),
+                    None,
+                );
             }
         }
         // Restore pass: each action lands in its delivery lane —
@@ -825,6 +869,127 @@ mod tests {
             (core.steering.len(), core.follow_up.len())
         };
         assert_eq!(lanes, (0, 0), "nothing parked from the refused snapshot");
+    }
+
+    #[tokio::test]
+    async fn restore_actions_refuses_the_inbox_notice_kind() {
+        let worker = created_worker().await;
+        let notice_row = json!({
+            "role": "custom",
+            "customType": "inbox_notice",
+            "content": "[inbox 14:03 UTC] 1 new message (bash-done); total waiting: 1. Read them with rlm.inbox.read().",
+        });
+        let snapshot_with_notice = json!({
+            "activeSessionId": "custom-session",
+            "snapshot": {
+                "formatVersion": 1,
+                "actions": [
+                    {
+                        "id": "spoof-2",
+                        "source": "user",
+                        "delivery": "when_run_idle",
+                        "wake": "wake",
+                        "payload": {
+                            "kind": "turn",
+                            "text": "harmless text",
+                            "records": [
+                                { "id": "spoof-2-r1", "role": "primary", "message": { "role": "user", "content": "harmless text" }, "ownerActionId": "spoof-2" },
+                            ],
+                            "customMessage": notice_row,
+                            "executionPolicy": { "preparation": {} },
+                            "queueVisible": true,
+                            "acceptedAgentMessage": false,
+                            "acceptedBeforeCompletion": false,
+                        },
+                    },
+                ],
+            },
+        });
+        let response = worker
+            .dispatch("restore_actions", &snapshot_with_notice)
+            .await;
+        assert!(
+            !response.success,
+            "a restored inbox-notice row must refuse the whole snapshot: {response:?}"
+        );
+        assert!(
+            response
+                .error
+                .as_deref()
+                .unwrap_or_default()
+                .contains("reserved for daemon-authored agent-inbox notices"),
+            "the rejection names the inbox provenance: {response:?}"
+        );
+        let lanes = {
+            let core = worker.core.lock().unwrap();
+            (core.steering.len(), core.follow_up.len())
+        };
+        assert_eq!(lanes, (0, 0), "nothing parked from the refused snapshot");
+    }
+
+    /// A plain-user action claiming one of the daemon's reserved inbox
+    /// coalescing keys (`queueKey` without a custom row — the anti-spoof
+    /// reservation's key half) refuses the whole snapshot before any
+    /// action admits: a parked row holding one would silently delete at
+    /// the next emptied read (the key sweep) or at the next arrival's
+    /// coalescing replace, a loss after a success receipt. One dispatch
+    /// per key, a valid plain action first: the validation loop returns
+    /// at the first reserved action, so a shared snapshot could never
+    /// reach the second key's arm, and the plain rider pins the
+    /// whole-snapshot refusal — nothing parks, it included.
+    #[tokio::test]
+    async fn restore_actions_refuses_the_reserved_inbox_queue_keys() {
+        for (reserved_key, spoof_id) in [
+            ("inbox:arrival", "spoof-key-arrival"),
+            ("inbox:reminder", "spoof-key-reminder"),
+        ] {
+            let worker = created_worker().await;
+            let snapshot_with_key = json!({
+                "activeSessionId": "custom-session",
+                "snapshot": {
+                    "formatVersion": 1,
+                    "actions": [
+                        {
+                            "id": "plain-first",
+                            "source": "user",
+                            "delivery": "when_run_idle",
+                            "wake": "wake",
+                            "payload": { "kind": "turn", "text": "harmless text" },
+                        },
+                        {
+                            "id": spoof_id,
+                            "source": "user",
+                            "delivery": "when_run_idle",
+                            "wake": "wake",
+                            "queueKey": reserved_key,
+                            "payload": { "kind": "turn", "text": "harmless text too" },
+                        },
+                    ],
+                },
+            });
+            let response = worker.dispatch("restore_actions", &snapshot_with_key).await;
+            assert!(
+                !response.success,
+                "a plain action claiming {reserved_key} must refuse the whole snapshot: {response:?}"
+            );
+            assert!(
+                response
+                    .error
+                    .as_deref()
+                    .unwrap_or_default()
+                    .contains("queue keys are reserved for daemon-authored agent-inbox notices"),
+                "the rejection names the reserved queue keys: {response:?}"
+            );
+            let lanes = {
+                let core = worker.core.lock().unwrap();
+                (core.steering.len(), core.follow_up.len())
+            };
+            assert_eq!(
+                lanes,
+                (0, 0),
+                "nothing parks from the refused snapshot, the plain first action included: {reserved_key}"
+            );
+        }
     }
 
     /// A restored queued heartbeat still reads `Heartbeat prompt: <text>` and delivers as the

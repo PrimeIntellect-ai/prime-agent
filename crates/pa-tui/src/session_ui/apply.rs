@@ -633,6 +633,7 @@ impl SessionUi {
                 follow_ups,
                 starting,
                 rlm_child_status,
+                inbox_notice,
                 injected_prompts,
             } => {
                 view.queued = crate::queued::QueuedMessages {
@@ -640,6 +641,7 @@ impl SessionUi {
                     follow_ups,
                     starting,
                     rlm_child_status,
+                    inbox_notice,
                     injected_prompts,
                 };
                 // A queue change under an active browse reconciles the selection: the cursor

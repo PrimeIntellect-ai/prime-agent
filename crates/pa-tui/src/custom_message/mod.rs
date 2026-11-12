@@ -29,6 +29,12 @@
 //! dispatch classes them as injected-prompt rows (turn prompts). The
 //! notices still drive their turn (the daemon's `followUp` notice action is
 //! unchanged); only the transcript row's class moves.
+//!
+//! The inbox notice rows (`inbox_notice`: the daemon agent-inbox arrival
+//! and reminder notices) render in their own class with the same envelope
+//! geometry — daemon-attributed mail, never user input — the notice text
+//! always visible as the body (the count and the read call-to-action never
+//! collapse away).
 
 pub(crate) mod geometry;
 pub(crate) use geometry::agent_message_body_count;
@@ -44,6 +50,7 @@ pub use injected_prompt::{InjectedPromptKind, InjectedPromptRow};
 
 use crate::chat::{ChatEntry, StatusKind};
 use crate::theme::ThemeColor;
+use pa_types::inbox_notice::INBOX_NOTICE_CUSTOM_TYPE;
 use serde_json::Value;
 
 /// Custom types with a dedicated component (pa-core owns the engine-side
@@ -97,6 +104,21 @@ pub struct AgentMessageRow {
     /// `details.message` (the body shown expanded; never a collapsed
     /// preview).
     pub message: String,
+}
+
+/// One inbox-notice row: the daemon's inbox system announcing waiting
+/// machine messages. The summary line attributes the notice to the inbox
+/// system (the sender, with the class word beside it); the body is the
+/// notice text, always visible — the count and the `rlm.inbox.read()`
+/// call-to-action never collapse away.
+#[derive(Debug, Clone, PartialEq)]
+pub struct InboxNoticeRow {
+    /// `details.sender` (the inbox system's identity).
+    pub sender: String,
+    /// `details.class`: `arrival` or `reminder`.
+    pub class: String,
+    /// The notice text (the row's content; the model-visible prompt).
+    pub text: String,
 }
 
 /// One background-shell completion row, standalone form (the TS live path attaches
@@ -158,8 +180,9 @@ pub struct CustomPanelRow {
 /// The transcript entries for one `custom`-role message, mirroring the TS
 /// dispatch order: slash rows, compaction and refinement outcomes, agent
 /// messages (the received agent-message rows and the RLM child status
-/// notices, the same class), shell completions, injected prompts, then the
-/// generic panel. Non-display rows render nothing.
+/// notices, the same class), the inbox notices (Rust-only, their own row
+/// class), shell completions, injected prompts, then the generic panel.
+/// Non-display rows render nothing.
 pub fn custom_message_entries(message: &Value) -> Vec<ChatEntry> {
     use pa_types::slash_commands::{
         SESSION_SLASH_COMMAND_CUSTOM_TYPE, SESSION_SLASH_COMMAND_RESULT_CUSTOM_TYPE,
@@ -200,6 +223,10 @@ pub fn custom_message_entries(message: &Value) -> Vec<ChatEntry> {
         }],
         REFINEMENT_OUTCOME_CUSTOM_TYPE => refinement::refinement_outcome_entries(message, details),
         AGENT_MESSAGE_CUSTOM_TYPE => agent_message_entry(details).map_or_else(
+            || vec![generic_panel_entry(custom_type, message)],
+            |entry| vec![entry],
+        ),
+        INBOX_NOTICE_CUSTOM_TYPE => inbox_notice_entry(message, details).map_or_else(
             || vec![generic_panel_entry(custom_type, message)],
             |entry| vec![entry],
         ),
@@ -347,6 +374,19 @@ fn agent_message_entry(details: &Value) -> Option<ChatEntry> {
         direction: AgentMessageDirection::Received,
         counterpart,
         message: message.to_string(),
+    })))
+}
+
+/// The inbox notice decodes with its sender and class attributed: a row
+/// missing either string falls through to the generic box (the file's
+/// dispatch rule for malformed details).
+fn inbox_notice_entry(message: &Value, details: &Value) -> Option<ChatEntry> {
+    let sender = details.get("sender").and_then(Value::as_str)?;
+    let class = details.get("class").and_then(Value::as_str)?;
+    Some(ChatEntry::InboxNotice(Box::new(InboxNoticeRow {
+        sender: sender.to_string(),
+        class: class.to_string(),
+        text: custom_content_text(message),
     })))
 }
 
@@ -763,6 +803,75 @@ mod tests {
         assert!(matches!(entries.as_slice(), [ChatEntry::AgentMessage(_)]));
     }
 
+    /// The inbox notices decode to their own class: the sender and the
+    /// class ride the row, the notice text is the body (the class
+    /// assertion is the mutation pin — routing the type back through the
+    /// user or injected-prompt arms fails it).
+    #[test]
+    fn inbox_notice_rows_decode_with_sender_class_and_body() {
+        let arrival = "[inbox 19:14 UTC] 1 new message (bash-done); total waiting: 1. Read them with rlm.inbox.read().";
+        let reminder = "[inbox reminder] 2 messages still waiting (oldest waited 5m) \u{2014} rlm.inbox.read()";
+        for (class, text) in [("arrival", arrival), ("reminder", reminder)] {
+            let entries = decoded(&json!({
+                "role": "custom",
+                "customType": INBOX_NOTICE_CUSTOM_TYPE,
+                "content": text,
+                "display": true,
+                "details": { "sender": "Agent inbox", "class": class },
+                "timestamp": 1_730_000_000_000u64,
+            }));
+            assert_eq!(
+                entries,
+                vec![ChatEntry::InboxNotice(Box::new(InboxNoticeRow {
+                    sender: "Agent inbox".to_string(),
+                    class: class.to_string(),
+                    text: text.to_string(),
+                }))],
+                "{class} notice row"
+            );
+        }
+    }
+
+    /// A display:false inbox notice renders nothing (the shared early
+    /// return).
+    #[test]
+    fn inbox_notice_display_false_renders_nothing() {
+        let entries = decoded(&json!({
+            "role": "custom",
+            "customType": INBOX_NOTICE_CUSTOM_TYPE,
+            "content": "[inbox 19:14 UTC] 1 new message (bash-done)",
+            "display": false,
+            "details": { "sender": "Agent inbox", "class": "arrival" },
+        }));
+        assert!(entries.is_empty(), "{entries:?}");
+    }
+
+    /// Malformed details (missing or non-string sender/class) fall through
+    /// to the generic box, the file's dispatch rule.
+    #[test]
+    fn inbox_notice_malformed_details_fall_to_the_generic_panel() {
+        for details in [
+            json!({ "class": "arrival" }),
+            json!({ "sender": "Agent inbox" }),
+            json!({ "sender": 1, "class": "arrival" }),
+            json!({ "sender": "Agent inbox", "class": null }),
+        ] {
+            let entries = decoded(&json!({
+                "role": "custom",
+                "customType": INBOX_NOTICE_CUSTOM_TYPE,
+                "content": "[inbox 19:14 UTC] 1 new message",
+                "display": true,
+                "details": details,
+            }));
+            assert!(
+                matches!(entries.as_slice(), [ChatEntry::CustomPanel(row)]
+                    if row.custom_type == INBOX_NOTICE_CUSTOM_TYPE
+                        && row.content == "[inbox 19:14 UTC] 1 new message"),
+                "{details} must fall to the generic box: {entries:?}"
+            );
+        }
+    }
+
     #[test]
     fn compaction_outcome_maps_to_status_rows() {
         let skipped = decoded(&json!({
@@ -876,6 +985,11 @@ mod tests {
             custom_type: "notice".to_string(),
             content: body.clone(),
         };
+        let inbox = InboxNoticeRow {
+            sender: "Agent inbox".to_string(),
+            class: "arrival".to_string(),
+            text: body.clone(),
+        };
         let compacted = format!(" {body}");
         // (collapsed rows + their expected text, expanded rows, expanded
         // header text)
@@ -914,6 +1028,11 @@ mod tests {
                 None,
                 render::render_custom_panel(&panel, &theme, 60),
                 vec!["", " [notice]"],
+            ),
+            (
+                None,
+                render::render_inbox_notice(&inbox, &theme, 60, true),
+                vec!["", " \u{2709} Agent inbox \u{b7} arrival"],
             ),
             (
                 Some((
