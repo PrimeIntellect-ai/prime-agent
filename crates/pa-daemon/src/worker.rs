@@ -659,6 +659,7 @@ impl Worker {
                                 Lane::Steering,
                                 closed,
                                 |_, _| None,
+                                Some(engine.as_ref()),
                             );
                             return;
                         }
