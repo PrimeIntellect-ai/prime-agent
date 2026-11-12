@@ -1862,7 +1862,6 @@ async fn run_interactive_surface(
                             crate::chat::StatusKind::Info,
                             &mut view,
                         );
-                        session.reconnection_failed = None;
                         session_reconnect = None;
                         session.spawn_heartbeat_refresh();
                         session.dirty = true;

@@ -421,9 +421,11 @@ impl SessionUi {
         // keeps a cursor-less attach from stashing a handoff.
         self.last_event_sequence = reconstructed.last_event_sequence;
         self.attach_cursor_present = reconstructed.cursor_present;
-        // The closing notice is per-connection: it clears on every attach, so a later bare session
-        // stop must not route into a stale shutdown recovery's reconnect hang.
+        // The closing notice and an expired re-attach window are per-connection: both clear on every
+        // attach, so a later bare session stop must not route into a stale shutdown recovery's
+        // reconnect hang, and a recovered connection must not keep refusing submits.
         self.daemon_closing_notice = None;
+        self.reconnection_failed = None;
         self.session_name.clone_from(&reconstructed.session_name);
         self.service_tier.clone_from(&reconstructed.service_tier);
         self.pending_model_fallback_message = reconstructed.model_fallback_message;
@@ -961,6 +963,24 @@ mod backfill_tests {
         })
         .await
         .expect("mock session open and both panel opens complete within ten seconds");
+    }
+
+    /// Every successful attach clears an expired re-attach window's failure: the flag is
+    /// per-connection, so a recovered connection must not keep refusing submits.
+    #[tokio::test]
+    async fn an_attach_clears_the_reconnection_failure() {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            let dir = tempfile::tempdir().unwrap();
+            let socket = dir.path().join("reconnect.sock");
+            let (mut session, server) = mock_session(&socket, mpsc::unbounded_channel().0).await;
+            session.reconnection_failed = Some("the session worker is gone".to_string());
+            session.attach_session("s1", DockFold::Held).await.unwrap();
+            assert_eq!(session.reconnection_failed, None);
+            drop(session);
+            server.abort();
+        })
+        .await
+        .expect("mock session open and re-attach complete within ten seconds");
     }
 
     #[tokio::test]
