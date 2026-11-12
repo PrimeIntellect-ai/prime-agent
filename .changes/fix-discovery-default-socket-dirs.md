@@ -1,1 +1,0 @@
-- `prime-agent status`, `doctor`, and `shutdown` now see the default daemon on Linux for uid 1000 and root (socket dir `/tmp/prime-agent-1000` or `/tmp/prime-agent-0`) instead of skipping it, so `shutdown` stops it and `doctor --fix` can reap it.

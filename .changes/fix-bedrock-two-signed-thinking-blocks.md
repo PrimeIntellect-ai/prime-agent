@@ -1,1 +1,0 @@
-- Fixed Bedrock concatenating two signed thinking blocks streamed under one content index into a single block, which failed replay with an "Invalid signature" error.

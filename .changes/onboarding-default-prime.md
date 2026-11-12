@@ -1,1 +1,0 @@
-- The first-run provider picker now says that Prime Inference is your default model, and its continue row reads `Continue with Prime Inference (default)`. When you started with your own model, it says you are signed in to Prime Inference and offers `Continue with your current model` instead.

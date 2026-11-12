@@ -1,1 +1,0 @@
-- A Codex request cancelled right before it was sent no longer leaves the session's WebSocket stuck as busy; later turns in that session reuse the cached connection and continue the response chain again instead of opening a new socket and resending the full context every turn.
