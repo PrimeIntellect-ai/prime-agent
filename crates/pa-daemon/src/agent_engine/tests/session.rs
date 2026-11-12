@@ -223,11 +223,7 @@ async fn replacement_teardown_retires_the_session_and_the_funnel_adopts_the_bran
     // Retire: the built session drops with its mirrored goal handles.
     engine.retire_session_runtime().await;
     assert!(engine.session.lock().await.is_none());
-    assert!(engine
-        .goal_runtime
-        .lock()
-        .expect("goal runtime lock")
-        .is_none());
+    assert!(engine.built_handles().is_none());
 
     // Park the moved branch on the unbuilt engine (the worker parks it on a blocking thread).
     let mut store = crate::session_store::SessionFile::create("/tmp", None, 0);
@@ -327,12 +323,7 @@ async fn live_branch_rebuild_reloads_the_goal_state_from_the_moved_branch() {
     let goal_branch = {
         let engine = std::sync::Arc::clone(&engine);
         tokio::task::spawn_blocking(move || {
-            let handles = engine
-                .goal_runtime
-                .lock()
-                .expect("goal runtime lock")
-                .clone()
-                .expect("goal handles");
+            let handles = engine.live_handles().expect("goal handles").goal.clone();
             let entries = engine
                 .runtime
                 .block_on(async { handles.session.lock().await })

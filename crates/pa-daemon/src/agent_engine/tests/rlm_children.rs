@@ -248,23 +248,27 @@ fn persisted_rlm_max_depth_scan_matches_reference_across_classes() {
 /// defers it.
 #[test]
 fn release_settled_child_kernel_defers_to_scheduled_jobs_and_fires_the_release_probe() {
-    let dir = tempfile::TempDir::new().unwrap();
-    let engine = std::sync::Arc::new(bare_engine(dir.path()));
+    let _faux = FAUX_TEST_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let (engine, _dir) = faux_engine_with_settings(&serde_json::json!({ "responses": [] }), 1);
+    let engine = std::sync::Arc::new(engine);
+    engine
+        .ensure_core_session(&engine.resolve_model().expect("faux model"))
+        .expect("session build");
     let fired = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let probe_fired = std::sync::Arc::clone(&fired);
-    *engine
-        .kernel_release_probe
-        .lock()
-        .expect("kernel release probe lock") = Some(std::sync::Arc::new(move || {
-        probe_fired.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        Box::pin(std::future::ready(()))
-    }));
+    engine.set_test_probes(
+        None,
+        Some(std::sync::Arc::new(move || {
+            probe_fired.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Box::pin(std::future::ready(()))
+        })),
+    );
     // No children and no jobs probe: the release probe fires once.
     engine
         .runtime
-        .block_on(crate::engine::SessionEngine::release_settled_child_kernel(
-            &*engine,
-        ));
+        .block_on(engine.release_settled_child_kernel());
     assert_eq!(fired.load(std::sync::atomic::Ordering::SeqCst), 1);
     // A jobs probe reporting jobs defers the release.
     *engine
@@ -273,9 +277,7 @@ fn release_settled_child_kernel_defers_to_scheduled_jobs_and_fires_the_release_p
         .expect("registered jobs probe lock") = Some(std::sync::Arc::new(|| true));
     engine
         .runtime
-        .block_on(crate::engine::SessionEngine::release_settled_child_kernel(
-            &*engine,
-        ));
+        .block_on(engine.release_settled_child_kernel());
     assert_eq!(fired.load(std::sync::atomic::Ordering::SeqCst), 1);
 }
 
@@ -287,6 +289,9 @@ fn release_settled_child_kernel_defers_to_scheduled_jobs_and_fires_the_release_p
 /// a kernel keeps the worker and its registry resident.
 #[test]
 fn can_passivate_worker_mirrors_the_release_gates_and_adds_the_registry_rule() {
+    let _faux = FAUX_TEST_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let dir = tempfile::TempDir::new().unwrap();
     let engine = std::sync::Arc::new(
         AgentSessionEngine::new(AgentEngineConfig {
@@ -298,7 +303,7 @@ fn can_passivate_worker_mirrors_the_release_gates_and_adds_the_registry_rule() {
             thinking: None,
             session_dir: None,
             session_file: None,
-            faux_script: None,
+            faux_script: Some(serde_json::json!({ "responses": [] }).to_string()),
             supervisor_link: Some(crate::agent_engine::SupervisorLinkConfig {
                 socket_path: dir.path().join("dead.sock"),
                 active_session_id: "parent-session".to_string(),
@@ -310,37 +315,32 @@ fn can_passivate_worker_mirrors_the_release_gates_and_adds_the_registry_rule() {
         })
         .unwrap(),
     );
+    engine
+        .ensure_core_session(&engine.resolve_model().expect("faux model"))
+        .expect("session build");
     let fired = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let probe_fired = std::sync::Arc::clone(&fired);
-    *engine
-        .kernel_release_probe
-        .lock()
-        .expect("kernel release probe lock") = Some(std::sync::Arc::new(move || {
-        probe_fired.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        Box::pin(std::future::ready(()))
-    }));
+    engine.set_test_probes(
+        None,
+        Some(std::sync::Arc::new(move || {
+            probe_fired.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Box::pin(std::future::ready(()))
+        })),
+    );
     assert!(engine
         .runtime
         .block_on(crate::engine::SessionEngine::can_passivate_worker(&*engine)));
     // A live background bash handle blocks the passivation, and the release consumes
     // the same gate: the probe never fires while a handle runs.
-    *engine
-        .background_bash_probe
-        .lock()
-        .expect("background bash probe lock") = Some(std::sync::Arc::new(|| true));
+    engine.set_test_probes(Some(std::sync::Arc::new(|| true)), None);
     assert!(!engine
         .runtime
         .block_on(crate::engine::SessionEngine::can_passivate_worker(&*engine)));
     engine
         .runtime
-        .block_on(crate::engine::SessionEngine::release_settled_child_kernel(
-            &*engine,
-        ));
+        .block_on(engine.release_settled_child_kernel());
     assert_eq!(fired.load(std::sync::atomic::Ordering::SeqCst), 0);
-    *engine
-        .background_bash_probe
-        .lock()
-        .expect("background bash probe lock") = None;
+    engine.set_test_probes(Some(std::sync::Arc::new(|| false)), None);
     *engine
         .registered_jobs_probe
         .lock()
@@ -350,9 +350,7 @@ fn can_passivate_worker_mirrors_the_release_gates_and_adds_the_registry_rule() {
         .block_on(crate::engine::SessionEngine::can_passivate_worker(&*engine)));
     engine
         .runtime
-        .block_on(crate::engine::SessionEngine::release_settled_child_kernel(
-            &*engine,
-        ));
+        .block_on(engine.release_settled_child_kernel());
     assert_eq!(fired.load(std::sync::atomic::Ordering::SeqCst), 0);
     *engine
         .registered_jobs_probe
@@ -379,8 +377,6 @@ fn can_passivate_worker_mirrors_the_release_gates_and_adds_the_registry_rule() {
         .block_on(crate::engine::SessionEngine::can_passivate_worker(&*engine)));
     engine
         .runtime
-        .block_on(crate::engine::SessionEngine::release_settled_child_kernel(
-            &*engine,
-        ));
+        .block_on(engine.release_settled_child_kernel());
     assert_eq!(fired.load(std::sync::atomic::Ordering::SeqCst), 1);
 }

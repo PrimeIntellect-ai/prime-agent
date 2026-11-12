@@ -80,7 +80,7 @@ impl AgentSessionEngine {
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<EngineEvent>();
         // Goal usage accounting at the message_end hook: each settled non-error
         // assistant message records its token delta, from the engine mirror.
-        let goal_runtime = self.goal_runtime.lock().expect("goal runtime lock").clone();
+        let goal_runtime = self.live_handles().map(|live| live.goal.clone());
         let goal_budget_crossed = std::sync::Arc::clone(&self.goal_budget_crossed);
         // The run-opening boundary frames are the worker's own for the
         // item's first run; this subscription forwards them only once a
