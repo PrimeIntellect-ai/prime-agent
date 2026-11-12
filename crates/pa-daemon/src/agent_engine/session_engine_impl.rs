@@ -610,6 +610,12 @@ impl SessionEngine for AgentSessionEngine {
         }
     }
 
+    fn set_auto_compaction_enabled(&self, enabled: bool) {
+        if let Some(core) = self.session.blocking_lock().as_deref() {
+            core.session.set_auto_compaction_enabled(enabled);
+        }
+    }
+
     fn run_compaction(
         &self,
         request: CompactionRequest,
