@@ -488,16 +488,11 @@ impl SessionUi {
                 }
             }
             TurnUpdate::TurnEnded { error } => {
-                // Only the engine's own turn_end clears the busy state: trailing frames
-                // from the previous turn must not cancel a turn admitted in between.
+                // One LLM turn ended; the run, and with it the busy state, lasts until
+                // `agent_end`.
                 self.streaming_index = None;
                 self.turn_ends_seen += 1;
-                self.turn_active = false;
-                view.working = None;
-                view.working_since = None;
                 view.retry = None;
-                // The turn settled: the held bash cards stream into the transcript.
-                Self::flush_pending_bash(view);
                 crate::snapshot::settle_pending_tool_cards(
                     view,
                     &mut self.pending_tools,
@@ -626,11 +621,7 @@ impl SessionUi {
                     }
                 }
             }
-            TurnUpdate::Idle => {
-                if !self.turn_active {
-                    view.working = None;
-                }
-            }
+            TurnUpdate::Idle => self.end_run(view),
             TurnUpdate::GoalUpdate(goal) => {
                 self.apply_goal_update(goal, view);
             }
@@ -704,6 +695,26 @@ impl SessionUi {
             TurnUpdate::StatusUpdate => {}
         }
         self.dirty = true;
+    }
+
+    /// The agent run ended: the busy state clears and the held bash cards stream into the
+    /// transcript.
+    fn end_run(&mut self, view: &mut AgentView) {
+        self.turn_active = false;
+        view.working = None;
+        view.working_since = None;
+        // A run that ends without its `turn_end` (a pre-run abort, a detach) still
+        // leaves no live streaming slot or retry countdown behind.
+        self.streaming_index = None;
+        view.retry = None;
+        Self::flush_pending_bash(view);
+        // A detached run's `turn_end` never arrives: its open cards settle here.
+        crate::snapshot::settle_pending_tool_cards(
+            view,
+            &mut self.pending_tools,
+            &mut self.aborted_tools,
+            "the turn ended before this call returned",
+        );
     }
 
     /// The abort ladder shared by the Ctrl+C and Escape interrupts: a compacting session aborts the

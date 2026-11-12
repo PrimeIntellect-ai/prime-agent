@@ -361,6 +361,7 @@ impl SharedAnswers {
                             }),
                         );
                         write_session_event(&mut writer, &json!({ "type": "turn_end" }));
+                        write_session_event(&mut writer, &json!({ "type": "agent_end" }));
                     } else {
                         let mut delayed = writer.try_clone().expect("clone delayed writer");
                         let delay = self.hold_turn_ms;
@@ -380,6 +381,7 @@ impl SharedAnswers {
                                 }),
                             );
                             write_session_event(&mut delayed, &json!({ "type": "turn_end" }));
+                            write_session_event(&mut delayed, &json!({ "type": "agent_end" }));
                         });
                     }
                 }

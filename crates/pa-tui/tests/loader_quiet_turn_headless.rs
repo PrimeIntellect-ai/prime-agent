@@ -42,14 +42,16 @@ impl MockSupervisor {
                     let mut event_writer = writer.try_clone().expect("clone event socket");
                     std::thread::spawn(move || {
                         std::thread::sleep(std::time::Duration::from_millis(QUIET_TURN_MS));
-                        write_json(
-                            &mut event_writer,
-                            &json!({
-                                "type": "session_event",
-                                "activeSessionId": "s1",
-                                "event": { "type": "turn_end" },
-                            }),
-                        );
+                        for event_type in ["turn_end", "agent_end"] {
+                            write_json(
+                                &mut event_writer,
+                                &json!({
+                                    "type": "session_event",
+                                    "activeSessionId": "s1",
+                                    "event": { "type": event_type },
+                                }),
+                            );
+                        }
                     });
                 }
                 _ => return false,
