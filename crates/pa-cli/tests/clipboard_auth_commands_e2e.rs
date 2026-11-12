@@ -1826,7 +1826,7 @@ async fn tui_update_failure_lands_the_error_row() {
         "the guard clears when the outcome lands:\n{rendered}"
     );
     assert!(
-        rendered.contains("Update uninstalls the TypeScript version"),
+        rendered.contains("Update installs the latest Prime Agent build"),
         "the second run re-opens the confirm:\n{rendered}"
     );
     assert_eq!(*update_view.calls.lock().unwrap(), 1, "one funnel run");
