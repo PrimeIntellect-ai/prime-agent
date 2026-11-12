@@ -36,9 +36,8 @@ impl AgentSessionEngine {
             return Vec::new();
         }
         let auth = pa_core::auth::AuthStorage::create(&self.config.agent_dir);
-        let mut registry =
+        let registry =
             pa_core::models::ModelRegistry::create(auth, self.config.agent_dir.join("models.json"));
-        registry.load_private_authorization_from_cache();
         let available: Vec<pa_types::ai::Model> =
             registry.get_available().into_iter().cloned().collect();
         let candidates = pa_core::models::failover_candidates(model, &available);

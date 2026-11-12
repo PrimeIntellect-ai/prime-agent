@@ -32,10 +32,6 @@ fn in_memory_loads_built_in_catalog() {
     let registry = ModelRegistry::in_memory(auth_with(&serde_json::json!({})));
     assert!(registry.get_error().is_none());
     assert!(!registry.get_all().is_empty());
-    assert!(registry
-        .get_all()
-        .iter()
-        .any(|m| m.id == "internal/glm-5.2-fast"));
 }
 
 /// TS `755-configured-max-tokens.test.ts`: built-in catalog models stay
@@ -381,13 +377,6 @@ fn a_missing_or_corrupt_cache_falls_back_to_the_bundled_catalog() {
 }
 
 #[test]
-fn explicit_private_ids_are_authorized() {
-    let registry = ModelRegistry::in_memory(auth_with(&serde_json::json!({})));
-    let private_model = model("internal/custom-private", "prime-inference");
-    assert!(!registry.is_authorized_private_model(&private_model));
-}
-
-#[test]
 fn a_stored_copilot_credential_rewrites_its_models_base_url() {
     // TS `githubCopilotOAuthProvider.modifyModels`: the token's
     // proxy endpoint wins.
@@ -574,11 +563,7 @@ async fn scope_readiness_timeout_keeps_models_available_before_refresh() {
     let mut registry = ModelRegistry::in_memory(auth);
     registry.catalog = Arc::new(pa_models::ModelCatalog::with_urls(None, None, &url, &url));
     let existing = model("internal/existing", "prime-inference");
-    let missing = model("internal/missing", "prime-inference");
-    registry.models = vec![existing.clone(), missing];
-    registry.authorized_private_ids.insert(existing.id.clone());
-    registry.authorized_private_models = vec![existing.clone()];
-    registry.authorized_team_id = Some("team-1".to_string());
+    registry.models = vec![existing.clone()];
     let patterns = vec![
         "prime-inference/internal/existing".to_string(),
         "prime-inference/internal/missing".to_string(),
@@ -592,7 +577,7 @@ async fn scope_readiness_timeout_keeps_models_available_before_refresh() {
     )
     .await;
     assert!(
-        registry.authorized_private_ids.is_empty(),
+        !registry.get_all().contains(&existing),
         "refresh started before timing out"
     );
     assert_eq!(

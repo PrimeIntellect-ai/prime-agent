@@ -19,8 +19,9 @@ pub fn is_private_prime_inference_model(model: &Model) -> bool {
     model.provider == "prime-inference" && is_private_prime_inference_model_id(&model.id)
 }
 
-/// The bundled private model table. Private route templates matter: the public
-/// provider default carries request shapes the private endpoint rejects.
+/// The bundled private-route template for private ids the catalog does not
+/// list: the public provider default carries request shapes the private
+/// endpoint rejects.
 #[must_use]
 pub fn private_prime_inference_models() -> Vec<Model> {
     vec![Model {

@@ -393,12 +393,14 @@ async fn prime_inference_cache_is_scope_keyed_and_isolated() {
         .refresh(&team_a, true)
         .await
         .expect("team-a live models");
-    assert_eq!(a.len(), 60, "public live entries only");
-    // The public models cache never includes private ids (the private
-    // entitlement flow is the registry's, over its own authorization).
+    assert_eq!(
+        a.len(),
+        61,
+        "public live entries plus the scope's private route"
+    );
     assert!(
-        !a.iter().any(|m| m.id == "internal/team-a-secret"),
-        "private ids are filtered from the public models cache"
+        a.iter().any(|m| m.id == "internal/team-a-secret"),
+        "the scoped snapshot carries the account's private routes"
     );
     let request = &server.recorded_requests()[0];
     assert!(request.contains("authorization: Bearer key-a"), "{request}");
@@ -424,6 +426,66 @@ async fn prime_inference_cache_is_scope_keyed_and_isolated() {
     .unwrap();
     let expected_scope = pa_models::prime_inference::scope_key("key-a", "team-a");
     assert_eq!(stored["scope"], expected_scope, "scope fingerprint on disk");
+}
+
+/// The scoped snapshot is the private-route authorization: a normal
+/// response without a private route revokes it, while an empty or thin
+/// authenticated response fails the public coverage gate and keeps the
+/// last-good snapshot, so it can never wipe the public routes.
+#[tokio::test]
+async fn private_routes_revoke_through_normal_responses_but_public_routes_survive_thin_ones() {
+    let dir = tempfile::tempdir().unwrap();
+    let compiled = pa_models::transports::prime_inference_offline_entries();
+    let entry = |id: &str| {
+        json!({
+            "id": id,
+            "pricing": {"input_usd_per_mtok": 1.0, "output_usd_per_mtok": 2.0},
+            "specs": {
+                "context_window": 200_000, "max_output_tokens": 32_768,
+                "supports_reasoning": true,
+                "modalities": {"input": ["text"], "output": ["text"]},
+            },
+        })
+    };
+    let public: Vec<Value> = compiled.iter().map(|m| entry(&m.id)).collect();
+    let mut entitled = public.clone();
+    entitled.push(entry("internal/entitled"));
+    let server = common::MockServer::start(vec![
+        common::ok_json(json!({"data": entitled}).to_string(), None),
+        common::ok_json(json!({"data": []}).to_string(), None),
+        common::ok_json(
+            json!({"data": [entry(&compiled[0].id), entry("internal/entitled")]}).to_string(),
+            None,
+        ),
+        common::ok_json(json!({"data": public}).to_string(), None),
+    ])
+    .await;
+    let catalog = PrimeInferenceCatalog::with_base_url(
+        Some(PathBuf::from(dir.path())),
+        &server.url("/api/v1"),
+    );
+    let creds = PrimeInferenceCredentials {
+        api_key: "key-a".into(),
+        team_id: Some("team-a".into()),
+    };
+    let has = |models: &[pa_models::Model], id: &str| models.iter().any(|m| m.id == id);
+
+    let entitled = catalog.refresh(&creds, true).await.expect("entitled fetch");
+    assert!(has(&entitled, "internal/entitled"));
+
+    for thin in ["empty", "thin"] {
+        let _ = catalog.refresh(&creds, true).await;
+        let kept = catalog.get(&creds).expect("last-good snapshot kept");
+        assert_eq!(
+            kept.len(),
+            compiled.len() + 1,
+            "{thin} response kept every route"
+        );
+    }
+
+    let revoked = catalog.refresh(&creds, true).await.expect("normal fetch");
+    assert!(!has(&revoked, "internal/entitled"), "private route revoked");
+    assert_eq!(revoked.len(), compiled.len(), "public routes kept");
 }
 
 #[tokio::test]
