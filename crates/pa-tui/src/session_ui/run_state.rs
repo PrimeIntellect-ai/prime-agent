@@ -84,6 +84,9 @@ impl SessionUi {
             RunState::Idle => {
                 view.working = None;
                 view.working_since = None;
+                // A completed bash card held while the run was busy must not strand when the
+                // submission fails (or an abort lands) before any run starts.
+                Self::flush_pending_bash(view);
                 return;
             }
             RunState::Submitted | RunState::Running => {}
