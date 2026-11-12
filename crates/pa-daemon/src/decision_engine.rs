@@ -103,10 +103,18 @@ impl DecisionEngine {
             .unwrap_or_else(PoisonError::into_inner)
             .clone();
         // Only the parent edge names the target; the identity's own id is
-        // unused here.
-        let target = FamilyIdentity::from_summary(summary.as_ref(), "")
+        // unused here. The target prefers the parent's live active id and
+        // falls back to its durable session id: a woken (passivated)
+        // child's summary carries no live id, and the durable id resolves
+        // the same parent — a live worker directly, a passivated one
+        // through its wake.
+        let identity = FamilyIdentity::from_summary(summary.as_ref(), "");
+        let target = identity
             .parent_active_session_id
-            .ok_or_else(|| anyhow!("the decision child has no parent id in its session summary"))?;
+            .or(identity.parent_session_id)
+            .ok_or_else(|| {
+                anyhow!("the decision child has no parent edge in its session summary")
+            })?;
         let sender = Arc::clone(&self.sender);
         let message = message.to_string();
         self.runtime.block_on(async move {
@@ -889,7 +897,7 @@ mod tests {
             .send_reply(&json!({"type": "decision_api.decision", "seq": 1}))
             .unwrap_err();
         assert!(
-            error.to_string().contains("no parent id"),
+            error.to_string().contains("no parent edge"),
             "a missing parent edge must fail on the known id: {error:#}"
         );
         assert!(
