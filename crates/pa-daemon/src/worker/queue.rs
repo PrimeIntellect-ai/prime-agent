@@ -887,36 +887,141 @@ pub(crate) fn admit_inbox_reminder(
     work_notify.notify_one();
 }
 
-/// Withdraw one queued bash completion notice: the kernel read the result
-/// before the notice delivered (pids are reused, so the command disambiguates).
+/// Withdraw one queued bash completion notice: the kernel read the finished
+/// command's result through its handle (`bash.consumed`, fired by any read
+/// of a finished handle inside a live cell — `poll()`, `output()`, `tail()`,
+/// or an await; pids are reused, so the command disambiguates). The same
+/// collection drains the notice's inbox message (the auto-read-on-collection
+/// parity): the kernel already read the result, so the pushed bash-done must
+/// not wait for an explicit `rlm.inbox.read()`, and the queued inbox rows
+/// must not promise it.
 pub(crate) fn withdraw_bash_completion_notice(
     recovery: &std::sync::Mutex<Option<WorkerRecoveryJournal>>,
     core: &Arc<Mutex<SessionCore>>,
+    inbox: Option<(
+        &std::sync::Arc<pa_core::session_engine::inbox::SessionInbox>,
+        &pa_core::session_engine::inbox::InboxArrivals,
+    )>,
     notice: &crate::engine::BashConsumedNotice,
     engine: Option<&dyn crate::engine::SessionEngine>,
 ) {
-    let removed = {
-        let mut core_guard = core.lock().unwrap();
-        let before = core_guard.steering.len() + core_guard.follow_up.len();
-        // The front-most match across the two lanes, never the
-        // whole set.
-        let mut withdrawn = false;
-        let mut withdraw_one = |item: &QueuedItem| {
-            if !withdrawn && is_bash_completion_notice_for(item, notice) {
-                withdrawn = true;
-                false
-            } else {
-                true
-            }
-        };
-        core_guard.steering.retain(&mut withdraw_one);
-        core_guard.follow_up.retain(withdraw_one);
-        if let Some(engine) = engine {
-            clear_withdrawn_progress_note(&core_guard, engine);
+    // One critical section in the arrival admission's lock order (core
+    // first, then the store, then the arrivals batch): the withdrawal and
+    // any `admit_inbox_notice` run on separate host-request tasks, so
+    // taking the batch before the core would deadlock the worker against
+    // an admission holding both.
+    let mut core_guard = core.lock().unwrap();
+    // The legacy full-row withdrawal (the kill-switch lane): the
+    // front-most match across the two lanes, never the whole set.
+    let mut removed = false;
+    let mut withdraw_one = |item: &QueuedItem| {
+        if !removed && is_bash_completion_notice_for(item, notice) {
+            removed = true;
+            false
+        } else {
+            true
         }
-        before != core_guard.steering.len() + core_guard.follow_up.len()
     };
-    if removed {
+    core_guard.steering.retain(&mut withdraw_one);
+    core_guard.follow_up.retain(withdraw_one);
+    // The collected job's inbox message leaves the store like a read would
+    // drain it; the queued rows that announced it stop promising it.
+    let mut inbox_rows_changed = false;
+    if let Some((inbox, arrivals)) = inbox {
+        if inbox
+            .withdraw_bash_completion(notice.pid, &notice.command)
+            .is_some()
+        {
+            let mut batch = arrivals.lock().unwrap();
+            // The batch reconciles against the LIVE waiting set, not a
+            // single-id trim: a concurrent read can have drained other
+            // covered messages since the batch formed, and the re-rendered
+            // row (and its checkpoint) must not advertise ids that are
+            // already gone.
+            let waiting = inbox.waiting_ids();
+            batch.retain(|message| waiting.contains(&message.id));
+            let (count, _, _) = inbox.count();
+            if count == 0 {
+                // An emptied inbox drops its queued wake rows (a coalesced
+                // arrival row, a reminder): both would announce an empty
+                // inbox.
+                let before = core_guard.steering.len() + core_guard.follow_up.len();
+                let not_inbox_row = |item: &QueuedItem| {
+                    !matches!(
+                        item.queue_key.as_deref(),
+                        Some(INBOX_ARRIVAL_QUEUE_KEY | INBOX_REMINDER_QUEUE_KEY)
+                    )
+                };
+                core_guard.steering.retain(not_inbox_row);
+                core_guard.follow_up.retain(not_inbox_row);
+                inbox_rows_changed =
+                    before != core_guard.steering.len() + core_guard.follow_up.len();
+            } else {
+                // The queued arrival row promised only the withdrawn
+                // message when the batch emptied: drop its now-empty wake
+                // (older waiting messages keep the reminder). A batch that
+                // still covers arrivals re-renders the row over the
+                // trimmed batch and the live count.
+                if batch.is_empty() {
+                    let before = core_guard.steering.len() + core_guard.follow_up.len();
+                    let not_arrival_row = |item: &QueuedItem| {
+                        item.queue_key.as_deref() != Some(INBOX_ARRIVAL_QUEUE_KEY)
+                    };
+                    core_guard.steering.retain(not_arrival_row);
+                    core_guard.follow_up.retain(not_arrival_row);
+                    inbox_rows_changed =
+                        before != core_guard.steering.len() + core_guard.follow_up.len();
+                } else if core_guard
+                    .steering
+                    .iter()
+                    .chain(core_guard.follow_up.iter())
+                    .any(|item| item.queue_key.as_deref() == Some(INBOX_ARRIVAL_QUEUE_KEY))
+                {
+                    let (preview, text) =
+                        pa_core::session_engine::inbox::arrival_notice(&batch, count);
+                    for item in &mut core_guard.steering {
+                        if item.queue_key.as_deref() == Some(INBOX_ARRIVAL_QUEUE_KEY) {
+                            item.message.clone_from(&text);
+                            item.preview = Some(preview.clone());
+                        }
+                    }
+                    for item in &mut core_guard.follow_up {
+                        if item.queue_key.as_deref() == Some(INBOX_ARRIVAL_QUEUE_KEY) {
+                            item.message.clone_from(&text);
+                            item.preview = Some(preview.clone());
+                        }
+                    }
+                    inbox_rows_changed = true;
+                }
+                // A queued reminder repeats the count the withdrawal may
+                // have changed: re-render it with the live count.
+                let reminder = pa_core::session_engine::inbox::reminder_notice(count);
+                for item in &mut core_guard.steering {
+                    if item.queue_key.as_deref() == Some(INBOX_REMINDER_QUEUE_KEY)
+                        && item.message != reminder
+                    {
+                        item.message.clone_from(&reminder);
+                        inbox_rows_changed = true;
+                    }
+                }
+                for item in &mut core_guard.follow_up {
+                    if item.queue_key.as_deref() == Some(INBOX_REMINDER_QUEUE_KEY)
+                        && item.message != reminder
+                    {
+                        item.message.clone_from(&reminder);
+                        inbox_rows_changed = true;
+                    }
+                }
+            }
+        }
+    }
+    // The idle-session progress note clears only once the lanes it
+    // reported on are final (the sweep may have emptied them).
+    if let Some(engine) = engine {
+        clear_withdrawn_progress_note(&core_guard, engine);
+    }
+    drop(core_guard);
+    if removed || inbox_rows_changed {
         // The withdrawal refreshes the verdict so a consumed notice cannot keep
         // busy=true promising a revive the withdrawn row would replay.
         checkpoint_queue_recovery(
