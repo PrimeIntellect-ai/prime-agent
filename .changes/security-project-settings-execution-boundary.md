@@ -1,1 +1,0 @@
-- Prevented repository settings and Python skills from running code automatically when a project opens.

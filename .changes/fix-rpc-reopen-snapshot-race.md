@@ -1,1 +1,0 @@
-- Reopening the current session over RPC (`switch_session` to the session's own file) no longer revives an older Python namespace: the reopened kernel restores only after the replaced kernel has saved its final snapshot.

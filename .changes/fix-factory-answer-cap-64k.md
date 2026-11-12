@@ -1,1 +1,0 @@
-- The factory's settle-capture cap rose from 8,192 to 65,536 characters, at parity with the 64 KiB bound the host already puts on `rlm.collect`'s answer text. A settled child's fenced JSON output longer than the old cap was truncated mid-object before the parse and failed capture although the envelope carried the whole answer; one that fits the collect bound now binds whole.
