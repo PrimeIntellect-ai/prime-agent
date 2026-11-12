@@ -31,6 +31,10 @@ pub const KERNEL_BUSY_REUSE_WAIT_MS: u64 = 5_000;
 pub const KERNEL_BUSY_INTERRUPT_INTERVAL_MS: u64 = 500;
 pub const MAX_LATE_SENT_AGENT_MESSAGE_HANDLERS: usize = 256;
 pub const KERNEL_BUSY_AFTER_INTERRUPT_MESSAGE: &str = "The Python kernel is still running the previously interrupted cell. Wait and try again, or kill the kernel to start fresh.";
+/// The message when a new cell cannot start because a backgrounded cell is
+/// still running; nothing interrupts backgrounded work, so the wait answers
+/// with a note instead.
+pub const KERNEL_BUSY_BACKGROUND_CELL_MESSAGE: &str = "The Python kernel is still running a backgrounded cell; its completion notice will arrive in the inbox. Continue other work or end the turn, or kill the kernel to start fresh.";
 
 /// Cap for unattributed background output buffered between and during cells.
 pub const MAX_BACKGROUND_OUTPUT_CHARS: usize = 64 * 1024;
@@ -223,10 +227,43 @@ pub struct ExecuteResult {
     pub status: ExecuteStatus,
     pub error: Option<KernelError>,
     pub duration_ms: u64,
-    /// The [`ExecuteOptions::cell_timeout_ms`] limit that interrupted this
-    /// cell; `None` when the cell settled on its own or was aborted.
-    pub timed_out_after_ms: Option<u64>,
+    /// `Some` when this call did not wait for the cell: the wait returned
+    /// early (a wake, or the wait budget) and the cell keeps running. `None`
+    /// when the cell settled within the call.
+    pub detached: Option<DetachedCell>,
 }
+
+/// Why a running cell's wait returned early. The cell is never signalled;
+/// it keeps running either way, and its completion arrives as a notice.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DetachReason {
+    /// A user message or inbox arrival interrupted the wait.
+    Interrupted,
+    /// The cell outlived this call's wait budget (milliseconds).
+    WaitBudget(u64),
+}
+
+/// The early-return marker on an [`ExecuteResult`]: the call did not wait
+/// for the cell, which keeps running in the kernel.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DetachedCell {
+    pub reason: DetachReason,
+    /// The cell's request id; the completion notice names it.
+    pub cell_id: String,
+}
+
+/// One auto-backgrounded cell's late completion, handed to the session's
+/// callback so the embedding can land a notice (the daemon routes it into
+/// the inbox).
+#[derive(Debug, Clone)]
+pub struct BackgroundCellOutcome {
+    pub cell_id: String,
+    pub reason: DetachReason,
+    pub result: ExecuteResult,
+}
+
+/// Receives [`BackgroundCellOutcome`]s.
+pub type BackgroundCellCallback = Arc<dyn Fn(BackgroundCellOutcome) + Send + Sync>;
 
 /// Options for one `execute` call.
 #[derive(Default)]
@@ -243,12 +280,20 @@ pub struct ExecuteOptions {
     pub internal: bool,
     /// The protocol repair's own request; exempt from waiting on the repair it belongs to.
     pub protocol_repair: bool,
-    /// Per-cell time limit in milliseconds, measured from the request going on
-    /// the wire (queue wait and kernel boot excluded). A cell that outlives it
-    /// is interrupted exactly like an aborted one (interrupt, then force-abort
-    /// after the grace window), and its result carries
-    /// [`ExecuteResult::timed_out_after_ms`]. `None` and zero disable it; the
-    /// runtime bootstrap and state ops never arm it.
+    /// The session's shared cell wake: when it fires while the cell runs, this
+    /// call returns early ([`ExecuteResult::detached`]) and the cell keeps
+    /// running. `None` leaves the call unbounded by wakes.
+    pub wake: Option<Arc<crate::kernel::cell_wake::CellWake>>,
+    /// Receives the late completion of a detached cell; `None` drops it (the
+    /// cell still runs on).
+    pub on_background_cell: Option<BackgroundCellCallback>,
+    /// Wait budget in milliseconds for this call, measured from the request
+    /// going on the wire (queue wait and kernel boot excluded). A cell that
+    /// outlives it is detached, not interrupted: this call returns early with
+    /// [`ExecuteResult::detached`] (reason [`DetachReason::WaitBudget`]), the
+    /// cell keeps running, and its completion goes to `on_background_cell`.
+    /// `None` and zero disable it; the runtime bootstrap and state ops never
+    /// arm it.
     pub cell_timeout_ms: Option<u64>,
 }
 

@@ -6,6 +6,7 @@
 
 pub mod bootstrap;
 pub mod cancellation;
+pub mod cell_wake;
 pub mod live_kernels;
 pub mod manager;
 pub mod orphan_journal;
@@ -21,6 +22,7 @@ pub use bootstrap::{
     KernelBootstrapProgressHandler, KernelPythonSkill, PYTHON_SKILL_IMPORT_ERROR_REPORT_MARKER,
 };
 pub use cancellation::AbortSignal;
+pub use cell_wake::{CellWake, CellWakeReceiver};
 pub use manager::ReplKernelManager;
 pub use provisioner::IpythonKernelProvisioner;
 pub use rlm_runtime::{

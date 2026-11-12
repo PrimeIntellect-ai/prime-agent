@@ -117,6 +117,13 @@ fn serve(
     let data = script(request);
     let mut payload = String::new();
     for data in data {
+        // `@sleep:<ms>`: hold the model call open first. A busy window with
+        // no cell running is where the inbox coalesces its wake rows (a
+        // running cell is woken by each arrival instead).
+        if let Some(ms) = data.strip_prefix("@sleep:") {
+            std::thread::sleep(Duration::from_millis(ms.parse().unwrap_or_default()));
+            continue;
+        }
         write!(payload, "data: {data}\n\n").expect("write to String");
     }
     payload.push_str("data: [DONE]\n\n");
@@ -151,7 +158,13 @@ fn inbox_script(request: usize) -> Vec<String> {
             ),
             chunk(&json!({}), Some("tool_calls")),
         ].to_vec(),
+        // The arrivals' window: both detached commands finish while this
+        // model call is held open (a busy window with no cell running, so
+        // the notices coalesce into ONE queued wake), then the count cell
+        // reads them mid-turn. A sleeping cell would be woken by the first
+        // arrival instead (the T-0049 interrupt).
         1 => [
+            "@sleep:4000".to_string(),
             chunk(
                 &json!({
                     "role": "assistant",
@@ -161,7 +174,7 @@ fn inbox_script(request: usize) -> Vec<String> {
                         "id": "call-inbox-2",
                         "type": "function",
                         "function": python_cell(
-                            "import asyncio\nawait asyncio.sleep(4)\nfrom rlm import inbox\nc = await inbox.count()\nprint((c.count, c.oldest_arrived_at_ms > 0, dict(c.classes)))"
+                            "from rlm import inbox\nc = await inbox.count()\nprint((c.count, c.oldest_arrived_at_ms > 0, dict(c.classes)))"
                         )
                     }]
                 }),
@@ -253,7 +266,13 @@ fn agent_message_script(request: usize) -> Vec<String> {
             ),
             chunk(&json!({}), Some("tool_calls")),
         ].to_vec(),
+        // The arrivals' window: the detached completion (~1s) and the
+        // delivered agent message (~3s) land while this model call is held
+        // open, coalescing into ONE queued wake; the count cell then reads
+        // both mid-turn. A sleeping poll cell would be woken by the first
+        // arrival instead (the T-0049 interrupt).
         1 => [
+            "@sleep:4500".to_string(),
             chunk(
                 &json!({
                     "role": "assistant",
@@ -263,7 +282,7 @@ fn agent_message_script(request: usize) -> Vec<String> {
                         "id": "call-am-1b",
                         "type": "function",
                         "function": python_cell(
-                            "from rlm import inbox\nimport asyncio\nfor _ in range(80):\n    c = await inbox.count()\n    if c.count >= 2:\n        break\n    await asyncio.sleep(0.25)\nprint(('AM_E2E_BUSY', c.count, tuple(sorted(c.classes))))"
+                            "from rlm import inbox\nc = await inbox.count()\nprint(('AM_E2E_BUSY', c.count, tuple(sorted(c.classes))))"
                         )
                     }]
                 }),

@@ -208,6 +208,8 @@ impl Fixture {
         faux: &FauxSession,
     ) -> SessionEngineConfig {
         SessionEngineConfig {
+            cell_wake: None,
+            on_background_cell: None,
             steering_mode: None,
             follow_up_mode: None,
             cwd: self.cwd.clone(),

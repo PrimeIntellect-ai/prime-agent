@@ -68,8 +68,10 @@ pub struct ExecuteResult {
     /// The cell's `rlm.session.messages` reads (`transcriptReads` on the
     /// tool-result details).
     pub transcript_reads: Vec<serde_json::Value>,
-    /// The time limit that interrupted this cell, if one did.
-    pub timed_out_after_ms: Option<u64>,
+    /// `Some` when this call did not wait for the cell: the wait returned
+    /// early (a user/inbox interrupt, or the wait budget) and the cell keeps
+    /// running; its completion arrives as a notice.
+    pub detached: Option<crate::kernel::shared::DetachedCell>,
     /// The cell ended the turn via the sanctioned `rlm.end_turn()` call:
     /// the host marked the execution, and this result terminates the tool
     /// batch (the "turn ended" note on the tool-result text).
@@ -256,11 +258,7 @@ pub fn image_blocks_from_attachments(attachments: &[KernelAttachment]) -> Vec<To
         .collect()
 }
 
-fn format_execute_text(
-    result: &ExecuteResult,
-    background_output: Option<&str>,
-    kernel_restarted: bool,
-) -> String {
+fn format_execute_text(result: &ExecuteResult, background_output: Option<&str>) -> String {
     let mut text = result.stdout.clone();
     if !result.stderr.is_empty() {
         text.push_str(if text.is_empty() { "" } else { "\n" });
@@ -270,10 +268,9 @@ fn format_execute_text(
         text.push_str(if text.is_empty() { "" } else { "\n" });
         text.push_str(result_text);
     }
-    if let Some(limit_ms) = result.timed_out_after_ms {
-        // Replaces the KeyboardInterrupt traceback, which only says where the cell was.
+    if let Some(detached) = &result.detached {
         text.push_str(if text.is_empty() { "" } else { "\n" });
-        text.push_str(&cell_timeout_message(limit_ms, kernel_restarted));
+        text.push_str(&background_cell_message(detached));
     } else if result.status == ExecuteStatus::Error {
         if let Some(error) = &result.error {
             text.push_str(if text.is_empty() { "" } else { "\n" });
@@ -290,20 +287,26 @@ fn format_execute_text(
     text
 }
 
-/// The model-facing cause and fix for a cell interrupted at its time limit.
-fn cell_timeout_message(limit_ms: u64, kernel_restarted: bool) -> String {
-    let mut message = format!(
-        "This cell was interrupted after {}: long blocking work stops the session. Make it \
-non-blocking: start the work as a task (`task = asyncio.create_task(...)`; wrap blocking libraries \
-with `asyncio.to_thread`) and check `task.done()` / `task.result()` in later cells. Run shell \
-commands with `bash()`. A cell that legitimately needs longer can pass a larger `timeout` (max \
-{PYTHON_REPL_TIMEOUT_MAX_S} s), but long work belongs in tasks.",
-        humanize_ms(limit_ms)
-    );
-    if kernel_restarted {
-        message.push_str(" The cell did not stop on the interrupt, so the kernel was restarted.");
-    }
-    message
+/// The model-facing note for a call that returned early while its cell keeps
+/// running (the auto-background): names the cause, the cell, and how the
+/// completion arrives.
+fn background_cell_message(detached: &crate::kernel::shared::DetachedCell) -> String {
+    use crate::kernel::shared::DetachReason;
+    let cause = match detached.reason {
+        DetachReason::Interrupted => "A new message interrupted the wait".to_string(),
+        DetachReason::WaitBudget(ms) => {
+            format!(
+                "The cell outlived this call's {} wait budget",
+                humanize_ms(ms)
+            )
+        }
+    };
+    format!(
+        "{cause}; the cell was auto-backgrounded (cell {}) and keeps running — nothing was killed. \
+Its [cell-done] completion notice arrives in the inbox. Read its state in a later cell, or end \
+the turn while it finishes.",
+        detached.cell_id
+    )
 }
 
 /// Milliseconds as one plain reading: whole seconds when the value divides,
@@ -348,12 +351,6 @@ async fn execute_with_busy_kernel_choice(
             .await;
         match result {
             Ok(result) => {
-                if result.timed_out_after_ms.is_some() && result.status == ExecuteStatus::Aborted {
-                    // The cell outlived its limit and ignored the interrupt:
-                    // no one is there to choose, so take the Kill choice.
-                    provisioner.kill().await;
-                    kernel_restarted = true;
-                }
                 return Ok((result, kernel_restarted));
             }
             Err(err) => {
@@ -411,7 +408,7 @@ pub fn ipython_tool_schema() -> serde_json::Value {
             "timeout": {
                 "type": "integer",
                 "description": format!(
-                    "Seconds before this cell is interrupted (default {} unless the user configured otherwise, max {PYTHON_REPL_TIMEOUT_MAX_S}).",
+                    "Seconds this call waits before auto-backgrounding a still-running cell (default {} unless the user configured otherwise, max {PYTHON_REPL_TIMEOUT_MAX_S}). The cell keeps running and its [cell-done] completion notice arrives in the inbox.",
                     DEFAULT_PYTHON_CELL_TIMEOUT_MS / 1000
                 )
             }
@@ -430,7 +427,7 @@ fn timeout_arg_ms(params: &serde_json::Value) -> Option<u64> {
 }
 
 pub fn ipython_tool_description() -> &'static str {
-    "Execute Python code in a persistent Python REPL. Top-level `await` is supported. Variables, imports, and loaded data persist across calls, and are revived on a best-effort basis when a session is resumed (objects that cannot be serialized are dropped and reported). Run shell commands with `bash('cmd')` / `await bash('cmd')`. Project imports, tests, scripts, CLIs, and dependency checks should run through the target project's own environment."
+    "Execute Python code in a persistent Python REPL. Top-level `await` is supported. Variables, imports, and loaded data persist across calls, and are revived on a best-effort basis when a session is resumed (objects that cannot be serialized are dropped and reported). Sleeping and waiting in a cell are fine: a new user message or inbox arrival ends the wait early and the cell keeps running in the background, its completion arriving as a [cell-done] inbox notice. Run shell commands with `bash('cmd')` / `await bash('cmd')`. Project imports, tests, scripts, CLIs, and dependency checks should run through the target project's own environment."
 }
 
 #[tracing::instrument(
@@ -501,7 +498,7 @@ pub async fn execute_ipython(
 
     let (r, kernel_restarted) = result.map_err(|err| anyhow::anyhow!("{}", err.message()))?;
 
-    let mut text = format_execute_text(&r, r.background_output.as_deref(), kernel_restarted);
+    let mut text = format_execute_text(&r, r.background_output.as_deref());
     if kernel_restarted {
         text = if text.is_empty() {
             kernel_restart_notice().to_string()
@@ -520,12 +517,10 @@ pub async fn execute_ipython(
     let mut content = vec![ToolContentBlock::text(text)];
     content.extend(image_blocks);
 
-    // A timed-out cell is an error even when it had to be force-aborted:
-    // nobody aborted it.
     let status = match r.status {
         ExecuteStatus::Ok => "ok",
-        ExecuteStatus::Aborted if r.timed_out_after_ms.is_none() => "aborted",
-        ExecuteStatus::Error | ExecuteStatus::Aborted => "error",
+        ExecuteStatus::Aborted => "aborted",
+        ExecuteStatus::Error => "error",
     };
     let mut details = json!({
         "status": status,
@@ -533,6 +528,16 @@ pub async fn execute_ipython(
     });
     if let Some(duration) = r.duration_ms {
         details["durationMs"] = json!(duration);
+    }
+    if let Some(detached) = &r.detached {
+        let reason = match detached.reason {
+            crate::kernel::shared::DetachReason::Interrupted => "interrupted".to_string(),
+            crate::kernel::shared::DetachReason::WaitBudget(ms) => format!("wait-budget:{ms}"),
+        };
+        details["backgrounded"] = json!({
+            "cellId": detached.cell_id,
+            "reason": reason,
+        });
     }
     if !r.stdout.is_empty() {
         details["stdout"] = json!(r.stdout);

@@ -138,6 +138,7 @@ impl AgentSessionEngine {
             goal_input_probe: std::sync::Mutex::new(None),
             goal_admission_sink: std::sync::Mutex::new(None),
             kernel_notice_sink: std::sync::Mutex::new(None),
+            cell_wake: std::sync::Arc::new(pa_core::kernel::cell_wake::CellWake::new()),
             bash_consumed_sink: std::sync::Mutex::new(None),
             inbox: std::sync::Mutex::new(None),
             inbox_read_hook: std::sync::Mutex::new(None),
@@ -1203,6 +1204,23 @@ impl AgentSessionEngine {
             .expect("late agent message sink lock")
             .clone();
         pa_core::session_engine::engine::create_session(SessionEngineConfig {
+            cell_wake: Some(std::sync::Arc::clone(&self.cell_wake)),
+            on_background_cell: {
+                let weak = self
+                    .self_weak
+                    .lock()
+                    .expect("engine self weak lock")
+                    .clone();
+                weak.map(|weak| {
+                    std::sync::Arc::new(
+                        move |outcome: pa_core::kernel::shared::BackgroundCellOutcome| {
+                            if let Some(engine) = weak.upgrade() {
+                                engine.admit_background_cell_outcome(&outcome);
+                            }
+                        },
+                    ) as pa_core::kernel::shared::BackgroundCellCallback
+                })
+            },
             on_late_sent_agent_message,
             semantic_edges,
             telemetry,

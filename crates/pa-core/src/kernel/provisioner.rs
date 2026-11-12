@@ -107,12 +107,19 @@ pub type KernelBootstrapResultHandler = Arc<dyn Fn(KernelBootstrapStats) + Send 
 pub struct IpythonKernelProvisionerOptions {
     /// Python override. Must have prime-agent-runtime installed.
     pub python: Option<PathBuf>,
-    /// Default time limit for user `python_repl` cells, in milliseconds
+    /// Default wait budget for user `python_repl` cells, in milliseconds
     /// (`None`: never armed; `0`: disabled). The daemon engine resolves it
     /// from settings and disarms it for daemonless sessions; a cell's own
-    /// `timeout` argument replaces it. The runtime bootstrap and internal
-    /// state ops never arm it.
+    /// `timeout` argument replaces it. A cell that outlives it is detached,
+    /// not interrupted: the call returns early, the cell keeps running, and
+    /// its completion goes to `on_background_cell`. The runtime bootstrap
+    /// and internal state ops never arm it.
     pub cell_timeout_ms: Option<u64>,
+    /// The session's shared cell wake: fires the detach on a user/inbox
+    /// interrupt.
+    pub cell_wake: Option<Arc<crate::kernel::cell_wake::CellWake>>,
+    /// Receives the late completion of a detached cell.
+    pub on_background_cell: Option<crate::kernel::shared::BackgroundCellCallback>,
     pub env: HashMap<String, String>,
     /// Command prefix prepended to every kernel `bash()` invocation.
     pub command_prefix: Option<String>,
@@ -287,11 +294,23 @@ impl IpythonKernelProvisioner {
         self.lock_state().manager.clone()
     }
 
-    /// The default time limit the kernel executor arms for user cells
+    /// The default wait budget the kernel executor arms for user cells
     /// (`None`: never armed).
     #[must_use]
     pub fn cell_timeout_ms(&self) -> Option<u64> {
         self.inner.options.cell_timeout_ms
+    }
+
+    /// The session's shared cell wake, when one was wired.
+    #[must_use]
+    pub fn cell_wake(&self) -> Option<Arc<crate::kernel::cell_wake::CellWake>> {
+        self.inner.options.cell_wake.clone()
+    }
+
+    /// The background-cell completion sink, when one was wired.
+    #[must_use]
+    pub fn on_background_cell(&self) -> Option<crate::kernel::shared::BackgroundCellCallback> {
+        self.inner.options.on_background_cell.clone()
     }
 
     /// The Python skills pre-imported at kernel bootstrap.

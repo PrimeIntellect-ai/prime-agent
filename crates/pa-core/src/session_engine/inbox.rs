@@ -14,7 +14,10 @@ use serde_json::{json, Value};
 use crate::kernel::shared::{host_handler, HostRequestHandlers};
 
 use super::bash_notices::KernelNotice;
-use super::messages::{ASYNC_BASH_COMPLETION_CUSTOM_TYPE, FACTORY_PROGRESS_NOTICE_CUSTOM_TYPE};
+use super::messages::{
+    ASYNC_BACKGROUND_CELL_COMPLETION_CUSTOM_TYPE, ASYNC_BASH_COMPLETION_CUSTOM_TYPE,
+    FACTORY_PROGRESS_NOTICE_CUSTOM_TYPE,
+};
 use pa_types::ai::UserContent;
 
 /// The kernel host request that drains and returns the waiting messages
@@ -32,6 +35,9 @@ pub const INBOX_CLASS_FACTORY_PROGRESS: &str = "factory-progress";
 /// The agent-message class label: one delivered `agent_message.send`
 /// row (parent/sibling/child traffic) routed into the inbox.
 pub const INBOX_CLASS_AGENT_MESSAGE: &str = "agent-message";
+/// The cell-done class label: one auto-backgrounded cell's completion
+/// (the `[cell-done ...]` row) routed into the inbox.
+pub const INBOX_CLASS_CELL_DONE: &str = "cell-done";
 
 /// The coalescing batch state the daemon's notice sink owns: the
 /// arrivals the currently queued short-notice row covers (reset when the
@@ -123,6 +129,7 @@ pub fn inbox_class_for_custom_type(custom_type: &str) -> Option<&'static str> {
     match custom_type {
         ASYNC_BASH_COMPLETION_CUSTOM_TYPE => Some(INBOX_CLASS_BASH_DONE),
         FACTORY_PROGRESS_NOTICE_CUSTOM_TYPE => Some(INBOX_CLASS_FACTORY_PROGRESS),
+        ASYNC_BACKGROUND_CELL_COMPLETION_CUSTOM_TYPE => Some(INBOX_CLASS_CELL_DONE),
         _ => None,
     }
 }
@@ -139,6 +146,7 @@ pub fn inbox_notice_fields(notice: &KernelNotice) -> Option<InboxNotice> {
     let sender = match class {
         INBOX_CLASS_BASH_DONE => meta.get("command").and_then(Value::as_str),
         INBOX_CLASS_FACTORY_PROGRESS => meta.get("runId").and_then(Value::as_str),
+        INBOX_CLASS_CELL_DONE => meta.get("cellId").and_then(Value::as_str),
         _ => None,
     };
     Some(InboxNotice {

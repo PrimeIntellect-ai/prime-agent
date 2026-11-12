@@ -1,7 +1,9 @@
-//! Multi-steer tool-boundary batching: parked steering messages co-deliver
-//! at the next tool-call boundary as ONE batched turn. Deliberate divergence
-//! from TS "one-at-a-time" (Kevin 2026-09-23); "one-at-a-time" stays
-//! selectable.
+//! Multi-steer wake + tool-boundary batching: parked steering messages wake a
+//! sleeping cell (the wait ends early; the cell auto-backgrounds and keeps
+//! running), and the parked steers co-deliver as ONE batched turn at the early
+//! boundary. The backgrounded cell's completion lands as a `cell-done` inbox
+//! notice. Co-delivery is a deliberate divergence from TS "one-at-a-time"
+//! (Kevin 2026-09-23); "one-at-a-time" stays selectable.
 // Stack-resident futures by design on the daemon's hot paths.
 #![allow(clippy::large_futures)]
 // Narrowing casts sit at OS boundaries (pid/fd/time/size) where the kernel
@@ -49,10 +51,10 @@ fn kernel_python() -> Option<PathBuf> {
 }
 
 /// The faux provider script: the long turn's first model response calls a
-/// kernel cell that sleeps (the tool-call boundary the steers queue
-/// behind), and the scripted replies behind it name every delivery —
-/// the batch reply for the co-delivered prefix, the drip replies for the
-/// pre-fix one-per-boundary shape.
+/// kernel cell that sleeps 15s; the steers parked against it must wake the
+/// wait (delivering well before the sleep's natural end), and the scripted
+/// replies behind it name every delivery — the batch reply for the
+/// co-delivered prefix, the drip replies for a split shape.
 fn faux_script(dir: &Path) -> PathBuf {
     let path = dir.join("faux-script.json");
     std::fs::write(
@@ -69,7 +71,7 @@ fn faux_script(dir: &Path) -> PathBuf {
                     {"type": "text", "text": "Running the first sleep cell."},
                     {"type": "toolCall", "name": "python_repl", "id": "toolu_sleep01",
                      "arguments": {"code":
-                        "import time\nopen('sleep-one-started','w').write('1')\ntime.sleep(4)\nprint('slept one')"}}
+                        "import time\nopen('sleep-one-started','w').write('1')\ntime.sleep(15)\nprint('slept one')"}}
                 ]},
                 {"content": [{"type": "text", "text": "batch reply for all three steers"}]},
                 {"content": [{"type": "text", "text": "queued reply"}]},
@@ -243,7 +245,7 @@ impl Client {
 }
 
 #[test]
-fn multi_steer_parked_mid_run_co_delivers_as_one_batched_turn() {
+fn multi_steer_wake_a_sleeping_cell_and_co_deliver_at_the_early_boundary() {
     let Some(_kernel) = kernel_python() else {
         return;
     };
@@ -297,6 +299,7 @@ fn multi_steer_parked_mid_run_co_delivers_as_one_batched_turn() {
         "the sleep cell never started; events: {:#?}",
         client.events
     );
+    let cell_started_at = Instant::now();
     for (id, message) in [
         ("s1", "steer one"),
         ("s2", "steer two"),
@@ -334,22 +337,26 @@ fn multi_steer_parked_mid_run_co_delivers_as_one_batched_turn() {
     }
     client.drain_events(Duration::from_secs(2));
 
-    // The delivery window is everything after the long turn's first
-    // `agent_end`.
-    let types = event_types(&client.events);
-    let first_agent_end = types
-        .iter()
-        .position(|t| t == "agent_end")
-        .expect("the long turn settled");
-    let delivery = &types[first_agent_end + 1..];
+    // The wake ended the sleeping cell's wait early: the steers delivered
+    // while the cell was still sleeping, well inside its natural 15s end.
+    assert!(
+        cell_started_at.elapsed() < Duration::from_secs(8),
+        "the steers waited out the sleep instead of waking it: {:?}",
+        cell_started_at.elapsed()
+    );
 
-    let agent_starts: usize = delivery
-        .iter()
-        .filter(|t| *t == &"agent_start".to_string())
-        .count();
-    assert_eq!(
-        agent_starts, 2,
-        "the steer batch runs as ONE turn, the follow-up as its own: {delivery:?}"
+    // The cell was never signalled: its tool result names the auto-background.
+    let rows = event_rows(&client.events);
+    assert!(
+        rows.iter()
+            .any(|(role, text)| role == "toolResult" && text.contains("auto-backgrounded")),
+        "the sleep cell's tool result must name the auto-background: {rows:?}"
+    );
+    assert!(
+        !rows
+            .iter()
+            .any(|(_, text)| text.contains("interrupted after")),
+        "the wait budget must not interrupt the cell: {rows:?}"
     );
 
     let texts = event_texts(&client.events);
@@ -376,16 +383,25 @@ fn multi_steer_parked_mid_run_co_delivers_as_one_batched_turn() {
         "follow up last",
         "the follow-up delivers behind the batch, never merged: {texts:?}"
     );
-    let rows = event_rows(&client.events);
-    let follow_up_at = rows
-        .iter()
-        .position(|(role, text)| role == "user" && text == "follow up last")
-        .expect("the follow-up row delivered");
-    assert_eq!(
-        rows[follow_up_at + 1].0,
-        "assistant",
-        "the follow-up's own turn carries its own reply: {rows:?}"
-    );
+
+    // The backgrounded cell kept running to completion: its `cell-done`
+    // completion lands as an inbox arrival wake row (never the steered row's
+    // shape), and its printed verdict rides the same notice.
+    let deadline = Instant::now() + Duration::from_secs(60);
+    loop {
+        if event_texts(&client.events)
+            .iter()
+            .any(|text| text.contains("new message (cell-done)"))
+        {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the cell-done notice never landed; events: {:#?}",
+            event_types(&client.events)
+        );
+        client.drain_events(Duration::from_millis(500));
+    }
     drop(supervisor);
 }
 

@@ -29,9 +29,10 @@ use crate::kernel::shared::{
     DEFAULT_MAX_OUTPUT_CHARS, DEFAULT_SNAPSHOT_DEBOUNCE_MS, DIFF_DISPLAY_MIME,
     END_TURN_REQUEST_TYPE, FACTIVITY_SETTLE_TIMEOUT_MS, FACTIVITY_WATCH_TIMEOUT_MS_CAP,
     HOST_REQUEST_SHUTDOWN_TIMEOUT_MS, KERNEL_ABORT_GRACE_MS, KERNEL_BUSY_AFTER_INTERRUPT_MESSAGE,
-    KERNEL_BUSY_INTERRUPT_INTERVAL_MS, KERNEL_BUSY_REUSE_WAIT_MS, KERNEL_SHUTDOWN_TIMEOUT_MS,
-    KERNEL_STDERR_LOG_BUDGET_MARKER, MAX_ATTACHMENT_DATA_CHARS, MAX_BACKGROUND_OUTPUT_CHARS,
-    MAX_KERNEL_STDERR_CHARS, MAX_KERNEL_STDERR_LOG_BYTES, MAX_LATE_SENT_AGENT_MESSAGE_HANDLERS,
+    KERNEL_BUSY_BACKGROUND_CELL_MESSAGE, KERNEL_BUSY_INTERRUPT_INTERVAL_MS,
+    KERNEL_BUSY_REUSE_WAIT_MS, KERNEL_SHUTDOWN_TIMEOUT_MS, KERNEL_STDERR_LOG_BUDGET_MARKER,
+    MAX_ATTACHMENT_DATA_CHARS, MAX_BACKGROUND_OUTPUT_CHARS, MAX_KERNEL_STDERR_CHARS,
+    MAX_KERNEL_STDERR_LOG_BYTES, MAX_LATE_SENT_AGENT_MESSAGE_HANDLERS,
     RESTORE_EXECUTION_TIMEOUT_MS, SNAPSHOT_EXECUTION_TIMEOUT_MS, TRANSCRIPT_READ_DISPLAY_MIME,
 };
 use crate::kernel::state_snapshot::{
@@ -103,8 +104,6 @@ struct ExecBuffers {
     ended_turn: bool,
     done_fields: Option<Value>,
     settled: bool,
-    /// The time limit the cell outlived and was interrupted for.
-    timed_out_after_ms: Option<u64>,
 }
 
 pub(crate) struct ActiveExecution {
@@ -112,6 +111,10 @@ pub(crate) struct ActiveExecution {
     started: Instant,
     max_chars: usize,
     opts: ExecuteOptions,
+    /// The call detached from this execution (a wake or the wait budget): its
+    /// result now goes to the background-completion sink. A detached cell is
+    /// never interrupted by a new cell's reuse wait.
+    detached: AtomicBool,
     /// The request runs user-namespace code (an execute — the bootstrap class
     /// included, internal or not): its settle can rebind or mutate names.
     namespace_code: bool,
@@ -144,7 +147,37 @@ impl InternalExecuteResult {
                 status: ExecuteStatus::Aborted,
                 error: None,
                 duration_ms: started.elapsed().as_millis() as u64,
-                timed_out_after_ms: None,
+                detached: None,
+            },
+            done_fields: None,
+        }
+    }
+
+    /// The early return of a detached call: the cell keeps running; the
+    /// result carries the partial output so far and the detach marker.
+    fn detached(
+        started: Instant,
+        reason: crate::kernel::shared::DetachReason,
+        cell_id: String,
+        stdout: String,
+        stderr: String,
+    ) -> Self {
+        Self {
+            result: ExecuteResult {
+                stdout,
+                stderr,
+                result: None,
+                diffs: None,
+                attachments: None,
+                sent_agent_messages: None,
+                bash_commands: None,
+                transcript_reads: None,
+                background_output: None,
+                ended_turn: false,
+                status: ExecuteStatus::Ok,
+                error: None,
+                duration_ms: started.elapsed().as_millis() as u64,
+                detached: Some(crate::kernel::shared::DetachedCell { reason, cell_id }),
             },
             done_fields: None,
         }
@@ -609,9 +642,11 @@ impl ReplKernelManager {
         let result = self
             .enqueue_execute(code, opts, execution_timeout_ms)
             .await?;
-        // An ok cell committed its namespace changes: refresh the snapshot,
-        // or a crash would revive a namespace missing the cell.
-        if result.result.status == ExecuteStatus::Ok {
+        // An ok cell that settled committed its namespace changes: refresh
+        // the snapshot, or a crash would revive a namespace missing the cell.
+        // A detached call's cell is still running: its continuation schedules
+        // the snapshot at its own settlement.
+        if result.result.status == ExecuteStatus::Ok && result.result.detached.is_none() {
             self.schedule_snapshot();
         }
         Ok(result.result)

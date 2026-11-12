@@ -1,0 +1,1 @@
+- Sleeping and long waits in `python_repl` cells are allowed again: a user message or inbox arrival ends the wait early, the cell auto-backgrounds and keeps running instead of being killed, and its `[cell-done]` completion notice lands in the inbox. A cell that outlives its wait budget backgrounds the same way.

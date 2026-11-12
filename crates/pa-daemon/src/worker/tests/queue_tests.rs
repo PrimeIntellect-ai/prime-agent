@@ -504,3 +504,23 @@ async fn forced_batch_arming_classifies_the_visible_plain_rows() {
         );
     }
 }
+
+/// The "all" steering mode co-delivers the whole parked run as ONE batch: the
+/// wake may move the delivery moment earlier (a steer ends a running cell's
+/// wait), but the batch rule itself is unchanged.
+#[test]
+fn steering_all_mode_co_delivers_the_whole_parked_run() {
+    let mut core = SessionCore::test_core(None, "/tmp".to_string());
+    core.steering_mode = "all".to_string();
+    for text in ["steer one", "steer two", "steer three"] {
+        core.steering
+            .push_back(priority_test_item(text, TurnPolicy::Queued));
+    }
+    let batch = gather_delivery_batch(&mut core, Lane::Steering);
+    let messages: Vec<&str> = batch.iter().map(|item| item.message.as_str()).collect();
+    assert_eq!(messages, ["steer one", "steer two", "steer three"]);
+    assert!(
+        core.steering.is_empty(),
+        "the whole parked run leaves the lane as one batch"
+    );
+}

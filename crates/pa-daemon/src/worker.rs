@@ -662,6 +662,9 @@ impl Worker {
                                 Some(engine.as_ref()),
                             );
                             if admitted.is_ok() {
+                                // The arrival rides the steering lane: it must
+                                // reach a running (possibly sleeping) cell too.
+                                engine.fire_cell_wake();
                                 return;
                             }
                             // The store moved on between the capture and
@@ -677,6 +680,7 @@ impl Worker {
                         notice,
                         closed,
                     );
+                    engine.fire_cell_wake();
                 });
                 crate::agent_inbox::spawn_inbox_reminder(
                     std::sync::Arc::downgrade(concrete),

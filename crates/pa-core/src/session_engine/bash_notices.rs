@@ -16,7 +16,7 @@ use pa_types::session::CustomMessage;
 
 use super::messages::{
     self, ASYNC_BASH_COMPLETION_CUSTOM_TYPE, ASYNC_BASH_COMPLETION_PREVIEW_LABEL,
-    FACTORY_PROGRESS_PREVIEW_LABEL,
+    BACKGROUND_CELL_PREVIEW_LABEL, FACTORY_PROGRESS_PREVIEW_LABEL,
 };
 use super::{session_message_to_loop, SessionAgentMessage};
 
@@ -44,6 +44,30 @@ impl KernelNotice {
                 crate::autonomous::now_millis(),
             ),
             preview_label: ASYNC_BASH_COMPLETION_PREVIEW_LABEL,
+        }
+    }
+
+    /// The `[cell-done]` notice for one auto-backgrounded cell's completion:
+    /// the cell kept running after its call returned early, and this row
+    /// wakes the session with the outcome.
+    #[must_use]
+    pub fn background_cell_completion(
+        cell_id: &str,
+        status: &str,
+        duration_ms: u64,
+        reason: &str,
+        output: &str,
+    ) -> Self {
+        Self {
+            row: messages::create_background_cell_completion_message(
+                cell_id,
+                status,
+                duration_ms,
+                reason,
+                output,
+                crate::autonomous::now_millis(),
+            ),
+            preview_label: BACKGROUND_CELL_PREVIEW_LABEL,
         }
     }
 }

@@ -240,6 +240,8 @@ async fn session_engine_drop_kills_the_prewarmed_kernel_process() {
 
     let engine = pa_core::session_engine::engine::create_session(
         pa_core::session_engine::engine::SessionEngineConfig {
+            cell_wake: None,
+            on_background_cell: None,
             cron_store: None,
             steering_mode: None,
             follow_up_mode: None,
@@ -316,6 +318,8 @@ async fn engine_dispose_kernel_kills_the_prewarmed_kernel_process() {
 
     let engine = pa_core::session_engine::engine::create_session(
         pa_core::session_engine::engine::SessionEngineConfig {
+            cell_wake: None,
+            on_background_cell: None,
             cron_store: None,
             steering_mode: None,
             follow_up_mode: None,

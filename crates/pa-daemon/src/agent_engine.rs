@@ -149,6 +149,10 @@ pub struct AgentSessionEngine {
     /// admit through the steering lane, `bash.consumed` withdraws a completion
     /// row. `None` outside a daemon worker.
     pub(crate) kernel_notice_sink: std::sync::Mutex<Option<crate::engine::KernelNoticeSink>>,
+    /// The session's shared cell wake (stable across session rebuilds): a user
+    /// message or inbox arrival fires it so a running cell's wait ends early
+    /// and the work auto-backgrounds.
+    pub(crate) cell_wake: std::sync::Arc<pa_core::kernel::cell_wake::CellWake>,
     pub(crate) bash_consumed_sink: std::sync::Mutex<Option<crate::engine::BashConsumedSink>>,
     /// The current session's agent inbox store (the notice sink routes
     /// `bash.completed`/`factory.progress` messages into it); set at

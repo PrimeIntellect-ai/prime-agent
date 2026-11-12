@@ -314,7 +314,7 @@ fn session_role_section(options: &BuildSystemPromptOptions, has_ipython: bool) -
                 .to_string(),
         );
         lines.push(
-            "Do not run long blocking work in a cell; start long Python work as an asyncio task and check on it in later cells."
+            "Sleeping and long waits inside a cell are fine (`time.sleep(...)`, awaiting a handle). A user message or inbox arrival ends the wait early: the cell auto-backgrounds (it keeps running; nothing is killed) and its `[cell-done]` completion notice arrives in the inbox. A cell that outlives its wait budget auto-backgrounds the same way."
                 .to_string(),
         );
     } else {

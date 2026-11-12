@@ -826,6 +826,8 @@ async fn engine_sessions_emit_the_timeline_only_when_the_flag_is_on() {
     let agent_model = json_round_trip(&model).unwrap();
     let stream_fn = real_stream_fn(None, model.clone());
     let engine = create_session(SessionEngineConfig {
+        cell_wake: None,
+        on_background_cell: None,
         cwd: dir.path().to_path_buf(),
         agent_dir: agent_dir.clone(),
         model: Some(agent_model),
@@ -884,6 +886,8 @@ async fn engine_sessions_emit_the_timeline_only_when_the_flag_is_on() {
     )]);
     let off_dir = tempfile::tempdir().unwrap();
     let engine = create_session(SessionEngineConfig {
+        cell_wake: None,
+        on_background_cell: None,
         cwd: off_dir.path().to_path_buf(),
         agent_dir: off_dir.path().to_path_buf(),
         model: Some(json_round_trip(&model).unwrap()),
@@ -1039,6 +1043,8 @@ async fn engine_sessions_capture_the_outbound_payload_when_the_flag_is_on() {
     .unwrap();
 
     let engine = create_session(SessionEngineConfig {
+        cell_wake: None,
+        on_background_cell: None,
         cwd: dir.path().to_path_buf(),
         agent_dir: agent_dir.clone(),
         model: Some(test_model()),
@@ -1072,6 +1078,8 @@ async fn engine_sessions_capture_the_outbound_payload_when_the_flag_is_on() {
     // Flag off: no capture directory at all.
     let off_dir = tempfile::tempdir().unwrap();
     let engine = create_session(SessionEngineConfig {
+        cell_wake: None,
+        on_background_cell: None,
         cwd: off_dir.path().to_path_buf(),
         agent_dir: off_dir.path().to_path_buf(),
         model: Some(test_model()),

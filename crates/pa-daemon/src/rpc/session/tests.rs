@@ -34,6 +34,8 @@ async fn engine_handle(
     };
     let provider = Arc::new(pa_agent::scripted::ScriptedProvider::new(model.clone()));
     let engine = create_session(SessionEngineConfig {
+        cell_wake: None,
+        on_background_cell: None,
         cwd: cwd.to_path_buf(),
         agent_dir: agent_dir.to_path_buf(),
         model: Some(model.clone()),

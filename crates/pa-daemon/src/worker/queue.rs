@@ -660,6 +660,9 @@ pub(crate) fn admit_inbox_notice(
     } else {
         (TurnPolicy::Injected, false)
     };
+    // Whether the admitted wake row rides the steering lane (it must reach a
+    // running cell); set with the final lane decision below.
+    let wake_steering;
     {
         let mut arrivals = arrivals.lock().unwrap();
         // A queued notice row covers its arrivals until it delivers; no
@@ -686,6 +689,7 @@ pub(crate) fn admit_inbox_notice(
         } else {
             lane
         };
+        wake_steering = lane == Lane::Steering;
         // The replacement pattern the scheduler's queue keys use: the
         // fresh row replaces the coalesced one instead of stacking.
         core_guard
@@ -725,6 +729,13 @@ pub(crate) fn admit_inbox_notice(
             operation: "steer_queued",
         },
     );
+    // A steering arrival ends a running cell's wait early (the work keeps
+    // running in the background); inert with no live wait.
+    if wake_steering {
+        if let Some(engine) = engine {
+            engine.fire_cell_wake();
+        }
+    }
     work_notify.notify_one();
     Ok(queued)
 }
@@ -884,6 +895,10 @@ pub(crate) fn admit_inbox_reminder(
             operation: "steer_queued",
         },
     );
+    // A reminder rides the steering lane: it must reach a sleeping turn too.
+    if let Some(engine) = engine {
+        engine.fire_cell_wake();
+    }
     work_notify.notify_one();
 }
 

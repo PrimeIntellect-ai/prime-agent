@@ -1,9 +1,11 @@
 //! Request plumbing: enqueue/execute state machine, signal enum, and failure
 //! description helpers.
 
+use std::sync::atomic::Ordering;
+
 use super::{
     anyhow, json, lock, merge_signals, oneshot, AbortSignal, ActiveExecution, Arc, AsyncWriteExt,
-    Duration, ExecBuffers, ExecuteOptions, ExecuteResult, ExecuteStatus, Instant,
+    AtomicBool, Duration, ExecBuffers, ExecuteOptions, ExecuteResult, ExecuteStatus, Instant,
     InternalExecuteResult, KernelStartOptions, KernelState, Mutex, ReplKernelManager, Request,
     DEFAULT_MAX_OUTPUT_CHARS, KERNEL_ABORT_GRACE_MS,
 };
@@ -139,6 +141,35 @@ impl HeadTailBuffer {
         self.omitted += chars;
     }
 
+    /// A non-consuming copy of [`Self::finish`]: the head, marker, and tail a
+    /// finish would produce right now, leaving the buffer untouched (the
+    /// detach path reads the partial output while the cell keeps writing).
+    pub(crate) fn snapshot(&self, max_chars: usize) -> String {
+        let (_, tail_cap) = Self::split_cap(max_chars);
+        let mut omitted = self.omitted;
+        let tail = if self.tail_chars > tail_cap {
+            let drop = self.tail_chars - tail_cap;
+            omitted += drop;
+            let end = self
+                .tail
+                .char_indices()
+                .nth(drop)
+                .map_or(self.tail.len(), |(i, _)| i);
+            &self.tail[end..]
+        } else {
+            self.tail.as_str()
+        };
+        if omitted == 0 {
+            let mut text = self.head.clone();
+            text.push_str(tail);
+            return text;
+        }
+        format!(
+            "{}\n[... {} chars omitted ...]\n{}",
+            self.head, omitted, tail
+        )
+    }
+
     /// Resolve the buffered text: trim the tail to its cap, then return head,
     /// marker, and tail. Text that fit the cap passes through unchanged.
     pub(crate) fn finish(mut self, max_chars: usize) -> String {
@@ -233,7 +264,10 @@ impl ReplKernelManager {
             return Err(anyhow!("Kernel has been shut down"));
         }
 
-        // Bound the execution with an out-of-band abort (interrupt + grace).
+        // The hard bound (internal ops: bootstrap/state captures) merges into
+        // the abort signal: an unfinished op must fail, not detach. The
+        // model-facing wait budget in `opts.cell_timeout_ms` is separate: its
+        // clock arms in `execute_inner` and it detaches instead.
         let timeout_signal = execution_timeout_ms.map(|ms| {
             let signal = AbortSignal::new();
             let timer_signal = signal.clone();
@@ -305,48 +339,44 @@ impl ReplKernelManager {
             buffers: Mutex::new(buffers),
             result_tx: Mutex::new(Some(result_tx)),
             opts,
+            detached: AtomicBool::new(false),
         });
         {
             let mut g = lock(&self.inner.guarded);
             g.active_execution = Some(execution.clone());
         }
 
-        // Abort watcher: on an abort, or when the cell outlives its time limit,
-        // interrupts the kernel out-of-band, then force-aborts after the grace
-        // window if the runtime did not settle the cell. The limit's clock
-        // starts here, as the request goes on the wire (no await separates the
-        // two): queue wait and kernel boot are excluded.
+        // Abort watcher: on an abort, interrupts the kernel out-of-band, then
+        // force-aborts after the grace window if the runtime did not settle the
+        // cell (a detached cell included: an abort stops backgrounded work).
+        // The wait budget is separate: when the cell outlives it, the call
+        // detaches (the cell keeps running; its completion goes to the
+        // background sink). Both clocks start here, as the request goes on the
+        // wire (no await separates the two): queue wait and kernel boot are
+        // excluded.
         let cell_timeout_ms = execution.opts.cell_timeout_ms.filter(|ms| *ms > 0);
-        if execution.opts.signal.is_some() || cell_timeout_ms.is_some() {
-            let signal = execution.opts.signal.clone();
+        let budget_wake = cell_timeout_ms.map(|ms| {
+            let wake = crate::kernel::cell_wake::CellWake::new();
+            let timer = wake.clone();
+            tokio::spawn(async move {
+                tokio::time::sleep(Duration::from_millis(ms)).await;
+                timer.request();
+            });
+            wake
+        });
+        if let Some(signal) = execution.opts.signal.clone() {
             // Weak on both sides: a never-fired signal leaves this watcher pending forever, and a
             // strong manager would pin the kernel past the last manager's drop.
             let inner = Arc::downgrade(&self.inner);
             let weak_exec = Arc::downgrade(&execution);
             tokio::spawn(async move {
-                let timed_out_after_ms = tokio::select! {
-                    () = async {
-                        match &signal {
-                            Some(signal) => signal.cancelled().await,
-                            None => std::future::pending().await,
-                        }
-                    } => None,
-                    () = async {
-                        match cell_timeout_ms {
-                            Some(ms) => tokio::time::sleep(Duration::from_millis(ms)).await,
-                            None => std::future::pending().await,
-                        }
-                    } => cell_timeout_ms,
-                };
+                signal.cancelled().await;
                 let Some(execution) = weak_exec.upgrade() else {
                     return;
                 };
                 let Some(inner) = inner.upgrade() else {
                     return;
                 };
-                if timed_out_after_ms.is_some() {
-                    lock(&execution.buffers).timed_out_after_ms = timed_out_after_ms;
-                }
                 // A blocked request write holds the stdin mutex. Do not let an
                 // interrupt queued behind it postpone the force-abort forever.
                 // Dropping the interrupt at this deadline cannot tear its
@@ -365,7 +395,6 @@ impl ReplKernelManager {
                 inner.force_abort(&execution);
             });
         }
-
         let mut frame = request.to_json();
         frame["id"] = json!(request_id);
 
@@ -438,25 +467,102 @@ impl ReplKernelManager {
             }
         };
 
-        match settled_result.take() {
-            Some(result) => result,
-            None => match send_outcome {
-                Err(error) => {
-                    {
-                        let mut g = lock(&self.inner.guarded);
-                        if matches!(g.active_execution.as_ref(), Some(active) if Arc::ptr_eq(active, &execution))
-                        {
-                            g.active_execution = None;
-                        }
-                    }
-                    Err(error)
-                }
-                Ok(()) => match result_rx.await {
-                    Ok(result) => result,
-                    Err(_) => Err(anyhow!("Kernel has been shut down")),
-                },
-            },
+        if let Some(result) = settled_result.take() {
+            return result;
         }
+        if let Err(error) = send_outcome {
+            {
+                let mut g = lock(&self.inner.guarded);
+                if matches!(g.active_execution.as_ref(), Some(active) if Arc::ptr_eq(active, &execution))
+                {
+                    g.active_execution = None;
+                }
+            }
+            Err(error)
+        } else {
+            // The wait: the cell's settlement, or a detach (the
+            // session wake or the budget firing while the cell runs).
+            // A settled cell wins a tie: the work is done, so there is
+            // nothing to background.
+            let mut wake_rx = execution.opts.wake.as_ref().map(|wake| wake.subscribe());
+            let mut budget_rx = budget_wake
+                .as_ref()
+                .map(crate::kernel::cell_wake::CellWake::subscribe);
+            let wait = tokio::select! {
+                biased;
+                settled = &mut result_rx => Wait::Settled(Box::new(
+                    settled.unwrap_or_else(|_| Err(anyhow!("Kernel has been shut down"))),
+                )),
+                () = awakened(wake_rx.as_mut()) => {
+                    Wait::Detach(crate::kernel::shared::DetachReason::Interrupted)
+                }
+                () = awakened(budget_rx.as_mut()) => Wait::Detach(
+                    crate::kernel::shared::DetachReason::WaitBudget(
+                        cell_timeout_ms.unwrap_or(0),
+                    ),
+                ),
+            };
+            match wait {
+                Wait::Settled(settled) => *settled,
+                Wait::Detach(reason) => {
+                    // The call stops waiting; the cell does not. Its
+                    // completion resolves through the same channel and
+                    // goes to the background sink.
+                    execution.detached.store(true, Ordering::SeqCst);
+                    let (stdout, stderr) = {
+                        let buffers = lock(&execution.buffers);
+                        (
+                            buffers.stdout.snapshot(max_chars),
+                            buffers.stderr.snapshot(max_chars),
+                        )
+                    };
+                    let cell_id = execution.request_id.clone();
+                    let completion = execution.opts.on_background_cell.clone();
+                    let detached_execution = Arc::clone(&execution);
+                    let inner = Arc::downgrade(&self.inner);
+                    tokio::spawn(async move {
+                        let Ok(Ok(settled)) = result_rx.await else {
+                            return;
+                        };
+                        if settled.result.status == ExecuteStatus::Ok {
+                            if let Some(inner) = inner.upgrade() {
+                                inner.schedule_snapshot();
+                            }
+                        }
+                        if let Some(callback) = completion {
+                            let mut result = settled.result;
+                            result.detached = Some(crate::kernel::shared::DetachedCell {
+                                reason,
+                                cell_id: detached_execution.request_id.clone(),
+                            });
+                            callback(crate::kernel::shared::BackgroundCellOutcome {
+                                cell_id: detached_execution.request_id.clone(),
+                                reason,
+                                result,
+                            });
+                        }
+                    });
+                    Ok(InternalExecuteResult::detached(
+                        started, reason, cell_id, stdout, stderr,
+                    ))
+                }
+            }
+        }
+    }
+}
+
+/// What one cell wait resolved to: the cell's settlement, or a detach (the
+/// call stops waiting; the cell keeps running).
+enum Wait {
+    Settled(Box<anyhow::Result<InternalExecuteResult>>),
+    Detach(crate::kernel::shared::DetachReason),
+}
+
+/// Resolve when the optional wake receiver fires; never when absent.
+async fn awakened(receiver: Option<&mut crate::kernel::cell_wake::CellWakeReceiver>) {
+    match receiver {
+        Some(receiver) => receiver.awakened().await,
+        None => std::future::pending().await,
     }
 }
 
@@ -775,5 +881,230 @@ for line in sys.stdin:
             "the tail window must not retain the frame's allocation"
         );
         assert_eq!(buffer.finish(16), oracle(&frame, 16));
+    }
+
+    /// The fake kernel behind the detach tests: ready, then every execute
+    /// streams a start line, sleeps a second, streams its finish line, and
+    /// settles. Interrupt frames are counted in a sidecar file so a test can
+    /// prove a detached cell was never signalled.
+    #[cfg(unix)]
+    fn background_cell_kernel(dir: &std::path::Path) -> std::path::PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let python = dir.join("background-cell-kernel");
+        std::fs::write(
+            &python,
+            r#"#!/usr/bin/env python3
+import json, os, sys, time
+print(json.dumps({"event": "ready", "protocol": 3, "python": "3.13.0"}), flush=True)
+for line in sys.stdin:
+    try:
+        req = json.loads(line)
+    except Exception:
+        continue
+    if req.get("type") == "interrupt":
+        with open(os.path.abspath(__file__) + ".interrupts", "a") as fh:
+            fh.write("x")
+        continue
+    if req.get("type") == "execute":
+        rid = req.get("id")
+        print(json.dumps({"event": "stdout", "id": rid, "text": "starting\n"}), flush=True)
+        time.sleep(1.0)
+        print(json.dumps({"event": "stdout", "id": rid, "text": "finished\n"}), flush=True)
+        print(json.dumps({"event": "done", "id": rid, "status": "ok"}), flush=True)
+"#,
+        )
+        .expect("write fake kernel");
+        std::fs::set_permissions(&python, std::fs::Permissions::from_mode(0o755))
+            .expect("chmod fake kernel");
+        python
+    }
+
+    #[cfg(unix)]
+    fn background_cell_outcomes() -> (
+        std::sync::Arc<std::sync::Mutex<Vec<crate::kernel::shared::BackgroundCellOutcome>>>,
+        crate::kernel::shared::BackgroundCellCallback,
+    ) {
+        use std::sync::Arc;
+        let outcomes: Arc<std::sync::Mutex<Vec<crate::kernel::shared::BackgroundCellOutcome>>> =
+            Arc::default();
+        let sink = Arc::clone(&outcomes);
+        let callback: crate::kernel::shared::BackgroundCellCallback =
+            Arc::new(move |outcome| sink.lock().unwrap().push(outcome));
+        (outcomes, callback)
+    }
+
+    /// A wake lands mid-cell: the call returns early with the partial output
+    /// and a detach marker, the cell is never signalled, and its completion
+    /// arrives through the background sink with the full output.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_wake_returns_early_and_the_cell_completes_in_background() {
+        use super::*;
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let python = background_cell_kernel(dir.path());
+        let manager = ReplKernelManager::new(crate::kernel::shared::KernelManagerOptions {
+            python: Some(python.clone()),
+            ..Default::default()
+        });
+        manager
+            .start(KernelStartOptions::default())
+            .await
+            .expect("ready handshake");
+        let wake = Arc::new(crate::kernel::cell_wake::CellWake::new());
+        let (outcomes, callback) = background_cell_outcomes();
+        let runner = manager.clone();
+        let wake_for_call = Arc::clone(&wake);
+        let call = tokio::spawn(async move {
+            runner
+                .execute(
+                    "cell",
+                    ExecuteOptions {
+                        wake: Some(wake_for_call),
+                        on_background_cell: Some(callback),
+                        ..Default::default()
+                    },
+                )
+                .await
+        });
+        // The wake lands mid-cell (the fake kernel sleeps a second after its
+        // start line).
+        tokio::time::sleep(Duration::from_millis(250)).await;
+        wake.request();
+        let result = tokio::time::timeout(Duration::from_secs(5), call)
+            .await
+            .expect("the detached call returns early")
+            .expect("the call task joins")
+            .expect("the execute settles");
+        let detached = result.detached.as_ref().expect("detach marker");
+        assert_eq!(
+            detached.reason,
+            crate::kernel::shared::DetachReason::Interrupted
+        );
+        assert!(
+            result.stdout.contains("starting"),
+            "the partial output rides the early return: {result:?}"
+        );
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            if let Some(outcome) = outcomes.lock().unwrap().pop() {
+                assert_eq!(
+                    outcome.reason,
+                    crate::kernel::shared::DetachReason::Interrupted
+                );
+                assert_eq!(outcome.cell_id, detached.cell_id);
+                assert!(
+                    outcome.result.stdout.contains("finished"),
+                    "the late completion carries the full output: {outcome:?}"
+                );
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "the background completion never fired"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert!(
+            !python.with_extension("interrupts").exists(),
+            "the detached cell must never be signalled"
+        );
+        manager.kill();
+    }
+
+    /// The wait budget backgrounds the cell instead of interrupting it: the
+    /// call returns early with the budget reason, the cell settles ok, and the
+    /// reuse wait drains quietly without ever signalling it.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn the_wait_budget_backgrounds_instead_of_interrupting() {
+        use super::*;
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let python = background_cell_kernel(dir.path());
+        let manager = ReplKernelManager::new(crate::kernel::shared::KernelManagerOptions {
+            python: Some(python.clone()),
+            ..Default::default()
+        });
+        manager
+            .start(KernelStartOptions::default())
+            .await
+            .expect("ready handshake");
+        let (outcomes, callback) = background_cell_outcomes();
+        let result = manager
+            .execute(
+                "cell",
+                ExecuteOptions {
+                    cell_timeout_ms: Some(200),
+                    on_background_cell: Some(callback),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("the bounded call settles");
+        let detached = result.detached.as_ref().expect("detach marker");
+        assert_eq!(
+            detached.reason,
+            crate::kernel::shared::DetachReason::WaitBudget(200)
+        );
+        assert!(
+            result.stdout.contains("starting"),
+            "the partial output rides the early return: {result:?}"
+        );
+        // The reuse wait (a later cell's contention path) drains once the
+        // background cell settles, and it never interrupts a detached cell.
+        let runner = manager.clone();
+        let drained = tokio::time::timeout(
+            Duration::from_secs(6),
+            runner.wait_for_active_execution_to_clear_for_reuse(None),
+        )
+        .await
+        .expect("the reuse wait settles");
+        drained.expect("a detached cell is waited out, not interrupted");
+        let outcome = outcomes.lock().unwrap().pop().expect("completion fired");
+        assert!(
+            outcome.result.stdout.contains("finished"),
+            "the cell completed in the background: {outcome:?}"
+        );
+        assert!(
+            !python.with_extension("interrupts").exists(),
+            "no interrupt may be sent to a backgrounded cell"
+        );
+        manager.kill();
+    }
+
+    /// A cell that settles inside its budget never detaches: the normal
+    /// result rides the call and the background sink stays empty.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_cell_inside_its_budget_never_detaches() {
+        use super::*;
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let python = background_cell_kernel(dir.path());
+        let manager = ReplKernelManager::new(crate::kernel::shared::KernelManagerOptions {
+            python: Some(python),
+            ..Default::default()
+        });
+        manager
+            .start(KernelStartOptions::default())
+            .await
+            .expect("ready handshake");
+        let (outcomes, callback) = background_cell_outcomes();
+        let result = manager
+            .execute(
+                "cell",
+                ExecuteOptions {
+                    cell_timeout_ms: Some(5_000),
+                    on_background_cell: Some(callback),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("the cell settles");
+        assert!(
+            result.detached.is_none(),
+            "no detach inside the budget: {result:?}"
+        );
+        assert!(result.stdout.contains("finished"));
+        assert!(outcomes.lock().unwrap().is_empty(), "no completion fires");
+        manager.kill();
     }
 }
