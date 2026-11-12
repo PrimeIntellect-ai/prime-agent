@@ -13,6 +13,12 @@ pub(super) const CAPABILITY: &str = "session_content_search";
 /// The typing pause before a scan: each scan reads the whole store, so it never runs per key.
 const DEBOUNCE: Duration = Duration::from_millis(150);
 
+/// The message-search fetch's request budget: the LONG-RUNNING class, never the 30s default —
+/// each scan walks the whole session store file by file.
+fn content_search_timeout_ms() -> u64 {
+    crate::daemon_client::LONG_RUNNING_REQUEST_TIMEOUT_MS
+}
+
 #[derive(Default)]
 pub(super) struct ContentSearch {
     pub(super) supported: bool,
@@ -115,12 +121,15 @@ pub(super) fn spawn_fetch(
     let client = client.clone();
     tokio::spawn(async move {
         let outcome = client
-            .request_ok(DaemonCommand::SearchSessionContent {
-                id: None,
-                session_dir: session_dir.map(|dir| dir.to_string_lossy().into_owned()),
-                query: query.clone(),
-                rest: serde_json::Map::default(),
-            })
+            .request_ok_with_timeout(
+                DaemonCommand::SearchSessionContent {
+                    id: None,
+                    session_dir: session_dir.map(|dir| dir.to_string_lossy().into_owned()),
+                    query: query.clone(),
+                    rest: serde_json::Map::default(),
+                },
+                content_search_timeout_ms(),
+            )
             .await
             .map(|data| {
                 data.get("sessionIds")
