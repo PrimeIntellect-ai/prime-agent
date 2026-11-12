@@ -52,7 +52,7 @@ mod turn_types;
 
 use turn_types::{
     aborted_message, drop_trailing_assistant, retry_event_to_engine_event, BoundaryRun,
-    TurnAdmission, TurnOnce, TurnPrompt, TurnResult,
+    QueuedDeliveryConsumed, TurnAdmission, TurnOnce, TurnPrompt, TurnResult,
 };
 
 mod model;

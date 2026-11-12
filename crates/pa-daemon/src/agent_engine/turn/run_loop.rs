@@ -65,6 +65,13 @@ impl AgentSessionEngine {
             };
             let turn = self.run_model_turn(admission, &prompt, &boundary_passed, aborted, emit);
             match turn {
+                // A parked delivery the running turn consumed: this seat
+                // carries the acceptance settle and no boundary work — the
+                // running turn's seat owns its stream and its accounting.
+                TurnResult::Queued => {
+                    emit(EngineEvent::Done(Ok(())));
+                    return;
+                }
                 TurnResult::Message(_assistant) => {
                     // A settled non-error turn resets the overflow state and
                     // counts into the auto-refine review's turn line.

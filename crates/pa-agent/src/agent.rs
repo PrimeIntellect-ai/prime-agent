@@ -1102,6 +1102,19 @@ impl Agent {
         self.inner.current_signal()
     }
 
+    /// Whether a run occupies the active-run slot: the slot is taken before
+    /// `is_streaming` flips and released after it clears, so a busy decision
+    /// that must not fall into either window consults this beside the
+    /// streaming state.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the `run` mutex is poisoned.
+    #[must_use]
+    pub fn has_active_run(&self) -> bool {
+        self.inner.run.lock().unwrap().is_some()
+    }
+
     /// # Panics
     ///
     /// Panics if the `run` mutex is poisoned.

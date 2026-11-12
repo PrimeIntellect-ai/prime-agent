@@ -619,6 +619,7 @@ pub(crate) fn admit_inbox_notice(
         &std::collections::VecDeque<QueuedItem>,
         &std::collections::VecDeque<QueuedItem>,
     ) -> Option<String>,
+    engine: Option<&crate::agent_engine::AgentSessionEngine>,
 ) -> Option<String> {
     // The busy sample, the batch, and the push share ONE critical
     // section, like the notice admission below: a turn starting between
@@ -636,7 +637,20 @@ pub(crate) fn admit_inbox_notice(
     if let Some(error) = capacity_error(&core_guard.steering, &core_guard.follow_up) {
         return Some(error);
     }
-    let message = inbox.push(notice, pa_core::autonomous::now_millis());
+    // The append is atomic with the session swap: the route-fetched store
+    // is identity-checked under the slot's own mutex (push_to_live_inbox),
+    // so a `create` replacement that retired it — or a closed-session
+    // retire that cleared it — refuses here; a delivery never succeeds
+    // against a store the replacement cannot read.
+    let message = match engine {
+        Some(engine) => {
+            match engine.push_to_live_inbox(inbox, notice, pa_core::autonomous::now_millis()) {
+                Some(message) => message,
+                None => return Some("Target session is closed".to_string()),
+            }
+        }
+        None => inbox.push(notice, pa_core::autonomous::now_millis()),
+    };
     let (policy, queue_visible) = if core_guard.busy {
         (TurnPolicy::Queued, true)
     } else {
