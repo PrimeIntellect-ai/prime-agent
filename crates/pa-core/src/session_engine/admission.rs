@@ -51,10 +51,16 @@ impl AgentSession {
             )));
         }
         let mut prompt_messages = Vec::new();
-        if let Some(digest_row) = self.pending_digest_prompt_row().await? {
-            prompt_messages.push(digest_row);
+        let digest_row = self.pending_digest_prompt_row().await?;
+        if let Some(digest_row) = &digest_row {
+            prompt_messages.push(digest_row.clone());
         }
-        prompt_messages.extend(self.take_next_turn_rows().await);
+        let next_turn_rows = self.take_next_turn_rows_raw();
+        prompt_messages.extend(
+            next_turn_rows.iter().filter_map(|row| {
+                session_message_to_loop(&SessionAgentMessage::Custom(row.clone()))
+            }),
+        );
         let custom_row = session_message_to_loop(&SessionAgentMessage::Custom(message.clone()))
             .ok_or_else(|| anyhow::anyhow!("injected custom message conversion failed"))?;
         // The dispatch-time routing fires for every dispatched turn; injected
@@ -63,9 +69,25 @@ impl AgentSession {
         // model), so a route left by the previous turn clears here.
         self.apply_image_model_routing(&[], &[]).await?;
         prompt_messages.push(custom_row);
-        self.agent
+        if let Err(error) = self
+            .agent
             .prompt(pa_agent::agent::AgentPromptInput::Messages(prompt_messages))
-            .await?;
+            .await
+        {
+            // The rows never reached a run (the slot refusal): put them
+            // back — a lost race must not lose the harness digest or the
+            // queued restore notices (the queueing fallback then carries
+            // them into the next admission).
+            if is_busy_slot_refusal(&error) {
+                if digest_row.is_some() {
+                    self.rearm_digest_pending();
+                }
+                for row in next_turn_rows {
+                    self.queue_next_turn_row(row);
+                }
+            }
+            return Err(error);
+        }
         Ok(PromptOutcome::Prompt)
     }
 
@@ -240,11 +262,16 @@ impl AgentSession {
         // The turn's prompt messages: the deferred first-turn harness
         // digest rides first when one is due, streamed ahead of the user
         // prompt and carried on `agent_end`.
-        let mut prompt_messages = Vec::new();
+        // The drained auxiliary rows (the first-turn digest and the queued
+        // next-turn rows) ride the turn's prompt AND the race fallback's
+        // queued batch: a lost run slot must not lose goal context or
+        // restore notices.
+        let mut aux_rows: Vec<pa_agent::types::AgentMessage> = Vec::new();
         if let Some(digest_row) = self.pending_digest_prompt_row().await? {
-            prompt_messages.push(digest_row);
+            aux_rows.push(digest_row);
         }
-        prompt_messages.extend(self.take_next_turn_rows().await);
+        aux_rows.extend(self.take_next_turn_rows().await);
+        let mut prompt_messages = aux_rows.clone();
         prompt_messages.push(user_prompt_message(&normalized, &images));
         // Each batched action contributes its user row after the
         // primary, through the same admission normalization (TS
@@ -266,7 +293,8 @@ impl AgentSession {
                 // of a prompt that DID start surfaces unchanged.
                 if is_busy_slot_refusal(&error) {
                     if let Some(behavior) = options.streaming_behavior {
-                        let mut batch = vec![user_prompt_message(&normalized, &images)];
+                        let mut batch = aux_rows.clone();
+                        batch.push(user_prompt_message(&normalized, &images));
                         batch.extend(self.normalized_batch_rows(&options.batch, expand));
                         match behavior {
                             StreamingBehavior::Steer => self.agent.steer(batch),
@@ -294,7 +322,8 @@ impl AgentSession {
             // failed surfaces unchanged.
             if is_busy_slot_refusal(&error) {
                 if let Some(behavior) = options.streaming_behavior {
-                    let mut batch = vec![user_prompt_message(&normalized, &images)];
+                    let mut batch = aux_rows.clone();
+                    batch.push(user_prompt_message(&normalized, &images));
                     batch.extend(self.normalized_batch_rows(&options.batch, expand));
                     match behavior {
                         StreamingBehavior::Steer => self.agent.steer(batch),
@@ -352,6 +381,17 @@ impl AgentSession {
             next.extend(own_rows);
         }
         self.pending_next_turn_rows = shared;
+    }
+
+    /// Drain the queued next-turn rows in their stored form (the admission
+    /// converts them; an admission that loses the run slot restores them
+    /// untouched).
+    pub(crate) fn take_next_turn_rows_raw(&self) -> Vec<pa_types::session::CustomMessage> {
+        self.pending_next_turn_rows
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .drain(..)
+            .collect()
     }
 
     /// Drain the queued next-turn rows: the admitting turn owns them; an
