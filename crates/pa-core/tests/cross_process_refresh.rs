@@ -386,7 +386,7 @@ impl OAuthIntegration for ExitingRefresh {
 
 /// Records the token-endpoint call, announces it, and holds the fetch
 /// open until released: the schedule a stalled token endpoint produces
-/// (the MCP OAuth fetch has no HTTP deadline).
+/// until the fetch's HTTP deadline.
 struct HeldRefresh {
     dir: std::path::PathBuf,
 }
