@@ -9,7 +9,7 @@
 # this script's own launcher replaces the prime-agent-rust one it wrote in
 # past installs. The FILENAME stays install-rust.sh deliberately: the
 # curl|sh URL and the update entry points (`prime-agent update`, the TUI
-# /update — both exec this script with --update) already point at it, and
+# /update — both run this script with no arguments) already point at it, and
 # the filename is invisible to users; the command they type is what
 # changed.
 #
@@ -226,10 +226,11 @@ USAGE
 }
 
 # --- arguments ---------------------------------------------------------------
-# No positional arguments. --update is the documented alias the update entry
-# points (`prime-agent update`, the TUI /update) exec — identical to the default
-# run because the flow is idempotent by construction. --verbose folds the fd-3
-# progress detail onto stdout (PRIME_AGENT_RUST_VERBOSE=1 does the same).
+# No positional arguments. --update is an accepted alias identical to the
+# default run (the update entry points, `prime-agent update` and the TUI
+# /update, run this script with no arguments) because the flow is idempotent
+# by construction. --verbose folds the fd-3 progress detail onto stdout
+# (PRIME_AGENT_RUST_VERBOSE=1 does the same).
 # --rollback and --archive pick the payload source (MODE); the default is the
 # channel download.
 VERBOSE="${PRIME_AGENT_RUST_VERBOSE:-0}"
