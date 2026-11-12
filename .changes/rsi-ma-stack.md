@@ -1,0 +1,1 @@
+- Autonomous runs: a continuation that may be the budget's last now carries the exact budget numbers and a deliverable-first directive, and exhausting the budget mints one finalize wake — a final turn that orders the deliverable written and the task's submission step run — instead of stopping mid-work.
