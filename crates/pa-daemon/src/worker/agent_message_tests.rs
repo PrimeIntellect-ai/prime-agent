@@ -448,7 +448,8 @@ async fn clear_queue_bounces_recovered_agent_messages_to_their_senders() {
 
 #[cfg(unix)]
 async fn assert_clear_queue_bounces(restore_queue: bool) {
-    let dir = std::env::temp_dir().join(format!("pa-worker-am-bounce-{}", uuid::Uuid::new_v4()));
+    let dir =
+        std::path::Path::new("/tmp").join(format!("pa-worker-am-bounce-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(&dir).unwrap();
     let socket = dir.join("supervisor.sock");
     let (sends, _server) = crate::worker::tests::fake_supervisor(&socket);

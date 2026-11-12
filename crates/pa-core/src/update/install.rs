@@ -439,7 +439,8 @@ mod tests {
     fn anchors_the_running_release_directory() {
         let dir = tempfile::tempdir().unwrap();
         let release = format!("0.1.0-linux-x64-{}", "a".repeat(64));
-        let release_dir = dir.path().join(&release);
+        // running_release returns a canonical path; macOS temp dirs sit behind the /var symlink.
+        let release_dir = dir.path().canonicalize().unwrap().join(&release);
         std::fs::create_dir_all(&release_dir).unwrap();
         let exe = release_dir.join("prime-agent");
         std::fs::write(&exe, "binary").unwrap();

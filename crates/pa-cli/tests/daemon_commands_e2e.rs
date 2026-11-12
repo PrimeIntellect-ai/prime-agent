@@ -80,6 +80,14 @@ fn daemon_binary() -> PathBuf {
     daemon
 }
 
+/// A canonical fixture root short enough for every socket the product makes
+/// under it. macOS's `$TMPDIR` is too long: the product socket dir then falls
+/// back to the shared `/tmp/prime-agent-<uid>`, where the user's real daemon
+/// listens. Canonical so the paths the product reports compare equal.
+fn fixture_dir() -> tempfile::TempDir {
+    tempfile::tempdir_in(Path::new("/tmp").canonicalize().expect("canonical /tmp"))
+        .expect("fixture dir")
+}
 struct Daemon {
     child: Child,
     socket: PathBuf,
@@ -342,7 +350,7 @@ fn list_args<'a>(socket: &'a str, rest: &[&'a str]) -> Vec<&'a str> {
 
 #[test]
 fn rust_daemon_cli_commands_end_to_end() {
-    let dir = tempfile::TempDir::new().expect("temp dir");
+    let dir = fixture_dir();
     let agent_dir = dir.path().join("agent");
     let sessions = agent_dir.join("sessions");
     std::fs::create_dir_all(&sessions).expect("sessions dir");
@@ -564,7 +572,7 @@ fn rust_daemon_cli_commands_end_to_end() {
 
 #[test]
 fn cli_connect_error_matches_ts_golden() {
-    let dir = tempfile::TempDir::new().expect("temp dir");
+    let dir = fixture_dir();
     let agent_dir = dir.path().join("agent");
     let missing = dir.path().join("missing.sock");
     let cli = PathBuf::from(env!("CARGO_BIN_EXE_prime-agent"));
@@ -619,7 +627,7 @@ fn cli_connect_error_matches_ts_golden() {
 /// operands; the TS CLI rejects the same shape).
 #[test]
 fn schedule_usage_errors_and_valid_invocations() {
-    let dir = tempfile::TempDir::new().expect("temp dir");
+    let dir = fixture_dir();
     let agent_dir = dir.path().join("agent");
     std::fs::create_dir_all(agent_dir.join("sessions")).expect("sessions dir");
     let cli = PathBuf::from(env!("CARGO_BIN_EXE_prime-agent"));
