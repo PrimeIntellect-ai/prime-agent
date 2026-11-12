@@ -1031,7 +1031,7 @@ async fn a_replaced_inbox_refuses_the_open_sessions_append() {
         Some(engine.as_ref()),
     );
     assert_eq!(
-        refused.as_deref(),
+        refused.as_ref().err().map(String::as_str),
         Some("Target session is closed"),
         "the retired store refuses the accepted delivery: {refused:?}"
     );
