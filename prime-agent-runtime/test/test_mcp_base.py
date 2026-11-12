@@ -208,6 +208,11 @@ class McpIntegrationTest(unittest.TestCase):
         result = type("R", (), {"content": [block], "structuredContent": None})()
         self.assertEqual(mcp_base._parse_result(result), "hello")
 
+    def test_non_text_result_returned_as_blocks(self):
+        image = type("Image", (), {"data": "raw"})()
+        result = type("R", (), {"content": [image], "structuredContent": None, "isError": False})()
+        self.assertEqual(mcp_base._parse_result(result), [image])
+
     def test_requires_server_attribute(self):
         class Bad(McpIntegration):
             server = ""
@@ -286,6 +291,26 @@ class McpIntegrationTest(unittest.TestCase):
             url, headers = _run(_Integration()._resolve_config())
             self.assertEqual(url, _Integration.url)
             self.assertEqual(headers, {})
+
+
+class McpBaseHelpersTest(unittest.TestCase):
+    def test_resolve_config_value_env_literal_and_command_forms(self):
+        with mock.patch.dict("os.environ", {"MY_MCP_KEY": "resolved-secret"}):
+            self.assertEqual(mcp_base._resolve_config_value("MY_MCP_KEY"), "resolved-secret")
+        self.assertEqual(mcp_base._resolve_config_value("key-abc"), "key-abc")
+        self.assertEqual(mcp_base._resolve_config_value("!security find-key"), "")
+        self.assertEqual(mcp_base._resolve_config_value("  "), "")
+
+    def test_read_auth_reads_provider_entry(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cred = {"type": "oauth", "access": "tok", "refresh": "r", "expires": 1, "endpoint": "https://e.test/mcp"}
+            (Path(tmp) / "auth.json").write_text(json.dumps({"mcp:demo": cred, "other": "junk"}))
+            with mock.patch.dict("os.environ", {"PRIME_AGENT_CODING_AGENT_DIR": tmp}):
+                self.assertEqual(mcp_base._read_auth("mcp:demo"), cred)
+                self.assertIsNone(mcp_base._read_auth("mcp:missing"))
+
+    def test_resolve_streamable_http_returns_callable(self):
+        self.assertTrue(callable(mcp_base._resolve_streamable_http()))
 
 
 if __name__ == "__main__":
