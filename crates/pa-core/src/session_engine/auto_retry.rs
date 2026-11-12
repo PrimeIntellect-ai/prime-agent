@@ -176,6 +176,7 @@ where
         }
         if let Some(message) = end_turn_on_auth_rejection(&message, auth_recovery.as_mut()).await {
             emit(AutoRetryEvent::End {
+                aborted: false,
                 success: false,
                 attempt: retries_performed,
                 final_error: Some(final_error_of(&message)),

@@ -213,6 +213,7 @@ where
         }
         if let Some(message) = end_turn_on_auth_rejection(&message, auth_recovery.as_mut()).await {
             emit(AutoRetryEvent::End {
+                aborted: false,
                 success: false,
                 attempt: total_retries,
                 final_error: Some(final_error_of(&message)),
@@ -616,6 +617,7 @@ mod tests {
                 |_| async { Ok(()) },
                 || async { Ok(None) },
                 None,
+                None,
             )
             .await
             .unwrap();
@@ -919,6 +921,7 @@ mod tests {
         assert_eq!(
             *events.lock().unwrap(),
             vec![AutoRetryEvent::End {
+                aborted: false,
                 success: false,
                 attempt: 0,
                 final_error: Some("sign in again".to_string()),

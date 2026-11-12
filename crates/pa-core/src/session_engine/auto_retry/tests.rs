@@ -784,6 +784,7 @@ async fn an_aborted_retry_attempt_carries_cancellation_provenance() {
         },
         |_| async { true },
         None,
+        None,
     )
     .await
     .unwrap();
@@ -1013,6 +1014,7 @@ async fn an_auth_rejection_whose_recovery_ends_the_turn_never_retries() {
     assert_eq!(
         *events.lock().unwrap(),
         vec![AutoRetryEvent::End {
+            aborted: false,
             success: false,
             attempt: 0,
             final_error: Some("sign in again".to_string()),
