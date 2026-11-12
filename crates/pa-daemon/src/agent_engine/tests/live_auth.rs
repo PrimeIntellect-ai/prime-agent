@@ -504,9 +504,12 @@ impl pa_core::auth::OAuthIntegration for CountingRefresh {
         &self,
         _provider: &str,
         _credentials: &pa_core::auth::AuthStorageData,
-    ) -> Option<pa_core::auth::AuthCredential> {
+    ) -> Result<pa_core::auth::AuthCredential, String> {
         *self.attempts.lock().unwrap() += 1;
-        self.succeeds.then(|| pa_core::auth::AuthCredential::Oauth {
+        if !self.succeeds {
+            return Err("invalid_grant: the refresh token was revoked".to_string());
+        }
+        Ok(pa_core::auth::AuthCredential::Oauth {
             access: "refreshed-access".to_string(),
             refresh: Some("rotated-refresh".to_string()),
             expires: 4_102_444_800_000,
@@ -637,6 +640,160 @@ fn a_failed_refresh_makes_one_attempt_per_resolution() {
         );
     }
     registration.unregister();
+}
+
+/// One live-auth engine run of a user prompt through the full turn (the
+/// retry driver included), returning its events.
+fn run_live_prompt(engine: &AgentSessionEngine) -> Vec<EngineEvent> {
+    let mut events = Vec::new();
+    engine.run_prompt(
+        0,
+        PromptRequest {
+            batch: Vec::new(),
+            images: Vec::new(),
+            message: "hi".to_string(),
+            source: "user".to_string(),
+            agent_message_id: None,
+            custom_message: None,
+        },
+        &|| false,
+        &mut |event| {
+            events.push(event);
+            true
+        },
+    );
+    events
+}
+
+/// A faux `battery` provider that rejects `rejected-access` with a
+/// 401-classified auth failure and answers any other key.
+fn register_rejecting_faux() -> pa_ai::faux::FauxProviderRegistration {
+    let registration =
+        pa_ai::faux::register_faux_provider(pa_ai::faux::RegisterFauxProviderOptions {
+            api: Some("faux".to_string()),
+            provider: Some("battery".to_string()),
+            ..Default::default()
+        });
+    registration.set_repeat_last_response(true);
+    registration.set_responses(vec![pa_ai::faux::FauxResponseStep::Factory(Arc::new(
+        |_, options, _, _| {
+            if options.and_then(|options| options.api_key.as_deref()) != Some("rejected-access") {
+                return Ok(pa_ai::faux::faux_assistant_text_message(
+                    "ok",
+                    pa_ai::faux::FauxAssistantMessageOptions::default(),
+                ));
+            }
+            let mut rejection = pa_ai::faux::faux_assistant_message(
+                Vec::new(),
+                pa_ai::faux::FauxAssistantMessageOptions {
+                    stop_reason: Some(pa_types::ai::StopReason::Error),
+                    error_message: Some("401 invalid bearer token".to_string()),
+                    ..Default::default()
+                },
+            );
+            rejection.diagnostics = Some(vec![serde_json::from_value(json!({
+                "type": "provider_stream_failure", "timestamp": 0,
+                "details": { "kind": "auth", "status": 401 }
+            }))
+            .unwrap()]);
+            Ok(rejection)
+        },
+    ))]);
+    registration
+}
+
+/// The engine over a stored, locally unexpired OAuth credential the
+/// provider rejects, with a scripted refresh and a fast retry ladder.
+fn rejected_credential_engine(
+    dir: &std::path::Path,
+    refresh_succeeds: bool,
+    attempts: &Arc<std::sync::Mutex<usize>>,
+) -> std::sync::Arc<AgentSessionEngine> {
+    let agent_dir = dir.join("agent");
+    write_credential_backed_faux_provider(&agent_dir);
+    std::fs::write(
+        agent_dir.join("auth.json"),
+        json!({
+            "battery": { "type": "oauth", "access": "rejected-access",
+                "refresh": "stored-refresh", "expires": 4_102_444_800_000i64 }
+        })
+        .to_string(),
+    )
+    .unwrap();
+    std::fs::write(
+        agent_dir.join("settings.json"),
+        json!({ "retry": { "baseDelayMs": 1 } }).to_string(),
+    )
+    .unwrap();
+    live_auth_engine_with_oauth(
+        dir,
+        None,
+        "battery",
+        "mock-1",
+        Some(Arc::new(CountingRefresh {
+            attempts: Arc::clone(attempts),
+            succeeds: refresh_succeeds,
+        })),
+    )
+}
+
+/// A provider rejection of a locally unexpired OAuth credential
+/// force-refreshes it, and the turn's one auth retry carries the
+/// refreshed token.
+#[test]
+fn a_rejected_unexpired_credential_is_refreshed_and_the_retry_serves_it() {
+    let _faux = FAUX_TEST_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let dir = tempfile::TempDir::new().unwrap();
+    let registration = register_rejecting_faux();
+    let attempts = Arc::new(std::sync::Mutex::new(0));
+    let engine = rejected_credential_engine(dir.path(), true, &attempts);
+    let events = run_live_prompt(&engine);
+    let served = served_keys(&registration);
+    registration.unregister();
+    assert_eq!(
+        served,
+        vec![
+            Some("rejected-access".to_string()),
+            Some("refreshed-access".to_string())
+        ]
+    );
+    assert_eq!(*attempts.lock().unwrap(), 1, "one forced refresh");
+    assert_eq!(events.last(), Some(&EngineEvent::Done(Ok(()))));
+}
+
+/// A forced refresh the token endpoint refuses ends the turn with the
+/// re-login sentence instead of re-sending the rejected token.
+#[test]
+fn a_refused_forced_refresh_ends_the_turn_with_the_re_login_sentence() {
+    let _faux = FAUX_TEST_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let dir = tempfile::TempDir::new().unwrap();
+    let registration = register_rejecting_faux();
+    let attempts = Arc::new(std::sync::Mutex::new(0));
+    let engine = rejected_credential_engine(dir.path(), false, &attempts);
+    let events = run_live_prompt(&engine);
+    let served = served_keys(&registration);
+    registration.unregister();
+    assert_eq!(served, vec![Some("rejected-access".to_string())]);
+    let retry_ends: Vec<&EngineEvent> = events
+        .iter()
+        .filter(|event| matches!(event, EngineEvent::AutoRetryEnd { .. }))
+        .collect();
+    assert_eq!(
+        retry_ends,
+        vec![&EngineEvent::AutoRetryEnd {
+            success: false,
+            attempt: 0,
+            final_error: Some(
+                "Authentication failed for \"battery\": the stored credential could not be refreshed (invalid_grant: the refresh token was revoked).\n\nRun /login to update credentials."
+                    .to_string()
+            ),
+            restored_model: None,
+        }]
+    );
 }
 
 /// Runs of a counting `!command` (one line appended per execution).

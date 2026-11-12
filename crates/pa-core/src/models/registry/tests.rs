@@ -149,9 +149,9 @@ fn get_api_key_and_headers_attempts_one_refresh_per_call() {
             &self,
             _provider: &str,
             _credentials: &crate::auth::types::AuthStorageData,
-        ) -> Option<crate::auth::types::AuthCredential> {
+        ) -> Result<crate::auth::types::AuthCredential, String> {
             *self.0.lock().unwrap() += 1;
-            None
+            Err("the token call failed".to_string())
         }
     }
     let dir = tempfile::tempdir().unwrap();
@@ -214,6 +214,56 @@ fn get_api_key_and_headers_attempts_one_refresh_per_call() {
     let resolved = registry.get_api_key_and_headers(&battery, None);
     assert_eq!(resolved.api_key.as_deref(), Some("live-access"));
     assert_eq!(*refreshes.0.lock().unwrap(), 0, "no refresh fires");
+}
+
+/// An expired OAuth credential whose refresh fails, with no other key to
+/// serve, fails the resolution with the re-login sentence (not a keyless
+/// request that surfaces as "No API key").
+#[test]
+fn a_failed_refresh_with_nothing_else_to_serve_fails_with_the_re_login_sentence() {
+    struct RevokedGrant;
+    impl crate::auth::manager::OAuthIntegration for RevokedGrant {
+        fn api_key_for(
+            &self,
+            _provider: &str,
+            _credential: &crate::auth::types::AuthCredential,
+        ) -> Option<String> {
+            None
+        }
+
+        fn refresh(
+            &self,
+            _provider: &str,
+            _credentials: &AuthStorageData,
+        ) -> Result<crate::auth::types::AuthCredential, String> {
+            Err("invalid_grant".to_string())
+        }
+    }
+    let data = AuthStorageData(
+        serde_json::json!({
+            "anthropic": {
+                "type": "oauth", "access": "expired-access", "refresh": "stored-refresh", "expires": 1
+            }
+        })
+        .as_object()
+        .cloned()
+        .unwrap_or_default(),
+    );
+    let mut registry = ModelRegistry::in_memory(AuthStorage::in_memory_without_env(
+        &data,
+        Arc::new(RevokedGrant),
+    ));
+    assert_eq!(
+        registry.get_api_key_and_headers(&model("m", "anthropic"), None),
+        ResolvedRequestAuth {
+            ok: false,
+            error: Some(
+                "Authentication failed for \"anthropic\": the stored credential could not be refreshed (invalid_grant).\n\nRun /login to update credentials."
+                    .to_string()
+            ),
+            ..Default::default()
+        }
+    );
 }
 
 #[test]

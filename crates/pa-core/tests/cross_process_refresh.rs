@@ -48,7 +48,11 @@ impl OAuthIntegration for CountingRefresh {
         }
     }
 
-    fn refresh(&self, provider: &str, credentials: &AuthStorageData) -> Option<AuthCredential> {
+    fn refresh(
+        &self,
+        provider: &str,
+        credentials: &AuthStorageData,
+    ) -> Result<AuthCredential, String> {
         use std::io::Write as _;
         let spent = match credentials.credential(provider) {
             Some(AuthCredential::Oauth { refresh, .. }) => refresh.unwrap_or_default(),
@@ -70,7 +74,7 @@ impl OAuthIntegration for CountingRefresh {
         while self.calls() < 2 && Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(20));
         }
-        Some(AuthCredential::Oauth {
+        Ok(AuthCredential::Oauth {
             access: format!("fresh-{}", std::process::id()),
             refresh: Some(format!("rotated-{}", std::process::id())),
             expires: 4_102_444_800_000,
@@ -104,7 +108,11 @@ impl OAuthIntegration for PausingRefresh {
         }
     }
 
-    fn refresh(&self, provider: &str, credentials: &AuthStorageData) -> Option<AuthCredential> {
+    fn refresh(
+        &self,
+        provider: &str,
+        credentials: &AuthStorageData,
+    ) -> Result<AuthCredential, String> {
         use std::io::Write as _;
         let spent = match credentials.credential(provider) {
             Some(AuthCredential::Oauth { refresh, .. }) => refresh.unwrap_or_default(),
@@ -141,7 +149,7 @@ impl OAuthIntegration for PausingRefresh {
             // not a slow HTTP request: the holder stays live and stopped.
             assert_eq!(unsafe { libc::raise(libc::SIGSTOP) }, 0);
         }
-        Some(fresh)
+        Ok(fresh)
     }
 }
 
@@ -372,7 +380,11 @@ impl OAuthIntegration for ExitingRefresh {
         }
     }
 
-    fn refresh(&self, _provider: &str, _credentials: &AuthStorageData) -> Option<AuthCredential> {
+    fn refresh(
+        &self,
+        _provider: &str,
+        _credentials: &AuthStorageData,
+    ) -> Result<AuthCredential, String> {
         use std::io::Write as _;
         let mut file = std::fs::OpenOptions::new()
             .create(true)
@@ -399,7 +411,11 @@ impl OAuthIntegration for HeldRefresh {
         }
     }
 
-    fn refresh(&self, _provider: &str, _credentials: &AuthStorageData) -> Option<AuthCredential> {
+    fn refresh(
+        &self,
+        _provider: &str,
+        _credentials: &AuthStorageData,
+    ) -> Result<AuthCredential, String> {
         use std::io::Write as _;
         let mut file = std::fs::OpenOptions::new()
             .create(true)
@@ -417,7 +433,7 @@ impl OAuthIntegration for HeldRefresh {
             );
             std::thread::sleep(Duration::from_millis(20));
         }
-        Some(AuthCredential::Oauth {
+        Ok(AuthCredential::Oauth {
             access: format!("fresh-mcp-{}", std::process::id()),
             refresh: Some("rotated-mcp".to_string()),
             expires: 4_102_444_800_000,
@@ -446,7 +462,11 @@ impl OAuthIntegration for ImmediateRefresh {
         }
     }
 
-    fn refresh(&self, _provider: &str, _credentials: &AuthStorageData) -> Option<AuthCredential> {
+    fn refresh(
+        &self,
+        _provider: &str,
+        _credentials: &AuthStorageData,
+    ) -> Result<AuthCredential, String> {
         use std::io::Write as _;
         let mut file = std::fs::OpenOptions::new()
             .create(true)
@@ -454,7 +474,7 @@ impl OAuthIntegration for ImmediateRefresh {
             .open(self.dir.join("refresh-calls"))
             .expect("the counter file opens");
         writeln!(file, "pid={}", std::process::id()).expect("the call is recorded");
-        Some(AuthCredential::Oauth {
+        Ok(AuthCredential::Oauth {
             access: format!("fresh-{}", std::process::id()),
             refresh: Some(format!("rotated-{}", std::process::id())),
             expires: 4_102_444_800_000,

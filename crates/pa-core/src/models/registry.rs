@@ -578,6 +578,14 @@ impl ModelRegistry {
                 }
             }
         }
+        // A failed OAuth refresh with nothing else to serve: fail with the re-login sentence.
+        if let (None, Some(failure)) = (&api_key, &stored.refresh_failure) {
+            return ResolvedRequestAuth {
+                ok: false,
+                error: Some(failure.to_string()),
+                ..Default::default()
+            };
+        }
         // TS `getApiKeyAndHeaders` resolves the xAI request model per call
         // from the lookup's own result (v0.9.8 model-registry.ts:1604-1619):
         // the subscription shape only when the stored OAuth credential

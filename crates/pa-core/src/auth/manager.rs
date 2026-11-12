@@ -85,6 +85,25 @@ pub struct AuthApiKeyResult {
     pub api_key: Option<String>,
     pub source_token: Option<AuthSourceToken>,
     pub credential_type: Option<&'static str>,
+    /// Set when the stored OAuth credential's refresh failed and no environment key serves.
+    pub refresh_failure: Option<OAuthRefreshFailure>,
+}
+
+/// A failed OAuth refresh; `Display` is the user-facing re-login sentence.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OAuthRefreshFailure {
+    pub provider: String,
+    pub reason: String,
+}
+
+impl std::fmt::Display for OAuthRefreshFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let OAuthRefreshFailure { provider, reason } = self;
+        write!(
+            f,
+            "Authentication failed for \"{provider}\": the stored credential could not be refreshed ({reason}).\n\nRun /login to update credentials."
+        )
+    }
 }
 
 /// OAuth integration seam, implemented by the pa-ai oauth registry; a
@@ -92,8 +111,16 @@ pub struct AuthApiKeyResult {
 pub trait OAuthIntegration: Send + Sync {
     /// The resolved API key for stored OAuth credentials (bearer/token form).
     fn api_key_for(&self, provider_id: &str, credential: &AuthCredential) -> Option<String>;
-    /// Refresh an expired credential; `None` = refresh failed.
-    fn refresh(&self, provider_id: &str, credentials: &AuthStorageData) -> Option<AuthCredential>;
+    /// Refresh the provider's stored credential at its token endpoint.
+    ///
+    /// # Errors
+    ///
+    /// Returns why the refresh failed, without credential values (it is shown and logged).
+    fn refresh(
+        &self,
+        provider_id: &str,
+        credentials: &AuthStorageData,
+    ) -> Result<AuthCredential, String>;
 }
 
 /// No OAuth provider registry available (embedded hosts); stored OAuth
@@ -109,8 +136,12 @@ impl OAuthIntegration for NoOAuth {
         }
     }
 
-    fn refresh(&self, _provider: &str, _credentials: &AuthStorageData) -> Option<AuthCredential> {
-        None
+    fn refresh(
+        &self,
+        _provider: &str,
+        _credentials: &AuthStorageData,
+    ) -> Result<AuthCredential, String> {
+        Err("no OAuth integration is available".to_string())
     }
 }
 
