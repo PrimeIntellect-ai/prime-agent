@@ -184,7 +184,7 @@ warning and the first session bootstraps the kernel itself — it needs the
 network once.
 
 Options:
-  --update    the documented alias the update entry points exec (identical run)
+  --update    accepted alias; identical to a plain run
   --force     if a Prime Agent daemon (TypeScript or Rust) is still up after the
               shutdown requests and the drain wait, send it SIGTERM, then SIGKILL.
               Never applies to the daemon this install runs under.
