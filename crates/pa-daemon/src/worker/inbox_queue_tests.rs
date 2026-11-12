@@ -525,7 +525,7 @@ async fn a_withdrawal_reconciles_the_batch_against_the_live_waiting_set() {
         |_, _| None,
         None,
     );
-    assert!(milestone.is_none(), "the milestone admitted");
+    assert!(milestone.is_ok(), "the milestone admitted");
     // A concurrent read drained another covered message: the batch holds
     // an id the store no longer waits on.
     arrivals
