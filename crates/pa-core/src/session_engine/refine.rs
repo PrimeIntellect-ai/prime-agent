@@ -771,6 +771,7 @@ pub(crate) fn recorded_refiner_call(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn review_compact_refinement(
     session: &std::sync::Arc<tokio::sync::Mutex<SessionManager>>,
     branch_state: &std::sync::Mutex<super::auto_refine_trigger::CompactAutoRefineState>,
