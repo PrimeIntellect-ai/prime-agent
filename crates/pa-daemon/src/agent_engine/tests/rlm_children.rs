@@ -332,7 +332,7 @@ fn can_passivate_worker_mirrors_the_release_gates_and_adds_the_registry_rule() {
         .block_on(crate::engine::SessionEngine::can_passivate_worker(&*engine)));
     // A live background bash handle blocks the passivation, and the release consumes
     // the same gate: the probe never fires while a handle runs.
-    engine.set_test_probes(Some(std::sync::Arc::new(|| true)), None);
+    engine.set_test_probes(Some(std::sync::Arc::new(|| 1)), None);
     assert!(!engine
         .runtime
         .block_on(crate::engine::SessionEngine::can_passivate_worker(&*engine)));
@@ -340,7 +340,7 @@ fn can_passivate_worker_mirrors_the_release_gates_and_adds_the_registry_rule() {
         .runtime
         .block_on(engine.release_settled_child_kernel());
     assert_eq!(fired.load(std::sync::atomic::Ordering::SeqCst), 0);
-    engine.set_test_probes(Some(std::sync::Arc::new(|| false)), None);
+    engine.set_test_probes(Some(std::sync::Arc::new(|| 0)), None);
     *engine
         .registered_jobs_probe
         .lock()

@@ -21,8 +21,8 @@ pub(crate) struct BuiltHandles {
     /// The in-run autonomous consult's view (see
     /// [`crate::autonomous_continuation`]).
     pub(crate) autonomous_boundary: AutonomousBoundaryMirror,
-    /// `true` while the kernel still runs background `bash()` handles.
-    pub(crate) background_bash_probe: Arc<dyn Fn() -> bool + Send + Sync>,
+    /// The count of live kernel background `bash()` handles (`0` = none).
+    pub(crate) background_bash_probe: Arc<dyn Fn() -> usize + Send + Sync>,
     /// The stop-with-snapshot kernel release over a weak provisioner
     /// reference (the park arm never takes the session mutex).
     pub(crate) kernel_release: SettledKernelRelease,
@@ -51,7 +51,7 @@ impl BuiltHandles {
                 provisioner
                     .upgrade()
                     .and_then(|provisioner| provisioner.manager())
-                    .is_some_and(|manager| manager.has_background_work())
+                    .map_or(0, |manager| manager.background_bash_handle_count())
             }),
             kernel_release: Arc::new(move || {
                 let provisioner = release_provisioner.clone();
@@ -185,7 +185,7 @@ impl AgentSessionEngine {
     #[cfg(test)]
     pub(crate) fn set_test_probes(
         &self,
-        background_bash: Option<Arc<dyn Fn() -> bool + Send + Sync>>,
+        background_bash: Option<Arc<dyn Fn() -> usize + Send + Sync>>,
         kernel_release: Option<SettledKernelRelease>,
     ) {
         let mut state = self.core_state();
