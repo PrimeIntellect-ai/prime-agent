@@ -2484,6 +2484,71 @@ fn acp_overflow_recovery_compacts_and_retries_the_turn() {
     assert!(metas[0]["tokensBefore"].as_u64().unwrap() > 0);
 }
 
+/// The byte-size overflow class through the arm end to end: a 413 whose
+/// live body carries `error.type: "invalid_request_error"` (the gateway's
+/// shape for a request over the body-size cap) must run the same
+/// compact-and-retry as a token overflow — the unrecognized shape is the
+/// wedged image-heavy session: a permanent invalid request that replays the
+/// same oversized body forever.
+#[test]
+fn acp_overflow_recovery_recovers_from_the_live_413_body() {
+    let script = json!({
+        "engine": "faux",
+        "contextWindow": 128_000,
+        "responses": [
+            { "text": "seed reply" },
+            {
+                "text": "",
+                "stopReason": "error",
+                "errorMessage": "413 Hosted decision request exceeds the body size limit.",
+            },
+            { "text": "the summary" },
+            { "text": "recovered reply" },
+        ]
+    });
+    let mut client =
+        spawn_with_compaction_settings(&["--mode", "acp", "--no-session"], &script, 1, 10);
+    let init = client.request("initialize", &initialize_params());
+    let _ = client.wait_response(init, TIMEOUT);
+    let new = client.request("session/new", &json!({ "mcpServers": [] }));
+    let (new_response, _) = client.wait_response(new, TIMEOUT);
+    let session_id = new_response["result"]["sessionId"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let prompt = client.request(
+        "session/prompt",
+        &json!({
+            "sessionId": session_id,
+            "prompt": [{ "type": "text", "text": format!("seed turn {}", "x".repeat(48_000)) }],
+        }),
+    );
+    let (prompt_response, _) = client.wait_response(prompt, TIMEOUT);
+    assert_end_turn(&prompt_response);
+
+    // The live 413 body settles as the overflow arm's input, not a
+    // permanent invalid request: one compaction, the retried turn recovers.
+    // (The seed turn carries mass so the compaction cut leaves history to
+    // summarize; the live body's wording is the only variable.)
+    let prompt = client.request(
+        "session/prompt",
+        &json!({
+            "sessionId": session_id,
+            "prompt": [{ "type": "text", "text": format!("overflow probe {}", "x".repeat(2_000)) }],
+        }),
+    );
+    let (prompt_response, updates) = client.wait_response(prompt, TIMEOUT);
+    assert_eq!(
+        prompt_response["result"],
+        json!({ "stopReason": "end_turn" }),
+        "the retry recovered the turn: {prompt_response}"
+    );
+    let metas = compaction_metas(&updates);
+    assert_eq!(metas.len(), 1, "one compaction meta: {metas:?}");
+    assert_eq!(metas[0]["summary"], "the summary");
+}
+
 /// The kernel Python with prime-agent-runtime installed; set
 /// `PA_E2E_KERNEL_PYTHON` to point at an explicit interpreter instead.
 /// Without one, the live RLM quiescence lanes below skip (with a note).
