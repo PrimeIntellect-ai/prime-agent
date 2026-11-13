@@ -35,6 +35,9 @@ struct MockSupervisor {
     /// Reject the prompt at this 0-based dispatch index with [`SUSPENDED_ADMISSION`] instead of
     /// streaming a turn.
     reject_prompt_index: Option<usize>,
+    /// Accept the prompt at this 0-based dispatch index without starting its run (the window
+    /// before `agent_start`).
+    unstarted_prompt_index: Option<usize>,
     hold_turn_ms: u64,
     /// Drop the connection when the next prompt arrives (the dead-daemon transport case).
     close_on_prompt: bool,
@@ -59,6 +62,7 @@ struct SharedAnswers {
     create_requests: Arc<Mutex<Vec<Value>>>,
     create_answers: Mutex<Vec<CreateAnswer>>,
     reject_prompt_index: Option<usize>,
+    unstarted_prompt_index: Option<usize>,
     hold_turn_ms: u64,
     close_on_prompt: bool,
     /// Rebind to s2 before closing, so the pending prompt outcome outlives its active id.
@@ -73,6 +77,7 @@ impl MockSupervisor {
             prompt_requests: Arc::new(Mutex::new(Vec::new())),
             create_requests: Arc::new(Mutex::new(Vec::new())),
             reject_prompt_index: None,
+            unstarted_prompt_index: None,
             hold_turn_ms: 0,
             close_on_prompt: false,
             rebind_before_close: false,
@@ -94,6 +99,7 @@ impl MockSupervisor {
             create_requests: self.create_requests,
             create_answers: std::sync::Mutex::new(std::mem::take(&mut self.create_answers)),
             reject_prompt_index: self.reject_prompt_index,
+            unstarted_prompt_index: self.unstarted_prompt_index,
             hold_turn_ms: self.hold_turn_ms,
             close_on_prompt: self.close_on_prompt,
             rebind_before_close: self.rebind_before_close,
@@ -305,6 +311,9 @@ impl SharedAnswers {
                             "success": true,
                         }),
                     );
+                    if Some(index) == self.unstarted_prompt_index {
+                        continue;
+                    }
                     // The client streams the message until the delayed `turn_end` settles it.
                     let question = command
                         .get("message")
@@ -570,6 +579,39 @@ fn rejected_mid_turn_submission_renders_the_error_row_and_keeps_running() {
     assert!(
         all.contains("the streamed answer"),
         "the held turn still rendered:\n{all}"
+    );
+}
+
+/// An accepted prompt keeps the session busy until its run starts: a later submit's refusal in
+/// that window leaves the loader up.
+#[test]
+fn a_refused_follow_up_keeps_an_admitted_prompt_busy() {
+    let refusal = "the daemon rejected the prompt request";
+    let steps = vec![
+        HeadlessStep::Type("first turn".to_string()),
+        HeadlessStep::Key(enter()),
+        HeadlessStep::Type("steer me".to_string()),
+        HeadlessStep::Key(alt_enter()),
+        HeadlessStep::WaitRender {
+            needle: refusal.to_string(),
+            timeout_ms: 4000,
+        },
+        // The abort withdraws the admitted prompt, so the headless run settles.
+        HeadlessStep::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
+    ];
+    let run = run_plan_with(steps, |supervisor| {
+        supervisor.unstarted_prompt_index = Some(0);
+        supervisor.reject_prompt_index = Some(1);
+    })
+    .expect("interactive run");
+    let refused = run
+        .frames
+        .iter()
+        .find(|frame| frame.contains(refusal))
+        .expect("the refusal rendered");
+    assert!(
+        refused.contains("Waiting"),
+        "the admitted prompt's loader survives the refusal:\n{refused}"
     );
 }
 

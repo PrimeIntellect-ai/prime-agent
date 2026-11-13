@@ -474,7 +474,7 @@ impl SessionUi {
         let mut card =
             crate::bash_card::BashExecutionCard::new_running(&id, command, exclude_from_context);
         card.suppress_leading_space = matches!(view.chat.last(), Some(ChatEntry::AgentMessage(_)));
-        if self.turn_active {
+        if self.run_busy() {
             view.pending_bash.push(card);
         } else {
             view.push_entry(ChatEntry::BashExecution(Box::new(card)));
