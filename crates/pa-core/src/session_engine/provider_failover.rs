@@ -141,6 +141,7 @@ where
             if switched {
                 let restored_model = restore().await?;
                 emit(AutoRetryEvent::End {
+                    aborted: message.stop_reason == StopReason::Aborted,
                     success: true,
                     attempt: total_retries,
                     final_error: None,
@@ -149,6 +150,7 @@ where
                 .await?;
             } else if total_retries > 0 {
                 emit(AutoRetryEvent::End {
+                    aborted: message.stop_reason == StopReason::Aborted,
                     success: true,
                     attempt: total_retries,
                     final_error: None,
@@ -162,6 +164,14 @@ where
             if switched {
                 let _ = restore().await?;
             }
+            emit(AutoRetryEvent::End {
+                aborted: true,
+                success: false,
+                attempt: total_retries,
+                final_error: Some("Retry cancelled".to_string()),
+                restored_model: None,
+            })
+            .await?;
             return Ok(with_stop_reason_aborted(message));
         }
         // Permanent and deterministic failures never walk the chain: a
@@ -189,6 +199,7 @@ where
                     && !is_context_overflow_failure(&message, context_window))
             {
                 emit(AutoRetryEvent::End {
+                    aborted: false,
                     success: false,
                     attempt: total_retries,
                     final_error: Some(final_error_of(&message)),
@@ -200,6 +211,7 @@ where
         }
         if let Some(message) = end_turn_on_auth_rejection(&message, auth_recovery.as_mut()).await {
             emit(AutoRetryEvent::End {
+                aborted: false,
                 success: false,
                 attempt: total_retries,
                 final_error: Some(final_error_of(&message)),
@@ -217,6 +229,7 @@ where
                 let _ = restore().await?;
             }
             emit(AutoRetryEvent::End {
+                aborted: false,
                 success: false,
                 attempt: total_retries - 1,
                 final_error: Some(final_error_of(&message)),
@@ -231,6 +244,7 @@ where
                     let _ = restore().await?;
                 }
                 emit(AutoRetryEvent::End {
+                    aborted: false,
                     success: false,
                     attempt: total_retries,
                     final_error: Some(final_error_of(&message)),
@@ -299,6 +313,7 @@ where
                     ),
                 };
                 emit(AutoRetryEvent::End {
+                    aborted: false,
                     success: false,
                     attempt: total_retries - 1,
                     final_error: Some(final_error),
@@ -321,6 +336,7 @@ where
                 let _ = restore().await?;
             }
             emit(AutoRetryEvent::End {
+                aborted: true,
                 success: false,
                 attempt: total_retries,
                 final_error: Some("Retry cancelled".to_string()),
@@ -566,6 +582,83 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn cancellation_after_a_failed_attempt_is_reported_without_reading_error_text() {
+        for switched in [false, true] {
+            let controller = pa_agent::abort::AbortController::new();
+            let events = Arc::new(Mutex::new(Vec::new()));
+            let mut calls = 0;
+            let cancel_call = if switched { 4 } else { 1 };
+            let message = run_turn_with_provider_failover(
+                &quick_policy(),
+                &fast_failover(),
+                &[model("backup")],
+                0,
+                Some(&controller.signal()),
+                || {
+                    calls += 1;
+                    if calls == cancel_call {
+                        controller.abort();
+                    }
+                    async {
+                        Ok(error_message(
+                            Some("server_error"),
+                            Some(500),
+                            "ordinary failure",
+                        ))
+                    }
+                },
+                |event| {
+                    events.lock().unwrap().push(event);
+                    async { Ok(()) }
+                },
+                |_| async { true },
+                |_| async { Ok(()) },
+                || async { Ok(None) },
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+            assert_eq!(calls, cancel_call);
+            assert_eq!(message.stop_reason, StopReason::Aborted);
+            assert_eq!(
+                events.lock().unwrap().last(),
+                Some(&AutoRetryEvent::End {
+                    aborted: true,
+                    success: false,
+                    attempt: if switched { 3 } else { 0 },
+                    final_error: Some("Retry cancelled".to_string()),
+                    restored_model: None,
+                })
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn an_aborted_retry_keeps_its_cancellation_outcome_after_provider_failover() {
+        for switched in [false, true] {
+            let attempts = if switched { 3 } else { 1 };
+            let candidates = vec![model("backup")];
+            let mut script =
+                vec![error_message(Some("server_error"), Some(500), "retry"); attempts];
+            let mut aborted = ok_message("cancelled");
+            aborted.stop_reason = StopReason::Aborted;
+            script.push(aborted);
+            let harness = drive(&fast_failover(), &candidates, script).await;
+            assert_eq!(
+                harness.events.last(),
+                Some(&AutoRetryEvent::End {
+                    aborted: true,
+                    success: true,
+                    attempt: if switched { 3 } else { 1 },
+                    final_error: None,
+                    restored_model: switched.then(|| "primary/glm-5.3".to_string()),
+                })
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn provider_failure_switches_to_the_next_provider_then_succeeds() {
         let candidates = vec![model("backup-a"), model("backup-b")];
         // Two failures exhaust the primary's budget (max_retries 2).
@@ -630,6 +723,7 @@ mod tests {
                     },
                 },
                 AutoRetryEvent::End {
+                    aborted: false,
                     success: true,
                     attempt: 3,
                     final_error: None,
@@ -669,6 +763,7 @@ mod tests {
         assert_eq!(
             end,
             &AutoRetryEvent::End {
+                aborted: false,
                 success: false,
                 attempt: MAX_TOTAL_PROVIDER_RETRIES,
                 final_error: Some("down 8".to_string()),
@@ -706,6 +801,7 @@ mod tests {
         assert_eq!(
             end,
             &AutoRetryEvent::End {
+                aborted: false,
                 success: false,
                 attempt: MAX_TOTAL_PROVIDER_RETRIES,
                 final_error: Some("down 8".to_string()),
@@ -743,6 +839,7 @@ mod tests {
         assert_eq!(
             harness.events.as_slice(),
             &[AutoRetryEvent::End {
+                aborted: false,
                 success: false,
                 attempt: 0,
                 final_error: Some("bad request".to_string()),
@@ -767,6 +864,7 @@ mod tests {
         assert_eq!(
             harness.events.as_slice(),
             &[AutoRetryEvent::End {
+                aborted: false,
                 success: false,
                 attempt: 0,
                 final_error: Some(
@@ -821,6 +919,7 @@ mod tests {
         assert_eq!(
             *events.lock().unwrap(),
             vec![AutoRetryEvent::End {
+                aborted: false,
                 success: false,
                 attempt: 0,
                 final_error: Some("sign in again".to_string()),
@@ -856,6 +955,7 @@ mod tests {
         assert_eq!(
             end,
             &AutoRetryEvent::End {
+                aborted: false,
                 success: false,
                 attempt: 3,
                 final_error: Some("down 3".to_string()),

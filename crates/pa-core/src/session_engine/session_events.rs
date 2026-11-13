@@ -122,10 +122,17 @@ pub fn agent_event_json(event: &AgentEvent) -> Option<serde_json::Value> {
     }
     let value = match event {
         AgentEvent::AgentStart => serde_json::json!({ "type": "agent_start" }),
-        AgentEvent::AgentEnd { messages } => serde_json::json!({
-            "type": "agent_end",
-            "messages": messages.iter().map(message_value).collect::<Vec<_>>(),
-        }),
+        AgentEvent::AgentEnd { messages, aborted } => {
+            let mut value = serde_json::json!({
+                "type": "agent_end",
+                "messages": messages.iter().map(message_value).collect::<Vec<_>>(),
+            });
+            // The daemon's wire shape: the marker rides aborted runs only.
+            if *aborted {
+                value["aborted"] = serde_json::json!(true);
+            }
+            value
+        }
         AgentEvent::TurnStart => serde_json::json!({ "type": "turn_start" }),
         AgentEvent::TurnEnd {
             message,
@@ -255,6 +262,22 @@ mod tests {
             serde_json::json!({"type": "text_delta", "contentIndex": 0, "delta": "first reply"})
         );
     }
+    /// `agent_end` carries the abort marker on aborted runs only (the daemon's wire shape).
+    #[test]
+    fn agent_end_json_marks_only_aborted_runs() {
+        for aborted in [false, true] {
+            let value = agent_event_json(&AgentEvent::AgentEnd {
+                messages: Vec::new(),
+                aborted,
+            })
+            .expect("an agent_end json line");
+            assert_eq!(
+                value.get("aborted").cloned(),
+                aborted.then_some(serde_json::json!(true))
+            );
+        }
+    }
+
     /// `tool_execution_end` carries the tool's error flag, as the TS agent loop emits it
     /// (`{ type, toolCallId, toolName, result, isError }`).
     #[test]

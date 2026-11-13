@@ -74,6 +74,7 @@ pub(crate) fn parse_event(
                         }
                     }
                     b'[' => parse_csi(buffer),
+                    b']' => parse_osc_program_status_reply(buffer, input_available),
                     b'\x1B' => Ok(Some(InternalEvent::Event(Event::Key(KeyCode::Esc.into())))),
                     _ => parse_event(&buffer[1..], input_available).map(|event_option| {
                         event_option.map(|event| {
@@ -211,6 +212,78 @@ pub(crate) fn parse_csi(buffer: &[u8]) -> io::Result<Option<InternalEvent>> {
     };
 
     Ok(input_event.map(InternalEvent::Event))
+}
+
+/// Prime Agent patch: the OSC 7501 detection reply's fixed head.
+const PROGRAM_STATUS_REPLY_HEAD: &[u8] = b"\x1B]7501;";
+/// The protocol's cap on a whole sequence, OSC through ST: a reply that never
+/// terminates is dropped instead of swallowing the keys typed after it.
+const PROGRAM_STATUS_SEQUENCE_MAX: usize = 4096;
+
+/// Prime Agent patch: the OSC 7501 (Program Status Protocol) detection reply
+/// `ESC ] 7501 ; ? [: key=value]* ST`, with ST as `ESC \` or BEL.
+/// Unrecognized pairs are ignored and whitespace around keys and values is
+/// removed (the protocol's syntax). Any other `ESC ]` stays upstream's Alt+]
+/// key.
+fn parse_osc_program_status_reply(
+    buffer: &[u8],
+    input_available: bool,
+) -> io::Result<Option<InternalEvent>> {
+    assert!(buffer.starts_with(&[b'\x1B', b']'])); // ESC ]
+
+    if buffer.len() <= PROGRAM_STATUS_REPLY_HEAD.len() {
+        if PROGRAM_STATUS_REPLY_HEAD.starts_with(buffer) && (buffer.len() > 2 || input_available)
+        {
+            return Ok(None);
+        }
+        return Ok(Some(InternalEvent::Event(Event::Key(KeyEvent::new(
+            KeyCode::Char(']'),
+            KeyModifiers::ALT,
+        )))));
+    }
+    if !buffer.starts_with(PROGRAM_STATUS_REPLY_HEAD) {
+        return Ok(Some(InternalEvent::Event(Event::Key(KeyEvent::new(
+            KeyCode::Char(']'),
+            KeyModifiers::ALT,
+        )))));
+    }
+    if buffer.len() > PROGRAM_STATUS_SEQUENCE_MAX {
+        return Err(could_not_parse_event_error());
+    }
+    let body = match &buffer[PROGRAM_STATUS_REPLY_HEAD.len()..] {
+        [body @ .., b'\x07'] | [body @ .., b'\x1B', b'\\'] => body,
+        [.., b'\x1B'] => return Ok(None),
+        [.., b'\x1B', _] => return Err(could_not_parse_event_error()),
+        _ => return Ok(None),
+    };
+    let body = std::str::from_utf8(body).map_err(|_| could_not_parse_event_error())?;
+    let mut pairs = body.split(':');
+    if pairs.next().map(str::trim) != Some("?") {
+        return Err(could_not_parse_event_error());
+    }
+    let mut support = crate::terminal::ProgramStatusSupport {
+        states: None,
+        kinds: None,
+    };
+    for pair in pairs {
+        let Some((key, value)) = pair.split_once('=') else {
+            continue;
+        };
+        let list = Some(
+            value
+                .split(',')
+                .map(str::trim)
+                .filter(|item| !item.is_empty())
+                .map(str::to_string)
+                .collect(),
+        );
+        match key.trim() {
+            "states" => support.states = list,
+            "kinds" => support.kinds = list,
+            _ => {}
+        }
+    }
+    Ok(Some(InternalEvent::ProgramStatusSupport(support)))
 }
 
 pub(crate) fn next_parsed<T>(iter: &mut dyn Iterator<Item = &str>) -> io::Result<T>
@@ -931,6 +1004,53 @@ mod tests {
                 KeyModifiers::ALT | KeyModifiers::CONTROL
             )))),
         );
+    }
+
+    #[test]
+    fn test_program_status_detection_reply() {
+        let base = b"\x1B]7501;?\x1B\\";
+        // Every partial reply waits for more bytes: none of it becomes a key.
+        for end in 2..base.len() {
+            assert_eq!(parse_event(&base[..end], true).unwrap(), None);
+        }
+        assert_eq!(
+            parse_event(base, false).unwrap(),
+            Some(InternalEvent::ProgramStatusSupport(
+                crate::terminal::ProgramStatusSupport {
+                    states: None,
+                    kinds: None,
+                }
+            )),
+        );
+        assert_eq!(
+            parse_event(
+                b"\x1B]7501; ? : states=idle, working,done : future=1 : kinds=permission\x07",
+                false
+            )
+            .unwrap(),
+            Some(InternalEvent::ProgramStatusSupport(
+                crate::terminal::ProgramStatusSupport {
+                    states: Some(vec!["idle".into(), "working".into(), "done".into()]),
+                    kinds: Some(vec!["permission".into()]),
+                }
+            )),
+        );
+        // A 7501 sequence that is not the detection reply, and one that never
+        // terminates within the protocol's size cap, are dropped.
+        assert!(parse_event(b"\x1B]7501;state=idle\x1B\\", false).is_err());
+        let mut unterminated = b"\x1B]7501;?:states=".to_vec();
+        unterminated.resize(PROGRAM_STATUS_SEQUENCE_MAX + 1, b'a');
+        assert!(parse_event(&unterminated, true).is_err());
+    }
+
+    #[test]
+    fn test_alt_right_bracket_is_not_a_program_status_reply() {
+        let alt_bracket = Some(InternalEvent::Event(Event::Key(KeyEvent::new(
+            KeyCode::Char(']'),
+            KeyModifiers::ALT,
+        ))));
+        assert_eq!(parse_event(b"\x1B]", false).unwrap(), alt_bracket);
+        assert_eq!(parse_event(b"\x1B]x", true).unwrap(), alt_bracket);
     }
 
     #[test]

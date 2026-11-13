@@ -785,6 +785,7 @@ fn a_refused_forced_refresh_ends_the_turn_with_the_re_login_sentence() {
     assert_eq!(
         retry_ends,
         vec![&EngineEvent::AutoRetryEnd {
+            aborted: false,
             success: false,
             attempt: 0,
             final_error: Some(
