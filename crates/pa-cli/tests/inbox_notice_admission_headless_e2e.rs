@@ -71,7 +71,7 @@ fn graceful_shutdown(socket: &Path) {
     let _ = reader.read_line(&mut String::new());
 }
 
-#[allow(clippy::zombie_processes)]
+#[allow(clippy::zombie_processes)] // the Supervisor's Drop reaps the child (graceful shutdown, kill, wait) — the reaping crosses the function boundary this lint cannot see
 fn spawn_supervisor(dir: &Path, kernel_venv: &Path) -> Supervisor {
     let socket = dir.join("daemon.sock");
     let agent_dir = dir.join("agent");
