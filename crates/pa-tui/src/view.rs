@@ -165,7 +165,7 @@ pub struct AgentView {
     /// Rendering options that affect cached entry rows.
     layout_options: Option<layout::LayoutOptions>,
     /// The session whose scrollback bases this view diffs against (see `view::flush`):
-    /// bound per-run to the live session, unique per view otherwise.
+    /// bound per-run to the attached session's durable id, unique per view otherwise.
     scrollback_session: String,
     pub(crate) frame_rows: usize,
     /// The last composed frame's clickable link ranges: the click
@@ -350,10 +350,10 @@ impl AgentView {
         }
     }
 
-    /// Point the view's scrollback bases at the live session: the bases live in the
+    /// Point the view's scrollback bases at the session's durable id: the bases live in the
     /// process-wide store (see `view::flush`), so a fresh per-run view re-entering a
-    /// session resumes the previous run's bases instead of re-appending its transcript
-    /// into the same scrollback.
+    /// session, or a worker replacement re-attaching it under a new active id, resumes the
+    /// previous bases instead of re-appending its transcript into the same scrollback.
     pub(crate) fn bind_scrollback_session(&mut self, session: &str) {
         if self.scrollback_session != session {
             self.scrollback_session = session.to_string();

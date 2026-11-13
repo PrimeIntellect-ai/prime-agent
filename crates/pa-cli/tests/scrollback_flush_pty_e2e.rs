@@ -25,7 +25,7 @@ use std::os::fd::{AsRawFd, OwnedFd};
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -140,6 +140,51 @@ fn the_exit_flush_kill_switch_suppresses_the_auto_flush() {
     );
 }
 
+#[test]
+fn a_worker_replacement_never_re_appends_the_flushed_transcript() {
+    let _lock = match HARNESS_LOCK.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    let turns = Arc::new(AtomicUsize::new(0));
+    let mut harness = ScrollbackHarness::start(Arc::clone(&turns), false);
+    harness.replace_worker.store(true, Ordering::SeqCst);
+
+    harness.wait_from_start(KITTY_QUERY, "the kitty capability query");
+    harness.write(KITTY_ANSWER);
+    harness.wait_from_start(
+        b"Collapsed mode (Ctrl+O to expand)",
+        "the session frame mounted",
+    );
+    harness.settle();
+
+    let mark = harness.output().len();
+    harness.submit("hello");
+    harness.wait_settle_flush(mark, "hello", "first answer");
+
+    // The re-attach runs inside the run loop's event arm: once the mock serves it, the
+    // keystrokes below queue behind the rebuilt view.
+    let deadline = Instant::now() + FLUSH_WAIT;
+    while harness.replace_worker.load(Ordering::SeqCst) {
+        assert!(
+            Instant::now() < deadline,
+            "the TUI never re-attached the replacement worker"
+        );
+        harness.drain();
+    }
+
+    // The same conversation under a new active id resumes its scrollback: the next settle
+    // appends only the new turn.
+    let mark = harness.output().len();
+    harness.submit("again");
+    let second = harness.wait_settle_flush(mark, "again", "second answer");
+    let joined = String::from_utf8_lossy(&second);
+    assert!(
+        !joined.contains("hello") && !joined.contains("first answer"),
+        "the re-attached session never re-appends the flushed turn:\n{joined}"
+    );
+}
+
 /// One attached session behind a mock supervisor socket: `create` + `attach` answer the
 /// startup, and each `prompt` runs one streamed turn whose settle must append scrollback.
 /// With `kill_switch` set, the child runs with `PRIME_AGENT_TUI_EXIT_FLUSH=0`.
@@ -147,6 +192,9 @@ struct ScrollbackHarness {
     child: Child,
     _server: std::thread::JoinHandle<()>,
     master: PtyReader,
+    /// Raised by a test before its first turn: once that turn settles, the mock replaces the
+    /// session's worker, and it lowers the flag when the TUI re-attaches to the replacement.
+    replace_worker: Arc<AtomicBool>,
 }
 
 impl ScrollbackHarness {
@@ -163,7 +211,8 @@ impl ScrollbackHarness {
     fn start(turns: Arc<AtomicUsize>, kill_switch: bool) -> ScrollbackHarness {
         let dir = tempfile::TempDir::new().expect("temp dir");
         let socket = dir.path().join("tui.sock");
-        let supervisor = MockSupervisor::bind(&socket, turns);
+        let replace_worker = Arc::new(AtomicBool::new(false));
+        let supervisor = MockSupervisor::bind(&socket, turns, Arc::clone(&replace_worker));
         let server = std::thread::spawn(move || supervisor.serve());
 
         let pty = openpty(
@@ -184,6 +233,7 @@ impl ScrollbackHarness {
             child,
             _server: server,
             master: PtyReader::new(pty.master),
+            replace_worker,
         }
     }
 
@@ -563,30 +613,37 @@ impl pa_tui::client_settings::ClientSettings for SettingsStoreSettings {
 
 /// One mock supervisor: `create` + `attach` answer the startup, every `prompt` runs one
 /// paced streamed turn (its start must land in its own event batch), and everything else
-/// answers promptly.
+/// answers promptly. An attach answers for the id it names with the turns streamed so far, so
+/// a raised `replace_worker` flag rebinds the session from `s1` to `s2` after a turn on `s1`.
 struct MockSupervisor {
     listener: std::os::unix::net::UnixListener,
     turns: Arc<AtomicUsize>,
+    replace_worker: Arc<AtomicBool>,
 }
 
 impl MockSupervisor {
-    fn bind(socket: &Path, turns: Arc<AtomicUsize>) -> Self {
+    fn bind(socket: &Path, turns: Arc<AtomicUsize>, replace_worker: Arc<AtomicBool>) -> Self {
         MockSupervisor {
             listener: std::os::unix::net::UnixListener::bind(socket).expect("bind mock socket"),
             turns,
+            replace_worker,
         }
     }
 
     fn serve(self) {
         for stream in self.listener.incoming() {
             match stream {
-                Ok(stream) => Self::serve_connection(stream, &self.turns),
+                Ok(stream) => Self::serve_connection(stream, &self.turns, &self.replace_worker),
                 Err(_) => return,
             }
         }
     }
 
-    fn serve_connection(stream: std::os::unix::net::UnixStream, turns: &Arc<AtomicUsize>) {
+    fn serve_connection(
+        stream: std::os::unix::net::UnixStream,
+        turns: &Arc<AtomicUsize>,
+        replace_worker: &AtomicBool,
+    ) {
         let write_stream = stream.try_clone().expect("clone mock socket");
         let mut writer = write_stream;
         let mut reader = BufReader::new(stream);
@@ -600,6 +657,7 @@ impl MockSupervisor {
             }),
         );
         let mut line = String::new();
+        let mut transcript = Vec::new();
         loop {
             line.clear();
             match reader.read_line(&mut line) {
@@ -635,30 +693,44 @@ impl MockSupervisor {
                     );
                 }
                 "attach" => {
-                    write_json(&mut writer, &attach_data(id));
+                    let active = command
+                        .get("activeSessionId")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default();
+                    write_json(&mut writer, &attach_data(id, active, &transcript));
+                    if active == "s2" {
+                        replace_worker.store(false, Ordering::SeqCst);
+                    }
                 }
                 "prompt" => {
                     write_json(&mut writer, &success_response(id, "prompt"));
+                    let active = command
+                        .get("activeSessionId")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default();
                     let question = command
                         .get("message")
                         .and_then(Value::as_str)
                         .unwrap_or_default()
                         .to_string();
                     let answer = format!("{} answer", ordinal(turns));
-                    write_session_event(&mut writer, &json!({ "type": "turn_start" }));
+                    write_session_event(&mut writer, active, &json!({ "type": "turn_start" }));
                     // The start must settle into its own event batch before the turn ends,
                     // or the run loop's per-iteration settle detection never sees an active
                     // turn turn quiet.
                     std::thread::sleep(TURN_PACING);
+                    let user = json!({ "role": "user", "content": question });
                     write_session_event(
                         &mut writer,
+                        active,
                         &json!({
                             "type": "message_start",
-                            "message": { "role": "user", "content": question },
+                            "message": user,
                         }),
                     );
                     write_session_event(
                         &mut writer,
+                        active,
                         &json!({
                             "type": "message_start",
                             "message": {
@@ -670,6 +742,7 @@ impl MockSupervisor {
                     );
                     write_session_event(
                         &mut writer,
+                        active,
                         &json!({
                             "type": "message_update",
                             "message": {
@@ -679,19 +752,36 @@ impl MockSupervisor {
                             "assistantMessageEvent": { "type": "text_delta", "delta": answer },
                         }),
                     );
+                    let reply = json!({
+                        "role": "assistant",
+                        "stopReason": "stop",
+                        "content": [{ "type": "text", "text": answer }],
+                    });
                     write_session_event(
                         &mut writer,
+                        active,
                         &json!({
                             "type": "message_end",
-                            "message": {
-                                "role": "assistant",
-                                "stopReason": "stop",
-                                "content": [{ "type": "text", "text": answer }],
-                            },
+                            "message": reply,
                         }),
                     );
-                    write_session_event(&mut writer, &json!({ "type": "turn_end" }));
-                    write_session_event(&mut writer, &json!({ "type": "agent_end" }));
+                    write_session_event(&mut writer, active, &json!({ "type": "turn_end" }));
+                    write_session_event(&mut writer, active, &json!({ "type": "agent_end" }));
+                    transcript.extend([user, reply]);
+                    if active == "s1" && replace_worker.load(Ordering::SeqCst) {
+                        // Paced like the turn start: the settle's flush paints before the
+                        // supersede notice lands.
+                        std::thread::sleep(TURN_PACING);
+                        write_json(
+                            &mut writer,
+                            &json!({
+                                "type": "session_binding",
+                                "previousActiveSessionId": "s1",
+                                "activeSessionId": "s2",
+                                "sessionId": "sess-1",
+                            }),
+                        );
+                    }
                 }
                 _ => {
                     write_json(&mut writer, &success_response(id, &command_type));
@@ -729,19 +819,19 @@ fn success_response(id: &str, command: &str) -> Value {
 
 /// One streamed session event, routed like the daemon's event pump routes it (the
 /// `session_event` envelope keyed by the active session).
-fn write_session_event(writer: &mut std::os::unix::net::UnixStream, event: &Value) {
+fn write_session_event(writer: &mut std::os::unix::net::UnixStream, active: &str, event: &Value) {
     write_json(
         writer,
         &json!({
             "type": "session_event",
-            "activeSessionId": "s1",
+            "activeSessionId": active,
             "event": event,
         }),
     );
 }
 
-/// The slim attach result with an empty transcript.
-fn attach_data(id: &str) -> Value {
+/// The slim attach result for `active`, carrying the session's transcript.
+fn attach_data(id: &str, active: &str, messages: &[Value]) -> Value {
     json!({
         "type": "response",
         "id": id,
@@ -749,12 +839,12 @@ fn attach_data(id: &str) -> Value {
         "success": true,
         "data": {
             "protocol": { "name": "prime-agent.daemon", "version": 7 },
-            "activeSessionId": "s1",
+            "activeSessionId": active,
             "snapshot": {
-                "activeSessionId": "s1",
-                "summary": { "id": "s1", "cwd": "/tmp" },
+                "activeSessionId": active,
+                "summary": { "id": active, "cwd": "/tmp" },
                 "state": {
-                    "activeSessionId": "s1",
+                    "activeSessionId": active,
                     "cwd": "/tmp",
                     "sessionId": "sess-1",
                     "sessionName": "scrollback flush e2e",
@@ -763,7 +853,7 @@ fn attach_data(id: &str) -> Value {
                     "isCompacting": false,
                     "sessionActions": { "queuedCount": 0, "steering": [], "followUps": [] },
                 },
-                "messages": [],
+                "messages": messages,
                 "lastEventSequence": 0,
                 "lastEventCursor": null,
             },
