@@ -670,3 +670,147 @@ fn an_unbuilt_engine_branch_summary_carries_the_request_session_id() {
     );
     assert_eq!(*seen.lock().unwrap(), [Some("durable-session".to_string())]);
 }
+
+/// An injected custom row without a timestamp admits the turn (the type's
+/// serde default fills the clock at parse) — the regression for the live
+/// `injected custom message parse failed: missing field timestamp`
+/// failures, whose sender the dropped payload could not identify.
+#[test]
+fn an_injected_custom_row_without_a_timestamp_admits_the_turn() {
+    let _faux = FAUX_TEST_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let (engine, _dir) = faux_engine_with_settings(
+        &serde_json::json!({ "responses": [{"text": "notice acknowledged"}] }),
+        1,
+    );
+    let notice_text = "[child-exited: no-reply child:lane]";
+    // No "timestamp" field: the external-sender shape.
+    let notice = serde_json::json!({
+        "role": "custom",
+        "customType": "rlm_child_terminal_notice",
+        "content": notice_text,
+        "display": true,
+        "details": {
+            "kind": "completed_without_reply",
+            "childId": "sub-1",
+            "sessionName": "lane",
+        },
+    });
+    let mut events: Vec<EngineEvent> = Vec::new();
+    engine.run_prompt(
+        0,
+        PromptRequest {
+            batch: Vec::new(),
+            images: Vec::new(),
+            message: notice_text.to_string(),
+            source: "user".to_string(),
+            agent_message_id: None,
+            custom_message: Some(notice),
+        },
+        &|| false,
+        &mut |event| {
+            events.push(event);
+            true
+        },
+    );
+    // THE PIN: the turn ADMITS (no parse-failed Done) and the turn RUNS to
+    // its model response — the injected parse never refused the delivery
+    // over the missing clock. The accepted row IS the parsed row: the
+    // default-filled clock rides it, so the frames clients get and the
+    // model context hold one representation (the frame/context pair is
+    // pinned end to end at the worker delivery seam; the default itself at
+    // the pa-types seam).
+    let parse_failed = events.iter().any(|event| {
+        matches!(event, EngineEvent::Done(Err(message)) if message.contains("parse failed"))
+    });
+    assert!(
+        !parse_failed,
+        "the missing timestamp must not kill the turn"
+    );
+    let accepted = events
+        .iter()
+        .find_map(|event| match event {
+            EngineEvent::CustomMessage(row) => Some(row.clone()),
+            _ => None,
+        })
+        .expect("the accepted row emitted");
+    assert_eq!(accepted["customType"], "rlm_child_terminal_notice");
+    assert!(
+        accepted["timestamp"]
+            .as_u64()
+            .is_some_and(|millis| millis > 0),
+        "the accepted row carries the default-filled clock: {accepted}"
+    );
+    let done = events
+        .iter()
+        .any(|event| matches!(event, EngineEvent::Done(Ok(()))));
+    assert!(done, "the turn completed: {:?}", events.len());
+}
+
+/// The parse-failure diagnostic line: the requesting turn's identity plus
+/// a summary of the row (`customType`, top-level keys, byte length) — never
+/// the raw payload, which can carry base64 image blocks and private
+/// prompt text.
+#[test]
+fn the_parse_failure_log_line_carries_the_senders_identity_not_the_payload() {
+    use crate::agent_engine::session_engine_impl::injected_custom_parse_failed_log_line;
+    let secret = "private-prompt-text-and-a-base64-blob";
+    let payload = serde_json::json!({
+        "role": "custom",
+        "customType": "queued.note",
+        "content": secret,
+        "display": true,
+        "details": { "image": secret },
+    });
+    // A real seam-shaped parse failure (content is the wrong shape for
+    // UserContent), exactly the kind the diagnostic logs.
+    let error = serde_json::from_value::<pa_types::session::AgentMessage>(serde_json::json!({
+        "role": "custom",
+        "customType": "queued.note",
+        "content": 123,
+        "display": true,
+    }))
+    .expect_err("the wrong-typed content fails the parse");
+    let line = injected_custom_parse_failed_log_line(
+        "user",
+        Some("agentmsg-1"),
+        "/tmp/sessions/chief.jsonl",
+        &payload,
+        &error,
+    );
+    // The identity: where the row came from.
+    assert!(
+        line.contains("agentmsg-1"),
+        "the message id must ride the line: {line}"
+    );
+    assert!(
+        line.contains("/tmp/sessions/chief.jsonl"),
+        "the session file must ride the line: {line}"
+    );
+    assert!(
+        line.contains(r#"source="user""#),
+        "the source must ride the line: {line}"
+    );
+    assert!(line.contains("parse failed"), "the line names the failure");
+    // The summary: what the row was — never its raw payload.
+    assert!(
+        line.contains(r#"customType="queued.note""#),
+        "the customType identifies the row: {line}"
+    );
+    assert!(
+        line.contains(r#"keys=["role", "customType", "content", "display", "details"]"#),
+        "the top-level keys ride the line: {line}"
+    );
+    assert!(
+        line.contains(&format!(
+            "bytes={}",
+            serde_json::to_vec(&payload).unwrap().len()
+        )),
+        "the byte length rides the line: {line}"
+    );
+    assert!(
+        !line.contains(secret),
+        "the raw payload must not ride the log line: {line}"
+    );
+}
