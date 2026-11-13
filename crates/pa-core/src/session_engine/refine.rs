@@ -1124,7 +1124,9 @@ mod tests {
     async fn disabling_refinements_blocks_planning_and_discards_in_flight_results() {
         let dir = TempDir::new().unwrap();
         let mut manager = persisted_session(&dir);
-        manager.append_message(user_message("remember this")).unwrap();
+        manager
+            .append_message(user_message("remember this"))
+            .unwrap();
         let session = tokio::sync::Mutex::new(manager);
         let agent = Arc::new(Agent::new(AgentOptions::default()));
         let global_dir = dir.path().join("harness");
@@ -1177,11 +1179,9 @@ mod tests {
             entries_before.as_slice()
         );
         let session_guard = session.lock().await;
-        assert!(
-            !local_harness_state_dir(&session_guard)
-                .join("harness_state.json")
-                .exists()
-        );
+        assert!(!local_harness_state_dir(&session_guard)
+            .join("harness_state.json")
+            .exists());
         assert!(!global_dir.exists());
     }
 

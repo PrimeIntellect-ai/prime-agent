@@ -60,15 +60,8 @@ pub async fn prompt(state: &Arc<RpcState>, payload: &Value) -> Result<ResponseDa
     // would deadlock.
     let model = handle.model.clone();
     let api_key = handle.api_key.clone();
-    let command_result = run_session_command(
-        state,
-        engine.clone(),
-        &command,
-        model,
-        api_key,
-        &images,
-    )
-    .await;
+    let command_result =
+        run_session_command(state, engine.clone(), &command, model, api_key, &images).await;
     drop(handle);
     // The pump is scheduled only after the command settles: an earlier
     // kick would deliver parked rows into the rebuild's window.

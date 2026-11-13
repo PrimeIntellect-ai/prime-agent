@@ -415,7 +415,6 @@ impl AgentSession {
         Ok(())
     }
 
-
     /// Start ephemeral background refinement; awaiting the returned task is
     /// optional for hosts that deliver completion through their event stream.
     /// Planning never reserves a user turn. Committed rows append at full-run idle.
@@ -437,7 +436,8 @@ impl AgentSession {
         let usage_store = self.usage_store.clone();
         tokio::spawn(async move {
             let session_id = session.lock().await.get_session_id().to_string();
-            let refiner = refine::session_refiner_call(auxiliary, &model, api_key, session_id).await?;
+            let refiner =
+                refine::session_refiner_call(auxiliary, &model, api_key, session_id).await?;
             let refiner =
                 refine::recorded_refiner_call(refiner, "refine", session.clone(), usage_store);
             refine::run_refinement(
