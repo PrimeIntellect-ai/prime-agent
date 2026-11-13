@@ -214,6 +214,7 @@ fn input() -> AgentMessageSendInput {
         target: "bbb222".to_string(),
         message: "hello there".to_string(),
         receiver_role: Some(AgentFamilyRelationship::Sibling),
+        delivery_mode: None,
     }
 }
 
@@ -390,6 +391,7 @@ async fn self_target_is_refused() {
             target: "aaa111".to_string(),
             message: "note to self".to_string(),
             receiver_role: None,
+            delivery_mode: None,
         })
         .await
         .unwrap_err();
@@ -506,6 +508,7 @@ async fn direct_ticket_delivers_to_the_target_worker_socket() {
     let receipt = controller
         .send_agent_message(AgentMessageSendInput {
             target: "sess-b".to_string(),
+            delivery_mode: Some("follow_up"),
             ..input()
         })
         .await
@@ -525,6 +528,9 @@ async fn direct_ticket_delivers_to_the_target_worker_socket() {
     let delivery = &received[1].1;
     assert_eq!(delivery["targetActiveSessionId"], "bbb222");
     assert_eq!(delivery["message"], "hello there");
+    // The requested delivery mode rides the command: a follow-up send
+    // never mutates into a steer mid-transport.
+    assert_eq!(delivery["deliveryMode"], "follow_up");
     // TS sender identity block: endpoint fields plus the agent client id.
     assert_eq!(delivery["sender"]["activeSessionId"], "aaa111");
     assert_eq!(delivery["sender"]["sessionId"], "sess-a");

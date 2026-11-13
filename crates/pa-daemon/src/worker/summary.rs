@@ -615,6 +615,7 @@ pub(crate) fn session_summary(core: &SessionCore, inputs: SummaryInputs) -> Sess
         model: inputs.model,
         model_fallback_message: inputs.model_fallback_message,
         runtime_kind: Some(core.runtime_kind.clone()),
+        decision_child: core.decision_child.then_some(true),
         unfinished_action_count: Some(0),
         anthropic_warning_shown: store
             .map(crate::session_store::SessionFile::anthropic_warning_shown),

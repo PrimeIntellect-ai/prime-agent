@@ -493,7 +493,7 @@ fn the_kernel_runs_in_the_client_launch_env() {
 #[cfg(target_os = "linux")] // /proc/<pid>/environ
 #[tokio::test]
 async fn an_rlm_spawn_child_inherits_the_parent_worker_env() {
-    use pa_core::session_engine::rlm_host::{RlmSpawnRequest, RlmSubagentHost};
+    use pa_core::session_engine::rlm_host::{RlmSpawnKind, RlmSpawnRequest, RlmSubagentHost};
     use pa_daemon::rlm_children::{ParentIdentity, SupervisorChildSessions};
     use pa_daemon::supervisor_link::SupervisorLink;
 
@@ -546,6 +546,7 @@ async fn an_rlm_spawn_child_inherits_the_parent_worker_env() {
             model: None,
             thinking: None,
             cwd: None,
+            kind: RlmSpawnKind::Subagent,
             spawned_by_request_id: None,
             factory: None,
         })

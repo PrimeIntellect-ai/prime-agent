@@ -162,6 +162,11 @@ struct ChildRecord {
     label: String,
     started_at_ms: u64,
     run: RunState,
+    /// The Decision API child (`rlm.spawn kind="decision"`): its spawn
+    /// task is a readiness handshake, never its whole run — the settle
+    /// watcher's terminal handling (the ledger display's completed flip)
+    /// is withheld for it.
+    decision_child: bool,
     answer_preview: Option<String>,
     /// The full final-answer text (bounded by
     /// [`ANSWER_TEXT_MAX_CHARS`]), the collect envelope's binding lane:
@@ -730,6 +735,7 @@ impl SupervisorChildSessions {
                 label: String::new(),
                 started_at_ms: 0,
                 run: RunState::running(),
+                decision_child: false,
                 answer_preview: None,
                 answer_text: None,
                 answer_captured: false,

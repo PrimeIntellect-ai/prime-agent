@@ -39,6 +39,7 @@ fn burst_runner(engine: Arc<dyn SessionEngine>) -> TurnRunner {
         last_action_snapshot: Some(SessionActionSnapshot::default()),
         rlm_depth: 0,
         runtime_kind: "top-level".to_string(),
+        decision_child: false,
         rlm_child_id: None,
         parent_active_session_id: None,
         parent_session_id: None,

@@ -323,6 +323,10 @@ pub struct Settings {
     /// session model does not accept image input. Default: none - image turns on a text-only model
     /// fail with a configuration hint instead of silently dropping the images.
     pub image_model: Option<String>,
+    /// The Decision API's model reference ("provider/model-id" or a bare
+    /// id), resolved through the model registry exactly like `imageModel`.
+    /// Unset (or unresolvable): the Decision API stays off.
+    pub decision_model: Option<String>,
     /// Default time limit for user `python_repl` cells, in milliseconds
     /// (default [`DEFAULT_PYTHON_CELL_TIMEOUT_MS`]; `0` disables). A cell
     /// running longer is interrupted; the model can pass a per-call

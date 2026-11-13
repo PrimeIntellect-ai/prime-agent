@@ -239,6 +239,39 @@ fn deeper_descendants_roll_up_and_nest_recursively() {
     assert_eq!(rows[4].title, "grandchild");
 }
 
+/// A Decision API child (`decisionChild`) renders no row and never counts in
+/// the user-facing subagent readout; its spend still rolls into the parent's
+/// cost, so the hidden System 1 server stays paid for.
+#[test]
+fn a_decision_child_hides_but_its_spend_still_rolls_up() {
+    let mut decision = child_summary("dc", "p", "system 1");
+    decision["decisionChild"] = json!(true);
+    decision["usage"] = json!({ "cost": 0.5 });
+    let mut worker = child_summary("c", "p", "worker one");
+    worker["usage"] = json!({ "cost": 0.25 });
+    let roster = vec![
+        roster_entry("p", "idle", &parent_summary("p")),
+        roster_entry("c", "running", &worker),
+        roster_entry("dc", "running", &decision),
+    ];
+    let rows = rows_for(&roster, None, &["file:/x/p.jsonl"]);
+    assert!(
+        !rows.iter().any(|row| row.title == "system 1"),
+        "the decision child renders no row"
+    );
+    assert!(rows.iter().any(|row| row.title == "worker one"));
+    let summary = rows
+        .iter()
+        .find(|row| row.kind == RowKind::SubagentSummary)
+        .expect("the summary row");
+    assert_eq!(summary.title, "1 subagent · 1 running");
+    let parent = rows
+        .iter()
+        .find(|row| row.kind == RowKind::Agent)
+        .expect("the agent row");
+    assert!((parent.cost - 0.75).abs() < 1e-9, "cost {}", parent.cost);
+}
+
 /// The summary row's title is count-only (the operator's 2026-09-26 follow-up): `"{total}
 /// subagents · {running} running"`, no model mix.
 #[test]
@@ -561,6 +594,43 @@ fn scoped_rows_lift_direct_children_and_exclude_the_root() {
             active_session_id: Some("p-live".to_string()),
         }
     ));
+}
+
+/// A parent whose only children are hidden Decision API servers (`decisionChild`)
+/// renders no child rows, so it must not arm the expand affordance either.
+#[test]
+fn a_decision_child_never_arms_the_expand_affordance() {
+    let mut decision = child_summary("dc", "p", "system 1");
+    decision["decisionChild"] = json!(true);
+    let key = SelectionKey {
+        session_id: Some("p".to_string()),
+        active_session_id: Some("p-live".to_string()),
+    };
+    let only_hidden = reconcile_unified_sessions(
+        &[
+            roster_entry("p", "idle", &parent_summary("p")),
+            roster_entry("dc", "running", &decision),
+        ],
+        &[],
+        None,
+    );
+    assert!(
+        !has_session_children(&only_hidden, &key),
+        "the hidden child renders no row, so the parent cannot expand"
+    );
+    let with_visible = reconcile_unified_sessions(
+        &[
+            roster_entry("p", "idle", &parent_summary("p")),
+            roster_entry("dc", "running", &decision),
+            roster_entry("c", "running", &child_summary("c", "p", "worker one")),
+        ],
+        &[],
+        None,
+    );
+    assert!(
+        has_session_children(&with_visible, &key),
+        "a visible child still arms the affordance"
+    );
 }
 
 /// A `--no-session` root's live summary publishes an empty `sessionFile`
